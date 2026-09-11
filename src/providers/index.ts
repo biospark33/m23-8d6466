@@ -224,4 +224,8 @@ export * from "./timeout.ts";
 // pre-spawn budget gate join the exported surface — the dispatcher (DF3.1)
 // reaches them through the same front door as every other verb.
 export * from "./cost-ledger.ts";
+// DF2.12: the host-side token bridge — teardown drives `ingestCostEvent` from
+// the harvested engine log through it, and `qds cost` classifies the same
+// evidence through it, so the two surfaces agree by construction.
+export * from "./cost-ledger-bridge.ts";
 export * from "./budget-gate.ts";

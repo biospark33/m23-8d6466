@@ -393,21 +393,21 @@ test.todoIf(liveTodoOff())(
       );
       expect(boxHours.length).toBe(1); // fractional µ$ row (post-F8), priced
       expect(boxHours[0]?.unpriced).toBe(0);
-      // KNOWN GAP (documented, not worked around): kind='tokens' rows have NO
-      // production writer — the `CostLedger.ingestCostEvent` method in
-      // `src/providers/cost-ledger.ts` (cited by symbol, not line: the old
-      // `:753` pointed at a blank line between `AdmissionInput` and
-      // `AdmissionDecision`, having drifted ~200 lines)
-      // has zero non-test callers, so engine/gate model spend never reaches
-      // cost_events. The authoritative figure is the record's spendMicroUsd
-      // (provider-side captureSpend) asserted above. Recorded, asserted-as-gap:
+      // WIRED (DF2.12): kind='tokens' rows land through the host bridge —
+      // `CostLedger.ingestCostEvent` in `src/providers/cost-ledger.ts` (cited
+      // by symbol, not line: the old `:753` pointed at a blank line between
+      // `AdmissionInput` and `AdmissionDecision`, having drifted ~200 lines),
+      // driven by `src/providers/cost-ledger-bridge.ts` from the harvested
+      // engine log at teardown's close step. A priced engine run therefore
+      // leaves token rows, asserted below; the record's spendMicroUsd
+      // (provider-side captureSpend) stays the authoritative figure.
       const tokensRows = ledgerRows(
         recordsDir,
         "SELECT COUNT(*) AS n FROM cost_events WHERE run_id = ? AND kind = 'tokens'",
         runId,
       )[0]?.n ?? -1;
-      evidence.push({ phase: "ledger", boxHours, tokensRows, tokensRowsGap: "ingestCostEvent has no production caller — see run report" });
-      expect(tokensRows).toBe(0);
+      evidence.push({ phase: "ledger", boxHours, tokensRows, tokensRowsGap: "DF2.12 bridge live — a priced run leaves token rows; zero means the engine emitted no cost_attribution lines or harvest lost the engine log — see run report" });
+      expect(tokensRows).toBeGreaterThan(0);
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (EB3): the post-finally verdicts below must render on

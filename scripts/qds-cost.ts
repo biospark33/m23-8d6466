@@ -16,18 +16,24 @@
  * for an issue that has burned budget whenever a stale .sandbox/cost-ledger.db
  * happened to exist.
  *
- * F001: a ledger holding no `kind='tokens'` row gets a structured
- * `tokens-ledger-unwired` line above the numbers — the DF2.7 cost-event bridge
- * into the ledger is unbuilt, so the totals below (and the per-issue cap that
- * reads the same SUM) count box-hours only. Non-fatal, and never a different
- * exit code: it qualifies the report, it is not a refusal.
+ * A ledger holding no `kind='tokens'` row gets a structured
+ * `tokens-ledger-unwired` line above the numbers: with the DF2.12 token
+ * bridge live (cost-ledger-bridge.ts → ingestCostEvent), that means no run
+ * has delivered token rows to this ledger yet — and the totals below (and the
+ * per-issue cap that reads the same SUM) count box-hours only until one does.
+ * Non-fatal, and never a different exit code: it qualifies the report, it is
+ * not a refusal.
  *
  * Prints the cumulative cost view for an issue, all derived from SUM (no
  * denormalized columns):
  * - Issue ref header
  * - Total spend in µ$ (raw integer) and $ (two-tier formatting)
  * - Per-role split (lead/worker/resident/tier1 + literal `box-hours` line)
- * - Per-run table (RUN | SPEND µ$ | BOX HOURS — `pending` when hasBoxHours false)
+ * - Per-run table (RUN | SPEND µ$ | BOX HOURS — `pending` when hasBoxHours
+ *   false; TOKENS — the AC4 discriminator, re-derived per run from the same
+ *   harvested evidence the teardown's bridge read:
+ *   `✓` priced token rows landed | `no-token-spend` | `token-rows-refused (n)`
+ *   | `tokens-not-harvested`, never `0` for unharvested spend)
  * - Token totals (inputTokens/outputTokens) with thousands separators
  * - Cache totals (cacheReadTokens/cacheWriteTokens) with thousands separators
  * - Unpriced row count
@@ -48,6 +54,7 @@
 import { writeSync } from "node:fs";
 
 import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
+import { classifyHarvestedTokens } from "../src/providers/cost-ledger-bridge.ts";
 import { resolveRunsDir } from "../src/providers/run-record.ts";
 import { setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -226,9 +233,32 @@ function pad(s: string, width: number): string {
 }
 
 /**
+ * The per-run TOKENS cell (DF2.12 AC4). The discriminator is the HARVESTED
+ * EVIDENCE, re-derived here from the same file the teardown's bridge read —
+ * `<runsDir>/<runId>-artifacts/<runId>.engine.log` — through the same
+ * classifier the bridge uses, so the two surfaces agree by construction:
+ * absent/unreadable → `tokens-not-harvested` (never `0`); zero
+ * `cost_attribution` lines → `no-token-spend`; lines present but no priced
+ * token row landed → `token-rows-refused (n)` with the line count.
+ */
+function renderTokenCell(ledger: CostLedger, runsDir: string, runId: string): string {
+  const state = classifyHarvestedTokens(runsDir, runId);
+  if (state.state === "tokens-not-harvested") return "tokens-not-harvested";
+  if (state.state === "no-token-spend") return "no-token-spend";
+  const pricedRoles = Object.keys(ledger.readRunCost(runId)?.perRole ?? {}).filter((k) => k !== "box-hours");
+  if (pricedRoles.length === 0) return `token-rows-refused (${state.lines})`;
+  return "✓";
+}
+
+/**
  * Print the cost view to stdout.
  */
-function printView(out: (s: string) => void, issueRef: string, view: CostView, runs: Array<{runId: string; totalMicroUsd: number; hasBoxHours: boolean}>): void {
+function printView(
+  out: (s: string) => void,
+  issueRef: string,
+  view: CostView,
+  runs: Array<{runId: string; totalMicroUsd: number; hasBoxHours: boolean; tokens: string}>,
+): void {
   assertValidMicroTotal(view.totalMicroUsd, `issue ${issueRef}`);
   out(`${issueRef}\n\n`);
 
@@ -250,11 +280,11 @@ function printView(out: (s: string) => void, issueRef: string, view: CostView, r
   if (runs.length > 0) {
     out("PER RUN:\n");
     // Header
-    out(`  ${pad("RUN", 30)} ${pad("SPEND µ$", 15)} ${pad("BOX HOURS", 12)}\n`);
-    out(`  ${pad("".padEnd(30, "-"), 30)} ${pad("".padEnd(15, "-"), 15)} ${pad("".padEnd(12, "-"), 12)}\n`);
+    out(`  ${pad("RUN", 30)} ${pad("SPEND µ$", 15)} ${pad("BOX HOURS", 12)} ${pad("TOKENS", 24)}\n`);
+    out(`  ${pad("".padEnd(30, "-"), 30)} ${pad("".padEnd(15, "-"), 15)} ${pad("".padEnd(12, "-"), 12)} ${pad("".padEnd(24, "-"), 24)}\n`);
     for (const run of runs) {
       const boxHours = run.hasBoxHours ? "✓" : "pending";
-      out(`  ${pad(run.runId, 30)} ${pad(formatNumber(run.totalMicroUsd), 15)} ${pad(boxHours, 12)}\n`);
+      out(`  ${pad(run.runId, 30)} ${pad(formatNumber(run.totalMicroUsd), 15)} ${pad(boxHours, 12)} ${pad(run.tokens, 24)}\n`);
     }
     out("\n");
   }
@@ -398,15 +428,18 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   // throw the catch cannot itself survive never reads as success.
   let code = 1;
   try {
-    // BEFORE the numbers, because it qualifies them: F001 / Q1 "deferred" —
-    // nothing calls `ingestCostEvent`, so a ledger with no `kind='tokens'` row
-    // is reporting box hours as if they were the whole bill, and the per-issue
-    // cap is enforcing against that same partial figure. Reading the totals
-    // below without this line is how an operator concludes an issue is cheap.
-    // Ledger-wide and non-fatal: it never changes the exit code.
+    // BEFORE the numbers, because it qualifies them: a ledger with no
+    // `kind='tokens'` row has received nothing from the DF2.12 token bridge
+    // yet, so the totals below price box hours only and the per-issue cap is
+    // enforcing against that same partial figure. Reading the totals without
+    // this line is how an operator concludes an issue is cheap. Ledger-wide
+    // and non-fatal: it never changes the exit code.
     ledger.emitTokenBridgeState();
     const view = ledger.readIssueCost(issueRef.repoSlug, issueRef.issueId);
-    const runs = ledger.readIssueRuns(issueRef.repoSlug, issueRef.issueId);
+    const runs = ledger.readIssueRuns(issueRef.repoSlug, issueRef.issueId).map((run) => ({
+      ...run,
+      tokens: renderTokenCell(ledger, storeDir, run.runId),
+    }));
 
     printView(out, `${issueRef.repoSlug}#${issueRef.issueId}`, view, runs);
     code = 0;
@@ -466,13 +499,13 @@ function writeReport(out: (s: string) => void): (s: string) => void {
 }
 
 if (import.meta.main) {
-  // D5 (round 3): the ledger's structured frames (the F001
-  // `tokens-ledger-unwired` qualification) emit through the swarmclaw DEFAULT
-  // sink, `process.stdout.write` — asynchronous on a pipe or redirect, and
+  // D5 (round 3): the ledger's structured frames (the `tokens-ledger-unwired`
+  // qualification) emit through the swarmclaw DEFAULT sink,
+  // `process.stdout.write` — asynchronous on a pipe or redirect, and
   // `process.exit` below tears the stream down before a pending write lands,
   // so the one line the feature exists to print was exactly the line a
   // `qds-cost … > report.txt` could lose. This sink keeps the frame on stdout
-  // (where the F001 contract and its tests read it) but writes it with the
+  // (where its contract and its tests read it) but writes it with the
   // same writeSync discipline as every report line — and degrades like
   // fleet.ts's sink: the ledger emits the frame from inside its own reporting
   // path, so a raising sink must not escape past the mapped exit code

@@ -41,7 +41,8 @@ import { join, resolve } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
 import { stopVisualizer, type ProviderDriver } from "./driver.ts";
-import type { BoxHoursCtx } from "./cost-ledger.ts";
+import { ingestHarvestedTokens } from "./cost-ledger-bridge.ts";
+import type { BoxHoursCtx, CostWireEvent, IngestCtx, IngestResult } from "./cost-ledger.ts";
 import {
   bunGitRunner,
   getRecord,
@@ -68,6 +69,19 @@ import type { RunLockHandle } from "../../scripts/lib/run-lock.ts";
  */
 export interface CostLedgerHook {
   ingestBoxHours(ctx: BoxHoursCtx): { eventId: string; inserted: boolean; unpriced: boolean };
+  /**
+   * DF2.12: the token half. teardown drives it through
+   * `ingestHarvestedTokens` (cost-ledger-bridge.ts) at BOTH ingest points, so
+   * `ingestCostEvent` stays the only writer of `kind='tokens'` rows and this
+   * interface gains a caller, not a writer. Optional for the same reason
+   * `readRunCost` is — the hook is structural, and a hook that cannot answer
+   * is simply not asked — with one money-shaped caveat a reader must not
+   * rediscover by accident: a hook WITHOUT it prices box hours only, and the
+   * run's token rows are silently skipped (today that is exactly
+   * fleet.ts's `makeLoserLedgerHook`, whose loser teardowns never carried a
+   * token ingest). Production wires the full CostLedger, which has the method.
+   */
+  ingestCostEvent?(event: CostWireEvent, ctx: IngestCtx): IngestResult;
   /**
    * F032: the DERIVED per-run view, for the divergence check at the close step.
    * `perRole` comes with it because the comparison has to be like-for-like: the
@@ -555,6 +569,27 @@ function ingestBoxHoursIfAttributed(
 }
 
 /**
+ * DF2.12: drive the token half of the ledger from the harvested engine log —
+ * the shared body of the two ingest points, called immediately before the
+ * box-hours ingest at each. Reads the budget attribution off the same record
+ * field the box-hours ingest reads; the string-only validation and every
+ * refusal live in the bridge, which reports its own structured summary.
+ * A hook without `ingestCostEvent` (see CostLedgerHook) is skipped, not
+ * asked — the same posture readRunCost's absence takes at the divergence
+ * check below.
+ */
+function ingestHarvestedTokensIfWired(
+  costLedger: CostLedgerHook,
+  rec: { extensions?: { budget?: { repoSlug?: string | number; issueId?: string | number } } },
+  runsDir: string | undefined,
+  runId: string,
+  requestId: string,
+): void {
+  if (costLedger.ingestCostEvent === undefined) return;
+  ingestHarvestedTokens(costLedger, runsDir, runId, rec.extensions?.budget, requestId);
+}
+
+/**
  * F032: how far the record's spend and the ledger's derived total may sit apart
  * before the close step says so, in micro-USD. A tenth of a cent — above the
  * rounding noise of per-token and per-box-hour pricing (both round to whole
@@ -585,10 +620,13 @@ export const SPEND_DIVERGENCE_TOLERANCE_MICRO_USD = 1_000;
  * and in the wrong direction. The box-hours bucket is subtracted back out
  * (`CostView.perRole`'s literal `"box-hours"` key, cost-ledger.ts's `view`).
  *
- * The F001 shape gets its own `outcome` — a FIELD, not prose an operator has to
- * parse: `unwired` when the ledger holds no token spend for this run at all
- * against a non-zero provider figure (the DF2.7 bridge is unbuilt), `divergent`
- * when both sides have numbers and they disagree.
+ * The no-token-spend shape gets its own `outcome` — a FIELD, not prose an
+ * operator has to parse: `unwired` when the ledger holds no token row for this
+ * run at all against a non-zero provider figure. With the DF2.12 bridge live
+ * that is a FAULT, not a wiring note — the run's engine log never reached this
+ * teardown (an artifacts pull failed, or the box died before harvest), or
+ * every cost_attribution line it carried was refused — and the message says
+ * so. `divergent` is when both sides have numbers and they disagree.
  *
  * Never throws: the box is destroyed and the record is closed by the time this
  * runs, so a raising log sink or an unqueryable ledger must not turn a
@@ -633,7 +671,7 @@ function reportSpendDivergence(
       reason:
         `the provider-authoritative token spend on the record (${recorded} µUSD) and the cost ledger's derived token spend for this run (${derived} µUSD, box hours excluded) disagree by more than ${SPEND_DIVERGENCE_TOLERANCE_MICRO_USD} µUSD`,
       message: unwired
-        ? `run ${runId}: the provider charged ${recorded} µUSD in tokens and the ledger holds NO token spend for this run — the DF2.7 cost-event bridge never delivered it, so no per-issue cap counted any of it (CostLedger.emitTokenBridgeState() reports the ledger-wide form of this as tokens-ledger-unwired)`
+        ? `run ${runId}: the provider charged ${recorded} µUSD in tokens and the ledger holds NO token row for this run — with the DF2.12 token bridge live this is a FAULT: the harvested engine log never reached this teardown (check the run's artifacts pull outcome), or every cost_attribution line it carried was refused, so no per-issue cap counted any of it (CostLedger.emitTokenBridgeState() reports the ledger-wide form of this as tokens-ledger-unwired)`
         : `run ${runId}: recorded token spend ${recorded} µUSD vs derived ${derived} µUSD (box hours excluded) — every per-issue cap reads the DERIVED figure, so the difference is spend no cap counted`,
     });
   } catch {
@@ -655,9 +693,12 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     for (const step of STEPS) skipStep(ctx, step, "record already closed (first-close-wins)");
     // DF2.8 crash-window fix: if store.close succeeded but the process died before ingestBoxHours ran,
     // a re-run would skip everything and the row would never land. Run the hook here — it's
-    // idempotent by eventId, so a repeated close is a no-op.
+    // idempotent by eventId, so a repeated close is a no-op. DF2.12: the token
+    // ingest rides the same point, immediately before the box-hours ingest, so
+    // a crash-recovery re-run heals both halves together.
     if (deps.costLedger) {
       try {
+        ingestHarvestedTokensIfWired(deps.costLedger, rec, deps.runsDir, runId, ctx.requestId);
         ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
       } catch (e) {
         // Preserve the original error as cause so CostLedgerError classification survives the wrap.
@@ -807,6 +848,11 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     // the close that just succeeded above.
     if (deps.costLedger) {
       const closedRec = deps.store.get(runId);
+      // DF2.12: the harvested engine log's cost_attribution lines become token
+      // rows HERE — immediately before the box-hours ingest, at the same point
+      // DF2.8 established, so a teardown that aborts before close writes
+      // neither and reportSpendDivergence below compares like for like.
+      ingestHarvestedTokensIfWired(deps.costLedger, closedRec, deps.runsDir, runId, ctx.requestId);
       if (!ingestBoxHoursIfAttributed(deps.costLedger, closedRec, runId, ctx.requestId)) {
         log({
           ...stepBase(ctx, "teardown", "close"),

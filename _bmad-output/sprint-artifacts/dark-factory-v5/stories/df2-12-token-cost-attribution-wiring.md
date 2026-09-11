@@ -314,9 +314,13 @@ than a constant that is never approached.
   carries **µ$ directly**. On the host, the reader converts µ$ → USD once to hand
   `ingestCostEvent` a **`CostWireEvent`, which converts back** at `usdToMicros` — exactly as DF2.8
   specifies, with one conversion at each side's boundary and µ$ inside both. That round trip is
-  **exact** for every integer µ$ value the
-  ledger accepts — `usdToMicros` already refuses anything outside safe-integer range — and the
-  mandated ≥10,000-value property test pins it across the range, not only at the boundary. A second
+  **exact** across the money range the mandated ≥10,000-value property test sweeps — *(dev-recorded
+  2026-09-10: bit-exact through 2^50; above ~2^51 a float half-tie can drift ONE µ$ — ~$4.5
+  quadrillion of spend, five orders past any real run; idempotency unaffected, since the same
+  float re-harvest digests identically; the fix, an exact decimal conversion in `usdToMicros`, is
+  a `cost-ledger.ts` behaviour change this story does not take — recorded at the property test,
+  not hidden)* — and `usdToMicros` refuses anything outside safe-integer range, so no wrong value
+  is ever stored. A second
   writer taking µ$ directly was rejected: `ingestCostEvent` being the *only* writer of
   `kind='tokens'` rows is a property DF2.8's idempotency and unpriced taxonomy both rest on.
   **Rate provenance (F8/R6, binding):** the resident's rate is an **API** rate stamped on DF3.6a's
@@ -544,4 +548,106 @@ DF2.8 already established rather than anywhere new in the six-step sequence.
 
 ## Dev Agent Record
 
-*(empty — story not yet started)*
+**Implemented 2026-09-10** — branch `feature/df2-12-token-cost-attribution-wiring` (cut from `dev`
+at the seventh-pin head), two-leg build: in-box leg and host leg implemented by separate workers
+with exclusive file sets, each verified at source and gate-run by the parent before commit.
+
+### What shipped
+
+- **In-box leg (commit `074a4532`)** — `dispatch-task.ts`: `emitCostAttribution` writes fd 2
+  directly (INV-COST-10 — not the injectable `deps.log` seam, not overridable); one
+  `cost_attribution` line per cost event at the `case "cost"` arm; `role` from the roster entry
+  (`agentRoles` map, `roles[0]` = lead — never inferred); `invocationSeq` from a factory-scoped
+  per-agent counter (named ceiling: Restart=no, reboot ends the run); wire `timestamp` verbatim;
+  missing role → `cost_attribution_refused`, zero emission (INV-COST-8).
+  `team-event-adapter.ts`: pure `costAttributionFields` projection — `CostTraceEvent` and the
+  trace row untouched. `steering.ts`: `meter()` returns its µ$ delta;
+  `emitResidentAttribution` at the meter site — `role:"resident"` supplied, `costMicroUsd`
+  direct, genuinely-absent wire fields `null`, `unpricedTurns: 1` when usage is absent
+  (fail-closed), broken sink is a sidecar fault that never degrades the resident; optional
+  `emitAttribution` dep defaulting to the fd-2 writer (production injects nothing → cannot lose
+  the row).
+- **Host leg** — `cost-ledger-bridge.ts` (NEW): `ingestHarvestedTokens` reads
+  `<runsDir>/<runId>-artifacts/<runId>.engine.log` and drives `ingestCostEvent` once per line —
+  the ledger stays the only writer; `classifyHarvestedTokens` is the same evidence classified
+  without a write, shared with `qds cost` so the two surfaces agree by construction;
+  `role`/`invocationSeq` read off the line, never from position (partial-replay negative
+  control); string-only budget validation identical to `ingestBoxHoursIfAttributed`.
+  `teardown.ts`: the token ingest at BOTH existing ingest points, immediately before the
+  box-hours ingest each time — no step added, none reordered; `reportSpendDivergence`'s
+  `unwired` message reclassified as a FAULT (outcome value unchanged).
+  `qds-cost.ts`: per-run TOKENS column — `✓ | no-token-spend | token-rows-refused (n) |
+  tokens-not-harvested`, the refined AC4 discriminator re-derived from the harvested log.
+  AC6 prose retirement: every shipped string describing the bridge as unbuilt is gone
+  (grep + positive control; `emitTokenBridgeState` KEPT as a diagnostic, its message now naming
+  the live condition — see deviations).
+
+### Design decisions and deviations (all recorded, none silent)
+
+1. **The line's money field is `costMicroUsd`, never `costUsd`.** The DD-9 unit-boundary guard
+   (`tests/phase-engine/usage.test.ts` — no float-dollar field inside `src/phase-engine`,
+   exactly one `costUsd` reference in the adapter) forbids carrying the wire's float USD on an
+   engine-emitted line. The worker's first cut carried `costUsd` and the guard caught it — the
+   fix emits the µ$ the adapter's sanctioned conversion already produced. One conversion per
+   side at each boundary; µ$ inside both. Story refined in-commit (`7d52db1`).
+2. **AC4's discriminator mechanism named.** The teardown summary is a log line no later reader
+   can see, so `qds cost` re-derives it from the harvested log through the bridge's own
+   classifier. Story refined in-commit (`7d52db1`).
+3. **`ingestCostEvent` now binds the `model` column.** AC1 requires `model` populated; the
+   column has existed since DF2.8's SCHEMA and no caller ever filled it — unsatisfiable under
+   the story's "prose only" constraint, which the parent relaxed for exactly this one additive
+   binding (model is NOT an `event_id` digest input: no idempotency, sum or view-shape change;
+   pinned by a new round-trip assertion in `tests/providers/cost-ledger.test.ts`). The
+   resident's `model` binds as `""` — its wire genuinely has none.
+4. **`emitTokenBridgeState` stays a diagnostic, not a hard fault.** It is ledger-WIDE and cannot
+   know whether a token row *should* exist (a legitimately spendless fleet reads zero too); a
+   hard fault would false-alarm every cheap run. Its message now names the live condition and
+   the evidence path. The per-run fault framing lives in `reportSpendDivergence`'s `unwired`
+   arm, where the provider figure *proves* spend happened.
+5. **Unparseable line vs INV-COST-8/9 tension.** INV-COST-9 says hand malformed data to
+   `ingestCostEvent` (unpriced=1); INV-COST-8 forbids guessing `role`. Resolution: a PARSED
+   line with unusable money → `ingestCostEvent`, `unpriced=1` (AC5 honored); an UNPARSEABLE
+   line still carrying the `cost_attribution` head → refused, counted, field named; plain
+   non-JSON engine-log noise (stack traces) is ignored — counting it would false-alarm every
+   cheap run.
+6. **Summary gained a fourth outcome, `no-token-spend`.** A readable log with zero
+   `cost_attribution` lines is not `tokens-not-harvested` — calling a spendless run unharvested
+   is exactly AC4's false-alarm negative control.
+7. **Resident line `timestamp` is the emission time** — the resident has no provider wire event
+   to read one from; the event is created at the meter site. Digest-stable per line (the durable
+   log carries it), so re-harvest idempotency holds.
+
+### Findings recorded, not fixed (out of scope by the story's own Files to Modify)
+
+- **`fleet.ts`'s `makeLoserLedgerHook` narrows `CostLedgerHook` to box-hours** — fan-out loser
+  teardowns skip the token ingest (documented at `CostLedgerHook`). Real spend visibility gap
+  for loser arms; needs an owner (follow-up story or DF2.12-b).
+- **`usdToMicros` round trip drifts ≤1 µ$ above ~2^51** — pinned at the property test with the
+  fix path named (exact decimal conversion, a `cost-ledger.ts` behaviour change). Bit-exact
+  through 2^50; five orders of magnitude past real spend; idempotency unaffected.
+- **Live-e2e assertions flipped** (`toBe(0)` → `toBeGreaterThan(0)` in the three tier live
+  tests): with the bridge live, pinning zero was asserting the defect. Unverifiable offline —
+  the next live round proves them.
+
+### Verification
+
+- `tests/providers/` + `tests/scripts/qds-cost.test.ts`: **1199 pass / 0 fail**
+- `tests/phase-engine/` + image pin + story-consistency: **1110 pass / 0 fail** (image
+  tracked-inputs literal adopted in-commit, `7eb1b314…`, 234/0)
+- `bunx tsc --noEmit` clean; biome clean on all touched files
+- TDD order held on both legs (11 + 15+ new tests written and confirmed failing first)
+- Negative controls pinned: fd-2 delivery under an injected `deps.log`; shared-model roster
+  (model-derived role cannot distinguish lead from worker); `(run_id, agent_id, kind)`-keyed
+  dedup collapses a second genuine invocation; partial re-harvest re-numbering; box-hours-only
+  ledger; empty-envelope `0 µ$` rendering; position-derived invocationSeq; unpriced-filtering
+  reader; ratio constant grep (R5 fact 12)
+
+### Owed, post-merge
+
+- **AC1's evidence arm (b) — the TIER-2 live round** (`qds-live-e2e`): one real lead + 2-worker
+  + armed-resident run on an exe.dev box, capture the harvested
+  `<runsDir>/<runId>-artifacts/<runId>.engine.log` showing one `cost_attribution` line per cost
+  event, plus the resulting ledger rows. Arm (a) is covered offline (teardown integration tests
+  drive the real artifacts pull from box `$HOME`). Operator-gated spend, DF2.11 round-6 pattern.
+- The image republish → adopt ritual rides the merge (publish-exedev-image.yml fires on dev;
+  the tracked-inputs literal is already adopted in-branch).

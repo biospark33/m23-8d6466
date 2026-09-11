@@ -380,8 +380,8 @@ test.todoIf(liveTodoOff())(
         armRunIds[0] as string,
         armRunIds[1] as string,
       )[0]?.n ?? -1;
-      evidence.push({ phase: "ledger", boxHours, tokensRows, tokensRowsGap: "ingestCostEvent has no production caller — see run report" });
-      expect(tokensRows).toBe(0);
+      evidence.push({ phase: "ledger", boxHours, tokensRows, tokensRowsGap: "DF2.12 bridge live — a priced run leaves token rows; zero means the engine emitted no cost_attribution lines or harvest lost the engine log — see run report" });
+      expect(tokensRows).toBeGreaterThan(0);
       expect(existsSync(join(recordsDir, `${armRunIds[0]}.bundle`))).toBeTrue();
       expect(existsSync(join(recordsDir, `${armRunIds[1]}.bundle`))).toBeTrue();
     } catch (e) {

@@ -8,14 +8,16 @@
  * AC6  box-hours: exactly one row per torn-down run, at close only
  * INV-COST-1 append-only enforced by store triggers
  * INV-COST-2 no denormalized cost column anywhere — DERIVATION, not
- *            COMPLETENESS: while F001 stands, nothing outside these tests
- *            calls ingestCostEvent, so a live ledger's SUM is box-hours only
+ *            COMPLETENESS: the DF2.12 bridge now calls ingestCostEvent in
+ *            production, but a run's SUM is complete only once its token rows
+ *            landed (tokens-not-harvested otherwise) — read totals accordingly
  * INV-COST-4 integer micro-dollars everywhere; float exists only on the wire
  * INV-COST-5 key_hash + key_limit on every token row, fail-closed when absent
  * INV-COST-6 unopenable ledger / unpersistable ingest refuse, never read as zero
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -33,7 +35,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
@@ -3380,5 +3382,309 @@ describe("DF2.11 read-path round 2 — D3 WAL-led remediation, D5 warn-only mode
     } finally {
       chmodSync(dir, 0o700);
     }
+  });
+});
+
+// ─── DF2.12: the token bridge is live — ledger-side contracts ────────────────
+
+describe("DF2.12 ledger-side contracts", () => {
+  /**
+   * emitTokenBridgeState, reclassified (AC6): the bridge it used to announce
+   * as unbuilt is live (cost-ledger-bridge.ts), so the line no longer reports
+   * a permanent wiring gap — it names the live condition of a ZERO-token-row
+   * ledger: nothing delivered yet (runs open, genuinely spendless runs) or a
+   * bridge/harvest regression, which is the broken-bridge tripwire it is kept
+   * for. The read-only behaviour DF2.11's openReadOnly path depends on is
+   * unchanged (probe + boolean + guarded emit).
+   */
+  test("emitTokenBridgeState on a zero-token-row ledger names the live bridge and its evidence path", () => {
+    seedRecord("run-a1", { createdAt: "2026-09-10T10:00:00Z", closedAt: "2026-09-10T10:30:00Z" });
+    ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    try {
+      expect(ledger.emitTokenBridgeState()).toBe(true);
+    } finally {
+      restore();
+    }
+    const line = lines.find((l) => l.code === "tokens-ledger-unwired") as Record<string, unknown> | undefined;
+    expect(line).toBeDefined();
+    const message = String(line?.message);
+    // The live condition, not the old unbuilt claim — and where to look.
+    expect(message).toContain("cost-ledger-bridge.ts");
+    expect(message).toContain("pricing box hours only until a token row lands");
+    expect(message).toContain("engine.log");
+    expect(line?.outcome).toBe("token-bridge-unwired");
+  });
+
+  test("emitTokenBridgeState is silent once any token row exists anywhere — unchanged read-only contract", () => {
+    seedRecord("run-a1");
+    ledger.ingestCostEvent(mkEvent(), mkCtx());
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    try {
+      expect(ledger.emitTokenBridgeState()).toBe(false);
+    } finally {
+      restore();
+    }
+    expect(lines.some((l) => l.code === "tokens-ledger-unwired")).toBe(false);
+  });
+
+  // ── Contract pin (DoD): the bridge is a CALLER, never a schema change ──────
+
+  test("cost_events keeps DF2.8's exact column set — DF5.3/DF5.4 read the same shape", () => {
+    const db = rawDb();
+    try {
+      const cols = (db.prepare("PRAGMA table_info(cost_events)").all() as { name: string }[]).map((c) => c.name);
+      expect(cols).toEqual([
+        "event_id",
+        "run_id",
+        "repo_slug",
+        "issue_id",
+        "request_id",
+        "role",
+        "agent_id",
+        "provider",
+        "model",
+        "kind",
+        "invocation_seq",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "turn_count",
+        "cost_micro_usd",
+        "unpriced",
+        "key_hash",
+        "key_limit_micro_usd",
+        "created_at",
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("the model column is bound from the event (DF2.12 — the column existed, no caller ever filled it)", () => {
+    seedRecord("run-a1");
+    ledger.ingestCostEvent(mkEvent(), mkCtx());
+    // The resident leg's line carries model "" (its wire has no model) — binds
+    // as the empty string, never invented into a slug.
+    ledger.ingestCostEvent(mkEvent({ model: "", agentId: "resident" }), mkCtx({ role: "resident", invocationSeq: 1 }));
+    const db = rawDb();
+    try {
+      const rows = db
+        .prepare("SELECT agent_id, model FROM cost_events WHERE run_id = 'run-a1' ORDER BY invocation_seq")
+        .all() as { agent_id: string; model: string }[];
+      expect(rows).toEqual([
+        { agent_id: "lead-1", model: "cheap/model" },
+        { agent_id: "resident", model: "" },
+      ]);
+    } finally {
+      db.close();
+    }
+    // Re-ingest is still a no-op: model is NOT an event_id digest input, so
+    // binding it changed no idempotency surface.
+    const replay = ledger.ingestCostEvent(mkEvent(), mkCtx());
+    expect(replay.inserted).toBe(false);
+  });
+
+  // ── The µ$ ↔ USD seam (DoD): a PROPERTY test across the money range ────────
+  //
+  // The bridge converts integer µ$ → float USD once (costUsd = µ$ / 1e6) and
+  // usdToMicros converts back (round(µ$ / 1e6 × 1e6)). The boundary alone
+  // proves nothing: the values that could expose an error are mid-range ones
+  // whose /1e6 lands on a representation tie. So: ≥10,000 deterministic
+  // pseudo-random integers spanning 1 … 2^50, driven through the PUBLIC seam
+  // (ingestCostEvent is the only writer and usdToMicros is module-private —
+  // the round trip through the real ingest is the round trip production
+  // takes), every stored row read back and compared exactly.
+  //
+  // FINDING (dev-recorded, 2026-09-10): the story's "exact for every integer
+  // µ$ value the ledger accepts" is TRUE only below ~2^51. Above that, µ$/1e6
+  // ×1e6 can land on a float half-tie (ulp of the ~4.3e9 intermediate reaches
+  // 0.5 µ$) and Math.round resolves it upward — the pinned test below shows
+  // 4300036924212877 µ$ storing as …878, a drift of ONE µ$. That is ~$4.5
+  // quadrillion of token spend — five orders of magnitude past any real run —
+  // idempotency is unaffected (the same float re-harvest digests identically),
+  // and the fix (an exact decimal conversion in usdToMicros) belongs to
+  // cost-ledger.ts, which this story takes prose-only. Recorded, not hidden.
+  test("µ$ round trip: 10,000 deterministic values across the money range [1, 2^50] come back bit-exact", () => {
+    seedRecord("run-prop");
+    const MAX = 2 ** 50; // empirically clean: dense sampling shows zero drift ≤ 2^50 (drift begins in (2^50, 2^51))
+    const N = 10_000;
+    // Fixed-stride sweep PLUS a seeded LCG (no Math.random): the stride walks
+    // every magnitude band deterministically, the LCG hits arbitrary values,
+    // including the /1e6 representation ties a stride misses.
+    const expected = new Map<string, number>();
+    const ingest = (micros: number, agentId: string): void => {
+      ledger.ingestCostEvent(
+        mkEvent({ agentId, costUsd: micros / 1e6, timestamp: "2026-09-10T12:00:00.000Z" }),
+        mkCtx({ runId: "run-prop", role: "worker" }),
+      );
+      expected.set(agentId, micros);
+    };
+    let i = 0;
+    for (let micros = 1n; micros <= BigInt(MAX); micros += BigInt(MAX) / BigInt(N / 2)) {
+      ingest(Number(micros), `stride-${i++}`);
+    }
+    let state = 0x2f6e2b1n;
+    for (let j = 0; j < N / 2; j++) {
+      state = (state * 6364136223846793005n + 1442695040888963407n) & 0xffffffffffffffffn;
+      const micros = 1n + ((state >> 11n) % BigInt(MAX - 1));
+      ingest(Number(micros), `lcg-${j}`);
+    }
+    expect(expected.size).toBeGreaterThanOrEqual(N);
+
+    const db = rawDb();
+    try {
+      const rows = db
+        .prepare("SELECT agent_id, cost_micro_usd, unpriced FROM cost_events WHERE agent_id LIKE '%-%'")
+        .all() as { agent_id: string; cost_micro_usd: number; unpriced: number }[];
+      expect(rows.length).toBe(expected.size);
+      for (const row of rows) {
+        const want = expected.get(row.agent_id);
+        expect(want).toBeDefined();
+        expect(row.unpriced).toBe(0);
+        expect(row.cost_micro_usd).toBe(want as number); // bit-exact: the float seam lost nothing
+      }
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
+  test("the seam's edges: 2^53−1 µ$ is refused to unpriced (never a wrong value); a half-tie above 2^51 drifts exactly 1 µ$ — pinned, not hidden", () => {
+    seedRecord("run-bnd");
+    // (2^53−1)/1e6 × 1e6 rounds to 2^53 — NOT a safe integer — and usdToMicros
+    // refuses. The refusal joins AC4's unpriced class (row at 0, flagged,
+    // counted), so the refusal is visible and nothing is dropped or mispriced.
+    ledger.ingestCostEvent(
+      mkEvent({ agentId: "bnd-outside", costUsd: (2 ** 53 - 1) / 1e6, timestamp: "2026-09-10T12:00:01.000Z" }),
+      mkCtx({ runId: "run-bnd", role: "worker" }),
+    );
+    // The half-tie drift, one concrete instance of the FINDING above: the
+    // product lands on .5 and half-up rounding moves it one µ$ off the line's
+    // integer. Drift magnitude is 1 µ$ at ~$4.3 quadrillion of spend.
+    ledger.ingestCostEvent(
+      mkEvent({ agentId: "bnd-halftie", costUsd: 4300036924212877 / 1e6, timestamp: "2026-09-10T12:00:02.000Z" }),
+      mkCtx({ runId: "run-bnd", role: "worker", invocationSeq: 1 }),
+    );
+    const db = rawDb();
+    try {
+      const rows = db
+        .prepare("SELECT agent_id, cost_micro_usd, unpriced FROM cost_events ORDER BY agent_id")
+        .all() as { agent_id: string; cost_micro_usd: number; unpriced: number }[];
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ agent_id: "bnd-halftie", cost_micro_usd: 4300036924212878, unpriced: 0 });
+      expect(rows[1]).toMatchObject({ agent_id: "bnd-outside", cost_micro_usd: 0, unpriced: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ── The D4 tripwire quantity (AC3): derivable, never enforced ──────────────
+  //
+  // per-run resident share = perRole.resident / (totalMicroUsd − box-hours),
+  // and the p50 across runs by ONE query over cost_events, from REAL ingested
+  // rows. No fifteen-percent constant exists anywhere — fact 12 forbids
+  // writing the ratio into an AC, and this query writes no threshold either.
+
+  test("resident share per run, p50 across runs by a single query — from real ingested rows", () => {
+    const runs = ["run-share-1", "run-share-2", "run-share-3"];
+    const shares = [0.1, 0.5, 0.9]; // resident share of token spend per run (unitless ratios, not thresholds)
+    for (let r = 0; r < runs.length; r++) {
+      const runId = runs[r] as string;
+      seedRecord(runId, { createdAt: "2026-09-10T10:00:00Z", closedAt: "2026-09-10T10:30:00Z" });
+      const tokenMicros = 10_000_000; // $10 of token spend — must exceed the box-hours row for the share denominator
+      const residentMicros = Math.round(tokenMicros * (shares[r] as number));
+      ledger.ingestCostEvent(
+        mkEvent({ agentId: "lead", costUsd: (tokenMicros - residentMicros) / 1e6, timestamp: "2026-09-10T10:05:00Z" }),
+        mkCtx({ runId, role: "lead" }),
+      );
+      ledger.ingestCostEvent(
+        mkEvent({ agentId: "resident", costUsd: residentMicros / 1e6, timestamp: "2026-09-10T10:06:00Z" }),
+        mkCtx({ runId, role: "resident", invocationSeq: 1 }),
+      );
+      ledger.ingestBoxHours({ runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-share" });
+    }
+
+    const p50 = Number(
+      (
+        rawDb()
+          .prepare(
+            `WITH per_run AS (
+               SELECT run_id,
+                 SUM(CASE WHEN unpriced = 0 AND kind = 'tokens' THEN cost_micro_usd ELSE 0 END) AS token_micro,
+                 SUM(CASE WHEN unpriced = 0 AND kind = 'box_hours' THEN cost_micro_usd ELSE 0 END) AS box_micro,
+                 SUM(CASE WHEN unpriced = 0 AND role = 'resident' THEN cost_micro_usd ELSE 0 END) AS resident_micro
+               FROM cost_events GROUP BY run_id
+             ), shares AS (
+               SELECT run_id, resident_micro * 1.0 / (token_micro - box_micro) AS share
+               FROM per_run WHERE (token_micro - box_micro) > 0
+             )
+             SELECT share FROM shares ORDER BY share
+             LIMIT 1 OFFSET (SELECT (COUNT(*) - 1) / 2 FROM shares)`,
+          )
+          .get() as { share: number }
+      ).share,
+    );
+    // The AC formula's denominator: totalMicroUsd − box-hours = 10M − 1.8M
+    // per run, so the median share is (0.5 × 10M) / 8.2M.
+    expect(p50).toBeCloseTo(5_000_000 / 8_200_000, 12);
+  });
+
+  test("a run whose resident spent but whose rows are lead/worker only reads share 0 — the false green, made visible", () => {
+    seedRecord("run-nores");
+    ledger.ingestCostEvent(
+      mkEvent({ agentId: "lead", costUsd: 0.05, timestamp: "2026-09-10T10:05:00Z" }),
+      mkCtx({ runId: "run-nores", role: "lead" }),
+    );
+    const view = ledger.readRunCost("run-nores");
+    // The quantity is computable and honestly 0 — which is exactly why the
+    // BRIDGE must land the resident's rows: a dropped resident line is a
+    // resident share of 0 on a run that paid one (pinned from the log side in
+    // tests/providers/cost-ledger-bridge.test.ts).
+    expect(view?.perRole.resident).toBeUndefined();
+    expect(view?.perRole.lead).toBe(50_000);
+  });
+
+  // ── AC6 prose retirement: the grep must prove it read the files ────────────
+
+  test("no shipped string still claims the bridge is unbuilt — zero-match sweep PAIRED with a positive control", () => {
+    const repoRoot = resolve(import.meta.dir, "..", "..");
+    const grep = (pattern: string): string[] => {
+      const res = spawnSync("grep", ["-rn", pattern, "src", "scripts", "tests", "--include=*.ts"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+      return res.stdout.split("\n").filter((l) => l.trim() !== "");
+    };
+    // POSITIVE CONTROL, same file set: one pattern that MUST match. A grep
+    // that silently read nothing (binary misclassification on one control
+    // byte, a wrong cwd) would otherwise report a clean zero and prove
+    // nothing — the control failing reads as UNPROVEN, never clean.
+    const control = grep("cost_attribution");
+    expect(control.length).toBeGreaterThan(0);
+    expect(control.some((l) => l.startsWith("src/providers/cost-ledger-bridge.ts"))).toBe(true);
+    expect(control.some((l) => l.startsWith("src/phase-engine/phases/dispatch-task.ts"))).toBe(true);
+
+    // The AC6 sweep. Matches inside THIS test are excluded — the sweep's own
+    // pattern literal is the one string in the tree that must be allowed to
+    // contain the patterns it sweeps for.
+    const stale = grep("no production caller\\|nothing calls .ingestCostEvent\\|F001").filter((l) =>
+      !l.startsWith("tests/providers/cost-ledger.test.ts"),
+    );
+    if (stale.length > 0) {
+      throw new Error(
+        `AC6 prose retirement FAILED — ${stale.length} shipped line(s) still describe the bridge as unbuilt:\n${stale.join("\n")}`,
+      );
+    }
+    expect(stale).toHaveLength(0);
+
+    // Fact 12's own grep: no fifteen-percent ratio constant anywhere (D4
+    // stays decidable, never enforced — enforcement is DF3.6a's ceiling).
+    // The test's own comments are excluded for the same self-reference reason
+    // as the sweep above.
+    const ratio = grep("15%").filter((l) => !l.startsWith("tests/providers/cost-ledger.test.ts"));
+    expect(ratio).toHaveLength(0);
   });
 });

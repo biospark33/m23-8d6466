@@ -14,6 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1078,8 +1079,18 @@ describe("DF2.5 teardownSandbox", () => {
     class MockCostLedgerHook implements CostLedgerHook {
       readonly calls: IngestCall[] = [];
       ingestCount = 0;
+      /** DF2.12: token rows the bridge drove through ingestCostEvent, in call order. */
+      readonly tokenCalls: { event: Record<string, unknown>; ctx: Record<string, unknown> }[] = [];
       /** When set, throws on next call with code/remediation */
       error?: { code: string; message: string; remediation: string };
+
+      ingestCostEvent(
+        event: Parameters<NonNullable<CostLedgerHook["ingestCostEvent"]>>[0],
+        ctx: Parameters<NonNullable<CostLedgerHook["ingestCostEvent"]>>[1],
+      ): { eventId: string; inserted: boolean; unpriced: boolean } {
+        this.tokenCalls.push({ event: { ...event }, ctx: { ...ctx } });
+        return { eventId: `token-${ctx.invocationSeq}`, inserted: true, unpriced: false };
+      }
 
       ingestBoxHours(ctx: IngestCall): { eventId: string; inserted: boolean; unpriced: boolean } {
         this.ingestCount++;
@@ -1560,7 +1571,7 @@ describe("DF2.5 teardownSandbox", () => {
       expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
     }, 30_000);
 
-    test("no token row at all → outcome 'unwired' (the F001 shape), box hours excluded from derived", async () => {
+    test("no token row at all → outcome 'unwired' (the DF2.12 fault shape: tokens never harvested or all refused), box hours excluded from derived", async () => {
       const runId = "df25-spend-unwired";
       await tornDownWith(runId);
 
@@ -1703,13 +1714,224 @@ describe("DF2.5 teardownSandbox", () => {
       await mintFor(runId);
 
       await teardownSandbox(
-        deps({ gitCwd: host, costLedger: { ingestBoxHours: () => ({ eventId: "x", inserted: true, unpriced: false }) } }),
+        deps({
+          gitCwd: host,
+          costLedger: {
+            ingestBoxHours: () => ({ eventId: "x", inserted: true, unpriced: false }),
+            ingestCostEvent: () => ({ eventId: "x", inserted: true, unpriced: false }),
+          },
+        }),
         runId,
         lockFor(runId),
       );
 
       expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
       expect(store.get(runId).closedAt).toBeString();
+    }, 30_000);
+  });
+
+  // ─── 8d. DF2.12: the token ingest at BOTH teardown ingest points ──────────
+  //
+  // The engine log fixture is hand-authored on the fake box's $HOME (a
+  // BOX_HOME_SOURCES entry), so it reaches
+  // `<runsDir>/<runId>-artifacts/<runId>.engine.log` through the REAL artifacts
+  // pull — the bridge reads exactly the surface production reads.
+
+  describe("DF2.12 token ingest at the teardown ingest points", () => {
+    const RUN = "df212-token-run";
+    const TOKENS_MICRO_USD = 8_100; // agrees with FakeKeyApi's 0.0081 usage
+
+    /** One in-box `cost_attribution` line, dispatch-task's wire shape. */
+    function attributionLine(over: Record<string, unknown> = {}): string {
+      return JSON.stringify({
+        type: "cost_attribution",
+        requestId: "req-box",
+        runId: RUN,
+        phaseId: "implement",
+        agentId: "lead-1",
+        role: "lead",
+        invocationSeq: 0,
+        model: "cheap/model",
+        costMicroUsd: TOKENS_MICRO_USD,
+        inputTokens: 1_000,
+        outputTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        turnCount: 1,
+        unpricedTurns: 0,
+        timestamp: "2026-09-10T12:01:00.000Z",
+        ...over,
+      });
+    }
+
+    async function realLedger(runId: string): Promise<CostLedgerHook & { close(): void }> {
+      const { CostLedger } = await import("../../src/providers/cost-ledger.ts");
+      return new CostLedger({
+        path: join(dir, `ledger-${runId}.db`),
+        readRunRecord: (id) => {
+          try {
+            const rec = store.get(id);
+            const createdAt =
+              rec.closedAt === undefined
+                ? rec.createdAt
+                : new Date(Date.parse(rec.closedAt) - 30 * 60_000).toISOString();
+            return { createdAt, closedAt: rec.closedAt, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd };
+          } catch {
+            return undefined;
+          }
+        },
+        config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 1_000_000 },
+      });
+    }
+
+    function attribute(runId: string): void {
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 50_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 50_000_000,
+          },
+        },
+      });
+    }
+
+    function tokenRowCount(ledgerPath: string): number {
+      const db = new Database(ledgerPath);
+      try {
+        return (db.prepare("SELECT COUNT(*) AS n FROM cost_events WHERE kind = 'tokens'").get() as { n: number }).n;
+      } finally {
+        db.close();
+      }
+    }
+
+    test("close step: three cost_attribution lines → three token rows + exactly one box_hours row, no divergence line", async () => {
+      const runId = RUN;
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      // The fixture goes on the fake box's $HOME so the REAL artifacts pull
+      // delivers it to the artifacts directory the bridge reads at close.
+      writeFileSync(join(boxHome, `${runId}.engine.log`), `${[
+        attributionLine(),
+        attributionLine({ agentId: "worker-1", role: "worker", costMicroUsd: 0, inputTokens: 10, timestamp: "2026-09-10T12:02:00.000Z" }),
+        attributionLine({ agentId: "resident", role: "resident", invocationSeq: 0, model: null, cacheReadTokens: null, cacheWriteTokens: null, costMicroUsd: 0, timestamp: "2026-09-10T12:03:00.000Z" }),
+      ].join("\n")}\n`);
+
+      const ledger = await realLedger(runId);
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
+
+        const view = ledger.readRunCost!(runId);
+        // lead + worker + resident rows, split by role — the multi-role split
+        // the per-issue views now carry. AC1: role is the line's, never the
+        // model's; the resident row exists (AC3's falsifiable core).
+        expect(view.hasTokenRows).toBe(true);
+        expect(view.perRole.lead).toBe(TOKENS_MICRO_USD);
+        expect(Object.keys(view.perRole)).toEqual(expect.arrayContaining(["lead", "worker", "resident", "box-hours"]));
+        expect(tokenRowCount(join(dir, `ledger-${runId}.db`))).toBe(3);
+        const summary = logs.find((l) => l.operation === "cost-ledger.token-ingest-summary");
+        expect(summary?.outcome).toBe("ingested");
+        expect(summary?.rowsRead).toBe(3);
+        expect(summary?.rowsInserted).toBe(3);
+        // The provider figure (8,100) and the derived token figure now agree —
+        // reportSpendDivergence compares like for like, so it is silent.
+        expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
+      } finally {
+        ledger.close();
+      }
+    }, 30_000);
+
+    test("already-closed early path: a crash-recovery re-run heals the token rows too", async () => {
+      const runId = "df212-early-path";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      writeFileSync(join(boxHome, `${runId}.engine.log`), `${attributionLine({ runId, costMicroUsd: 5_000 })}\n`);
+
+      // First teardown closes the record with NO ledger wired — the crash
+      // window DF2.8's fix exists for, now healing both halves.
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
+      expect(store.get(runId).closedAt).toBeString();
+
+      const ledger = await realLedger(runId);
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
+        const view = ledger.readRunCost!(runId);
+        expect(view.hasTokenRows).toBe(true);
+        expect(view.perRole.lead).toBe(5_000);
+        expect(view.perRole["box-hours"]).toBeGreaterThan(0);
+      } finally {
+        ledger.close();
+      }
+    }, 30_000);
+
+    test("no harvested log → summary tokens-not-harvested naming the path, box hours still land", async () => {
+      const runId = "df212-not-harvested";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+
+      const ledger = await realLedger(runId);
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
+        const summary = logs.find((l) => l.operation === "cost-ledger.token-ingest-summary");
+        expect(summary?.outcome).toBe("tokens-not-harvested");
+        expect(String(summary?.logPath)).toContain(`${runId}.engine.log`);
+        expect(String(summary?.reason)).toContain("artifacts");
+        const view = ledger.readRunCost!(runId);
+        expect(view.hasTokenRows).toBe(false);
+        expect(view.perRole["box-hours"]).toBeGreaterThan(0);
+      } finally {
+        ledger.close();
+      }
+    }, 30_000);
+
+    test("readable log with zero cost_attribution lines → summary no-token-spend", async () => {
+      const runId = "df212-no-spend";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      writeFileSync(join(boxHome, `${runId}.engine.log`), `${JSON.stringify({ type: "step", name: "implement" })}\n`);
+
+      const ledger = await realLedger(runId);
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
+        expect(logs.find((l) => l.operation === "cost-ledger.token-ingest-summary")?.outcome).toBe("no-token-spend");
+      } finally {
+        ledger.close();
+      }
+    }, 30_000);
+
+    test("the token ingest runs immediately BEFORE the box-hours ingest at each point", async () => {
+      const runId = "df212-order";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      writeFileSync(join(boxHome, `${runId}.engine.log`), `${attributionLine({ runId, costMicroUsd: 1 })}\n`);
+
+      const order: string[] = [];
+      const hook: CostLedgerHook = {
+        ingestCostEvent: () => {
+          order.push("tokens");
+          return { eventId: "t", inserted: true, unpriced: false };
+        },
+        ingestBoxHours: () => {
+          order.push("box-hours");
+          return { eventId: "b", inserted: true, unpriced: false };
+        },
+      };
+      await teardownSandbox(deps({ gitCwd: host, costLedger: hook }), runId, lockFor(runId));
+      expect(order).toEqual(["tokens", "box-hours"]);
     }, 30_000);
   });
 

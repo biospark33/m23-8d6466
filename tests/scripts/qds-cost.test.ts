@@ -726,18 +726,19 @@ console.log("ALL_OK");
     });
   });
 
-  // ── F001 / Q1 "deferred": the DF2.7→ledger bridge was never built ──────────
+  // ── the zero-token-row ledger: what the qualification says NOW ─────────────
   //
-  // `ingestCostEvent` is the only writer of `kind='tokens'` rows and nothing
-  // in the dispatch path calls it, so a real ledger holds box-hours ONLY and
-  // the per-issue cap enforces against a fraction of the true spend. Q1 chose
-  // to keep the writer and DECLARE the gap loudly rather than wire it, so the
-  // reporting CLI is where an operator meets it.
+  // `ingestCostEvent` is the only writer of `kind='tokens'` rows, and the
+  // DF2.12 bridge (cost-ledger-bridge.ts) drives it at teardown. A ledger
+  // with zero token rows therefore means no run has DELIVERED token rows yet
+  // — runs still open, harvested runs that spent nothing, or a bridge/harvest
+  // regression — and the qualification says exactly that, plus where the
+  // per-run evidence lives.
   //
   // `QDS_LOG_VERBOSE=1` because src/swarmclaw/log.ts mutes the JSONL sink
   // under NODE_ENV=test (which `bun test` sets and spawnSync inherits); in
   // production the line is on stdout unconditionally.
-  describe("degraded token ledger (F001)", () => {
+  describe("zero-token-row ledger qualification", () => {
     // Built per test, never hoisted to the describe body: the describe
     // callback runs at COLLECTION time, before `beforeEach` sets
     // QDS_COST_LEDGER_FILE, so a hoisted snapshot points the CLI at a ledger
@@ -770,7 +771,11 @@ console.log("ALL_OK");
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
       expect(out).toContain("tokens-ledger-unwired");
-      expect(out).toContain("per-issue caps count box-hours only");
+      // The reclassified (DF2.12) wording: the bridge is live, so the line
+      // names the live condition — nothing delivered yet — and its money
+      // consequence, and points at the per-run evidence.
+      expect(out).toContain("pricing box hours only until a token row lands");
+      expect(out).toContain("cost-ledger-bridge.ts");
     });
 
     test("the line is ledger-wide, not issue-scoped — a token row anywhere silences it", () => {
@@ -806,6 +811,152 @@ console.log("ALL_OK");
       const res = runCli(["qds/demo#42"], { env: verbose() });
       expect(res.status).toBe(0);
       expect(res.stdout.toString()).not.toContain("tokens-ledger-unwired");
+    });
+  });
+
+  // ── DF2.12: the per-run TOKENS discriminator (AC4) ─────────────────────────
+  //
+  // `qds cost` re-derives the per-run token state from the SAME harvested
+  // evidence the teardown's bridge read —
+  // `<runsDir>/<runId>-artifacts/<runId>.engine.log`, through the same
+  // classifier — so the teardown summary and this table agree by construction.
+  // Unharvested spend renders `tokens-not-harvested`, never `0 µ$`.
+  describe("per-run token discriminator (DF2.12)", () => {
+    const LEDGER_FILE = () => join(dir, "cost-ledger.db");
+    const RUNS = () => join(dir, "runs");
+
+    function seedLedger(seed: (ledger: CostLedger) => void): void {
+      const ledger = new CostLedger({
+        path: LEDGER_FILE(),
+        config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: 3_600_000 },
+        readRunRecord: () => ({
+          keyHash: "hash-df212",
+          limitMicroUsd: 50_000_000,
+          createdAt: "2026-09-10T10:00:00Z",
+          closedAt: "2026-09-10T10:30:00Z",
+        }),
+      });
+      try {
+        seed(ledger);
+      } finally {
+        ledger.close();
+      }
+    }
+
+    function line(runId: string, over: Record<string, unknown> = {}): string {
+      return JSON.stringify({
+        type: "cost_attribution",
+        requestId: "req-box",
+        runId,
+        phaseId: "implement",
+        agentId: "lead-1",
+        role: "lead",
+        invocationSeq: 0,
+        model: "cheap/model",
+        costMicroUsd: 12_345,
+        inputTokens: 1_000,
+        outputTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        turnCount: 1,
+        unpricedTurns: 0,
+        timestamp: "2026-09-10T10:05:00Z",
+        ...over,
+      });
+    }
+
+    function writeEngineLog(runId: string, lines: string[]): void {
+      mkdirSync(join(RUNS(), `${runId}-artifacts`), { recursive: true });
+      writeFileSync(join(RUNS(), `${runId}-artifacts`, `${runId}.engine.log`), `${lines.join("\n")}\n`);
+    }
+
+    function costCli(args: string[]): ReturnType<typeof spawnSync> {
+      return runCli(args, { env: { ...process.env, QDS_RUNS_DIR: RUNS() } });
+    }
+
+    function boxHours(runId: string): (ledger: CostLedger) => void {
+      return (ledger: CostLedger): void => {
+        ledger.ingestBoxHours({ runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-df212" });
+      };
+    }
+
+    test("priced token rows → multi-role split and a ✓ TOKENS cell", () => {
+      const runId = "df212-priced-run";
+      mkdirSync(RUNS(), { recursive: true });
+      seedLedger((ledger) => {
+        boxHours(runId)(ledger);
+        ledger.ingestCostEvent(
+          {
+            agentId: "lead-1", model: "cheap/model", durationMs: 0, inputTokens: 1_000, outputTokens: 500,
+            cacheReadTokens: 0, cacheWriteTokens: 0, turnCount: 1, costUsd: 12_345 / 1e6,
+            timestamp: "2026-09-10T10:05:00Z",
+          } satisfies CostEvent,
+          { runId, repoSlug: "qds/demo", issueId: "42", requestId: "r", role: "lead", invocationSeq: 0 },
+        );
+        ledger.ingestCostEvent(
+          {
+            agentId: "resident", model: "", durationMs: 0, inputTokens: 2_000, outputTokens: 900,
+            cacheReadTokens: 0, cacheWriteTokens: 0, turnCount: 1, costUsd: 7_000 / 1e6,
+            timestamp: "2026-09-10T10:06:00Z",
+          } satisfies CostEvent,
+          { runId, repoSlug: "qds/demo", issueId: "42", requestId: "r", role: "resident", invocationSeq: 0 },
+        );
+      });
+      writeEngineLog(runId, [line(runId), line(runId, { agentId: "resident", role: "resident", costMicroUsd: 7_000 })]);
+
+      const res = costCli(["qds/demo#42"]);
+      expect(res.status).toBe(0);
+      const out = res.stdout.toString();
+      // The multi-role split: lead, worker-less but resident-present, and the
+      // literal box-hours key, all in PER ROLE.
+      expect(out).toContain("lead");
+      expect(out).toContain("resident");
+      expect(out).toContain("box-hours (unattributed)");
+      expect(out).not.toContain("tokens-not-harvested");
+      expect(out).toContain("✓");
+    });
+
+    test("absent engine log → tokens-not-harvested, never 0 µ$", () => {
+      const runId = "df212-unharvested-run";
+      mkdirSync(RUNS(), { recursive: true });
+      seedLedger(boxHours(runId));
+      const res = costCli(["qds/demo#42"]);
+      expect(res.status).toBe(0);
+      const out = res.stdout.toString();
+      expect(out).toContain("tokens-not-harvested");
+      expect(out).toContain(runId);
+    });
+
+    test("readable log with zero cost_attribution lines → no-token-spend", () => {
+      const runId = "df212-spendless-run";
+      mkdirSync(RUNS(), { recursive: true });
+      seedLedger(boxHours(runId));
+      writeEngineLog(runId, [JSON.stringify({ type: "step", name: "implement" })]);
+      const res = costCli(["qds/demo#42"]);
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).toContain("no-token-spend");
+    });
+
+    test("lines present but zero priced rows landed → token-rows-refused (n)", () => {
+      const runId = "df212-refused-run";
+      mkdirSync(RUNS(), { recursive: true });
+      seedLedger((ledger) => {
+        boxHours(runId)(ledger);
+        // The run's only token row is UNPRICED (the producer said so) —
+        // excluded from every priced bucket, so nothing priced landed.
+        ledger.ingestCostEvent(
+          {
+            agentId: "lead-1", model: "cheap/model", durationMs: 0, inputTokens: 10, outputTokens: 5,
+            cacheReadTokens: 0, cacheWriteTokens: 0, turnCount: 1, costUsd: 0, unpricedTurns: 1,
+            timestamp: "2026-09-10T10:05:00Z",
+          } satisfies CostEvent,
+          { runId, repoSlug: "qds/demo", issueId: "42", requestId: "r", role: "lead", invocationSeq: 0 },
+        );
+      });
+      writeEngineLog(runId, [line(runId), line(runId, { agentId: "worker-1", role: "worker", costMicroUsd: 5 })]);
+      const res = costCli(["qds/demo#42"]);
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).toContain("token-rows-refused (2)");
     });
   });
 
