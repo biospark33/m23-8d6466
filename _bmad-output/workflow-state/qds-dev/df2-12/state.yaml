@@ -1,0 +1,19 @@
+story: DF2.12
+title: Per-Role Token Cost Attribution Wired End to End
+branch: feature/df2-12-token-cost-attribution-wiring
+base: dev
+target: dev
+phase: research
+started: 2026-09-10
+checkpoints:
+  phase0: done   # story confirmed; deps DF1.6/DF2.5/DF2.7/DF2.8 done; DF2.11 landed first
+  phase1: done   # branch cut from dev @ 45095e79
+  pre-dev-repairs: done   # W6-E-M5 money-path splice restored; stale epics-index blockquote retired (index gap fully closed, verified by grep + control)
+  phase2: in_progress   # 3 research agents: current-state map / patterns / DF2.8 invariants
+  phase3: pending
+  phase4: pending
+  phase5: pending
+notes:
+  - W6-E verdict: CONVERGED on substance. W6-E-M6/M7 stale blockquote retired. Line-cite drift (W6-E-L8/L9/L10) to be absorbed at implementation with by-symbol cites, recorded in Dev Agent Record.
+  - Story mandates TIER-2 live e2e arm (b) for the e2e demo — use qds-live-e2e skill at that point.
+  - Blast radius per story (GitNexus @ fa7d0e26): ingestCostEvent impactedCount 0 LOW; teardownSandbox CRITICAL 7 callers. Re-verify impact against fresh index before editing.

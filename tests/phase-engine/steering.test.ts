@@ -1690,3 +1690,165 @@ describe("steering — the ack-fault latch is id-normalized (round-10 S7)", () =
     expect(seen2[0]?.detail).toContain("EACCES");
   });
 });
+
+/**
+ * DF2.12 in-box leg, resident half: every metered solicitation emits one
+ * `cost_attribution` line with `role: "resident"` and the resident's µ$ carried
+ * DIRECTLY (the resident has no provider-reported USD). Additive at the meter
+ * site only — solicitation points, fold budget, ResidentTelemetry's key set and
+ * the journal resident block are untouched.
+ */
+describe("resident cost attribution (DF2.12)", () => {
+  let captured: string[];
+  let savedWrite: typeof process.stderr.write;
+
+  const fd2Lines = (): Record<string, unknown>[] =>
+    captured
+      .flatMap((chunk) => chunk.split("\n"))
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>) // dp:ok parses THIS test's own captured fd-2 lines, not external input
+      .filter((o) => o.type === "cost_attribution");
+
+  test("a metered solicitation emits role resident with the µ$ delta (DD-9, integer µ$)", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 100, outputTokens: 50 } },
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(lines.length).toBe(1);
+    // 100 × 100_000/1e6 = 10 µ$ in, 50 × 180_000/1e6 = 9 µ$ out.
+    expect(lines[0]).toMatchObject({
+      type: "cost_attribution",
+      requestId: "req-1",
+      runId: "run-1",
+      role: "resident",
+      invocationSeq: 0,
+      agentId: "resident",
+      costMicroUsd: 19,
+      inputTokens: 100,
+      outputTokens: 50,
+      turnCount: 1,
+      unpricedTurns: 0,
+    });
+    expect(c.telemetry.spendMicros).toBe(19);
+  });
+
+  test("second solicitation increments invocationSeq and carries the active phase", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1, outputTokens: 1 } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    await c.solicit("run_start", ctx());
+    await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+    expect(lines.map((l) => l.invocationSeq)).toEqual([0, 1]);
+    expect(lines[0]?.phaseId).toBeNull(); // run_start: no phase active
+    expect(lines[1]?.phaseId).toBe("build");
+  });
+
+  test("malformed token counts price nothing and read unpriced, not free (PR #253 review)", async () => {
+    // A negative count is evidence money flowed that could not be metered.
+    // clampTerm alone would silently LAUNDER it into a priced-zero row — the
+    // exact conflation the ledger's unpriced taxonomy exists to prevent.
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: -5, outputTokens: 50 } }]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatchObject({ costMicroUsd: 0, unpricedTurns: 1 });
+    // Nothing was metered off the poisoned input.
+    expect(c.telemetry.spendMicros).toBe(0);
+  });
+
+  test("the two honest zeros stay distinct: absent usage unpriced, zero-token usage priced (PR #253 review)", async () => {
+    const lines: Record<string, unknown>[] = [];
+    // A bespoke caller, not scriptedCaller: its `?? {0, 0}` default can never
+    // produce the absent-usage shape this test's second arm needs.
+    const replies: { raw: string; usage?: { inputTokens: number; outputTokens: number } }[] = [
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 0, outputTokens: 0 } },
+      { raw: '{"action":"proceed"}' },
+    ];
+    let i = 0;
+    const caller: ResidentCaller = {
+      // ResidentCaller's type pins usage non-optional; the RUNTIME contract
+      // (never-throws metering) still has to survive a caller that omits it —
+      // hence the cast, mirroring what a loose JS embedder produces.
+      async call(): Promise<Awaited<ReturnType<ResidentCaller["call"]>>> {
+        const reply = replies[Math.min(i++, replies.length - 1)]!;
+        return reply as Awaited<ReturnType<ResidentCaller["call"]>>;
+      },
+    };
+    const c = createSteering({ caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    await c.solicit("run_start", ctx());
+    await c.solicit("run_end", ctx());
+    expect(lines.length).toBe(2);
+    // A genuinely free (fully-cached) reply: priced, unpricedTurns 0 — it must
+    // not be conflated with the unpriced class.
+    expect(lines[0]).toMatchObject({ costMicroUsd: 0, unpricedTurns: 0 });
+    // No usage object at all: fail-closed, unpriced (the shipped behavior).
+    expect(lines[1]).toMatchObject({ costMicroUsd: 0, unpricedTurns: 1 });
+  });
+
+  test("fields the resident wire genuinely lacks are null, never invented", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 10, outputTokens: 10 } }]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    await c.solicit("run_start", ctx());
+    expect(lines[0]?.model).toBeNull();
+    expect(lines[0]?.cacheReadTokens).toBeNull();
+    expect(lines[0]?.cacheWriteTokens).toBeNull();
+    // µ$ is carried directly (`costMicroUsd`) and no USD key exists AT ALL —
+    // absence, not null: the line's schema never declares a `costUsd` field.
+    expect(lines[0]).not.toHaveProperty("costUsd");
+  });
+
+  test("default writer reaches fd 2 with no injected dep (INV-COST-10)", async () => {
+    captured = [];
+    savedWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 5, outputTokens: 5 } }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      await c.solicit("run_start", ctx());
+      expect(fd2Lines().length).toBe(1);
+      expect(fd2Lines()[0]?.role).toBe("resident");
+    } finally {
+      process.stderr.write = savedWrite;
+    }
+  });
+
+  test("a throwing emitAttribution is a sidecar fault, never a degradation", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 5, outputTokens: 5 } }]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      emitAttribution: () => {
+        throw new Error("stderr is broken");
+      },
+    });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+    expect(c.telemetry.spendMicros).toBeGreaterThan(0); // metering unaffected
+    // Never silent: the failure is latched on the controller (PR #253 review).
+    expect(c.lastAttributionErrorReason).toBe("stderr is broken");
+    // Once-only: a second solicitation against the same broken sink re-fires
+    // nothing — the latch keeps the first cause.
+    await c.solicit("run_end", ctx());
+    expect(c.lastAttributionErrorReason).toBe("stderr is broken");
+  });
+
+  test("a healthy attribution sink leaves no diagnostic", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 5, outputTokens: 5 } }]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: () => {} });
+    await c.solicit("run_start", ctx());
+    expect(c.lastAttributionErrorReason).toBeNull();
+  });
+});

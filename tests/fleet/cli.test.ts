@@ -5604,6 +5604,61 @@ process.on = ((sig, listener) => {
     expect(ingestCalls).toEqual([1, 2]);
   });
 
+  test("loser ledger hook forwards ingestCostEvent through the same lazy open / drop-on-close seam (PR #253 review)", () => {
+    // Loser teardowns drive the harvested cost_attribution rows through this
+    // method (teardown's ingestHarvestedTokensIfWired); without the forward
+    // the hook's token half was silently skipped and the cap never counted a
+    // loser's token spend. The reopen-after-finally contract is the SAME seam:
+    // a close that throws must still drop the handle, and the late token
+    // ingest must land on a fresh handle.
+    const ctx = {
+      runId: "qds-20260101-00000a",
+      repoSlug: "o/r",
+      issueId: "7",
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      role: "lead" as const,
+      invocationSeq: 0,
+    };
+    const event = {
+      agentId: "lead",
+      model: "anthropic/claude-haiku-4-5",
+      inputTokens: 10,
+      outputTokens: 5,
+      costUsd: 0.000001,
+      timestamp: "2026-09-11T00:00:00.000Z",
+    } as Parameters<NonNullable<ReturnType<typeof makeLoserLedgerHook>["ingestCostEvent"]>>[0];
+    const tokenCalls: number[] = [];
+    let opened = 0;
+    const hook = makeLoserLedgerHook(() => {
+      opened += 1;
+      const id = opened;
+      return {
+        ingestBoxHours: () => ({ eventId: `evt-${id}`, inserted: true, unpriced: false }),
+        ingestCostEvent: () => {
+          tokenCalls.push(id);
+          return { eventId: `tok-${id}`, inserted: true, unpriced: false };
+        },
+        // Handle #1's close fails — the exact failure mode the box-hours test
+        // above pins; the token forward must ride the identical seam.
+        close:
+          id === 1
+            ? () => {
+                throw new Error("simulated sqlite close failure");
+              }
+            : () => {},
+      };
+    });
+    // First forward opens handle #1.
+    expect(hook.ingestCostEvent?.(event, ctx)).toEqual({ eventId: "tok-1", inserted: true, unpriced: false });
+    expect(() => hook.close()).toThrow("simulated sqlite close failure");
+    // The late token ingest after the failed close lands on a NEW handle.
+    expect(hook.ingestCostEvent?.(event, ctx)).toEqual({ eventId: "tok-2", inserted: true, unpriced: false });
+    expect(tokenCalls).toEqual([1, 2]);
+    expect(opened).toBe(2);
+    hook.close();
+    expect(opened).toBe(2);
+  });
+
   test("fanout stdout is a keyed contract: exact key sets per emitted line kind", async () => {
     // Story :499 documents what a caller parses off these lines. Pinning the
     // EXACT key sets (not just their presence) is what makes a silently added

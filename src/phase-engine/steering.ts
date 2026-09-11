@@ -240,6 +240,17 @@ export interface SteeringController {
    * resident's health and the channel's health are two facts.
    */
   readonly lastInboxErrorReason: string | null;
+  /**
+   * DF2.12 (PR #253 review): the first sanitized failure cause of the
+   * cost-attribution sink, or null while every emission landed. A throwing
+   * `emitAttribution` is a sidecar fault — the reply is still metered, the
+   * resident is not degraded — but it is money EVIDENCE being lost, so it may
+   * not also be silent. Latched once: a persistently broken sink re-fires
+   * nothing. Additive getter, deliberately NOT on `ResidentTelemetry` (the
+   * journal's resident block is a closed shape) — the same in-process
+   * diagnostic pattern as `acksBeforeCall`.
+   */
+  readonly lastAttributionErrorReason: string | null;
   /** Never throws. Degraded/disabled → resolves { action: "proceed" }
    *  (deterministic default, INV-RES-5). */
   solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective>;
@@ -416,6 +427,18 @@ export function createSteering(deps: {
    * SYNCHRONOUS throw. The sidecar rule holds for both shapes or for neither.
    */
   onInboxError?: (e: { runId: string; requestId?: string; detail: string }) => void | Promise<void>;
+  /**
+   * DF2.12 (INV-COST-10): the cost-attribution sink. A plain
+   * `process.stderr.write` default is the STANDALONE posture only — raw
+   * stderr bypasses pipeline-run's fd-2 tee (the tee is caller-level, not an
+   * OS-level dup), so under the in-box systemd unit the line would reach
+   * journald and never the harvested `$HOME/<runId>.engine.log`. Production
+   * (pipeline-run) therefore injects `moneyLineTee()` here, which writes
+   * through `writeAll` and lands on BOTH surfaces. Not shared with
+   * dispatch-task's `emitMoneyLine`: this file imports no phase or fleet
+   * code (module boundary, file header), and the writer is one line.
+   */
+  emitAttribution?: (line: Record<string, unknown>) => void;
 }): SteeringController {
   const telemetry: ResidentTelemetry = {
     status: "active",
@@ -428,6 +451,11 @@ export function createSteering(deps: {
   };
   let lastDegradationReason: string | null = null;
   let lastInboxErrorReason: string | null = null;
+  /** DF2.12: the attribution SINK's health, latched at the first failure —
+   *  distinct from `lastDegradationReason` (the resident answered fine) and
+   *  from `lastInboxErrorReason` (a different sidecar). Null while every
+   *  emission landed. */
+  let lastAttributionErrorReason: string | null = null;
 
   /** Integer µ$ per reply (DD-9): round at each term, sum integers only.
    *  A non-finite or negative token count — or rate — clamps to 0: one
@@ -445,15 +473,110 @@ export function createSteering(deps: {
   const clampTerm = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
   const rateInput = clampTerm(deps.rate.inputPerMTok);
   const rateOutput = clampTerm(deps.rate.outputPerMTok);
-  const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): void => {
-    const inputMicros = Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000);
-    const outputMicros = Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
-    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) return;
+  /** Returns the µ$ THIS reply metered (DF2.12: the attribution line's
+   * `costMicroUsd`) AND whether the reply priced at all. `unpriced` is true —
+   * and spendMicros is left untouched — when the usage could not be trusted to
+   * a priced figure: a token value that is present but unusable (non-finite,
+   * negative, non-number — clampTerm would otherwise silently LAUNDER it into
+   * a priced zero, PR #253 review), a rounded term past MAX_SAFE_INTEGER, or a
+   * sum that would overflow. A genuinely free reply (0/0 tokens) stays
+   * priced: absence of money is not absence of evidence, and the ledger keeps
+   * the two classes apart (`unpriced = 0` priced-zero rows vs
+   * `unpricedTurns > 0` rows). ABSENT usage meters as zero but is recorded
+   * UNPRICED (fail-closed) — that flag is the emitter's
+   * (`emitResidentAttribution`), so this docstring does not promise priced
+   * where the row says unpriced. */
+  const rawTokens = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? (v > 0 ? v : v === 0 ? 0 : null) : v === undefined ? 0 : null;
+  const meter = (
+    usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined,
+  ): { costMicroUsd: number; unpriced: boolean } => {
+    const inTok = rawTokens(usage?.inputTokens);
+    const outTok = rawTokens(usage?.outputTokens);
+    if (inTok === null || outTok === null) return { costMicroUsd: 0, unpriced: true };
+    const inputMicros = Math.round((inTok * rateInput) / 1_000_000);
+    const outputMicros = Math.round((outTok * rateOutput) / 1_000_000);
+    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) {
+      return { costMicroUsd: 0, unpriced: true };
+    }
     const next = telemetry.spendMicros + inputMicros + outputMicros;
     // Defense-in-depth: reachable when already-safe terms SUM past
     // MAX_SAFE_INTEGER — directly tested by the sum-guard test.
-    if (!Number.isSafeInteger(next)) return;
+    if (!Number.isSafeInteger(next)) return { costMicroUsd: 0, unpriced: true };
     telemetry.spendMicros = next;
+    return { costMicroUsd: inputMicros + outputMicros, unpriced: false };
+  };
+
+  /** DF2.12: the fd-2 writer. The DEFAULT is the STANDALONE posture only —
+   * raw stderr, for a caller with no fd-2 tee. It confers NO durability:
+   * production durability comes from pipeline-run injecting `moneyLineTee()`
+   * here (pinned by tests/phase-engine/pipeline-run-money-line.test.ts), and
+   * only the injected writer lands the row on the harvested engine log. Same
+   * line discipline as dispatch-task's `defaultMoneyLine` (the
+   * `DispatchTaskDeps.emitMoneyLine` default); not imported from there — this
+   * file imports no phase code. */
+  const emitAttribution =
+    deps.emitAttribution ??
+    ((line: Record<string, unknown>): void => {
+      process.stderr.write(`${JSON.stringify(line)}\n`);
+    });
+  // DF2.12 INV-COST-8: ordinal of the resident's metered calls within the run,
+  // incremented at the emission point. ponytail: engine-memory counter, safe
+  // for the same named ceiling as dispatch-task's (Restart=no; a reboot ends
+  // the run — no resumed run exists to collide with).
+  let residentInvocationSeq = 0;
+  /** One attribution line per metered solicitation. `role: "resident"` is
+   * SUPPLIED, never inferred; µ$ is carried DIRECTLY (`costMicroUsd` — the
+   * resident has no provider-reported USD, so there is no `costUsd`). Fields
+   * the resident wire genuinely lacks (model, cache counts) are null, never
+   * invented. `timestamp`: the resident's cost event is CREATED here — there
+   * is no provider wire event to read one from — so the emission time IS the
+   * event's time. A broken sink is a sidecar fault: it must never degrade a
+   * resident that answered (same rule as onTripwire's observer), and it is
+   * never SILENT — the first failure latches `lastAttributionErrorReason`
+   * (below), once, so a persistently broken sink cannot flood anything. */
+  const emitResidentAttribution = (
+    ctx: SolicitCtx,
+    metered: { costMicroUsd: number; unpriced: boolean },
+    usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined,
+  ): void => {
+    try {
+      emitAttribution({
+        type: "cost_attribution",
+        requestId: ctx.requestId ?? null,
+        runId: ctx.runId,
+        phaseId: ctx.phase ?? null,
+        agentId: "resident",
+        role: "resident",
+        invocationSeq: residentInvocationSeq++,
+        model: null,
+        costMicroUsd: metered.costMicroUsd,
+        inputTokens: clampTerm(usage?.inputTokens),
+        outputTokens: clampTerm(usage?.outputTokens),
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        turnCount: 1,
+        // PR #253 review: the flag comes FROM the meter, not from usage
+        // existence alone — a reply whose tokens failed the meter's safety
+        // validation priced nothing and must read as unpriced, not as a
+        // legitimately-free turn. Absent usage stays unpriced (fail-closed).
+        unpricedTurns: metered.unpriced || usage === undefined ? 1 : 0,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      // Sidecar — the money is still metered on telemetry.spendMicros, and a
+      // broken sink must never degrade a resident that answered. But never
+      // SWALLOWED: the first failure latches a sanitized diagnostic on the
+      // controller. This module has no `log` dep to write through and the
+      // tripwire/inbox channels are spoken for (a closed cause union; the
+      // channel's health is a different fact), so the diagnostic rides the
+      // same additive-getter pattern as `acksBeforeCall` — in-process
+      // observers, tests today. Once-only: a persistently broken sink would
+      // otherwise re-fire per reply without adding a fact.
+      if (lastAttributionErrorReason === null) {
+        lastAttributionErrorReason = sanitizeForMessage(err instanceof Error ? err.message : String(err));
+      }
+    }
   };
 
   /** A rejected directive has exactly one effect: a telemetry row (INV-RES-2). */
@@ -891,7 +1014,8 @@ export function createSteering(deps: {
         acksBeforeCall += ackedThisPass;
         return PROCEED;
       }
-      meter(reply.usage);
+      const metered = meter(reply.usage);
+      emitResidentAttribution(ctx, metered, reply.usage);
       let parsed: ReplyParse;
       try {
         // SEAM: call → parse.
@@ -971,6 +1095,9 @@ export function createSteering(deps: {
     },
     get lastInboxErrorReason() {
       return lastInboxErrorReason; // sanitized at write (INV-2)
+    },
+    get lastAttributionErrorReason() {
+      return lastAttributionErrorReason; // sanitized at latch (INV-2)
     },
     get acksBeforeCall() {
       return acksBeforeCall;

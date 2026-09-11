@@ -183,11 +183,17 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     // The count alone is position-blind: removing one meter term (say, output
     // tokens) while adding an unrelated `/ 1_000_000` elsewhere keeps it at 2
     // and passes unexamined — exactly the smuggled conversion the pin exists
-    // to catch. Pin that BOTH token streams are the numerator of a
-    // `/ 1_000_000` term (each within the same statement, never crossing a
-    // `;`), so dropping either term fails here.
-    expect(steering).toMatch(/inputTokens[^;]{0,160}?\/\s*1_000_000/);
-    expect(steering).toMatch(/outputTokens[^;]{0,160}?\/\s*1_000_000/);
+    // to catch. The meter splits VALIDATION from DIVISION into two statements
+    // per term (`const inTok = rawTokens(usage?.inputTokens)` then
+    // `(inTok * rateInput) / 1_000_000`), so a single-statement proximity pin
+    // can no longer span them; pin each link instead — every division's
+    // numerator is a variable extracted by the meter's rawTokens site for its
+    // own token field, so rewiring a numerator away from a validated raw
+    // token count (or dropping a term) fails here.
+    expect(steering).toMatch(/inTok\s*=\s*rawTokens\(usage\?\.inputTokens\)/);
+    expect(steering).toMatch(/outTok\s*=\s*rawTokens\(usage\?\.outputTokens\)/);
+    expect(steering).toMatch(/\(inTok\s*\*\s*rateInput\)\s*\/\s*1_000_000/);
+    expect(steering).toMatch(/\(outTok\s*\*\s*rateOutput\)\s*\/\s*1_000_000/);
     const others: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

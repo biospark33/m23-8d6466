@@ -1441,3 +1441,319 @@ describe("dispatch-task: non-success RUN classifications settle the phase fail (
     expect(fin.exitCode).toBe(0);
   });
 });
+
+/**
+ * DF2.12 in-box leg: the cost-attribution line. INV-COST-10 — the emission is
+ * a dedicated fd-2 writer, deliberately NOT the injectable `log` seam, so a
+ * caller that injects a logger may lose trace lines but must not be able to
+ * lose money rows. INV-COST-8 — `role` comes from the roster entry the
+ * dispatcher spawned the agentId with and `invocationSeq` from the dispatcher's
+ * own counter; a line missing either is refused with a structured error and
+ * never emitted. `timestamp` is the wire event's, never the log's clock.
+ */
+describe("dispatch-task: cost attribution (DF2.12)", () => {
+  const WIRE_TIMESTAMP = "2020-01-01T00:00:00.000Z";
+
+  function costLine(over: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: "cost",
+      agentId: "worker",
+      model: "anthropic/claude-haiku-4-5",
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 100,
+      turnCount: 2,
+      unpricedTurns: 0,
+      durationMs: 1234,
+      costUsd: 0.012345,
+      timestamp: WIRE_TIMESTAMP,
+      ...over,
+    });
+  }
+
+  let captured: string[];
+  let savedWrite: typeof process.stderr.write;
+
+  beforeEach(() => {
+    captured = [];
+    savedWrite = process.stderr.write;
+    // fd-2 capture: the attribution writer targets process.stderr.write
+    // directly (INV-COST-10), so this spy IS the assertion surface.
+    process.stderr.write = ((chunk: unknown): boolean => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+  });
+
+  afterEach(() => {
+    process.stderr.write = savedWrite;
+  });
+
+  function attributionLines(): Record<string, unknown>[] {
+    return captured
+      .flatMap((chunk) => chunk.split("\n"))
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>) // dp:ok parses THIS test's own captured stderr lines, not external input
+      .filter((o) => o.type === "cost_attribution");
+  }
+
+  it("emits one attribution line per cost event with the full contract field set", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch();
+    const lines = attributionLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatchObject({
+      type: "cost_attribution",
+      requestId: "req-test",
+      runId: "run-test",
+      phaseId: "phase-1",
+      agentId: "worker",
+      role: "worker",
+      invocationSeq: 0,
+      model: "anthropic/claude-haiku-4-5",
+      // µ$ — converted once at the adapter's DD-9 boundary (0.012345 USD × 1e6)
+      costMicroUsd: 12345,
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 100,
+      turnCount: 2,
+      unpricedTurns: 0,
+      timestamp: WIRE_TIMESTAMP,
+    });
+  });
+
+  it("a shared invocationSeqByAgent map keeps the ordinal monotonic across bodies (run-scoped, PR #253 review)", async () => {
+    // pipeline-run's makeBodyFactory injects ONE map into every dispatch_task
+    // body of a run; two bodies sharing an agentId must continue the ordinal,
+    // not restart at 0 — the story's per-(runId, agentId) monotonic contract.
+    const shared = new Map<string, number>();
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, { invocationSeqByAgent: shared });
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, { invocationSeqByAgent: shared });
+    const lines = attributionLines();
+    expect(lines.length).toBe(2);
+    expect(lines[0]?.invocationSeq).toBe(0);
+    expect(lines[1]?.invocationSeq).toBe(1);
+  });
+
+  it("reaches fd 2 even when deps.log is an injected spy (INV-COST-10 negative control)", async () => {
+    const logSpy: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, { log: (l) => void logSpy.push(l) });
+    expect(attributionLines().length).toBe(1);
+    // The money row never rode the injectable seam — an implementation routed
+    // through deps.log fails exactly here.
+    expect(logSpy.some((l) => l.type === "cost_attribution")).toBe(false);
+  });
+
+  it("rides the dedicated emitMoneyLine seam when production injects one; deps.log still never sees it (INV-COST-10)", async () => {
+    // The production writer is pipeline-run's moneyLineTee (a tee-ing fd-2
+    // writer) injected through this dep — a caller's injected logger must still
+    // never be able to swallow the money row, and the injected money writer
+    // must be the ONLY surface the line rides (the default raw-stderr writer
+    // stays out of the way when a dedicated one is supplied).
+    const money: Record<string, unknown>[] = [];
+    const logSpy: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, {
+      emitMoneyLine: (l) => void money.push(l),
+      log: (l) => void logSpy.push(l),
+    });
+    expect(money.length).toBe(1);
+    expect(money[0]).toMatchObject({
+      type: "cost_attribution",
+      agentId: "worker",
+      role: "worker",
+      invocationSeq: 0,
+    });
+    expect(logSpy.some((l) => l.type === "cost_attribution")).toBe(false);
+    // The default raw-stderr writer did not double-emit behind the injected one.
+    expect(attributionLines().length).toBe(0);
+  });
+
+  it("role comes from the roster entry, never the model slug (INV-COST-8)", async () => {
+    // Both roster roles share ONE model (claude-haiku-4-5), so a model-derived
+    // role cannot distinguish lead from worker — only the roster entry can.
+    injectFake((opts) => {
+      feedLine(opts, costLine({ agentId: "lead" }));
+      feedLine(opts, costLine({ agentId: "worker" }));
+      return successResult();
+    });
+    await runDispatch();
+    const byAgent = new Map(attributionLines().map((l) => [String(l.agentId), l.role]));
+    expect(byAgent.get("lead")).toBe("lead");
+    expect(byAgent.get("worker")).toBe("worker");
+    // Per-agent ordinals (INV-COST-8): two DIFFERENT agents in one body each
+    // start at 0 — pins that the counter is keyed by agentId, not one global
+    // sequence that would read 0 and 1 here.
+    const seqByAgent = new Map(attributionLines().map((l) => [String(l.agentId), l.invocationSeq]));
+    expect(seqByAgent.get("lead")).toBe(0);
+    expect(seqByAgent.get("worker")).toBe(0);
+  });
+
+  it("two genuine invocations of one agent get invocationSeq 0 and 1", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine({ costUsd: 0.001 }));
+      feedLine(opts, costLine({ costUsd: 0.002 }));
+      return successResult();
+    });
+    await runDispatch();
+    const seqs = attributionLines().map((l) => l.invocationSeq);
+    expect(seqs).toEqual([0, 1]);
+  });
+
+  it("carries the wire event's timestamp, not the log's clock", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch();
+    const lines = attributionLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0]?.timestamp).toBe(WIRE_TIMESTAMP);
+  });
+
+  it("refuses an agent the roster never spawned: no attribution line, structured error naming role", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine({ agentId: "stray-agent" }));
+      return successResult();
+    });
+    await runDispatch();
+    expect(attributionLines().length).toBe(0);
+    // Exact structured refusal, not a substring: the money seam must carry the
+    // durable marker with the canonical reason, and deps.log must carry the
+    // matching diagnostic — a one-word "role" match would pass any renamed
+    // prose that happens to contain it.
+    const refused = captured
+      .flatMap((l) => l.split("\n"))
+      .filter((l) => l.includes("cost_attribution_refused"))
+      .map((l) => JSON.parse(l) as Record<string, unknown>); // dp:ok parses THIS test's own captured fd-2 lines
+    const markers = refused.filter((o) => o.type === "cost_attribution_refused");
+    expect(markers.length).toBe(1);
+    expect(markers[0]).toMatchObject({
+      type: "cost_attribution_refused",
+      agentId: "stray-agent",
+      runId: "run-test",
+      reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+    });
+    const diags = refused.filter((o) => o.event === "cost_attribution_refused");
+    expect(diags.length).toBe(1);
+  });
+
+  it("a refused cost event emits a durable refusal marker on the money seam — the money is never dropped silently", async () => {
+    // The refusal arm used to emit ONLY through deps.log/defaultLog — journald
+    // under the in-box unit, invisible to the harvest — so a run whose cost
+    // events were all refused read as `no-token-spend` downstream: a false
+    // negative on exactly the state AC4's negative control rules out. The
+    // refusal marker rides the DEDICATED money seam so the harvested log
+    // carries the evidence and the bridge can count it.
+    const money: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, costLine({ agentId: "ghost" }));
+      return successResult();
+    });
+    await runDispatch({}, { emitMoneyLine: (l) => void money.push(l) });
+    expect(attributionLines().length).toBe(0); // still never an attribution line (INV-COST-8)
+    const markers = money.filter((l) => l.type === "cost_attribution_refused");
+    expect(markers.length).toBe(1);
+    expect(markers[0]).toMatchObject({
+      agentId: "ghost",
+      runId: "run-test",
+      reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+    });
+  });
+
+  it("malformed money (non-finite / beyond safe µ$) is unpriced EVIDENCE, not a silent skip — the attribution line still rides the money seam", async () => {
+    // The adapter refuses to put a bad figure on the TRACE row (a
+    // `cost_skipped_*` coms note), and before the review round that ALSO
+    // dropped the spend evidence: the attribution block keyed on
+    // `adapted.type === "cost"` alone, so a run whose only cost events carried
+    // malformed money would read `no-token-spend` downstream — the false
+    // negative AC4's negative control rules out. The raw event is still a cost
+    // event: the attribution line now emits with NO usable money (NaN), which
+    // the bridge coerces at the seam and the ledger persists unpriced (AC5).
+    const money: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      // Both inputs are FINITE, non-negative USD — the wire parser
+      // (cli-anything team-events.ts) rejects non-finite/negative costUsd
+      // before the adapter ever sees them — so both REACH the adapter and its
+      // µ$ guards: 1e10 USD → 1e16 µ$ is past MAX_SAFE_INTEGER; 1e308 USD →
+      // µ$ overflows to Infinity.
+      feedLine(opts, costLine({ costUsd: 1e10 }));
+      feedLine(opts, costLine({ costUsd: 1e308 }));
+      return successResult();
+    });
+    await runDispatch({}, { emitMoneyLine: (l) => void money.push(l) });
+    const lines = money.filter((l) => l.type === "cost_attribution");
+    expect(lines.length).toBe(2);
+    expect(lines[0]).toMatchObject({ agentId: "worker", role: "worker", invocationSeq: 0 });
+    expect(lines[1]).toMatchObject({ agentId: "worker", role: "worker", invocationSeq: 1 });
+    // Both carry no usable money — NaN on the object, which JSON.stringify
+    // renders as `null` on the wire line the engine log harvest reads.
+    expect(Number.isNaN(lines[0]?.costMicroUsd)).toBe(true);
+    expect(Number.isNaN(lines[1]?.costMicroUsd)).toBe(true);
+    // And no priced trace-note substitute leaked onto the money seam.
+    expect(money.some((l) => l.type === "cost_attribution_refused")).toBe(false);
+  });
+
+  it("a throwing money sink is a sidecar fault: the body completes, one diagnostic fires, later events still attempt emission", async () => {
+    // The money seam is a sidecar in steering's posture: the DEFAULT writer is
+    // raw process.stderr.write and can throw (EPIPE on a closed pipe) for a
+    // standalone caller — a throw inside onTeamEvent must never degrade the
+    // phase. The failure is also never silent: deps.log carries ONE error
+    // diagnostic (deduplicated), while every later cost event still ATTEMPTS
+    // the sink — the latch deduplicates the diagnostic, not the emission.
+    const logSpy: Record<string, unknown>[] = [];
+    const landed: Record<string, unknown>[] = [];
+    let attempts = 0;
+    injectFake((opts) => {
+      feedLine(opts, costLine({ costUsd: 0.001 }));
+      feedLine(opts, costLine({ costUsd: 0.002 }));
+      // Merged + exit facts so the body classifies success — the point is that
+      // the sidecar fault leaves the typed result untouched.
+      feedLine(opts, '{"type":"merged","result":{"summary":"clean run"}}');
+      opts.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null });
+      return successResult();
+    });
+    const result = await runDispatch({}, {
+      emitMoneyLine: (l) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("EPIPE: stderr closed");
+        landed.push(l);
+      },
+      log: (l) => void logSpy.push(l),
+    });
+    // The body completed.
+    expect(result.exitStatus).toBe("success");
+    // Exactly one diagnostic, level error, naming the failure.
+    const diags = logSpy.filter((l) => l.event === "money_line_sink_failed");
+    expect(diags.length).toBe(1);
+    expect(diags[0]).toMatchObject({ level: "error", phase: "dispatch-task" });
+    expect(String(diags[0]?.message)).toContain("cost-attribution sink failed");
+    // The second cost event was still attempted — and landed (the first event's
+    // row is the one the broken sink lost).
+    expect(attempts).toBe(2);
+    expect(landed.length).toBe(1);
+    expect(landed[0]).toMatchObject({ agentId: "worker", invocationSeq: 1 });
+  });
+});

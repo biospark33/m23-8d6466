@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 
-**Status:** ready-for-dev
+**Status:** review
 
 **Sprint:** v5-S3
 
@@ -10,17 +10,22 @@
 
 > **Placement provenance (2026-09-08) — do not "restore" the old framing.** Three artifacts titled
 > this story's work as happening *"at the Dispatcher"*: `sprint-status.yaml`'s DF2.12 row and
-> `df3-6a-resident-spend-iteration-bounds.md:229` and `:313`. That is the **pre-ADR** placement,
+> `df3-6a-resident-spend-iteration-bounds.md`'s "at the dispatcher" statements (grep anchor
+> `at the dispatcher`; the former `:229`/`:313` cites do not carry them — W6-E-M7; the yaml row is
+> already corrected). That is the **pre-ADR** placement,
 > which D8 forbids — an in-box call cannot reach the host-side SQLite ledger. This story's own
 > Technical Notes refute it (see "Why the marker's 'one call at the dispatcher' is stale"): the
 > work is **stamped in-box at the dispatcher, ingested host-side at teardown's close step**, and
-> the ADR splits the two. The three artifacts are being corrected; the story file is authoritative
-> because it is the only one of the four that agrees with the ACCEPTED ADR.
+> the ADR splits the two. The story file is authoritative
+> because it is the only one of the four that agrees with the ACCEPTED ADR; the three surviving
+> lines in `df3-6a…` are owned by DF3.6a's own rework wave (it is `ready-for-dev`).
 >
-> **Epics index:** `_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md` has
-> **no DF2.12 entry at all** — nor DF2.11, DF3.6a, DF6.1a or DF6.1b; the whole 2026-09-08 slate
-> change is absent. Out of scope here; **owner: the Phase 3 wrap-up**, tracked on DF5.5's Trigger
-> Surface alongside that file's stale A–E framing.
+> **Epics index (corrected 2026-09-10 — the original "no entries at all" claim is retired, and so is
+> W6-E's narrower "only DF2.13 missing" reading; verified at source by grep):** all seven
+> 2026-09-08 slate additions now have entries in
+> `_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md`, including DF2.13's
+> full section ("Story DF2.13: Per-Run Key Cap Wired from the Admission Budget"). Positive control
+> on the same sweep: `DF2.8` → 16. Nothing owed here any more.
 
 - **Provenance — derived 2026-09-08 from the pre-dev adversarial review**
   (`_bmad-output/sprint-artifacts/dark-factory-v5/2026-09-08-remaining-stories-pre-dev-review-tracker.md`).
@@ -173,13 +178,23 @@ than a constant that is never approached.
    as **`tokens-not-harvested`**, never as zero token spend: `readRunCost` returns
    `hasTokenRows: false` with a `box_hours` row present, and `qds cost` renders that run's token
    line as `tokens-not-harvested` in the same idiom `box-hours-pending` already uses.
-   **The discriminator is the teardown's own `{ rowsRead, outcome }` summary (Observability
-   Contract), not `hasTokenRows`.** `hasTokenRows` is `anyTokenRow.n > 0` (`cost-ledger.ts:1407`),
+   **The discriminator is the harvested evidence itself, not `hasTokenRows` alone.**
+   `hasTokenRows` is `anyTokenRow.n > 0` (`cost-ledger.ts:1407`),
    which reads `false` for two different runs: one that was never harvested, and one that
    legitimately spent nothing on tokens (a dispatch refused before any spawn, a run killed in
-   setup) — both with a `box_hours` row present. So `outcome: "ingested"` with `rowsRead: 0`
-   renders **`no-token-spend`**, and `outcome: "tokens-not-harvested"` renders
-   **`tokens-not-harvested`**, naming the path it looked for. *Negative controls, both MUST fail:
+   setup) — both with a `box_hours` row present. *(Mechanism refined during dev, 2026-09-10: the
+   teardown's `{ rowsRead, outcome }` summary is a log line no later reader can see, so `qds cost`
+   — a separate invocation — re-derives the discriminator from the same evidence the teardown
+   read, at `<runsDir>/<runId>-artifacts/<runId>.engine.log`: the log is **absent or unreadable**
+   → render **`tokens-not-harvested`**, naming the path it looked for; the log is **present with
+   zero `cost_attribution` lines** → render **`no-token-spend`**; the log has **lines whose rows
+   all landed unpriced** (unusable money or sub-µ$ — ingested, not refused) → render
+   **`unpriced (n)`** with the row count; the log has **lines but zero token rows written at
+   all** (every line refused) → render **`token-rows-refused (n)`** with the count, never a
+   silent `0 µ$` *(review round: the old single "zero priced rows" arm folded honest unpriced
+   rows into the refusal label)*. The teardown's own summary line carries the outcome vocabulary
+   (Observability Contract), so the two surfaces agree by construction.)*
+   *Negative controls, both MUST fail:
    an implementation that renders a missing token set as `0 µ$` reports a run that certainly spent
    money as free (the same fail-closed rule INV-COST-6 states for an absent ledger); and a renderer
    keyed on `hasTokenRows` alone reports every refused-before-spawn run as unharvested, firing a
@@ -289,27 +304,36 @@ than a constant that is never approached.
   unchanged); a crash-recovery re-run heals both; and `reportSpendDivergence` (`:619`, `:771`),
   which runs **after**, finally compares the provider's authoritative figure against a derived total
   that contains tokens.
-- **The µ$ ↔ USD seam for the resident, stated because it is a money path.** The team runtime's
-  events carry `costUsd` (`cli-anything/src/types.ts:141-161`), so lead/worker rows hand
-  `ingestCostEvent` the wire value verbatim and it converts once at `usdToMicros`
-  (`cost-ledger.ts:270`), exactly as DF2.8 specifies. The **resident** has no provider-reported USD:
-  `steering.ts`'s `meter()` (`:448-456`) computes integer µ$ from `usage.inputTokens/outputTokens ×
-  rate` and accumulates `telemetry.spendMicros` (`:212-213`). Its attribution line therefore carries
-  **µ$ directly**, and the host leg converts µ$ → USD once to hand `ingestCostEvent` a
-  **`invocationSeq` is read off the line, never re-derived from the reader's iteration order.** A
+- **The µ$ ↔ USD seam, stated because it is a money path.** *(Refined during dev, 2026-09-10: the
+  DD-9 unit-boundary guard — `tests/phase-engine/usage.test.ts`, "no float-dollar field exists
+  anywhere inside src/phase-engine", exactly one `costUsd` reference in the adapter — forbids the
+  engine line from carrying the wire's float `costUsd`, so **both** team and resident attribution
+  lines carry `costMicroUsd` (integer µ$) and the union "costMicroUsd | costUsd" below is now
+  `costMicroUsd` only.)* The team runtime's events carry `costUsd`
+  (`cli-anything/src/types.ts:141-161`); the adapter's one sanctioned conversion
+  (`CostTraceEvent.costMicros`) turns it into integer µ$ at the DF1.3 boundary and the line carries
+  that. The **resident** has no provider-reported USD: `steering.ts`'s `meter()` computes integer µ$
+  from `usage.inputTokens/outputTokens × rate` and accumulates `telemetry.spendMicros`; its line
+  carries **µ$ directly**. On the host, the reader converts µ$ → USD once to hand
+  `ingestCostEvent` a **`CostWireEvent`, which converts back** at `usdToMicros` — exactly as DF2.8
+  specifies, with one conversion at each side's boundary and µ$ inside both. That round trip is
+  **exact** across the money range the mandated ≥10,000-value property test sweeps — *(dev-recorded
+  2026-09-10: bit-exact through 2^50; above ~2^51 a float half-tie can drift ONE µ$ — ~$4.5
+  quadrillion of spend, five orders past any real run; idempotency unaffected, since the same
+  float re-harvest digests identically; the fix, an exact decimal conversion in `usdToMicros`, is
+  a `cost-ledger.ts` behaviour change this story does not take — recorded at the property test,
+  not hidden)* — and `usdToMicros` refuses anything outside safe-integer range, so no wrong value
+  is ever stored. A second
+  writer taking µ$ directly was rejected: `ingestCostEvent` being the *only* writer of
+  `kind='tokens'` rows is a property DF2.8's idempotency and unpriced taxonomy both rest on.
+  **Rate provenance (F8/R6, binding):** the resident's rate is an **API** rate stamped on DF3.6a's
+  frozen manifest; no Max-derived rate may appear in the ledger or any view derived from it.
+- **`invocationSeq` is read off the line, never re-derived from the reader's iteration order.** A
   reader that enumerates harvested lines and assigns the ordinal by position re-numbers on a
   *partial* re-harvest, which changes AC2's `event_id` digest and turns `ON CONFLICT DO NOTHING`
   into duplicate spend. *Negative control: a position-derived reader passes AC2's full-replay test
   and MUST fail a partial-replay test (ingest lines 1-2, then ingest lines 1-4).* (INV-COST-8
   covers the field's provenance; this covers the reader's.)
-
-  `CostWireEvent`, which converts back. That round trip is **exact** for every integer µ$ value the
-  ledger accepts — `usdToMicros` already refuses anything outside safe-integer range
-  (`cost-ledger.ts:274-277`) — and AC's round-trip test pins it at the boundary. A second writer
-  taking µ$ directly was rejected: `ingestCostEvent` being the *only* writer of `kind='tokens'` rows
-  is a property DF2.8's idempotency and unpriced taxonomy both rest on. **Rate provenance (F8/R6,
-  binding):** the resident's rate is an **API** rate stamped on DF3.6a's frozen manifest; no
-  Max-derived rate may appear in the ledger or any view derived from it.
 - **D4 tripwire (a) — made *decidable*, deliberately not made *enforceable*, and why that is the
   correct reading.** R5 §6 fact **12** is binding — *never write the 15% ratio into an AC* — and
   `df3-6a-resident-spend-iteration-bounds.md` (the 2026-09-08 split of DF3.6) records the gates report's finding that the ratio is a **trap**
@@ -362,15 +386,20 @@ than a constant that is never approached.
 ## Observability Contract
 
 - Every in-box attribution emission logs `{ requestId, runId, phaseId, agentId, role,
-  invocationSeq, model, costMicroUsd | costUsd, inputTokens, outputTokens, cacheReadTokens,
+  invocationSeq, model, costMicroUsd, inputTokens, outputTokens, cacheReadTokens,
   cacheWriteTokens, turnCount, unpricedTurns, timestamp }` — `timestamp` being the **wire event's**
   emission time, which is a digest input and must not be replaced by the log's own clock.
 - Every host-side ingest logs `{ requestId, runId, repoSlug, issueId, role, kind: "tokens",
   costMicroUsd, unpriced, inserted, durationMs, outcome }` where `outcome ∈ ingested | duplicate |
   refused`, and one summary line per teardown carrying `{ rowsRead, rowsInserted, rowsDuplicate,
-  rowsUnpriced, outcome }` with `outcome ∈ ingested | tokens-not-harvested | refused`. A
-  `tokens-not-harvested` summary names the path it looked for and the DF2.5 outcome that explains
-  it, so an operator can tell a failed artifacts pull from a run that genuinely emitted nothing.
+  rowsUnpriced, outcome }` with `outcome ∈ ingested | tokens-not-harvested | no-token-spend |
+  refused`. `tokens-not-harvested` and `no-token-spend` are deliberately distinct states (review
+  round): the former is missing or UNREADABLE harvest evidence — the summary names the path it
+  looked for and the DF2.5 outcome that explains it, and the run's spend is UNRECORDED, never
+  zero; the latter is a READABLE log that carries zero `cost_attribution` lines — readable zero
+  spend. Folding one into the other either alarms on a genuinely spendless run or books a failed
+  pull as a clean zero; `refused` (evidence present, attribution refused) never degrades to
+  either.
 - Errors carry `{ code, message, remediation }` where `remediation` is the literal next command.
   Sub-timings: `log_read_ms`, `ingest_ms`. **No credential material anywhere:** the attribution
   line carries `agentId`, `role` and `model` and never a key, a key hash or an `sk-or-` token, and
@@ -527,4 +556,303 @@ DF2.8 already established rather than anywhere new in the six-step sequence.
 
 ## Dev Agent Record
 
-*(empty — story not yet started)*
+**Implemented 2026-09-10** — branch `feature/df2-12-token-cost-attribution-wiring` (cut from `dev`
+at the seventh-pin head), two-leg build: in-box leg and host leg implemented by separate workers
+with exclusive file sets, each verified at source and gate-run by the parent before commit.
+
+### What shipped
+
+- **In-box leg (commit `074a4532`)** — `dispatch-task.ts`: `emitCostAttribution` writes fd 2
+  directly (INV-COST-10 — not the injectable `deps.log` seam, not overridable); one
+  `cost_attribution` line per cost event at the `case "cost"` arm; `role` from the roster entry
+  (`agentRoles` map, `roles[0]` = lead — never inferred); `invocationSeq` from a factory-scoped
+  per-agent counter (named ceiling: Restart=no, reboot ends the run); wire `timestamp` verbatim;
+  missing role → `cost_attribution_refused`, zero emission (INV-COST-8).
+  `team-event-adapter.ts`: pure `costAttributionFields` projection — `CostTraceEvent` and the
+  trace row untouched. `steering.ts`: `meter()` returns its µ$ delta;
+  `emitResidentAttribution` at the meter site — `role:"resident"` supplied, `costMicroUsd`
+  direct, genuinely-absent wire fields `null`, `unpricedTurns: 1` when usage is absent
+  (fail-closed), broken sink is a sidecar fault that never degrades the resident; optional
+  `emitAttribution` dep defaulting to the fd-2 writer (production injects nothing → cannot lose
+  the row).
+- **Host leg** — `cost-ledger-bridge.ts` (NEW): `ingestHarvestedTokens` reads
+  `<runsDir>/<runId>-artifacts/<runId>.engine.log` and drives `ingestCostEvent` once per line —
+  the ledger stays the only writer; `classifyHarvestedTokens` is the same evidence classified
+  without a write, shared with `qds cost` so the two surfaces agree by construction;
+  `role`/`invocationSeq` read off the line, never from position (partial-replay negative
+  control); string-only budget validation identical to `ingestBoxHoursIfAttributed`.
+  `teardown.ts`: the token ingest at BOTH existing ingest points, immediately before the
+  box-hours ingest each time — no step added, none reordered; `reportSpendDivergence`'s
+  `unwired` message reclassified as a FAULT (outcome value unchanged).
+  `qds-cost.ts`: per-run TOKENS column — `✓ | no-token-spend | unpriced (n) | token-rows-refused (n) |
+  tokens-not-harvested`, the refined AC4 discriminator re-derived from the harvested log
+  (`unpriced (n)` names rows that were INGESTED at no price — the review round split it from
+  `token-rows-refused (n)`, now reserved for lines present with zero token rows written).
+  AC6 prose retirement: every shipped string describing the bridge as unbuilt is gone
+  (grep + positive control; `emitTokenBridgeState` KEPT as a diagnostic, its message now naming
+  the live condition — see deviations).
+
+### Design decisions and deviations (all recorded, none silent)
+
+1. **The line's money field is `costMicroUsd`, never `costUsd`.** The DD-9 unit-boundary guard
+   (`tests/phase-engine/usage.test.ts` — no float-dollar field inside `src/phase-engine`,
+   exactly one `costUsd` reference in the adapter) forbids carrying the wire's float USD on an
+   engine-emitted line. The worker's first cut carried `costUsd` and the guard caught it — the
+   fix emits the µ$ the adapter's sanctioned conversion already produced. One conversion per
+   side at each boundary; µ$ inside both. Story refined in-commit (`7d52db1`).
+2. **AC4's discriminator mechanism named.** The teardown summary is a log line no later reader
+   can see, so `qds cost` re-derives it from the harvested log through the bridge's own
+   classifier. Story refined in-commit (`7d52db1`).
+3. **`ingestCostEvent` now binds the `model` column.** AC1 requires `model` populated; the
+   column has existed since DF2.8's SCHEMA and no caller ever filled it — unsatisfiable under
+   the story's "prose only" constraint, which the parent relaxed for exactly this one additive
+   binding (model is NOT an `event_id` digest input: no idempotency, sum or view-shape change;
+   pinned by a new round-trip assertion in `tests/providers/cost-ledger.test.ts`). The
+   resident's `model` binds as `""` — its wire genuinely has none.
+4. **`emitTokenBridgeState` stays a diagnostic, not a hard fault.** It is ledger-WIDE and cannot
+   know whether a token row *should* exist (a legitimately spendless fleet reads zero too); a
+   hard fault would false-alarm every cheap run. Its message now names the live condition and
+   the evidence path. The per-run fault framing lives in `reportSpendDivergence`'s `unwired`
+   arm, where the provider figure *proves* spend happened.
+5. **Unparseable line vs INV-COST-8/9 tension.** INV-COST-9 says hand malformed data to
+   `ingestCostEvent` (unpriced=1); INV-COST-8 forbids guessing `role`. Resolution: a PARSED
+   line with unusable money → `ingestCostEvent`, `unpriced=1` (AC5 honored); an UNPARSEABLE
+   line still carrying the `cost_attribution` head → refused, counted, field named; plain
+   non-JSON engine-log noise (stack traces) is ignored — counting it would false-alarm every
+   cheap run.
+6. **Summary gained a fourth outcome, `no-token-spend`.** A readable log with zero
+   `cost_attribution` lines is not `tokens-not-harvested` — calling a spendless run unharvested
+   is exactly AC4's false-alarm negative control.
+7. **Resident line `timestamp` is the emission time** — the resident has no provider wire event
+   to read one from; the event is created at the meter site. Digest-stable per line (the durable
+   log carries it), so re-harvest idempotency holds.
+8. **POST-REVIEW FIXES (independent closeout review — 1 CRITICAL, 2 MEDIUM, 2 LOW; every
+   finding verified at source before acting; F3 already recorded above and stands):**
+   - **F1 (CRITICAL, LOGIC) — the fd-2 emission bypassed the tee. FIXED.** Both emission sites
+     wrote `process.stderr.write` directly. The fd-2 tee in pipeline-run is caller-level
+     (`writeAll`'s own tee branch), not an OS-level dup of fd 2, and the in-box systemd unit's
+     fd 2 is journald (bare `ExecStart`, no `StandardError=`) — so in the production shape every
+     `cost_attribution` line reached journald and NEVER the harvested `<runId>.engine.log`:
+     zero token rows for every run, the disarmed-tripwire state this story closes. The offline
+     tests could not see it — they monkey-patch `process.stderr.write`, asserting the write
+     happened, not that the tee captured it (the deviation-1 record's "production injects
+     nothing → cannot lose the row" premise was false: the default writer itself was the loss).
+     Fix: a DEDICATED money seam (never `deps.log`), `emitMoneyLine` on dispatch-task and the
+     existing `emitAttribution` on steering, defaulting to raw stderr for standalone callers;
+     pipeline-run exports `moneyLineTee()` (writes through `writeAll` — the line lands on the
+     engine log AND stays on stderr) and injects it at BOTH production call sites. INV-COST-10's
+     own name now holds for real — durability is ASSERTED: pinned by
+     `tests/phase-engine/pipeline-run-money-line.test.ts` (real subprocess, real `--engine-log`
+     file, both surfaces, exactly one line each; plus a structural pin on both injection sites
+     with a positive control) and a dedicated-seam test in `dispatch-task.test.ts`; the TIER-2
+     live round remains the end-to-end proof.
+   - **F2 (MEDIUM, INVARIANT) — the in-box refusal dropped money silently. FIXED.** An agentId
+     the roster never spawned (including `parseTeamEventLine`'s `"unknown"` coercion for
+     external emitters) took the refusal arm, which emitted ONLY through `deps.log` — invisible
+     to the harvest — so a run whose cost events were all refused read as `no-token-spend`
+     downstream: a false negative on AC4's own negative control. Fix: the refusal arm now also
+     emits a `cost_attribution_refused` marker on the DEDICATED money seam (still never an
+     attribution line — INV-COST-8 holds); the bridge classifies the marker, counts it in
+     `rowsRefused`, writes no row, and `classifyHarvestedTokens` counts it as evidence — the
+     AC4 discriminator now reads `token-rows-refused (n)`, never a false spendless.
+   - **F4 (LOW, EDGE) — mixed-log summary read as a clean bill. FIXED.** A log with priced rows
+     AND refused lines reported `outcome: "ingested"` with no `reason`. Now any summary with
+     refusals carries a reason naming the count and whether priced rows still landed.
+   - **F5 (LOW, DESIGN) — token rows lacked the landedLate tripwire. FIXED.** Only
+     `ingestBoxHours` carried the K1 late-landing warning; token rows feed the SAME derived SUM
+     `admitIssue` reads, so a crash-recovery token ingest past the reservation-retirement cutoff
+     silently re-priced a re-granted cap. `ingestCostEvent` now carries the same tripwire
+     (same STRICT `<`, same margin): `token-ingest-late-past-reservation-cutoff`, outcome
+     `late-ingest-over-cap-risk`, positive-spend-only, insert-only (dedup re-runs stay silent) —
+     pinned with a fresh-close control mirroring the box-hours test.
+   - **F3 (MEDIUM, DESIGN) — loser-arm token ingest gap: already recorded above; re-confirmed
+     by the review at `makeLoserLedgerHook`. Stands as recorded (owner owed).**
+   - The tracked-inputs literal moved with the phase-engine + pipeline-run edits and is adopted
+     in-commit per the ritual; the branch's added defensive-programming pattern lines are
+     annotated `dp:ok` with per-line reasons (the advisory baseline itself is dev-red at 342
+     pre-existing findings — not this branch's regression).
+9. **POST-REVIEW-ROUND-6 (2026-09-11) — `steering.ts`'s `meter()` classification was reworked,
+   beyond the story's "adds only one emit call" claim for the DF3.3-owned file.** Negative /
+   non-finite / non-numeric usage now classifies `unpriced` where `clampTerm` previously
+   clamped it to a priced zero (fail-closed, same direction as the absent-usage rule); token
+   reads moved behind a `rawTokens()` helper. The untouched surfaces named in Region ownership
+   (solicitation points, fold budget, `ResidentTelemetry`'s closed key set, journal `resident`
+   block) really are untouched — pinned by tests. Recorded here because the deviation was
+   attributed only to a code comment before this round's audit flagged it.
+10. **POST-REVIEW-ROUND-6 — known ceiling, charge-without-reply resident spend.** A resident
+    `caller.call()` that throws AFTER the provider billed (timeout mid-flight, process death)
+    returns PROCEED with no attribution emission and no marker: the engine cannot know a
+    reply-less spend happened, and provider-side `captureSpend` remains authoritative for the
+    run total (the tier-2 evidence position). Named ceiling, not built.
+
+### Findings recorded, not fixed (out of scope by the story's own Files to Modify)
+
+- **`fleet.ts`'s `makeLoserLedgerHook` narrows `CostLedgerHook` to box-hours** — fan-out loser
+  teardowns skip the token ingest (documented at `CostLedgerHook`). Real spend visibility gap
+  for loser arms; needs an owner (follow-up story or DF2.12-b).
+  **RESOLVED in review round 6 (2026-09-11, post-PR):** `makeLoserLedgerHook` now forwards
+  `ingestCostEvent` through its lazy-open seam (`scripts/fleet.ts`, with
+  `tests/fleet/cli.test.ts` re-open pins and a teardown-level lazy-seam unit test), closing
+  the gap this bullet recorded. The `fleet.ts` edit escaped the story's declared file set —
+  accepted as the review's own remediation of this recorded finding, noted here so the
+  boundary exception is on the record rather than silent.
+- **`usdToMicros` round trip drifts ≤1 µ$ above ~2^51** — pinned at the property test with the
+  fix path named (exact decimal conversion, a `cost-ledger.ts` behaviour change). Bit-exact
+  through 2^50; five orders of magnitude past real spend; idempotency unaffected.
+- **Live-e2e assertions flipped** (`toBe(0)` → `toBeGreaterThan(0)` in the three tier live
+  tests): with the bridge live, pinning zero was asserting the defect. Unverifiable offline —
+  the next live round proves them.
+
+### Verification
+
+- `tests/providers/` + `tests/scripts/qds-cost.test.ts`: **1199 pass / 0 fail**
+- `tests/phase-engine/` + image pin + story-consistency: **1110 pass / 0 fail** (image
+  tracked-inputs literal adopted in-commit, `7eb1b314…`, 234/0)
+- `bunx tsc --noEmit` clean; biome clean on all touched files
+- TDD order held on both legs (11 + 15+ new tests written and confirmed failing first)
+- Negative controls pinned: fd-2 delivery under an injected `deps.log`; shared-model roster
+  (model-derived role cannot distinguish lead from worker); `(run_id, agent_id, kind)`-keyed
+  dedup collapses a second genuine invocation; partial re-harvest re-numbering; box-hours-only
+  ledger; empty-envelope `0 µ$` rendering; position-derived invocationSeq; unpriced-filtering
+  reader; ratio constant grep (R5 fact 12)
+
+### Owed, post-merge
+
+- **AC1's evidence arm (b) — the TIER-2 live round** (`qds-live-e2e`): one real lead + 2-worker
+  + armed-resident run on an exe.dev box, capture the harvested
+  `<runsDir>/<runId>-artifacts/<runId>.engine.log` showing one `cost_attribution` line per cost
+  event, plus the resulting ledger rows. Arm (a) is covered offline (teardown integration tests
+  drive the real artifacts pull from box `$HOME`). Operator-gated spend, DF2.11 round-6 pattern.
+  Round 6 hardened the live assertions it must satisfy: per-arm token-row counts (the old
+  OR-aggregate could pass with one arm at zero) and a priced token-SUM cross-check against the
+  record's authoritative spend at the `SPEND_DIVERGENCE_TOLERANCE_MICRO_USD` tolerance —
+  correct-by-construction offline, proven by the next live round.
+- The image republish → adopt ritual rides the merge (publish-exedev-image.yml fires on dev;
+  the tracked-inputs literal is adopted in-branch — re-pinned at round 6 after the engine-cluster
+  fixes moved the walked inputs again, with the moved-input identification recorded in the test).
+
+## Review Findings — Round 6 (BMAD adversarial wave, 2026-09-11)
+
+Seven reviewers (4 blind chunk-only, 3 repo-verifying edge/auditor) over chunked diffs, then
+two fix waves on disjoint file clusters. Raw findings deduped to a triage ledger:
+**36 patched** (incl. 2 confirmed-red gates), **20 dismissed with source evidence**, all LOW
+priors included per review charter.
+
+### Patched — engine cluster (`src/phase-engine/*` + tests)
+- [x] **ENG-1 (HIGH, red gate)** — `usage.test.ts` DD-9 proximity pin was red: the meter
+  refactor split token reads from the µ$ division across `;`, which the pin's `[^;]` regex
+  cannot cross. Pin rewritten for the two-statement shape, purpose preserved (each division's
+  numerator must be the `rawTokens()` variable for its own token field; count-must-be-2 kept).
+- [x] **ENG-2 (HIGH)** — dispatch-task's money emission was unguarded: a throwing money sink
+  aborted `onTeamEvent` (losing remaining cost evidence; the default stderr writer CAN throw
+  where production's tee cannot). Now the steering sidecar posture: one redacted
+  `money_line_sink_failed` diagnostic, body never degraded, later events still attempt.
+- [x] Comments de-contradicted (ENG-3 default-writer durability claim, ENG-4 meter docstring
+  vs absent-usage classification, ENG-7 stale `emitCostAttribution` cross-ref).
+- [x] **ENG-6** — a silently-throwing resident attribution sink now latches a once-only
+  sanitized diagnostic (`lastAttributionErrorReason`, additive getter per the file's existing
+  pattern) instead of vanishing.
+- [x] Tests: per-agent `invocationSeq` asserted both-0 (global-counter blind spot); refusal
+  reasons asserted structurally (was `toContain("role")`); tee-test tmp dirs cleaned; the
+  "share 0" test's comment aligned with its absence assertion.
+
+### Patched — bridge cluster (`src/providers/*` + tests)
+- [x] **BRG-1 (MEDIUM, verified by probe)** — a FRACTIONAL token count passed the
+  `typeof === "number"` gate into the STRICT SQLite bind → REAL-in-INTEGER error → raw
+  rethrow → the ingest loop ABORTED, permanently wedging that run's remaining token rows on
+  every healing re-run. Now: non-integer counts take the per-line refusal arm (field named,
+  loop continues); `Infinity` (`1e999`) covered by the same gate. Money stays visible either
+  way (string-typed numerics keep the coerce-to-0 path).
+- [x] **BRG-2** — refusal evidence was manufactured from NOISE: any unparseable line merely
+  CONTAINING "cost_attribution" (tee'd stderr chatter) counted as truncated money evidence.
+  Now requires a `{` JSON head.
+- [x] **BRG-3** — the role vocabulary existed in three literals (`CostRole` type, bridge set,
+  `assertIngestCtx` set). One `COST_ROLES` const now feeds all three.
+- [x] **BRG-4** — refused-only logs classified `no-token-spend` upstream while the ingest
+  summary said `refused`; the classifier now separates `lines` (parseable) from
+  `refusedLines` (markers + truncated), and `qds cost` renders it (CLI-1 below).
+- [x] **BRG-5..10** — divergence FAULT message gained the empty-readable-log cause; NaN money
+  logs `null` not a confident `0`; refusal rows log `status:"error"`; duplicate-only re-runs
+  name themselves in the summary reason; `rowsUnpriced` counts inserted-only; the
+  crash-recovery refusal line reports its real phase (`close-recovery`); **every new
+  error/warning emission now carries `remediation`** (the Observability Contract's errors
+  bullet — `key-hash-missing`'s remediation was being dropped by `tokenIngestRefusalLog`).
+- [x] Tests: `costMicroUsd: null` — the exact wire shape production emits for malformed money
+  (dispatch NaN → JSON null) — now pinned unpriced=1 at the bridge (was only ever tested as a
+  `"junk"` string production never sends); negative money; idempotency across two DISTINCT
+  ledger handles (the real crash-recovery shape); mixed-runId log; identical line twice in
+  one read.
+
+### Patched — CLI cluster (`scripts/*` + tests)
+- [x] **CLI-1 (HIGH)** — `renderTokenCell` rendered `✓` whenever ANY priced row existed,
+  hiding refused/unpriced evidence for the same run. Refused evidence is now always visible:
+  `✓ (refused n)` / `unpriced (n, refused m)`; `token-rows-refused (n)` counts refusal
+  evidence only (was parseable-line count).
+- [x] **CLI-2 (HIGH, red gate)** — the build-image digest literal was stale at HEAD (moved by
+  rounds `9102b7c9`/`17fe4066` touching the walked `src/phase-engine/` COPY inputs; the same
+  rounds' `src/providers/*` edits verifiably do not move it). Adopted with the moved-input
+  identification in the test's own pairing-debt comment; re-adopted after the round's own
+  engine fixes moved it again.
+- [x] **CLI-3** — a throwing classifier killed the whole `qds cost` report; now the per-run
+  cell fails closed (`tokens-not-harvested (<reason>)`) and the report survives (ledger
+  failures keep their own exit-1 classification).
+- [x] Doc/header: "zero token-evidence lines" wording; `unpriced (n)` added to the header
+  vocabulary; both evidence-vs-ledger drift arms named in the render docstring.
+
+### Patched — wave 2 (test hardening)
+- [x] Live two-arm token assertions are per-arm (was an OR-aggregate one arm could zero).
+- [x] Live token SUM cross-checked against the record's authoritative spend (same tolerance
+  `reportSpendDivergence` uses) — catches partial/unpriced-only harvests `>0` accepted.
+- [x] `MockCostLedgerHook.ingestCostEvent` honors its documented `error` field.
+- [x] Loser-arm token ingest now has teardown-level unit coverage through the real
+  `ingestHarvestedTokensIfWired` with a lazily-opening hook (open-once, forward-both,
+  close-drops, re-open-works).
+
+### False positives (verified at source, not fixed)
+- "Projection drops undefined fields" — `parseTeamEventLine` normalizes every projected field
+  (`agentId`→"unknown", `model`→"unknown", `timestamp`→"", `countOr0` numerics) and gates
+  `onTeamEvent`; `costAttributionFields` is total as documented.
+- "Test env vars leak" — the suite's module-level hooks already snapshot/restore all four.
+- `agentRoles` duplicate-name collapse — the roster schema refuses duplicate names at load.
+- `storeDir` vs `runsDir`, fleet throw-on-missing reachability, box-hours unpriced asymmetry,
+  truncated-line misclassification (`(fail)`-class), `hasTokenRows` "missing" — each cleared
+  at `file:line` by the verifying reviewers; details in the round's triage ledger.
+
+### Dismissed with evidence (structural/spec-bound, on the record)
+- **Digest omits `role`** — collision needs an ms-precise timestamp coincidence AND the digest
+  input set is DF2.8's quoted AC2 contract; changing it violates the spec for an unreachable
+  edge.
+- **Replay double-count on the money seam** — no replay mechanism exists in the runner;
+  retries reuse the run-scoped map, so ordinals continue monotonically.
+- **Charge-without-reply resident spend** — recorded as ceiling (deviation 10).
+- **TIER-2 live arm (b)** — owed post-merge by the story's own record (operator-gated).
+- **AC3 negative control by composition** — the teeth are the teardown 3-row `perRole` assert
+  (a dropped resident row fails it), documented here as the control's location.
+- **Half-tie µ$ drift pinned as priced** — intentional: the test is the driver for the
+  recorded `usdToMicros` fix.
+
+### Behavior changes this round (all intentional)
+1. Throwing money sink no longer aborts `onTeamEvent` (sidecar posture, parity with steering).
+2. Fractional/infinite token-count lines refuse per-line instead of wedging the run's ingest.
+3. Noise lines can no longer fabricate refusal evidence; refused-only logs classify
+   `token-rows`, and `qds cost` renders refusal evidence in every cell shape.
+4. Refusal rows log `status:"error"`; NaN money logs `null`; duplicate-only summaries self-
+   identify; `rowsUnpriced` counts inserted rows only.
+5. All new error/warning emissions carry `remediation`.
+6. A throwing `qds cost` classifier degrades one cell, not the report.
+7. Steering gains an additive `lastAttributionErrorReason` diagnostic getter.
+
+### Gates (round 6 close)
+- `bun test tests/providers/ tests/phase-engine/ tests/scripts/ tests/fleet/cli.test.ts` →
+  **2826 pass / 1 fail**, the canonical combined run's only failure being the pre-existing
+  `O_EXCL fallback is still exclusive` load flake in fleet's run-lock (passes in isolation;
+  no round-6 file touches `run-lock.ts` or locking paths). Two later `tests/fleet/cli.test.ts`
+  reruns under residual machine load showed intermittent 5s-subprocess-timeout flakes (13,
+  then 2, different tests each run, all green in isolation) — timeout-class only, zero
+  deterministic failures across three runs. `bunx tsc --noEmit` clean; `bunx biome check`
+  clean on all 18 touched files. `detect_changes`: 36 changed symbols / 18 files, every
+  symbol inside the PR's own modules (providers, phase-engine, scripts + tests) — no
+  out-of-scope surface; HIGH risk class expected (the teardown process family is the story's
+  declared CRITICAL neighborhood).
+- The TIER-2 live round remains the end-to-end proof for AC1 arm (b) and now runs against the
+  hardened per-arm + SUM assertions.

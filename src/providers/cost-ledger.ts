@@ -14,18 +14,18 @@
  * transaction, because a bare read-and-compare is a TOCTOU two concurrent
  * dispatches can both win (R2 §6 serialized-admission mandate).
  *
- * **What actually reaches this ledger today (F001).** `kind='box_hours'` rows
- * only. `teardown.ts` writes those; `ingestCostEvent`, the only writer of
- * `kind='tokens'` rows, has no caller outside `tests/` — nothing bridges the
- * DF2.7 `CostEvent`s that `cli-anything/src/runner.ts` emits into this store.
- * So every figure derived here, `admitIssue`'s cap included, is box time and
- * no token spend. INV-COST-2 still holds as written — the SUM is derived and
- * nothing is denormalized — but it promises DERIVATION, never COMPLETENESS,
- * and the two must not be confused while reading a total. `qds-cost` says so
- * out loud on every degraded ledger (`emitTokenBridgeState`, code
- * `tokens-ledger-unwired`). Q1 of `docs/decisions/2026-08-tech-debt-answers.md`
- * deferred (did not drop) the bridge: the writer and its tests stay, ready for
- * the one dispatcher call site that would make the prose above complete.
+ * **What reaches this ledger.** Both kinds: `teardown.ts` writes `box_hours`
+ * at close, and the DF2.12 token bridge (`cost-ledger-bridge.ts`) drives
+ * `ingestCostEvent` — the only writer of `kind='tokens'` rows — from the
+ * harvested engine log's `cost_attribution` lines, at teardown's two ingest
+ * points. A run whose tokens are NOT here is a named state, never a quiet
+ * zero: the bridge reports `tokens-not-harvested` when the engine log never
+ * made it to teardown, and `qds-cost`'s `emitTokenBridgeState` line names a
+ * ledger that has never received a token row. INV-COST-2 still holds as
+ * written — the SUM is derived and nothing is denormalized — but it promises
+ * DERIVATION, never COMPLETENESS, and the two must not be confused while
+ * reading a total: a total is complete for a run only once that run's token
+ * rows landed.
  *
  * The float accumulator this design exists to NOT be: inkwell's tracer keeps
  * `total_cost REAL` and does `total_cost = total_cost + ?` per turn (tracer.py
@@ -258,6 +258,27 @@ export const ADMISSION_GRACE_MS = 60_000;
  * Exported for tests ONLY, on the same reasoning as ADMISSION_GRACE_MS.
  */
 export const ADMISSION_SKEW_MARGIN_MS = 300_000;
+
+/**
+ * The shared reservation-retirement cutoff predicate behind BOTH late-ingest
+ * tripwires (`token-ingest-late-past-reservation-cutoff` and
+ * `box-hours-late-past-reservation-cutoff`): a spend row landing after
+ * `closedAt` + ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS names the same
+ * exposure — admitIssue may already have retired the closed run's reservation
+ * and re-granted the headroom, so the issue total can exceed its cap.
+ * STRICT `<`, matching classifyReservation's retirement operator (round-5
+ * EE-5 / round-3 C14): a close at EXACTLY the cutoff is still COUNTING, so
+ * warning there would name an exposure the admission path has not released.
+ * `closedAtMs` may be NaN (a token row whose run record is absent) — the
+ * isFinite guard keeps that from reading as "late".
+ */
+function landedPastReservationCutoff(spendMicroUsd: number, closedAtMs: number): boolean {
+  return (
+    spendMicroUsd > 0 &&
+    Number.isFinite(closedAtMs) &&
+    closedAtMs < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS
+  );
+}
 
 /**
  * DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up.
@@ -743,22 +764,35 @@ export function capForIssue(config: CostConfig, repoSlug: string, issueId: strin
 // ─── ledger ──────────────────────────────────────────────────────────────────
 
 /**
- * The DF2.7 wire event as this module WOULD receive it — float USD on the
- * wire, µ$ never. No production caller passes one yet (F001, see the header);
- * the type is the contract the unbuilt bridge would satisfy.
+ * The DF2.7 wire event as this module receives it — float USD on the wire,
+ * µ$ never. The DF2.12 host leg (`cost-ledger-bridge.ts`) builds one per
+ * harvested `cost_attribution` line and hands it to `ingestCostEvent` from
+ * teardown's two ingest points.
  */
 export type CostWireEvent = CostEvent;
 
 export type CostRole = "lead" | "worker" | "resident" | "tier1";
 
 /**
- * The attribution context only the spawning dispatcher WOULD know: DF2.7's
+ * The role vocabulary as ONE list, derived from `CostRole` (`satisfies`, so a
+ * new union member fails to compile until it is added here — and every
+ * consumer that previously hand-rolled the same literal set — the bridge's
+ * reader, `assertIngestCtx` below — now shares this one, PR #253 review
+ * BRG-3: two divergent copies of the set would let a role the ledger refuses
+ * pass the bridge's gate, or vice versa).
+ */
+export const COST_ROLES = ["lead", "worker", "resident", "tier1"] as const satisfies readonly CostRole[];
+
+/**
+ * The attribution context only the spawning dispatcher knows: DF2.7's
  * event carries agent/model/tokens/cost and nothing else, so run/issue/request/
  * role and the invocation counter arrive here. `role` is read from the roster
  * entry the dispatcher spawned under — never inferred from the model slug, the
  * agent name, or emission order.
  *
- * No dispatcher assembles one today (F001): only `tests/` construct this.
+ * Assembled by the DF2.12 bridge (`cost-ledger-bridge.ts`): repoSlug/issueId
+ * from the run record's `extensions.budget`, `role`/`invocationSeq` off the
+ * harvested `cost_attribution` line, `requestId` from the teardown.
  */
 export interface IngestCtx {
   runId: string;
@@ -1404,13 +1438,14 @@ export class CostLedger {
 
   /**
    * One row per emitted event — the ONLY writer of `kind='tokens'` rows, and
-   * (F001) a writer with no caller outside `tests/`. The DF2.7 events that
-   * `cli-anything/src/runner.ts` produces are consumed by that runner's own
-   * in-process budget guard and are never handed to this method, so the
-   * behaviour described below is exercised only by its tests. Q1 kept it
-   * deliberately: the bridge is deferred, not dropped, and this is the half
-   * that already exists. Wiring it means one call at the dispatcher site that
-   * consumes the `{kind:"cost"}` team event — nothing here needs to change.
+   * since DF2.12 a wired one: the host leg (`cost-ledger-bridge.ts`) reads the
+   * harvested engine log's `cost_attribution` lines and calls this method once
+   * per line, at teardown's two ingest points, immediately before the
+   * box-hours ingest. The line carries integer µ$ (the DD-9 unit-boundary
+   * guard keeps float USD out of the engine); the bridge converts µ$ → USD
+   * once here at the seam and this method converts back at `usdToMicros` —
+   * exact for every safe-integer µ$ value, pinned by the ledger's property
+   * test below.
    *
    * A malformed event — non-finite or negative
    * `costUsd` — persists with `unpriced = 1` and `cost_micro_usd = 0`, never
@@ -1480,10 +1515,11 @@ export class CostLedger {
         .prepare(
           `INSERT INTO cost_events (
            event_id, run_id, repo_slug, issue_id, request_id, role, agent_id,
+           model,
            kind, invocation_seq, input_tokens, output_tokens, cache_read_tokens,
            cache_write_tokens, turn_count, cost_micro_usd, unpriced,
            key_hash, key_limit_micro_usd, created_at
-         ) VALUES (?,?,?,?,?,?,?, 'tokens', ?,?,?,?,?,?,?,?,?,?,?)
+         ) VALUES (?,?,?,?,?,?,?, ?, 'tokens', ?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(event_id) DO NOTHING`,
         )
         .run(
@@ -1497,6 +1533,13 @@ export class CostLedger {
           ctx.requestId,
           ctx.role,
           event.agentId,
+          // DF2.12: the event's own model, now that a production caller exists
+          // (the bridge). The column existed since DF2.8's SCHEMA and was never
+          // bound; model is NOT an event_id digest input, so this changes no
+          // idempotency, no sum, no view shape — it fills the column AC1
+          // requires. The resident's line carries model "" (its wire has no
+          // model), which binds as the empty string, honestly.
+          event.model ?? null,
           ctx.invocationSeq,
           event.inputTokens ?? 0,
           event.outputTokens ?? 0,
@@ -1593,6 +1636,47 @@ export class CostLedger {
       outcome: inserted ? "inserted" : "duplicate",
       ingest_ms: durationMs,
     });
+    if (inserted) {
+      // K1 parity (closeout review F5): token rows feed the SAME derived SUM
+      // admitIssue reads as box hours, so a token row landing past the
+      // reservation-retirement cutoff is the same exposure the box-hours
+      // tripwire names — spend on a cap whose reservation may already have
+      // been retired and re-granted. Same STRICT `<`, same margin, same
+      // posture: nothing can un-retire the admission, so the money-safe
+      // response is to name the exposure the moment it lands.
+      const closed = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
+      // Review round: the exposure is the PRICED SUM admitIssue reads. An
+      // unpriced row (`unpricedTurns > 0` with a finite, positive costUsd)
+      // persists a POSITIVE cost_micro_usd but is EXCLUDED from that SUM
+      // (the views' `unpriced = 0` filter), so warning about cap exposure
+      // from it would be a false alarm — priced rows only.
+      if (!unpriced && landedPastReservationCutoff(costMicroUsd, closed)) {
+        emitGuarded({
+          requestId: ctx.requestId,
+          operation: "cost-ledger.ingest",
+          agentId: event.agentId,
+          timestamp: new Date().toISOString(),
+          duration: durationMs,
+          durationMs,
+          status: "ok",
+          runId: ctx.runId,
+          repoSlug: canonicalRepoSlug(ctx.repoSlug),
+          issueId: canonicalIssueId(ctx.issueId),
+          kind: "tokens",
+          role: ctx.role,
+          costMicroUsd,
+          closedAt: record?.closedAt,
+          code: "token-ingest-late-past-reservation-cutoff",
+          message: `token spend for run ${ctx.runId} landed ${Math.round((Date.now() - closed) / 1000)}s after its close — past the ~${(ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) / 1000}s reservation-retirement cutoff, so admissions granted since may have spent into this charge; the issue total can exceed its cap`,
+          // PR #253 review BRG-10: the warning named the exposure but no next
+          // command. There is none that un-lands the row (gate_admissions is
+          // append-only, INV-COST-1), so the literal next action is a
+          // reservation reconciliation before the next dispatch.
+          remediation: `no command un-lands this row — before the next dispatch for issue ${canonicalIssueId(ctx.issueId)}, check its reservation retirement against the SUM qds cost reports and re-cap if the retired headroom is now over-committed`,
+          outcome: "late-ingest-over-cap-risk",
+        });
+      }
+    }
     return { eventId, inserted, unpriced };
   }
 
@@ -1603,9 +1687,9 @@ export class CostLedger {
    * destroy is confirmed and the lifetime is final. Never from
    * `captureSpend`: that reads the same token money DF2.7 already priced, and
    * ingesting it would double-count inside the SUM the gate reads — a rule
-   * that survives F001 unchanged. It is about which SOURCE owns token money,
-   * not about whether that money currently arrives; when the bridge lands,
-   * `ingestCostEvent` is still the one writer, and `captureSpend` is still not.
+   * that survives the DF2.12 bridge unchanged. It is about which SOURCE owns
+   * token money: `ingestCostEvent` is still the one writer of token rows, and
+   * `captureSpend` is still not.
    *
    * F8 (2026-08-24): the DF2.8 story originally specified ceil(lifetime in
    * whole hours) × rate — a 1-hour MINIMUM per box. Live evidence (a ~20s box
@@ -1727,11 +1811,7 @@ export class CostLedger {
       // the boundary went to counting so the close→price window can never be
       // retired out from under — so warning "past the cutoff" there would name
       // an exposure the admission path has not actually released.
-      const landedLate =
-        costMicroUsd > 0 &&
-        Number.isFinite(closed) &&
-        closed < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
-      if (landedLate) {
+      if (landedPastReservationCutoff(costMicroUsd, closed)) {
         emitGuarded({
           requestId: ctx.requestId,
           operation: "cost-ledger.ingest",
@@ -1748,6 +1828,9 @@ export class CostLedger {
           closedAt: record.closedAt,
           code: "box-hours-late-past-reservation-cutoff",
           message: `box hours for run ${ctx.runId} landed ${Math.round((Date.now() - closed) / 1000)}s after its close — past the ~${(ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) / 1000}s reservation-retirement cutoff, so admissions granted since may have spent into this charge; the issue total can exceed its cap`,
+          // Same literal next command as the token-side tripwire above
+          // (BRG-10): the row is landed and append-only; reconcile the cap.
+          remediation: `no command un-lands this row — before the next dispatch for issue ${canonicalIssueId(ctx.issueId)}, check its reservation retirement against the SUM qds cost reports and re-cap if the retired headroom is now over-committed`,
           outcome: "late-ingest-over-cap-risk",
         });
       }
@@ -1806,15 +1889,16 @@ export class CostLedger {
 
   // ─── views ─────────────────────────────────────────────────────────────────
 
-  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema, and the same F001 box-hours-only caveat, as the issue view. */
+  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema as the issue view. A run whose token rows never landed (tokens-not-harvested) sums box hours only; `hasTokenRows` is the field that says so. */
   readRunCost(runId: string): CostView {
     return this.view("run_id = ?", [runId], "run_id = ? AND unpriced = 0", [runId], "run_id = ? AND unpriced = 1", [runId]);
   }
 
   /**
    * The issue-keyed view — the same SUM the gate reads (INV-COST-2: derived,
-   * never denormalized; see the header for what that does NOT promise while
-   * F001 stands — the rows summed here are box hours only).
+   * never denormalized; see the header for what that does NOT promise: a
+   * run's contribution is complete only once its token rows landed — the
+   * bridge reports `tokens-not-harvested` when they did not).
    */
   readIssueCost(repoSlug: string, issueId: string): CostView {
     const all = issueScopeSql();
@@ -1925,32 +2009,36 @@ export class CostLedger {
   }
 
   /**
-   * F001 / Q1 ("deferred", `docs/decisions/2026-08-tech-debt-answers.md`):
-   * announce that this ledger holds no `kind='tokens'` row at all.
+   * The zero-token-row tripwire (DF2.12 reclassified the old unwired-bridge
+   * notice — the bridge it announced as unbuilt is now live, in
+   * `cost-ledger-bridge.ts`). Announce that this ledger holds no
+   * `kind='tokens'` row at all, and say what that CAN mean now that the
+   * wiring exists: no torn-down run has delivered token rows yet (runs still
+   * open), every harvested run so far genuinely spent nothing on tokens, or
+   * the bridge/harvest path REGRESSED for the runs that should have delivered
+   * — the broken-bridge case is the one this line exists to catch.
    *
-   * `ingestCostEvent` is the only writer of those rows, and nothing in the
-   * dispatch path calls it — the DF2.7 `cost` events the CLI runner emits
-   * (`cli-anything/src/runner.ts`) never reach this store. The bridge is
-   * designed, typed and tested; it is not built. So a real ledger holds box
-   * hours only, and every per-issue figure derived from it — this store's
-   * views AND `admitIssue`'s cap — counts box time and no token spend. The gap
-   * is money-shaped, so it is stated on the operator's own channel instead of
-   * being left to a docstring nobody reads while budgeting.
+   * Deliberately a DIAGNOSTIC, not a hard fault, and this is the narrowest
+   * honest reading: the probe is LEDGER-WIDE and cannot know whether any
+   * particular run or issue SHOULD have token rows — with the bridge live, a
+   * legitimately spendless fleet's fresh ledger also reads zero. What it can
+   * say truthfully is that this ledger's caps are pricing box hours only
+   * until a token row lands, and where the evidence to check lives.
    *
-   * Ledger-WIDE, not issue-scoped: the claim is about the WIRING, so a single
-   * token row anywhere is proof enough that the bridge is live, and an issue
-   * that happens to have spent nothing on tokens is not evidence of anything.
-   * A `LIMIT 1` existence probe, never a COUNT — the answer is a boolean.
+   * Ledger-WIDE, not issue-scoped: a single token row anywhere proves the
+   * bridge delivered something, and an issue that happens to have spent
+   * nothing on tokens is not evidence of anything. A `LIMIT 1` existence
+   * probe, never a COUNT — the answer is a boolean.
    *
-   * Returns whether the ledger is degraded, so a caller can branch without
-   * re-querying. Guarded like every other emission here: a raising sink must
-   * not convert a report into a thrown error.
+   * Returns whether the ledger has zero token rows, so a caller can branch
+   * without re-querying. Guarded like every other emission here: a raising
+   * sink must not convert a report into a thrown error.
    */
-  // ponytail: this DECLARES the F001 gap rather than closing it — token spend
-  // stays outside every per-issue cap, and only an operator reading qds-cost
-  // learns that. Upgrade path: one `ingestCostEvent` call at the dispatcher
-  // site that consumes the `{kind:"cost"}` team event, after which this method
-  // can only ever return false and should be deleted with its tests.
+  // ponytail: with the DF2.12 bridge live this can no longer fire on the old
+  // permanent state; it fires on a zero-token-row ledger — normal until the
+  // first priced run lands, and a tripwire for a bridge or harvest path that
+  // regresses after that. Kept (not deleted) because that regression is
+  // otherwise silent.
   emitTokenBridgeState(): boolean {
     this.assertQueryable();
     // Round-3 C13: same per-query wrap as `view`'s tokens probe — the LIMIT-1
@@ -1974,7 +2062,7 @@ export class CostLedger {
       status: "ok",
       code: "tokens-ledger-unwired",
       ledgerPath: this.path,
-      message: `no kind='tokens' row has ever been written to ${this.path} — the DF2.7 cost-event bridge into this ledger is unbuilt, so per-issue caps count box-hours only and token spend is unbudgeted`,
+      message: `no kind='tokens' row has ever been written to ${this.path} — the DF2.12 token bridge (cost-ledger-bridge.ts → ingestCostEvent) has delivered nothing here yet: runs still open, harvested runs that spent nothing on tokens, or a bridge/harvest regression worth checking (per-run evidence: <runsDir>/<runId>-artifacts/<runId>.engine.log). Per-issue caps on this ledger are pricing box hours only until a token row lands`,
       outcome: "token-bridge-unwired",
     });
     return true;
@@ -2648,7 +2736,7 @@ export class CostLedger {
 
 // ─── ctx validation ──────────────────────────────────────────────────────────
 
-const COST_ROLES: ReadonlySet<string> = new Set(["lead", "worker", "resident", "tier1"]);
+const COST_ROLES_SET: ReadonlySet<string> = new Set(COST_ROLES);
 
 function assertIngestCtx(ctx: IngestCtx): void {
   const strings = ["runId", "repoSlug", "issueId", "requestId", "role"] as const;
@@ -2662,7 +2750,7 @@ function assertIngestCtx(ctx: IngestCtx): void {
       );
     }
   }
-  if (!COST_ROLES.has(ctx.role)) {
+  if (!COST_ROLES_SET.has(ctx.role)) {
     // The schema's CHECK is the backstop; this is the error surface — a raw
     // SQLITE_CONSTRAINT would name no field and suggest no next command.
     throw new CostLedgerError(

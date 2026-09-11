@@ -307,7 +307,7 @@ let engineLogFd: number | undefined;
  * Never throws: a log sink that can fail the run is a worse sink than no sink
  * (AC5, and the same rule `writeAll` already keeps).
  */
-function openEngineLog(target: string): void {
+export function openEngineLog(target: string): void {
   // `main` is re-entrant through the `run` front door, which opens the derived
   // log BEFORE deriving the rest of the argv (so a derivation throw is
   // harvestable) and then hands `--engine-log` to the inner `main`, which opens
@@ -616,6 +616,23 @@ function writeAll(fd: number, data: string | Buffer): void {
       /* the marker is a sidecar too */
     }
   }
+}
+
+/**
+ * DF2.12 INV-COST-10: the production money-line writer, injected at BOTH
+ * emission sites (`dispatchTask`'s `emitMoneyLine`, steering's
+ * `emitAttribution`). It MUST go through `writeAll`: the fd-2 tee is
+ * caller-level, not an OS-level dup, so a plain `process.stderr.write` would
+ * land on journald only under the in-box systemd unit (no `StandardError=`
+ * override, bare `ExecStart`) — never on the ext4 engine log the artifacts
+ * harvest pulls, leaving token spend invisible to every per-issue cap: the
+ * exact disarmed-tripwire state DF2.12 exists to close. Durability is asserted:
+ * `tests/phase-engine/pipeline-run-money-line.test.ts` pins the tee capture
+ * (real subprocess, real `--engine-log` file) and this file's two injection
+ * sites; the TIER-2 live round is the end-to-end proof.
+ */
+export function moneyLineTee(): (line: Record<string, unknown>) => void {
+  return (line) => writeAll(2, `${JSON.stringify(line)}\n`);
 }
 
 function runCommand(
@@ -1989,6 +2006,13 @@ function makeBodyFactory(
   journal?: PhaseJournal,
   resident?: ResidentHooks,
 ) {
+  // DF2.12 INV-COST-8 (PR #253 review): ONE per-agent ordinal counter per RUN,
+  // injected into every dispatch_task body this factory builds. A per-body map
+  // restarted the ordinal at 0 in each dispatch_task phase, breaking the
+  // story's monotonic per-(runId, agentId) contract whenever two phases'
+  // agentId domains overlap. Factory (per-run) scope is the point: this
+  // function is constructed once per engine run.
+  const invocationSeqByAgent = new Map<string, number>();
   const makeBody = (spec: PhaseSpec): PhaseBody<unknown> => {
     if (spec.kind === "code") {
       const cmd = spec.command ?? [];
@@ -2141,7 +2165,13 @@ function makeBodyFactory(
     // events land in the trace store (DD-8, Observability Contract). rootDir
     // pins artifact reads to the SAME --run-root the code phases use.
     if (spec.kind === "dispatch_task") {
-      const body = dispatchTask(spec, { tracer, requestId, rootDir: cwd });
+      const body = dispatchTask(spec, {
+        tracer,
+        requestId,
+        rootDir: cwd,
+        emitMoneyLine: moneyLineTee(),
+        invocationSeqByAgent,
+      });
       // DF3.3: an accepted run_start select_roster pick applies to the
       // dispatch_task phase the directive NAMED (`directive.phase` —
       // validated against the run's closed DISPATCH_TASK phase set by
@@ -3294,6 +3324,10 @@ async function main(argv: readonly string[]): Promise<number> {
       steering = createSteering({
         caller: spawned.caller,
         rate: spawned.rate,
+        // DF2.12 INV-COST-10: money rides the tee, never raw stderr — a plain
+        // process.stderr.write bypasses writeAll's engine-log tee and the line
+        // would reach journald only (see moneyLineTee).
+        emitAttribution: moneyLineTee(),
         // DF3.4 AC6: `fleet attach`'s queued messages are folded into the next
         // of DF3.3's three solicitation points. The engine addresses the in-box
         // steering paths as local paths, exactly as journal.ts addresses

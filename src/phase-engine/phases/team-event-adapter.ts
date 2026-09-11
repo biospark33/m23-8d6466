@@ -125,6 +125,49 @@ export function makeStreamHealth(): StreamHealth {
   return health;
 }
 
+/** DF2.12: the stable wire fields of a cost event, projected for the
+ * attribution line. A SEPARATE projection from CostTraceEvent above — the
+ * trace shape and the trace row it feeds are unchanged (the trace row is
+ * /run tmpfs; the money record rides the fd-2 engine log instead). Null for
+ * any non-cost event. */
+export interface CostAttributionFields {
+  agentId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  turnCount: number;
+  unpricedTurns: number;
+  timestamp: string;
+}
+
+/**
+ * DF2.12: project the wire event's stable fields for the attribution line the
+ * dispatch_task cost branch emits. Field-for-field the parsed CostEvent —
+ * parseTeamEventLine has already defaulted the optional numerics, so the
+ * projection is total. Deliberately NO money field: the DD-9 unit boundary
+ * keeps float USD out of the engine, so the line's money value is the µ$ the
+ * adapter's ONE sanctioned conversion already produced (`CostTraceEvent.
+ * costMicros`, read by the caller off the adapted event) — never the wire's
+ * `costUsd` re-read here.
+ */
+export function costAttributionFields(event: TeamEvent): CostAttributionFields | null {
+  if (event.kind !== "cost") return null;
+  const e = event.event;
+  return {
+    agentId: e.agentId,
+    model: e.model,
+    inputTokens: e.inputTokens,
+    outputTokens: e.outputTokens,
+    cacheReadTokens: e.cacheReadTokens ?? 0,
+    cacheWriteTokens: e.cacheWriteTokens ?? 0,
+    turnCount: e.turnCount ?? 0,
+    unpricedTurns: e.unpricedTurns ?? 0,
+    timestamp: e.timestamp,
+  };
+}
+
 /**
  * Adapt a parsed TeamEvent into a phase-engine surface.
  *

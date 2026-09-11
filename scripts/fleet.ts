@@ -100,7 +100,7 @@ import { resolveRunsDir, RunRecordStore } from "../src/providers/index.ts";
  * not the provider layer, was where redaction stopped.
  */
 import { MAX_ECHO, boundedEcho, redactSecrets } from "../src/providers/step-log.ts";
-import type { BoxHoursCtx, IngestResult } from "../src/providers/cost-ledger.ts";
+import type { BoxHoursCtx, CostWireEvent, IngestCtx, IngestResult } from "../src/providers/cost-ledger.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import {
@@ -1308,25 +1308,34 @@ function makeLedgerFactory(store: RunRecordStore): () => LedgerLike {
 /**
  * Structural minimum the loser-ledger hook needs from a handle: the real
  * CostLedger satisfies it, and tests substitute a controllable fake.
+ * `ingestCostEvent` is optional on the handle for the same structural reason
+ * `CostLedgerHook` makes it optional — the real ledger always has it.
  */
 interface LoserLedgerHandle {
   ingestBoxHours(ctx: BoxHoursCtx): IngestResult;
+  ingestCostEvent?(event: CostWireEvent, ctx: IngestCtx): IngestResult;
   close(): void;
 }
 
 /**
  * The lazy loser-ledger hook (see the fanout block's comment): opened on the
- * FIRST ingestBoxHours, closed by the fanout verb's finally — teardown's close
- * step only ever ingests. The reference drop is unconditional (try/finally):
+ * FIRST ingest, closed by the fanout verb's finally — teardown's close step
+ * only ever ingests. The reference drop is unconditional (try/finally):
  * a close() that THROWS must still drop the handle, because an abandoned
  * loser teardown can reach its ingest after the verb's finally ran, and on a
  * handle whose close failed bun:sqlite answers "Database has closed" — the
- * late box-hours row lost, under-counting the ledger the cap admits against.
+ * late row lost, under-counting the ledger the cap admits against.
  * Dropped, the late ingest re-opens a fresh ledger, and the event-id conflict
  * rule keeps it idempotent against rows already landed. The throw still
  * propagates: the verb's finally is what reports it (exit 6). The opener seam
  * exists so that contract is testable without manufacturing a SQLite close
  * failure (bun's close is idempotent — a double close does not throw).
+ *
+ * PR #253 review: `ingestCostEvent` forwards too, through the SAME
+ * lazy-open/drop-on-close seam — a loser teardown's close step drives the
+ * harvested engine log's cost_attribution rows through it (teardown's
+ * `ingestHarvestedTokensIfWired` no longer sees a hook without the method and
+ * silently skips the run's token spend, which the cap then never counted).
  */
 export function makeLoserLedgerHook(
   openLedger: () => LoserLedgerHandle,
@@ -1336,6 +1345,17 @@ export function makeLoserLedgerHook(
     ingestBoxHours: (ctx) => {
       if (handle === undefined) handle = openLedger();
       return handle.ingestBoxHours(ctx);
+    },
+    ingestCostEvent: (event, ctx) => {
+      if (handle === undefined) handle = openLedger();
+      const ingest = handle.ingestCostEvent;
+      // Only a fake without the method lands here; the real CostLedger always
+      // carries it. Fail loudly — "not asked" is the hook-less posture, never
+      // a quiet zero (INV-COST-9).
+      if (ingest === undefined) {
+        throw new Error("loser-ledger handle exposes no ingestCostEvent — token rows cannot be ingested");
+      }
+      return ingest.call(handle, event, ctx);
     },
     close(): void {
       try {

@@ -456,7 +456,11 @@ existing write path.
 - [ ] **Impl:** `RunLockHandle` + `withRunLock` exported from `scripts/lib/run-lock.ts`;
       `acquireRunLock` returns the branded type; `releaseRunLock`, the destructive mark and the
       signal-release discipline are unchanged.
-- [ ] **Image re-pin (INHERITED DEBT — this story owns it, and it is not optional).**
+- [x] **Image re-pin (INHERITED DEBT — this story owns it, and it is not optional).**
+      *TICKED 2026-09-10: settled by the seventh-pin adoption `706366c5` (three sites, one
+      commit — driver.ts `DEFAULT_IMAGE_REF` → `…@sha256:13061e0f…`, `DEFAULT_IMAGE_BUILD_ID`
+      → `a6278c4510cfc539`, gate B of publish run 34536729175) + live boot proof `b896eab4`
+      (tier1-driver-lifecycle, isRepoPin:true; story §"Live E2E — round 6").*
       `scripts/lib/run-lock.ts` is inside a directory COPY (`oci/exedev/Dockerfile`,
       `COPY scripts/lib/ scripts/lib/`), so **this story moves a tracked image input** and owes
       DF2.10's publish → adopt → re-pin ritual. It also inherits a **standing debt**: PR #238

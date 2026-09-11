@@ -27,6 +27,7 @@ import {
 import {
   adaptTeamEvent,
   classifyRun,
+  costAttributionFields,
   makeStreamHealth,
   isExitStatus,
 } from "./team-event-adapter.ts";
@@ -88,6 +89,27 @@ export interface DispatchTaskDeps {
    * don't inject one still get the same one-JSON-object-per-line stream the
    * engine promises to parsers. */
   log?: (line: Record<string, unknown>) => void;
+  /**
+   * INV-COST-10 (DF2.12): the money line's dedicated sink — never `log`. A
+   * caller that injects a logger may lose trace lines; it must not be able to
+   * lose money rows, so money rides its own dep. Production (pipeline-run)
+   * injects `moneyLineTee()`, which tees the line onto the ext4 engine log
+   * AND the live stderr; the default writes raw stderr for standalone
+   * callers. See `defaultMoneyLine` for the full rationale.
+   */
+  emitMoneyLine?: (line: Record<string, unknown>) => void;
+  /**
+   * DF2.12 INV-COST-8 (PR #253 review): the RUN-scoped per-agent ordinal
+   * counter. The pipeline runner's `makeBodyFactory` creates ONE map per run
+   * and injects it into every dispatch_task body it builds, so an agent's
+   * cost-event ordinal stays monotonic across PHASES — two dispatch_task
+   * phases whose agentId domains overlap would otherwise each restart at 0,
+   * breaking the story's per-`(runId, agentId)` monotonic contract. Optional:
+   * a caller that omits it (standalone bodies, tests) gets a factory-local
+   * counter spanning only that body's retries — the phase-local ceiling this
+   * had before the injection seam existed.
+   */
+  invocationSeqByAgent?: Map<string, number>;
 }
 
 // NOTE: minimal runner injection seam for tests — default is real runTeamManifest.
@@ -96,6 +118,24 @@ let _runTeamManifest = runTeamManifest;
 export function _injectRunner(fn: typeof runTeamManifest | null): void {
   _runTeamManifest = fn ?? runTeamManifest;
 }
+
+/**
+ * INV-COST-10 (DF2.12): the money line's default writer. NOT the injectable
+ * `log` seam — a caller that injects a logger may lose trace lines; it must
+ * not be able to lose money rows, so money rides its OWN dep. Production
+ * (pipeline-run) injects `moneyLineTee()` through `deps.emitMoneyLine`: a
+ * plain `process.stderr.write` here would bypass pipeline-run's fd-2 tee (the
+ * tee is caller-level, not an OS-level dup), and under the in-box systemd unit
+ * fd 2 is journald — the line would never reach the harvested engine log and
+ * every run would read zero token rows. The default keeps standalone callers
+ * (and tests) on the same one-JSON-per-line stderr stream the engine promises.
+ * Durability is asserted, not inherited: the tee capture is pinned by
+ * `tests/phase-engine/pipeline-run-money-line.test.ts` (real subprocess, real
+ * `--engine-log` file) and end-to-end by the TIER-2 live round.
+ */
+const defaultMoneyLine = (line: Record<string, unknown>): void => {
+  process.stderr.write(`${JSON.stringify(line)}\n`);
+};
 
 /** Build a refusal-shaped value. Never spawns anything; counters are
  * truthfully zero (nothing was parsed) and sub-timings omitted (never ran). */
@@ -254,17 +294,59 @@ export function dispatchTask(
   spec: PhaseSpec,
   deps: DispatchTaskDeps = {},
 ): PhaseBody<DispatchTaskValue> {
+  // DF2.12 INV-COST-8: invocationSeq is the ordinal of that agent's cost
+  // events within the run, incremented AT the emission point — DF2.7 emits
+  // exactly one cost event per pi subprocess invocation, so the cost-event
+  // ordinal and the invocation ordinal are the same number without any
+  // spawn-site plumbing. Scope: the INJECTED run-scoped counter when the
+  // pipeline runner supplies one (makeBodyFactory builds one map per run, so
+  // the ordinal is monotonic across every dispatch_task phase of the run —
+  // PR #253 review); the factory-local fallback spans only phase-body retries
+  // of THIS body. ponytail: engine-memory counter, safe because DF1.10 ships
+  // Restart=no and a reboot ENDS the run (DF1.11 AC4a) — there is no resumed
+  // run for a restarted counter to collide with. If a resumable engine ever
+  // lands, seed this from the durable engine log's last ordinal (story
+  // Technical Notes).
+  const invocationSeqByAgent = deps.invocationSeqByAgent ?? new Map<string, number>();
   return async (ctx: PhaseBodyContext): Promise<DispatchTaskValue> => {
     const { signal, phaseId, ctx: runCtx } = ctx;
     const { runId, pipelineId } = runCtx;
     const requestId = deps.requestId ?? runCtx.requestId;
     const log = deps.log ?? defaultLog;
+    const emitMoneyLine = deps.emitMoneyLine ?? defaultMoneyLine;
     const emit = (
       level: "warn" | "error",
       event: string,
       message: string,
       extra?: Record<string, unknown>,
     ): void => emitLog(log, level, event, message, extra);
+
+    // DF2.12 review: the money seam is a SIDECAR, in steering's posture — a
+    // throwing sink must never degrade the phase body. The production sink
+    // (moneyLineTee → writeAll) never throws, but the DEFAULT writer is raw
+    // `process.stderr.write`, which can (EPIPE on a closed pipe) for a
+    // standalone caller, and a throw inside `onTeamEvent` aborts the REST of
+    // that callback — the runner catches it, but this body's own state after
+    // the emission (the coms_init_error capture, later stream counters) is
+    // what would be lost. Never silent: the first failure emits ONE deps.log
+    // error diagnostic (redacted); every later cost event still ATTEMPTS
+    // emission — the latch deduplicates the diagnostic, not the sink.
+    let moneySinkFaultLogged = false;
+    const emitMoney = (line: Record<string, unknown>): void => {
+      try {
+        emitMoneyLine(line);
+      } catch (err) {
+        if (!moneySinkFaultLogged) {
+          moneySinkFaultLogged = true;
+          emit(
+            "error",
+            "money_line_sink_failed",
+            "[dispatch-task] cost-attribution sink failed; the money row did not reach its sink",
+            { requestId, phaseId, error: redact(err instanceof Error ? err.message : String(err)) },
+          );
+        }
+      }
+    };
 
     // INV-4 boundary redaction: real provider key values, name-only logging.
     const secretEnv: Record<string, string> = {};
@@ -374,6 +456,16 @@ export function dispatchTask(
 
     const leadRole = roles[0]!;
     const workerRoles = roles.slice(1);
+    // DF2.12 INV-COST-8: role comes from the roster entry the dispatcher
+    // spawned the agentId with — roles[0] is the lead, the rest are workers
+    // (DF1.5 precedence). NEVER inferred from the model slug, the agent name
+    // or emission order. CostRole's closed set lives host-side (the
+    // `CostRole` export in cost-ledger.ts); the engine writes only the two
+    // values a roster can produce.
+    const agentRoles = new Map<string, "lead" | "worker">([
+      [leadRole.name, "lead"],
+      ...workerRoles.map((r) => [r.name, "worker"] as const),
+    ]);
     const prompts: Record<string, string> = {};
     for (const role of roles) {
       prompts[role.name] = taskBrief;
@@ -467,7 +559,7 @@ export function dispatchTask(
           switch (adapted.type) {
             case "coms":
             case "cost":
-            case "coms_init_error":
+            case "coms_init_error": {
               tracer?.trace({
                 requestId,
                 phaseId,
@@ -476,7 +568,85 @@ export function dispatchTask(
                 payloadJson:
                   "payloadJson" in adapted ? adapted.payloadJson : JSON.stringify(adapted),
               });
+              // DF2.12 review round: a cost event whose money figure is
+              // malformed (non-finite or beyond safe-integer µ$) is adapted as
+              // a `cost_skipped_*` coms note — the TRACE row must not carry the
+              // bad figure, but the SPEND EVIDENCE must not die with it. The
+              // raw event is still a cost event, so its attribution line emits
+              // with NO usable money (NaN): the bridge coerces that to NaN at
+              // the seam and the ledger persists the row unpriced (AC5).
+              // Skipping the emission entirely would drop the evidence on the
+              // floor — a run whose only cost events were malformed would read
+              // `no-token-spend` downstream, the false negative AC4's negative
+              // control rules out.
+              const skippedCost =
+                adapted.type === "coms" &&
+                (adapted.name === "cost_skipped_nonfinite" || adapted.name === "cost_skipped_unsafe");
+              if (adapted.type === "cost" || skippedCost) {
+                // DF2.12: one attribution line per cost event, stamped where
+                // the attribution is known (in the box) onto the fd-2 engine
+                // log harvest already pulls — never on the tmpfs trace row.
+                // `timestamp` is the WIRE event's emission time (a digest
+                // input), never this log's clock. INV-COST-8: a line whose
+                // role or invocationSeq cannot be supplied is refused with a
+                // structured error naming the field and never emitted — an
+                // unattributable cost is not persisted under a guessed key.
+                const costMicroUsd = adapted.type === "cost" ? adapted.costMicros : Number.NaN;
+                const fields = costAttributionFields(event);
+                const role = fields === null ? undefined : agentRoles.get(fields.agentId);
+                if (fields === null || role === undefined) {
+                  emit(
+                    "error",
+                    "cost_attribution_refused",
+                    "[dispatch-task] cost attribution refused: missing role — no roster entry spawned this agentId (INV-COST-8)",
+                    { requestId, phaseId, agentId: fields?.agentId ?? "unknown" },
+                  );
+                  // The refusal also rides the DEDICATED money seam: a
+                  // deps.log/defaultLog line is journald-only under the in-box
+                  // unit, and a run whose cost events were ALL refused would
+                  // read as `no-token-spend` downstream — a false negative on
+                  // exactly what AC4's negative control rules out. The marker
+                  // is evidence, never money: the bridge counts it in
+                  // rowsRefused and writes no row (INV-COST-8 holds — nothing
+                  // is attributed, and nothing is silently dropped).
+                  emitMoney({
+                    type: "cost_attribution_refused",
+                    requestId,
+                    runId,
+                    phaseId,
+                    agentId: fields?.agentId ?? "unknown",
+                    reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+                  });
+                } else {
+                  const invocationSeq = invocationSeqByAgent.get(fields.agentId) ?? 0;
+                  invocationSeqByAgent.set(fields.agentId, invocationSeq + 1);
+                  emitMoney({
+                    type: "cost_attribution",
+                    requestId,
+                    runId,
+                    phaseId,
+                    agentId: fields.agentId,
+                    role,
+                    invocationSeq,
+                    model: fields.model,
+                    // µ$, already converted once at the adapter's sanctioned
+                    // DD-9 boundary — the engine never carries the wire's
+                    // float USD past it. The host reader converts µ$ → USD
+                    // once at the ledger seam (round trip exact, pinned by
+                    // the ledger's µ$ property test).
+                    costMicroUsd,
+                    inputTokens: fields.inputTokens,
+                    outputTokens: fields.outputTokens,
+                    cacheReadTokens: fields.cacheReadTokens,
+                    cacheWriteTokens: fields.cacheWriteTokens,
+                    turnCount: fields.turnCount,
+                    unpricedTurns: fields.unpricedTurns,
+                    timestamp: fields.timestamp,
+                  });
+                }
+              }
               break;
+            }
             case "envelope":
               tracer?.trace({
                 requestId,
