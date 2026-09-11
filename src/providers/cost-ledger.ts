@@ -1635,7 +1635,12 @@ export class CostLedger {
       // posture: nothing can un-retire the admission, so the money-safe
       // response is to name the exposure the moment it lands.
       const closed = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
-      if (landedPastReservationCutoff(costMicroUsd, closed)) {
+      // Review round: the exposure is the PRICED SUM admitIssue reads. An
+      // unpriced row (`unpricedTurns > 0` with a finite, positive costUsd)
+      // persists a POSITIVE cost_micro_usd but is EXCLUDED from that SUM
+      // (the views' `unpriced = 0` filter), so warning about cap exposure
+      // from it would be a false alarm — priced rows only.
+      if (!unpriced && landedPastReservationCutoff(costMicroUsd, closed)) {
         emitGuarded({
           requestId: ctx.requestId,
           operation: "cost-ledger.ingest",

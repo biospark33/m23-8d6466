@@ -828,6 +828,34 @@ describe("DF2.8 box hours (AC6)", () => {
     }
     expect(linesAfter.find((l) => l.code === "token-ingest-late-past-reservation-cutoff")).toBeUndefined();
   });
+
+  // Review round: an UNPRICED token row (unpricedTurns > 0 with a finite,
+  // positive costUsd) persists a positive cost_micro_usd but is EXCLUDED from
+  // the priced SUM the gate reads — warning about cap exposure from money the
+  // SUM never counts is a false alarm. Only priced rows carry the exposure.
+  test("an unpriced token row landing PAST the cutoff stays silent — the priced SUM never counts it", () => {
+    const graceCutoffMs = ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS;
+    const closedLongAgo = new Date(Date.now() - graceCutoffMs - 60_000);
+    seedRecord("run-token-late-unpriced", {
+      createdAt: new Date(closedLongAgo.getTime() - 10 * 60_000).toISOString(),
+      closedAt: closedLongAgo.toISOString(),
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>)); // dp:ok widens THIS test's own captured sink events
+    let res: ReturnType<CostLedger["ingestCostEvent"]>;
+    try {
+      res = ledger.ingestCostEvent(
+        mkEvent({ unpricedTurns: 1, costUsd: 0.5 }), // positive money, producer-marked unpriced
+        mkCtx({ runId: "run-token-late-unpriced", requestId: "req-tlu" }),
+      );
+    } finally {
+      restore();
+    }
+    expect(res.inserted).toBe(true);
+    expect(res.unpriced).toBe(true); // landed unpriced: positive µ$, excluded from the priced SUM
+    expect(lines.find((l) => l.code === "token-ingest-late-past-reservation-cutoff")).toBeUndefined();
+  });
 });
 
 // ─── serialized admission (R2 §6 mandate: the gate's TOCTOU fix) ────────────

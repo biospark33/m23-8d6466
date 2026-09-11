@@ -187,10 +187,13 @@ than a constant that is never approached.
    — a separate invocation — re-derives the discriminator from the same evidence the teardown
    read, at `<runsDir>/<runId>-artifacts/<runId>.engine.log`: the log is **absent or unreadable**
    → render **`tokens-not-harvested`**, naming the path it looked for; the log is **present with
-   zero `cost_attribution` lines** → render **`no-token-spend`**; the log has **lines but zero
-   priced rows landed** (every line refused or unpriced) → render **`token-rows-refused`** with
-   the count, never a silent `0 µ$`. The teardown's own summary line carries the same outcome
-   vocabulary (Observability Contract), so the two surfaces agree by construction.)*
+   zero `cost_attribution` lines** → render **`no-token-spend`**; the log has **lines whose rows
+   all landed unpriced** (unusable money or sub-µ$ — ingested, not refused) → render
+   **`unpriced (n)`** with the row count; the log has **lines but zero token rows written at
+   all** (every line refused) → render **`token-rows-refused (n)`** with the count, never a
+   silent `0 µ$` *(review round: the old single "zero priced rows" arm folded honest unpriced
+   rows into the refusal label)*. The teardown's own summary line carries the outcome vocabulary
+   (Observability Contract), so the two surfaces agree by construction.)*
    *Negative controls, both MUST fail:
    an implementation that renders a missing token set as `0 µ$` reports a run that certainly spent
    money as free (the same fail-closed rule INV-COST-6 states for an absent ledger); and a renderer
