@@ -42,9 +42,10 @@ they get their own third session with fresh context (operator decision).
   re-adopted the tracked-inputs literal to `e52c8135…`).
 - Publish workflow's first post-merge run (`34642063966`) failed BY DESIGN (the printed-pair
   dispatch — its own log says a push touching driver.ts heals it); the healing run
-  (`34646842629` on `075eeb0a`) was in_progress at handoff time. **First act: confirm it went
-  green and `verify-image-pin.yml` followed** — that closes G9's last inch. Do NOT re-run the
-  failed run; its own output forbids it.
+  (`34646842629` on `075eeb0a`) went **SUCCESS with attest SUCCESS**, and
+  `verify-image-pin.yml` was re-run (safe: registry-read-only) to **SUCCESS** after its first
+  attempt raced the push (MANIFEST_UNKNOWN at 20:56, image attested 21:03). G9 is fully
+  closed. Do not re-pin anything; do not re-run the failed first publish run.
 - Slate: DF2.12 `ready-for-dev` (correct — not done until the live round), DF2.13
   `ready-for-dev`. Everything else untouched.
 
@@ -62,9 +63,8 @@ they get their own third session with fresh context (operator decision).
 
 ### (i) DF2.12 finish line
 
-1. Confirm publish run green + `verify-image-pin.yml` green on dev (G9 closes). If the fresh
-   run printed a THIRD digest instead of going green, the build is not reproducible — stop and
-   investigate; never keep re-pinning.
+1. ~~Confirm publish run green + verify-image-pin~~ **DONE pre-handoff** — publish attested
+   SUCCESS, verify-image-pin SUCCESS (see §2). G9 closed.
 2. **TIER-2 live round** (`qds-live-e2e` skill; **operator-gated spend — ask before spending**;
    DF2.11 round-6 pattern): one real lead + 2-worker + armed-resident run through
    `qds-run@<runId>.service`, then `sandbox-teardown`. Capture: the harvested
@@ -72,7 +72,7 @@ they get their own third session with fresh context (operator decision).
    event) + the resulting ledger rows (role-split, resident row present) + the `qds cost`
    TOKENS cell. This proves the three flipped live assertions — now hardened per-arm plus a
    SUM cross-check against the record's spend (round 6). Evidence convention:
-   `_bmad-output/evidence/df3-e2e/<date>-*` (DF2.11 round-6 precedent).
+   `_bmad-output/evidence/df3-e2e/<date>-*` (DF2.11 round-6 precedent). Closes G10.
 3. Flip DF2.12 → `done` in sprint-status.yaml + the story header; **recompute the slate (never
    increment)**; consistency checker must stay green. Closes G11.
 
