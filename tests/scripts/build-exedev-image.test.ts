@@ -1154,15 +1154,23 @@ describe("buildIdFileInputs", () => {
     // stranded-lock remediation) and `src/fleet/fanout-primitive.ts`
     // (timeout-arm remediation).
     //
-    // THE DEBT: the published image still ships the pre-#238 `run-lock.ts`. The
-    // divergence is provenance-only, not behavioural — #238 escaped the bytes
-    // rather than removing them, and they are a load-bearing cache-key separator
-    // whose runtime value is unchanged. DEFAULT_IMAGE_REF still pins the fourth
-    // adoption from gate B of run 34174243205 at src_sha fdb2b755 (3746998b… /
-    // 6f847d4e69b06b35). Publish → adopt is deferred ON PURPOSE: DF2.11 takes a
-    // required `RunLockHandle` and will move `scripts/lib/run-lock.ts` again
-    // within days, so one republish after DF2.11 lands settles both. **DF2.11's
-    // DoD owns that republish** — this comment is the hand-off, not a wish.
+    // ~~THE DEBT: the published image still ships the pre-#238 `run-lock.ts`.
+    // The divergence is provenance-only, not behavioural — #238 escaped the
+    // bytes rather than removing them, and they are a load-bearing cache-key
+    // separator whose runtime value is unchanged. DEFAULT_IMAGE_REF still pins
+    // the fourth adoption from gate B of run 34174243205 at src_sha fdb2b755
+    // (3746998b… / 6f847d4e69b06b35). Publish → adopt is deferred ON PURPOSE:
+    // DF2.11 takes a required `RunLockHandle` and will move
+    // `scripts/lib/run-lock.ts` again within days, so one republish after
+    // DF2.11 lands settles both. **DF2.11's DoD owns that republish** — this
+    // comment is the hand-off, not a wish.~~
+    //
+    // DEBT SETTLED 2026-09-10 (kept struck-through, not deleted — provenance):
+    // DF2.11 landed, its six review rounds re-pinned this literal each time, and
+    // the SEVENTH pin adoption (706366c5, gate B of run 34536729175, the first
+    // green build off the ea6c3f5c exeuntu base) republished the image with
+    // post-#238 + post-DF2.11 `run-lock.ts` aboard. Live boot proof: b896eab4,
+    // tier1-driver-lifecycle, isRepoPin:true, buildId a6278c4510cfc539.
     //
     // This literal is the FILE-INPUT hash, never the published image digest — the
     // two coexist unequally by design (4cc6dfcd pinned 54cfc974… here while the
