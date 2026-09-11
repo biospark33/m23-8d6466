@@ -33,8 +33,10 @@
   revoke/verify lifecycle and `defaultKeyCapMicroUsd`), `df2-8-cost-ledger-budget-cap.md` (the
   per-issue admission cap, its reservation accounting and `admittedCeilingMicroUsd`)
 - Downstream consumer whose spec asserts the chain: `df3-6a-resident-spend-iteration-bounds.md`
-  (`residentSpendCeilingMicros` = 8,000 µ$ per run, `:286`; the chain at `:117`, `:370`, `:387`,
-  `:550`; the effective-ceiling clamp `min(residentSpendCeilingMicros, limitMicroUsd)` at `:153`)
+  (`residentSpendCeilingMicros` = 8,000 µ$ per run in its Technical Notes; the spend chain,
+  stated verbatim in its dependencies record; the effective-ceiling clamp
+  `min(residentSpendCeilingMicros, limitMicroUsd)` in its derivation — cite it by grep anchor
+  `effectiveCeiling`, not by line: Wave-7 rework owns that file and every number in it moves)
 - Decision register: **DD-9** (integer micro-dollars; float USD only at a wire boundary),
   **INV-CRED-1** (an uncapped key must never be minted-and-kept), **F004** (the cap is a ceiling,
   not a suggestion), **INV-COST-6** (under-admitting is the safe direction)
@@ -75,8 +77,8 @@ compares anything to it.** Every guard on the path bounds the cap by something e
 - `admitIssue` refuses a `keyCapMicroUsd` that is not a positive integer — no upper bound.
 - `capForIssue` returns a `perIssueOverrides` value with no upper bound; `loadCostConfig`'s
   `assertMicros` bounds it by the safe-integer range only.
-- `mintRunKey:282-301` refuses a non-positive, non-integer or non-round-tripping cap — no upper
-  bound.
+- `mintRunKey`'s pre-mint validation ladder refuses a non-positive, non-integer or
+  non-round-tripping cap — no upper bound.
 
 Consequence, reachable with configuration alone and no code change: an operator who sets a
 `perIssueOverrides` entry of `900_000_000` and dispatches with `--cap 900000000` mints a live
@@ -232,12 +234,15 @@ is blocked from treating `capMicroUsd ≤ defaultKeyCapMicroUsd` as a fact.
   implementation that re-reads the ledger at mint time reintroduces exactly the disagreement the
   serialized admission exists to prevent — including on the replay path, where `admitIssue`
   deliberately hands back **the ceiling already on the row** rather than a freshly computed one.
-- **Why the bound belongs in `mintRunKey` and not in `dispatch`.** `mintRunKey` has four callers
-  reaching it (impact analysis, upstream, `risk: CRITICAL`, 9 impacted symbols across 5 execution
-  flows: `dispatch`, `runDispatch`, `runCapHitDemo`, `main`, `runCredentialLifecycle`). A bound in
+- **Why the bound belongs in `mintRunKey` and not in `dispatch`.** `mintRunKey` has **three direct
+  call sites** (`src/fleet/dispatch.ts`, `scripts/cap-hit-demo.ts`, and `runCredentialLifecycle`
+  inside `credentials.ts` itself — verified 2026-09-10; W6-E-L11 recorded that the earlier "four
+  callers" conflated direct callers with the ~9 transitively impacted symbols impact analysis
+  reports, `risk: CRITICAL`). A bound in
   `dispatch.ts`'s argument validation covers one of them; a bound in the shared function covers all
   of them and every future one. It is also the smaller diff — one condition added to an existing
-  ladder versus a check duplicated per caller — and the ladder already holds both operands.
+  ladder versus a check duplicated per caller — and the ladder already holds both operands. The
+  correction strengthens the argument: `runCredentialLifecycle` is a third uncovered path.
 - **`defaultKeyCapMicroUsd` becomes load-bearing, and that is the point.** Today it is a default
   operand (`credentials.ts`) and a documented intent. AC4 makes it an enforced ceiling while
   leaving it the default, so the two roles the constant plays are both real: *"what you get if you
@@ -264,7 +269,7 @@ is blocked from treating `capMicroUsd ≤ defaultKeyCapMicroUsd` as a fact.
   hazard accurately is in scope; redesigning the reservation contract is not.
 - **Units (DD-9), unchanged.** Caps are integer micro-dollars everywhere in this story. The single
   conversion is `microsToUsd(capMicroUsd)` at `credentials.ts`, into `keyApi.createKey`. AC3
-  guards the inverse. The F004 over-grant check at `:475` compares in the **USD** domain before
+  guards the inverse. The F004 over-grant check compares in the **USD** domain before
   rounding, and its correctness depends on the requested cap round-tripping cleanly — which is why
   AC3 is an acceptance criterion and not a nicety.
 - **What a "per-run policy ceiling" is, concretely.** It is `keyCapMicroUsd`: `deps.capMicroUsd`
@@ -297,7 +302,7 @@ cap-validation failures and reads the message to tell them apart.
 
 | File | Change |
 |------|--------|
-| `src/providers/credentials.ts` | `mintRunKey`: add the `capMicroUsd > defaultKeyCapMicroUsd` refusal to the existing validation ladder (`:282-301`), before the `createKey` call. Update the `defaultKeyCapMicroUsd` docstring to state that the backstop is now enforced at the mint and name this story. |
+| `src/providers/credentials.ts` | `mintRunKey`: add the `capMicroUsd > defaultKeyCapMicroUsd` refusal to the existing pre-mint validation ladder, before the `createKey` call. Update the `defaultKeyCapMicroUsd` docstring to state that the backstop is now enforced at the mint and name this story — and in the same edit, drop the docstring's own stale `:261`/`:281` self-citations (W6-E-M8: three generations of one wrong number; the paragraph keeps its lesson, loses the numbers). |
 | `src/fleet/dispatch.ts` | Comment only (`:2548-2576`): correct the stale *"dispatch never passes `keyCapMicroUsd`"* claim and the already-fired upgrade trigger 1; state the `no-ceiling` arm's reachability and why the reservation is left to the orphan window. No behavioural change. |
 | `tests/providers/credentials.test.ts` | AC3 (both round-trip arms, with a derived cap), AC4 (backstop refusal + `createKey` zero times + the caller-placement negative control). |
 | `tests/fleet/dispatch.test.ts` | AC1 (the `capMicroUsd` reaching `mintRunKey` equals `admittedCeilingMicroUsd` and the `gate_admissions` row), AC2 (both directions of the `min`), AC5 (underivable budget refuses; the dispatch path never reaches the `??` default). |
