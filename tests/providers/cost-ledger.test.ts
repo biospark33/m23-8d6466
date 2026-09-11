@@ -783,6 +783,51 @@ describe("DF2.8 box hours (AC6)", () => {
     }
     expect(linesAfter.find((l) => l.code === "box-hours-late-past-reservation-cutoff")).toBeUndefined();
   });
+
+  // Closeout review F5: token rows contribute to the SAME derived SUM admitIssue
+  // reads, so a token row landing past the retirement cutoff is the SAME exposure
+  // the box-hours tripwire names — and it must warn the same way, not silently
+  // re-price a cap whose reservation was already re-granted.
+  test("token rows landing PAST the reservation-retirement cutoff warn like box hours do", () => {
+    const graceCutoffMs = ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS;
+    const closedLongAgo = new Date(Date.now() - graceCutoffMs - 60_000);
+    const createdTenMinEarlier = new Date(closedLongAgo.getTime() - 10 * 60_000);
+    seedRecord("run-token-late", {
+      createdAt: createdTenMinEarlier.toISOString(),
+      closedAt: closedLongAgo.toISOString(),
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>)); // dp:ok widens THIS test's own captured sink events
+    let res: ReturnType<CostLedger["ingestCostEvent"]>;
+    try {
+      res = ledger.ingestCostEvent(mkEvent(), mkCtx({ runId: "run-token-late", requestId: "req-tl" }));
+    } finally {
+      restore();
+    }
+    expect(res.inserted).toBe(true); // the money row DID land — this is a report, not a refusal
+
+    const line = lines.find((l) => l.code === "token-ingest-late-past-reservation-cutoff");
+    expect(line).toBeDefined();
+    expect(line?.outcome).toBe("late-ingest-over-cap-risk");
+    expect(line?.kind).toBe("tokens");
+    expect(String(line?.message)).toContain("reservation-retirement cutoff");
+
+    // Control in the other direction: a row landing inside the window stays
+    // silent — the warning means "past the cutoff", not "late relative to today".
+    const linesAfter: Record<string, unknown>[] = [];
+    const restore2 = setLogSink((e) => linesAfter.push(e as unknown as Record<string, unknown>)); // dp:ok widens THIS test's own captured sink events
+    try {
+      seedRecord("run-token-fresh", {
+        createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+        closedAt: new Date(Date.now() - 30_000).toISOString(),
+      });
+      ledger.ingestCostEvent(mkEvent(), mkCtx({ runId: "run-token-fresh", requestId: "req-tf" }));
+    } finally {
+      restore2();
+    }
+    expect(linesAfter.find((l) => l.code === "token-ingest-late-past-reservation-cutoff")).toBeUndefined();
+  });
 });
 
 // ─── serialized admission (R2 §6 mandate: the gate's TOCTOU fix) ────────────
@@ -3401,7 +3446,7 @@ describe("DF2.12 ledger-side contracts", () => {
     seedRecord("run-a1", { createdAt: "2026-09-10T10:00:00Z", closedAt: "2026-09-10T10:30:00Z" });
     ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
     const lines: Record<string, unknown>[] = [];
-    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>)); // dp:ok widens THIS test's own captured sink events
     try {
       expect(ledger.emitTokenBridgeState()).toBe(true);
     } finally {
@@ -3421,7 +3466,7 @@ describe("DF2.12 ledger-side contracts", () => {
     seedRecord("run-a1");
     ledger.ingestCostEvent(mkEvent(), mkCtx());
     const lines: Record<string, unknown>[] = [];
-    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>)); // dp:ok widens THIS test's own captured sink events
     try {
       expect(ledger.emitTokenBridgeState()).toBe(false);
     } finally {

@@ -1706,7 +1706,7 @@ describe("resident cost attribution (DF2.12)", () => {
     captured
       .flatMap((chunk) => chunk.split("\n"))
       .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .map((l) => JSON.parse(l) as Record<string, unknown>) // dp:ok parses THIS test's own captured fd-2 lines, not external input
       .filter((o) => o.type === "cost_attribution");
 
   test("a metered solicitation emits role resident with the µ$ delta (DD-9, integer µ$)", async () => {

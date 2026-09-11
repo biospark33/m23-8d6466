@@ -119,6 +119,49 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// ─── in-box refusal markers + mixed-log honesty (closeout review F2/F4) ─────
+
+describe("DF2.12 refusal markers and mixed-log summary", () => {
+  test("a cost_attribution_refused marker counts as refused evidence and writes no row", () => {
+    writeLog([
+      JSON.stringify({
+        type: "cost_attribution_refused",
+        runId: RUN,
+        agentId: "ghost",
+        phaseId: "phase-1",
+        reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+      }),
+    ]);
+    const summary = ingestHarvestedTokens(ledger, runsDir, RUN, { repoSlug: REPO, issueId: ISSUE }, "req-host");
+    expect(summary.rowsRefused).toBe(1);
+    expect(summary.rowsRead).toBe(0);
+    expect(summary.rowsInserted).toBe(0);
+    expect(summary.outcome).toBe("refused");
+    // The marker is evidence, not money: no row landed in the ledger, and the
+    // only token-kind log line is the refusal report itself.
+    const view = ledger.readRunCost!(RUN);
+    expect(view.hasTokenRows).toBe(false);
+    expect(logs.filter((l) => (l as { kind?: string; outcome?: string }).kind === "tokens" && (l as { outcome?: string }).outcome === "inserted").length).toBe(0);
+  });
+
+  test("a MIXED log (priced line + refused evidence) reports ingested AND names the refusals in its reason", () => {
+    writeLog([
+      attributionLine({ role: "lead", costMicroUsd: 12_345 }),
+      JSON.stringify({
+        type: "cost_attribution_refused",
+        runId: RUN,
+        agentId: "ghost",
+        reason: "missing role",
+      }),
+    ]);
+    const summary = ingestHarvestedTokens(ledger, runsDir, RUN, { repoSlug: REPO, issueId: ISSUE }, "req-host");
+    expect(summary.outcome).toBe("ingested");
+    expect(summary.rowsInserted).toBe(1);
+    expect(summary.rowsRefused).toBe(1);
+    expect(String(summary.reason)).toContain("1 line");
+  });
+});
+
 // ─── AC1: the three-agent run ────────────────────────────────────────────────
 
 describe("DF2.12 bridge ingest (AC1)", () => {
@@ -363,7 +406,7 @@ describe("DF2.12 bridge observability", () => {
       expect(["ingested", "duplicate", "refused"]).toContain(l.outcome as string);
       expect(typeof l.ingest_ms).toBe("number");
     }
-    const summaryLine = logs.find((l) => l.operation === "cost-ledger.token-ingest-summary") as unknown as {
+    const summaryLine = logs.find((l) => l.operation === "cost-ledger.token-ingest-summary") as unknown as { // dp:ok narrows THIS test's own captured log entry
       [k: string]: unknown;
     };
     for (const field of ["rowsRead", "rowsInserted", "rowsDuplicate", "rowsUnpriced", "rowsRefused", "outcome", "logPath", "log_read_ms"]) {

@@ -1605,6 +1605,41 @@ export class CostLedger {
       outcome: inserted ? "inserted" : "duplicate",
       ingest_ms: durationMs,
     });
+    if (inserted) {
+      // K1 parity (closeout review F5): token rows feed the SAME derived SUM
+      // admitIssue reads as box hours, so a token row landing past the
+      // reservation-retirement cutoff is the same exposure the box-hours
+      // tripwire names — spend on a cap whose reservation may already have
+      // been retired and re-granted. Same STRICT `<`, same margin, same
+      // posture: nothing can un-retire the admission, so the money-safe
+      // response is to name the exposure the moment it lands.
+      const closed = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
+      const landedLate =
+        costMicroUsd > 0 &&
+        Number.isFinite(closed) &&
+        closed < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
+      if (landedLate) {
+        emitGuarded({
+          requestId: ctx.requestId,
+          operation: "cost-ledger.ingest",
+          agentId: event.agentId,
+          timestamp: new Date().toISOString(),
+          duration: durationMs,
+          durationMs,
+          status: "ok",
+          runId: ctx.runId,
+          repoSlug: canonicalRepoSlug(ctx.repoSlug),
+          issueId: canonicalIssueId(ctx.issueId),
+          kind: "tokens",
+          role: ctx.role,
+          costMicroUsd,
+          closedAt: record?.closedAt,
+          code: "token-ingest-late-past-reservation-cutoff",
+          message: `token spend for run ${ctx.runId} landed ${Math.round((Date.now() - closed) / 1000)}s after its close — past the ~${(ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) / 1000}s reservation-retirement cutoff, so admissions granted since may have spent into this charge; the issue total can exceed its cap`,
+          outcome: "late-ingest-over-cap-risk",
+        });
+      }
+    }
     return { eventId, inserted, unpriced };
   }
 

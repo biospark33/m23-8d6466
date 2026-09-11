@@ -89,6 +89,15 @@ export interface DispatchTaskDeps {
    * don't inject one still get the same one-JSON-object-per-line stream the
    * engine promises to parsers. */
   log?: (line: Record<string, unknown>) => void;
+  /**
+   * INV-COST-10 (DF2.12): the money line's dedicated sink — never `log`. A
+   * caller that injects a logger may lose trace lines; it must not be able to
+   * lose money rows, so money rides its own dep. Production (pipeline-run)
+   * injects `moneyLineTee()`, which tees the line onto the ext4 engine log
+   * AND the live stderr; the default writes raw stderr for standalone
+   * callers. See `defaultMoneyLine` for the full rationale.
+   */
+  emitMoneyLine?: (line: Record<string, unknown>) => void;
 }
 
 // NOTE: minimal runner injection seam for tests — default is real runTeamManifest.
@@ -99,17 +108,22 @@ export function _injectRunner(fn: typeof runTeamManifest | null): void {
 }
 
 /**
- * INV-COST-10 (DF2.12): the cost-attribution writer. Deliberately NOT the
- * injectable `log` seam and NOT overridable by `deps`: `deps.log` is optional,
- * and production only captures these lines because pipeline-run happens not to
- * inject a logger. A caller that injects one may lose trace lines — it must
- * not be able to lose money rows — so the writer targets fd 2 directly
- * (pipeline-run's tee puts it on `$HOME/<runId>.engine.log`, already a harvest
- * source).
+ * INV-COST-10 (DF2.12): the money line's default writer. NOT the injectable
+ * `log` seam — a caller that injects a logger may lose trace lines; it must
+ * not be able to lose money rows, so money rides its OWN dep. Production
+ * (pipeline-run) injects `moneyLineTee()` through `deps.emitMoneyLine`: a
+ * plain `process.stderr.write` here would bypass pipeline-run's fd-2 tee (the
+ * tee is caller-level, not an OS-level dup), and under the in-box systemd unit
+ * fd 2 is journald — the line would never reach the harvested engine log and
+ * every run would read zero token rows. The default keeps standalone callers
+ * (and tests) on the same one-JSON-per-line stderr stream the engine promises.
+ * Durability is asserted, not inherited: the tee capture is pinned by
+ * `tests/phase-engine/pipeline-run-money-line.test.ts` (real subprocess, real
+ * `--engine-log` file) and end-to-end by the TIER-2 live round.
  */
-function emitCostAttribution(line: Record<string, unknown>): void {
+const defaultMoneyLine = (line: Record<string, unknown>): void => {
   process.stderr.write(`${JSON.stringify(line)}\n`);
-}
+};
 
 /** Build a refusal-shaped value. Never spawns anything; counters are
  * truthfully zero (nothing was parsed) and sub-timings omitted (never ran). */
@@ -284,6 +298,7 @@ export function dispatchTask(
     const { runId, pipelineId } = runCtx;
     const requestId = deps.requestId ?? runCtx.requestId;
     const log = deps.log ?? defaultLog;
+    const emitMoneyLine = deps.emitMoneyLine ?? defaultMoneyLine;
     const emit = (
       level: "warn" | "error",
       event: string,
@@ -529,10 +544,26 @@ export function dispatchTask(
                     "[dispatch-task] cost attribution refused: missing role — no roster entry spawned this agentId (INV-COST-8)",
                     { requestId, phaseId, agentId: fields?.agentId ?? "unknown" },
                   );
+                  // The refusal also rides the DEDICATED money seam: a
+                  // deps.log/defaultLog line is journald-only under the in-box
+                  // unit, and a run whose cost events were ALL refused would
+                  // read as `no-token-spend` downstream — a false negative on
+                  // exactly what AC4's negative control rules out. The marker
+                  // is evidence, never money: the bridge counts it in
+                  // rowsRefused and writes no row (INV-COST-8 holds — nothing
+                  // is attributed, and nothing is silently dropped).
+                  emitMoneyLine({
+                    type: "cost_attribution_refused",
+                    requestId,
+                    runId,
+                    phaseId,
+                    agentId: fields?.agentId ?? "unknown",
+                    reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+                  });
                 } else {
                   const invocationSeq = invocationSeqByAgent.get(fields.agentId) ?? 0;
                   invocationSeqByAgent.set(fields.agentId, invocationSeq + 1);
-                  emitCostAttribution({
+                  emitMoneyLine({
                     type: "cost_attribution",
                     requestId,
                     runId,

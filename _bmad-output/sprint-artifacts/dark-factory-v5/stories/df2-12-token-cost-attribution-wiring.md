@@ -616,6 +616,51 @@ with exclusive file sets, each verified at source and gate-run by the parent bef
 7. **Resident line `timestamp` is the emission time** — the resident has no provider wire event
    to read one from; the event is created at the meter site. Digest-stable per line (the durable
    log carries it), so re-harvest idempotency holds.
+8. **POST-REVIEW FIXES (independent closeout review — 1 CRITICAL, 2 MEDIUM, 2 LOW; every
+   finding verified at source before acting; F3 already recorded above and stands):**
+   - **F1 (CRITICAL, LOGIC) — the fd-2 emission bypassed the tee. FIXED.** Both emission sites
+     wrote `process.stderr.write` directly. The fd-2 tee in pipeline-run is caller-level
+     (`writeAll`'s own tee branch), not an OS-level dup of fd 2, and the in-box systemd unit's
+     fd 2 is journald (bare `ExecStart`, no `StandardError=`) — so in the production shape every
+     `cost_attribution` line reached journald and NEVER the harvested `<runId>.engine.log`:
+     zero token rows for every run, the disarmed-tripwire state this story closes. The offline
+     tests could not see it — they monkey-patch `process.stderr.write`, asserting the write
+     happened, not that the tee captured it (the deviation-1 record's "production injects
+     nothing → cannot lose the row" premise was false: the default writer itself was the loss).
+     Fix: a DEDICATED money seam (never `deps.log`), `emitMoneyLine` on dispatch-task and the
+     existing `emitAttribution` on steering, defaulting to raw stderr for standalone callers;
+     pipeline-run exports `moneyLineTee()` (writes through `writeAll` — the line lands on the
+     engine log AND stays on stderr) and injects it at BOTH production call sites. INV-COST-10's
+     own name now holds for real — durability is ASSERTED: pinned by
+     `tests/phase-engine/pipeline-run-money-line.test.ts` (real subprocess, real `--engine-log`
+     file, both surfaces, exactly one line each; plus a structural pin on both injection sites
+     with a positive control) and a dedicated-seam test in `dispatch-task.test.ts`; the TIER-2
+     live round remains the end-to-end proof.
+   - **F2 (MEDIUM, INVARIANT) — the in-box refusal dropped money silently. FIXED.** An agentId
+     the roster never spawned (including `parseTeamEventLine`'s `"unknown"` coercion for
+     external emitters) took the refusal arm, which emitted ONLY through `deps.log` — invisible
+     to the harvest — so a run whose cost events were all refused read as `no-token-spend`
+     downstream: a false negative on AC4's own negative control. Fix: the refusal arm now also
+     emits a `cost_attribution_refused` marker on the DEDICATED money seam (still never an
+     attribution line — INV-COST-8 holds); the bridge classifies the marker, counts it in
+     `rowsRefused`, writes no row, and `classifyHarvestedTokens` counts it as evidence — the
+     AC4 discriminator now reads `token-rows-refused (n)`, never a false spendless.
+   - **F4 (LOW, EDGE) — mixed-log summary read as a clean bill. FIXED.** A log with priced rows
+     AND refused lines reported `outcome: "ingested"` with no `reason`. Now any summary with
+     refusals carries a reason naming the count and whether priced rows still landed.
+   - **F5 (LOW, DESIGN) — token rows lacked the landedLate tripwire. FIXED.** Only
+     `ingestBoxHours` carried the K1 late-landing warning; token rows feed the SAME derived SUM
+     `admitIssue` reads, so a crash-recovery token ingest past the reservation-retirement cutoff
+     silently re-priced a re-granted cap. `ingestCostEvent` now carries the same tripwire
+     (same STRICT `<`, same margin): `token-ingest-late-past-reservation-cutoff`, outcome
+     `late-ingest-over-cap-risk`, positive-spend-only, insert-only (dedup re-runs stay silent) —
+     pinned with a fresh-close control mirroring the box-hours test.
+   - **F3 (MEDIUM, DESIGN) — loser-arm token ingest gap: already recorded above; re-confirmed
+     by the review at `makeLoserLedgerHook`. Stands as recorded (owner owed).**
+   - The tracked-inputs literal moved with the phase-engine + pipeline-run edits and is adopted
+     in-commit per the ritual; the branch's added defensive-programming pattern lines are
+     annotated `dp:ok` with per-line reasons (the advisory baseline itself is dev-red at 342
+     pre-existing findings — not this branch's regression).
 
 ### Findings recorded, not fixed (out of scope by the story's own Files to Modify)
 

@@ -152,6 +152,13 @@ export function classifyHarvestedTokens(runsDir: string | undefined, runId: stri
  *                  a line whose runId field is absent still belongs to this
  *                  run's evidence; only a line naming a DIFFERENT runId is
  *                  foreign and skipped;
+ *  - "refused"   — a parseable `cost_attribution_refused` marker in scope:
+ *                  the in-box emission was REFUSED (INV-COST-8 — role or
+ *                  invocationSeq not attributable). Evidence, never money:
+ *                  counted in `rowsRefused`, zero rows written, so a run
+ *                  whose cost events were all refused reads as `refused`,
+ *                  never as the `no-token-spend` that means genuinely
+ *                  spendless;
  *  - "truncated" — an UNPARSEABLE line still carrying the `cost_attribution`
  *                  head (truncation cuts a line's tail): money evidence the
  *                  reader cannot attribute;
@@ -159,7 +166,10 @@ export function classifyHarvestedTokens(runsDir: string | undefined, runId: stri
  *                  notes, another run's lines, tee'd stderr noise): not cost
  *                  evidence, never counted, never dropped spend.
  */
-function classifyLine(raw: string, runId: string): { kind: "line"; line: Record<string, unknown> } | { kind: "truncated" } | { kind: "other" } {
+function classifyLine(
+  raw: string,
+  runId: string,
+): { kind: "line"; line: Record<string, unknown> } | { kind: "refused" } | { kind: "truncated" } | { kind: "other" } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -168,6 +178,10 @@ function classifyLine(raw: string, runId: string): { kind: "line"; line: Record<
   }
   if (parsed === null || typeof parsed !== "object") return { kind: "other" };
   const line = parsed as Record<string, unknown>;
+  if (line.type === "cost_attribution_refused") {
+    if (line.runId !== undefined && line.runId !== runId) return { kind: "other" };
+    return { kind: "refused" };
+  }
   if (line.type !== "cost_attribution") return { kind: "other" };
   if (line.runId !== undefined && line.runId !== runId) return { kind: "other" };
   return { kind: "line", line };
@@ -250,6 +264,17 @@ export function ingestHarvestedTokens(
     if (rawLine.trim() === "") continue;
     const classified = classifyLine(rawLine, runId);
     if (classified.kind === "other") continue;
+    if (classified.kind === "refused") {
+      // The in-box emission refused itself (INV-COST-8): the marker is
+      // durable evidence that money flowed and was NOT attributed — counted,
+      // never written as a row, never folded into a clean zero.
+      summary.rowsRefused += 1;
+      emitRow(requestId, runId, repoSlug, issueId, {
+        outcome: "refused",
+        reason: "in-box refusal marker (cost_attribution_refused) — the emission was refused before attribution (INV-COST-8); no row written",
+      });
+      continue;
+    }
     if (classified.kind === "truncated") {
       // A log truncated mid-write: this line's money figure is gone, and
       // INV-COST-8 forbids guessing the role it would need. Refused loudly
@@ -362,8 +387,15 @@ export function ingestHarvestedTokens(
           "no-token-spend";
   if (summary.outcome === "no-token-spend") {
     summary.reason = `harvested engine log at ${read.logPath} is readable and carries zero cost_attribution lines — nothing was emitted to harvest`;
-  } else if (summary.outcome === "refused") {
-    summary.reason = `${summary.rowsRefused} line(s) refused (see the per-row refusals above) — no token row landed for run ${runId}`;
+  } else if (summary.rowsRefused > 0) {
+    // Mixed logs get an honest summary too: `ingested` with refused evidence
+    // must not read as a clean bill (closeout review F4) — the reason names
+    // the refusals whether or not priced rows also landed.
+    summary.reason = `${summary.rowsRefused} line(s) refused (see the per-row refusals above) — ${
+      summary.rowsInserted + summary.rowsDuplicate > 0
+        ? "the priced rows still landed; evidence was lost for the refused ones"
+        : `no token row landed for run ${runId}`
+    }`;
   }
   emitSummary(requestId, runId, summary);
   return summary;

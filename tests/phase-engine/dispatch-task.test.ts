@@ -1496,7 +1496,7 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     return captured
       .flatMap((chunk) => chunk.split("\n"))
       .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .map((l) => JSON.parse(l) as Record<string, unknown>) // dp:ok parses THIS test's own captured stderr lines, not external input
       .filter((o) => o.type === "cost_attribution");
   }
 
@@ -1540,6 +1540,34 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     // The money row never rode the injectable seam — an implementation routed
     // through deps.log fails exactly here.
     expect(logSpy.some((l) => l.type === "cost_attribution")).toBe(false);
+  });
+
+  it("rides the dedicated emitMoneyLine seam when production injects one; deps.log still never sees it (INV-COST-10)", async () => {
+    // The production writer is pipeline-run's moneyLineTee (a tee-ing fd-2
+    // writer) injected through this dep — a caller's injected logger must still
+    // never be able to swallow the money row, and the injected money writer
+    // must be the ONLY surface the line rides (the default raw-stderr writer
+    // stays out of the way when a dedicated one is supplied).
+    const money: Record<string, unknown>[] = [];
+    const logSpy: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, {
+      emitMoneyLine: (l) => void money.push(l),
+      log: (l) => void logSpy.push(l),
+    });
+    expect(money.length).toBe(1);
+    expect(money[0]).toMatchObject({
+      type: "cost_attribution",
+      agentId: "worker",
+      role: "worker",
+      invocationSeq: 0,
+    });
+    expect(logSpy.some((l) => l.type === "cost_attribution")).toBe(false);
+    // The default raw-stderr writer did not double-emit behind the injected one.
+    expect(attributionLines().length).toBe(0);
   });
 
   it("role comes from the roster entry, never the model slug (INV-COST-8)", async () => {
@@ -1588,5 +1616,25 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     const refusal = captured.find((l) => l.includes("cost_attribution_refused"));
     expect(refusal).toBeDefined();
     expect(refusal).toContain("role");
+  });
+
+  it("a refused cost event emits a durable refusal marker on the money seam — the money is never dropped silently", async () => {
+    // The refusal arm used to emit ONLY through deps.log/defaultLog — journald
+    // under the in-box unit, invisible to the harvest — so a run whose cost
+    // events were all refused read as `no-token-spend` downstream: a false
+    // negative on exactly the state AC4's negative control rules out. The
+    // refusal marker rides the DEDICATED money seam so the harvested log
+    // carries the evidence and the bridge can count it.
+    const money: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, costLine({ agentId: "ghost" }));
+      return successResult();
+    });
+    await runDispatch({}, { emitMoneyLine: (l) => void money.push(l) });
+    expect(attributionLines().length).toBe(0); // still never an attribution line (INV-COST-8)
+    const markers = money.filter((l) => l.type === "cost_attribution_refused");
+    expect(markers.length).toBe(1);
+    expect(markers[0]).toMatchObject({ agentId: "ghost", runId: "run-test" });
+    expect(String(markers[0]?.reason)).toContain("role");
   });
 });

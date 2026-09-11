@@ -417,14 +417,15 @@ export function createSteering(deps: {
    */
   onInboxError?: (e: { runId: string; requestId?: string; detail: string }) => void | Promise<void>;
   /**
-   * DF2.12 (INV-COST-10): the cost-attribution sink. Optional and
-   * defaulting to the fd-2 writer — a caller that injects one is a TEST
-   * capturing the line; the production path (pipeline-run injects nothing)
-   * cannot lose the money row, because the default writes it to
-   * process.stderr, which pipeline-run's tee puts on
-   * `$HOME/<runId>.engine.log`, already a harvest source. Not shared with
-   * dispatch-task's `emitCostAttribution`: this file imports no phase or
-   * fleet code (module boundary, file header), and the writer is one line.
+   * DF2.12 (INV-COST-10): the cost-attribution sink. A plain
+   * `process.stderr.write` default is the STANDALONE posture only — raw
+   * stderr bypasses pipeline-run's fd-2 tee (the tee is caller-level, not an
+   * OS-level dup), so under the in-box systemd unit the line would reach
+   * journald and never the harvested `$HOME/<runId>.engine.log`. Production
+   * (pipeline-run) therefore injects `moneyLineTee()` here, which writes
+   * through `writeAll` and lands on BOTH surfaces. Not shared with
+   * dispatch-task's `emitMoneyLine`: this file imports no phase or fleet
+   * code (module boundary, file header), and the writer is one line.
    */
   emitAttribution?: (line: Record<string, unknown>) => void;
 }): SteeringController {
