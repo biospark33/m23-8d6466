@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 
-**Status:** review
+**Status:** done
 
 **Sprint:** v5-S3
 
@@ -701,7 +701,10 @@ with exclusive file sets, each verified at source and gate-run by the parent bef
   through 2^50; five orders of magnitude past real spend; idempotency unaffected.
 - **Live-e2e assertions flipped** (`toBe(0)` → `toBeGreaterThan(0)` in the three tier live
   tests): with the bridge live, pinning zero was asserting the defect. Unverifiable offline —
-  the next live round proves them.
+  the next live round proves them. *(RESOLVED by the G10 round, 2026-09-12: the flip premise
+  presupposed an engine run those dispatch-only flows never perform — measured live; the three
+  re-pinned to their honest outcomes and the engine-bearing proof landed as T2.7. Story
+  §"Live E2E — G10".)*
 
 ### Verification
 
@@ -716,20 +719,53 @@ with exclusive file sets, each verified at source and gate-run by the parent bef
   ledger; empty-envelope `0 µ$` rendering; position-derived invocationSeq; unpriced-filtering
   reader; ratio constant grep (R5 fact 12)
 
-### Owed, post-merge
+### Live E2E — G10 (2026-09-12, post-merge): AC1 arm (b) CLOSED
 
-- **AC1's evidence arm (b) — the TIER-2 live round** (`qds-live-e2e`): one real lead + 2-worker
-  + armed-resident run on an exe.dev box, capture the harvested
-  `<runsDir>/<runId>-artifacts/<runId>.engine.log` showing one `cost_attribution` line per cost
-  event, plus the resulting ledger rows. Arm (a) is covered offline (teardown integration tests
-  drive the real artifacts pull from box `$HOME`). Operator-gated spend, DF2.11 round-6 pattern.
-  Round 6 hardened the live assertions it must satisfy: per-arm token-row counts (the old
-  OR-aggregate could pass with one arm at zero) and a priced token-SUM cross-check against the
-  record's authoritative spend at the `SPEND_DIVERGENCE_TOLERANCE_MICRO_USD` tolerance —
-  correct-by-construction offline, proven by the next live round.
-- The image republish → adopt ritual rides the merge (publish-exedev-image.yml fires on dev;
-  the tracked-inputs literal is adopted in-branch — re-pinned at round 6 after the engine-cluster
-  fixes moved the walked inputs again, with the moved-input identification recorded in the test).
+Operator-gated TIER-2 round (`qds-live-e2e`, DF2.11 round-6 pattern), on the **ninth pin**
+(`DEFAULT_IMAGE_REF` `…59d2849b…` / `DEFAULT_IMAGE_BUILD_ID` `acee19cb…`, `isRepoPin: true` — the
+round proved the image the tree ships).
+
+- **The engine-bearing arm — NEW file `tier2-df212-attribution.live.test.ts` (T2.7), the first
+  in-box `dispatch_task` round ever.** Run `qds-20260912-1f8538`: dispatch → `fleet run`
+  (`qds-run@<runId>.service`) → a `dispatch_task` phase with lead + **two** workers (roster
+  `roles[0]` lead precedence; both workers share the deepseek model — the INV-COST-8
+  role-from-roster shape) → the DF3.3 resident armed by the run-context → settled `ok` →
+  `scripts/sandbox-teardown.ts` (the story's named CLI) → ledger. **Green:** 5 `cost_attribution`
+  lines / 0 refused (roles resident, worker, worker, lead, resident; the resident's run_start and
+  run_end solicitations carry distinct `invocation_seq`), exactly 5 priced `kind='tokens'` rows —
+  one per cost event — plus one priced `box_hours` row; priced token SUM 6 979 µ$ vs the record's
+  provider-authoritative 6 977 µ$ (tolerance 1 000); `qds cost` TOKENS cell `✓` beside the
+  multi-role split; idempotent re-teardown added zero rows. Evidence:
+  `_bmad-output/evidence/df3-e2e/2026-09-12-181545-t2-7-token-attribution-ii473t.json`.
+- **The three dispatch-only flows re-pinned to their honest outcomes.** T2.1's hand-driven
+  worker, T2.2's and T3.2's dispatch-to-gate arms never run the engine — the flip premise
+  ("a priced run leaves token rows") presupposed an engine run those flows don't perform;
+  measured live, first post-flip attempt. Amended (commit `5767f6c`): zero rows is the CORRECT
+  dispatch-only outcome, each arm's teardown asserts the `spend-divergence` posture its own spend
+  dictates — T2.1's engine-external worker spend (thousands of µ$) FIRES the `unwired` alarm
+  (live-proven); the fanout/manystories arms' 72 µ$ gate-ping remainder sits under the F032
+  tolerance floor and the silent close is the pin (commit `ec7a8351`). All four files live green
+  (T2.7 1/0, T2.1 1/0, T2.2 1/0, T3.2 2/0).
+- **FINDING (product bug, fixed in-round): in-box `dispatch_task` could never load a roster.**
+  `loadRoster`'s containment root fell back to `defaultRepoRoot()` — three levels above
+  `schema.ts`, i.e. the repo on the host but `/opt/qds-factory` in the image (the engine ships as
+  unbundled source) — so every run-root roster was refused "outside the repo root" before a role
+  could spawn (measured on run `qds-20260912-de25bf`; the compiler-exhaustiveness note in
+  tier2-in-box-engine covered code-gen, not resolution — this half had never been exercised
+  in-box). Fix: both resolution sites (`dispatchTask`'s `loadRoster` call and `closedRosterIds`,
+  which must agree with it) anchor containment at the run root — the one anchor the manifest
+  read, the witness read and every code phase's cwd already share (`deriveInBoxArgv` AC2b).
+  Commit `970846b5`; the offline suite migrated to carry the invariant (rosters live in the run
+  root, both anchoring directions pinned).
+- **The ninth pin ritual rode the fix** (it moves walked inputs): publish run `34709349793` gate B
+  printed the pair → adopted at the three sites (`f90c47ce`) → healing run `34709947429` SUCCESS →
+  private mirror re-pushed and inspected → `verify-image-pin` re-run SUCCESS (`34710430637`; its
+  first attempt raced the healing push, the eighth-pin precedent). Walk literal `72d8d83b` adopted
+  in-commit with the fix.
+- **Round hygiene:** red-path forensics arm added to T2.7 after the first red burned its journal
+  with the box; every run's cleanup verified (zero leaked keys by hash delta, zero leaked boxes,
+  no fleet lock). Actual spend ≈ $0.55 across ten short-lived boxes — inside the approved
+  envelope. `bunx tsc` clean, biome clean, offline e2e sweep 50/0 after every commit.
 
 ## Review Findings — Round 6 (BMAD adversarial wave, 2026-09-11)
 
