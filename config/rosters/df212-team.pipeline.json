@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "df212-token-attribution-live",
+  "runBudgetMs": 930000,
+  "phases": [
+    {
+      "name": "df212-team",
+      "kind": "dispatch_task",
+      "description": "DF2.12 live round: one dispatch_task team (lead + two workers) whose cost events must each land as a cost_attribution line on the engine log; the task is pure arithmetic Q&A so every micro of spend is token spend attributable by roster role.",
+      "roster": "config/rosters/df212-team.roster.yaml",
+      "task": "You lead a two-worker team. Immediately spawn BOTH workers, worker-a and worker-b. Ask worker-a exactly: Reply with only the number: 17*23. Ask worker-b exactly: Reply with only the number: 31*37. When both replies arrive, finish with a JSON object of shape {\"changedFiles\": [], \"result\": {\"summary\": \"worker-a=<first answer> worker-b=<second answer>\"}}. Do not modify any files.",
+      "maxDurationMs": 300000,
+      "retries": 0
+    },
+    {
+      "name": "df212-close",
+      "kind": "code",
+      "description": "Closing sanity phase that exits cleanly; the schema wants at least two phases and this one is free.",
+      "command": ["true"],
+      "maxDurationMs": 1000,
+      "retries": 0
+    }
+  ]
+}

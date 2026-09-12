@@ -1,0 +1,27 @@
+# DF2.12 G10 live round — the dispatch_task TEAM roster: lead + TWO workers.
+# `roles[0]` is the lead and the rest are workers (roster-adapter precedence),
+# so this file is the deterministic shape AC1(b) names. The two workers SHARE
+# the deepseek model on purpose — that is DF2.12's own negative-control shape:
+# `role` comes from the roster entry the dispatcher spawned the agentId with,
+# never from the model slug, so a shared model must still split lead/worker
+# correctly in the ledger. The file is delivered to the box by the repo clone
+# the run fills, and the in-box `dispatch_task` body resolves `spec.roster`
+# against the checkout root (`$HOME/src`), which is why the path is
+# repo-relative.
+defaults:
+  provider: openrouter
+  thinking: medium
+  tools: null
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: lead
+    model: anthropic/claude-haiku-4.5
+    thinking: high
+
+  - name: worker-a
+    model: deepseek/deepseek-v3.2
+
+  - name: worker-b
+    model: deepseek/deepseek-v3.2
