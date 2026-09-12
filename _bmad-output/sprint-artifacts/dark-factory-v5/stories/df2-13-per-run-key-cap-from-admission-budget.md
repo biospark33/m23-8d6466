@@ -388,11 +388,22 @@ evidence recorded per gate). All citations below are by symbol.
   citation (`runBudgetCapMicros`, the `--budget-cap` option — artifact field, enforces nothing). No
   line numbers remain in the docstring.
 - **`dispatch.ts`:** comment-only addition to the `no-ceiling` block (verified by diff: 13 inserted
-  comment lines, zero code): documents the NEW reachable downstream refusal DF2.13 creates — a
-  `--cap` above the backstop passes B1 (which bounds only by MAX_SAFE_INTEGER), passes admission
-  (reserves headroom, writes its gate_admissions row), and dies at the mint with `cap-invalid`,
-  stranding the reservation for the orphan window exactly as a `no-ceiling` would. No behavioural
-  change on that path.
+  comment lines, zero code), documenting the NEW downstream mint-time `cap-invalid` refusal.
+  Review-round-1 correction: that refusal is NOT a `no-ceiling`-equivalent stranding. A `no-ceiling`
+  fires before `store.create`, so its stranded reservation is an absent record the orphan guard
+  retires after `ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS` (~6 min); the mint-time
+  `cap-invalid` fires AFTER `provisionAdmittedRun` has written an OPEN run record and created a
+  LIVE BILLABLE box, and `classifyReservation` counts unclosed records (cost-ledger.ts,
+  `closedAt === undefined` → "count"), so the orphan guard never retires it — headroom returns only
+  at teardown close (plus grace), and the box bills until an operator tears the run down.
+  Reachability, corrected: the knob is `--cap-micro-usd` (`DispatchDeps.capMicroUsd`, B1-bounded by
+  MAX_SAFE_INTEGER only) AND the config issue cap minus committed spend must also clear the
+  backstop — against the shipped `defaultCapMicroUsd` of 5_000_000 µ$, `--cap-micro-usd
+  900_000_000` alone admits at 5M and mints fine. Observable, corrected: the refusal surfaces as
+  the `fleet.dispatch` error line with `payload.providerCode` "cap-invalid" (exit 1, the generic
+  key-delivery-failed text — `CredentialLifecycleError` is not a `FleetError`, so its
+  message/remediation do not survive the catch), not as a `no-ceiling` (exit 5) line. No
+  behavioural change on that path.
 - **Contract held:** no new config key, no new log event, no ledger column or query;
   `cost-ledger.ts` and `budget-gate.ts` byte-untouched.
 
@@ -437,6 +448,19 @@ evidence recorded per gate). All citations below are by symbol.
    round-trip message and pinned by the pre-existing `MAX_SAFE_INTEGER` round-trip test. INV-CAP-1
    holds under either order (the refusal is the conjunction; no mint above the backstop in any
    path).
+7. **(Review round 1) The Observability Contract's row 1 premise is false — no `credential.mint`
+   error line exists for this refusal.** All pre-mint guards (integer, round-trip, backstop) throw
+   BEFORE `timed`, so no credential-level log line ever rides a `mintRunKey` refusal — and that was
+   true of the pre-existing guards too (no `mintRunKey` refusal has ever surfaced on
+   `runCredentialLifecycle`). Real observables: the `fleet.dispatch` error line with
+   `payload.providerCode` "cap-invalid" (dispatch path), the `demo.mint` error line (demo path),
+   nothing credential-level. Recorded, not patched: emitting a credential-level line for pre-mint
+   refusals would add a log event, violating the story's own "no new log event" contract.
+8. **(Review round 1) AC4's "no run record is written" is credentials-seam wording and misdescribes
+   the dispatch path.** On dispatch, `deps.store.set(runId, { requestId })` runs before
+   `mintAndDeliverKey`, so a request-only record (no keyHash) exists when the mint refuses. The
+   tests assert the correct seam observable (`keyHash` undefined); the spec sentence's dispatch-path
+   reading is false.
 
 ### Tests (all named with AC markers for grep)
 
@@ -476,3 +500,32 @@ evidence recorded per gate). All citations below are by symbol.
   2 test helpers. Affected processes: 3 dispatch log flows (comment), 3 `runCredentialLifecycle`
   flows (the guard). Risk HIGH — expected for a CRITICAL-radius symbol; every affected flow
   accounted for above.
+
+## Review Findings
+
+**Round 1 — adversarial review 2026-09-12.** 7 reviewers (3 blind, 3 edge, 1 acceptance auditor).
+Tally: 11 PATCHED / 2 DEFERRED / 12 DISMISSED. CodeRabbit re-review pending; story stays in-review.
+
+- **PATCHED (11).** P1 the mint refusal's message/remediation names `min(remaining, backstop)`
+  rather than implying the backstop alone binds (HIGH). P2 AC3's lossy test pins the round-trip
+  guard's distinguishing message, not just the shared `cap-invalid` code (HIGH). P6 the dispatch
+  comment rewritten to verified facts (MED — the pre-rewrite text claimed the stranded reservation
+  aged out like a `no-ceiling`; see the Dev Agent Record's `dispatch.ts` bullet and deviations 7-8).
+  P7 new AC4 dispatch test driving admission → mint-time `cap-invalid` → exit-1
+  key-delivery-failed, plus the stranded box and the OPEN record it leaves behind (MED). P9 the
+  default-keyCap binding half pinned in budget-gate (MED). P3/P4/P5/P8/P10/P11 (LOW: just-above
+  boundary 50_000_001, demo `--cap` help notes, timeout comment, AC5 quote, row-uniqueness assert,
+  try/finally).
+- **DEFERRED (2).** Fanout `--cap-micro-usd` CLI upper bound ($1M) vs the enforced backstop —
+  config-load bounding is DF2.8's filed follow-up, not this story's knob. The dispatch catch
+  discards `CredentialLifecycleError`'s message/remediation (only `providerCode` survives) — an
+  error-shape contract change, out of scope.
+- **DISMISSED (12), verified, not argued.** NaN passes the backstop predicate — the integer guard
+  throws first. Stale-citation claims (`admittedCeilingMicroUsd`, `--budget-cap`, the caller
+  roster) — all verified real in source. Spy hygiene — `beforeEach` recreates keyApi/driver/store.
+  Config/log isolation — per-test dirs. AC2 leg weakness — the min direction is pinned at the gate
+  layer. Red-control conflation — the auditor re-verified: 2 fail = both AC4 tests. AC1 literal
+  wording — disclosed as deviation 3.
+
+Negative-control evidence re-verified: `/tmp/df213-red3.log` = 2 fail (both AC4 tests) / 90 pass
+against unguarded source.

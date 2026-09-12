@@ -799,6 +799,35 @@ describe("DF2.13: min(keyCap, remaining) at the decision layer", () => {
     expect(decision.admittedCeilingMicroUsd).toBe(10_000_000);
   });
 
+  test("AC2: default key cap binds — a 60,000,000 µ$ issue cap admits at the 50,000,000 µ$ default key cap", () => {
+    // Both AC2 tests above pin one half of min(keyCap, remaining) with the
+    // DEFAULT key cap as the non-binding operand. This is the third arm: the
+    // issue cap raised ABOVE the backstop through the same config seam, no
+    // explicit key cap, so the default 50,000,000 µ$ from credentials.ts is
+    // what the min returns — raising the default or dropping the min goes red.
+    mkdirSync(join(dir, ".sandbox"), { recursive: true });
+    writeFileSync(join(dir, ".sandbox", "cost-config.json"), JSON.stringify({
+      defaultCapMicroUsd: 60_000_000,
+    }, null, 2));
+
+    const ledger = freshLedger();
+    const cap = capForIssue(ledger.config, "qds/demo", "42");
+    expect(cap).toBe(60_000_000);
+
+    const decision = assertWithinBudget(ledger, {
+      repoSlug: "qds/demo",
+      issueId: "42",
+      runId: "df213-default-20260912-000001",
+      requestId: "req-df213-default",
+    });
+
+    expect(decision.admitted).toBeTrue();
+    expect(decision.capMicroUsd).toBe(60_000_000);
+    expect(decision.remainingMicroUsd).toBe(60_000_000);
+    // min(50,000,000, 60,000,000): the DEFAULT key cap is the binding half.
+    expect(decision.admittedCeilingMicroUsd).toBe(50_000_000);
+  });
+
   test("AC1: the admitted ceiling is the ceiling the gate_admissions row carries", async () => {
     // The dispatch-layer tests record what the gate was handed via a fake; THIS
     // is the real-ledger half of that seam — the decision's own output is the
@@ -833,15 +862,22 @@ describe("DF2.13: min(keyCap, remaining) at the decision layer", () => {
     // opens the file.
     ledger.close();
     const db = new Database(ledgerPath);
-    const row = db
-      .prepare("SELECT ceiling_micro_usd FROM gate_admissions WHERE request_id = ? AND run_id = ?")
-      .get("req-df213-rowread", "df213-rowread-20260912-000001") as { ceiling_micro_usd: number } | null;
-    db.close();
+    let rows: { ceiling_micro_usd: number }[];
+    try {
+      rows = db
+        .prepare("SELECT ceiling_micro_usd FROM gate_admissions WHERE request_id = ? AND run_id = ?")
+        .all("req-df213-rowread", "df213-rowread-20260912-000001") as { ceiling_micro_usd: number }[];
+    } finally {
+      db.close();
+    }
 
-    expect(row).not.toBeNull();
-    expect(row?.ceiling_micro_usd).toBe(1_000_000);
+    // Exactly one row per (request_id, run_id) — the read-back assumes that
+    // uniqueness, so assert it instead of silently taking whatever .get()
+    // returns first.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.ceiling_micro_usd).toBe(1_000_000);
     // The two figures are the same number, not merely equal by coincidence of
     // two separate derivations.
-    expect(row?.ceiling_micro_usd).toBe(decision.admittedCeilingMicroUsd);
+    expect(rows[0]?.ceiling_micro_usd).toBe(decision.admittedCeilingMicroUsd);
   });
 });

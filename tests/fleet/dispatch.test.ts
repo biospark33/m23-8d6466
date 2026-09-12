@@ -5282,9 +5282,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // Ceiling ≠ cap on purpose (the AC9b confusion), and the ceiling is ALSO
       // below defaultKeyCapMicroUsd — so the three candidate figures are all
       // distinct and a dispatcher propagating any of the two wrong ones fails.
-      // This is the AC5 "the backstop is ?? never exercised" pin riding the
-      // same path: 50.0 below is the failure a fallback to the default cap
-      // would produce.
+      // This is the AC5 pin that "the dispatch path never exercises it: the
+      // `capMicroUsd` reaching `mintRunKey` from `dispatch` is always defined"
+      // riding the same path: 50.0 below is the failure a fallback to the
+      // default cap would produce.
       const admittedCeiling = 1_000_000;
       const cap = 5_000_000;
       const ledger = goodLedger(admittedCeiling, cap);
@@ -5339,6 +5340,51 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       const callB = policyLedger.admitCalls[0] as (typeof policyLedger.admitCalls)[number];
       expect(callB.capMicroUsd).toBe(50_000_000);
       expect(callB.keyCapMicroUsd).toBe(10_000_000);
+    });
+
+    test("AC4: an admitted ceiling above the backstop reaches the mint and is refused there — stranding a real box", async () => {
+      // Nothing between the decision and the mint clamps the ceiling (AC1/AC2
+      // pin the pass-through), so the backstop refusal is the FIRST bound an
+      // over-granted admission meets — in step 7, AFTER provisionAdmittedRun
+      // wrote the OPEN record and created the box. Both halves of the gate's
+      // min must clear the backstop for the decision to look like this, which
+      // is why the fixture names a 60M ceiling AND a 60M config cap AND a 60M
+      // deps.capMicroUsd: the shipped 5_000_000 µ$ default would bind
+      // `remaining` below 50M and the mint would SUCCEED.
+      const overBackstop = 60_000_000;
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(
+          validBrief(),
+          deps({
+            capMicroUsd: overBackstop,
+            ledgerFactory: () => goodLedger(overBackstop, overBackstop),
+          }),
+        );
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(1);
+        expect(err.code).toBe("key-delivery-failed");
+        expect(err.payload?.providerCode).toBe("cap-invalid");
+        // The guard is pre-createKey: no key was asked for, none exists.
+        expect(mintSpy).not.toHaveBeenCalled();
+        // The stranded-box reality: step 6 already ran, the record is OPEN and
+        // carries no keyHash, and `classifyReservation` counts it until teardown
+        // closes it — the headroom does NOT age out the way a no-ceiling
+        // refusal's absent record does.
+        expect(createSpy).toHaveBeenCalledTimes(1);
+        expect(readdirSync(store.dir)).toHaveLength(1);
+        const record = store.get(err.payload?.runId as string);
+        expect(record.closedAt).toBeUndefined();
+        expect(record.keyHash).toBeUndefined();
+      }
     });
 
     test("AC5: a ledgerFactory that THROWS refuses admission-failed and never mints", async () => {

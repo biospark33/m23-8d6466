@@ -323,7 +323,7 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
     throw new CredentialLifecycleError(
       "cap-invalid",
       `capMicroUsd ${capMicroUsd} exceeds the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — refusing to mint a key above the provider ceiling`,
-      "lower capMicroUsd to the admission's remaining budget (the dispatch path already derives it), or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
+      "the working ceiling is min(the admission's remaining budget, defaultKeyCapMicroUsd) — when the remaining budget exceeds the backstop, defaultKeyCapMicroUsd itself is the working figure (lowering to the unclamped budget would just loop back here); lower capMicroUsd to that min (the dispatch path already derives it), or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
     );
   }
   const name = `${SBX_KEY_PREFIX}${runId}`;

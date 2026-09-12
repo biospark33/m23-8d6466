@@ -2591,20 +2591,36 @@ export async function dispatch(
     //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
     //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
     //      refusing a non-positive `capMicroUsd`.
-    // DF2.13 adds one more reachable refusal downstream of here, with the same
-    // stranded-reservation shape: `mintRunKey` now refuses any cap above
-    // `defaultKeyCapMicroUsd` — the provider backstop is an enforced bound at
-    // the mint, not a docstring. B1 bounds `deps.capMicroUsd` by
-    // MAX_SAFE_INTEGER only, so a `--cap` above the backstop passes admission
-    // (reserves headroom, writes its gate_admissions row) and dies at the mint
-    // with `cap-invalid`. That reservation strands for the orphan window exactly
-    // as a `no-ceiling` one would, and for the same structural reason: the bound
-    // under test is the mint's operand, so the guard cannot move before the
-    // admission — the ponytail note above, one layer down. This is the accepted
-    // cost, not an oversight: bounding `perIssueOverrides`/`--cap` at config
-    // load is DF2.8's filed follow-up, and the orphan guard bounds the exposure.
+    // DF2.13 adds one more reachable refusal downstream of here, and the
+    // reservation it strands does NOT age out the way this arm's does.
+    // `mintRunKey` now refuses any cap above `defaultKeyCapMicroUsd` — the
+    // provider backstop is an enforced bound at the mint, not a docstring. The
+    // knob that reaches it is `--cap-micro-usd` (`deps.capMicroUsd`), which B1
+    // bounds by MAX_SAFE_INTEGER only; that knob alone cannot reach the refusal
+    // either — the effective ceiling is `min(keyCap, remaining)`, so against the
+    // shipped `defaultCapMicroUsd` of 5_000_000 µ$ even a 900_000_000 µ$
+    // `--cap-micro-usd` admits at 5M and mints fine. The mint refuses only when
+    // BOTH halves of that min clear the backstop: the issue's remaining budget
+    // (config `defaultCapMicroUsd` / `perIssueOverrides` minus committed spend)
+    // AND the passed cap.
     //
-    // A `no-ceiling` refusal appearing in the dispatch log is the same signal
+    // This arm fires BEFORE `store.create`, so the reservation it strands is an
+    // absent record the orphan guard retires after `ADMISSION_GRACE_MS` +
+    // `ADMISSION_SKEW_MARGIN_MS` (~6 min). A `cap-invalid` refusal fires in step
+    // 7, AFTER `provisionAdmittedRun` has written an OPEN run record and created
+    // a LIVE BILLABLE box — `classifyReservation` returns "count" while that
+    // record is unclosed (`closedAt === undefined`), so the orphan guard never
+    // retires it: the headroom returns only when teardown closes the record
+    // (plus the grace window), and the box bills until an operator tears the
+    // run down.
+    //
+    // This is the accepted cost, not an oversight: bounding the config caps at
+    // load is DF2.8's filed follow-up, and until it lands the mint guard is the
+    // enforced backstop. The observable is the `fleet.dispatch` error line with
+    // `payload.providerCode` "cap-invalid" (exit 1, the generic
+    // `key-delivery-failed` text — `CredentialLifecycleError` is not a
+    // `FleetError`, so its message and remediation do not survive the step-7
+    // catch). A `cap-invalid` line in the dispatch log is the same signal
     // arriving the expensive way.
     if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
       throw refuse(

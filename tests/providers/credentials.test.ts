@@ -497,9 +497,11 @@ describe("DF2.3 credential lifecycle", () => {
 
   test("AC4: a cap above the defaultKeyCapMicroUsd backstop is refused before the provider is called", async () => {
     // DF2.13 derives the per-run cap from the admission budget; this guard is
-    // the ceiling that derivation can never exceed. 90M is the plausible
-    // fat-finger, 900M the multi-run budget handed to one key.
-    for (const [i, capMicroUsd] of [90_000_000, 900_000_000].entries()) {
+    // the ceiling that derivation can never exceed. 50_000_001 is the
+    // just-above-boundary probe (it round-trips, so it reaches THIS guard and
+    // not the round-trip one), 90M the plausible fat-finger, 900M the
+    // multi-run budget handed to one key.
+    for (const [i, capMicroUsd] of [50_000_001, 90_000_000, 900_000_000].entries()) {
       const runId = `df213-cap-over-${i}`;
       await makeRun(runId);
       let err: unknown;
@@ -567,7 +569,13 @@ describe("DF2.3 credential lifecycle", () => {
       err = e;
     }
     expect(err).toBeInstanceOf(CredentialLifecycleError);
-    expect((err as CredentialLifecycleError).code).toBe("cap-invalid");
+    const cle = err as CredentialLifecycleError;
+    expect(cle.code).toBe("cap-invalid");
+    // This literal ALSO exceeds the defaultKeyCapMicroUsd backstop, which
+    // refuses with the same code — so the guard pinned here is identified by
+    // MESSAGE, not by code alone: delete the round-trip guard above and the
+    // backstop would satisfy `code` but not this string.
+    expect(cle.message).toContain("does not round-trip");
     expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
   });
 

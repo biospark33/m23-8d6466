@@ -366,7 +366,8 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(mintLine?.error?.code).toBe("cap-invalid");
     // and the provider was never asked for a key
     expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
-  }, 20_000); // same ceiling as its §4g/§4h siblings — this drives a full demo run
+  }, 20_000); // same ceiling as its §4g/§4h siblings — this aborts at the mint via
+  // finishEarly (no key POST, no workload exec), so cheaper than they are, not longer
 
   // ─── 4c. Wall-clock cancel on a no-execTimed substrate ───────────────────────
 
