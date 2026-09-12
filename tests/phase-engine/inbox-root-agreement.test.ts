@@ -197,7 +197,15 @@ describe("AC2b inbox root agreement — engine-derived argv vs fill.ts constants
     );
     fs.writeFileSync(
       path.join(checkout, "r.yaml"),
-      "# A two-role roster (DF1.6 shape); the content never matters here — INV-2 refuses the read before it is parsed.\nroles:\n  - name: lead\n    model: claude-haiku-4-5\n  - name: worker\n    model: claude-haiku-4-5\n",
+      // A two-role roster, deliberately SCHEMA-INVALID (roles without a
+      // `writes` declaration): the roster must RESOLVE at the checkout —
+      // found, read, parsed — and then refuse deterministically on
+      // validation, which proves the anchor without ever reaching the
+      // dual-gate. Before the in-box roster anchoring (DF2.12 G10 live
+      // finding) this refusal never got past containment, because the
+      // containment root was defaultRepoRoot() — /opt/qds-factory in the
+      // image — not the checkout this run root names.
+      "roles:\n  - name: lead\n    model: claude-haiku-4-5\n  - name: worker\n    model: claude-haiku-4-5\n",
     );
 
     const { stderr, exitCode } = await runEngineRaw("ac2b-roster-run", home, {
@@ -222,11 +230,14 @@ describe("AC2b inbox root agreement — engine-derived argv vs fill.ts constants
       ["plan", "success"],
       ["ship", "fail"],
     ]);
-    // THE pin: the dispatch phase's refusal names the checkout-anchored path
-    // under INV-2's confinement — found and realpath'd at <checkout>/r.yaml
-    // (never an ENOENT for a differently-anchored guess).
+    // THE pin: the dispatch phase's refusal names the CHECKOUT-anchored path —
+    // found and realpath'd at <checkout>/r.yaml (never an ENOENT for a
+    // differently-anchored guess, never a containment refusal for a path the
+    // checkout owns). The refusal body is the roster's own validation error,
+    // which is the proof the roster was FOUND where the checkout says it is.
     const message = journal.phases[1]?.error?.message ?? "";
-    expect(message).toContain("outside the repo root");
     expect(message).toContain(rosterAt);
+    expect(message).not.toContain("outside the repo root");
+    expect(message).toContain("writes is required");
   }, 60_000);
 });

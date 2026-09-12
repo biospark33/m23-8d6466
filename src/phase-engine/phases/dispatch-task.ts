@@ -432,7 +432,17 @@ export function dispatchTask(
     }
     let roster: ResolvedRoster;
     try {
-      roster = loadRoster(rosterPath, { cwd: runRoot });
+      // repoRoot: runRoot, not just cwd. loadRoster's containment root falls
+      // back to defaultRepoRoot() — three levels above schema.ts, which is the
+      // REPO on the host but /opt/qds-factory IN THE IMAGE (the engine ships
+      // as unbundled source there), so every run-root roster was refused
+      // in-box with "roster path is outside the repo root" — measured live,
+      // first in-box dispatch_task round (DF2.12 G10, run qds-20260912-de25bf
+      // in the evidence). The manifest read and the witness read already
+      // anchor at this same run root (deriveInBoxArgv's AC2b), and the
+      // host-side runner anchors --run-root at the checkout too, so the
+      // roster containment follows the one anchor everything else shares.
+      roster = loadRoster(rosterPath, { cwd: runRoot, repoRoot: runRoot });
     } catch (err) {
       return refuse(err instanceof Error ? err.message : String(err), redact);
     }

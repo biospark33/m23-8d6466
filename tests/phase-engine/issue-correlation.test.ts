@@ -144,7 +144,7 @@ const offlineGate: ValidateDeps = {
 };
 
 /** Minimal dispatch_task PhaseSpec (fixture roster, DF1.6 pattern). */
-function dispatchSpec(): PhaseSpec {
+function dispatchSpec(over: Partial<PhaseSpec> = {}): PhaseSpec {
   return {
     name: "dispatch",
     kind: "dispatch_task",
@@ -153,6 +153,7 @@ function dispatchSpec(): PhaseSpec {
     retries: 0,
     roster: FIXTURE_ROSTER,
     task: "fix the seeded failing test",
+    ...over,
   };
 }
 
@@ -777,7 +778,12 @@ describe("dispatch_task correlation integration (offline)", () => {
     }) satisfies typeof runTeamManifest);
 
     try {
-      const value = await dispatchTask(dispatchSpec(), {
+      // The roster must live INSIDE the run root — loadRoster's containment
+      // root is now the run root itself (the in-box anchoring: DF2.12 G10
+      // live finding), so the fixture is copied where rootDir points.
+      const rosterInRoot = path.join(markerRoot, "dispatch-roster.yaml");
+      fs.copyFileSync(FIXTURE_ROSTER, rosterInRoot);
+      const value = await dispatchTask(dispatchSpec({ roster: rosterInRoot }), {
         tracer,
         requestId: resolved.requestId,
         rootDir: markerRoot,

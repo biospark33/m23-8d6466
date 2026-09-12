@@ -1,0 +1,64 @@
+{
+  "outcome": "fail",
+  "sha": "92cc11e7aa3fbca5a7486cb7083fbf75ab80a779",
+  "runId": "qds-20260912-706c2a",
+  "vmName": "",
+  "evidence": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000,
+      "manifestPath": "config/rosters/df212-team.pipeline.json"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t27probe-mtymrpx62h7w"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 5,
+      "stdoutTail": "",
+      "stderrTail": "alidate_ms\":0}}\n{\"reason\":\"list-unverified\",\"liveVms\":0,\"ceiling\":50,\"headroom\":0,\"runId\":\"qds-20260912-706c2a\",\"code\":\"no-headroom\",\"message\":\"refusing dispatch: list-unverified — live 0/50, headroom 0\",\"remediation\":\"wait for a slot (fleet status), tear a run down, or raise the ceiling in the quota limits\"}\n{\"requestId\":\"a450088d-3a66-46a5-8ffe-ecfc3d1f1ed9\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-12T17:00:13.345Z\",\"duration\":15037,\"durationMs\":15037,\"status\":\"error\",\"runId\":\"qds-20260912-706c2a\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 5\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260912-706c2a",
+      "vmName": ""
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260912-706c2a",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 4,
+      "refusalCode": "run-not-found",
+      "stderrTail": "hing was mutated\"}\n{\"requestId\":\"95ed922a-16df-4df5-b864-7dab98fb11ae\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-12T17:00:13.416Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"qds-20260912-706c2a\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":4,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-12T17:00:18.501Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1ee61c011d87cc3fe49196a2f4ae1d09f738b55d2b1c1f9a54fe1804d647e957",
+    "buildId": "6f47990422b70761",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

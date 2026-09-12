@@ -1220,7 +1220,11 @@ describe("buildIdFileInputs", () => {
     // the only run whose green actually binds the commit.
 
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "e52c8135a156a7d28eaaf950bd9c132297644473d0c600cf2766e577d32a0dfb",
+      // 72d8d83b: moved from e52c8135 by the in-box roster anchoring —
+      // `src/phase-engine/phases/dispatch-task.ts` (repoRoot: runRoot at the
+      // loadRoster call — the DF2.12 G10 live finding) and
+      // `scripts/pipeline-run.ts` (closedRosterIds anchored identically).
+      "72d8d83b1cb2ed7893d0348798b8eb41b1ec819aa7c8771f57578d1d79c23386",
     );
   });
 });

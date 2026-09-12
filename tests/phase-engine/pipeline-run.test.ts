@@ -1749,7 +1749,13 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     // deterministically: QDS_TEAM_RUNNER is not "local", so dispatchTask's AC5
     // refusal fires FIRST — no pi catalog probe, no team spawn, no network.
     const ws = workspace();
-    const roster = path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+    // The roster must live INSIDE THE RUN ROOT — loadRoster's containment
+    // root is the run root itself since the in-box roster anchoring (DF2.12
+    // G10 live finding: in the image, defaultRepoRoot() names
+    // /opt/qds-factory, not the run's checkout), so the fixture is copied
+    // where --run-root points.
+    const roster = path.join(ws.dir, "dispatch-roster.yaml");
+    fs.copyFileSync(path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml"), roster);
     const manifest = path.join(ws.dir, "pipeline.json");
     fs.writeFileSync(
       manifest,
@@ -1878,7 +1884,11 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     // expected verdict differ, so the contrast between the two cases is the
     // pin: identical arming inputs, one duplicated name apart.
     const ws = workspace();
-    const roster = path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+    // The roster must live INSIDE THE RUN ROOT — loadRoster's containment
+    // root is the run root itself since the in-box roster anchoring (DF2.12
+    // G10 live finding), so the fixture is copied where --run-root points.
+    const roster = path.join(ws.dir, "dispatch-roster.yaml");
+    fs.copyFileSync(path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml"), roster);
     const manifest = path.join(ws.dir, "pipeline.json");
     fs.writeFileSync(
       manifest,

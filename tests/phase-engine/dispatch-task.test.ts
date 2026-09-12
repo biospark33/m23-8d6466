@@ -11,6 +11,7 @@
  */
 import { describe, it, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import {
+  copyFileSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -41,7 +42,14 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { ValidateDeps } from "../../src/phase-engine/roster/validate.ts";
 
-const FIXTURE_ROSTER = join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+// The roster SOURCE lives in the repo fixtures dir, but the roster the tests
+// USE is copied into tmpRoot by beforeEach (FIXTURE_ROSTER below). Since the
+// in-box roster anchoring fix, loadRoster's containment root IS the run root
+// (QDS_RUN_ROOT = tmpRoot here) — a roster in the repo but outside the run
+// root is exactly the shape production refuses, so the fixture must live
+// where the run root is.
+const ROSTER_SOURCE = join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+let FIXTURE_ROSTER = ROSTER_SOURCE;
 const FIXTURE_NDJSON = join(import.meta.dir, "fixtures", "dispatch-task-ndjson.jsonl");
 
 type TraceEntry = {
@@ -93,6 +101,12 @@ beforeEach(() => {
   // not remap relative argv paths, so a relative root breaks sh <script>.
   tmpRoot = mkdtempSync(join(tmpdir(), "qds-dispatch-test-"));
   process.env.QDS_RUN_ROOT = tmpRoot;
+  // The working roster copy lives INSIDE the run root — the containment root
+  // loadRoster is anchored to (see ROSTER_SOURCE above).
+  const rosterDir = join(tmpRoot, "fixtures");
+  mkdirSync(rosterDir, { recursive: true });
+  FIXTURE_ROSTER = join(rosterDir, "dispatch-roster.yaml");
+  copyFileSync(ROSTER_SOURCE, FIXTURE_ROSTER);
   // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.QDS_TEAM_RUNNER;
   // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
@@ -292,7 +306,7 @@ describe("dispatch-task: manifest schema refusal", () => {
     // finally) — otherwise the refusal is the confinement error, not the
     // manifest-schema error this test exists to exercise.
     // ponytail: write to per-test temp path inside fixtures (collision-safe via timestamp)
-    const rosterPath = join(import.meta.dir, "fixtures", `.tmp-five-worker-${Date.now()}.yaml`);
+    const rosterPath = join(tmpRoot, `.tmp-five-worker-${Date.now()}.yaml`);
     writeFileSync(rosterPath, `${lines.join("\n")}\n`);
     let result: Awaited<ReturnType<typeof runDispatch>>;
     try {
@@ -369,7 +383,7 @@ describe("dispatch-task: roster gates refuse pre-spawn", () => {
     // as an explicit minimal roster — regex-deriving it from the two-role
     // fixture couples this test to that fixture's exact formatting.
     // ponytail: write to per-test temp path inside fixtures (collision-safe via timestamp)
-    const oneRole = join(import.meta.dir, "fixtures", `.tmp-one-role-${Date.now()}.yaml`);
+    const oneRole = join(tmpRoot, `.tmp-one-role-${Date.now()}.yaml`);
     writeFileSync(
       oneRole,
       [
@@ -1169,10 +1183,10 @@ describe("dispatch-task: F059 structured log sites", () => {
 
 let engineSeq = 0;
 
-/** Write a per-test roster INSIDE the repo (loadRoster's repo-root
- * confinement rejects tmpRoot) at a collision-safe path. Caller unlinks. */
+/** Write a per-test roster INSIDE the run root (loadRoster's containment root
+ * — the in-box anchoring) at a collision-safe path. Caller unlinks. */
 function writeTempRoster(lines: string[]): string {
-  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${randomUUID()}-${engineSeq++}.yaml`);
+  const p = join(tmpRoot, `.tmp-verdict-${randomUUID()}-${engineSeq++}.yaml`);
   writeFileSync(p, `${lines.join("\n")}\n`);
   return p;
 }
@@ -1755,5 +1769,53 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     expect(attempts).toBe(2);
     expect(landed.length).toBe(1);
     expect(landed[0]).toMatchObject({ agentId: "worker", invocationSeq: 1 });
+  });
+});
+
+describe("dispatch-task: the roster resolves against the RUN root (in-box anchoring — DF2.12 G10 live finding)", () => {
+  // The in-box engine resolves the manifest, the witness and (now) the roster
+  // against runRoot = $HOME/src; loadRoster's CONTAINMENT root used to fall
+  // back to defaultRepoRoot() — three levels above schema.ts, i.e. the REPO on
+  // the host but /opt/qds-factory in the image — so every run-root roster was
+  // refused in-box with "roster path is outside the repo root" before a single
+  // role could spawn. Measured live: run qds-20260912-de25bf, evidence
+  // 2026-09-12-172013-t2-7-token-attribution-3hfwob.json. These two pins hold
+  // both directions of the anchor: inside the run root LOADS (even outside the
+  // repo), outside the run root REFUSES (even inside the repo).
+
+  it("a roster inside deps.rootDir loads even when that root is outside the repo", async () => {
+    const runRoot = mkdtempSync(join(tmpRoot, "runroot-"));
+    const rosterDir = join(runRoot, "config", "rosters");
+    mkdirSync(rosterDir, { recursive: true });
+    const rosterPath = join(rosterDir, "team.yaml");
+    copyFileSync(FIXTURE_ROSTER, rosterPath);
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    // The fake must complete the run contract the real runner does — a merged
+    // event and exit facts — or the precedence classifier reads lead_failure
+    // and the test would pass for the wrong reason on a green roster.
+    const spy = injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"run-root roster loaded"}}');
+      opts.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null });
+      return successResult();
+    });
+    const result = await runDispatch({ roster: "config/rosters/team.yaml" }, { rootDir: runRoot });
+    // The phase RAN: the roster loaded from the run root and the team spawned.
+    expect(result.exitStatus).toBe("success");
+    expect(spy.calls).toBe(1);
+  });
+
+  it("a roster outside deps.rootDir refuses containment even when the file exists", async () => {
+    const runRoot = mkdtempSync(join(tmpRoot, "runroot-empty-"));
+    const elsewhere = mkdtempSync(join(tmpRoot, "elsewhere-"));
+    const rosterPath = join(elsewhere, "team.yaml");
+    copyFileSync(FIXTURE_ROSTER, rosterPath);
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch({ roster: rosterPath }, { rootDir: runRoot });
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toContain("outside the repo root");
+    expect(spy.calls).toBe(0); // refused before any spawn
   });
 });

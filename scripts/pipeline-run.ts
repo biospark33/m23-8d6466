@@ -1157,7 +1157,12 @@ function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[
   for (const spec of phases) {
     if (spec.kind !== "dispatch_task" || spec.roster === undefined) continue;
     try {
-      for (const role of loadRoster(spec.roster, { cwd: runRoot }).roles) ids.add(role.name);
+      // repoRoot: runRoot — the SAME anchor dispatch_task resolves its roster
+      // with (this set must agree with the phase's own resolution, or the
+      // closed set is computed from a roster the phase will refuse, or vice
+      // versa). defaultRepoRoot() names /opt/qds-factory in the image, not the
+      // run's checkout; see dispatch-task's call site for the live finding.
+      for (const role of loadRoster(spec.roster, { cwd: runRoot, repoRoot: runRoot }).roles) ids.add(role.name);
     } catch (err) {
       // A roster that will not load is an OPERATOR fault, but the effect is
       // "every select_roster rejected as gate_bypass_attempt" — an agent is
