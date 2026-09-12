@@ -35,6 +35,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+// The divergence floor the close step's alarm is gated by (F032): a remainder
+// at or under it is rounding-class and stays silent. The per-arm expectation
+// below keys off it.
+import { SPEND_DIVERGENCE_TOLERANCE_MICRO_USD } from "../../../src/providers/teardown.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
@@ -301,24 +305,38 @@ test.todoIf(liveTodoOff())(
         expect(arm.spendMicroUsd).toBeGreaterThan(0);
         return arm;
       });
-      // The alarm, both arms: the unwired divergence line fired once per arm.
-      const unwiredLines = td2Stderrs.filter(
-        (stderr) => stderr.split("\n").filter((l) => {
+      // The alarm is TOLERANCE-GATED (F032): an unattributed remainder within
+      // SPEND_DIVERGENCE_TOLERANCE_MICRO_USD is rounding-class and the close
+      // step stays SILENT — measured live: these arms' gate-ping spend was
+      // 72 µ$ each, far under the 1 000 µ$ floor. So the per-arm expectation
+      // follows the arm's own spend: above the floor the unwired line MUST
+      // have fired (measured on T2.1's engine-external worker spend); below
+      // it the close is silent, and that silence is the pin.
+      const unwiredPerArm = td2Stderrs.map((stderr) =>
+        stderr.split("\n").filter((l) => {
           try {
             const parsed = JSON.parse(l) as { code?: string; outcome?: string };
             return parsed.code === "spend-divergence" && parsed.outcome === "unwired";
           } catch {
             return false;
           }
-        }).length > 0,
+        }).length,
       );
       evidence.push({
         phase: "ledger",
         boxHours,
         tokenRowsPerArm,
-        unwiredArms: unwiredLines.length,
+        unwiredPerArm,
       });
-      expect(unwiredLines.length).toBe(2);
+      for (let i = 0; i < tokenRowsPerArm.length; i++) {
+        const arm = tokenRowsPerArm[i]!;
+        const fired = (unwiredPerArm[i] ?? 0) > 0;
+        if (arm.spendMicroUsd > SPEND_DIVERGENCE_TOLERANCE_MICRO_USD) {
+          expect(fired).toBe(true); // above-floor remainder: the alarm fired
+        } else {
+          expect(fired).toBe(false); // rounding-class remainder: silent close
+        }
+      }
       expect(existsSync(join(recordsDir, `${armRunIds[0]}.bundle`))).toBeTrue();
       expect(existsSync(join(recordsDir, `${armRunIds[1]}.bundle`))).toBeTrue();
     } catch (e) {
