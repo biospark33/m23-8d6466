@@ -395,7 +395,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // already carries this tree's walk; the private mirror re-push and the live
 // boot proof follow this commit (#226's closer, now for the seventh pin).
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1ee61c011d87cc3fe49196a2f4ae1d09f738b55d2b1c1f9a54fe1804d647e957";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:59d2849bcf95a4b344b2172e1965f8e3a36d307423d3db7a9147e23b2a1c580e";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -459,7 +459,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "6f47990422b70761";
+export const DEFAULT_IMAGE_BUILD_ID = "acee19cb9a6cdbaf";
 
 
 
