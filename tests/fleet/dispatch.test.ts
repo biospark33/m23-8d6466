@@ -5274,4 +5274,154 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
     expectSingleRefusalLine("dispatch-failed");
   });
+
+  // ─── DF2.13: the derived cap is what reaches the mint ────────────────────────
+
+  describe("DF2.13: the derived cap is what reaches the mint", () => {
+    test("AC1: the admitted ceiling, not the issue cap and not the key backstop, is the limit the mint is asked for", async () => {
+      // Ceiling ≠ cap on purpose (the AC9b confusion), and the ceiling is ALSO
+      // below defaultKeyCapMicroUsd — so the three candidate figures are all
+      // distinct and a dispatcher propagating any of the two wrong ones fails.
+      // This is the AC5 "the backstop is ?? never exercised" pin riding the
+      // same path: 50.0 below is the failure a fallback to the default cap
+      // would produce.
+      const admittedCeiling = 1_000_000;
+      const cap = 5_000_000;
+      const ledger = goodLedger(admittedCeiling, cap);
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+
+      expect(mintSpy).toHaveBeenCalledTimes(1);
+      const [, limitArg] = mintSpy.mock.calls[0] as [string, number];
+      expect(limitArg).toBe(admittedCeiling / 1_000_000);
+      expect(limitArg).not.toBe(5.0); // the issue cap, ÷1e6
+      expect(limitArg).not.toBe(50.0); // defaultKeyCapMicroUsd, ÷1e6 — the backstop
+      // The value propagated is the DECISION's own output: what the gate was
+      // handed is what went out. `RecordingLedger`'s returned decision stands
+      // in for the gate_admissions row at this seam — the real-row equality is
+      // proven against a live SQLite ledger in budget-gate.test.ts.
+      const call = ledger.admitCalls[0] as (typeof ledger.admitCalls)[number];
+      expect(call.capMicroUsd).toBe(cap);
+      // No deps.capMicroUsd supplied, so the gate's clamp ran against the
+      // DF2.3 backstop — same figure the AC7 hand-off test pins.
+      expect(call.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+    });
+
+    test("AC2: the remainder binds without --cap, the policy ceiling binds with one — both directions of the min", async () => {
+      // (a) No --cap: the issue's remaining spend (the ceiling) is smaller than
+      // the 50M key backstop, so the REMAINDER is the binding half.
+      const remainderLedger = goodLedger(1_000_000, 5_000_000);
+      const originalMintA = keyApi.createKey.bind(keyApi);
+      const mintA = mock((name: string, limit: number) => originalMintA(name, limit));
+      keyApi.createKey = mintA;
+      await dispatch(validBrief(), deps({ ledgerFactory: () => remainderLedger }));
+
+      const [, limitA] = mintA.mock.calls[0] as [string, number];
+      expect(limitA).toBe(1.0);
+      const callA = remainderLedger.admitCalls[0] as (typeof remainderLedger.admitCalls)[number];
+      expect(callA.capMicroUsd).toBe(5_000_000);
+      expect(callA.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+
+      // (b) deps.capMicroUsd supplied below the issue cap: the POLICY ceiling
+      // is the binding half, and the mint is asked for IT, not the 50M cap.
+      const policyLedger = goodLedger(10_000_000, 50_000_000);
+      const originalMintB = keyApi.createKey.bind(keyApi);
+      const mintB = mock((name: string, limit: number) => originalMintB(name, limit));
+      keyApi.createKey = mintB;
+      await dispatch(validBrief(), deps({ ledgerFactory: () => policyLedger, capMicroUsd: 10_000_000 }));
+
+      const [, limitB] = mintB.mock.calls[0] as [string, number];
+      expect(limitB).toBe(10.0);
+      expect(limitB).not.toBe(50.0);
+      const callB = policyLedger.admitCalls[0] as (typeof policyLedger.admitCalls)[number];
+      expect(callB.capMicroUsd).toBe(50_000_000);
+      expect(callB.keyCapMicroUsd).toBe(10_000_000);
+    });
+
+    test("AC5: a ledgerFactory that THROWS refuses admission-failed and never mints", async () => {
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMintA = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMintA(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(
+          validBrief(),
+          deps({
+            ledgerFactory: () => {
+              throw new Error("factory exploded");
+            },
+          }),
+        );
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("admission-failed");
+      }
+      expect(createSpy).not.toHaveBeenCalled();
+      // No path falls back to defaultKeyCapMicroUsd on the way out.
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+
+    test("AC5: a typed CostLedgerError from the gate refuses ledger-failed and never mints", async () => {
+      // `admitThrowsLedger()` throws a RAW Error, which lands in the
+      // admission-failed arm the two tests above and AC7's own already pin;
+      // the ledger-failed code is the TYPED arm, so this fixture throws the
+      // typed error the way AC7's sibling does.
+      const ledger = goodLedger();
+      ledger.admitIssue = () => {
+        throw new CostLedgerError("ledger-schema-mismatch", "schema drifted under the gate", "migrate, then retry");
+      };
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMintC = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMintC(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("ledger-failed");
+        expect(err.payload?.providerCode).toBe("ledger-schema-mismatch");
+      }
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+
+    test("AC5: an over-budget issue refuses budget-exceeded and never mints", async () => {
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMintD = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMintD(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(validBrief(), deps({ ledgerFactory: () => overBudgetLedger() }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("budget-exceeded");
+      }
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+  });
 });

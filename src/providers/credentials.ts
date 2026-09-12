@@ -45,14 +45,18 @@ import { ProviderError } from "./errors.ts";
 
 /**
  * Provider-side BACKSTOP cap — the ceiling on what `mintRunKey` may request, not the run's
- * operating budget. The per-run budget is `deps.capMicroUsd`, resolved in `mintRunKey` below as
- * `deps.capMicroUsd ?? defaultKeyCapMicroUsd`, which currently defaults to this backstop; wiring
- * it from the admission budget is DF2.13.
+ * operating budget. ENFORCED at the mint: `mintRunKey` refuses any `capMicroUsd` above this
+ * value with `cap-invalid` before `keyApi.createKey` runs, so every caller inherits the bound
+ * (INV-CAP-1). Raising the ceiling is a code change plus a test that names it.
  *
- * (Cited by symbol, not by line. The first draft of this comment said "at mint (`:261`)" and was
- * wrong within minutes — the twenty lines it added pushed that call to `:281`. Stale line
- * citations were the most common defect the 2026-09-08 review found across ten agent reports,
- * and this docstring managed to commit one about itself.)
+ * The per-run figure itself is not configured here: the dispatch path derives the cap from
+ * DF2.8's admission (`admittedCeilingMicroUsd`), and DF2.13 made this backstop itself an
+ * enforced ceiling over that derivation.
+ *
+ * (Cited by symbol, not by line. The first draft of this comment cited the mint call by line
+ * number and was wrong within minutes — the twenty lines it added pushed that call further
+ * down the file. Stale line citations were the most common defect the 2026-09-08 review found
+ * across ten agent reports, and this docstring managed to commit one about itself.)
  *
  * The ordering invariant is:
  *
@@ -60,15 +64,18 @@ import { ProviderError } from "./errors.ts";
  *      DF3.6a, engine-enforced          provider-enforced, per run        provider ceiling
  *      in-box, a CLAIM under R9         OUTSIDE the trust boundary        on the above
  *
+ * The top bound is the enforced one: the mint refuses caps above it (INV-CAP-1).
+ *
  * Corrected 2026-09-08. This docstring previously read "DF3.6's `loadResidentBounds` asserts
  * `residentSpendCeilingMicros < runBudgetCapMicros <= defaultKeyCapMicroUsd` against this value".
- * `runBudgetCapMicros` is declared ONLY at `scripts/cap-hit-demo.ts:97,148`, annotated there as
- * "artifact field only" — it is written into DF2.4's evidence JSON and enforces nothing. So the
- * middle term named a control that did not exist, and a comment in production code promised an
- * assertion nobody could write. The bound it was reaching for is real: without it, the resident is
- * held at 8_000 micro-USD while a run may spend up to this 50_000_000 backstop, leaving tier-3
- * workers unbounded in-run across that band. Its enforcement point already exists — the mint-time
- * cap — so the term is re-homed rather than invented.
+ * `runBudgetCapMicros` is declared ONLY in `scripts/cap-hit-demo.ts` (the `--budget-cap` option),
+ * annotated there as "artifact field only" — it is written into DF2.4's evidence JSON and
+ * enforces nothing. So the middle term named a control that did not exist, and a comment in
+ * production code promised an assertion nobody could write. The bound it was reaching for is
+ * real: without it, the resident is held at 8_000 micro-USD while a run may spend up to this
+ * 50_000_000 backstop, leaving tier-3 workers unbounded in-run across that band. Its
+ * enforcement point already exists — the mint-time cap — so the term is re-homed rather than
+ * invented.
  */
 export const defaultKeyCapMicroUsd = 50_000_000;
 
@@ -303,6 +310,20 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       "cap-invalid",
       `capMicroUsd ${capMicroUsd} does not round-trip through the provider's dollar-denominated API — refusing to mint with a lossy cap`,
       "pass a µ$ ceiling that survives microsToUsd/usdToMicros unchanged (e.g. 50_000_000), or omit it for the default",
+    );
+  }
+  // INV-CAP-1: the backstop is enforced HERE, pre-mint — every caller (dispatch's
+  // derived cap, the demo, `runCredentialLifecycle`) inherits the bound through
+  // this one guard, instead of each re-asserting it above its own mint call. The
+  // post-mint `uncapped-key`/`mint-ceiling-mismatch` guards below can only fire
+  // after a live key exists (INV-CRED-1); the ceiling must be refused before the
+  // provider is asked for one. Raising it is a code change plus a test that names
+  // the ceiling (see the `defaultKeyCapMicroUsd` header).
+  if (capMicroUsd > defaultKeyCapMicroUsd) {
+    throw new CredentialLifecycleError(
+      "cap-invalid",
+      `capMicroUsd ${capMicroUsd} exceeds the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — refusing to mint a key above the provider ceiling`,
+      "lower capMicroUsd to the admission's remaining budget (the dispatch path already derives it), or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
     );
   }
   const name = `${SBX_KEY_PREFIX}${runId}`;

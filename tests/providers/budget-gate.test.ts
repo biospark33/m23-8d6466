@@ -16,6 +16,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -730,5 +731,117 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     // The ledger should track both admissions separately by their (request_id, run_id) PK.
     // This test asserts the behavior: if dedupe were by requestId only, the second would be
     // rejected or carry merged state, which would be a corruption bug.
+  });
+});
+
+// ─── DF2.13: min(keyCap, remaining) at the decision layer ─────────────────────
+
+describe("DF2.13: min(keyCap, remaining) at the decision layer", () => {
+  test("AC2: remainder binds — 4,000,000 µ$ spent of a 5,000,000 µ$ cap admits at 1,000,000, under the 50M key backstop", async () => {
+    const store = new RunRecordStore(join(dir, "runs"));
+    const keyApi = new FakeKeyApi();
+    const ledger = freshLedger(undefined, store);
+
+    await seedPriorSpend({
+      store,
+      keyApi,
+      ledger,
+      runId: "seed-run-1",
+      repoSlug: "qds/demo",
+      issueId: "42",
+      requestId: "req-seed",
+      role: "lead",
+      microUsd: 4_000_000,
+    });
+
+    const decision = assertWithinBudget(ledger, {
+      repoSlug: "qds/demo",
+      issueId: "42",
+      runId: "df213-remainder-20260912-000001",
+      requestId: "req-df213-remainder",
+    });
+
+    expect(decision.admitted).toBeTrue();
+    expect(decision.status).toBe("within-budget");
+    expect(decision.capMicroUsd).toBe(5_000_000);
+    expect(decision.spentMicroUsd).toBe(4_000_000);
+    expect(decision.remainingMicroUsd).toBe(1_000_000);
+    // min(defaultKeyCapMicroUsd, remaining): the issue's remaining spend is the
+    // binding half, not the 50,000,000 µ$ key cap.
+    expect(decision.admittedCeilingMicroUsd).toBe(1_000_000);
+  });
+
+  test("AC2: policy ceiling binds — an untouched issue under a 50,000,000 µ$ cap admits at the 10,000,000 µ$ key cap", () => {
+    // For the KEY CAP to be the binding half, the issue cap must exceed it, so
+    // this test raises the default cap through the config seam the per-issue
+    // override test uses — no spend, fresh issue, and the smaller policy
+    // figure is what the decision hands the mint.
+    mkdirSync(join(dir, ".sandbox"), { recursive: true });
+    writeFileSync(join(dir, ".sandbox", "cost-config.json"), JSON.stringify({
+      defaultCapMicroUsd: 50_000_000,
+    }, null, 2));
+
+    const ledger = freshLedger();
+    const cap = capForIssue(ledger.config, "qds/demo", "42");
+    expect(cap).toBe(50_000_000);
+
+    const decision = assertWithinBudget(ledger, {
+      repoSlug: "qds/demo",
+      issueId: "42",
+      runId: "df213-policy-20260912-000001",
+      requestId: "req-df213-policy",
+    }, 10_000_000);
+
+    expect(decision.admitted).toBeTrue();
+    expect(decision.capMicroUsd).toBe(50_000_000);
+    expect(decision.remainingMicroUsd).toBe(50_000_000);
+    // min(10,000,000, 50,000,000): the key cap is the binding half.
+    expect(decision.admittedCeilingMicroUsd).toBe(10_000_000);
+  });
+
+  test("AC1: the admitted ceiling is the ceiling the gate_admissions row carries", async () => {
+    // The dispatch-layer tests record what the gate was handed via a fake; THIS
+    // is the real-ledger half of that seam — the decision's own output is the
+    // ceiling persisted under (request_id, run_id), so a dispatcher reading the
+    // row back is reading the figure it was admitted at.
+    const store = new RunRecordStore(join(dir, "runs"));
+    const keyApi = new FakeKeyApi();
+    const ledgerPath = join(dir, "cost-ledger.db");
+    const ledger = freshLedger(ledgerPath, store);
+
+    await seedPriorSpend({
+      store,
+      keyApi,
+      ledger,
+      runId: "seed-run-1",
+      repoSlug: "qds/demo",
+      issueId: "42",
+      requestId: "req-seed",
+      role: "lead",
+      microUsd: 4_000_000,
+    });
+
+    const decision = assertWithinBudget(ledger, {
+      repoSlug: "qds/demo",
+      issueId: "42",
+      runId: "df213-rowread-20260912-000001",
+      requestId: "req-df213-rowread",
+    });
+    expect(decision.admittedCeilingMicroUsd).toBe(1_000_000);
+
+    // The handle owns the SQLite connection, so it closes before anything else
+    // opens the file.
+    ledger.close();
+    const db = new Database(ledgerPath);
+    const row = db
+      .prepare("SELECT ceiling_micro_usd FROM gate_admissions WHERE request_id = ? AND run_id = ?")
+      .get("req-df213-rowread", "df213-rowread-20260912-000001") as { ceiling_micro_usd: number } | null;
+    db.close();
+
+    expect(row).not.toBeNull();
+    expect(row?.ceiling_micro_usd).toBe(1_000_000);
+    // The two figures are the same number, not merely equal by coincidence of
+    // two separate derivations.
+    expect(row?.ceiling_micro_usd).toBe(decision.admittedCeilingMicroUsd);
   });
 });

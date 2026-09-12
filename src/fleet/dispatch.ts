@@ -2591,6 +2591,19 @@ export async function dispatch(
     //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
     //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
     //      refusing a non-positive `capMicroUsd`.
+    // DF2.13 adds one more reachable refusal downstream of here, with the same
+    // stranded-reservation shape: `mintRunKey` now refuses any cap above
+    // `defaultKeyCapMicroUsd` — the provider backstop is an enforced bound at
+    // the mint, not a docstring. B1 bounds `deps.capMicroUsd` by
+    // MAX_SAFE_INTEGER only, so a `--cap` above the backstop passes admission
+    // (reserves headroom, writes its gate_admissions row) and dies at the mint
+    // with `cap-invalid`. That reservation strands for the orphan window exactly
+    // as a `no-ceiling` one would, and for the same structural reason: the bound
+    // under test is the mint's operand, so the guard cannot move before the
+    // admission — the ponytail note above, one layer down. This is the accepted
+    // cost, not an oversight: bounding `perIssueOverrides`/`--cap` at config
+    // load is DF2.8's filed follow-up, and the orphan guard bounds the exposure.
+    //
     // A `no-ceiling` refusal appearing in the dispatch log is the same signal
     // arriving the expensive way.
     if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
