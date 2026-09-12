@@ -86,9 +86,16 @@ const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
  * `dispatch_task` phase (lead + two workers, per the roster it names) plus a
  * free closing `code` phase. Budget arithmetic (manifest.ts
  * `requiredBudgetMs`): (retries+1)×(PARSE_FIX_ATTEMPTS+1)×maxDurationMs per
- * phase + phases×ROUTING_MARGIN_MS = 1×3×300 000 + 1×3×1 000 + 2×5 000 =
- * 913 000, so `runBudgetMs` is 930 000 — required + 17 s, sized the T4 way,
- * not padded.
+ * phase + phases×ROUTING_MARGIN_MS = 1×3×190 000 + 1×3×1 000 + 2×5 000 =
+ * 583 000, so `runBudgetMs` is 585 000 — required + 2 s, sized the T4 way.
+ * The BINDING CEILING is dispatch's own: the verb's internal wall clock
+ * (`deps.timeoutMs ?? 600_000`, dispatch.ts, no CLI surface) is the manifest
+ * loader's `callerBudgetMs`, so a team phase larger than ~195 s per attempt
+ * is refused at dispatch (`runBudgetMs exceeds callerBudgetMs 599999` —
+ * measured live, first run of this file). Inside 190 s: the dual-gate's
+ * probes (memoized per process, F052; the provider probe bounds at 10 s) +
+ * the lead + two workers' tiny arithmetic turns. The first run's refusal is
+ * the sizing evidence.
  */
 const T2_MANIFEST_PATH = "config/rosters/df212-team.pipeline.json";
 
