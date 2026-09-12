@@ -541,7 +541,29 @@ test.todoIf(liveTodoOff())(
     expect(destroyFailures).toEqual([]);
     expect(keyProblems).toEqual([]);
     expect(finalBoxes).toEqual([]);
-  }
+  },
+  // The test-level ceiling, the same third argument every live tier passes
+  // (bun's default is 5 000 ms — a live file without this number dies mid-
+  // dispatch, which the first run of THIS file did). Budget audit:
+  //   dispatch            timeoutMs 900_000                               900 s
+  //   fleet run           timeoutMs 180_000                               180 s
+  //   status polls        40 × (60 000 verb + 20 000 wait)             3 200 s
+  //   sandbox-teardown    timeoutMs 300_000                               300 s
+  //   qds-cost            ~60 000                                          60 s
+  //   re-teardown         timeoutMs 300_000                               300 s
+  //   box-absent poll     4 × (read + 10 000 wait)                        80 s
+  //                                                                  body ────
+  //                                                                 5 020 s
+  //   finally (T2.1's arithmetic: teardownQuietly 180 + destroyQuietly 120 +
+  //   fleetLeftovers 880 + keyLeakProblems 360 + evidence 10)        1 550 s
+  //                                                                   ────────
+  //                                                                 6 570 s
+  //
+  // Hence 6 600 000. Every inner ceiling FIRING is safe — it rejects into the
+  // catch and the `finally` still runs — so the fail-safe direction is UP.
+  // A healthy round finishes far inside it. WHOEVER RAISES AN INNER CEILING
+  // OR ADDS A CLEANUP STEP MUST RE-ADD IT HERE.
+  6_600_000,
 );
 
 /**
