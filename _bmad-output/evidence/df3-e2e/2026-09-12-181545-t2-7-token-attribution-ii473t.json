@@ -1,0 +1,206 @@
+{
+  "outcome": "pass",
+  "sha": "f90c47cefbd737c4cd544ed25aac7143935e9571",
+  "runId": "qds-20260912-1f8538",
+  "vmName": "qds-20260912-1f8538",
+  "evidence": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000,
+      "manifestPath": "config/rosters/df212-team.pipeline.json"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t27probe-mtypav6ul87g"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260912-1f8538\",\"requestId\":\"6a0a1697-7f90-4a52-935e-07e14d978218\",\"state\":\"ready\",\"vmName\":\"qds-20260912-1f8538\",\"httpsUrl\":\"https://qds-20260912-1f8538.exe.xyz\"}",
+      "stderrTail": "-12T18:12:22.567Z\",\"duration\":95496,\"durationMs\":95496,\"status\":\"ok\",\"runId\":\"qds-20260912-1f8538\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":47064,\"mint_ms\":1455,\"fill_ms\":28696,\"setup_gate_ms\":17035}}\n{\"requestId\":\"6a0a1697-7f90-4a52-935e-07e14d978218\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-12T18:12:22.572Z\",\"duration\":95513,\"durationMs\":95513,\"status\":\"ok\",\"runId\":\"qds-20260912-1f8538\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260912-1f8538",
+      "vmName": "qds-20260912-1f8538"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdoutTail": "started: qds-20260912-1f8538"
+    },
+    {
+      "phase": "status-poll",
+      "seenStates": [
+        "running",
+        "running",
+        "running",
+        "running",
+        "running",
+        "running",
+        "running",
+        "ok"
+      ],
+      "exitFailures": 0
+    },
+    {
+      "phase": "settled",
+      "state": "ok"
+    },
+    {
+      "phase": "engine-log-read",
+      "exitCode": 0,
+      "bytes": 4234
+    },
+    {
+      "phase": "attribution-lines",
+      "count": 5,
+      "refused": 0,
+      "roles": [
+        "resident",
+        "worker",
+        "worker",
+        "lead",
+        "resident"
+      ],
+      "agents": [
+        "resident",
+        "worker-b",
+        "worker-a",
+        "lead"
+      ]
+    },
+    {
+      "phase": "sandbox-teardown",
+      "exitCode": 0,
+      "stdoutTail": "torn down: qds-20260912-1f8538",
+      "stderrTail": "\",\"operation\":\"cost-ledger.ingest\",\"agentId\":null,\"timestamp\":\"2026-09-12T18:15:36.937Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260912-1f8538\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"46\",\"role\":null,\"kind\":\"box_hours\",\"costMicroUsd\":18438,\"unpriced\":0,\"durationMs\":0,\"outcome\":\"inserted\",\"ingest_ms\":0}\n{\"requestId\":\"7a904eb4-faa6-43bd-a143-9fc3c557af29\",\"operation\":\"teardown.close\",\"agentId\":null,\"timestamp\":\"2026-09-12T18:15:36.894Z\",\"runId\":\"qds-20260912-1f8538\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":43,\"durationMs\":43,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":43}"
+    },
+    {
+      "phase": "spend",
+      "capMicroUsd": 50000,
+      "actualMicroUsd": 6977
+    },
+    {
+      "phase": "harvested-log",
+      "count": 5,
+      "refused": 0
+    },
+    {
+      "phase": "token-rows",
+      "rows": [
+        {
+          "agent_id": "lead",
+          "role": "lead",
+          "model": "openrouter/anthropic/claude-haiku-4.5",
+          "invocation_seq": 0,
+          "cost_micro_usd": 0,
+          "unpriced": 0
+        },
+        {
+          "agent_id": "resident",
+          "role": "resident",
+          "model": "",
+          "invocation_seq": 0,
+          "cost_micro_usd": 63,
+          "unpriced": 0
+        },
+        {
+          "agent_id": "resident",
+          "role": "resident",
+          "model": "",
+          "invocation_seq": 1,
+          "cost_micro_usd": 27,
+          "unpriced": 0
+        },
+        {
+          "agent_id": "worker-a",
+          "role": "worker",
+          "model": "openrouter/deepseek/deepseek-v3.2",
+          "invocation_seq": 0,
+          "cost_micro_usd": 4115,
+          "unpriced": 0
+        },
+        {
+          "agent_id": "worker-b",
+          "role": "worker",
+          "model": "openrouter/deepseek/deepseek-v3.2",
+          "invocation_seq": 0,
+          "cost_micro_usd": 2774,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "ledger",
+      "tokenRowCount": 5,
+      "pricedTokenMicroUsd": 6979,
+      "spendMicroUsd": 6977,
+      "boxHours": [
+        {
+          "cost_micro_usd": 18438,
+          "unpriced": 0
+        }
+      ],
+      "crossCheck": "SUM(cost_micro_usd WHERE unpriced = 0) vs the record's captureSpend figure, tolerance from teardown's SPEND_DIVERGENCE_TOLERANCE_MICRO_USD"
+    },
+    {
+      "phase": "qds-cost",
+      "exitCode": 0,
+      "stdout": "{\"requestId\":\"7af57299-d5ea-45e2-9290-844206e1fe13\",\"operation\":\"cost-ledger.open\",\"agentId\":null,\"timestamp\":\"2026-09-12T18:15:37.478Z\",\"duration\":10,\"status\":\"ok\",\"mode\":\"read-only\",\"ledgerPath\":\"/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t27-6ITvBN/runs/cost-ledger.db\",\"outcome\":\"opened\",\"durationMs\":10,\"ledgerOpenMs\":10,\"message\":\"opened /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t27-6ITvBN/runs/cost-ledger.db read-only — no mkdir, chmod, mode assert, schema or persistent pragma effect was performed; busy_timeout is connection-local (INV-COST-7)\"}\nQuantum-Digital-Solutions/QDS-Factory#46\n\nTOTAL: 25,417 µ$  $0.0254\n\nPER ROLE:\n  box-hours (unattributed) 18,438          µ$  $0.0184\n  lead                     0               µ$  $0.0000\n  resident                 90              µ$  $0.0001\n  worker                   6,889           µ$  $0.0069\n\nPER RUN:\n  RUN                            SPEND µ$        BOX HOURS    TOKENS                  \n  ------------------------------ --------------- ------------ ------------------------\n  qds-20260912-1f8538            25,417          ✓            ✓                       \n\nTOKENS:  input 13,716  output 3,230\nCACHE:   read 17,408  write 0\nunpriced rows: 0\n",
+      "stderrTail": ""
+    },
+    {
+      "phase": "tokens-cell",
+      "tokensCell": "✓"
+    },
+    {
+      "phase": "sandbox-teardown-retry",
+      "exitCode": 0,
+      "stdoutTail": "torn down: qds-20260912-1f8538"
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20260912-1f8538",
+      "attempts": 1
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260912-1f8538",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "e\",\"ingest_ms\":1}\n{\"requestId\":\"e918d8f4-59cf-47af-9817-1c288de98586\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-12T18:15:40.407Z\",\"duration\":30,\"durationMs\":30,\"status\":\"ok\",\"runId\":\"qds-20260912-1f8538\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260912-1f8538",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-12T18:15:45.032Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:59d2849bcf95a4b344b2172e1965f8e3a36d307423d3db7a9147e23b2a1c580e",
+    "buildId": "acee19cb9a6cdbaf",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

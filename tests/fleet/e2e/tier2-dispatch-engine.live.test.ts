@@ -44,9 +44,6 @@ import type { ExecResult } from "../../../src/providers/driver.ts";
 // The in-box layout, imported rather than re-spelled — see the `cat` at step 5.
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-// The divergence tolerance the close step itself reports against — the live
-// token cross-check below compares at the SAME threshold, one source of truth.
-import { SPEND_DIVERGENCE_TOLERANCE_MICRO_USD } from "../../../src/providers/teardown.ts";
 import {
   EVIDENCE_DIR,
   REPO_ROOT,
@@ -396,39 +393,49 @@ test.todoIf(liveTodoOff())(
       );
       expect(boxHours.length).toBe(1); // fractional µ$ row (post-F8), priced
       expect(boxHours[0]?.unpriced).toBe(0);
-      // WIRED (DF2.12): kind='tokens' rows land through the host bridge —
-      // `CostLedger.ingestCostEvent` in `src/providers/cost-ledger.ts` (cited
-      // by symbol, not line: the old `:753` pointed at a blank line between
-      // `AdmissionInput` and `AdmissionDecision`, having drifted ~200 lines),
-      // driven by `src/providers/cost-ledger-bridge.ts` from the harvested
-      // engine log at teardown's close step. A priced engine run therefore
-      // leaves token rows, asserted below; the record's spendMicroUsd
-      // (provider-side captureSpend) stays the authoritative figure.
+      // DF2.12 G10 (2026-09-12): THIS FLOW IS DISPATCH-ONLY BY DESIGN. The
+      // worker pi runs through driver.exec — outside the engine's money seam
+      // (dispatchTask's cost arm and steering's meter site, both tee'd by
+      // moneyLineTee onto the engine log) — so no cost_attribution line can
+      // exist here and ZERO token rows is the CORRECT outcome. History: the
+      // original `toBe(0)` pinned the bridge defect and was flipped in PR
+      // #253; the flip presupposed an engine run this flow never performs
+      // (measured live, first post-flip run: tokenRows 0 beside real spend).
+      // The engine-bearing end-to-end attribution proof — one row per cost
+      // event, lead + both workers + resident, priced-SUM cross-check — lives
+      // in tier2-df212-attribution.live.test.ts (T2.7).
       //
-      // W2-2 (PR #253 review): a row COUNT alone passes a partial harvest —
-      // rows present but every one unpriced while the provider charged. So
-      // the PRICED token sum is cross-checked against the record's
-      // authoritative spend figure, like for like (tokens only, unpriced
-      // excluded) at the same tolerance reportSpendDivergence runs at close.
+      // What this flow proves instead, live: a priced run whose spend cannot
+      // be attributed SHOUTS. The close step's spend-divergence report fires
+      // `unwired` — the provider figure beside zero token rows — at the
+      // tolerance SPEND_DIVERGENCE_TOLERANCE_MICRO_USD names. The bridge
+      // itself is cited by symbol: CostLedger.ingestCostEvent
+      // (src/providers/cost-ledger.ts), driven by
+      // src/providers/cost-ledger-bridge.ts from the harvested engine log.
       const tokens = ledgerRows(
         recordsDir,
-        "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS pricedMicroUsd FROM cost_events WHERE run_id = ? AND kind = 'tokens'",
+        "SELECT COUNT(*) AS n FROM cost_events WHERE run_id = ? AND kind = 'tokens'",
         runId,
-      )[0] as { n: number; pricedMicroUsd: number } | undefined;
+      )[0] as { n: number } | undefined;
       const tokenRows = tokens?.n ?? -1;
-      const pricedTokenMicroUsd = Number(tokens?.pricedMicroUsd ?? -1);
       evidence.push({
         phase: "ledger",
         boxHours,
         tokenRows,
-        pricedTokenMicroUsd,
         spendMicroUsd: closed.spendMicroUsd,
-        crossCheck: "SUM(cost_micro_usd WHERE unpriced = 0) vs the record's captureSpend figure, tolerance from teardown's SPEND_DIVERGENCE_TOLERANCE_MICRO_USD",
       });
-      expect(tokenRows).toBeGreaterThan(0);
-      expect(Math.abs((closed.spendMicroUsd ?? 0) - pricedTokenMicroUsd)).toBeLessThanOrEqual(
-        SPEND_DIVERGENCE_TOLERANCE_MICRO_USD,
-      );
+      expect(tokenRows).toBe(0);
+      expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
+      const unwiredLines = teardown.stderr.split("\n").filter((l) => {
+        try {
+          const parsed = JSON.parse(l) as { code?: string; outcome?: string };
+          return parsed.code === "spend-divergence" && parsed.outcome === "unwired";
+        } catch {
+          return false;
+        }
+      });
+      evidence.push({ phase: "divergence-alarm", count: unwiredLines.length, sample: unwiredLines[0]?.slice(0, 300) });
+      expect(unwiredLines.length).toBe(1);
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (EB3): the post-finally verdicts below must render on

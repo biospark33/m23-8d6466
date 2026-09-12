@@ -29,10 +29,6 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-// The divergence tolerance the close step itself reports against — the live
-// per-arm token cross-check below compares at the SAME threshold, one source
-// of truth.
-import { SPEND_DIVERGENCE_TOLERANCE_MICRO_USD } from "../../../src/providers/teardown.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
@@ -346,6 +342,8 @@ test.todoIf(liveTodoOff())(
 
       // ── harvest BOTH stories, teardown BOTH boxes ────────────────────────
       const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
+      /** Each arm's teardown stderr, for the per-arm divergence-alarm check below. */
+      const td2Stderrs: string[] = [];
       for (let i = 0; i < armRunIds.length; i++) {
         const id = armRunIds[i] as string;
         const h = await runFleet(["harvest", id, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, timeoutMs: 300_000 });
@@ -357,6 +355,7 @@ test.todoIf(liveTodoOff())(
         const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, timeoutMs: 300_000 });
         evidence.push({ phase: "teardown-arm", arm: i, exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
         expect(td.exitCode).toBe(0);
+        td2Stderrs.push(td.stderr);
 
         const closed = new RunRecordStore({ dir: recordsDir }).get(id);
         expect(closed.closedAt ?? "").not.toBe("");
@@ -378,39 +377,56 @@ test.todoIf(liveTodoOff())(
       );
       expect(boxHours.length).toBe(2);
       expect(boxHours.every((r) => r.unpriced === 0)).toBe(true);
-      // W2-1 (PR #253 review): the two-id aggregate (`run_id IN (?, ?)` under
-      // COUNT(*)) passed when ONE arm landed zero rows and the other carried
-      // both — a per-arm harvest gap was invisible. Count PER arm id.
+      // DF2.12 G10 (2026-09-12): THESE ARMS ARE DISPATCH-ONLY BY DESIGN — the
+      // fanout arms end at the dispatch ack (fill + setup gate + expose), no
+      // engine ever runs, so no engine log exists and ZERO token rows per arm
+      // is the CORRECT outcome. History: W2-1/W2-2 (PR #253 review) hardened
+      // a `toBeGreaterThan(0)` whose premise — "a priced run leaves token
+      // rows" — presupposes an engine run these arms never perform; measured
+      // live, first post-flip attempt. The engine-bearing per-arm attribution
+      // proof (rows per cost event, priced-SUM cross-check at the
+      // SPEND_DIVERGENCE_TOLERANCE_MICRO_USD tolerance) lives in
+      // tier2-df212-attribution.live.test.ts (T2.7).
       //
-      // W2-2: a per-arm count alone still passes a partial harvest (rows
-      // present but every one unpriced while the provider charged), so each
-      // arm's PRICED token sum is cross-checked against its record's
-      // authoritative spend figure, like for like (tokens only, unpriced
-      // excluded) at the same tolerance reportSpendDivergence runs at close.
+      // What these arms prove instead, live, PER ARM (the W2-1 per-arm lesson
+      // retained — a two-id aggregate hides a one-arm gap): a priced arm whose
+      // spend cannot be attributed SHOUTS — each arm's teardown close step
+      // fires the spend-divergence line `unwired`, naming the provider figure
+      // beside zero token rows.
       const tokenRowsPerArm = armRunIds.map((id, i) => {
         const row = ledgerRows(
           recordsDir,
-          "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS pricedMicroUsd FROM cost_events WHERE kind = 'tokens' AND run_id = ?",
+          "SELECT COUNT(*) AS n FROM cost_events WHERE kind = 'tokens' AND run_id = ?",
           id,
-        )[0] as { n: number; pricedMicroUsd: number } | undefined;
+        )[0] as { n: number } | undefined;
         const arm = {
           runId: id,
           rows: row?.n ?? -1,
-          pricedTokenMicroUsd: Number(row?.pricedMicroUsd ?? -1),
           spendMicroUsd: spends[i] ?? 0,
         };
-        expect(arm.rows).toBeGreaterThan(0);
-        expect(Math.abs(arm.spendMicroUsd - arm.pricedTokenMicroUsd)).toBeLessThanOrEqual(
-          SPEND_DIVERGENCE_TOLERANCE_MICRO_USD,
-        );
+        expect(arm.rows).toBe(0);
+        // The setup gate's C/D pings charged the run key even with no engine.
+        expect(arm.spendMicroUsd).toBeGreaterThan(0);
         return arm;
       });
+      // The alarm, both arms: the unwired divergence line fired once per arm.
+      const unwiredLines = td2Stderrs.filter(
+        (stderr) => stderr.split("\n").filter((l) => {
+          try {
+            const parsed = JSON.parse(l) as { code?: string; outcome?: string };
+            return parsed.code === "spend-divergence" && parsed.outcome === "unwired";
+          } catch {
+            return false;
+          }
+        }).length > 0,
+      );
       evidence.push({
         phase: "ledger",
         boxHours,
         tokenRowsPerArm,
-        crossCheck: "per arm: SUM(cost_micro_usd WHERE unpriced = 0) vs the record's captureSpend figure, tolerance from teardown's SPEND_DIVERGENCE_TOLERANCE_MICRO_USD",
+        unwiredArms: unwiredLines.length,
       });
+      expect(unwiredLines.length).toBe(2);
       expect(existsSync(join(recordsDir, `${armRunIds[0]}.bundle`))).toBeTrue();
       expect(existsSync(join(recordsDir, `${armRunIds[1]}.bundle`))).toBeTrue();
     } catch (e) {
