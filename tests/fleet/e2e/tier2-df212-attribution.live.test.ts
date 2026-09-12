@@ -47,6 +47,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+// The systemd instance name, from the ONE place that builds it — the forensics
+// arm must journal the unit `fleet run` actually started.
+import { runUnitName } from "../../../src/fleet/run.ts";
+// The repo's own redactor, for the engine-log and journal tails the red path
+// quotes: box-authored text on the capped run key heading for an evidence
+// file. Producer-side, exactly as `src/fleet/run.ts` treats stderr.
+import { redactSecrets } from "../../../src/providers/step-log.ts";
 // The divergence tolerance the close step itself reports against — the priced
 // token-SUM cross-check below compares at the SAME threshold, one source of
 // truth.
@@ -343,13 +350,61 @@ test.todoIf(liveTodoOff())(
       // retry around (see the header's FIRST-LIVE STATUS).
       const settled = await pollTerminalState(runId, recordsDir, evidence);
       evidence.push({ phase: "settled", state: settled });
+      // The in-box layout anchor, read before anything else needs it (the
+      // engine log path and the red-path forensics both join onto HOME).
+      // live-mirror: $HOME/<runId>.engine.log = inBoxEngineLogPath (scripts/pipeline-run.ts derives it from the unit's %i)
+      const home = await boxHome(ctx.driver, vmName);
+      const engineLogBoxPath = `${home}/${runId}.engine.log`;
+      // FORENSICS BEFORE CLEANUP: a red terminal state used to burn with the
+      // box (the first red round's journal went to the destroyer). A failed
+      // engine is a FINDING — its journal, engine log and the record's spend
+      // are the finding's body, so they come off the box while it still
+      // exists. // live-mirror: runUnitName = the unit fleet run started (src/fleet/run.ts)
+      if (settled !== "ok") {
+        const unit = runUnitName(runId);
+        const journal = await ctx.driver.exec(vmName, [
+          "sh", "-c",
+          `journalctl -u ${shellQuote(unit)} --no-pager -n 120 2>&1 | tail -80; ` +
+            `printf '\\n---ENGINE-LOG---\\n'; tail -c 3000 ${shellQuote(engineLogBoxPath)} 2>&1; ` +
+            `printf '\\n---ARTIFACTS---\\n'; ls -la ${shellQuote(home)} 2>&1 | tail -12`,
+        ]);
+        evidence.push({ phase: "forensics-not-ok", exitCode: journal.exitCode, output: redactSecrets(journal.stdout.slice(-4000)) });
+        const rec = new RunRecordStore({ dir: recordsDir }).get(runId);
+        evidence.push({ phase: "red-path-record", spendMicroUsd: rec.spendMicroUsd, closedAt: rec.closedAt ?? null });
+        // HARVEST-BEARING teardown on the red path: the artifacts and the
+        // ledger rows of a FAILED run are evidence too. The finally's own
+        // --no-harvest teardown then rides first-close-wins as a no-op.
+        const redTd = await runSandboxTeardown(runId, recordsDir, TEARDOWN_TIMEOUT_MS);
+        evidence.push({
+          phase: "red-path-teardown",
+          exitCode: redTd.exitCode,
+          stdoutTail: redTd.stdout.trim().slice(-400),
+          stderrTail: redTd.stderr.trim().slice(-500),
+        });
+        const harvestedLogPath = join(recordsDir, `${runId}-artifacts`, `${runId}.engine.log`);
+        if (existsSync(harvestedLogPath)) {
+          const redParsed = parseAttributionLines(readFileSync(harvestedLogPath, "utf8"));
+          evidence.push({
+            phase: "red-path-harvested-log",
+            count: redParsed.lines.length,
+            refused: redParsed.refused,
+            roles: redParsed.lines.map((l) => l.role),
+            agents: [...new Set(redParsed.lines.map((l) => l.agentId))],
+          });
+        }
+        evidence.push({
+          phase: "red-path-ledger",
+          rows: ledgerRows(
+            recordsDir,
+            "SELECT kind, role, agent_id, cost_micro_usd, unpriced FROM cost_events WHERE run_id = ? ORDER BY kind, agent_id",
+            runId,
+          ),
+        });
+      }
       // live-mirror: "ok" = InBoxState terminal vocabulary (src/fleet/status.ts)
       expect(settled).toBe("ok");
 
       // ── 4. the engine log, read ON THE BOX before anything moves it ──────
-      // live-mirror: $HOME/<runId>.engine.log = inBoxEngineLogPath (scripts/pipeline-run.ts derives it from the unit's %i)
-      const home = await boxHome(ctx.driver, vmName);
-      const engineLogBoxPath = `${home}/${runId}.engine.log`;
       const logRead = await ctx.driver.exec(vmName, ["sh", "-c", `cat ${shellQuote(engineLogBoxPath)}`]);
       evidence.push({ phase: "engine-log-read", exitCode: logRead.exitCode, bytes: logRead.stdout.length });
       expect(logRead.exitCode).toBe(0);
