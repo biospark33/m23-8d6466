@@ -474,7 +474,9 @@ export interface DispatchDeps {
   /**
    * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Validated at dispatch
    * before reaching the budget gate: if provided, must be a positive integer no
-   * greater than `Number.MAX_SAFE_INTEGER`. Flows to the budget gate's
+   * greater than `defaultKeyCapMicroUsd`, inclusively (INV-CAP-1, DF2.14 — the
+   * provider backstop `mintRunKey` enforces; a larger value refuses exit-2
+   * `invalid-cap` pre-admission). Flows to the budget gate's
    * `keyCapMicroUsd` — the ceiling it clamps into `admittedCeilingMicroUsd`,
    * which becomes the minted key's provider-side hard USD limit at mintRunKey.
    * Absent/undefined ⇒ the single-run default (`defaultKeyCapMicroUsd`) —

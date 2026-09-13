@@ -562,6 +562,12 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         capMicroUsd: defaultKeyCapMicroUsd,
       }));
       expect(res.arms).toHaveLength(2);
+      // Both arms actually DISPATCHED clean — the boundary cap is not merely
+      // accepted by validation, the arms reached `ready`.
+      for (const arm of res.arms) {
+        expect(arm.outcome).toBe("ready");
+        expect(arm.runId).not.toBeNull();
+      }
     });
   });
 

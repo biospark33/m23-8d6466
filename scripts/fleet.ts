@@ -2308,7 +2308,7 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
             1,
             defaultKeyCapMicroUsd,
             "a micro-dollar amount",
-            `--cap-micro-usd takes a positive integer of micro-dollars (1-${defaultKeyCapMicroUsd}, where $1 is 1000000) — a cap above the backstop defaultKeyCapMicroUsd is refused at the mint by INV-CAP-1 after billable boxes exist; lower it, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it`,
+            `--cap-micro-usd takes a positive integer of micro-dollars (1-${defaultKeyCapMicroUsd}, where $1 is 1000000) — a cap above the backstop defaultKeyCapMicroUsd is rejected HERE, at argument parsing, before fanout() runs anything (INV-CAP-1's own mint-time guard is the caller-agnostic backstop, not this refusal); lower it, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it`,
           );
 
     // INV-2 / validation-before-construction: fanout()'s cheap structural
