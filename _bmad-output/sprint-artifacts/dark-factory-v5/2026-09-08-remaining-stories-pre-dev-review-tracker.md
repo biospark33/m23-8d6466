@@ -282,6 +282,100 @@ in merged code. **DF2.13 being least-reviewed did not make it weakest.** Blocker
 **PR #238 must merge first** — `scripts/lib/run-lock.ts` still carries raw NULs, so every
 grep-authoritative DoD item over that file is unprovable, silently.
 
+## Wave 7 — seam-ownership rework (2026-09-13)
+
+Executed per the charter (`2026-09-10-wave7-HANDOFF.md` §4(ii)): NOT a fourth prose-patch round.
+One **seam-ownership table per rework unit**, every deliverable/file/call-site/flag/AC/test listed
+once with exactly one owner, then each spec reconciled to its table. Tables:
+`seam-ownership/unit-{A,B,C,D,E}-*.md` — every Wave-6 finding (90) has a written disposition there
+(fixed / deleted / ruled / verified-closed / out-of-scope-with-reason). The consistency gate was
+run after each unit and stayed green; it also caught and fixed one pre-existing drift (DF2.13's
+story header said `in-review` against a merged done-flip).
+
+**Operator rulings landed this wave (both recorded in the specs they govern):**
+
+1. **DF3.6a metering basis (resolves W6-C-B1): honest metered operand.** The engine accumulates
+   `meter(reply.usage)` actuals; the pre-call refusal compares the *projected* next-call worst case
+   (`spent + projected > effectiveCeiling`) — making the story's "refusal is driven by the
+   projection" sentence true unambiguously; the post-call tripwire bounds the one-call overshoot a
+   soft projection allows; AC1's journal assertion weakened to `ceiling + one call's metered cost`.
+   The accumulator is the same quantity DF2.12's landed token rows record — one spend truth,
+   auditable at DF5.3 hop 3. **No binding call count is derived** — three derivations died deriving
+   one; what is pre-checked is reachability (AC6), what is enforced is the refusal.
+2. **DF3.6a ceiling basis (resolves W6-C-B3): user policy, not a derivation.** A spend amount the
+   user sets — a global default applying to all repos/projects/tasks, plus a per-task custom
+   override. Ladder at fill: `perIssueOverrides` entry (the factory substrate's per-task seam, the
+   one DF2.13's `--cap` uses; a factory UI is a future product story — no new surface invented
+   here) → user-set config default → shipped **fallback** 8,000 µ$ (documented as a fallback for
+   cheap rosters, never as a derivation). `below_one_call` stays as the typed refusal when the
+   configured amount cannot buy one projected call — a named policy outcome (subsumes W6-C-L2).
+
+**Structural decisions taken under the charter's fix directions (all written into the unit tables):**
+W6-A-H1 resolved by **deletion** (option b — `markerWitnessed` had no producer of `true`; a
+collected record is always `completion-unwitnessed`); W6-A-H2 resolved to the **one true reading**
+(DF2.11 landed → hard predecessor everywhere; the temporary `--help` reap warning deleted; the
+`run-lock.ts` ponytail-note retirement owned by DF3.8); W6-B-H1..H4 closed as **one gap** (the
+frozen fixture reaching outside itself: PR body frozen, four path seams on `qds-audit.ts`, the
+audit store's no-create opener, `harvestRun` joining the required-seam list); W6-D-B1 resolved by
+**naming the invocation** (invocation 2 continues into DF6.1b's poll leg before exiting — the
+window anchors inside it); W6-D-H1's parent-run lookup re-keyed on the **head branch**
+(`qds/<parentRunId>`, the zero-cost join); W6-D-H2's ceiling check re-homed to
+`feedback-run.ts` (`fix-ceiling-insufficient` — the fan-out primitive's code cannot fire on a
+single dispatch); W6-D-H3's fence restated at **symbol level**; W6-C-B4's trigger made producible
+(**two-leg live proof**: synthetic allocator as the leg's `QDS_PI_BIN` at ~zero spend proves the
+kernel kill; the real solicitation proves attachment).
+
+**Parent-owned edits this wave:** yaml rows DF3.7/DF3.8 prose rewritten against merged text
+(W6-A-M7); `DF2.11` added to DF5.3's deps (W6-B-M8); `DF2.13` added to DF3.6a's deps (W6-C-M4);
+DF2.13 header flipped `in-review` → `done` (factual, git-verified). Verified closed at source:
+DF2.13's epics-index entry exists (W6-E-M3 — grep → 1, control → 16); df3-6a's "at the dispatcher"
+framings accurate post-DF2.12 (W6-E-M7). Out of scope with reason: all Wave-6-E findings on
+DF2.11/DF2.12/DF2.13 (done stories; charter §8).
+
+**Line-citation discipline:** baseline 407 file-anchored line citations across the nine specs; no
+new ones introduced (gated). Wave 8 follows: five fresh verifiers, no recipes, category
+classification, convergence target C4-dominant.
+
+## Wave 8 result — five fresh verifiers over the reworked specs (2026-09-13)
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave8-{A,B,C,D,E}-*.md`. Fresh eyes,
+no recipes, no prior-wave evidence read; every claim source-verified with positive controls.
+
+| Unit | Wave 6 | Wave 8 | BLOCKERs | HIGHs | C2 | C3 | Verdicts |
+|---|---|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 15 | 12 | 0 | 1 | **0** | 2 | **DF3.7 CONVERGED** (high) · DF3.8 NOT (high) |
+| B (DF5.3+DF5.4) | 16 | 8 | 0 | 0 | **0** | 3 | both NOT (medium-high) |
+| C (DF3.6a+DF3.6b) | 17 | 12 | 0 | 3 | 2 | 4 | both NOT (high) |
+| D (DF6.1a+DF6.1b) | 20 | 8 | 0 | 1 | 3 | 3 | both NOT (high) |
+| E (DF5.5) | 22* | 8 | 0 | 0 | 3 | 1 | NOT (high) |
+| **TOTAL** | **90** | **48** | **0** | **5** | **5** | **13** | 1 of 9 stories CONVERGED |
+
+*E's Wave-6 count includes 13 DF2.11/12/13 findings retired as done-story out-of-scope in Wave 7.
+
+**Campaign verdict: NOT CONVERGED — but the class moved.** BLOCKERs 5→0, HIGHs 20→5, C2 18→5,
+C3 31→13, total 90→48. Unit A's zero-C2 result is the Wave-6 lesson landing: "every mechanism
+claim held — the residue is address accuracy." The rework killed the seam class it targeted; the
+48-finding residue is enumerated in the five wave8 reports (point at the report, never relay), and
+its load-bearing core is small:
+
+- **W8-C (3 HIGH, C3):** DF3.6a's three stamped operands have **no owned fill-side provisioner**
+  (dispatch stamps `limitMicroUsd` only — every real resident run would refuse while
+  hand-authored-fixture suites stay green); DF3.6b's mandatory live legs are sited on
+  `tier4-resident`'s **darwin host-side file**, where the story itself concedes cgroups cannot
+  exist; DF3.6b AC4's stop/record outcome is unreachable under the pair's own closed edit list.
+- **W8-D (1 HIGH, C3):** the attempt-2 driver's attempt-state lookup reads
+  `fixOutcome.runIds`, which by the write-once/terminal-only contract does not exist after a
+  charged attempt-1 failure — **no one owns a dispatch-time parent-record write**.
+- **W8-A (1 HIGH, C3):** DF3.8 AC4(d)'s cross-pass retirement contradicts the sweep's own
+  no-persistence/single-pass invariant. Plus the exit-5-vs-AC6 wording split (MEDIUM).
+- **W8-B (C3 MEDIUM):** the F001/#157 "declared, not wired" premise is **inverted — DF2.12 landed
+  and wired the bridge**; both DF5.3 and DF5.4 (and DF6.1a's observability bullet) need the
+  honest post-DF2.12 state. C3's "merged envelope" names no harvested artifact.
+- **W8-E:** one C3 + one C2 MEDIUM, both narrow (see report).
+
+**Next: fix wave on the 48 (reports carry the fix directions), then Wave 9 fresh verify.**
+Convergence target unchanged: C4-dominant residue.
+
 ## Wave 5 result — the protocol predicted 30–50%; we got 93%
 
 | Verifier | B | H | M | L | Total |
