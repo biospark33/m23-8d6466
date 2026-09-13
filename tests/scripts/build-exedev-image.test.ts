@@ -1220,11 +1220,12 @@ describe("buildIdFileInputs", () => {
     // the only run whose green actually binds the commit.
 
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      // 72d8d83b: moved from e52c8135 by the in-box roster anchoring —
-      // `src/phase-engine/phases/dispatch-task.ts` (repoRoot: runRoot at the
-      // loadRoster call — the DF2.12 G10 live finding) and
-      // `scripts/pipeline-run.ts` (closedRosterIds anchored identically).
-      "72d8d83b1cb2ed7893d0348798b8eb41b1ec819aa7c8771f57578d1d79c23386",
+      // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
+      // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
+      // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
+      // and `src/providers/credentials.ts` is COPY-adjacent context the walk
+      // already carried.
+      "0c5509f3b05a9edc58acef2764c8437abc3aacbdc03060059912b7ccb4443aea",
     );
   });
 });
