@@ -819,6 +819,44 @@ function errorRemediation(e: unknown, fallback: string): string {
 }
 
 /**
+ * The structured half of a caught throwable — the `{code, remediation}` shape
+ * the ProviderError family carries (`src/providers/errors.ts`), detected by
+ * CAPABILITY, not by `instanceof`: the catches in this module sit ABOVE the
+ * providers layer, must not import its class tree, and a future error class
+ * carrying the same shape should get the same treatment without a new
+ * `instanceof` arm. Both fields must be non-empty strings — a bare `code`
+ * alone (transport errors grow one) is not a structured refusal — and the
+ * message must be a string too, since the caller renders it.
+ *
+ * Returns undefined for everything else; the caller keeps its own generic
+ * text. Both halves are third-party free text, so both get the INV-4
+ * redaction `errorMessage`/`errorRemediation` apply (`refuse` redacts again;
+ * the pass here keeps the composition sites honest about what they hold).
+ *
+ * DF2.14 (D2): this is the one shared vocabulary for catch→`refuse`
+ * translation sites that must not strand a structured error's diagnosis. The
+ * survey found the step-7 mint catch was the only FULL offender (it dropped
+ * message AND remediation for non-FleetErrors); the outer post-box catch
+ * already preserves remediation through `errorRemediation` and keeps working.
+ */
+function structuredErrorParts(e: unknown): { message: string; remediation: string } | undefined {
+  const shape = e as { message?: unknown; remediation?: unknown; code?: unknown } | null | undefined;
+  if (
+    typeof shape?.remediation !== "string" ||
+    shape.remediation.length === 0 ||
+    typeof shape.code !== "string" ||
+    shape.code.length === 0 ||
+    typeof shape.message !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    message: redactSecrets(shape.message),
+    remediation: redactSecrets(shape.remediation),
+  };
+}
+
+/**
  * Dispatch: validate → resolve → admit → record → box → key → fill → gate →
  * expose → ack.
  *
@@ -1688,14 +1726,28 @@ async function mintAndDeliverKey(
     // otherwise escape with no dispatch-log entry, no structured line and no
     // payload: exactly the bare-exit-1 treatment this catch exists to deny.
     if (alreadyRefused(e)) throw e;
+    // D2 (DF2.14): the discrimination is CAPABILITY (`structuredErrorParts`),
+    // not `instanceof FleetError`. A `CredentialLifecycleError` — the
+    // ProviderError family's `{code, remediation}` shape, NOT a FleetError —
+    // used to be flattened here to the generic text, and the diagnosis and
+    // remediation written for the refusal shipped nowhere but
+    // `payload.providerCode`: a `cap-invalid` mint refusal arrived as "key
+    // mint or delivery failed" with a remediation that never mentioned the
+    // cap. Now the provider's message survives (suffixed with the run
+    // context, the same pattern the FleetError branch used) and its
+    // remediation is COMPOSED with the INV-5 line — the record is open and
+    // the box is alive for ANY mint failure, so neither half is dropped.
+    // Unstructured throwables keep the fixed generic text: the provider's
+    // free text still never reaches a sink.
+    const parts = structuredErrorParts(e);
     throw ctx.refuse(
       1,
       e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
-      e instanceof FleetError
-        ? `${e.message} — during key mint or delivery for run ${runId}`
+      parts !== undefined
+        ? `${parts.message} — during key mint or delivery for run ${runId}`
         : `key mint or delivery failed for run ${runId}`,
-      e instanceof FleetError && typeof e.remediation === "string"
-        ? e.remediation
+      parts !== undefined
+        ? `${parts.remediation} The run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down`
         : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
       {
         ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),

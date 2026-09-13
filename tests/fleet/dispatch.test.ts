@@ -54,7 +54,7 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import type { ProviderDriver } from "../../src/providers/driver.ts";
 import type { ProviderVm } from "../../src/providers/driver.ts";
 import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
-import { defaultKeyCapMicroUsd, SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
+import { CredentialLifecycleError, defaultKeyCapMicroUsd, SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
 import { type AdmissionInput, CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -5412,6 +5412,50 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       const admit = ledger.admitCalls[0] as (typeof ledger.admitCalls)[number];
       expect(admit.capMicroUsd).toBe(defaultKeyCapMicroUsd);
       expect(admit.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+    });
+
+    test("D2: a STRUCTURED mint error (ProviderError family) keeps its message AND its composed remediation at the step-7 catch", async () => {
+      // The step-7 catch used to discriminate on `instanceof FleetError`, so a
+      // `CredentialLifecycleError` — the ProviderError family's `{code,
+      // remediation}` shape, NOT a FleetError — was flattened to the generic
+      // text plus the INV-5 line, and the diagnosis written for the refusal
+      // shipped nowhere but `payload.providerCode`. Capability-based now
+      // (DF2.14): the message survives (suffixed with the run context, the
+      // same pattern the FleetError branch uses) and the remediation is
+      // COMPOSED — structured first, INV-5 second, neither dropped.
+      const structured = new CredentialLifecycleError(
+        "cap-invalid",
+        "capMicroUsd 90000000 exceeds the backstop defaultKeyCapMicroUsd (50000000) — refusing to mint a key above the provider ceiling",
+        "lower capMicroUsd to the working ceiling, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
+      );
+      keyApi.createKey = async () => {
+        throw structured;
+      };
+      const ledger = goodLedger();
+
+      try {
+        await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(1);
+        // The mapping is UNCHANGED: a non-FleetError is still
+        // key-delivery-failed, and the exit code stays 1.
+        expect(err.code).toBe("key-delivery-failed");
+        // The provider's message survives, suffixed with the run context.
+        expect(err.message).toContain("exceeds the backstop defaultKeyCapMicroUsd");
+        expect(err.message).toContain("during key mint or delivery for run");
+        // COMPOSED remediation: the structured half first, INV-5 second.
+        expect(err.remediation).toContain("lower capMicroUsd to the working ceiling");
+        expect(err.remediation).toContain("raise defaultKeyCapMicroUsd in src/providers/credentials.ts");
+        expect(err.remediation).toContain("run record is OPEN and the box is ALIVE");
+        // The provider code still rides the payload as diagnosis.
+        expect(err.payload?.providerCode).toBe("cap-invalid");
+        // INV-5 posture unchanged: the box exists and the record is open.
+        const runId = err.payload?.runId as string;
+        expect(store.get(runId).closedAt).toBeUndefined();
+      }
     });
 
     test("AC5: a ledgerFactory that THROWS refuses admission-failed and never mints", async () => {
