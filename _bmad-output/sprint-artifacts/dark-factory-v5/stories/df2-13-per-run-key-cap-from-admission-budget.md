@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 
-**Status:** in-review
+**Status:** done
 
 **Sprint:** v5-S3
 

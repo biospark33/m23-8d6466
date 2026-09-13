@@ -94,8 +94,10 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 > **The real dependency graph, stated because the tracker had it wrong.** As of 2026-09-08 DF6.1 was
 > recorded as having its dependencies "all shipped (DF5.2)". It does not. **DF3.7 is an undeclared
 > hard edge** on DF6.1a — post-DF1.10 `fleet run` returns without holding the run
-> (`src/fleet/run.ts:6`), `src/fleet/run-completion.ts` and `--await-completion` do not exist, and
-> nothing host-side learns an in-box run finished. And **DF5.3 is declared but unbuilt**: `src/audit/`
+> (`src/fleet/run.ts:6`), and nothing host-side **drives the chain** off the completion observation:
+> `fleet status` reads the marker but composes nothing, and `src/fleet/run-completion.ts` does not
+> exist until DF3.7 delivers it (`observeAndDriveChain` has zero occurrences in `src/` and
+> `scripts/` until then). And **DF5.3 is declared but unbuilt**: `src/audit/`
 > does not exist, and `recordAuditLink`/`walkAuditChain` appear in `src/` exactly once, in a comment
 > at `src/providers/teardown.ts:12`. AC3 and the `src/audit/chain.ts` edit are **unbuildable until
 > DF5.3 merges**, so this story is sequenced strictly after it. DF5.3's own Technical Notes already
@@ -146,7 +148,9 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    advances to summarize and reaches a terminal success state (`:31`).
 
    The polling ceiling is **15 minutes measured from `pushVerifiedSha`'s return** — the CI-poll
-   window, not a wall clock over the whole attempt (see Technical Notes). Reaching the ceiling without
+   window, not a wall clock over the whole attempt (see Technical Notes). That return happens
+   **inside DF6.1a's invocation 2**, which continues into this poll leg before exiting (DF6.1a AC3):
+   the poll is this story's logic, driven from the invocation that owns the window's anchor. Reaching the ceiling without
    a settled required-check set is a `ci-verdict-unavailable` failure that escalates per AC2 and
    INV-6, never a green. Green means the suite is green: per design §8.0, edits landing with the suite
    still red is a FAIL. **The loop never reruns CI.** Design §8.0's "rerun a flaky suite once, then
@@ -263,7 +267,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 | --- | --- | --- |
 | Required-check verdict source | GitHub API via **two** host-authenticated `gh` calls: `gh pr view <n> --json headRefOid` (the head sha, taken before and after) and `gh pr checks <n> --required --json name,state,bucket` (the required-check set and its settled bucket) — **from the host, requiring no branch-protection read and therefore no repo-admin token scope** | polled at attempt start and every 30 s; no inbound webhook, no receiver, no public endpoint (AC1) |
 | GitHub required-check configuration | the PR's own required-check set as `gh pr checks <n> --required` reports it — **not** the classic branch-protection endpoint (`GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`), which requires **admin** on the repository | read at attempt start; a PR whose required set is empty ("no required checks reported on the '<branch>' branch") is refused, never counted green (AC1) |
-| Host GitHub token | host operator environment — `readHostToken` (`src/pr/github.ts:176`), never `process.env.GH_TOKEN`, never argv, never a box | the same scope opening a PR already needs; no escalation to repo-admin |
+| Host GitHub token | host operator environment — `readHostToken` (`src/pr/github.ts`), handed to `gh` **as the `gh` child's environment only** (`GH_TOKEN` set on the spawned child, never on this process's environment, never argv) — the same containment `gitEnv` uses for git credentials in `src/pr/push.ts` | the same scope opening a PR already needs; no escalation to repo-admin |
+| `gh` CLI | installed on the host, version-floored to one exposing `gh pr checks --required --json` with the `bucket` field and `gh pr view --json headRefOid` (both verified against gh 2.93.0; the floor exists so a host without them fails loudly, not green) | the two-call composition shells out to `gh`; this story introduces it as this repo's first `gh` dependency deliberately — its `--required`/`bucket` fields are the measured surface, and a `GitHubApi` port would need a GraphQL `isRequired(pullRequestId:)` selection, a bigger seam change than one child-env token |
 | Audit chain store | DF5.3's `src/audit/chain.ts` | **unbuilt as of 2026-09-08** — this story is sequenced after DF5.3 merges |
 | DF2.1 run records | host `<runsDir>` | attempt count and last error read from the records keyed by PR number — no second state store |
 
@@ -309,7 +314,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
     expires undecided ends the attempt as `approval-timed-out`, escalating per AC2 rather than
     counting as a failed fix.
   - **CI poll** is the 15 minutes: the window opens when `pushVerifiedSha` returns — i.e. at DF6.1a's
-    last write — and closes when every required check has settled or the window expires
+    last write, inside invocation 2, which continues into this poll leg — and closes when every
+    required check has settled or the window expires
     (`ci-verdict-unavailable`, AC1).
 
   Max-2-attempts (INV-5) is what bounds the loop overall; the 15 minutes bounds only the wait for a
@@ -358,18 +364,24 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 - **INV-7 applies to this half's one outward-facing act too.** Posting the escalation comment is
   irreversible. `fixOutcome`'s encoded payload is built and validated **before** the comment is
   posted, so a record write cannot refuse after a human has already been paged.
-- **Attempt bookkeeping — how the attempt state for a PR is *found*.** There is no PR-number index.
-  `extensions.pr.prNumber` (`src/providers/run-record.ts:214`) is written only by DF5.2 on the run
-  that **opened** the PR, and a fix run's PR number lives inside its JSON-encoded `fixContext`
-  **string** — so "scan every record for PR n" would mean a full `list()` sweep plus a JSON parse per
-  record, exactly the fleet-wide read cost DF6.1a's Technical Notes cite as the reason not to store
-  bulk in the record. The lookup is therefore the join that already exists: **resolve the parent run
-  by `extensions.pr.prNumber` (DF5.3's hop-1 join), then read
-  `extensions.fixLoop.fixOutcome.runIds` on that parent record** for the attempt set. One indexed
-  lookup plus one record read, and no second state store.
+- **Attempt bookkeeping — how the attempt state for a PR is *found*.** There is no PR-number index,
+  and the record store exposes no query-by-extension and no secondary index — its public surface is
+  `path`/`lockPath`/`create`/`get`/`set`/`close`/`list`/`listWithAnomalies`, records keyed by runId.
+  `extensions.pr.prNumber` is a field on a record you already hold, not a lookup key; the earlier
+  draft's "resolve the parent run by `extensions.pr.prNumber` (DF5.3's hop-1 join)" named a lookup in
+  a direction with no index — DF5.3's hop 1 runs PR → runId **from the PR body/branch over the
+  network**, not runId ← prNumber on the store. The zero-cost resolution already exists and DF6.1a
+  validates it: DF5.2's `defaultTargetRef(runId)` makes the PR's head branch **`qds/<parentRunId>`**,
+  and DF6.1a's Trigger Surface already refuses a PR whose head branch is not `qds/<run-id>` with a
+  matching run record. So **`parentRunId = headRefName.slice("qds/".length)`, validated by
+  `store.get(parentRunId)`** — one `gh pr view --json headRefName` (a call this story already makes
+  per poll) plus one record read; no sweep, no fleet-wide read cost, and the lock key exists before
+  any record is scanned. `extensions.fixLoop.fixOutcome.runIds` on that parent record then carries
+  the attempt set. No second state store.
 - **Concurrency: the lock is keyed on the PARENT run, not the fix run.** Two concurrent `--pr <n>`
   invocations are excluded by `acquireRunLock(runsDir, parentRunId, "fix-run --pr")`, where
-  `parentRunId` is the run resolved by the join above — the one identity every attempt for this PR
+  `parentRunId` is resolved by the head-branch join above — **before any lock is taken**, since the
+  lock key is the parent runId — the one identity every attempt for this PR
   shares.
 
   **Why not the fix run's own lock.** `acquireRunLock(runsDir, runId, who)` locks
@@ -383,12 +395,12 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 
   **So the loop takes two locks with two different scopes** — a **PR-scoped** one (parent runId) for
   the attempt counter, and a **run-scoped** one (fix runId) for the chain — and holds neither across a
-  human decision. `acquireRunLock` is not re-entrant (`df3-7…md:128` cites
-  `scripts/lib/run-lock.ts`, the guard at the head of `acquireRunLock`), which is another reason the two must be different keys rather than
+  human decision. `acquireRunLock` is not re-entrant (`RunLockReentrantError`, thrown by the guard at
+  the head of `acquireRunLock` in `scripts/lib/run-lock.ts`), which is another reason the two must be different keys rather than
   one lock taken twice.
 
   The loser exits **5** with DF3.1's existing mapping — "the run lock refused, so the verb never ran"
-  (`src/fleet/verbs.ts:117-124`) — a **counted refusal, not a failure**, and the operator re-invokes.
+  (`src/fleet/verbs.ts`'s exit table) — a **counted refusal, not a failure**, and the operator re-invokes.
   A **stale** lock is a distinct, remediated outcome carrying the `rm` line, never folded into the
   benign refusal count.
 
@@ -437,7 +449,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   check (charged **and** uncharged ceilings), the retry exception to DF6.1a's comment-ID dedup, **the
   attempt-start empty-required-set probe (AC1 — `gh pr checks <n> --required` before any dispatch,
   refusing with nothing provisioned)**, the `fixContext.attempt` value handed to DF6.1a's write path,
-  and the escalation call. DF6.1a's two-invocation drive path is otherwise unchanged.
+  **the post-push CI poll call — invoked in the same invocation, immediately after DF6.1a's
+  `fixContext` write, because the 15-minute window is measured from `pushVerifiedSha`'s return and a
+  third invocation would find it expired before its first poll (Wave 6 W6-D-B1: this call site was
+  owned by neither half)** — and the escalation call. Beyond that call site, DF6.1a's two-invocation
+  drive path is unchanged.
 - `src/providers/run-record.ts` — **no change expected**; listed because the already-registered
   `fixLoop` registry entry is *read*, and a change to it would be a DF2.1 core edit requiring its own
   justification.

@@ -86,8 +86,10 @@ grep -rl 'v5 amendment (DF5.5)' \
   _bmad-output/sprint-artifacts/phase-1/stories/ | sort
 ```
 
-The scoping is load-bearing: the literal `v5 amendment (DF5.5)` also occurs in this story file, in
-the epics doc and in the regression test, so an unscoped `grep -rl` returns **strictly more than
+The scoping is load-bearing: the literal `v5 amendment (DF5.5)` also occurs in this story file
+(verified 2026-09-13: 12 occurrences here; **zero** in the epics doc — the earlier enumeration that
+included it was wrong) and, once this story's dev creates it, in the regression test — so an
+unscoped `grep -rl` returns **strictly more than
 11** paths and can never equal 11. Every marker this chore writes lands inside those two directories: no amendment edits a
 file outside them.
 
@@ -180,7 +182,7 @@ dangling pointer (INV-4).
 | Developer applies the chore once, by hand, after the slate freezes | in-scope | `tests/scripts/keep-repoints.test.ts` (runs all three verification greps) | — |
 | CI regression check on `_bmad-output/sprint-artifacts/**` | in-scope | same test, run in the standard suite | — |
 | `sprint-status.yaml` phase-1 KEEP rows (the `deps:` arrays + their `deps repoint via DF5.5` comments) | **in-scope as a standing check; the edits are ALREADY-APPLIED (2026-09-08) and the file is not opened** | `tests/scripts/keep-repoints.test.ts` (yaml retired-ID scan, AC1 bullet 3) | — |
-| `epics-and-stories-dark-factory-v5.md:671` — a second, divergent statement of this story's make-or-break AC ("amendments **A–E**", no F, no G) | out-of-scope | — | Phase 3 wrap-up, together with DF2.11 / DF2.12 / DF3.6a / DF6.1a / DF6.1b, all of which are also absent from that index |
+| Epics index (`_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md`, cited by story key) | out-of-scope — **verified current 2026-09-13**: every slate story carries an entry, DF2.13 included (`grep -c 'DF2\.13'` → 1; positive control `DF2.8` → 16), and the index's DF5.5 make-or-break statement carries amendments A–F and the third grep — the divergence Wave 6 recorded has closed | — | none — the Phase-3 wrap-up item is discharged by the verification above |
 | `sprint-status.yaml` DF epic blocks + per-story disposition marks | out-of-scope | — | Phase 3 wrap-up (register §1), not a story |
 | Any automated rewrite of story markdown | out-of-scope | — | none — SPL keeps story edits human-authored |
 
@@ -277,10 +279,11 @@ No deployed component: this story ships markdown only.
   `/api/a2a` surface, which the header blockquote above already covers — no second annotation.)
 
   **P1.18 disposition (2026-09-08 correction — one edge handed off).** P1.18 is KEEP but
-  **UNSCHEDULED**: outside the v5 window and not counted in the DF slate totals
-  (`sprint-status.yaml:50-51,105`). Its mechanism — a SwarmClaw webhook receiver at
+  **UNSCHEDULED**: outside the v5 window and not counted in the DF slate totals (the P1.18 row in
+  `sprint-status.yaml`, cited by story key, records the UNSCHEDULED disposition and the
+  two-half denial). Its mechanism — a SwarmClaw webhook receiver at
   `/api/webhooks/[id]` with HMAC signature validation — is out of scope for v5.0 per DD-1 and
-  DF6.1b's AC1 webhook exclusion (`df6-1b-fix-loop-verdict-attempt-budget.md:158-159`), so
+  DF6.1b's AC1 webhook exclusion (that story's AC1, closing note: "Inbound webhooks … are **out of scope for v5.0**"), so
   repointing `:17`/`:23` bare would produce an apparently-current v5 contract describing
   ingress the slate has refused to build. Insert this blockquote below the H1 first, then repoint
   `:25` and annotate `:17`/`:23` beneath it:
@@ -299,9 +302,9 @@ No deployed component: this story ships markdown only.
   receiver is out of scope for v5.0"* (`df6-1a-pr-feedback-bounded-fix-attempt.md:117`, verified
   2026-09-08); DF6.1b — same anchor → *"**the *verdict* limb** … the verdict is **polled**, and a
   poll needs no receiver"* (`df6-1b-fix-loop-verdict-attempt-budget.md:114`), plus the webhook
-  exclusion (search `out of scope for v5.0`, `df6-1b:168`) and the Trigger Surface row (search
-  `Inbound webhooks`, `df6-1b:223`).
-  `sprint-status.yaml:126` (the P1.18 row) agrees: *"DF6.1a/DF6.1b do not depend on it, and each
+  exclusion (search `out of scope for v5.0` in `df6-1b-fix-loop-verdict-attempt-budget.md`) and the Trigger Surface row (search
+  `Inbound webhooks`, same file).
+  `sprint-status.yaml`'s P1.18 row (cited by story key) agrees: *"DF6.1a/DF6.1b do not depend on it, and each
   denies it for a DIFFERENT reason … DF6.1a denies the receiver as an INTAKE channel …, DF6.1b
   denies it as a VERDICT channel"*. **Note that row's own 2026-09-08 correction:** its earlier
   "v5.0 polls `gh pr checks`" wording is **retracted as wrong** — DF6.1b specifies a two-call
@@ -341,13 +344,16 @@ No deployed component: this story ships markdown only.
   2026-09-08: records the DF6.1 split, the dangling ID, and the `p1-18:50` assignment to DF6.1a's
   wave), so no register edit is owed. Verified 2026-09-08.
 
-  **`p1-9` edge divergence (recorded; resolve before applying).** `p1-9:25` names `P1.8`;
-  `sprint-status.yaml:99` names `deps: [P1.6]` and carries an unresolved 2026-07-28 note asking
-  whether P1.8 belongs back in deps. The two artifacts disagree about which predecessor P1.9 has,
-  so a mechanical one-sided repoint would harden the disagreement rather than clear it.
-  **Disposition: repoint both sides to the union of their mapped successors.** `p1-9:25` becomes
+  **`p1-9` edge divergence (RESOLVED and applied 2026-09-08; DF5.5's remaining obligation is the
+  `p1-9:25` edit only).** `p1-9:25` names `P1.8`; the yaml's `P1.9` row (cited by story key) named
+  `deps: [P1.6]` and carried an unresolved 2026-07-28 note asking whether P1.8 belongs back in
+  deps. The two artifacts disagreed about which predecessor P1.9 has, so a mechanical one-sided
+  repoint would have hardened the disagreement rather than cleared it.
+  **Disposition — applied:** both sides were repointed to the union of their mapped successors.
+  `p1-9:25` becomes
   `**Dependency edges (predecessors):** DF1.6 (was P1.6, per sprint-status), DF1.8 (was P1.8, per this file). <!-- v5 amendment (DF5.5) -->`
-  and `sprint-status.yaml:99` becomes `deps: [DF1.6, DF1.8]`. Both DF1.6 and DF1.8 are `done`, so
+  and the yaml row **already reads** `deps: [DF1.6, DF1.8]` (amendment G, applied 2026-09-08).
+  Both DF1.6 and DF1.8 are `done`, so
   the union blocks nothing and is strictly safer than picking a side; it is a dependency-edge
   repoint, which the KEEP amendment allowance covers (audit `:24`). Record divergence and
   resolution in the amendment log.
@@ -398,7 +404,8 @@ No deployed component: this story ships markdown only.
   **Operator ruling 2026-09-08: re-home the term, do not invent a control.** The corrected chain is
   `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` — note
   the strict `<` becomes `≤`. `mintRunKey` already takes `deps.capMicroUsd ?? defaultKeyCapMicroUsd`
-  (`src/providers/credentials.ts`); the enforcement point existed and was never wired, and
+  (cited by symbol; the docstring in `src/providers/credentials.ts` records the line numbers that
+  chased this exact expression and lost); the enforcement point existed and was never wired, and
   **DF2.13** ("Per-Run Key Cap Wired from the Admission Budget", ~3 pt, v5-S3) wires it from DF2.8's
   remaining issue budget. **DF5.5 neither repoints nor rewrites the chain** — amendment E's
   disposition is unchanged: E stays retired and `df2-3` stays unopened. Disposition (same shape as amendment B): record the verification and its command in the
@@ -430,17 +437,17 @@ No deployed component: this story ships markdown only.
   applied them the same day. **Re-verified 2026-09-08** against the tree — all fourteen changes are
   in place, at these (corrected) lines:
 
-  | Row (`sprint-status.yaml`) | `deps:` now | Was |
+  | Row (`sprint-status.yaml`, cited by story key — never by line; see the note below) | `deps:` now | Was |
   |---|---|---|
-  | `P1.2` (`:110`) | `[DF3.1]` ✅ | `[P1.1]` |
-  | `P1.7` (`:115`) | `[P0.6, DF1.6]` ✅ | `[P0.6, P1.6]` — P0.6 is DONE-KEEP, untouched |
-  | `P1.9` (`:117`) | `[DF1.6, DF1.8]` ✅ | `[P1.6]` — the union, per the `p1-9` divergence note |
-  | `P1.11` (`:119`) | `[P0.9, DF1.6]` ✅ | `[P0.9, P1.6]` |
-  | `P1.12` (`:120`) | `[P0.9, DF1.6]` ✅ | `[P0.9, P1.6]` |
-  | `P1.14` (`:122`) | `[P1.5, DF2.8]` ✅ | `[P1.5, P1.13]` — P1.5 is KEEP, untouched |
-  | `P1.18` (`:126`) | `[DF5.2]` ✅ | applied by another hand before this chore was specified |
+  | `P1.2` | `[DF3.1]` ✅ | `[P1.1]` |
+  | `P1.7` | `[P0.6, DF1.6]` ✅ | `[P0.6, P1.6]` — P0.6 is DONE-KEEP, untouched |
+  | `P1.9` | `[DF1.6, DF1.8]` ✅ | `[P1.6]` — the union, per the `p1-9` divergence note |
+  | `P1.11` | `[P0.9, DF1.6]` ✅ | `[P0.9, P1.6]` |
+  | `P1.12` | `[P0.9, DF1.6]` ✅ | `[P0.9, P1.6]` |
+  | `P1.14` | `[P1.5, DF2.8]` ✅ | `[P1.5, P1.13]` — P1.5 is KEEP, untouched |
+  | `P1.18` | `[DF5.2]` ✅ | applied by another hand before this chore was specified |
 
-  `P1.3` (`:111`, `[P1.2, P0.9]`) and `P1.5` (`:113`, `[P0.9, P0.10]`) carry the comment but **no
+  `P1.3` (`[P1.2, P0.9]`) and `P1.5` (`[P0.9, P0.10]`) carry the comment but **no
   retired ID** — their arrays were already correct and were never rewritten. All eight commented
   rows now read `# KEEP per F14; deps repointed by DF5.5 2026-09-08`, and P1.9's open 2026-07-28
   question ("re-evaluate whether P1.8 belongs back in deps") is discharged with the prescribed
@@ -458,11 +465,13 @@ No deployed component: this story ships markdown only.
   P1.6, P1.8, P1.13, P1.15, P1.19) has a successor the 2026-08-31 ADR moved: DF3.1, DF1.6, DF1.8,
   DF2.8 and DF5.2 are all unchanged by it, and P1.19's successor moved only by the 2026-09-08
   DF6.1 split (handled above). The ADR arc invalidated **zero** successor-map rows. (2) **Nothing
-  for DF3.6.** Amendment E stays retired and DF3.6's v5-S2 → v5-S3 re-sequence changes no
+  for DF3.6 (split 2026-09-08 into DF3.6a/DF3.6b).** Amendment E stays retired and the DF3.6
+  re-sequence changes no
   KEEP-story text — verified: no KEEP story mentions DF3.6 or the ceiling chain. (3) **Nothing
-  from DF2.11 / DF2.12.** The two stories added 2026-09-08 (teardown run-lock + read-only cost
-  ledger; per-role token cost attribution) introduce **no** KEEP-story edit: neither is the
-  successor of any retired ID, and no KEEP story references either — verified 2026-09-08. All
+  from DF2.11 / DF2.12 / DF2.13.** The stories added 2026-09-08 (teardown run-lock + read-only cost
+  ledger; per-role token cost attribution; per-run key cap) introduce **no** KEEP-story edit: none is the
+  successor of any retired ID, and no KEEP story references any of them — DF2.13 included, verified
+  2026-09-13. All
   three negatives are recorded here so a reader does not have to re-derive them.
 - **Amendment C erratum (recorded, DD-8 class).** Audit §2's P1.9 row and register §4 both describe
   P1.9's policy as "keyed on the exitStatus enum". Verified 2026-09-08: `exitStatus` occurs **zero**
@@ -564,6 +573,14 @@ list: zero hits, never opened.
       recorded in the amendment log, and `sprint-status.yaml` **absent from every hunk of the
       diff**. (The old "amendment G applied" item was unfalsifiable: it was already true before the
       story started.)
+- [ ] **Verify (not impl — the slate count is recomputed, never trusted):** at apply time, recompute
+      the slate from the per-story rows (stories, points, done, not-done — per-epic included) and
+      assert the meta block equals the recompute; record **both** numbers and the command in the
+      amendment log. **No count is hardcoded in this story or its log as an assertion input** — the
+      meta block has been wrong before (it lagged the DF2.13 row by a whole story), and a chore that
+      reads its count from a stale block records a number its own source contradicts. A mismatch
+      stops the chore: fix the meta block first (parent-owned, outside this story's diff), then
+      re-run.
 - [ ] **Hand-off:** `p1-18:50` (`P1.19`) is confirmed **annotated by DF6.1a's fix wave** — this
       story asserts the line is annotated, not that it annotated it. The hand-off and the DD-2
       supersession are recorded in the amendment log; the DD-2 register addendum is routed to the

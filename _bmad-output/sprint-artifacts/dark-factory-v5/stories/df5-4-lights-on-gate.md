@@ -114,7 +114,7 @@ clause.)*
 | Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
 |-----------|-------------------------------|-------------------------|
 | P0.11 gate chassis (`src/gate/gate-runner.ts`, `src/gate/assertions/lib/verdict.ts`) | in-tree, `bun test` | `runGate` returns a `GateReport`; the VOID path (`:167-178`) and the all-void FAIL rule (`:324-326`) are already covered by `tests/gate/phase0-exit-gate.test.ts` (45 cases) — this story adds clauses, not chassis behavior |
-| Run of record — one completed lights-on run's host-side evidence | `<runsDir>/<runId>.json` (the DF2.1 run record — carries `extensions.approval`, `extensions.pr`, `extensions.budget`, `extensions.gate`; `resolveRunsDir()`, `src/providers/run-record.ts:1178`), `.sandbox/reverify/<run-id>.jsonl`, `.sandbox/cost-ledger.db`, `.sandbox/audit.db`, `<runsDir>/<runId>-artifacts/` (the harvested in-box evidence, `harvest.ts:1068`), `refs/sandbox/<run-id>` | every path resolved at gate start; a missing path is `skip` with the path named — red, never silently green. **There is no `.sandbox/approvals/` file and there never was**: approval lives in the DF2.1-registered `extensions.approval` namespace (`src/providers/run-record.ts:299-315`) |
+| Run of record — one completed lights-on run's host-side evidence | `<runsDir>/<runId>.json` (the DF2.1 run record — carries `extensions.approval`, `extensions.pr`, `extensions.budget`, and **no `extensions.gate`: a healthy run carries none, DF3.1 writes that namespace only on gate failure, and C2's gate-green assertion is the recorded negation of it**; `resolveRunsDir()` in `src/providers/run-record.ts`), `.sandbox/reverify/<run-id>.jsonl`, `.sandbox/cost-ledger.db`, `.sandbox/audit.db`, `<runsDir>/<runId>-artifacts/` (the harvested in-box evidence), `refs/sandbox/<run-id>`, **and `pr-body.txt` — the frozen PR body, captured at freeze time so C8 asserts shape without a live GitHub read** | every path resolved at gate start; a missing path is `skip` with the path named — red, never silently green. **There is no `.sandbox/approvals/` file and there never was**: approval lives in the DF2.1-registered `extensions.approval` namespace |
 | **Producer of the run of record** | DF3.7 `fleet dispatch --await-completion` (in-box marker poll → harvest → teardown → reverify) or DF3.8's host-side sweep; both `ready-for-dev` as of 2026-09-08 | **This story cannot demonstrate AC1 until DF3.7 has merged.** The run of record is a real completed lights-on run captured once and frozen: run record, `.sandbox/reverify/<id>.jsonl`, `.sandbox/cost-ledger.db`, `.sandbox/audit.db`, `<runsDir>/<runId>-artifacts/` and `refs/sandbox/<run-id>` are copied into `tests/gate/fixtures/df5-run-of-record/` as a **directory**, not a single JSON file, by `scripts/dev/capture-run-of-record.ts`, which **checkpoints `cost-ledger.db` (`PRAGMA wal_checkpoint(TRUNCATE)`) before copying it and refuses to freeze a fixture with a non-empty `-wal`** — DF2.11's `openReadOnly()` refuses a hot-WAL ledger (`df2-11:291-305`), so a fixture captured mid-transaction would make C10 `skip` and the gate red forever. (`audit.db` needs no checkpoint: DF5.3 keeps it on the `DELETE` journal.) `--runs-dir`-style seams point the gate at it. Capturing it is a step of this story's e2e, recorded in the Dev Agent Record. **The harness copies the fixture directory into a `mkdtempSync` scratch dir and points the gate at the copy** through those seams, so the frozen fixture stays immutable across runs (Guards/limits) and the file-set snapshot has a clean baseline. It does **not** need to `chmod` the copy: git preserves only the executable bit, so committed DB files check out 0644 under 0755, but DF2.11's `openReadOnly()` carries **no `chmodSync`, no mode assertion, no pragma and no schema exec** (`df2-11:286`) — the 0700/0600 assertions stay on the **write** path where DF2.8 put them (`cost-ledger.ts:885-916`; `df2-11:306`, `:426`), and `df2-11:169-170`'s negative control fails an implementation that keeps them on the read path. A gate that only reads therefore reads a 0644 fixture fine. **C5's ref evidence is frozen too:** `refs/sandbox/<run-id>` is a ref in the host repo's `.git` and a bare ref file is a 40-hex line meaning nothing without its object store, so `scripts/dev/capture-run-of-record.ts` writes the ref and its objects into a bare repo at `tests/gate/fixtures/df5-run-of-record/refs.git` and the gate takes a `--git-dir` seam beside `--runs-dir`. **The gate never resolves a ref in the operator's working repo** — that is a live path Guards/limits forbids, and resolving one would make AC3's determinism machine-dependent |
 | `bun scripts/qds-audit.ts` host-side CLI (C9); DF2.8's `CostLedger.readRunCost(runId)` (C10); GitHub PR read for the PR clause | DF5.3 script; DF2.8 module against `.sandbox/cost-ledger.db` (`DEFAULT_COST_LEDGER_FILE`, `cost-ledger.ts:448`); GitHub API with the host-side token | `bun scripts/qds-audit.ts --json` invoked non-blockingly (never `spawnSync`, `:66-68`) so the chassis timeout can preempt it, and **its parsed output asserted, not merely its exit code** (C9). `readRunCost` is a **method on `class CostLedger`** (`cost-ledger.ts:1335`), not a module-level export, and the ordinary constructor is **not** read-only (`cost-ledger.ts:885-921`: `mkdirSync` 0700, `chmodSync` 0700, `new Database()` which CREATES the file when absent, `chmodSync` 0600, `PRAGMA journal_mode = WAL`, `db.exec(SCHEMA)`). C10 therefore reaches `readRunCost` through **DF2.11's `CostLedger.openReadOnly()`**, which opens SQLite read-only and performs no `mkdir`, `chmod`, mode assertion, pragma or schema exec (`df2-11:286`). It is **not an `existsSync` pre-check**: DF2.11 specifies a no-create `openSync(path, "r")` throwing `ledger-absent`, holding the fd and comparing `fstatSync(fd).ino` to the probed inode to throw `ledger-identity-changed` on a replace-and-restore across the open window (`df2-11:270-282`). C10 returns `skip` naming the path on either code, and on DF2.11's typed hot-WAL refusal (`df2-11:291-305`). It never constructs the ledger it is auditing. No subprocess either way. The PR fetch is read-only and the token never enters a diagnostic (INV-GATE-2) |
 
@@ -129,14 +129,14 @@ clause.)*
   |---|---|---|---|---|
   | `DF5.4-P1` | preflight | — | the run of record exists, is readable, names a runId | DF5.4 |
   | `DF5.4-C1` | main | channel | the run record carries a `requestId` (`src/providers/run-record.ts:139`) and an `extensions.budget` block with `repoSlug`, `issueId` and a non-zero `admittedCeilingMicroUsd` (`src/providers/run-record.ts:228-238`) — the durable evidence that dispatch went through DF3.1's operator CLI and DF2.8's admission gate rather than being hand-created. A record with a `runId` and no `extensions.budget` fails: a run nothing admitted is a run nothing capped. *(DF3.1 persists no brief digest, so the brief itself is not assertable here; asserting it is a DF3.1 change, recorded as a Deviation rather than invented as evidence.)* | DF3.1/DF2.8 |
-  | `DF5.4-C2` | main | fleet | box `create`d, `fill`ed at a pinned SHA, `setup` gate green, record closed (`closedAt`) **with a terminal `extensions.approval.state` of `approved` — `pausing` and `awaiting-approval` are also closed records (DF3.4: teardown sets `closedAt` before the promote), so `closedAt` alone does not mean the run finished** — and a non-zero `spendMicroUsd` (`credentials.ts` `captureSpend`) | DF3.1/DF2.2/DF2.5 |
-  | `DF5.4-C3` | main | team | the **harvested** merged envelope under `<runsDir>/<runId>-artifacts/` is present, parses, and carries zero malformed NDJSON lines — a **claim-integrity** assertion: it proves the box's claim *arrived intact*, never that its content is true. C6 is what earns the truth. | DF1.6 |
+  | `DF5.4-C2` | main | fleet | box `create`d, `fill`ed at a pinned SHA, **`setup` gate green — asserted as the negated field it is: `closedAt` present AND `commitSha` present AND `extensions.gate` absent. The carve-out from INV-GATE-5 is explicit and recorded here because absence is the only trace a green gate leaves: DF3.1 AC3's `extensions.gate` namespace is written only on gate failure (`dispatch.ts`'s failure branch), so there is no positive field to check — and the two positive companions (`closedAt`, `commitSha`) are what stop a truncated record from reading as a green gate** — record closed (`closedAt`) **with a terminal `extensions.approval.state` of `approved` — `pausing` and `awaiting-approval` are also closed records (DF3.4: teardown sets `closedAt` before the promote), so `closedAt` alone does not mean the run finished** — and a non-zero `spendMicroUsd` (`captureSpend` in `credentials.ts`) | DF3.1/DF2.2/DF2.5 |
+  | `DF5.4-C3` | main | team | the **harvested** merged envelope under `<runsDir>/<runId>-artifacts/` is present, parses, carries **at least one well-formed line**, and zero malformed NDJSON lines — a **claim-integrity** assertion: it proves the box's claim *arrived intact*, never that its content is true. C6 is what earns the truth. (The "at least one" conjunct is C3's sibling C4's own discipline applied at home: a zero-line envelope is present, parses, and carries zero malformed lines — it would pass without it, and C3 is the only clause covering team execution.) | DF1.6 |
   | `DF5.4-C4` | main | gates | the **harvested** trace DB (`<runsDir>/<runId>-artifacts/trace/trace.db`, read through the temp-dir copy DF5.3's Technical Notes mandate — a hot `-wal` with no `-shm` ships by design, `harvest.ts:184-212`, and an in-place read either refuses or silently reads a truncated DB) carries **at least one** `gate_results` row for the run, every row's `passed` column a literal `0` or `1` (never NULL — INV-GATE-5 positive assertion), joined on the run record's `requestId` (`trace/schema.ts:84-93` — `gate_results.request_id`, reached `runId → record.requestId`, since the trace store is keyed on `request_id` and never on `run_id`) — a **claim-integrity** assertion under INV-GATE-4: **in-box gate results are claims and can never be the proof that a gate passed.** The proof is C6's host-side re-verify. Pass/fail **diversity** is deliberately not asserted here: a run whose gates all pass first time produces only `passed = 1` rows, and the run of record is captured once and frozen, so demanding a fail row would make the clause permanently red with no remedy but fabricating a failure into the fixture. That discrimination is a unit test of the pure auditor against a synthetic two-row fixture in `tests/gate/df5-assertions.test.ts`, not a clause against the frozen run. | DF1.2/DF1.4 |
   | `DF5.4-C5` | main | bundle | bundle verified and fetched to `refs/sandbox/<run-id>`, resolved in the frozen fixture's bare repo through the `--git-dir` seam and never in the operator's working repo | DF2.5 |
   | `DF5.4-C6` | main | re-verify | tests **and** gates re-ran outside the box, green, **strictly before** the PR by host-recorded timestamp — `ReverifyReport.completedAt` < `extensions.pr.createdAt` (F10) | DF5.1 |
   | `DF5.4-C7` | main | approval | `extensions.approval` (`src/providers/run-record.ts:299-315`) carries a terminal `state: "approved"` with `approverId` and `decidedAt`, and `decidedAt` is **strictly after** the re-verify's `ReverifyReport.completedAt` and **strictly before** `extensions.pr.createdAt` — host clocks throughout, the same ordering discipline C6 applies on the other side of the decision. There is no `.sandbox/approvals/` file and there never was (DF5.2 merge record, 2026-08-26); a clause reading one can only ever `skip`. (EVIDENCE) | DF3.4 |
-  | `DF5.4-C8` | main | PR | PR on `qds/{runId}`, body carrying the runId, a labelled `Issue:` line and a cost summary line, push host-side | DF5.2 |
-  | `DF5.4-C9` | main | audit | `bun scripts/qds-audit.ts --json <pr-url>` exits `0` **and** its output, typed as DF5.3's exported `ChainReport` (`src/audit/index.ts` — imported, never re-declared here), satisfies: **at least one** contributing-runId key with the parent run reached at hop 1 among them (a PR with no fix attempts has exactly one; DF6.1b adds one key per fix runId — `df5-3` Technical Notes, "Ten hops *per contributing runId*"), **exactly ten hops under every key**, **zero** hops with status `broken` / `unlinked` / `hop-timeout` / `evidence-mismatch` / `evidence-not-harvested`, hop 10 `void`, and the credential (hop 4), box (hop 5) and bundle (hop 6) hops each carrying at least one emitted `audit_links` row id — the three hops DF5.3's `recordAuditLink` emitters own and the only ones no other clause covers. The exit code alone is not the assertion. | DF5.3 |
+  | `DF5.4-C8` | main | PR | the **frozen** `pr-body.txt` (captured beside the fixture by `scripts/dev/capture-run-of-record.ts`) carrying the runId, a labelled `Issue:` line and a cost summary line — read through the gate's `--pr-body` seam, never live GitHub: a live read makes AC3's determinism machine- and network-dependent and lets a `gh repo delete` or a missing CI token turn C8 `skip` on a gate whose fixture is otherwise frozen. The live PR read stays available as an out-of-scope Trigger Surface row | DF5.2 |
+  | `DF5.4-C9` | main | audit | `bun scripts/qds-audit.ts --json <runId> --runs-dir … --audit-db … --ledger … --reverify-dir …` — invoked **by runId**, so hop 1 resolves locally from the frozen record's `extensions.pr` and the walk performs **no network access at all** — with the four path seams threaded from the gate's own `--runs-dir`-style flags at the scratch copy, never the developer's real `.sandbox/` — exits `0` **and** its output, typed as DF5.3's exported `ChainReport` (`src/audit/index.ts` — imported, never re-declared here), satisfies: **at least one** contributing-runId key with the parent run reached at hop 1 among them (a PR with no fix attempts has exactly one; DF6.1b adds one key per fix runId — `df5-3` Technical Notes, "Ten hops *per contributing runId*"), **exactly ten hops under every key**, **zero** hops with status `broken` / `unlinked` / `hop-timeout` / `evidence-mismatch` / `evidence-not-harvested`, hop 10 `void`, and the credential (hop 4), box (hop 5) and bundle (hop 6) hops each carrying at least one emitted `audit_links` row id — the three hops DF5.3's `recordAuditLink` emitters own and the only ones no other clause covers. The exit code alone is not the assertion. | DF5.3 |
   | `DF5.4-C10` | main | cost | `CostLedger.openReadOnly({path}).readRunCost(runId)` (DF2.11's read-only seam over `cost-ledger.ts:1335`) reports `hasEvents: true` and a non-zero µ$ total — the run's **box-hours** spend, which is all the ledger holds until the F001/#157 bridge lands (`cost-ledger.ts:941-949`) — and, **separately**, the record's `spendMicroUsd` (the *key's* spend, written by `captureSpend`, `credentials.ts`) is at or under `extensions.budget.admittedCeilingMicroUsd` (`src/providers/run-record.ts:221-222`, the ceiling actually handed to DF2.3's mint). The two are different meters and the clause never compares one against the other's ceiling. An absent ledger is a `skip` naming the path, never a created file | DF2.8/DF2.11 |
   | `DF5.4-V1` | main | memory | **VOID** — retain receipt, `void_reason` per DD-4 | DF5.4 *(step 6)* |
 
@@ -145,10 +145,10 @@ clause.)*
   - **C6** compares **host** clocks only — the **bound** `ReverifyReport`'s `completedAt` against
     DF5.2's `extensions.pr.createdAt`, the ISO-8601 stamp DF5.2 takes on the host immediately before its
     `POST /pulls`. GitHub's `created_at` is a different clock and is never the ordering input. The bound
-    report is the one whose `reverifyId` equals `extensions.approval.reportId` (`src/providers/run-record.ts:299-315`),
-    selected from the append-only `.sandbox/reverify/<runId>.jsonl` (`src/reverify/report.ts:10`, which legitimately
-    holds several lines — `appendReport` is called at `src/reverify/runner.ts:290,418,469,481`, and `readReports`
-    returns an array). Its `completedAt`, **never the last line's**: reading the last line can fail a
+    report is the one whose `reverifyId` equals `extensions.approval.reportId` (the `extensions.approval` shape in `src/providers/run-record.ts`),
+    selected from the append-only `.sandbox/reverify/<runId>.jsonl` (`src/reverify/report.ts`, which legitimately
+    holds several lines — `appendReport` is called at each `runner.ts` verdict site, and `readReports`
+    returns an array; the module header names the last line authoritative *for DF5.2*, and C6/C7 deliberately select the **bound** report instead, for the reason that follows). Its `completedAt`, **never the last line's**: reading the last line can fail a
     lawfully-approved run whose final report is red, or pass a run whose approval bound a superseded
     report — a truth layer nothing approved. A report listed in
     `extensions.approval.supersededReportIds` is never the ordering input, and a `reportId` resolving to
@@ -162,11 +162,11 @@ clause.)*
     creates and schema-initialises the ledger when absent (`cost-ledger.ts:885-921`), so C10 opens
     through **DF2.11's `CostLedger.openReadOnly()`** (no-create `openSync` + held-fd inode probe, never
     a bare `existsSync`; no `chmod`, no mode assertion, no pragma, no schema exec); C10 `skip`s naming
-    the path on `ledger-absent`, `ledger-identity-changed` or the hot-WAL refusal. The issue-scoped `qds cost <owner/repo>#<N>` path is not used: an issue-less
+    the path on `ledger-absent`, `ledger-identity-changed` or the hot-WAL refusal `ledger-wal-recovery-required`. The issue-scoped `qds cost <owner/repo>#<N>` path is not used: an issue-less
     run has no issue key, and the clause is about *this run's* spend against *this run's* cap.
     C10 asserts the µ$ total only; it never asserts a multi-role `perRole` split, because until the
     DF2.7→ledger token bridge is wired (F001 / issue #157) a production run's ledger carries
-    `box_hours` rows only (`cost-ledger.ts:722-723`, `:941-949`).
+    `box_hours` rows only (`perRole`/`hasTokenRows`, on `readRunCost`'s return shape in `cost-ledger.ts`).
 - **Two-layer evidence doctrine, stated once for both halves of this contract.** In-box evidence is a
   claim in both halves of this contract. DF5.3 hop 9 attaches it as `{ kind: "claim" }`; DF5.4-C3/C4
   assert its integrity, never its truth. The truth layer is DF5.1's host-side re-verify — DF5.3 hop 7,
@@ -204,7 +204,10 @@ clause.)*
   **additively** (R3 §4.3) — P0.11's 45 existing cases stay green — never copied per module.
 - **Guards/limits:** checks must not block the event loop (`:66-68`) — no `spawnSync`, no unbounded
   synchronous walk, or the per-assertion timeout cannot preempt them. Every clause asserts against the
-  **frozen run of record**: a gate must be safe to re-run, and a live path costs money and mutates.
+  **frozen run of record** — and that claim is now true of all eleven clauses, C8's PR body included
+  (frozen at capture time, read through `--pr-body`) and C9's walk included (invoked by runId, hop 1
+  resolving locally, the four path seams pointed at the scratch copy): a gate must be safe to re-run,
+  and a live path costs money, mutates, or depends on a third-party artifact outliving the fixture.
 - **Deviation/assumption:** DF5.1/DF5.2 are authored concurrently; C6 and C8 assert their recorded
   outputs by path and identity only, a renamed path fixed in this story's resolver. Record any
   clause-versus-implementation discrepancy in the clause-map header, never reinterpret it silently.
@@ -241,7 +244,12 @@ clause.)*
   Notes, "Digest coverage is asymmetric"). That second write is **into the audit store itself, never
   into any store the gate asserts about**, is `INSERT … ON CONFLICT DO NOTHING` against a table whose
   `BEFORE UPDATE`/`BEFORE DELETE` triggers `RAISE(ABORT)` (INV-AUDIT-4), and **creates no file the gate
-  merely intended to read** — which is the operative half of this invariant. `audit.db` runs on the
+  merely intended to read** — which is the operative half of this invariant, and it holds by
+  **mechanism, not assertion**: the walker's read-write open is preceded by DF5.3's no-create
+  `openSync(path, "r")` probe (typed `audit-store-absent`) with the held-fd inode re-check, because
+  `bun:sqlite`'s `new Database(path)` would otherwise materialise a zero-byte `audit.db` before any
+  schema assertion — the identical defect DF2.11 chartered against, one store over, and the reason
+  the DoD's file-set snapshot runs one gate pass with `audit.db` **absent**. `audit.db` runs on the
   default `DELETE` journal, so those rows land without a `-wal`/`-shm` and the file-set assertion below
   stays exact. Everything else is
   read-only: DF2.8's ordinary `CostLedger` constructor creates and schema-initialises its database when
@@ -270,14 +278,17 @@ clause.)*
   test.*
 - **INV-GATE-5 (explicit positive assertions, fail closed):** every asserted field is checked
   positively (`!== 0`, `!== false`, a status literal) so an absent field fails rather than reading as
-  satisfied. Unreadable evidence yields `skip` naming reason and path — red, never green.
+  satisfied. **One recorded carve-out: C2's gate-green leg asserts the *negated* field
+  (`extensions.gate` absent) because DF3.1's registry leaves no positive trace of a green gate — and
+  the clause carries two positive companions (`closedAt`, `commitSha` present) so a truncated record
+  cannot ride the negation to green.** The carve-out lives in C2's row, not silently here. Unreadable evidence yields `skip` naming reason and path — red, never green.
 
 ## Definition of Done
 
 - [ ] **Impl:** three assertion modules under `src/gate/assertions/`, each exporting a pure auditor
       plus its `GateAssertion` factory, assembled by the driver's `buildAssertions()`.
 - [ ] **Impl:** `scripts/df5-lights-on-gate.ts` mirrors `phase0-exit-gate.ts` — clause-map header,
-      `parseValueFlags` for `--report`/`--help`/`--runs-dir`/`--git-dir`, rendered table,
+      `parseValueFlags` for `--report`/`--help`/`--runs-dir`/`--git-dir`/`--audit-db`/`--ledger`/`--reverify-dir`/`--pr-body` (the four store seams threaded through to C9's `qds-audit.ts` invocation, `--pr-body` feeding C8's frozen body), rendered table,
       `DF_GATE: PASS|FAIL`, exit 0/1/2.
 - [ ] **Contract:** the versioned wrapper `{ gate, gate_version, clause_map_version, report }` is
       written, `report` validating against `GateReportSchema` (`gate-runner.ts:117`).
@@ -296,7 +307,11 @@ clause.)*
       may only increase and no existing row may change (queried before and after). An implementation
       that uses the writing constructor against a missing ledger creates `.sandbox/cost-ledger.db`,
       `-wal` and `-shm` and MUST fail this test; so must one that mutates or deletes an existing
-      `audit_links` row, or that leaves a `trace.db-shm` inside `<runId>-artifacts/trace/`. A redaction test asserts no token, key material or PII reaches any
+      `audit_links` row, or that leaves a `trace.db-shm` inside `<runId>-artifacts/trace/`. The
+      snapshot exercise is run **twice**: once with the fixture's `audit.db` present (row count may
+      only increase) and once with it **absent** — the absent-file pass must end with `audit.db` still
+      absent (the no-create opener's proof) and the gate red on C9's `audit-store-absent`, never green
+      on a store the run created. A redaction test asserts no token, key material or PII reaches any
       assertion detail or report field.
 - [ ] **Test (unit):** each clause's pure auditor is green on the fixture and red on a mutant with the
       asserted field removed — proving a missing field fails rather than reading as satisfied.
@@ -325,7 +340,12 @@ clause.)*
       7 and C9 fails. `evidence-mismatch` is a second-and-later-walk guarantee (`df5-3` Technical
       Notes) — an implementation asserting it on a single cold walk MUST fail this test.
 - [ ] **Test (C8 shape, not mapping):** a PR body whose `Issue:` line reads `unresolved` passes C8; a
-      body with no `Issue:` line at all fails it — the clause never depends on P1.3 resolving.
+      body with no `Issue:` line at all fails it — the clause never depends on P1.3 resolving. C8's
+      input is the frozen `pr-body.txt` through `--pr-body`; a gate run with the network path reachable
+      at all MUST fail this test (the fixture is frozen or it is not).
+- [ ] **Test (C3 empty envelope):** an envelope file with **zero** lines makes C3 red — the
+      "at least one well-formed line" conjunct's mutant. *The generic removed-field mutant does not
+      generate this case (there is no field to remove), so this leg is its own fixture.*
 - [ ] **Test (fixture has no hot WAL):** the captured `tests/gate/fixtures/df5-run-of-record/` has no
       non-empty `cost-ledger.db-wal`, and `CostLedger.openReadOnly()` against it succeeds rather than
       hitting DF2.11's hot-WAL refusal. A capture tool that copies the ledger without checkpointing
