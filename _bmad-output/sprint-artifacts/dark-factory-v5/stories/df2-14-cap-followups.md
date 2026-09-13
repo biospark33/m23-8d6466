@@ -2,7 +2,7 @@
 
 **Story Points:** 1
 **Sprint:** v5 (unslotted follow-up; both findings surfaced and triaged by PR #254 review round 1, commit f96e7b53)
-**Status:** ready-for-dev
+**Status:** done
 
 ## Spec Reference
 
@@ -84,4 +84,11 @@ mint-throws test stays green by design).
 - Tests: dispatch.test.ts (AC4 rewrite + inclusive-boundary leg), patterns.test.ts
   (over-backstop rows + inclusive fan-out leg), cli.test.ts (C1 trio rewritten around the
   imported backstop), dispatch.test.ts D2 leg.
-- Status: done (evidence in PR #254).
+- Gates: `bunx biome check` exit 0; `bunx tsc --noEmit` exit 0. Focal suites 508/508 (D1),
+  then 468/468 after D2. Full suite: 5651 pass / 1 fail across 181 files — the 1 is the
+  buildId re-pin gate, red by design on any branch touching a walked image input
+  (`src/fleet/`); same expected-red documented in PR #254's own Verification section.
+- detect_changes: commit 1 = 4 symbols (runFanout, dispatch, validatePatternInput, fanout),
+  15 affected processes, ALL in the fleet/fanout/scripts families; commit 2 = 1 symbol
+  (mintAndDeliverKey), LOW, zero affected processes.
+- Status: done (evidence in PR #254; commits eb802a6 + f6afc79).
