@@ -349,6 +349,26 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(store.list()).toHaveLength(0);
   });
 
+  test("AC4: a cap above the defaultKeyCapMicroUsd backstop refuses the demo's mint — the bound is minted, not dispatch-only", async () => {
+    // The negative control for the shared guard: this demo mints through
+    // mintRunKey DIRECTLY, so a backstop added there must bind here without
+    // any demo-side check. The demo never RETHROWS a mint failure (its catch
+    // compensates the live box and returns finishEarly("mint-failed")), so
+    // the refusal is observed through the artifact, the demo.mint log line
+    // and the absence of a POST — not through a rejection.
+    const result = await runCapHitDemo(deps(), { ...defaultOpts(), capMicroUsd: 90_000_000 });
+
+    expect(result.artifact.reason).toBe("mint-failed");
+    expect(result.verdict).toBe("inconclusive");
+    // the refusal's identity survives the demo's catch: the mint line names
+    // the code mintRunKey threw
+    const mintLine = logs.find((l) => l.operation === "demo.mint");
+    expect(mintLine?.error?.code).toBe("cap-invalid");
+    // and the provider was never asked for a key
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+  }, 20_000); // same ceiling as its §4g/§4h siblings — this aborts at the mint via
+  // finishEarly (no key POST, no workload exec), so cheaper than they are, not longer
+
   // ─── 4c. Wall-clock cancel on a no-execTimed substrate ───────────────────────
 
   test("wall-clock cancel: workload destroyed and settled BEFORE the probe reads the key", async () => {

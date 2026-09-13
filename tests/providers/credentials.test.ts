@@ -495,6 +495,90 @@ describe("DF2.3 credential lifecycle", () => {
     expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
   });
 
+  test("AC4: a cap above the defaultKeyCapMicroUsd backstop is refused before the provider is called", async () => {
+    // DF2.13 derives the per-run cap from the admission budget; this guard is
+    // the ceiling that derivation can never exceed. 50_000_001 is the
+    // just-above-boundary probe (it round-trips, so it reaches THIS guard and
+    // not the round-trip one), 90M the plausible fat-finger, 900M the
+    // multi-run budget handed to one key.
+    for (const [i, capMicroUsd] of [50_000_001, 90_000_000, 900_000_000].entries()) {
+      const runId = `df213-cap-over-${i}`;
+      await makeRun(runId);
+      let err: unknown;
+      try {
+        await mintRunKey(deps({ capMicroUsd }), runId);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(CredentialLifecycleError);
+      const cle = err as CredentialLifecycleError;
+      expect(cle.code).toBe("cap-invalid");
+      // The message names BOTH numbers and the backstop BY NAME — the operator
+      // must learn which knob to turn, not just that one number beat another.
+      // Underscore-formatted or bare literals both normalize to the same
+      // digits, so the value assertions strip separators first.
+      expect(cle.message).toContain("defaultKeyCapMicroUsd");
+      const flat = cle.message.replace(/_/g, "");
+      expect(flat).toContain(String(capMicroUsd));
+      expect(flat).toContain(String(defaultKeyCapMicroUsd));
+      // the remediation is to raise the BACKSTOP, never to wedge this cap past it
+      expect(cle.remediation).toMatch(/defaultKeyCapMicroUsd|backstop/);
+      expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+      // nothing was minted, so nothing was recorded for this run
+      expect(store.get(runId).keyHash).toBeUndefined();
+    }
+  });
+
+  test("AC4: the backstop boundary is inclusive — a cap of exactly defaultKeyCapMicroUsd mints", async () => {
+    // Pins the guard against over-refusal: the documented default is the
+    // backstop, not above it.
+    const runId = "df213-cap-at-backstop";
+    await makeRun(runId);
+    await mintRunKey(deps({ capMicroUsd: defaultKeyCapMicroUsd }), runId);
+    const create = api.requests.find((r) => r.method === "POST" && r.path === "/keys");
+    expect(create?.limitUsd).toBe(50); // 50_000_000 µ$ crosses the wire as 50 dollars
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+
+  test("AC3: a derived remainder cap that round-trips through the dollar API mints exactly", async () => {
+    // 4_837_211 is an arbitrary `cap − spent − reserved` integer nobody
+    // inspected — the shape every DF2.13 per-run cap actually has. It survives
+    // microsToUsd/usdToMicros (verified before this test was written:
+    // Math.round((4_837_211 / 1e6) * 1e6) === 4_837_211), so the round-trip
+    // guard must let it through and the wire figure must be exact.
+    const runId = "df213-derived-remainder";
+    await makeRun(runId);
+    await mintRunKey(deps({ capMicroUsd: 4_837_211 }), runId);
+    const create = api.requests.find((r) => r.method === "POST" && r.path === "/keys");
+    expect(create?.limitUsd).toBe(4_837_211 / 1_000_000);
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+
+  test("AC3: a derived cap that does not round-trip is refused before the provider is called", async () => {
+    // 4_503_599_627_370_485 (2^52 − 11, odd) is VERIFIED lossy under the real
+    // semantics — usdToMicros rounds AFTER scaling, and
+    // Math.round((L / 1_000_000) * 1_000_000) !== L for this literal (checked
+    // with `bun -e` before this test was written; the neighbouring 2^52 + 1
+    // actually round-trips under that order and would not do here).
+    const runId = "df213-derived-lossy";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: 4_503_599_627_370_485 }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    const cle = err as CredentialLifecycleError;
+    expect(cle.code).toBe("cap-invalid");
+    // This literal ALSO exceeds the defaultKeyCapMicroUsd backstop, which
+    // refuses with the same code — so the guard pinned here is identified by
+    // MESSAGE, not by code alone: delete the round-trip guard above and the
+    // backstop would satisfy `code` but not this string.
+    expect(cle.message).toContain("does not round-trip");
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+  });
+
   test("one live key per run: minting over an existing keyHash is refused", async () => {
     const runId = "df23-remint";
     await makeRun(runId);

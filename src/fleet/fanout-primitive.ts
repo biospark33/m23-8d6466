@@ -322,15 +322,22 @@ function validatePatternInput(pattern: FanoutPattern, n: number, briefs: unknown
   }
   if (
     deps.capMicroUsd !== undefined &&
-    (!Number.isInteger(deps.capMicroUsd) || deps.capMicroUsd <= 0)
+    (!Number.isInteger(deps.capMicroUsd) ||
+      deps.capMicroUsd <= 0 ||
+      deps.capMicroUsd > defaultKeyCapMicroUsd)
   ) {
-    // Same shape as credentials.ts:231's mint-time check, but HERE — before the
+    // Same shape as credentials.ts's mint-time checks, but HERE — before the
     // lock — so an invalid cap never reaches the INV-3 admitted line or a box.
+    // INV-CAP-1 (DF2.14) adds the backstop bound: `mintRunKey` refuses any cap
+    // above `defaultKeyCapMicroUsd`, and refusing it only THERE let a fan-out
+    // pass admission and F15, provision every arm's billable box, and then die
+    // arm-by-arm at the mint. The bound is DERIVED from the same exported
+    // constant the mint enforces — never a numeric copy.
     throw invalid(
       2,
       "invalid-cap",
-      `capMicroUsd must be a positive integer of micro-dollars, got ${JSON.stringify(deps.capMicroUsd)}`,
-      "pass a positive-integer micro-dollar cap, or drop capMicroUsd to use the key default",
+      `capMicroUsd must be a positive integer of micro-dollars no greater than the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}), got ${JSON.stringify(deps.capMicroUsd)}`,
+      "pass a positive-integer micro-dollar cap at or below defaultKeyCapMicroUsd, or drop capMicroUsd to use the key default; raising the backstop is a code change in src/providers/credentials.ts that owes a test naming it",
     );
   }
   // R4-34: the loser-teardown deadline is a `withTimeout` budget like the
@@ -445,6 +452,11 @@ export async function fanout(
     // budget-exceeded refusals landed mid-flight, after arm 0 provisioned).
     // The remedy names every short group's own config line — the operator's
     // cost-config stays the one place budgets are declared.
+    // INV-CAP-1 (DF2.14): this cap can never be a figure the mint would
+    // refuse. `validatePatternInput` bounded the override at
+    // `defaultKeyCapMicroUsd` before the lock was taken, and the fallback IS
+    // the backstop — so `need = count × cap` never reserves headroom for arms
+    // whose keys could not be minted.
     const cap = deps.capMicroUsd ?? defaultKeyCapMicroUsd;
     const groups = new Map<string, { repoSlug: string; issueId: string; count: number }>();
     for (const b of input.briefList) {

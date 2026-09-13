@@ -90,7 +90,8 @@ export interface CapHitDemoDeps {
 }
 
 export interface CapHitDemoOptions {
-  /** Key cap in microdollars (default 50_000 = $0.05). */
+  /** Key cap in microdollars (default 50_000 = $0.05). Values above the
+   * 50_000_000 µ$ ($50) defaultKeyCapMicroUsd backstop are refused at the mint. */
   capMicroUsd?: number;
   /** Wall-clock ceiling in ms (default 900_000 = 15 min). */
   wallClockMs?: number;
@@ -1507,7 +1508,8 @@ export async function runCapHitDemo(
 const HELP = [
   "Usage: cap-hit-demo [options]",
   "",
-  "  --cap <µ$>              Key cap in microdollars (default 50000 = $0.05)",
+  "  --cap <µ$>              Key cap in microdollars (default 50000 = $0.05; values above 50000000 = $50,",
+  "                          the defaultKeyCapMicroUsd backstop, are refused at the mint)",
   "  --roster <path>         Roster path for live substrate setup",
   "  --driver <name>         Provider driver (default $QDS_PROVIDER_DRIVER or exedev)",
   "  --dir <path>            Records directory (default $QDS_RUNS_DIR)",

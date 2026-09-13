@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 
-**Status:** ready-for-dev
+**Status:** in-review
 
 **Sprint:** v5-S3
 
@@ -367,4 +367,165 @@ derivation ships and this story consumes it.
 
 ## Dev Agent Record
 
-*(to be completed by the implementing agent)*
+Implemented 2026-09-12 on `feature/df2-13-per-run-key-cap-from-admission-budget` (cut from `dev` at
+45f9af76). Orchestration: /qds-dev pipeline + /unlazy ledger (`.unlazy/df2-13/GATES.md`, 12 gates,
+evidence recorded per gate). All citations below are by symbol.
+
+### Impl
+
+- **`mintRunKey` (src/providers/credentials.ts):** fourth and final pre-mint guard —
+  `capMicroUsd > defaultKeyCapMicroUsd` → `CredentialLifecycleError("cap-invalid")`, message
+  `capMicroUsd ${capMicroUsd} exceeds the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) —
+  refusing to mint a key above the provider ceiling`, remediation: lower to the admission's remaining
+  budget, or raise `defaultKeyCapMicroUsd` "— a code change that owes a test naming it" (INV-CAP-1).
+  Sits after the round-trip guard, before the `createKey` call; boundary is inclusive (exactly
+  50_000_000 mints). NOT placed among the post-mint guards (INV-CRED-1: those fire after a live key
+  exists).
+- **`defaultKeyCapMicroUsd` docstring:** now states the backstop is ENFORCED at the mint (INV-CAP-1,
+  every caller inherits, raising it is a code change + test); the "wiring it from the admission
+  budget is DF2.13" sentence replaced by the shipped state; the stale-citation confession paragraph
+  kept its lesson and lost the `:261`/`:281` numbers; `scripts/cap-hit-demo.ts:97,148` → symbol
+  citation (`runBudgetCapMicros`, the `--budget-cap` option — artifact field, enforces nothing). No
+  line numbers remain in the docstring.
+- **`dispatch.ts`:** comment-only addition to the `no-ceiling` block (verified by diff: 13 inserted
+  comment lines, zero code), documenting the NEW downstream mint-time `cap-invalid` refusal.
+  Review-round-1 correction: that refusal is NOT a `no-ceiling`-equivalent stranding. A `no-ceiling`
+  fires before `store.create`, so its stranded reservation is an absent record the orphan guard
+  retires after `ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS` (~6 min); the mint-time
+  `cap-invalid` fires AFTER `provisionAdmittedRun` has written an OPEN run record and created a
+  LIVE BILLABLE box, and `classifyReservation` counts unclosed records (cost-ledger.ts,
+  `closedAt === undefined` → "count"), so the orphan guard never retires it — headroom returns only
+  at teardown close (plus grace), and the box bills until an operator tears the run down.
+  Reachability, corrected: the knob is `--cap-micro-usd` (`DispatchDeps.capMicroUsd`, B1-bounded by
+  MAX_SAFE_INTEGER only) AND the config issue cap minus committed spend must also clear the
+  backstop — against the shipped `defaultCapMicroUsd` of 5_000_000 µ$, `--cap-micro-usd
+  900_000_000` alone admits at 5M and mints fine. Observable, corrected: the refusal surfaces as
+  the `fleet.dispatch` error line with `payload.providerCode` "cap-invalid" (exit 1, the generic
+  key-delivery-failed text — `CredentialLifecycleError` is not a `FleetError`, so its
+  message/remediation do not survive the catch), not as a `no-ceiling` (exit 5) line. No
+  behavioural change on that path.
+- **Contract held:** no new config key, no new log event, no ledger column or query;
+  `cost-ledger.ts` and `budget-gate.ts` byte-untouched.
+
+### Deviations from story prose (all recorded, none silent)
+
+1. **The stale comment was already partially corrected before this story ran.** The story's
+   Technical Notes quote a comment state ("dispatch never passes `keyCapMicroUsd`…") that a
+   2026-09-08 Wave-6 correction had already fixed: upgrade trigger 1 is recorded as FIRED (DF3.2)
+   and COMPENSATED in the file this story modified. What remained genuinely stale was the absence
+   of any mention of DF2.13's new mint-side refusal — added (see above).
+2. **"The `no-ceiling` arm recorded as reachable" — NOT written, because it is false.** Ground
+   truth, verified in `cost-ledger.ts` `admitIssue`: the replay branch runs only after the
+   `committed >= cap` and `remainingMicroUsd <= 0` gates, and clamps `ceiling = min(prior.ceiling,
+   remainingMicroUsd)`; B1 bounds `deps.capMicroUsd` to a positive safe integer; the default is a
+   positive literal. The arm is UNREACHABLE from `dispatch` on every path, fresh or replay — the
+   in-file Wave-6 argument survives. The story's reachability example ("whenever a caller supplies
+   `--cap`") is contradicted by B1. AC5's test of the arm stands (it is exercised through the
+   ledger seam); the comment records the arm's true status.
+3. **AC1's row read-back lives in `tests/providers/budget-gate.test.ts`, not `dispatch.test.ts`.**
+   Dispatch tests drive `RecordingLedger` (tests/fleet/helpers.ts), which has no rows to read; the
+   real-ledger proof opens the sqlite file after `close()` and asserts the `gate_admissions` row's
+   `ceiling_micro_usd` === the decision's `admittedCeilingMicroUsd`. The seam-stand-in note is
+   commented at the dispatch-level AC1 test.
+4. **`cap-hit-demo` AC4 asserts observable inheritance, not a rejection:** `runCapHitDemo` catches
+   every `mintRunKey` error into `finishEarly("mint-failed")` and never rethrows, so a
+   `rejects.toThrow` assertion could never go green. The test pins `artifact.reason ===
+   "mint-failed"`, the `demo.mint` error log with `error.code: "cap-invalid"`, and zero keyApi
+   POSTs — still failing red against an unguarded mint for the right reason (dispatch-only
+   placement negative control).
+5. **The lossy round-trip literal is `4_503_599_627_370_485`** (2^52−11, odd), not 2^52+1: the
+   story-suggested candidate actually round-trips under the source's real order
+   (`usdToMicros` does `Math.round(usd * MICRO_PER_USD)` — multiply first). Verified against the
+   source-faithful expression; derivation cited in a test comment.
+6. **Self-review finding RECEIVED and REJECTED with cause (guard order).** Review raised LOW: a cap
+   both over-backstop and non-round-tripping (`Number.MAX_SAFE_INTEGER`) takes the round-trip arm
+   and never produces the backstop message; suggested moving the backstop guard above the
+   round-trip guard. Rejected: every integer ≤ the 50_000_000 backstop round-trips exactly (≤ 50
+   dollars with 6 decimals fits in ≤ 26 mantissa bits), so below the backstop the round-trip guard
+   would be DEAD CODE — the guard exists precisely for arbitrary-magnitude derived remainders,
+   whose magnitudes are exactly the over-backstop ones. The current order (integer → round-trip →
+   backstop) keeps both guards live and load-bearing; the overlap case is served by the honest
+   round-trip message and pinned by the pre-existing `MAX_SAFE_INTEGER` round-trip test. INV-CAP-1
+   holds under either order (the refusal is the conjunction; no mint above the backstop in any
+   path).
+7. **(Review round 1) The Observability Contract's row 1 premise is false — no `credential.mint`
+   error line exists for this refusal.** All pre-mint guards (integer, round-trip, backstop) throw
+   BEFORE `timed`, so no credential-level log line ever rides a `mintRunKey` refusal — and that was
+   true of the pre-existing guards too (no `mintRunKey` refusal has ever surfaced on
+   `runCredentialLifecycle`). Real observables: the `fleet.dispatch` error line with
+   `payload.providerCode` "cap-invalid" (dispatch path), the `demo.mint` error line (demo path),
+   nothing credential-level. Recorded, not patched: emitting a credential-level line for pre-mint
+   refusals would add a log event, violating the story's own "no new log event" contract.
+8. **(Review round 1) AC4's "no run record is written" is credentials-seam wording and misdescribes
+   the dispatch path.** On dispatch, `deps.store.set(runId, { requestId })` runs before
+   `mintAndDeliverKey`, so a request-only record (no keyHash) exists when the mint refuses. The
+   tests assert the correct seam observable (`keyHash` undefined); the spec sentence's dispatch-path
+   reading is false.
+
+### Tests (all named with AC markers for grep)
+
+- `tests/providers/credentials.test.ts`: AC4 backstop refusal (90_000_000 and 900_000_000 —
+  `createKey` recorded zero times, no keyHash written, message names both values, remediation names
+  the backstop), AC4 inclusive boundary (exactly 50_000_000 mints at 50.0 USD), AC3 derived
+  remainder 4_837_211 round-trips and mints exactly, AC3 lossy derived cap refuses pre-mint.
+- `tests/fleet/dispatch.test.ts`: AC1 the mint is asked for the decision's ceiling (1.0 — not the
+  issue cap 5.0, not the backstop 50.0; the AC5 never-at-backstop pin rides here), AC2 both
+  directions of the `min` (remainder binds without `--cap`; policy ceiling binds with one),
+  AC5×3 underivable-budget refusals (`admission-failed` raw throw / `ledger-failed` typed
+  `CostLedgerError` / `budget-exceeded` refused decision) — every arm: no box, no mint, zero run
+  records.
+- `tests/providers/budget-gate.test.ts`: AC2 remainder-binds (4_000_000 spent of 5_000_000 admits
+  at 1_000_000 under the 50M backstop), AC2 policy-ceiling-binds (untouched issue, 50M cap, 10M
+  keyCap admits at 10_000_000), AC1 the gate_admissions row carries the admitted ceiling (raw
+  read-back after `close()`).
+- `tests/providers/cap-hit-demo.test.ts`: AC4 the bound is minted-not-dispatch-only (shared-function
+  inheritance through the demo's own catch).
+
+### Verification evidence
+
+- **Negative control (red), captured BEFORE the guard landed** (`/tmp/df213-red3.log`): exactly 2
+  fail / 90 pass — the two AC4 refusal tests, failing because the unguarded mint SUCCEEDED. The
+  story's make-or-break "must go red against shipped `main` behaviour" is proven, not asserted.
+- Post-guard: credentials+cap-hit-demo 92 pass / 0 fail; dispatch+budget-gate 158 pass / 0 fail
+  (derivation pins undisturbed); full suite + tsc — see the PR's CI and `.unlazy/df2-13/GATES.md`
+  (G11 gate) for the tee'd full-suite log.
+- **Impact (CLAUDE.md duty):** `mintRunKey` upstream = CRITICAL, 9 symbols / 5 processes —
+  matching the story's recorded W6-E-L11 analysis. Every real caller enumerated
+  (`dispatch.ts` `mintAndDeliverKey`, `scripts/cap-hit-demo.ts` `runCapHitDemo`, in-module
+  `runCredentialLifecycle`, live-harness `mintCappedKey` at 5_000 µ$): all pass caps at or below
+  the backstop, so the CRITICAL radius is realized only by the new intentional refusals — which is
+  the story's point.
+- **`detect_changes()`**: 6 changed files; changed symbols exactly `dispatch` (comment-only),
+  `mintRunKey`, `defaultKeyCapMicroUsd` (docstring), `SBX_KEY_PREFIX` (hunk-adjacent, unchanged) +
+  2 test helpers. Affected processes: 3 dispatch log flows (comment), 3 `runCredentialLifecycle`
+  flows (the guard). Risk HIGH — expected for a CRITICAL-radius symbol; every affected flow
+  accounted for above.
+
+## Review Findings
+
+**Round 1 — adversarial review 2026-09-12.** 7 reviewers (3 blind, 3 edge, 1 acceptance auditor).
+Tally: 11 PATCHED / 2 DEFERRED / 12 DISMISSED. CodeRabbit re-review pending; story stays in-review.
+
+- **PATCHED (11).** P1 the mint refusal's message/remediation names `min(remaining, backstop)`
+  rather than implying the backstop alone binds (HIGH). P2 AC3's lossy test pins the round-trip
+  guard's distinguishing message, not just the shared `cap-invalid` code (HIGH). P6 the dispatch
+  comment rewritten to verified facts (MED — the pre-rewrite text claimed the stranded reservation
+  aged out like a `no-ceiling`; see the Dev Agent Record's `dispatch.ts` bullet and deviations 7-8).
+  P7 new AC4 dispatch test driving admission → mint-time `cap-invalid` → exit-1
+  key-delivery-failed, plus the stranded box and the OPEN record it leaves behind (MED). P9 the
+  default-keyCap binding half pinned in budget-gate (MED). P3/P4/P5/P8/P10/P11 (LOW: just-above
+  boundary 50_000_001, demo `--cap` help notes, timeout comment, AC5 quote, row-uniqueness assert,
+  try/finally).
+- **DEFERRED (2).** Fanout `--cap-micro-usd` CLI upper bound ($1M) vs the enforced backstop —
+  config-load bounding is DF2.8's filed follow-up, not this story's knob. The dispatch catch
+  discards `CredentialLifecycleError`'s message/remediation (only `providerCode` survives) — an
+  error-shape contract change, out of scope.
+- **DISMISSED (12), verified, not argued.** NaN passes the backstop predicate — the integer guard
+  throws first. Stale-citation claims (`admittedCeilingMicroUsd`, `--budget-cap`, the caller
+  roster) — all verified real in source. Spy hygiene — `beforeEach` recreates keyApi/driver/store.
+  Config/log isolation — per-test dirs. AC2 leg weakness — the min direction is pinned at the gate
+  layer. Red-control conflation — the auditor re-verified: 2 fail = both AC4 tests. AC1 literal
+  wording — disclosed as deviation 3.
+
+Negative-control evidence re-verified: `/tmp/df213-red3.log` = 2 fail (both AC4 tests) / 90 pass
+against unguarded source.

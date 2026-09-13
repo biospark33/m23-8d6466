@@ -39,7 +39,7 @@ import {
   stripAuthoredLimit,
 } from "../phase-engine/manifest.ts";
 import { fillRun, provisionAdmittedRun, type ProviderDriver } from "../providers/driver.ts";
-import { mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
+import { defaultKeyCapMicroUsd, mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
@@ -474,7 +474,9 @@ export interface DispatchDeps {
   /**
    * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Validated at dispatch
    * before reaching the budget gate: if provided, must be a positive integer no
-   * greater than `Number.MAX_SAFE_INTEGER`. Flows to the budget gate's
+   * greater than `defaultKeyCapMicroUsd`, inclusively (INV-CAP-1, DF2.14 — the
+   * provider backstop `mintRunKey` enforces; a larger value refuses exit-2
+   * `invalid-cap` pre-admission). Flows to the budget gate's
    * `keyCapMicroUsd` — the ceiling it clamps into `admittedCeilingMicroUsd`,
    * which becomes the minted key's provider-side hard USD limit at mintRunKey.
    * Absent/undefined ⇒ the single-run default (`defaultKeyCapMicroUsd`) —
@@ -816,6 +818,44 @@ function providerCodePayload(e: unknown): { providerCode?: string } {
 function errorRemediation(e: unknown, fallback: string): string {
   const remediation = (e as { remediation?: unknown } | null | undefined)?.remediation;
   return typeof remediation === "string" ? redactSecrets(remediation) : fallback;
+}
+
+/**
+ * The structured half of a caught throwable — the `{code, remediation}` shape
+ * the ProviderError family carries (`src/providers/errors.ts`), detected by
+ * CAPABILITY, not by `instanceof`: the catches in this module sit ABOVE the
+ * providers layer, must not import its class tree, and a future error class
+ * carrying the same shape should get the same treatment without a new
+ * `instanceof` arm. Both fields must be non-empty strings — a bare `code`
+ * alone (transport errors grow one) is not a structured refusal — and the
+ * message must be a string too, since the caller renders it.
+ *
+ * Returns undefined for everything else; the caller keeps its own generic
+ * text. Both halves are third-party free text, so both get the INV-4
+ * redaction `errorMessage`/`errorRemediation` apply (`refuse` redacts again;
+ * the pass here keeps the composition sites honest about what they hold).
+ *
+ * DF2.14 (D2): this is the one shared vocabulary for catch→`refuse`
+ * translation sites that must not strand a structured error's diagnosis. The
+ * survey found the step-7 mint catch was the only FULL offender (it dropped
+ * message AND remediation for non-FleetErrors); the outer post-box catch
+ * already preserves remediation through `errorRemediation` and keeps working.
+ */
+function structuredErrorParts(e: unknown): { message: string; remediation: string } | undefined {
+  const shape = e as { message?: unknown; remediation?: unknown; code?: unknown } | null | undefined;
+  if (
+    typeof shape?.remediation !== "string" ||
+    shape.remediation.length === 0 ||
+    typeof shape.code !== "string" ||
+    shape.code.length === 0 ||
+    typeof shape.message !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    message: redactSecrets(shape.message),
+    remediation: redactSecrets(shape.remediation),
+  };
 }
 
 /**
@@ -1688,14 +1728,28 @@ async function mintAndDeliverKey(
     // otherwise escape with no dispatch-log entry, no structured line and no
     // payload: exactly the bare-exit-1 treatment this catch exists to deny.
     if (alreadyRefused(e)) throw e;
+    // D2 (DF2.14): the discrimination is CAPABILITY (`structuredErrorParts`),
+    // not `instanceof FleetError`. A `CredentialLifecycleError` — the
+    // ProviderError family's `{code, remediation}` shape, NOT a FleetError —
+    // used to be flattened here to the generic text, and the diagnosis and
+    // remediation written for the refusal shipped nowhere but
+    // `payload.providerCode`: a `cap-invalid` mint refusal arrived as "key
+    // mint or delivery failed" with a remediation that never mentioned the
+    // cap. Now the provider's message survives (suffixed with the run
+    // context, the same pattern the FleetError branch used) and its
+    // remediation is COMPOSED with the INV-5 line — the record is open and
+    // the box is alive for ANY mint failure, so neither half is dropped.
+    // Unstructured throwables keep the fixed generic text: the provider's
+    // free text still never reaches a sink.
+    const parts = structuredErrorParts(e);
     throw ctx.refuse(
       1,
       e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
-      e instanceof FleetError
-        ? `${e.message} — during key mint or delivery for run ${runId}`
+      parts !== undefined
+        ? `${parts.message} — during key mint or delivery for run ${runId}`
         : `key mint or delivery failed for run ${runId}`,
-      e instanceof FleetError && typeof e.remediation === "string"
-        ? e.remediation
+      parts !== undefined
+        ? `${parts.remediation} The run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down`
         : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
       {
         ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
@@ -2436,6 +2490,28 @@ export async function dispatch(
         { capMicroUsd: deps.capMicroUsd },
       );
     }
+    // INV-CAP-1 (DF2.14): the backstop bound rides the same early guard.
+    // `mintRunKey` refuses any cap above `defaultKeyCapMicroUsd`, and before
+    // this arm a `--cap-micro-usd` above the backstop passed B1, admitted (the
+    // gate's `min(keyCap, remaining)` clears the backstop whenever the issue's
+    // own cap does too), provisioned a LIVE BILLABLE box and only then died at
+    // the mint's `cap-invalid` — stranding the OPEN record and the box until
+    // teardown (`classifyReservation` counts unclosed records; the orphan guard
+    // never retires them). Bounding the keyCap HERE makes the whole class
+    // pre-admission: zero boxes, zero records, zero admissions. Issue caps
+    // (`defaultCapMicroUsd` / `perIssueOverrides`) are deliberately NOT bounded
+    // — the gate's `min` absorbs them — and the mint guard stays the
+    // caller-agnostic last line for non-dispatch callers. The bound is DERIVED
+    // from the same exported constant, never a numeric copy.
+    if (deps.capMicroUsd !== undefined && deps.capMicroUsd > defaultKeyCapMicroUsd) {
+      throw refuse(
+        2,
+        "invalid-cap",
+        `capMicroUsd ${deps.capMicroUsd} exceeds the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — refusing to admit a run whose key could not be minted`,
+        "lower --cap-micro-usd to defaultKeyCapMicroUsd or below (the working ceiling is min(keyCap, the admission's remaining budget)), or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
+        { capMicroUsd: deps.capMicroUsd, backstopMicroUsd: defaultKeyCapMicroUsd },
+      );
+    }
     let ledger: LedgerLike | undefined;
     let decision: Extract<AdmissionDecision, { admitted: true }>;
     try {
@@ -2591,8 +2667,27 @@ export async function dispatch(
     //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
     //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
     //      refusing a non-positive `capMicroUsd`.
-    // A `no-ceiling` refusal appearing in the dispatch log is the same signal
-    // arriving the expensive way.
+    // DF2.13's mint-time `cap-invalid` refusal downstream of here used to be
+    // reachable from this call path, and EXPENSIVELY so. The effective ceiling
+    // is `min(keyCap, remaining)`, so it fired only when BOTH halves cleared
+    // the backstop — the issue's remaining budget (config `defaultCapMicroUsd`
+    // / `perIssueOverrides` minus committed spend) AND the passed
+    // `--cap-micro-usd`. By then `provisionAdmittedRun` had written an OPEN run
+    // record and created a LIVE BILLABLE box, which `classifyReservation`
+    // counts (`closedAt === undefined`) until teardown closes the record: the
+    // headroom did not age out the way this arm's absent record does, and the
+    // box billed until an operator tore the run down.
+    //
+    // DF2.14 RETIRES that class: B1 now bounds `deps.capMicroUsd` at
+    // `defaultKeyCapMicroUsd` pre-admission, so the knob that reached the mint
+    // guard cannot clear the backstop from dispatch at all. The `min` keeps its
+    // meaning — issue caps are deliberately unbounded and absorbed by it — and
+    // the observable for a would-be over-ceiling run is a clean exit-2
+    // `invalid-cap` refusal with zero boxes, zero run records and zero
+    // admissions, not a `providerCode: "cap-invalid"` line (exit 1, generic
+    // text) arriving the expensive way. The mint guard itself is UNCHANGED and
+    // stays the caller-agnostic last line for non-dispatch callers (the demo,
+    // `runCredentialLifecycle`, direct programmatic mint calls).
     if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
       throw refuse(
         5,

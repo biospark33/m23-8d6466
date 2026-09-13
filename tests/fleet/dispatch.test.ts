@@ -54,7 +54,7 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import type { ProviderDriver } from "../../src/providers/driver.ts";
 import type { ProviderVm } from "../../src/providers/driver.ts";
 import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
-import { defaultKeyCapMicroUsd, SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
+import { CredentialLifecycleError, defaultKeyCapMicroUsd, SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
 import { type AdmissionInput, CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -5273,5 +5273,272 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(record.httpsUrl).toMatch(/^https:\/\//);
     }
     expectSingleRefusalLine("dispatch-failed");
+  });
+
+  // ─── DF2.13: the derived cap is what reaches the mint ────────────────────────
+
+  describe("DF2.13: the derived cap is what reaches the mint", () => {
+    test("AC1: the admitted ceiling, not the issue cap and not the key backstop, is the limit the mint is asked for", async () => {
+      // Ceiling ≠ cap on purpose (the AC9b confusion), and the ceiling is ALSO
+      // below defaultKeyCapMicroUsd — so the three candidate figures are all
+      // distinct and a dispatcher propagating any of the two wrong ones fails.
+      // This is the AC5 pin that "the dispatch path never exercises it: the
+      // `capMicroUsd` reaching `mintRunKey` from `dispatch` is always defined"
+      // riding the same path: 50.0 below is the failure a fallback to the
+      // default cap would produce.
+      const admittedCeiling = 1_000_000;
+      const cap = 5_000_000;
+      const ledger = goodLedger(admittedCeiling, cap);
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+
+      expect(mintSpy).toHaveBeenCalledTimes(1);
+      const [, limitArg] = mintSpy.mock.calls[0] as [string, number];
+      expect(limitArg).toBe(admittedCeiling / 1_000_000);
+      expect(limitArg).not.toBe(5.0); // the issue cap, ÷1e6
+      expect(limitArg).not.toBe(50.0); // defaultKeyCapMicroUsd, ÷1e6 — the backstop
+      // The value propagated is the DECISION's own output: what the gate was
+      // handed is what went out. `RecordingLedger`'s returned decision stands
+      // in for the gate_admissions row at this seam — the real-row equality is
+      // proven against a live SQLite ledger in budget-gate.test.ts.
+      const call = ledger.admitCalls[0] as (typeof ledger.admitCalls)[number];
+      expect(call.capMicroUsd).toBe(cap);
+      // No deps.capMicroUsd supplied, so the gate's clamp ran against the
+      // DF2.3 backstop — same figure the AC7 hand-off test pins.
+      expect(call.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+    });
+
+    test("AC2: the remainder binds without --cap, the policy ceiling binds with one — both directions of the min", async () => {
+      // (a) No --cap: the issue's remaining spend (the ceiling) is smaller than
+      // the 50M key backstop, so the REMAINDER is the binding half.
+      const remainderLedger = goodLedger(1_000_000, 5_000_000);
+      const originalMintA = keyApi.createKey.bind(keyApi);
+      const mintA = mock((name: string, limit: number) => originalMintA(name, limit));
+      keyApi.createKey = mintA;
+      await dispatch(validBrief(), deps({ ledgerFactory: () => remainderLedger }));
+
+      const [, limitA] = mintA.mock.calls[0] as [string, number];
+      expect(limitA).toBe(1.0);
+      const callA = remainderLedger.admitCalls[0] as (typeof remainderLedger.admitCalls)[number];
+      expect(callA.capMicroUsd).toBe(5_000_000);
+      expect(callA.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+
+      // (b) deps.capMicroUsd supplied below the issue cap: the POLICY ceiling
+      // is the binding half, and the mint is asked for IT, not the 50M cap.
+      const policyLedger = goodLedger(10_000_000, 50_000_000);
+      const originalMintB = keyApi.createKey.bind(keyApi);
+      const mintB = mock((name: string, limit: number) => originalMintB(name, limit));
+      keyApi.createKey = mintB;
+      await dispatch(validBrief(), deps({ ledgerFactory: () => policyLedger, capMicroUsd: 10_000_000 }));
+
+      const [, limitB] = mintB.mock.calls[0] as [string, number];
+      expect(limitB).toBe(10.0);
+      expect(limitB).not.toBe(50.0);
+      const callB = policyLedger.admitCalls[0] as (typeof policyLedger.admitCalls)[number];
+      expect(callB.capMicroUsd).toBe(50_000_000);
+      expect(callB.keyCapMicroUsd).toBe(10_000_000);
+    });
+
+    test("AC4: a per-run cap above the backstop refuses PRE-ADMISSION at the dispatch boundary — no box, no record, no admission", async () => {
+      // DF2.14 retired the stranding class this test used to pin ("reaches the
+      // mint and is refused there — stranding a real box"): B1 now bounds
+      // `deps.capMicroUsd` at `defaultKeyCapMicroUsd` before the budget gate
+      // runs, so an over-backstop cap never admits, never provisions, never
+      // writes a record. The derivation is BEHAVIORAL, not textual: the bound
+      // under test is the imported constant, so raising the backstop moves this
+      // test's boundary instead of silently forking it — and B1 is never
+      // reverted to keep an old stranding pin green.
+      const overBackstop = defaultKeyCapMicroUsd + 1;
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+      const ledger = goodLedger(overBackstop, overBackstop);
+      const admitsBefore = ledger.admitCalls.length;
+
+      try {
+        await dispatch(
+          validBrief(),
+          deps({
+            capMicroUsd: overBackstop,
+            ledgerFactory: () => ledger,
+          }),
+        );
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(2);
+        expect(err.code).toBe("invalid-cap");
+        // The refusal names the knob and the code change that owes a test.
+        expect(err.message).toContain("defaultKeyCapMicroUsd");
+        expect(err.remediation).toContain("src/providers/credentials.ts");
+        // Both figures ride the payload: the refused cap and the backstop.
+        expect(err.payload?.capMicroUsd).toBe(overBackstop);
+        expect(err.payload?.backstopMicroUsd).toBe(defaultKeyCapMicroUsd);
+        // PRE-admission: the gate never ran, no key was asked for.
+        expect(ledger.admitCalls.length).toBe(admitsBefore);
+        expect(mintSpy).not.toHaveBeenCalled();
+      }
+      // The old test's stranding reality is exactly what must NOT happen now:
+      // zero boxes provisioned, zero run records written.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+
+    test("AC4: a cap AT the backstop passes the boundary and reaches the mint as the keyCap", async () => {
+      // The inclusive boundary leg of the same derivation: defaultKeyCapMicroUsd
+      // itself is legal at every layer (B1, the gate's min, the mint guard),
+      // and it is the keyCap the mint is asked for when it binds.
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+      const ledger = goodLedger(defaultKeyCapMicroUsd, defaultKeyCapMicroUsd);
+
+      await dispatch(
+        validBrief(),
+        deps({
+          capMicroUsd: defaultKeyCapMicroUsd,
+          ledgerFactory: () => ledger,
+        }),
+      );
+
+      const [, limitArg] = mintSpy.mock.calls[0] as [string, number];
+      expect(limitArg).toBe(defaultKeyCapMicroUsd / 1_000_000);
+      const admit = ledger.admitCalls[0] as (typeof ledger.admitCalls)[number];
+      expect(admit.capMicroUsd).toBe(defaultKeyCapMicroUsd);
+      expect(admit.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+    });
+
+    test("D2: a STRUCTURED mint error (ProviderError family) keeps its message AND its composed remediation at the step-7 catch", async () => {
+      // The step-7 catch used to discriminate on `instanceof FleetError`, so a
+      // `CredentialLifecycleError` — the ProviderError family's `{code,
+      // remediation}` shape, NOT a FleetError — was flattened to the generic
+      // text plus the INV-5 line, and the diagnosis written for the refusal
+      // shipped nowhere but `payload.providerCode`. Capability-based now
+      // (DF2.14): the message survives (suffixed with the run context, the
+      // same pattern the FleetError branch uses) and the remediation is
+      // COMPOSED — structured first, INV-5 second, neither dropped.
+      const structured = new CredentialLifecycleError(
+        "cap-invalid",
+        "capMicroUsd 90000000 exceeds the backstop defaultKeyCapMicroUsd (50000000) — refusing to mint a key above the provider ceiling",
+        "lower capMicroUsd to the working ceiling, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
+      );
+      keyApi.createKey = async () => {
+        throw structured;
+      };
+      const ledger = goodLedger();
+
+      try {
+        await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(1);
+        // The mapping is UNCHANGED: a non-FleetError is still
+        // key-delivery-failed, and the exit code stays 1.
+        expect(err.code).toBe("key-delivery-failed");
+        // The provider's message survives, suffixed with the run context.
+        expect(err.message).toContain("exceeds the backstop defaultKeyCapMicroUsd");
+        expect(err.message).toContain("during key mint or delivery for run");
+        // COMPOSED remediation: the structured half first, INV-5 second.
+        expect(err.remediation).toContain("lower capMicroUsd to the working ceiling");
+        expect(err.remediation).toContain("raise defaultKeyCapMicroUsd in src/providers/credentials.ts");
+        expect(err.remediation).toContain("run record is OPEN and the box is ALIVE");
+        // The provider code still rides the payload as diagnosis.
+        expect(err.payload?.providerCode).toBe("cap-invalid");
+        // INV-5 posture unchanged: the box exists and the record is open.
+        const runId = err.payload?.runId as string;
+        expect(store.get(runId).closedAt).toBeUndefined();
+      }
+    });
+
+    test("AC5: a ledgerFactory that THROWS refuses admission-failed and never mints", async () => {
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMintA = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMintA(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(
+          validBrief(),
+          deps({
+            ledgerFactory: () => {
+              throw new Error("factory exploded");
+            },
+          }),
+        );
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("admission-failed");
+      }
+      expect(createSpy).not.toHaveBeenCalled();
+      // No path falls back to defaultKeyCapMicroUsd on the way out.
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+
+    test("AC5: a typed CostLedgerError from the gate refuses ledger-failed and never mints", async () => {
+      // `admitThrowsLedger()` throws a RAW Error, which lands in the
+      // admission-failed arm the two tests above and AC7's own already pin;
+      // the ledger-failed code is the TYPED arm, so this fixture throws the
+      // typed error the way AC7's sibling does.
+      const ledger = goodLedger();
+      ledger.admitIssue = () => {
+        throw new CostLedgerError("ledger-schema-mismatch", "schema drifted under the gate", "migrate, then retry");
+      };
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMintC = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMintC(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("ledger-failed");
+        expect(err.payload?.providerCode).toBe("ledger-schema-mismatch");
+      }
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+
+    test("AC5: an over-budget issue refuses budget-exceeded and never mints", async () => {
+      const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMintD = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMintD(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(validBrief(), deps({ ledgerFactory: () => overBudgetLedger() }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("budget-exceeded");
+      }
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
   });
 });

@@ -64,7 +64,7 @@ import { FanoutRecordStore, mintFanoutId } from "../../src/fleet/fanout.ts";
 import { CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
-import type { KeyApi } from "../../src/providers/credentials.ts";
+import { defaultKeyCapMicroUsd, type KeyApi } from "../../src/providers/credentials.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { goodLedger, overBudgetLedger, type RecordingLedger } from "./helpers.ts";
 
@@ -6120,21 +6120,31 @@ process.on = ((sig, listener) => {
 
   // round-6 review: explicit-empty refusals (C1/C2/C3)
   describe("round-6 review refusals", () => {
-    test("C1: --cap-micro-usd above $1M (1e12 µ$) is refused with domain bound", async () => {
+    test("C1: --cap-micro-usd above the backstop defaultKeyCapMicroUsd is refused with the mint's vocabulary (INV-CAP-1, DF2.14)", async () => {
+      // The old bound here was a free-floating $1M domain figure — 20,000× the
+      // enforced ceiling — so an over-backstop cap passed this parse, passed
+      // admission and F15, provisioned billable boxes and died at the mint on
+      // every arm. The bound is now the backstop itself, and this test DERIVES
+      // its fixture from the imported constant: edit the number on either side
+      // and this boundary moves instead of silently forking.
       const code = await runCli(
-        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "1000000000001"],
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", String(defaultKeyCapMicroUsd + 1)],
         fanoutDeps(),
       );
       expect(code).toBe(2);
       const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
       expect(envelope.code).toBe("usage");
       expect(envelope.message).toContain("--cap-micro-usd");
-      expect(envelope.remediation).toContain("1000000000000");
+      // The remediation names the knob and the knob's home — the same
+      // vocabulary the mint guard uses.
+      expect(envelope.remediation).toContain("defaultKeyCapMicroUsd");
+      expect(envelope.remediation).toContain(String(defaultKeyCapMicroUsd));
+      expect(envelope.remediation).toContain("src/providers/credentials.ts");
     });
 
-    test("C1: --cap-micro-usd accepts exactly $1M (1e12 µ$)", async () => {
+    test("C1: --cap-micro-usd accepts exactly the backstop (defaultKeyCapMicroUsd µ$) — the bound is inclusive", async () => {
       const code = await runCli(
-        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "1000000000000"],
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", String(defaultKeyCapMicroUsd)],
         fanoutDeps(),
       );
       expect(code).toBe(0);

@@ -45,6 +45,7 @@ import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 // file keys on the `BOX_MARKER_PATH` literal the poller actually probes, so an
 // ambient `QDS_RUN_ROOT` cannot silently unhook the fixtures.
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
+import { defaultKeyCapMicroUsd } from "../../src/providers/credentials.ts";
 import { FleetError, type GateOpts } from "../../src/fleet/dispatch.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
@@ -529,6 +530,44 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(existsSync(lockPath)).toBe(false);
       expect(boxCount(driver)).toBe(0);
       expect(fanoutRecordFiles()).toHaveLength(0);
+    });
+
+    test("a cap above the backstop defaultKeyCapMicroUsd refuses exit 2 before anything runs — the bound is derived, not copied", async () => {
+      // INV-CAP-1 (DF2.14): the mint refuses any cap above the backstop; before
+      // this bound, a fan-out over it passed admission and F15, provisioned
+      // every arm's billable box, and died arm-by-arm at the mint. The bound
+      // under test is the IMPORTED constant, so raising the backstop moves
+      // these rows instead of silently forking the two layers.
+      manifest();
+      for (const cap of [defaultKeyCapMicroUsd + 1, 10 * defaultKeyCapMicroUsd]) {
+        /* dp:ok deliberately over-backstop fixtures: each row asserts the invalid-cap refusal */
+        const err = await refuseOf(
+          fanout("best-of-n", 2, brief(), deps({ rosterIds: ["a", "b"], capMicroUsd: cap })),
+        );
+        expect(err.exitCode).toBe(2);
+        expect(err.code).toBe("invalid-cap");
+        expect(err.message).toContain("defaultKeyCapMicroUsd");
+      }
+      // Zero side effects: no lock, no boxes, no fan-out record — and F15's
+      // reconciliation (which runs inside the lock) never saw a doomed figure.
+      expect(existsSync(lockPath)).toBe(false);
+      expect(boxCount(driver)).toBe(0);
+      expect(fanoutRecordFiles()).toHaveLength(0);
+    });
+
+    test("a cap AT the backstop is legal everywhere and fans out — the bound is inclusive", async () => {
+      manifest();
+      const res = await fanout("best-of-n", 2, brief(), deps({
+        rosterIds: ["r0", "r1"],
+        capMicroUsd: defaultKeyCapMicroUsd,
+      }));
+      expect(res.arms).toHaveLength(2);
+      // Both arms actually DISPATCHED clean — the boundary cap is not merely
+      // accepted by validation, the arms reached `ready`.
+      for (const arm of res.arms) {
+        expect(arm.outcome).toBe("ready");
+        expect(arm.runId).not.toBeNull();
+      }
     });
   });
 
