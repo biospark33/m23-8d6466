@@ -5342,49 +5342,76 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(callB.keyCapMicroUsd).toBe(10_000_000);
     });
 
-    test("AC4: an admitted ceiling above the backstop reaches the mint and is refused there — stranding a real box", async () => {
-      // Nothing between the decision and the mint clamps the ceiling (AC1/AC2
-      // pin the pass-through), so the backstop refusal is the FIRST bound an
-      // over-granted admission meets — in step 7, AFTER provisionAdmittedRun
-      // wrote the OPEN record and created the box. Both halves of the gate's
-      // min must clear the backstop for the decision to look like this, which
-      // is why the fixture names a 60M ceiling AND a 60M config cap AND a 60M
-      // deps.capMicroUsd: the shipped 5_000_000 µ$ default would bind
-      // `remaining` below 50M and the mint would SUCCEED.
-      const overBackstop = 60_000_000;
+    test("AC4: a per-run cap above the backstop refuses PRE-ADMISSION at the dispatch boundary — no box, no record, no admission", async () => {
+      // DF2.14 retired the stranding class this test used to pin ("reaches the
+      // mint and is refused there — stranding a real box"): B1 now bounds
+      // `deps.capMicroUsd` at `defaultKeyCapMicroUsd` before the budget gate
+      // runs, so an over-backstop cap never admits, never provisions, never
+      // writes a record. The derivation is BEHAVIORAL, not textual: the bound
+      // under test is the imported constant, so raising the backstop moves this
+      // test's boundary instead of silently forking it — and B1 is never
+      // reverted to keep an old stranding pin green.
+      const overBackstop = defaultKeyCapMicroUsd + 1;
       const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
       driver.create = createSpy;
       const originalMint = keyApi.createKey.bind(keyApi);
       const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
       keyApi.createKey = mintSpy;
+      const ledger = goodLedger(overBackstop, overBackstop);
+      const admitsBefore = ledger.admitCalls.length;
 
       try {
         await dispatch(
           validBrief(),
           deps({
             capMicroUsd: overBackstop,
-            ledgerFactory: () => goodLedger(overBackstop, overBackstop),
+            ledgerFactory: () => ledger,
           }),
         );
         failUnreachable();
       } catch (e) {
         if (e instanceof UnexpectedSuccessError) throw e;
         const err = e as FleetError;
-        expect(err.exitCode).toBe(1);
-        expect(err.code).toBe("key-delivery-failed");
-        expect(err.payload?.providerCode).toBe("cap-invalid");
-        // The guard is pre-createKey: no key was asked for, none exists.
+        expect(err.exitCode).toBe(2);
+        expect(err.code).toBe("invalid-cap");
+        // The refusal names the knob and the code change that owes a test.
+        expect(err.message).toContain("defaultKeyCapMicroUsd");
+        expect(err.remediation).toContain("src/providers/credentials.ts");
+        // Both figures ride the payload: the refused cap and the backstop.
+        expect(err.payload?.capMicroUsd).toBe(overBackstop);
+        expect(err.payload?.backstopMicroUsd).toBe(defaultKeyCapMicroUsd);
+        // PRE-admission: the gate never ran, no key was asked for.
+        expect(ledger.admitCalls.length).toBe(admitsBefore);
         expect(mintSpy).not.toHaveBeenCalled();
-        // The stranded-box reality: step 6 already ran, the record is OPEN and
-        // carries no keyHash, and `classifyReservation` counts it until teardown
-        // closes it — the headroom does NOT age out the way a no-ceiling
-        // refusal's absent record does.
-        expect(createSpy).toHaveBeenCalledTimes(1);
-        expect(readdirSync(store.dir)).toHaveLength(1);
-        const record = store.get(err.payload?.runId as string);
-        expect(record.closedAt).toBeUndefined();
-        expect(record.keyHash).toBeUndefined();
       }
+      // The old test's stranding reality is exactly what must NOT happen now:
+      // zero boxes provisioned, zero run records written.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+
+    test("AC4: a cap AT the backstop passes the boundary and reaches the mint as the keyCap", async () => {
+      // The inclusive boundary leg of the same derivation: defaultKeyCapMicroUsd
+      // itself is legal at every layer (B1, the gate's min, the mint guard),
+      // and it is the keyCap the mint is asked for when it binds.
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+      const ledger = goodLedger(defaultKeyCapMicroUsd, defaultKeyCapMicroUsd);
+
+      await dispatch(
+        validBrief(),
+        deps({
+          capMicroUsd: defaultKeyCapMicroUsd,
+          ledgerFactory: () => ledger,
+        }),
+      );
+
+      const [, limitArg] = mintSpy.mock.calls[0] as [string, number];
+      expect(limitArg).toBe(defaultKeyCapMicroUsd / 1_000_000);
+      const admit = ledger.admitCalls[0] as (typeof ledger.admitCalls)[number];
+      expect(admit.capMicroUsd).toBe(defaultKeyCapMicroUsd);
+      expect(admit.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
     });
 
     test("AC5: a ledgerFactory that THROWS refuses admission-failed and never mints", async () => {

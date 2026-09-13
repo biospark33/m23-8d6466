@@ -160,7 +160,7 @@ import { runUnitName, startRun, type StartRunOptions, type StartRunResult } from
 import { ATTACH_MESSAGE_CHAR_CEILING } from "../src/phase-engine/steering.ts";
 import { sanitizeForMessage } from "../src/phase-engine/types.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
-import type { KeyApi } from "../src/providers/credentials.ts";
+import { defaultKeyCapMicroUsd, type KeyApi } from "../src/providers/credentials.ts";
 import type { ExitStatus } from "../cli-anything/src/types.ts";
 
 const HELP = renderHelp(listVerbs());
@@ -2287,8 +2287,17 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
       "a fan-out width",
       `--n takes an integer 1-${FANOUT_MAX_N} (best-of-n/race need two arms to compare)`,
     );
-    // C1: Upper bound of $1M (1e12 µ$) — domain ceiling for per-arm caps.
-    const CAP_MAX_MICRO_USD = 1_000_000_000_000;
+    // C1 + INV-CAP-1 (DF2.14): the per-arm cap's ceiling is the BACKSTOP, not a
+    // free-floating $1M domain figure. The old 1e12 bound advertised values
+    // 20,000× the enforced ceiling: `--cap-micro-usd 100000000 --n 3` passed
+    // this parse, passed F15's reconciliation, reserved 3 × $100 of admission
+    // headroom, provisioned three BILLABLE boxes, and then died at the mint's
+    // INV-CAP-1 `cap-invalid` on every arm — real money for work that could
+    // never start. The bound is DERIVED from the same exported constant
+    // `mintRunKey` enforces — never a numeric copy — so raising the backstop is
+    // one edit plus its test (the drift alarm in tests/fleet/cli.test.ts
+    // asserts refusal at exactly defaultKeyCapMicroUsd + 1, so a number edited
+    // on either side moves the boundary instead of silently forking it).
     const capRaw = flags.get("--cap-micro-usd");
     const capMicroUsd =
       capRaw === undefined
@@ -2297,9 +2306,9 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
             "--cap-micro-usd",
             capRaw,
             1,
-            CAP_MAX_MICRO_USD,
+            defaultKeyCapMicroUsd,
             "a micro-dollar amount",
-            `--cap-micro-usd takes a positive integer of micro-dollars (1-${CAP_MAX_MICRO_USD}, where $1 is 1000000)`,
+            `--cap-micro-usd takes a positive integer of micro-dollars (1-${defaultKeyCapMicroUsd}, where $1 is 1000000) — a cap above the backstop defaultKeyCapMicroUsd is refused at the mint by INV-CAP-1 after billable boxes exist; lower it, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it`,
           );
 
     // INV-2 / validation-before-construction: fanout()'s cheap structural

@@ -39,7 +39,7 @@ import {
   stripAuthoredLimit,
 } from "../phase-engine/manifest.ts";
 import { fillRun, provisionAdmittedRun, type ProviderDriver } from "../providers/driver.ts";
-import { mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
+import { defaultKeyCapMicroUsd, mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
@@ -2436,6 +2436,28 @@ export async function dispatch(
         { capMicroUsd: deps.capMicroUsd },
       );
     }
+    // INV-CAP-1 (DF2.14): the backstop bound rides the same early guard.
+    // `mintRunKey` refuses any cap above `defaultKeyCapMicroUsd`, and before
+    // this arm a `--cap-micro-usd` above the backstop passed B1, admitted (the
+    // gate's `min(keyCap, remaining)` clears the backstop whenever the issue's
+    // own cap does too), provisioned a LIVE BILLABLE box and only then died at
+    // the mint's `cap-invalid` — stranding the OPEN record and the box until
+    // teardown (`classifyReservation` counts unclosed records; the orphan guard
+    // never retires them). Bounding the keyCap HERE makes the whole class
+    // pre-admission: zero boxes, zero records, zero admissions. Issue caps
+    // (`defaultCapMicroUsd` / `perIssueOverrides`) are deliberately NOT bounded
+    // — the gate's `min` absorbs them — and the mint guard stays the
+    // caller-agnostic last line for non-dispatch callers. The bound is DERIVED
+    // from the same exported constant, never a numeric copy.
+    if (deps.capMicroUsd !== undefined && deps.capMicroUsd > defaultKeyCapMicroUsd) {
+      throw refuse(
+        2,
+        "invalid-cap",
+        `capMicroUsd ${deps.capMicroUsd} exceeds the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — refusing to admit a run whose key could not be minted`,
+        "lower --cap-micro-usd to defaultKeyCapMicroUsd or below (the working ceiling is min(keyCap, the admission's remaining budget)), or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
+        { capMicroUsd: deps.capMicroUsd, backstopMicroUsd: defaultKeyCapMicroUsd },
+      );
+    }
     let ledger: LedgerLike | undefined;
     let decision: Extract<AdmissionDecision, { admitted: true }>;
     try {
@@ -2591,37 +2613,27 @@ export async function dispatch(
     //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
     //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
     //      refusing a non-positive `capMicroUsd`.
-    // DF2.13 adds one more reachable refusal downstream of here, and the
-    // reservation it strands does NOT age out the way this arm's does.
-    // `mintRunKey` now refuses any cap above `defaultKeyCapMicroUsd` — the
-    // provider backstop is an enforced bound at the mint, not a docstring. The
-    // knob that reaches it is `--cap-micro-usd` (`deps.capMicroUsd`), which B1
-    // bounds by MAX_SAFE_INTEGER only; that knob alone cannot reach the refusal
-    // either — the effective ceiling is `min(keyCap, remaining)`, so against the
-    // shipped `defaultCapMicroUsd` of 5_000_000 µ$ even a 900_000_000 µ$
-    // `--cap-micro-usd` admits at 5M and mints fine. The mint refuses only when
-    // BOTH halves of that min clear the backstop: the issue's remaining budget
-    // (config `defaultCapMicroUsd` / `perIssueOverrides` minus committed spend)
-    // AND the passed cap.
+    // DF2.13's mint-time `cap-invalid` refusal downstream of here used to be
+    // reachable from this call path, and EXPENSIVELY so. The effective ceiling
+    // is `min(keyCap, remaining)`, so it fired only when BOTH halves cleared
+    // the backstop — the issue's remaining budget (config `defaultCapMicroUsd`
+    // / `perIssueOverrides` minus committed spend) AND the passed
+    // `--cap-micro-usd`. By then `provisionAdmittedRun` had written an OPEN run
+    // record and created a LIVE BILLABLE box, which `classifyReservation`
+    // counts (`closedAt === undefined`) until teardown closes the record: the
+    // headroom did not age out the way this arm's absent record does, and the
+    // box billed until an operator tore the run down.
     //
-    // This arm fires BEFORE `store.create`, so the reservation it strands is an
-    // absent record the orphan guard retires after `ADMISSION_GRACE_MS` +
-    // `ADMISSION_SKEW_MARGIN_MS` (~6 min). A `cap-invalid` refusal fires in step
-    // 7, AFTER `provisionAdmittedRun` has written an OPEN run record and created
-    // a LIVE BILLABLE box — `classifyReservation` returns "count" while that
-    // record is unclosed (`closedAt === undefined`), so the orphan guard never
-    // retires it: the headroom returns only when teardown closes the record
-    // (plus the grace window), and the box bills until an operator tears the
-    // run down.
-    //
-    // This is the accepted cost, not an oversight: bounding the config caps at
-    // load is DF2.8's filed follow-up, and until it lands the mint guard is the
-    // enforced backstop. The observable is the `fleet.dispatch` error line with
-    // `payload.providerCode` "cap-invalid" (exit 1, the generic
-    // `key-delivery-failed` text — `CredentialLifecycleError` is not a
-    // `FleetError`, so its message and remediation do not survive the step-7
-    // catch). A `cap-invalid` line in the dispatch log is the same signal
-    // arriving the expensive way.
+    // DF2.14 RETIRES that class: B1 now bounds `deps.capMicroUsd` at
+    // `defaultKeyCapMicroUsd` pre-admission, so the knob that reached the mint
+    // guard cannot clear the backstop from dispatch at all. The `min` keeps its
+    // meaning — issue caps are deliberately unbounded and absorbed by it — and
+    // the observable for a would-be over-ceiling run is a clean exit-2
+    // `invalid-cap` refusal with zero boxes, zero run records and zero
+    // admissions, not a `providerCode: "cap-invalid"` line (exit 1, generic
+    // text) arriving the expensive way. The mint guard itself is UNCHANGED and
+    // stays the caller-agnostic last line for non-dispatch callers (the demo,
+    // `runCredentialLifecycle`, direct programmatic mint calls).
     if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
       throw refuse(
         5,
