@@ -529,3 +529,19 @@ Tally: 11 PATCHED / 2 DEFERRED / 12 DISMISSED. CodeRabbit re-review pending; sto
 
 Negative-control evidence re-verified: `/tmp/df213-red3.log` = 2 fail (both AC4 tests) / 90 pass
 against unguarded source.
+
+## Post-Merge Closeout (2026-09-13)
+
+- MERGED: PR #254 to dev as 8494999e, after PR review round 1 (7-reviewer adversarial pass —
+  14 patched / 2 deferred / 12 dismissed, rounds recorded above) and round 2 (3 coderabbit
+  findings, all verified against source and applied, de552d7).
+- BOTH ROUND-1 DEFERRALS RESOLVED by the unslotted 1-pt follow-up DF2.14
+  (df2-14-cap-followups.md, commits eb802a6 + f6afc79): (1) the keyCap bound at every entry —
+  CLI parse, fanout validatePatternInput, dispatch B1 pre-admission — all derived from the
+  imported defaultKeyCapMicroUsd, retiring the stranded-box cost this PR's rewritten dispatch.ts
+  comment had documented as accepted; (2) the step-7 catch's capability-based structured-error
+  preservation (composed remediation). The AC4 stranding test was rewritten to the
+  pre-admission refusal as part of the cascade.
+- Tenth image-pin adoption rode the merge: gate B run 34762465643 printed
+  31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67 / a095d2629d5bcc09 (walk
+  digest 72d8d83b -> 0c5509f3); adoption commit d63f603, healing run 34763066890.

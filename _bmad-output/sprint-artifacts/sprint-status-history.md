@@ -90,3 +90,31 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # contract). Sixth image-pin adoption rode the round (gate B 50360fbb…/5561b2caeb34b2f0, healing green,
 # mirror re-pushed). Findings filed: #247 (exeuntu base drift), #248 (bun sqlite same-process artifact).
 # Full record: story §"Live E2E — round 6"; evidence _bmad-output/evidence/df3-e2e/2026-09-10-*.
+
+# 2026-09-12 (DF2.13 IN-REVIEW — INV-CAP-1 enforced, DF3.6a UNBLOCKED from treating the chain as fact):
+# mintRunKey now refuses capMicroUsd > defaultKeyCapMicroUsd with cap-invalid in the pre-mint ladder
+# (src/providers/credentials.ts, before keyApi.createKey — every caller inherits it: dispatch,
+# scripts/cap-hit-demo.ts, runCredentialLifecycle). The chain's TOP term
+# residentSpendCeilingMicros <= capMicroUsd <= defaultKeyCapMicroUsd has an enforcement point that
+# runs. DF3.6a MAY NOW IMPLEMENT against the chain: its loadResidentBounds can assert
+# capMicroUsd <= defaultKeyCapMicroUsd as a property of the SYSTEM, not of the configuration. The
+# lower term remains DF3.6a's own clamp (min(residentSpendCeilingMicros, limitMicroUsd)) — no test
+# asserts an unconditional resident <= cap (legal near-exhaustion remainder mints below it).
+# Negative-control evidence (red-on-unguarded-src): the AC4 tests failed exactly as the story's
+# make-or-break demanded before the guard landed (ledger .unlazy/df2-13/GATES.md G8).
+# Deviations recorded (story deviations 1-2 + review round 1): the story asked dispatch.ts's
+# no-ceiling arm "recorded as reachable" — ground truth (verified in cost-ledger.ts admitIssue) is
+# UNREACHABLE from dispatch on all paths (B1 bound + remainingMicroUsd > 0 gates + replay clamp);
+# the DF2.13 comment addition instead documents the NEW downstream mint-time cap-invalid refusal,
+# and that refusal is NOT a no-ceiling equivalent. no-ceiling fires before store.create (absent
+# record; the orphan guard retires it after ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS ~6 min).
+# The mint-time cap-invalid fires AFTER provisionAdmittedRun wrote an OPEN run record and created a
+# LIVE BILLABLE box, and classifyReservation counts unclosed records (cost-ledger.ts closedAt ===
+# undefined -> "count"), so the orphan guard never retires it — headroom returns only at teardown
+# close (+ grace), the box bills until an operator tears the run down. Reachability: the knob is
+# --cap-micro-usd (DispatchDeps.capMicroUsd) AND the config issue cap minus committed spend must
+# also clear the backstop (the shipped 5_000_000 default binds below it: --cap-micro-usd
+# 900_000_000 alone admits at 5M and mints fine). Observable: the refusal surfaces as the
+# fleet.dispatch error line with payload.providerCode "cap-invalid" (exit 1, generic
+# key-delivery-failed text; CredentialLifecycleError's message/remediation do not survive the
+# catch) — not a no-ceiling exit-5 line. Details in the story's Dev Agent Record.
