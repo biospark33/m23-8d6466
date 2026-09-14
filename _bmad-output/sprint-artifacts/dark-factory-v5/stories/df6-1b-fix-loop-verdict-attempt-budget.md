@@ -220,7 +220,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    has minted the run record, provisioned the box and delivered the capped key, so one box-hour
    and one key cap are already sunk even though no CI ran and no second box is bought. "Charges
    nothing" means no `attempt` increment, never a free invocation: the refusal still enters the
-   uncharged ledger, but the loop itself never dispatches another attempt for it (first
+   uncharged ledger (recorded, never counted toward the ceiling), and the loop itself never
+   dispatches another attempt for it (first
    occurrence escalates immediately, every time) — so it can be recorded **at most once per PR**,
    and the accumulate-to-3 ceiling governs the classifications a re-invocation can actually
    reproduce (`transient`, `lead_failure`, `approval-timed-out`, `orphaned`), not this one. A

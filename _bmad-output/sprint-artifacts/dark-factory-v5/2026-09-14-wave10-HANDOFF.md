@@ -69,22 +69,25 @@ The load-bearing ones, with the parent's verification notes:
 - **W9-D-2 (HIGH, DF6.1b AC2/DoD) — APPLIED 2026-09-14 (CodeRabbit round, this branch):** the uncharged-attempt ceiling of 3, the per-attempt
   classification list, and `out-of-scope-diff`'s cap of 1 need **storage** no declared state can
   hold (record vocab closed; ledger = `fixAttemptRunIds` only; `fixOutcome` write-once-at-terminal).
-  Resolution applied (amended by the second 2026-09-14 CodeRabbit round): the per-attempt lifecycle
+  Resolution applied (amended by the second and third 2026-09-14 CodeRabbit rounds): the per-attempt lifecycle
   states (awaiting-approval / terminal / poll-interrupted-recovery / orphaned) are **derived on
   the driver's read from the fix run's own record, in arm order** — a terminal outcome ⇒ terminal,
   its **classification** deciding the budget (`ci-red`/`ci-verdict-unavailable` charged;
-  `transient`/`lead_failure`/`approval-timed-out`/`dispatch-refused` uncharged-terminal toward the
+  `transient`/`lead_failure`/`approval-timed-out` uncharged-terminal toward the
   ceiling of 3; `out-of-scope-diff` cap 1 / `scope-requires-privilege` neither); else
   `extensions.approval.state === "awaiting-approval"` (**the `state` field, not the bare extension**
   — `approved`/`rejected`/`timed-out` are decided states the terminal/`fixContext` arms classify;
   `ApprovalState`, `src/reverify/approval.ts`) ⇒ awaiting-approval continuation; else `fixContext`
   ⇒ poll recovery within the window; else orphaned (counts toward the uncharged ceiling) — no new
   registration, no second ledger field, and a crash cannot strand a half-written state.
-  `dispatch-refused` is **resource-bearing**: every DF6.2 refusal fires from the in-box
-  `dispatch_task` phase, after the record, box and capped key exist, so it counts toward the
-  uncharged ceiling while still escalating on first occurrence (the loop never dispatches another
-  attempt for it); `fixOutcome.runIds` stays the terminal audit aggregate (AC3) and is never the
-  retry ledger.
+  `dispatch-refused` is **resource-bearing** but **excluded from the uncharged accumulate-to-3
+  ceiling**: every DF6.2 refusal fires from the in-box `dispatch_task` phase, after the record,
+  box and capped key exist (one box-hour and one capped key are already sunk), yet the refusal is
+  deterministic — first occurrence escalates immediately, the loop never dispatches another
+  attempt for it, and it is recorded at most once per PR — so it is bounded by its own
+  first-occurrence escalation, not by the ceiling, which governs only the classifications a
+  re-invocation can actually reproduce; `fixOutcome.runIds` stays the terminal audit aggregate
+  (AC3) and is never the retry ledger.
 - **W9-D-4 (HIGH, DF6.1a AC2):** the proposal-variation trigger ("run carries a `fixContext`
   brief key") is unobservable in `src/reverify/runner.ts` (zero brief refs; brief consumed
   in-memory in `dispatch.ts`, never persisted host-side; `fixContext` written only after the

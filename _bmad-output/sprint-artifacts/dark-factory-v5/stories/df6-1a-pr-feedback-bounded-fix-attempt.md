@@ -228,12 +228,15 @@ the harvested diff, the credential probe, and the `fixContext` write.
    not-yet-known `attemptSha`.
 
    The record write is **pre-flighted in validate-only mode before `pushVerifiedSha` is called**
-   (INV-7): the encoded payload is built with `attemptSha` set to a canonical 40-lowercase-hex
-   placeholder and run through the same validation the write will apply, so a payload that would be
+   (INV-7): the encoded payload is built with the two fields whose real values cannot exist
+   before the push set to canonical placeholders — `attemptSha` as 40-lowercase-hex, and
+   `pollWindowOpenedAt` as a canonical ISO-8601 stamp (the window opens only when
+   `pushVerifiedSha` returns, so its true value is likewise unknowable pre-push) — and run
+   through the same validation the write will apply, so a payload that would be
    refused is refused **while nothing has been published**. The post-push write differs from the
-   pre-flighted value in **exactly that one field**, asserted by a test that diffs the two encoded
-   strings — "a write of an already-validated value" means precisely this, because the real
-   `attemptSha` cannot exist before the push. The residual is stated rather than hidden: a 40-hex
+   pre-flighted value in **exactly those two fields**, asserted by a test that diffs the two encoded
+   strings — "a write of an already-validated value" means precisely this, because neither the
+   real `attemptSha` nor the real `pollWindowOpenedAt` can exist before the push. The residual is stated rather than hidden: a 40-hex
    sha cannot trip `assertNoSecret`'s prefix scan, and cannot satisfy the shape heuristic's
    **`mixedClass` conjunct** — which requires lower **and** upper **and** digit, so an all-lowercase
    git SHA fails it (the shipped scanner's own comment says exactly this; the charset class alone
@@ -241,11 +244,13 @@ the harvested diff, the credential probe, and the `fixContext` write.
    failing validation.
 
    *Negative controls, both MUST fail:* an implementation that writes `fixContext` before the push, or
-   in two steps, leaves an `attemptSha`-less record that DF6.1b's SHA-bound poll would bind to
-   nothing; and an implementation whose pre-flight placeholder is not the documented 40-hex form, or
-   whose post-push value differs from the pre-flighted one in any **other** field, MUST fail —
-   "validated something before the push" is not the test; "validated this value, up to that one
-   field" is.
+   in two steps, leaves a record missing either post-push field (`attemptSha`-less, as DF6.1b's
+   SHA-bound poll would bind to nothing, or missing `pollWindowOpenedAt`, which kills the
+   `poll-interrupted` window accounting); and an implementation whose pre-flight placeholders are
+   not the documented forms (40-hex for `attemptSha`, canonical ISO-8601 for
+   `pollWindowOpenedAt`), or whose post-push value differs from the pre-flighted one in any field
+   **other than those two**, MUST fail — "validated something before the push" is not the test;
+   "validated this value, up to those two fields" is.
 5. **(boundary/guard — was DF6.1 AC5)** Given a fix roster declaring ≥2 workers with write access to
    the workspace, When the brief is validated, Then dispatch exits non-zero, provisions nothing, and
    names the unproven-capability guard (see Technical Notes).
