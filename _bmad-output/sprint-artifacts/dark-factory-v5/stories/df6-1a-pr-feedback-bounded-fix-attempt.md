@@ -708,6 +708,20 @@ the harvested diff, the credential probe, and the `fixContext` write.
   cannot, and the DoD's negative controls all still pass. A hit on **any** of them aborts the run and
   tears the box down.
 
+  **And the resolved unit itself is inspected, not only the environment a transient probe inherits.**
+  The `systemd-run --service-type=exec` probe starts from the system manager's environment and proves
+  nothing about the directives `qds-run@<runId>.service` itself carries: a drop-in —
+  `/etc/systemd/system/qds-run@.service.d/*.conf`, or the instance-scoped
+  `qds-run@<runId>.service.d/` — holding `Environment=GH_TOKEN=…` would be loaded by the real unit and
+  stay invisible to every check above, transient and `.env` alike. The same preflight therefore reads
+  the **resolved unit and its drop-ins** — `systemctl cat qds-run@<runId>.service`, which prints the
+  unit followed by every drop-in — before `fleet run` starts it, and asserts: every `Environment=`
+  value on the unit or any drop-in is free of credential-bearing keys (`GH_TOKEN`, `GITHUB_TOKEN`,
+  `GH_ENTERPRISE_TOKEN`, `GITHUB_API_TOKEN`, `SSH_AUTH_SOCK`, `GIT_ASKPASS`, or any `*TOKEN=` key),
+  and every `EnvironmentFile=` directive names the one approved path `/home/exedev/app/.env` — the
+  file whose content the leg above checks — with any additional `EnvironmentFile=` a refusal. A hit on
+  any of them aborts the run and tears the box down, exactly like the legs above.
+
   **Mechanism, not just requirement (M3).** The probe runs as
   `sudo -n systemd-run --wait --pipe --service-type=exec --uid=<the unit's User=> …` — `sudo -n`
   because passwordless sudo is an established substrate property (`fleet run`'s precedent in
@@ -798,11 +812,16 @@ the harvested diff, the credential probe, and the `fixContext` write.
 - [ ] **Security (credential-free box):** the dispatch preflight probe asserts every sink named in
       INV-3 — `credential.*`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh/hosts.yml`, `GH_TOKEN`,
       `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_API_TOKEN`, `SSH_AUTH_SOCK`, `url.*.insteadOf` —
-      in the environment the run unit inherits. A test that plants `~/.git-credentials`, one that
-      writes a `gh` `hosts.yml`, and one that sets `GH_ENTERPRISE_TOKEN` each abort the run before
+      in the environment the run unit inherits, **plus the resolved unit's own directives: every
+      `Environment=` value on `qds-run@<runId>.service` and its drop-ins free of credential-bearing
+      keys, and every `EnvironmentFile=` naming only the approved `/home/exedev/app/.env`**
+      (INV-3). A test that plants `~/.git-credentials`, one that
+      writes a `gh` `hosts.yml`, one that sets `GH_ENTERPRISE_TOKEN`, and one that drops
+      `/etc/systemd/system/qds-run@.service.d/plant.conf` carrying `Environment=GH_TOKEN=…` each abort
+      the run before
       `fleet run <run-id>` starts the unit, with no agent work performed and the box torn down.
       *An implementation probing only `GH_TOKEN`/`GITHUB_TOKEN` and `credential.*` MUST fail all
-      three* (INV-3).
+      four* (INV-3).
 - [ ] **Test (push outcome arms):** a refused `pushVerifiedSha` **resolves** `{ ok: false }` and never
       rejects — the attempt records the `failedPrecondition` and writes **no** `fixContext`; an
       `{ ok: true, pushed: false }` resume records `fixContext` and is a success;
@@ -900,8 +919,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `authorLogin`, (iii) a PR produced by DF5.2 under that `authorLogin` carrying a real comment
       from that bot, and **(iv) a `.factory/fix-scope.json` entry for the disposable repo's slug,
       carrying the shipped default (allow `src/**`, `tests/**`, `scripts/**`; the verification-surface
-      deny-list), verified present before the round starts** — its absence is a `fix-scope-missing`
-      refusal that lands after the box and the spend, which is exactly the failure to design out. The
+      deny-list), verified present before the round starts** — a round that begins without it dies on
+      its own setup: the command refuses `fix-scope-missing` **before any box is provisioned** (the
+      negative control below proves exactly that), so the pre-round verification is what keeps the
+      round runnable at all, not what rescues a spend. The
       same round asserts the free negative control: with the entry removed, the command refuses
       `fix-scope-missing` before any box exists. Roster is `config/rosters/roster.yaml` — the only
       e2e roster when this spec was written (DF2.12's tier-2 round later added

@@ -133,7 +133,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    Then the host **polls every 30 seconds** until every required check has settled, reading **two**
    host-authenticated `gh` calls per poll because **neither surface alone carries both facts**:
 
-   - `gh pr view <n> --json headRefOid` supplies the PR's current head commit sha. `gh pr checks`
+   - `gh pr view <n> --json headRefOid,headRefName` supplies the PR's current head commit sha — and
+     `headRefName`, which AC2's parent-run join reads off the same response. `gh pr checks`
      exposes no per-check commit sha and so cannot prove a green belongs to this attempt.
    - `gh pr checks <n> --required --json name,state,bucket` supplies the required-check set with its
      settled `bucket`. **`gh pr view --json statusCheckRollup` carries no requiredness marker and no
@@ -186,7 +187,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    successful push — When **the operator re-invokes `bun scripts/fix-run.ts --pr <n>`**, Then that invocation resolves the PR's recorded
    attempt state through the parent-run join and the **attempt-time `fixAttemptRunIds` ledger**
    (Technical Notes, "Attempt bookkeeping" — there is no PR-number index, and `fixOutcome` does not
-   exist pre-terminal), observes `attempt = 1` with a
+   exist pre-terminal). The join is concrete and runs before any record read beyond the validation
+   itself: `parentRunId = headRefName.slice("qds/".length)` off the same `gh pr view` response AC1
+   already specifies (`headRefName` rides beside `headRefOid`), **validated by
+   `store.get(parentRunId)`** — a PR whose head branch is not `qds/<existing-runId>` refuses here,
+   before the parent record is read any further. The invocation then observes `attempt = 1` with a
    non-green outcome, and dispatches attempt 2 with `fixContext.attempt = 2` carrying attempt 1's CI
    failure output and runId.
 
@@ -264,7 +269,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 | Trigger | Status | E2E Test | Follow-Up |
 | --- | --- | --- | --- |
 | `bun scripts/fix-run.ts --pr <n>` — the **sole** trigger (DD-1: the operator is the channel). One invocation drives **at most one attempt**; the operator's next invocation drives the next | in-scope — extends DF6.1a's verb additively | `tests/fixloop/cli.test.ts` | — |
-| Required-check verdict by the two-call composition (`gh pr view <n> --json headRefOid` + `gh pr checks <n> --required --json name,state,bucket`), SHA-bound to the attempt | in-scope | `tests/fixloop/ci-status.test.ts` | — |
+| Required-check verdict by the two-call composition (`gh pr view <n> --json headRefOid,headRefName` + `gh pr checks <n> --required --json name,state,bucket`), SHA-bound to the attempt | in-scope | `tests/fixloop/ci-status.test.ts` | — |
 | Human escalation comment on the PR at budget exhaustion or a non-recoverable terminal state | in-scope | `tests/fixloop/escalation.test.ts` | — |
 | Inbound webhooks (`status` / `check_suite` / `pull_request`) and any host-side receiver | out-of-scope — no webhook ingress in the v5 slate (AC1); P1.18's receiver is not built or depended on here | — | none in v5.0 |
 | Scheduled sweeper that re-polls stale PRs | out-of-scope — no scheduler in v5.0 | — | none derived; the operator re-invokes |
@@ -274,7 +279,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 
 | Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
 | --- | --- | --- |
-| Required-check verdict source | GitHub API via **two** host-authenticated `gh` calls: `gh pr view <n> --json headRefOid` (the head sha, taken before and after) and `gh pr checks <n> --required --json name,state,bucket` (the required-check set and its settled bucket) — **from the host, requiring no branch-protection read and therefore no repo-admin token scope** | polled at attempt start and every 30 s; no inbound webhook, no receiver, no public endpoint (AC1) |
+| Required-check verdict source | GitHub API via **two** host-authenticated `gh` calls: `gh pr view <n> --json headRefOid,headRefName` (the head sha taken before and after; the head branch name feeding AC2's parent-run join) and `gh pr checks <n> --required --json name,state,bucket` (the required-check set and its settled bucket) — **from the host, requiring no branch-protection read and therefore no repo-admin token scope** | polled at attempt start and every 30 s; no inbound webhook, no receiver, no public endpoint (AC1) |
 | GitHub required-check configuration | the PR's own required-check set as `gh pr checks <n> --required` reports it — **not** the classic branch-protection endpoint (`GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`), which requires **admin** on the repository | read at attempt start; a PR whose required set is empty ("no required checks reported on the '<branch>' branch") is refused, never counted green (AC1) |
 | Host GitHub token | host operator environment — `readHostToken` (`src/pr/github.ts`), handed to `gh` **as the `gh` child's environment only** (`GH_TOKEN` set on the spawned child, never on this process's environment, never argv) — the same containment `gitEnv` uses for git credentials in `src/pr/push.ts` | the same scope opening a PR already needs; no escalation to repo-admin |
 | `gh` CLI | installed on the host, version-floored to one exposing `gh pr checks --required --json` with the `bucket` field and `gh pr view --json headRefOid` (both verified against gh 2.93.0; the floor exists so a host without them fails loudly, not green) | the two-call composition shells out to `gh`; this story introduces it as this repo's first `gh` dependency deliberately — its `--required`/`bucket` fields are the measured surface, and a `GitHubApi` port would need a GraphQL `isRequired(pullRequestId:)` selection, a bigger seam change than one child-env token |
@@ -386,8 +391,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   validates it: DF5.2's `defaultTargetRef(runId)` makes the PR's head branch **`qds/<parentRunId>`**,
   and DF6.1a's Trigger Surface already refuses a PR whose head branch is not `qds/<run-id>` with a
   matching run record. So **`parentRunId = headRefName.slice("qds/".length)`, validated by
-  `store.get(parentRunId)`** — one `gh pr view --json headRefName` (a call this story already makes
-  per poll) plus one record read; no sweep, no fleet-wide read cost, and the lock key exists before
+  `store.get(parentRunId)`** — one `gh pr view --json headRefOid,headRefName` (the call
+  AC1 specifies — both facts, one request) plus one record read; no sweep, no fleet-wide read cost, and the lock key exists before
   any record is scanned. **The attempt-time ledger is `extensions.fixLoop.fixAttemptRunIds` — a
   `strings`-kind field this story registers (adds-only) on the already-registered `fixLoop`
   namespace, appended with each attempt's fixRunId at that attempt's dispatch** — and therefore
@@ -399,6 +404,20 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   this lookup must survive. `fixOutcome.runIds` remains the terminal aggregate the audit chain reads
   (AC3); the ledger is what AC2's driver reads. No second state store; no sweep — the ledger rides
   the parent record the join already resolves.
+
+  **The append is pinned to the dispatch path's first record write, not to its last.** The
+  `fixAttemptRunIds` append happens under the parent lock **immediately after the fix runId is minted
+  and before the box is provisioned** — so an invocation that exits early after provisioning (a
+  crash, a kill, a torn-down terminal) still leaves the attempt recorded, and the next `--pr`
+  invocation sees it. An entry with no terminal outcome on its own record is an **orphaned attempt**:
+  it counts toward AC2's uncharged ceiling — a dead attempt never reached CI, so it never increments
+  `attempt` — is named on the invocation's log line, and is what stops a crash-retry loop from
+  spending unboundedly: three orphaned attempts stop the loop exactly as three observed uncharged
+  attempts do. The terminal transition — the fix run's own outcome classification and, when terminal,
+  the parent's `fixOutcome` — is written under the **same parent lock** the dispatch was taken under.
+  Pending retention lives in the ledger alone; **`fixOutcome` is not extended to carry pending
+  attempts** — it stays write-once-at-terminal, which is the shape DF5.3's audit chain (hop 1, AC3)
+  reads.
 - **Concurrency: the lock is keyed on the PARENT run, not the fix run.** Two concurrent `--pr <n>`
   invocations are excluded by `acquireRunLock(runsDir, parentRunId, "fix-run --pr")`, where
   `parentRunId` is resolved by the head-branch join above — **before any lock is taken**, since the

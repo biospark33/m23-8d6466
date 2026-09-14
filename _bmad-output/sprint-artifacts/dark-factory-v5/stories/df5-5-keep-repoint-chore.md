@@ -551,7 +551,9 @@ list: zero hits, never opened.
   diff per file: an AC/DOD/INV hunk whose before/after differ by anything other than a mapped
   `P1.x` → `DF<n>.<m>` substitution (or the addition of `(now DF<n>.<m>)`) is a rejection.
   *(Why this is stated in substance terms: amendment A's occurrence table orders edits to five
-  lines that sit inside those blocks, so a line-touch reading would make INV-1 and AC1 mutually
+  lines, **four of which sit inside those blocks** — `p1-11:48` sits in that file's
+  `## Technical Notes`, not a governed block, and is counted separately below — so a line-touch
+  reading would make INV-1 and AC1 mutually
   unsatisfiable — apply them and review rejects, skip them and AC1's grep fails. The audit permits
   the swap; it forbids the substance change.)* The **four** known in-block edits are **`p1-3:39`**
   (AC4), **`p1-3:154`** and **`p1-3:155`** (DoD), and **`p1-12:31`** (AC3). *(`p1-11:48` sits in

@@ -251,7 +251,10 @@ clause.)*
   `BEFORE UPDATE`/`BEFORE DELETE` triggers `RAISE(ABORT)` (INV-AUDIT-4), and **creates no file the gate
   merely intended to read** — which is the operative half of this invariant, and it holds by
   **mechanism, not assertion**: the walker's read-write open is preceded by DF5.3's no-create
-  `openSync(path, "r")` probe (typed `audit-store-absent`) with the held-fd inode re-check, because
+  `openSync(path, "r")` probe (typed `audit-store-absent`) and **bound to the probed inode through
+  to the opened database** — the post-open identity re-open on the same path, with the probe fd
+  still held, refusing `audit-store-identity-changed` before any digest write (DF5.3's Infra
+  Prerequisites: the identity-window sequence) — because
   `bun:sqlite`'s `new Database(path)` would otherwise materialise a zero-byte `audit.db` before any
   schema assertion — the identical defect DF2.11 chartered against, one store over, and the reason
   the DoD's file-set snapshot runs one gate pass with `audit.db` **absent**. `audit.db` runs on the
@@ -316,7 +319,12 @@ clause.)*
       snapshot exercise is run **twice**: once with the fixture's `audit.db` present (row count may
       only increase) and once with it **absent** — the absent-file pass must end with `audit.db` still
       absent (the no-create opener's proof) and the gate red on C9's `audit-store-absent`, never green
-      on a store the run created. A redaction test asserts no token, key material or PII reaches any
+      on a store the run created. **A third pass covers the identity window:** with `audit.db`
+      swapped for a different file after the no-create probe and before C9's SQLite open, the walk
+      refuses `audit-store-identity-changed`, the gate is red on C9, no digest row lands in the
+      replacement, and the swap file is byte-identical afterwards — the replace-and-remove window
+      DF5.3's inode-bound opener exists to close, asserted at the gate, not assumed from DF5.3's
+      suite. A redaction test asserts no token, key material or PII reaches any
       assertion detail or report field.
 - [ ] **Test (unit):** each clause's pure auditor is green on the fixture and red on a mutant with the
       asserted field removed — proving a missing field fails rather than reading as satisfied.

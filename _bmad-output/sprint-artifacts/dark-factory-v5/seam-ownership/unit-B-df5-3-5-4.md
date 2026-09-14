@@ -14,7 +14,7 @@ resolves all four.
 | O1 | `src/audit/{link-store,chain,index}.ts` — the walker, the ten-hop table, `ChainReport`/`OQ4_VOID_REASON` exports | DF5.3 |
 | O2 | The audit store's **no-create opener** (`openSync(path, "r")` probe → `audit-store-absent`, held-fd inode re-check → `audit-store-identity-changed`) — the DF2.11 ledger discipline, one store over | DF5.3 |
 | O3 | `scripts/qds-audit.ts` CLI surface incl. the path seams `--runs-dir --audit-db --ledger --reverify-dir` (and runId invocation resolving hop 1 locally) | DF5.3 |
-| O4 | The `recordAuditLink` seam fields + required composition sites: `provisionAdmittedRun`, `teardownSandbox`, `runCredentialLifecycle`, **and `harvestRun` (its own `HarvestDeps` sites, incl. `scripts/fleet.ts` + `scripts/sandbox-teardown.ts` threading)** | DF5.3 |
+| O4 | The `recordAuditLink` seam fields + required composition sites: `provisionAdmittedRun` (its named options type), `teardownSandbox`, `runCredentialLifecycle`, **`harvestRun` (its own `HarvestDeps` sites, incl. `scripts/fleet.ts` + `scripts/sandbox-teardown.ts` threading), and `fillRun` — a new trailing **required** options argument on `fillRun` (`src/providers/driver.ts`), threaded at the dispatch fill step, `scripts/cap-hit-demo.ts`, and every `tests/providers/` fake** | DF5.3 |
 | O5 | The frozen fixture's `pr-body.txt` capture (in `scripts/dev/capture-run-of-record.ts`) | DF5.4 |
 | O6 | `src/gate/assertions/df5-{execution,boundary,accounting}.ts` + the driver | DF5.4 |
 | O7 | C8's PR-body read — **through the frozen `pr-body.txt` via the gate's `--pr-body` seam**, never live GitHub | DF5.4 |
@@ -39,7 +39,7 @@ resolves all four.
 | W6-B-M6 (C2) | `fetchBundle` (a symbol that does not exist) replaced by `harvestRun`'s `verify`/`fetch` steps; hop-6's reachable loss causes named (bundle absent after lawful harvest; `noHarvest` teardown with no prior harvest — the live pause-path call); the stronger true statement kept: an in-flight bundle failure aborts teardown, so it cannot produce a walkable PR. |
 | W6-B-M7 (C1+C2) | Hop 2 cites `src/phase-engine/trace/migrations.ts` beside the schema; the `String(sessions.issue_id)` coercion rule stated once; a NULL correlation resolves `not-applicable` naming DF1.8's nullability comment. |
 | W6-B-M8 (C1) | `DF2.11` added to the yaml DF5.3 row (parent). |
-| W6-B-L1 (C2) | Strictness kept; the divergence from `push.ts`'s non-strict `<` recorded in one sentence (remedy: tighten `push.ts`, never loosen C7). |
+| W6-B-L1 (C2) | Strictness kept; the divergence from `push.ts`'s non-strict `<` recorded in one sentence (remedy: tighten `push.ts`, never loosen C7 — **owned by DF5.3**, landing in DF5.3's own PR so the admission rule and the chain agree from one merge). |
 | W6-B-L2 (C1) | `RowClass`/`hasTokenRows` cited by symbol; `trace/schema.ts` given its directory. |
 | W6-B-L3 (C4) | Both stories note `report.ts`'s header names the last line authoritative *for DF5.2*; the audit chain and the gate deliberately select the bound report. |
 | W6-B-L4 (C4) | DoD Integration states the `dispatch.ts` composition-root exception explicitly. |

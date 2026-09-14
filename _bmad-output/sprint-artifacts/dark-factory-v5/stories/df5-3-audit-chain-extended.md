@@ -68,9 +68,12 @@ runs through `reap`, whose emitter lives in the reaper. **DF2.11** supplies
 **degraded to VOID**, not satisfied (R5 §5.3, DD-4).
 
 *Scope note on the shared files: each edit adds one `recordAuditLink(...)` emit at an existing event
-site, **plus one seam field per deps interface** — `recordAuditLink?: (link: AuditLink) => void` on
-`CredentialDeps` (`credentials.ts`), `HarvestDeps` (`harvest.ts`), `TeardownDeps`
-(`teardown.ts`) and `SweepDeps` (`reaper.ts`). The seam, not a direct import, is mandatory:
+site, **plus one seam field per deps interface** — `recordAuditLink: (link: AuditLink) => void` — a
+**required** field on `CredentialDeps` (`credentials.ts`), `HarvestDeps` (`harvest.ts`),
+`TeardownDeps` (`teardown.ts`) and `SweepDeps` (`reaper.ts`), and `provisionAdmittedRun`,
+`teardownSandbox`, `runCredentialLifecycle` and `harvestRun` accept (or narrow to) those interfaces
+as declared, so a construction missing the field fails **at compile time**, at every caller, not at
+run time for the first unthreaded one. The seam, not a direct import, is mandatory:
 `src/providers/*` takes no ambient dependencies, and importing `src/audit/*` there would invert the
 direction DF4.2 established with `src/providers/viz-guard.ts`. No logic or control flow in those files
 changes and no existing field is touched, so there is no double-implementation risk with their owning
@@ -85,10 +88,11 @@ production path), none of which flows through `TeardownDeps` — so a caller tha
 fails to typecheck rather than producing a run whose hop 6 is `unlinked` and whose lights-on gate is
 red forever.*** The `driver.ts` threading is smaller than it first
 looks — only `provisionAdmittedRun` and `fillRun` are live sites, and the driver-side seam carrier is
-stated rather than implied: a new optional `recordAuditLink?` field on `provisionAdmittedRun`'s named
-options type, and a new trailing optional options argument on `fillRun` (additive — its existing
-production callers, the dispatch fill step and `scripts/cap-hit-demo.ts`, are threaded in this story
-alongside every `tests/providers/` fake already listed), never a module-level ambient import, which
+stated rather than implied: a new **required** `recordAuditLink` field on `provisionAdmittedRun`'s named
+options type, and a new trailing **required** options argument on `fillRun` — signature changes whose
+existing production callers, the dispatch fill step and `scripts/cap-hit-demo.ts`, are threaded in this story
+alongside every `tests/providers/` fake already listed, so the compile-time-fail property covers the
+driver-side sites exactly as it covers the four `*Deps` interfaces — never a module-level ambient import, which
 would violate the no-ambient-dependencies rule above — but `src/fleet/dispatch.ts` gains
 the `setup-gate` emit, which is new work in a file this story did not originally touch. That
 threading, the harvest-call-site threading in `scripts/fleet.ts`/`scripts/sandbox-teardown.ts`, the
@@ -179,8 +183,13 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
    re-verify from the decision has not demonstrated the decision followed the evidence. **This
    strictness is a deliberate strengthening over shipped code, recorded as such:** `push.ts`'s
    enforcement on the same boundary is non-strict (`decided < completed` refuses; equality passes and
-   the PR opens), so a millisecond-equal pair is a red gate on a PR DF5.2 lawfully admitted — the
-   remedy is to tighten `push.ts`, never to loosen this chain's comparison. A violation is a
+   the PR opens — verified at `src/pr/push.ts`'s preflight), so a millisecond-equal pair is a red gate on a PR DF5.2 lawfully admitted — the
+   remedy is to tighten `push.ts`, never to loosen this chain's comparison. **The tightening is
+   owned, not wished for: this story lands it** (Files to Modify: `src/pr/push.ts`, DF5.2-owned —
+   the preflight's boundary refusal widens from `decided < completed` to `decided <= completed`,
+   refusal code and message unchanged), on the same consumer-owns-new-work-in-a-done-story's-file
+   precedent this story already set with the `src/fleet/dispatch.ts` `setup-gate` emit. DF5.4-C6/C7
+   assert the same strict pair, so the chain, the gate and the admission rule agree from one merge. A violation is a
    named broken hop `order-violation` with both timestamps and a non-zero exit. *Negative control (`tests/audit/chain.test.ts`): a chain whose revoke precedes its mint MUST fail
    this AC; an implementation asserting presence only passes and MUST fail.*
 
@@ -199,7 +208,7 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
 
 | Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
 |-----------|-------------------------------|-------------------------|
-| Host-side link store `.sandbox/audit.db` (resolved `QDS_AUDIT_DB ?? .sandbox/audit.db`, dir mode 0700, file 0600 — the `CostLedger` constructor's side-effect list is the pattern to copy, **except its `PRAGMA journal_mode = WAL`: this store stays on SQLite's default `DELETE` journal**, so it leaves no `-wal`/`-shm` siblings and DF5.4's "the gate wrote nothing but its report and these rows" file-set assertion can be **exact** rather than carrying a transient-sidecar exception list — an exception on a byte-identical assertion is where a real difference hides. `audit_links` is append-only, low-volume and read once per walk, so it has no throughput reason to want WAL, and DF2.11's "**Named ceiling — a read-only open of a WAL database**" bullet records the other half of the cost: a WAL database cannot be opened read-only without writing a `-shm`. **And the opener copies DF2.11's no-create discipline, because `bun:sqlite`'s `new Database(path)` creates the file when absent — the identical defect DF2.11 chartered against, one store over:** the walker's read-write open is preceded by a no-create `openSync(path, "r")` probe that throws a typed `audit-store-absent` while holding the fd, the held fd's `fstatSync(fd).ino` is re-checked against the probed inode to throw `audit-store-identity-changed` on a replace-and-restore across the open window, and only then does `new Database(path, {})` open the store that provably already existed) | `bun:sqlite`, bundled with the project's bun toolchain — no new dependency | schema migrated idempotently (`CREATE TABLE/TRIGGER IF NOT EXISTS`, serialized with `BEGIN IMMEDIATE` + `busy_timeout`) during the first `recordAuditLink` (write-time init) only; the walker opens read-**write** — it appends first-observation digest rows, see Technical Notes — but **never** migrates and **never creates**: it asserts the schema is present and fails the walk closed with a named broken hop per INV-AUDIT-6, and the no-create opener means an uninitialized store (zero `recordAuditLink` calls) is a typed `audit-store-absent` refusal, never a zero-byte file the read path materialised; host-side so it survives box destruction (§6 item 4) |
+| Host-side link store `.sandbox/audit.db` (resolved `QDS_AUDIT_DB ?? .sandbox/audit.db`, dir mode 0700, file 0600 — the `CostLedger` constructor's side-effect list is the pattern to copy, **except its `PRAGMA journal_mode = WAL`: this store stays on SQLite's default `DELETE` journal**, so it leaves no `-wal`/`-shm` siblings and DF5.4's "the gate wrote nothing but its report and these rows" file-set assertion can be **exact** rather than carrying a transient-sidecar exception list — an exception on a byte-identical assertion is where a real difference hides. `audit_links` is append-only, low-volume and read once per walk, so it has no throughput reason to want WAL, and DF2.11's "**Named ceiling — a read-only open of a WAL database**" bullet records the other half of the cost: a WAL database cannot be opened read-only without writing a `-shm`. **And the opener copies DF2.11's no-create discipline and then closes the hole a held-fd-only comparison leaves, because `bun:sqlite`'s `new Database(path)` creates the file when absent — the identical defect DF2.11 chartered against, one store over:** the walker's read-write open is (1) preceded by a no-create `openSync(path, "r")` probe that throws a typed `audit-store-absent` while **holding** the fd and recording its `fstatSync(fd).ino`; (2) followed by `new Database(path, {})` — an open **by path**, which can land on a different inode than the one probed if the store is removed or replaced in the window between probe and open (the held fd keeps the probed inode alive but does not pin the path, so comparing the held fd's inode to itself can never fire); (3) the opened database is therefore **bound to the probed inode before any digest write**: with the probe fd still held, the opener takes a second `openSync(path, "r")` on the same path and compares its `fstatSync(fd).ino` against the recorded probe inode — a mismatch (replace-and-restore across the window) or a failed re-open (removal across the window) throws `audit-store-identity-changed`, closes every fd and the database, and writes nothing; only verified identity proceeds to any first-observation digest row) | `bun:sqlite`, bundled with the project's bun toolchain — no new dependency | schema migrated idempotently (`CREATE TABLE/TRIGGER IF NOT EXISTS`, serialized with `BEGIN IMMEDIATE` + `busy_timeout`) during the first `recordAuditLink` (write-time init) only; the walker opens read-**write** — it appends first-observation digest rows, see Technical Notes — but **never** migrates and **never creates**: it asserts the schema is present and fails the walk closed with a named broken hop per INV-AUDIT-6, and the no-create opener means an uninitialized store (zero `recordAuditLink` calls) is a typed `audit-store-absent` refusal, never a zero-byte file the read path materialised; host-side so it survives box destruction (§6 item 4) |
 | DF2.8 cost ledger `.sandbox/cost-ledger.db` (`DEFAULT_COST_LEDGER_FILE`, overridable by `QDS_COST_LEDGER_FILE`) · DF1.4 **harvested** trace DB · DF2.1 run record | host `bun:sqlite` store · `<runsDir>/<runId>-artifacts/trace/trace.db` (pulled out of the box by DF2.5's `pullArtifacts`, `harvest.ts:1068`; the `trace/` prefix is load-bearing — see Technical Notes) · `<runsDir>/<runId>.json` via `resolveRunsDir()` (`src/providers/run-record.ts:1178`) | the cost hop constructs `new CostLedger({ path })` and calls its `readRunCost(runId)` **method** — DF2.8 exports the class, not a free function — run-keyed, never the issue-scoped `readIssueCost` — the hop is about *this run's* spend, not the issue's, and it never re-SUMs. **This buys no tolerance of an issue-less run:** `extensions.budget` is written only when the dispatch carries an issue ref (`src/providers/driver.ts:572`; `src/providers/run-record.ts:220-221`), and `ingestBoxHoursIfAttributed` writes no box-hours row without a string `repoSlug`/`issueId` (`teardown.ts`), so an issue-less run has zero ledger rows, `hasEvents` is `false`, and AC5 makes hop 3 a **broken** hop. That is intended and matches DF5.4-C1: a run nothing admitted is a run nothing capped, and it is not a run this chain can vouch for. **The ordinary constructor is not read-only** (the `CostLedger` constructor: `mkdirSync` 0700, `chmodSync` 0700, `new Database()` which CREATES the file when absent, `chmodSync` 0600, `PRAGMA journal_mode = WAL`, `db.exec(SCHEMA)`), so the walker opens through **DF2.11's `CostLedger.openReadOnly({ path })`** and never lets the read path create the store it is auditing. Not an `existsSync` pre-check: DF2.11 specifies a **no-create `openSync(path, "r")`** that throws `ledger-absent`, holding the fd open and comparing `fstatSync(fd).ino` against the probed inode to throw `ledger-identity-changed` on a replace-and-restore (DF2.11's "**`openReadOnly` is a static factory on the same class**" bullet). Hop 3 resolves as a named broken hop on either code, and on DF2.11's typed hot-WAL refusal `ledger-wal-recovery-required` (DF2.11's "**Named ceiling — a read-only open of a WAL database**" bullet — SQLite cannot open a WAL database read-only without writing a `-shm`). **The trace DB is an artefact of a completed harvest, not a live host store: hops 2 and 9 first resolve `runId → record.requestId` (`src/providers/run-record.ts:139`), then join the trace DB on `request_id` (`trace/schema.ts:35` `sessions`, `:86` `gate_results.request_id` — the store is keyed on `request_id` throughout, never on `run_id`).** A run whose artifacts pull failed (`teardown.ts:279-287`, non-fatal by design) or whose box rebooted before harvest (tier-2 placement ADR `:81-82`, measured: `/run` is tmpfs and a reboot wipes it) resolves hops 2 and 9 as `{ status: "evidence-not-harvested", reason, evidencePath }` — a *named, typed* outcome distinct from a broken hop, because the loss is a recorded teardown outcome, not a missing link. The run record is resolvable by runId at walk time, and an unreadable record is a named broken hop, never a skipped one |
 | DF5.1 re-verify record · DF3.4 approval record · DF5.2 PR record · GitHub PR body read | host-side artifacts written by those stories; GitHub API with the host-side token | each read read-only by path — the walker asserts presence and identity and never re-runs the underlying action; the token is checked by name only and never reaches a diagnostic or the chain object (INV-AUDIT-2) |
 
@@ -371,6 +380,9 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
 - `src/providers/teardown.ts`
 - `src/providers/reaper.ts`
 - `src/fleet/dispatch.ts` (the `setup-gate` emit — a composition root importing `recordAuditLink` directly)
+- `src/pr/push.ts` (DF5.2-owned; **one comparison tightened**: the preflight's `decided < completed`
+  refusal becomes `decided <= completed`, so the admission rule matches AC7's strict chain —
+  ownership rationale in AC7; no other line of the preflight changes)
 - `scripts/fleet.ts` and `scripts/sandbox-teardown.ts` (threading the now-required `HarvestDeps.recordAuditLink` at their existing `harvestRun` call sites — see the Scope note)
 - `scripts/qds-audit.ts`
 - `tests/audit/link-store.test.ts`
@@ -455,7 +467,12 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
       implementation whose read-write open materialises a zero-byte `audit.db` before any schema
       assertion MUST fail this test; so must one whose DoD fixture always ships an `audit.db`, hiding
       the create branch from the harness (the fixture carries no `audit.db` precisely so the branch
-      runs).
+      runs). **Two identity-window controls ride the same harness:** a walk whose `audit.db` is
+      **swapped for a different file after the no-create probe and before the SQLite open** refuses
+      `audit-store-identity-changed`, writes no digest row into the replacement, and leaves the
+      replacement byte-identical; one whose `audit.db` is **removed in the same window** refuses the
+      same code, recreates nothing, and ends with the path absent. An opener whose identity check
+      compares the probe fd's own inode to itself — a comparison that cannot fire — MUST fail both.
 - [ ] **Test (authorizing-record tamper, `tests/audit/chain.test.ts`):** a walk records digests for hops
       1, 7 and 8; editing the **bound** `ReverifyReport`'s `verdict` **in place** and re-walking yields
       `evidence-mismatch` on hop 7 and a non-zero exit, while **appending a lawful second report does
@@ -465,6 +482,11 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
 - [ ] **Test (ordering, `tests/audit/chain.test.ts`):** a chain whose `revoke` row precedes its `mint`
       row, and a run whose `approval.decidedAt` precedes its `reverify.completedAt`, each yield
       `order-violation` and a non-zero exit (AC7).
+- [ ] **Test (admission-rule strictness, AC7):** an approval whose `decidedAt` **equals** its bound
+      report's `completedAt` is refused `approval-precedes-report` by `pushVerifiedSha`'s preflight —
+      equality no longer opens a PR. An implementation leaving `push.ts` non-strict passes every
+      chain test and MUST fail this one; so must one that loosens the chain's comparison to match
+      the old admission rule instead of tightening the rule (AC7's remedy is one-directional).
 - [ ] **Test (e2e demo — MANDATORY):** walk a real merged factory PR and capture the printed chain as
       an artifact — ten hops, the VOID memory hop with its OQ-4 reason, a µ$ cost total, under 30 s.
 
