@@ -194,8 +194,10 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    exist pre-terminal). The join is concrete and runs before any record read beyond the validation
    itself: `parentRunId = headRefName.slice("qds/".length)` off the same `gh pr view` response AC1
    already specifies (`headRefName` rides beside `headRefOid`), **validated by
-   `store.get(parentRunId)`** — a PR whose head branch is not `qds/<existing-runId>` refuses here,
-   before the parent record is read any further. The invocation then observes `attempt = 1` with a
+   `store.get(parentRunId)` plus the resolved record's `extensions.pr.prNumber === n`** — a PR
+   whose head branch is not `qds/<existing-runId>`, or whose resolved record's `extensions.pr`
+   names a different PR number than the requested one, refuses here,
+   before `fixAttemptRunIds` is read or the parent record is read any further. The invocation then observes `attempt = 1` with a
    non-green outcome, and dispatches attempt 2 with `fixContext.attempt = 2` carrying attempt 1's CI
    failure output and runId.
 
@@ -209,17 +211,21 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    under-provisioned roster, dual-gate rejection, manifest-schema or manifest-dir refusal — is a
    **deterministic** failure that a second identical dispatch cannot fix. It does **not** increment
    `attempt`; it escalates immediately with the refusal's own message as the diagnostic, naming the
-   refused precondition, and provisions nothing further. **It is nonetheless resource-bearing, and
-   it counts toward the uncharged ceiling.** Every refusal in DF6.2's class list fires from the
+   refused precondition, and provisions nothing further. **It is nonetheless resource-bearing —
+   one box-hour and one capped key are already sunk — but it is bounded by its own
+   first-occurrence escalation, not by the uncharged ceiling.** Every refusal in DF6.2's class list fires from the
    `dispatch_task` phase *inside* the already-provisioned box
    (`src/phase-engine/phases/dispatch-task.ts` reads `QDS_TEAM_RUNNER` and the roster from the
    box's own environment; the dual-gate spawns pi there) — by the time the phase refuses, DF6.1a
    has minted the run record, provisioned the box and delivered the capped key, so one box-hour
    and one key cap are already sunk even though no CI ran and no second box is bought. "Charges
    nothing" means no `attempt` increment, never a free invocation: the refusal still enters the
-   uncharged ledger, the loop itself never dispatches another attempt for it (first occurrence
-   escalates immediately, every time), and repeated operator re-invocations against the same
-   refusal are exactly what the accumulate-to-3 ceiling bounds. An attempt classified `transient` or
+   uncharged ledger, but the loop itself never dispatches another attempt for it (first
+   occurrence escalates immediately, every time) — so it can be recorded **at most once per PR**,
+   and the accumulate-to-3 ceiling governs the classifications a re-invocation can actually
+   reproduce (`transient`, `lead_failure`, `approval-timed-out`, `orphaned`), not this one. A
+   later invocation that reads a recorded `dispatch-refused` dispatches nothing, provisions
+   nothing, and re-escalates. An attempt classified `transient` or
    `lead_failure` is likewise not a fix failure: DF1.3 already spent its own separately-bounded parse
    and gate retries inside the run, and this story adds no third retry vocabulary — such an attempt
    escalates with the classification named, and the operator decides whether to re-invoke. Only an
@@ -231,8 +237,10 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    own estimate), so "uncharged" must not mean "unlimited" — otherwise the loop terminates on the path
    where the fixer works and CI disagrees, and runs forever on the cheaper-to-reach path where the
    fixer is refused. At most **3** uncharged attempts are recorded per PR across the
-   spend-bearing uncharged classifications
-   (the lifecycle ladder in Technical Notes — "Attempt bookkeeping"); the fourth invocation
+   reproducing uncharged classifications (`transient`, `lead_failure`, `approval-timed-out`,
+   `orphaned` — the lifecycle ladder in Technical Notes — "Attempt bookkeeping";
+   `dispatch-refused` is excluded, capped at one by its own first-occurrence escalation); the
+   fourth invocation
    dispatches nothing, provisions no box, exits non-zero, and escalates with
    every recorded classification listed. **A last ledger entry whose fix run sits at
    `awaiting-approval` is the continuation state, not an uncharged attempt**: the approval
@@ -413,8 +421,10 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   validates it: DF5.2's `defaultTargetRef(runId)` makes the PR's head branch **`qds/<parentRunId>`**,
   and DF6.1a's Trigger Surface already refuses a PR whose head branch is not `qds/<run-id>` with a
   matching run record. So **`parentRunId = headRefName.slice("qds/".length)`, validated by
-  `store.get(parentRunId)`** — one `gh pr view --json headRefOid,headRefName` (the call
-  AC1 specifies — both facts, one request) plus one record read; no sweep, no fleet-wide read cost, and the lock key exists before
+  `store.get(parentRunId)` plus the resolved record's `extensions.pr.prNumber === n`** — one
+  `gh pr view --json headRefOid,headRefName` (the call
+  AC1 specifies — both facts, one request) plus one record read whose `pr` extension the join
+  checks before anything else reads the record; no sweep, no fleet-wide read cost, and the lock key exists before
   any record is scanned. **The attempt-time ledger is `extensions.fixLoop.fixAttemptRunIds` — a
   `strings`-kind field **DF6.1a registers** (adds-only) on the already-registered `fixLoop`
   namespace and appends with each attempt's fixRunId at that attempt's dispatch; this story's
@@ -443,11 +453,14 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
     **classification** — not the bare presence of an outcome — decides which budget it consumes:
     - **charged** (`ci-red`, `ci-verdict-unavailable`): the attempt reached CI and failed there;
       consumes the charged budget it earned.
-    - **uncharged-terminal** (`transient`, `lead_failure`, `approval-timed-out`,
-      `dispatch-refused`): the attempt terminated before CI but is resource-bearing, so each
-      counts toward AC2's uncharged ceiling of 3 and never the charged budget. `dispatch-refused`
-      additionally escalates on first occurrence and is never dispatched again by the loop — its
-      box and capped key were already provisioned when the in-box `dispatch_task` phase refused.
+    - **uncharged-terminal** (`transient`, `lead_failure`, `approval-timed-out`): the attempt
+      terminated before CI but is resource-bearing, so each counts toward AC2's uncharged ceiling
+      of 3 and never the charged budget.
+    - **`dispatch-refused`** — escalates on first occurrence and is never dispatched again by the
+      loop (its box and capped key were already provisioned when the in-box `dispatch_task` phase
+      refused). Never dispatched again means never recorded again: it can appear in the ledger at
+      most once per PR, so it consumes neither ceiling — its own first-occurrence escalation is
+      its bound (AC2).
     - the zero-charge refusals with their own caps — `out-of-scope-diff` (cap 1),
       `scope-requires-privilege` (never retried) — consume neither ceiling, per AC2.
   - **`awaiting-approval`** — the fix run's record carries an approval extension whose **`state`
@@ -462,10 +475,19 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   - **`poll-interrupted` (recovery)** — the record carries `fixContext` (the push happened) but no
     terminal outcome and no `awaiting-approval` approval state (the push happens only after the
     approval decides — `src/pr/push.ts` refuses on any state but `approved`): invocation 2 died
-    mid-poll. The next
-    invocation **re-enters the poll** within the 15-minute window measured from
-    `pushVerifiedSha`'s return; the poll then yields the classification fresh, so nothing has to
-    store it — window expiry classifies `ci-verdict-unavailable`, a charged failure.
+    mid-poll. The window's opening is **persisted, not remembered**: `fixContext` carries
+    `pollWindowOpenedAt` (DF6.1a's payload shape), the ISO-8601 host-clock stamp taken when
+    `pushVerifiedSha` returned — the moment the 15-minute window opens — written in the **same
+    single post-push write** as `attemptSha`. The next invocation **reads that anchor and
+    enforces it**: a window still active resumes the poll with its **remaining** time
+    (`now < pollWindowOpenedAt + 15 min`), and a window already spent is handled as expired with
+    **no poll at all** — classified `ci-verdict-unavailable`, a charged failure. The
+    classification is still never stored — the poll yields it fresh — but the window's opening
+    must be, because a recovering invocation has no other way to know when `pushVerifiedSha`
+    returned: the record store stamps `createdAt` once per record (run-record.ts:104), never per
+    write, so nothing else on disk carries the push moment. A `fixContext` whose anchor is
+    missing or unparseable refuses the recovery non-zero — fail closed (INV-6): never a
+    restarted window, never a green.
   - **`orphaned`** — none of the three: no terminal outcome, no `awaiting-approval` approval
     state, no `fixContext`. A dead attempt that never reached CI and never incremented `attempt`;
     it counts
@@ -476,7 +498,9 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   Derivation, not persistence, is the design: a persisted per-attempt state field would have its
   own crash window between the append and the state write — the exact defect class this ladder
   closes, one level down. Every input is record state the append-pinning and the gate's own
-  writes already guarantee exists, and the parent lock makes the read serial, so no prior attempt
+  writes already guarantee exists — plus the `pollWindowOpenedAt` anchor above, which rides
+  `fixContext`'s single write rather than adding one, so it inherits that write's crash-safety —
+  and the parent lock makes the read serial, so no prior attempt
   is mid-flight when it runs. The terminal transition — the fix run's own outcome classification
   and, when terminal, the parent's `fixOutcome` — is written under the **same parent lock** the
   dispatch was taken under.
@@ -596,7 +620,9 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       *An implementation reading `bucket` or requiredness off `gh pr view --json statusCheckRollup`
       MUST fail: neither field exists there.*
 - [ ] **Impl:** attempt budget (max 2 **charged** attempts) enforced from the parent record's
-      attempt-time `fixAttemptRunIds` ledger, resolved via the parent-run join, before any dispatch; one invocation drives at most one attempt, holds no lock
+      attempt-time `fixAttemptRunIds` ledger, resolved via the parent-run join —
+      `store.get(parentRunId)` plus `extensions.pr.prNumber === n`; a mismatch refuses before the
+      ledger is read — before any dispatch; one invocation drives at most one attempt, holds no lock
       across a human approval, and ships no daemon, PID file or `--loop` flag.
 - [ ] **Test (concurrent invocations, PR-scoped):** two concurrent `--pr <n>` invocations **that have
       not yet dispatched** — the read-check-increment runs under
@@ -608,13 +634,13 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       fixture runId does not exercise the mint race and does not satisfy this item. An implementation
       asserting a CAS semantic of `RunRecordStore.set` MUST also fail.*
 - [ ] **Test (uncharged-attempt ceiling):** three recorded uncharged attempts (any mix of
-      `transient`, `lead_failure`, `approval-timed-out`, `dispatch-refused`, `orphaned` —
-      `dispatch-refused` escalates on first occurrence yet still accumulates toward this ceiling:
-      its box and capped key were already provisioned when the in-box `dispatch_task` phase
-      refused, AC2) → the
+      `transient`, `lead_failure`, `approval-timed-out`, `orphaned`) → the
       fourth invocation
       dispatches nothing, provisions no box, exits non-zero and escalates listing every recorded
-      classification; **one** recorded `out-of-scope-diff` → the next invocation escalates without
+      classification; a recorded `dispatch-refused` follows its own bound, not this ceiling — the
+      invocation that records it escalates immediately and a subsequent invocation dispatches
+      nothing and re-escalates, so it never appears twice in the ledger and counts toward neither
+      ceiling (AC2); **one** recorded `out-of-scope-diff` → the next invocation escalates without
       dispatching; a last ledger entry whose fix run record carries an approval extension whose
       **`state` is `awaiting-approval`** and no
       terminal outcome is **not** counted — the invocation continues and the
@@ -669,7 +695,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 - [ ] **Test (poll ceiling):** required checks that never settle within the 15-minute poll window
       produce `ci-verdict-unavailable` → escalation, never a green; and an approval that sits
       undecided past that same 15 minutes does **not** abort the attempt — it ends only on DF3.4's
-      own expiry, as `approval-timed-out` (AC1, AC2, INV-6).
+      own expiry, as `approval-timed-out` (AC1, AC2, INV-6). A recovery invocation on a
+      `poll-interrupted` record resumes against the persisted `pollWindowOpenedAt` anchor —
+      remaining time only — and an expired anchor is classified `ci-verdict-unavailable` without
+      a single poll. *An implementation that restarts the full 15-minute window on recovery MUST
+      fail.*
 - [ ] **Test (budget exhaustion and the retry exception):** two recorded **charged** failed attempts
       → a third invocation dispatches nothing, provisions no box, exits non-zero, and posts the
       escalation with all four diagnostic elements plus the runIds; a first invocation on a PR with no

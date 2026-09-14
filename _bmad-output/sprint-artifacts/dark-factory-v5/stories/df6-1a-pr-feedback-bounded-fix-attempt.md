@@ -429,9 +429,15 @@ the harvested diff, the credential probe, and the `fixContext` write.
   So **both payloads are stored JSON-encoded as `"string"` values** and this story owns the *encoded*
   shape of `fixContext` (`schemaVersion: 1`), validated by `src/fixloop/`'s own parser on read and
   write. DF2.1's twelve-field core and its `FieldKind` set stay closed and unchanged.
-  - `fixContext: { prNumber, prBranch, attemptSha, attempt, commentIds: string[],
+  - `fixContext: { prNumber, prBranch, attemptSha, attempt, pollWindowOpenedAt,
+    commentIds: string[],
     omittedCommentIds: string[] (capped at 20), omittedCount: number, commentsDigest }` —
     `attempt` is always `1` at this story's merge point; DF6.1b supplies the value thereafter.
+    `pollWindowOpenedAt` is the ISO-8601 host-clock stamp taken when `pushVerifiedSha` returns —
+    the moment DF6.1b's 15-minute CI-poll window opens — so a later invocation recovering a
+    poll-interrupted attempt can enforce the window's remaining time instead of restarting it
+    (DF6.1b's `poll-interrupted` arm); it rides this story's single post-push write and adds no
+    second record write.
     JSON-encoded, written on **each fix run's own
     record**, one per attempt, describing the attempt that run *is*. It is never aggregated across
     attempts and never rewritten by a later attempt. **It carries no comment prose** (INV-7):
@@ -800,7 +806,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
       an "approval-extension block" of a file is not greppable).
 - [ ] **Impl:** the push goes through DF5.2's `pushVerifiedSha(runId, { targetRef })` with this
       attempt's own `ApprovalRecord` in place — no second push implementation, no INV-PR-5 bypass (AC2).
-- [ ] **Contract:** `fixContext` (incl. `attemptSha`, `attempt`, `commentIds`, `commentsDigest`) validated as the
+- [ ] **Contract:** `fixContext` (incl. `attemptSha`, `attempt`, `pollWindowOpenedAt`, `commentIds`, `commentsDigest`) validated as the
       **already-registered** `fixLoop` sub-key on **this fix run's own** DF2.1 record, JSON-encoded
       into the `"string"` field (`schemaVersion: 1`) — **no DF2.1 core edit, no new `FieldKind`, no
       `SHAPE_EXEMPT_PATHS` entry**; `dispatch_task` output validated against the v5 §5.2 step-output
