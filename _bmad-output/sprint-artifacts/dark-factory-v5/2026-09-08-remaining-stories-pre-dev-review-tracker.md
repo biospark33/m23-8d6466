@@ -376,6 +376,52 @@ its load-bearing core is small:
 **Next: fix wave on the 48 (reports carry the fix directions), then Wave 9 fresh verify.**
 Convergence target unchanged: C4-dominant residue.
 
+## Wave 8 fix — all 48 findings applied in-session (2026-09-14)
+
+Executed by the parent session (the five parallel fix agents died pre-edit on provider 429s —
+weekly limit, resets 2026-09-17 — so the work ran sequentially in-session, same protocol: every
+finding verified at source before editing, fixers pointed at report sections). All 48 findings
+across the five wave8 reports dispositioned; the consistency gate was green after every unit.
+
+**The load-bearing fixes:**
+- **W8-C-1 (HIGH):** DF3.6a gains the fill-side stamp provisioner it mandated but never owned —
+  an adds-only edit to the dispatch fill step in `src/fleet/dispatch.ts` (DF3.1-owned file,
+  DF5.3 setup-gate precedent), stamping the three bound operands onto the frozen manifest.
+  Ownership rows O20/O21 added to `seam-ownership/unit-C-df3-6ab.md`.
+- **W8-C-2 (HIGH):** DF3.6b's two AC1 live legs re-sited off the darwin host-side
+  `tier4-resident` file onto a dedicated in-box dispatch (`fleet run` under `qds-run@.service`,
+  the tier2-in-box pattern), second dispatch named, baseline `memory.peak` sourced from that
+  round's own control solicitation; costs corrected (~401 µ$ measured, two boxes).
+- **W8-C-3 (HIGH):** pipeline-run edit (v) widened to the exit-97 `unenforceable` classification;
+  the failed-solicitation record's emitter and destination named (fleet `warn` chokepoint,
+  harvested via fd-2) — mirrored in both halves' Files lists.
+- **W8-D-1 (HIGH):** the attempt-state lookup re-grounded on an owned **attempt-time ledger**:
+  DF6.1b registers `fixAttemptRunIds: "strings"` on the parent record's `fixLoop` namespace (the
+  first-class array DF5.3 anticipated), appended at each attempt's dispatch — so it exists
+  pre-terminal, unlike `fixOutcome`. Lookup = parent join → ledger's last entry → fix run's own
+  record. Ownership rows O15 (extended) + O22 added to `seam-ownership/unit-D-df6-1ab.md` (the
+  O5 pattern: DF6.1b's logic invoked from DF6.1a's invocation).
+- **W8-A-1 (HIGH):** DF3.8 AC4(d)'s retirement scoped **in-pass** — nothing persisted; a later
+  tick re-enumerates and re-refuses, counted and reported each time, the same per-tick fate as
+  the reboot arm.
+- **Post-DF2.12 premise inversions fixed everywhere they were asserted** (W8-B-1, W8-D-3):
+  DF5.3 AC5/hop-3/DoD, DF5.4-C10, both DF6.1 Observability Contracts now state the wired bridge
+  (`ingestHarvestedTokensIfWired`, `hasTokenRows: true` on healthy runs); DF5.4's producer row
+  also corrected (`fleet observe <run-id>`, not the out-of-scope `--await-completion` — found
+  in-pass, unflagged by wave8).
+- **W8-D-2:** `out-of-scope-diff` charges **zero** everywhere (DF6.1b's CI-reaching rule is
+  canonical); its cap of 1 is the third, deliberate vocabulary, owned by DF6.1b.
+- Cite-rot (W8-A-3..9, W8-B-3/4, W8-C-6, W8-D-6, W8-E-5/6): stale/wrong line citations replaced
+  by symbol or section anchors per the campaign's cite-by-symbol law; verified-exact cites kept.
+- W8-A-12: the sweep's event renamed `sweep-box-unreachable` (O15 updated).
+
+**Extra fixes beyond the worklist (recorded per open-the-file rule):** DF5.4 producer-row
+trigger (above); DF6.1a AC6 `out-of-scope-diff` charging aligned (part of W8-D-2's seam).
+
+**Not done this wave:** no yaml edits owed (no new stories, no dep-edge changes); tracker
+untouched except this section. **Next: Wave 9 — five fresh verifiers, no recipes, no prior
+reports, C1/C2/C3/C4 classification, per-story verdict. Target: C4-dominant residue.**
+
 ## Wave 5 result — the protocol predicted 30–50%; we got 93%
 
 | Verifier | B | H | M | L | Total |
