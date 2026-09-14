@@ -22,7 +22,8 @@ CI poll call site — is owned by DF6.1b's logic, invoked from DF6.1a's invocati
 | O12 | INV-3 credential probe incl. the `EnvironmentFile` sink and the `sudo -n` mechanism | DF6.1a |
 | O13 | The `p1-18` INV-2 `(P1.19)`→`(DF6.1a)` repoint edit | DF6.1a |
 | O14 | The parent-run lock key resolution (`headRefName` → `parentRunId`, validated by `store.get`) | DF6.1b |
-| O15 | The attempt bookkeeping (charged/uncharged ceilings, `out-of-scope-diff` cap) and `fixOutcome` write on the parent record | DF6.1b |
+| O15 | The attempt bookkeeping (charged/uncharged ceilings, `out-of-scope-diff` cap), the **attempt-time `fixAttemptRunIds` ledger on the parent record** (strings-kind registration + dispatch-time append — W8-D-1), and the terminal `fixOutcome` write on the parent record | DF6.1b |
+| O22 | The `fixAttemptRunIds` append call site in DF6.1a's invocation (DF6.1b's ledger logic, invoked from DF6.1a's dispatch flow — the O5 pattern) (W8-D-1) | DF6.1b (logic) via DF6.1a's invocation |
 | O16 | The `gh` child-env token containment (`GH_TOKEN` on the `gh` child only, `gitEnv` pattern) + the `gh` version floor | DF6.1b |
 | O17 | `src/audit/chain.ts` per-contributing-runId resolution (adds-only, post-DF5.3) | DF6.1b |
 | O18 | `config/rosters/roster.yaml` — **not modified by either half**; both specs describe the two-role shape it ships | parent-held invariant |

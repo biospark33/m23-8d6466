@@ -63,8 +63,11 @@ marker; **DF3.7's `observeAndDriveChain`** drives harvest (DF2.5) → teardown �
 holding no lock.**
 
 The operator decides on human time with `fleet approve <run-id>` (DF3.4). A **second**
-`bun scripts/fix-run.ts --pr <n>` invocation observes the fix run's record already carrying an
-approved `ApprovalRecord` bound to this attempt's `ReverifyReport.reportId` and head sha, re-takes
+`bun scripts/fix-run.ts --pr <n>` invocation resolves this attempt's fix run through **DF6.1b's
+attempt-time `fixAttemptRunIds` ledger on the parent record** — the head-branch join resolves the
+parent run, the ledger's last entry names the fix run (appended at that attempt's dispatch, so it
+exists before any terminal outcome), and that fix run's own record is what carries an
+approved `ApprovalRecord` bound to this attempt's `ReverifyReport.reportId` and head sha — re-takes
 `<runsDir>/<runId>.lock`, compares the harvested diff against the host-owned allowed-path list, and
 calls DF5.2's `pushVerifiedSha` to **append** one fast-forward commit to the PR branch. The sha that
 push published is `attemptSha`, written — once, after the push returns — into
@@ -139,11 +142,11 @@ the harvested diff, the credential probe, and the `fixContext` write.
 > precondition on the caller**. `scripts/fix-run.ts` takes it (the per-run invocation lock the fleet
 > already uses, `scripts/lib/run-lock.ts` — `acquireRunLock`/`withRunLock`, the same primitive
 > `fleet dispatch`'s key-mint and `runDestructive` hold), with
-> DF3.1's exit-5 "the run lock refused, so the verb never ran" mapping (`src/fleet/verbs.ts:117-124`).
+> DF3.1's exit-5 "the run lock refused, so the verb never ran" mapping (`src/fleet/verbs.ts`, the `harvest` descriptor's exit-5 note).
 > This story's fix run is one of **three** sanctioned automatic callers of that chain, alongside
 > DF3.7's own `fleet observe <run-id>` and DF3.8's `--all` sweep. DF3.7's INV-IBOX-16 **already
 > carries** the wording and already names this story
-> (`df3-7-approval-gate-bridge.md:128`): *"at most one automatic caller at a time, each holding the
+> (DF3.7's Security Invariants, INV-IBOX-16): *"at most one automatic caller at a time, each holding the
 > per-run invocation lock"* — and *"the lock lives in the caller, never in this module"*, because
 > `acquireRunLock` is not re-entrant. This caller holds it.
 >
@@ -196,7 +199,9 @@ the harvested diff, the credential probe, and the `fixContext` write.
    `awaiting-approval`, Then the invocation **exits 0** reporting `state: "awaiting-approval"`,
    releases `<runsDir>/<runId>.lock`, and leaves no child process; a concurrent `fleet harvest` or
    `fleet teardown` against that run is **not** refused exit 5. Given a later invocation of
-   `bun scripts/fix-run.ts --pr <n>` and a record already carrying an **approved** `ApprovalRecord`
+   `bun scripts/fix-run.ts --pr <n>`, the invocation resolves this attempt's fix run through the
+   parent-run join plus DF6.1b's attempt-time `fixAttemptRunIds` ledger (dispatch-time, so it
+   survives a charged attempt-1 failure — `fixOutcome` does not), and a record already carrying an **approved** `ApprovalRecord`
    bound to this attempt's `ReverifyReport.reportId` and head sha, Then that invocation re-takes the
    lock, performs AC6's scope check, calls `pushVerifiedSha`, and writes `fixContext` (AC4), **then
    continues into DF6.1b's post-push poll leg in the same invocation before exiting** — holding
@@ -225,9 +230,11 @@ the harvested diff, the credential probe, and the `fixContext` write.
    pre-flighted value in **exactly that one field**, asserted by a test that diffs the two encoded
    strings — "a write of an already-validated value" means precisely this, because the real
    `attemptSha` cannot exist before the push. The residual is stated rather than hidden: a 40-hex
-   sha cannot trip `assertNoSecret`'s prefix scan and cannot satisfy the shape heuristic's charset
-   requirements, so the one operator-uncontrollable input is provably incapable of failing
-   validation.
+   sha cannot trip `assertNoSecret`'s prefix scan, and cannot satisfy the shape heuristic's
+   **`mixedClass` conjunct** — which requires lower **and** upper **and** digit, so an all-lowercase
+   git SHA fails it (the shipped scanner's own comment says exactly this; the charset class alone
+   would admit a 40-hex string). The one operator-uncontrollable input is provably incapable of
+   failing validation.
 
    *Negative controls, both MUST fail:* an implementation that writes `fixContext` before the push, or
    in two steps, leaves an `attemptSha`-less record that DF6.1b's SHA-bound poll would bind to
@@ -273,13 +280,19 @@ the harvested diff, the credential probe, and the `fixContext` write.
    **The refusal is one of two states, because they are different events with different
    remediations:**
    - **`out-of-scope-diff` — agent error.** The fix touched files unrelated to its task (outside the
-     allow-list, or a denied action such as a delete). Retry may help. **Charges an attempt**, capped
-     at 1 by DF6.1b.
+     allow-list, or a denied action such as a delete). Retry may help. **Charges zero** — the budget
+     is charged only by attempts that reached CI (DF6.1b's opening rule); it is bounded by DF6.1b's
+     own **cap of 1 per PR** (the injection path's ceiling), a second occurrence escalating without
+     dispatching.
    - **`scope-requires-privilege` — correct refusal.** The diff matched a **deny** glob, i.e. the fix
      *necessarily* requires a privileged path: a genuine CI-config bug, a roster change, or a change
      to the verification surface. The agent behaved correctly and **retry can never succeed**, so this
      **charges zero attempts**, escalates immediately, and names the specific denied paths **and which
-     deny rule matched, with its `reason`**.
+     deny rule matched, with its `reason`**. (The escalation itself is **DF6.1b's** —
+     `src/fixloop/escalation.ts` lands there, sequenced after this story; at this story's merge point
+     the refusal records the escalation intent on its own refusal line, and the AC's escalation half
+     is satisfied at DF6.1b's merge — the same cross-half pointer shape as the charging half's cap
+     above.)
 
    Conflating them means an operator cannot tell *"my agent is misbehaving"* from *"this ticket needs
    a human"*, and burns budget on something no retry can fix.
@@ -336,7 +349,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   `grep -rn "allowedPath\|allowed-path\|allowlistPaths\|pathAllowlist" --include=*.ts src/ scripts/`
   returns nothing, and the nearest shipped allowlist — `resolveRepoEntry` (`src/pr/repos.ts`, called
   from `src/pr/push.ts`; `DEFAULT_REPOS_FILE = ".factory/repos.json"` lives beside the function) —
-  allowlists **repositories and base branches**, not paths, as its own section comment says
+  allowlists **repositories and base branches**, not paths, as the calling section's comment in `src/pr/push.ts` says
   (*"the allowlist — remote and base branch, never the harvested config"*).
 
   This story adds `.factory/fix-scope.json`:
@@ -404,7 +417,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   `extensions` namespace uses on the run record. No existing brief key changes, and a brief carrying
   any other unregistered key still fails validation.
 - **Contracts/Schema:** step output is unchanged from v5 §5.2. The `fixLoop` sub-key on DF2.1's
-  versioned `extensions` namespace is **already registered** (`src/providers/run-record.ts:216`:
+  versioned `extensions` namespace is **already registered** (`src/providers/run-record.ts`:
   `fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } }`); this story
   does **not** register it and does **not** change its kinds. `FieldKind` is
   `"string" | "int" | "ports" | "strings"` (`src/providers/run-record.ts:54`) — **there is no object kind**, and
@@ -427,7 +440,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
     **Pre-redaction is load-bearing, not incidental.** Redaction output is not a function of the
     comment alone — it depends on `SECRET_PREFIXES`, `LONG_TOKEN_RE` and `redactKeyManagementUrls`,
-    which are **living** security lists (`src/providers/run-record.ts:576-608` records `ghs_` and `AIza` added
+    which are **living** security lists (`src/providers/run-record.ts`'s `SECRET_PREFIXES` records `ghs_` and `AIza` added
     after the fact). Digesting post-redaction text would silently invalidate every historical digest
     the next time either list gains an entry. Hashing before redaction keeps the digest a stable
     statement about *what the reviewer wrote*, which is what it is for; hashing rather than embedding
@@ -443,15 +456,15 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
   **The registered shape was already right; the spec was wrong.** DF6.1 specified both payloads as
   objects and concluded `FieldKind` needed an object kind. It does not: a digest is a string and an ID
-  list is a string once encoded, so the two `"string"` fields registered at `src/providers/run-record.ts:216` are
+  list is a string once encoded, so the two `"string"` fields registered at `src/providers/run-record.ts` are
   the correct shape and no DF2.1 core edit is owed. This is the spec moving to the code, not the code
   to the spec.
 - **The run record is a closed, secret-scanned schema — not a document store, and this story does not
   use it as one.** DF6.1 specified up to 40 000 bytes of raw bot-review prose into
   `extensions.fixLoop.fixContext`. That fails three ways: every extension write passes
-  `assertNoSecret` (`src/providers/run-record.ts:685-738`), whose prefix scan
+  `assertNoSecret` (`src/providers/run-record.ts`), whose prefix scan
   `(^|[^A-Za-z0-9])<prefix>` runs on the whole value against `SECRET_PREFIXES` (`sk-`, `ghp_`,
-  `github_pat_`, `-----BEGIN`, …; `src/providers/run-record.ts:569-614`) — so a reviewer legitimately writing
+  `github_pat_`, `-----BEGIN`, …; `src/providers/run-record.ts`'s `SECRET_PREFIXES`) — so a reviewer legitimately writing
   *"don't hardcode `sk-…`"* **throws out of `store.set`**, a false positive on ordinary review prose;
   the payload is unbounded on a field kind with no length check, re-read in full by `fleet status` and
   every `list()` sweep; and it lands untrusted external content inside the record DF5.3 must prove
@@ -461,7 +474,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   weakening of it, no exemption, and no `SHAPE_EXEMPT_PATHS` entry** — the guard stays; the payload
   changes. Two properties of the shipped scanner make digest-plus-IDs safe by construction rather than
   by luck: the prefix scan cannot match a lowercase-hex digest or a GitHub comment ID, and the shape
-  heuristic requires `/^[A-Za-z0-9+/=_.:-]+$/` (`src/providers/run-record.ts:735`), a charset that excludes `{`,
+  heuristic requires `/^[A-Za-z0-9+/=_.:-]+$/` (the shape heuristic in `src/providers/run-record.ts`), a charset that excludes `{`,
   `"`, `,` and space — so it can never fire on a JSON-encoded payload at all.
 
   **Where the prose goes instead.** The comment bodies the fixer actually needs travel to the box on
@@ -477,7 +490,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   - **Use:** `src/providers/step-log.ts:225`, `redactSecrets(text: unknown, keep?: string)` — a
     **pattern** redactor. It runs `redactKeyManagementUrls`, then `PEM_BLOCK_RE` (`:108`),
     `SECRET_PREFIX_RE` (`:113`, driven by the **same** frozen `SECRET_PREFIXES` list `assertNoSecret`
-    enforces, imported at `step-log.ts:14` from `src/providers/run-record.ts:569`) and `LONG_TOKEN_RE` (`:117`).
+    enforces, imported at `step-log.ts:14` from `src/providers/run-record.ts`'s `SECRET_PREFIXES`) and `LONG_TOKEN_RE` (`:117`).
     It needs no prior knowledge of the secret. This is the redactor `src/providers/{driver,
     credentials,teardown,index,fake-gate}.ts` and `scripts/fleet.ts` all use.
   - **Do NOT use:** `cli-anything/src/redact.ts:62`, `redactSecrets(text, parentEnv)` — a
@@ -493,7 +506,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
     values you know and useless for prose someone else wrote. That is exactly this story's case.
 - **`bodySnippet` is untrusted quoted data, and it lives on the brief path only.** It is normalized
   (CRLF → LF) then validated for length
-  (≤ 4 000 chars — the GitHub comment-body ceiling this surface mirrors), strict UTF-8, and absence of
+  (≤ 4 000 chars — P1.18's own injection cap, which this surface mirrors; GitHub's comment-body ceiling is far higher, and this repo's `src/pr/body.ts` documents 65,536 for the adjacent PR-body surface), strict UTF-8, and absence of
   C0 control characters **other than LF and TAB** — a real bot review comment is Markdown and
   routinely multiline — then passed through the **pattern** redactor `redactSecrets(text)`
   (`src/providers/step-log.ts:225`, never `cli-anything/src/redact.ts:62` — see above), before it
@@ -602,13 +615,15 @@ the harvested diff, the credential probe, and the `fixContext` write.
   that reaches no published sha (`out-of-scope-diff`, a `pushVerifiedSha` refusal,
   `approval-timed-out`, a pre-dispatch guard refusal).
 - Sub-timings follow the sibling convention: `fix_run_ms`, `harvest_ms`, `reverify_ms`, `push_ms`,
-  each **absent, not `0`**, on a leg that did not run (`src/fleet/approval-gate.ts:1131-1136`).
+  each **absent, not `0`**, on a leg that did not run (the absent-not-zero sub-timings convention in `src/fleet/approval-gate.ts`).
 - Cost is reported from the run record's `spendMicroUsd` captured provider-side at teardown. This
-  story promises **no** token-row-based accounting and **no per-role cost attribution**:
-  `CostLedger.ingestCostEvent` (`src/providers/cost-ledger.ts:961`) has zero non-test callers, so
-  `kind='tokens'` rows never reach `cost_events` (issue #157). Per-role attribution becomes
-  obtainable only when **DF2.12** wires it at the dispatcher; this story neither depends on it nor
-  implies it exists, and budgets against `spendMicroUsd` alone.
+  story promises **no** token-row-based accounting and **no per-role cost attribution**, and budgets
+  against `spendMicroUsd` alone — the normative choice, unchanged. The factual note an earlier draft
+  carried is updated to the post-DF2.12 state: `CostLedger.ingestCostEvent` is **wired since DF2.12**
+  (2026-09-10 — `src/providers/cost-ledger-bridge.ts` calls it for every harvested
+  `cost_attribution` line and `teardown.ts`'s `ingestHarvestedTokensIfWired` wires it), so
+  `kind='tokens'` rows **do** reach `cost_events` on a healthy run. (Issue #157's deferred
+  money-loop residuals remain open and are no predecessor here.)
 
 ## Files to Modify
 
@@ -752,9 +767,9 @@ the harvested diff, the credential probe, and the `fixContext` write.
       *An implementation whose allow-list is `["src/**","tests/**","scripts/**"]` with no verification-
       surface deny lets all four through, trips no rule, and MUST fail this test.*
 - [ ] **Test (the two refusals are distinguishable):** a diff outside the allow-list refuses
-      `out-of-scope-diff` and **charges** an attempt; a diff matching a deny glob refuses
-      `scope-requires-privilege`, charges **zero**, and escalates immediately. *An implementation
-      reporting both as one state MUST fail.*
+      `out-of-scope-diff` and **charges zero** (bounded by DF6.1b's cap of 1); a diff matching a deny
+      glob refuses `scope-requires-privilege`, charges **zero**, and escalates immediately. *An
+      implementation reporting both as one state MUST fail.*
 - [ ] **Impl:** `src/fixloop/` imports neither `approval-gate.ts` nor `approvers.ts` at all; imports
       `src/pr/push.ts` **only for `pushVerifiedSha`/`PushOutcome`** and `src/providers/run-record.ts`
       **only for `RunRecordStore`/`RunRecord`** — asserted by a symbol-level import-specifier grep in
@@ -867,7 +882,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `pushVerifiedSha` is never called, nothing reaches the PR branch, and the attempt logs
       `flags: ["out-of-scope-diff"]` with the offending paths. An implementation relying only on the
       brief's in-box scoping MUST fail this test (AC6). *(`flags` is an **observability field on the
-      `fix-attempt-refused` log line**, never a run-record field: `src/providers/run-record.ts:216` registers
+      `fix-attempt-refused` log line**, never a run-record field: `src/providers/run-record.ts` registers
       exactly `fixContext` and `fixOutcome`, and AC4 forbids a record for an attempt that published no
       sha. Same for `scope-requires-privilege`.)*
 - [ ] **Test (e2e demo — MANDATORY):** `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` (new),
@@ -888,8 +903,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
       deny-list), verified present before the round starts** — its absence is a `fix-scope-missing`
       refusal that lands after the box and the spend, which is exactly the failure to design out. The
       same round asserts the free negative control: with the entry removed, the command refuses
-      `fix-scope-missing` before any box exists. Roster is `config/rosters/roster.yaml`, the only e2e
-      roster — it ships lead + one write-capable fixer, the shape AC5's guard tests.
+      `fix-scope-missing` before any box exists. Roster is `config/rosters/roster.yaml` — the only
+      e2e roster when this spec was written (DF2.12's tier-2 round later added
+      `df212-team.roster.yaml`); it remains the roster this e2e uses and the one AC5's shape guard
+      covers — it ships lead + one write-capable fixer, the shape AC5's guard tests.
 
       `bun scripts/fix-run.ts --pr <n>` → one fix run **in-box** → DF3.7's chain drives harvest →
       teardown → host-side re-verify green → `fleet approve <run-id>` records this attempt's
@@ -917,8 +934,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
       for the duration of the run**, asserted by snapshotting the host process table before and after
       and diffing for any argv containing `pi ` or `--provider`. *An implementation that satisfies the
       whole chain by exec'ing the worker argv from the host passes every other test in this story and
-      MUST fail this one.* This is the ADR's own failure mode, stated in its forensics: the host-side
-      placement *"survived seven review rounds precisely because no AC tested locality"*
+      MUST fail this one.* This is the ADR's own failure mode, stated in its forensics — in the ADR's
+      own words: *"Seven review rounds (~260 findings) missed it: e2e tests ran a fake pi on the host
+      and no AC tested locality"* — the host-side
+      placement having *"survived seven review rounds precisely because no AC tested locality"*
       (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md:46-48`). AC1's negative control names
       the wrong shape; this item is what makes it observable at runtime.
 
@@ -962,7 +981,7 @@ not the scanner:
   punctuation, so it cannot fire on this field at all.
 - **Part of B4 resolves the other way — the spec was wrong, not the code.** DF6.1 demanded an object
   `FieldKind`; a digest and an ID list are strings, so the two `"string"` fields already registered at
-  `src/providers/run-record.ts:216` were the right shape all along. No DF2.1 core edit is owed.
+  `src/providers/run-record.ts` were the right shape all along. No DF2.1 core edit is owed.
 - The durable lesson is stated once as **INV-7** (any validation that can refuse runs before the
   irreversible action; the record write is pre-flighted validate-only before `pushVerifiedSha`), so it
   outlives this field.

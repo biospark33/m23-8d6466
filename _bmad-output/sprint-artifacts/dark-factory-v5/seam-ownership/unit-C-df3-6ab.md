@@ -36,6 +36,8 @@ written into by both).
 | O9 | `src/phase-engine/manifest.ts` — the three bound fields + AC2a operands (DF3.6a); **the 512 MiB constant re-set from DF3.6b's measured baseline** (DF3.6b, scoped to that one value) | split per constant |
 | O10 | The e2e demo's env contract (`FAKE_RESIDENT_USAGE`, `spawnRunner` inheritance) | DF3.6a |
 | O11 | yaml DF3.6a row (`DF2.13` dep edge) | parent (W6-C-M4) |
+| O20 | The fill-side stamp provisioner — the dispatch fill-step edit stamping `residentSpendCeilingMicros`/`capMicroUsd`/`defaultKeyCapMicroUsd` (+`limitMicroUsd` when present) onto the frozen manifest, beside DF3.1's shipped `stampManifestLimit` (adds-only in the DF3.1-owned file; DF5.3 setup-gate precedent) (W8-C-1) | DF3.6a |
+| O21 | `src/fleet/dispatch.ts` — the fill-side stamp edit's only permitted scope (no other dispatch change) | DF3.6a |
 
 ## Reconciliations applied (Wave 6 → spec)
 

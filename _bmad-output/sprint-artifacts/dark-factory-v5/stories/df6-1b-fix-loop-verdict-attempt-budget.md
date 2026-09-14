@@ -101,7 +101,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 > does not exist, and `recordAuditLink`/`walkAuditChain` appear in `src/` exactly once, in a comment
 > at `src/providers/teardown.ts:12`. AC3 and the `src/audit/chain.ts` edit are **unbuildable until
 > DF5.3 merges**, so this story is sequenced strictly after it. DF5.3's own Technical Notes already
-> anticipate the edit (`df5-3-audit-chain-extended.md:140`, "DF6.1 … extends `src/audit/chain.ts`
+> anticipate the edit (DF5.3's Technical Notes, "Ten hops *per contributing runId*": "DF6.1 … extends `src/audit/chain.ts`
 > **additively**"; its Files-to-Modify lists it at `:168`) — the writer↔reader contract is agreed,
 > only the ordering was at issue.
 >
@@ -183,8 +183,10 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    receiver, no public endpoint and no signature scheme.*
 2. **(failure path — was DF6.1 AC4; the loop's driver is named)** Given attempt 1 ended in a
    **charged** non-green terminal state — a required check red, or `ci-verdict-unavailable` after a
-   successful push — When **the operator re-invokes `bun scripts/fix-run.ts --pr <n>`**, Then that invocation reads the PR's recorded
-   attempt state from the DF2.1 run records keyed by PR number, observes `attempt = 1` with a
+   successful push — When **the operator re-invokes `bun scripts/fix-run.ts --pr <n>`**, Then that invocation resolves the PR's recorded
+   attempt state through the parent-run join and the **attempt-time `fixAttemptRunIds` ledger**
+   (Technical Notes, "Attempt bookkeeping" — there is no PR-number index, and `fixOutcome` does not
+   exist pre-terminal), observes `attempt = 1` with a
    non-green outcome, and dispatches attempt 2 with `fixContext.attempt = 2` carrying attempt 1's CI
    failure output and runId.
 
@@ -217,14 +219,21 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    fixer.
 
    **`scope-requires-privilege` charges nothing and is never retried.** DF6.1a AC6 distinguishes a
-   diff that *wandered* (`out-of-scope-diff` — agent error, retry may help, charges an attempt) from
+   diff that *wandered* (`out-of-scope-diff` — agent error, retry may help, charges zero, capped at
+   1 here) from
    one that matched a **deny** glob (`scope-requires-privilege` — the fix necessarily needs a
    privileged path: a CI-config bug, a roster change, or the verification surface). The second is a
    **correct refusal**: the agent behaved properly and no retry can ever succeed, so it charges zero
    attempts, does **not** count against the uncharged ceiling either, and escalates on first
-   occurrence naming the denied paths and the matched deny rule with its `reason`. *Negative control:
+   occurrence naming the denied paths and the matched deny rule with its `reason`. DF6.1a AC6
+   distinguishes a diff that *wandered* (`out-of-scope-diff` — agent error, retry may help, charges
+   zero, capped at 1 here) from *Negative control:
    an implementation that charges an attempt for it, or retries it, burns budget on something no retry
-   can fix and MUST fail.*
+   can fix and MUST fail.* `out-of-scope-diff` — the *wandered* diff DF6.1a refuses — sits in the
+   same zero-charge family: the budget is charged **only by attempts that reached CI** (the opening
+   rule of this AC), so an `out-of-scope-diff` refusal charges **zero** and is bounded by its own
+   cap of 1 (above) rather than by either ceiling — the third vocabulary is deliberate and owned
+   here (the attempt bookkeeping is this story's), not an inconsistency.
 
    *Negative control: an implementation that bounds only charged attempts lets an adversarial review
    comment be re-attempted indefinitely, one box per invocation, with every attempt terminating
@@ -270,7 +279,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 | Host GitHub token | host operator environment — `readHostToken` (`src/pr/github.ts`), handed to `gh` **as the `gh` child's environment only** (`GH_TOKEN` set on the spawned child, never on this process's environment, never argv) — the same containment `gitEnv` uses for git credentials in `src/pr/push.ts` | the same scope opening a PR already needs; no escalation to repo-admin |
 | `gh` CLI | installed on the host, version-floored to one exposing `gh pr checks --required --json` with the `bucket` field and `gh pr view --json headRefOid` (both verified against gh 2.93.0; the floor exists so a host without them fails loudly, not green) | the two-call composition shells out to `gh`; this story introduces it as this repo's first `gh` dependency deliberately — its `--required`/`bucket` fields are the measured surface, and a `GitHubApi` port would need a GraphQL `isRequired(pullRequestId:)` selection, a bigger seam change than one child-env token |
 | Audit chain store | DF5.3's `src/audit/chain.ts` | **unbuilt as of 2026-09-08** — this story is sequenced after DF5.3 merges |
-| DF2.1 run records | host `<runsDir>` | attempt count and last error read from the records keyed by PR number — no second state store |
+| DF2.1 run records | host `<runsDir>` | attempt count and last error resolved through the parent-run join plus the **attempt-time `fixAttemptRunIds` ledger** on the parent record — no second state store, no PR-number index (none exists) |
 
 > No box, no LLM key and no model spend are prerequisites of this story. That is a property of the
 > split, and it is what makes the termination matrix cheap to exercise exhaustively.
@@ -326,10 +335,13 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   never enters the poll — it goes straight to AC2's classification. Intermediate commit SHAs from the
   same push are **not** attempt SHAs, and a poll result carrying one is discarded exactly like a stale
   sha (INV-4).
-- **Contracts/Schema — `fixOutcome`.** The `fixLoop` sub-key on DF2.1's versioned `extensions`
-  namespace is **already registered** (`src/providers/run-record.ts:216`:
-  `fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } }`); neither
-  half registers it and neither changes its kinds. `FieldKind` is
+- **Contracts/Schema — `fixOutcome` and the attempt-time ledger.** The `fixLoop` sub-key on DF2.1's versioned `extensions`
+  namespace is **already registered** (`src/providers/run-record.ts`:
+  `fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } }`); this
+  story makes **one adds-only registration** — `fixAttemptRunIds: "strings"`, the attempt-time
+  ledger the AC2 lookup reads (the first-class array DF5.3's Technical Notes anticipated; the
+  `strings` kind already exists, no existing kind changes, and `assertNoSecret` applies to its
+  members, which are hex run ids). `FieldKind` is
   `"string" | "int" | "ports" | "strings"` (`src/providers/run-record.ts:54`) — **there is no object kind** — so
   `fixOutcome: { prNumber, attempts, outcome: "green" | "escalated", runIds: string[] }` is stored
   **JSON-encoded as a `"string"` value** (`schemaVersion: 1`), validated by `src/fixloop/`'s own
@@ -340,7 +352,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   DF2.1's twelve-field core stays closed and unchanged, so DF5.3's audit chain and DF5.2's
   `extensions.pr` correlation key are unaffected.
 - **No third-party prose enters the run record from this half either (DF6.1a INV-7).** `fixOutcome`
-  is identifiers and counts, so `assertNoSecret`'s prefix scan (`src/providers/run-record.ts:685-738`) has nothing
+  is identifiers and counts, so `assertNoSecret`'s prefix scan (`src/providers/run-record.ts`) has nothing
   to false-positive on. What the record keeps is the escalation's classification and the runIds; the
   failure text stays reachable in the run's own trace rows and on the PR, and **none of it is
   persisted into the record as prose**.
@@ -376,8 +388,17 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   matching run record. So **`parentRunId = headRefName.slice("qds/".length)`, validated by
   `store.get(parentRunId)`** — one `gh pr view --json headRefName` (a call this story already makes
   per poll) plus one record read; no sweep, no fleet-wide read cost, and the lock key exists before
-  any record is scanned. `extensions.fixLoop.fixOutcome.runIds` on that parent record then carries
-  the attempt set. No second state store.
+  any record is scanned. **The attempt-time ledger is `extensions.fixLoop.fixAttemptRunIds` — a
+  `strings`-kind field this story registers (adds-only) on the already-registered `fixLoop`
+  namespace, appended with each attempt's fixRunId at that attempt's dispatch** — and therefore
+  present **before any terminal outcome**, which is exactly what `fixOutcome` is not: `fixOutcome`
+  stays write-once-at-terminal. The attempt-2 driver reads `fixAttemptRunIds` (dispatch-time),
+  takes its last entry as the latest fix runId, and reads **that fix run's own record** for
+  `fixContext`, its approval state and its non-green outcome — a charged attempt-1 failure leaves
+  the parent record carrying a populated ledger and no `fixOutcome`, which is precisely the state
+  this lookup must survive. `fixOutcome.runIds` remains the terminal aggregate the audit chain reads
+  (AC3); the ledger is what AC2's driver reads. No second state store; no sweep — the ledger rides
+  the parent record the join already resolves.
 - **Concurrency: the lock is keyed on the PARENT run, not the fix run.** Two concurrent `--pr <n>`
   invocations are excluded by `acquireRunLock(runsDir, parentRunId, "fix-run --pr")`, where
   `parentRunId` is resolved by the head-branch join above — **before any lock is taken**, since the
@@ -388,7 +409,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   `<runsDir>/<runId>.lock`, keyed on a **runId**. Two concurrent invocations that have not yet
   dispatched have **no runId in common** — each is about to mint its own — so they would take two
   different lock files and both proceed: two boxes, two capped keys, two model spends, two approval
-  requests, and two pushes racing onto the PR branch. `scripts/fleet.ts:1976`'s acquisition is the
+  requests, and two pushes racing onto the PR branch. `scripts/fleet.ts`'s dispatch key-mint acquisition is the
   key-mint lock on the **just-minted** runId, which is precisely why it cannot serialize two pre-mint
   invocations, and DF6.1a's lock is the **fix run's**, taken for DF3.7's `observeAndDriveChain`
   precondition.
@@ -408,9 +429,9 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   compare-and-set (the record's existing write path — no new lock primitive)", asserting a CAS
   semantic `RunRecordStore.set` does not document — it merges and re-persists. (b) A prior fix wave
   then wrote that the lock is "taken by `fleet dispatch` … **and by every run-scoped verb**". That is
-  false: `scripts/fleet.ts` has exactly two `acquireRunLock` call sites — `:1976` (dispatch key-mint)
-  and `:4257`, inside `runDestructive` (`:4112`). The **gate** verbs — `approve`, `reject`, `enrol`,
-  `unlock`, `attach`, routed through `runGateVerbs` (`GATE_VERBS`, `scripts/fleet.ts:3005-3007`) —
+  false: `scripts/fleet.ts` has exactly two `acquireRunLock` call sites — the dispatch key-mint
+  acquisition (on the just-minted runId) and the one inside `runDestructive`. The **gate** verbs — `approve`, `reject`, `enrol`,
+  `unlock`, `attach`, routed through `runGateVerbs` (the `GATE_VERBS` set in `scripts/fleet.ts`) —
   take **no** run lock. That is why an approval decision is never blocked by a held lock, and why an
   approval must never be relied on to be serialized by one.
 - **Authored fresh (DD-8 — NET-NEW, not ancestry):** human escalation with context — the source
@@ -431,13 +452,17 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   budget.
 - Sub-timings follow the sibling convention: `poll_ms`, `ci_settle_ms`, `escalation_ms`, each
   **absent, not `0`**, on a leg that did not run.
-- Cost is reported from the run record's `spendMicroUsd`, never from token rows:
-  `CostLedger.ingestCostEvent` (`src/providers/cost-ledger.ts:961`) has zero non-test callers, so
-  `kind='tokens'` rows never reach `cost_events` (issue #157). This story specs no budget arithmetic
-  and **no per-role cost attribution** against that capability, and consumes DF5.3's hop 3 exactly as
-  DF5.3 states it — `perRole={"box-hours":N}`, `hasTokenRows:false`. Per-role attribution becomes
-  obtainable only when **DF2.12** wires it at the dispatcher (closes #157); this story neither
-  depends on it nor implies it exists.
+- Cost is reported from the run record's `spendMicroUsd`, never from token rows — the normative
+  choice, unchanged. The factual note beneath an earlier draft is updated to the post-DF2.12 state:
+  `CostLedger.ingestCostEvent` is **wired since DF2.12** (2026-09-10 — `src/providers/cost-ledger-bridge.ts`
+  calls it for every harvested `cost_attribution` line, `teardown.ts`'s
+  `ingestHarvestedTokensIfWired` wires it at both teardown ingest points, and `scripts/fleet.ts`
+  forwards it through the loser-ledger handle), so `kind='tokens'` rows **do** reach `cost_events`
+  and `hasTokenRows` is `true` on a healthy run. This story still specs no budget arithmetic
+  and **no per-role cost attribution**, and consumes DF5.3's hop 3 exactly as
+  DF5.3 now states it — `perRole` verbatim as the ledger holds it, real role buckets beside
+  `"box-hours"`. (Issue #157's deferred money-loop residuals remain open and are no predecessor
+  here.)
 
 ## Files to Modify
 
@@ -454,9 +479,10 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   third invocation would find it expired before its first poll (Wave 6 W6-D-B1: this call site was
   owned by neither half)** — and the escalation call. Beyond that call site, DF6.1a's two-invocation
   drive path is unchanged.
-- `src/providers/run-record.ts` — **no change expected**; listed because the already-registered
-  `fixLoop` registry entry is *read*, and a change to it would be a DF2.1 core edit requiring its own
-  justification.
+- `src/providers/run-record.ts` — **one adds-only registration**: `fixAttemptRunIds: "strings"`
+  joins the already-registered `fixLoop` fields (the attempt-time ledger — see Technical Notes,
+  "Attempt bookkeeping"). No existing field or kind changes, and beyond that registration the
+  already-registered entry is *read* only.
 - `tests/fixloop/{ci-status,escalation,cli}.test.ts`
 
 ## Security Invariants
@@ -484,8 +510,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       `attemptSha` — mismatched/stale SHAs are discarded before any state transition (AC1, INV-4).
       *An implementation reading `bucket` or requiredness off `gh pr view --json statusCheckRollup`
       MUST fail: neither field exists there.*
-- [ ] **Impl:** attempt budget (max 2 **charged** attempts) enforced from the DF2.1 run records keyed
-      by PR number before any dispatch; one invocation drives at most one attempt, holds no lock
+- [ ] **Impl:** attempt budget (max 2 **charged** attempts) enforced from the parent record's
+      attempt-time `fixAttemptRunIds` ledger, resolved via the parent-run join, before any dispatch; one invocation drives at most one attempt, holds no lock
       across a human approval, and ships no daemon, PID file or `--loop` flag.
 - [ ] **Test (concurrent invocations, PR-scoped):** two concurrent `--pr <n>` invocations **that have
       not yet dispatched** — the read-check-increment runs under

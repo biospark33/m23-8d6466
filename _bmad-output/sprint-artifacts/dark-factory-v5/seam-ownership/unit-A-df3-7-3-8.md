@@ -29,7 +29,7 @@ second caller. Crossing surface: `observeAndDriveChain(runId, deps)` + `promoteS
 | O12 | `tests/fleet/observe.test.ts` | DF3.8 |
 | O13 | `tests/fleet/e2e/tier3-observe-detached.live.test.ts` | DF3.8 |
 | O14 | The `sweep-complete` counter set and its accounting identity (`runs_observed`, `runs_unsettled`, `runs_engine_dead`, `runs_box_unreachable`, `runs_lost_to_reboot`, `lock_refused`, `completion_unwitnessed`, `candidates_skipped`; measurements `box_reboot_after_dispatch`, `uptime_unknown` cut across) | DF3.8 |
-| O15 | The per-pass `box-unreachable` disposition (distinct counter, one typed line, reported-not-retired) (W6-A-M1) | DF3.8 |
+| O15 | The per-pass `sweep-box-unreachable` disposition (distinct counter `runs_box_unreachable`, one typed line, reported-not-retired; event named apart from DF3.7's terminal `box-unreachable` per W8-A-12) (W6-A-M1) | DF3.8 |
 | O16 | `sprint-status.yaml` DF3.7 + DF3.8 row prose | parent (W6-A-M7) |
 | O17 | The DF2.11 edge strength (hard predecessor; **landed**) — stated once per story, canonical form in the yaml | parent (W6-A-H2) |
 | O18 | `scripts/lib/run-lock.ts` ponytail-note comment retirement (the note's embedder trigger is realized by this story) — comment-only edit; the story's dev moves the image pin anyway via `src/fleet/observe.ts` | DF3.8 (W6-A-H2 orphan) |
