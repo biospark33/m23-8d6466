@@ -42,7 +42,7 @@ Every pi solicitation runs inside its own cgroup v2 leaf with `memory.max` set f
 "OOM-kills that cgroup" true rather than approximately true: at the kernel default (`0`) the OOM
 killer picks and kills a **single task**, leaving siblings running — which would leave the leaf
 un-`rmdir`-able (`EBUSY`) and produce exactly the orphaned child AC1 asserts cannot exist. Today pi
-is spawned `--no-tools` (`src/fleet/resident.ts:524`) and usually has no children, so the
+is spawned `--no-tools` (the pi spawn argv in `src/fleet/resident.ts`) and usually has no children, so the
 single-task kill happens to equal the cgroup kill and a test would pass for the wrong reason. The
 kernel enforces it: crossing the bound OOM-kills that cgroup and nothing else. The engine issues no signal, runs no timer, takes no sample, and never learns pi's pid. After
 the call the fleet layer reads `memory.peak` and `memory.events` from the leaf, reports them up as
@@ -69,13 +69,24 @@ the `memory.peak` reading and the bound it crossed, the solicitation's cgroup is
 **every remaining phase and gate executes on the deterministic path**. Observable artifacts: the
 harvested journal, and `memory.events`' `oom_kill` count read before removal.
 
-**This slice runs live.** It is a `qds-live-e2e` roster-**tier-4** assertion (`tier4-resident`:
-1 dispatch key + 1 resident key + 1 box, ≈ $0.10 worst case) against a real exe.dev box and real
-OpenRouter spend, per `.claude/skills/qds-live-e2e/SKILL.md`. **The gate is `QDS_E2E_LIVE` +
-`QDS_E2E_TIER=2`**: the file calls `liveGate("2")`, which accepts only `"1"` or `"2"`, so "tier 4"
-is a roster label and `QDS_E2E_TIER=4` throws. Read
-`tests/fleet/e2e/tier4-resident.live.test.ts` before touching the tier, and honour its `finally`
-teardown discipline — a leaked box on an OOM path is a leaked box that bills. A host-side unit test
+**This slice runs live, and it runs in-box.** It is a `qds-live-e2e` roster-**tier-4** assertion
+against a real exe.dev box and real OpenRouter spend, per
+`.claude/skills/qds-live-e2e/SKILL.md` — **but the two AC1 legs are NOT sited on the host-side
+`tier4-resident.live.test.ts` file**: every leg in that file runs `bun scripts/pipeline-run.ts` on
+the operator host (its own header says so — it cannot express in-box execution, and darwin has no
+cgroups), so a fourth leg beside L1/L2/L3 would inherit a darwin spawn with `residentRssBytes`
+present and INV-MEM-2 would disable the resident before Leg A could fire. **The proof is a
+dedicated in-box dispatch** — `fleet run` under `qds-run@.service`, the tier2-in-box-engine pattern,
+the only shipped shape that executes the engine inside the box — **as its own second dispatch**:
+the AC6 replay guard refuses a second run on a settled box, so the in-box leg cannot share the
+host-side tier's box. Cost, named rather than rounded: the host-side tier's one run key (minted at
+the 50,000 µ$ cap; the tier prices itself ≈ $0.05 model + ~1 box-hour, its measured real
+solicitation ~401 µ$) **plus two more boxes for the in-box dispatches — one per AC1 leg** (Leg
+A's OOM-kill ends its resident via AC5's stop latch and `startResident` resolves `QDS_PI_BIN`
+once per resident, so the legs cannot share a resident lifecycle, and the AC6 replay guard
+refuses a second run on a settled box, so they cannot share a box) — roughly triple the box count
+the tier alone would suggest. Honour the tier's `finally` teardown discipline — a leaked box on an
+OOM path is a leaked box that bills. A host-side unit test
 **cannot** substitute: the enforcer is the kernel, and darwin has no cgroups at all.
 
 **Wiring closed:** On completion of this story the memory bound is kernel-enforced end to end using
@@ -88,7 +99,7 @@ DF1.10's in-box engine and resident spawn path, and DF2.10's unit. No stub, no `
 in-box steering executor — the solicitation points this story wraps the cgroup around run inside
 it), **DF2.10** (the boot image and the `qds-run@.service` unit that must carry `Delegate=memory`,
 and whose digest pin must move), DF3.3 (the `resident` journal block and its `exitStatus` field).
-Matches `sprint-status.yaml:183`, which is authoritative.
+Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authoritative.
 
 ## Acceptance Criteria
 
@@ -107,7 +118,7 @@ Matches `sprint-status.yaml:183`, which is authoritative.
 2. **The bound is rooted at the resident by construction, not by convention.** Given a solicitation
    is about to spawn, When its cgroup is created, Then it contains **only pi and its descendants** —
    never the engine, and never the tier-3 `dispatch_task` workers the engine also parents in-box
-   (`QDS_TEAM_RUNNER=local`, `src/phase-engine/phases/dispatch-task.ts:290-298`). An engine-rooted
+   (`QDS_TEAM_RUNNER=local`; the env anchors in `src/phase-engine/phases/dispatch-task.ts`). An engine-rooted
    bound charges a bun team-lead's memory to a 512 MiB **resident** bound and trips on the first
    dispatch phase of every real run. This is the general invariant the tier-2 placement ADR states
    — *a bound on component X is rooted at X's pid, never at an ancestor's* (Appendix B, ACCEPTED
@@ -118,27 +129,46 @@ Matches `sprint-status.yaml:183`, which is authoritative.
    containing the pi child, the `code` phases and the team-lead drivers — passes a naive
    synthetic-allocator "does it fire?" test, and MUST fail a test in which a `dispatch_task` phase
    runs beside a small resident.*
-3. **Unenforceable means not started, checked against a real object.** Given the cgroup cannot be
+3. **Unenforceable means not started, checked against a real object, classified at the arming
+   boundary.** Given the cgroup cannot be
    created or `memory.max` cannot be written — `Delegate=memory` absent from the unit, the `memory`
    controller unavailable, the box not on cgroup v2 — When the resident arms, Then it is **not
    started**: the journal records `resident.status: "disabled"` (DF3.3's closed set — a fourth value
    would violate its AC5) and the runner emits the **shipped arming-refusal shape** on stderr —
    `{ level:"warn", event:"resident_disabled", runId, requestId, model, reason:"rss_unenforceable",
    detail }`, the same line the `rate_unresolved` refusal already uses
-   (`scripts/pipeline-run.ts:3280-3291`). It is deliberately **not** a bounds-check log line:
+   (the arming path's `scripts/pipeline-run.ts` refusal region). **The mechanism is owned, not
+   implied (W6-C-H5): the spawn path raises a typed error when the cgroup cannot be created or
+   `memory.max` written, and the arming `try/catch` — whose current arm rethrows everything that is
+   not the rate refusal — gains a handler for it beside that arm, emitting the line above through
+   the existing disabled-shape branch.** Bundling the emission into the `onBoundBreach` handler is
+   the named defect: that region lives inside `createSteering`, which on this path is never
+   constructed (`pipeline-run.ts` gates it on `!("disabled" in spawned)`), so an unclassified
+   rethrow here yields a tracer-closed, marker-absent box — `fleet status: engine-failed` — exactly
+   the outcome DF3.6a's AC2b negative control forbids. It is deliberately **not** a bounds-check log line:
    `checkBounds` lives inside `createSteering` (DF3.6a's Files list), and on this path
-   `createSteering` is never called (`scripts/pipeline-run.ts:3293` gates it on
-   `!("disabled" in spawned)`), so a bounds-check line is structurally unavailable and asserting one
+   `createSteering` is never called, so a bounds-check line is structurally unavailable and asserting one
    would force a second bounds-telemetry emitter into existence. No `residentTripwire` row is
    emitted, leaving DF3.3's closed three-cause set unchanged. The run proceeds deterministic rather than
    running an agent whose memory nobody can bound. The check runs at **arming**, against a cgroup
    the engine either can or cannot create — not against a process that does not yet exist
-   (`startResident` spawns nothing: `src/fleet/resident.ts:384-448`).
+   (`startResident` spawns nothing).
 4. **A failed placement never yields an unbounded call.** Given the per-solicitation cgroup existed
    at arming but the `cgroup.procs` write fails at solicitation time — the leaf was removed,
    `+memory` was disabled, or the write errors — When the placement wrapper runs, Then it exits
-   **97 without `exec`ing pi**, the solicitation is recorded failed with
-   `bound:"rss", allowed:false, cause:"unenforceable"`, the resident is stopped, and the run
+   **97 without `exec`ing pi**, and the failure crosses to the engine as a **typed rejection on
+   the `ResidentCaller.call` contract**: `PlacementRefusedError` — an engine-owned class declared
+   in `src/phase-engine/steering.ts` and thrown by fleet's caller implementation (fleet→engine is
+   the allowed import direction), carrying exit code 97 — so `createSteering`'s call-failure catch
+   classifies it with an `instanceof` arm beside the opaque-`Error` degrade arm instead of
+   converting it to the one-way `"degraded"` latch. The arm fires
+   `deps.onBoundBreach({bound:"rss", allowed:false, cause:"unenforceable", exitCode: 97})`, and the
+   runner's handler records the failed solicitation — `{bound:"rss", allowed:false, cause:"unenforceable"}` on the **fleet `warn` chokepoint**
+   line (harvested with the journal via fd-2; the emitter and destination are named because no
+   contracted record shape carries a mid-call placement failure: the bounds-check line cannot
+   observe a failure inside `caller.call`, and the tripwire union has no member for it) — and
+   **awaits `residentSpawn.stop()`** on the handle it holds, so the resident is stopped, **no
+   further solicitation is issued for it** (the stop latch and the status gate hold), and the run
    continues deterministic. AC3's arming check is once per run; this is the per-solicitation half of
    the same invariant. *Negative control: a wrapper joining the two commands with `;` execs pi with
    no `memory.max`, and the resulting journal is indistinguishable from a bounded solicitation —
@@ -157,7 +187,7 @@ Matches `sprint-status.yaml:183`, which is authoritative.
    `lastExit = "transient"` and throws, the engine's call-failure path writes `"degraded"`, nothing
    calls `stop()`, and the journal reads `status:"degraded"` beside `exitStatus:"overflow"` — a
    combination no story owns. *Negative controls: (a) an implementation relying on the `"degraded"`
-   status gate (`src/phase-engine/steering.ts:854-857`) instead of `stop()` leaves
+   status gate (the status gate in `src/phase-engine/steering.ts`) instead of `stop()` leaves
    `stopped === false`, so any later re-arm path re-opens a second in-run kill, and MUST fail;
    (b) an implementation leaving `status` at whatever the degrade path wrote MUST fail.*
 
@@ -165,7 +195,7 @@ Matches `sprint-status.yaml:183`, which is authoritative.
 
 | Trigger | Status | E2E Test | Follow-Up |
 |---------|--------|----------|-----------|
-| per-solicitation cgroup create + `memory.max` write at spawn | in-scope | `tests/fleet/e2e/tier4-resident.live.test.ts` (the kernel is the enforcer; no host-side test can prove an OOM-kill) | — |
+| per-solicitation cgroup create + `memory.max` write at spawn | in-scope | the **dedicated in-box dispatch** (E2E Slice — the tier-2-gated `fleet run` round under `qds-run@.service`; the kernel is the enforcer and no host-side test can prove an OOM-kill; **not** the host-side `tier4-resident.live.test.ts`, whose every leg runs `pipeline-run.ts` on the darwin operator host) | — |
 | `memory.peak` / `memory.events` read + cgroup removal after the call | in-scope | `tests/fleet/resident.test.ts` (fs-level, host-side) + the live round | — |
 | one-time delegated-subtree split at engine start | in-scope | `tests/fleet/resident.test.ts` | — |
 | `Delegate=memory` present in the shipped unit | in-scope | `oci/exedev/Dockerfile` build-time scan + `tests/providers/exedev/image-assets.test.ts` | — |
@@ -177,7 +207,7 @@ Matches `sprint-status.yaml:183`, which is authoritative.
 
 | Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
 |-----------|-------------------------------|-------------------------|
-| cgroup delegation | `Delegate=memory` on `oci/exedev/systemd/qds-run@.service` (DF2.10's unit; systemd 255, cgroup v2 unified). Delegation is what chowns the unit's cgroup directory, `cgroup.procs` and `cgroup.subtree_control` to `User=exedev`, so the engine can create the resident's child cgroup **without root, without D-Bus and without polkit** | build-time: DF2.10's Dockerfile unit scan gains a positive `grep -qE '^Delegate=memory$'` assertion, the same shape as the existing `RuntimeDirectoryPreserve=yes` check (`oci/exedev/Dockerfile:809`), so the directive cannot be silently dropped. Run time: absent delegation ⇒ resident **not started** (AC3) |
+| cgroup delegation | `Delegate=memory` on `oci/exedev/systemd/qds-run@.service` (DF2.10's unit; systemd 255, cgroup v2 unified). Delegation is what chowns the unit's cgroup directory, `cgroup.procs` and `cgroup.subtree_control` to `User=exedev`, so the engine can create the resident's child cgroup **without root, without D-Bus and without polkit** | build-time: DF2.10's Dockerfile unit scan gains a positive `grep -qE '^Delegate=memory$'` assertion, the same shape as the existing `RuntimeDirectoryPreserve=yes` check (the unit scan in `oci/exedev/Dockerfile`), so the directive cannot be silently dropped. Run time: absent delegation ⇒ resident **not started** (AC3) |
 | resident memory bound | cgroup v2 `memory.max` on a per-solicitation child cgroup created by the fleet spawn path, valued from the manifest's `residentRssBytes` (validated by DF3.6a) | kernel-enforced. The engine passes the **value**; it never signals, never samples, and never learns a pid. The live round asserts an allocator past the bound is OOM-killed and the run still completes deterministically |
 | resident memory telemetry | `memory.peak` and `memory.events` (`oom_kill`) read from that cgroup before it is removed | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the bounds-check log line and `detail` on the `watchdog_kill` row |
 | image digest pin | DF2.10's pin ritual — the unit is **baked into the image**, so this story's one-directive change requires a rebuild, a re-publish and a moved digest pin, not just a file edit | see the DoD item; a green local gate against a stale pinned image is exactly the failure this prerequisite exists to prevent |
@@ -191,8 +221,9 @@ Matches `sprint-status.yaml:183`, which is authoritative.
   code (`src/phase-engine/steering.ts:11-13`). Kernel enforcement dissolves that seam instead of
   widening it: **the engine never learns a pid, because it never has to signal anything.** But the
   seam is not closed by the fleet handle alone, and saying so was the earlier error: the engine
-  never *receives* `ResidentSpawn` — the call site passes exactly `spawned.caller` and
-  `spawned.rate` (`scripts/pipeline-run.ts:3295-3297`) — and `createSteering` cannot reach for more,
+  never *receives* `ResidentSpawn` — the call site passes `spawned.caller`/`spawned.rate` plus two
+  non-fleet sidecars (`emitAttribution` (DF2.12) and `inbox` (DF3.4); call site in
+  `scripts/pipeline-run.ts`) — **no `ResidentSpawn` member crosses** — and `createSteering` cannot reach for more,
   because `src/phase-engine/steering.ts:11-13` forbids importing fleet code. A method on
   `ResidentSpawn` that the engine cannot hold is not a channel. **Three facts cross, on two
   objects:**
@@ -224,6 +255,10 @@ Matches `sprint-status.yaml:183`, which is authoritative.
   ```
 
   `scripts/pipeline-run.ts` wires the third to the second (`lastMemory: spawned.lastMemory`). The
+  AC4 placement-failure classification crosses separately, as a **typed rejection on the existing
+  `ResidentCaller.call` contract** — an engine-owned error class (`PlacementRefusedError`, exit
+  97) that fleet's caller throws and the engine catches by name, fleet→engine being the allowed
+  import direction — not a fourth fact on these two objects (W9C-6b-2). The
   bound stays **engine-owned policy** (INV-MEM-1: it is read from the frozen manifest, and fleet
   neither defaults nor clamps it); fleet is mechanism only.
 - **Why cgroup and not a sampler, and what that costs — stated because it is genuine work.**
@@ -346,35 +381,59 @@ Matches `sprint-status.yaml:183`, which is authoritative.
   around the existing `Bun.spawn` / `memory.peak` + `memory.events` read / leaf removal, and
   `lastMemory()` on `ResidentSpawn`. Fleet supplies the *how*; the bound *value* stays the engine's
   (Technical Notes).
-- `src/phase-engine/steering.ts` — **one** edit, inside DF3.6a's already-enumerated carve-out: an
+- `src/phase-engine/steering.ts` — **two** edits, both inside DF3.6a's already-enumerated
+  carve-out: **(1)** an
   internal writer setting `telemetry.status = "stopped"` and `telemetry.exitStatus = "overflow"`,
   and firing `deps.onBoundBreach({ bound:"rss", cause:"watchdog_kill", … })`, when a solicitation's
-  call rejects **and** `deps.lastMemory?.()` reports `oomKilled: true` (AC5). The `lastMemory` dep
+  call rejects **and** `deps.lastMemory?.()` reports `oomKilled: true` (AC5); **(2)** the typed
+  placement-failure channel (W9C-6b-2, AC4): the `ResidentCaller` contract gains the engine-owned
+  `PlacementRefusedError` rejection (exit 97, thrown by fleet's caller when the placement wrapper
+  fails before `exec`) and the call-failure catch gains its `instanceof` arm beside the
+  degrade arm, firing `onBoundBreach({ bound:"rss", cause:"unenforceable", … })` instead of
+  writing the `"degraded"` latch. DF3.6a's enumerated list is amended accordingly (item 6, this
+  story's — the same cross-story amendment shape that put `lastMemory` in item 5). The `lastMemory` dep
   lands in **DF3.6a's** diff (its Files list item 5), because the deps object is one literal and two
-  stories must not edit it. The controller keeps its snapshot-only getter (`steering.ts:961-967`);
+  stories must not edit it. The controller keeps its snapshot-only getter;
   **no public setter is added**, because a public setter is a path the resident's own tier could
   reach and INV-MEM-1 forbids it. **The engine does not call `stop()` and cannot:** `stop()` is on
   `ResidentSpawn`, which the engine never receives — the same reason `lastMemory` had to become a
   dep. `onBoundBreach` is the channel out; the runner, which does hold the handle
-  (`residentSpawn = spawned`, `scripts/pipeline-run.ts:3294`), is what calls `stop()`.
-- `scripts/pipeline-run.ts` — this file takes **five** edits across the pair and neither story may
-  claim it alone: DF3.6a lands (i) the `loadResidentBounds` call + marker refusal and (ii)
-  `bounds`/`onBoundBreach` at `createSteering` (`:3295`); **this story adds (iii)**
-  `residentRssBytes` on the `startResident` call (`:3255`), **(iv)** `lastMemory:
-  spawned.lastMemory` at the `createSteering` call (`:3295`), and **(v)** the `onBoundBreach`
-  handler arm that calls `residentSpawn.stop()` on `cause:"watchdog_kill"` (AC5's latch) and emits
-  the `resident_disabled` / `rss_unenforceable` line on the AC3 arming-refusal path. Rebases onto
-  DF3.6a. Nothing else in the file changes.
+  (`residentSpawn = spawned` at the sole `createSteering` call site), is what calls `stop()`.
+- `src/phase-engine/manifest.ts` — **the `residentRssBytes` default constant only** (W6-C-H4):
+  DF3.6a marks the shipped 512 MiB default provisional-pending this story's measured baseline, and
+  this story's Files budget carries re-setting that one constant from the live measurement. No other
+  field, no schema change — the three bound fields and their validation are DF3.6a's.
+- `scripts/pipeline-run.ts` — **the pair takes six edits on this file; the count is stated once, in
+  DF3.6a's Files to Modify, and mirrored here so neither half's "no other change" can reject the
+  other's** (W6-C-M2): DF3.6a lands (i)–(ii); **this story adds (iii)** `residentRssBytes` on the
+  `startResident` call, **(iv)** `lastMemory: spawned.lastMemory` at the `createSteering` call,
+  **(v)** the `onBoundBreach` handler arm that **awaits** `residentSpawn.stop()` on
+  `cause:"watchdog_kill"` **and on the placement wrapper's exit-97 `unenforceable` classification**
+  (AC5's latch **and AC4's stop** — an exit-97 placement failure is neither a `watchdog_kill` nor a
+  `lastMemory().oomKilled` reading, so without this widening the engine's call-failure catch
+  converts it to the one-way `"degraded"` latch: a misclassification that records a routine
+  degrade where the bound is unenforceable and lands the classification nowhere — the status gate
+  would then treat the resident as absent so no further calls issue, but nothing stops the spawn
+  handle and nothing records why),
+  recording the failed solicitation `{bound:"rss", allowed:false, cause:"unenforceable"}` on the
+  fleet `warn` chokepoint (harvested via fd-2), and **(vi)** the arming-refusal classification — the typed
+  cgroup-refusal error handled beside the rate arm in the arming `try/catch`, emitting
+  `resident_disabled` / `rss_unenforceable` through the existing disabled-shape branch (AC3).
+  Rebases onto DF3.6a. Nothing else in the file changes.
 - `oci/exedev/systemd/qds-run@.service` — add `Delegate=memory`. One directive; it is what makes the
   cgroup writable by `User=exedev` without root, D-Bus or polkit.
 - `oci/exedev/Dockerfile` — one positive `grep -qE '^Delegate=memory$'` assertion in the existing
-  unit scan, matching the shape of the `RuntimeDirectoryPreserve=yes` check at `:809`, so the
+  unit scan, matching the shape of the `RuntimeDirectoryPreserve=yes` check, so the
   directive cannot be silently dropped by a later image edit. (Verified: `Delegate=` contains no
   `QDS_`, so DF2.10's AC6 env scan at `:1024-1040` is unaffected, and the `systemd-analyze verify`
   stage accepts the directive.)
 - `tests/fleet/resident.test.ts` — host-side fs-level coverage of the subtree split, the leaf
   lifecycle and the unenforceable path.
-- `tests/fleet/e2e/tier4-resident.live.test.ts` — the live OOM-kill assertion (AC1).
+- the **dedicated in-box dispatch's live round** (E2E Slice — a tier-2-gated `fleet run` round
+  under `qds-run@.service`, reusing the host-side tier's `runLeg` harness where it transfers) —
+  the live OOM-kill assertion (AC1). `tests/fleet/e2e/tier4-resident.live.test.ts` is **not**
+  modified: every leg in it runs `pipeline-run.ts` on the darwin operator host, where no cgroup
+  exists (the W8-C-2 re-site).
 
 ## Security Invariants
 
@@ -415,12 +474,51 @@ Matches `sprint-status.yaml:183`, which is authoritative.
 - [ ] **Contract:** the engine issues no signal and runs no timer for this bound; `grep` over the diff finds no `ps`, no `/proc` parser, no sample interval and no SIGTERM/SIGKILL sweep added by this story. `src/reverify/worktree.ts` is untouched.
 - [ ] **Image + pin (DF2.10 ritual — this story requires a rebuild, not just an edit):** `Delegate=memory` lands in `oci/exedev/systemd/qds-run@.service`; the image is **rebuilt, re-published and its digest pin moved** per DF2.10's pin ritual, and `deriveBuildId`'s inputs (which hash the systemd unit — `src/providers/exedev/driver.ts:395,425`) are re-derived. **A run against the previously pinned digest boots a unit with no `Delegate=`, so the resident refuses to start (AC3) — a green local gate against a stale pin is the exact failure this item exists to prevent.**
 - [ ] **Security:** the bound is unreachable from any path the resident controls (INV-MEM-1); an unenforceable cgroup prevents resident start (INV-MEM-2); the placement wrapper adds no argv surface and the key stays env-borne (INV-MEM-3).
-- [ ] **Test (memory bound fires, AC1 — LIVE, roster tier 4):** a resident whose pi child allocates past `residentRssBytes` is **OOM-killed by the kernel** with the engine issuing no signal; journal `resident.exitStatus:"overflow"`; `watchdog_kill` row carries the `memory.peak`; the run completes deterministically and the solicitation cgroup is removed. Lands in `tests/fleet/e2e/tier4-resident.live.test.ts` as a fourth leg beside L1/L2/L3. **Gate:** `QDS_E2E_LIVE` + `QDS_E2E_TIER=2` — the file calls `liveGate("2")`, and "tier 4" is a roster label, never an env value (`.claude/skills/qds-live-e2e/SKILL.md`); exporting `QDS_E2E_TIER=4` throws. **Spend:** reuses the existing dispatch + resident keys and box, so the marginal cost is one extra solicitation (~25 µ$ measured, `adr:83`) against the tier's ≈$0.10 worst-case envelope. **Setup inherited from the tier:** isolated `HOME` (gotcha #2 — host `~/.pi/agent/auth.json` shadows `OPENROUTER_API_KEY`), `QDS_PI_CATALOG_DIR` at `tests/phase-engine/fixtures/pi-catalog`, teardown in `finally` — a leaked box on an OOM path is a leaked box that bills. **Falsifier:** `memory.events`' `oom_kill` count is `0`, or the leaf survives `rmdir`. **A host-side unit test cannot substitute — darwin has no cgroups — and the story is not done without this round.**
-- [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the same round and the same box, read `memory.peak` from a **control solicitation that allocates nothing** (the existing L2 armed leg's first call) and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and re-derive DF3.6a's 512 MiB default against it. **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. Marginal spend: zero — it reads a file from a solicitation the round already makes.
+- [ ] **Test (memory bound fires, AC1 — LIVE, roster tier 4, TWO legs — each leg names the clause it
+      proves):** the make-or-break needs a *producible trigger* — something that deterministically
+      allocates past the bound — and no story mechanism, ADR clause or probe says how a real pi child
+      is driven to do that (Wave 6 W6-C-B4: without a named lever the round proves nothing and the
+      story is un-shippable by its own gate). The proof is therefore two legs on the same round —
+      **and two resident lifecycles, because no one resident lifecycle can serve both legs**:
+      `startResident` resolves `QDS_PI_BIN` once per resident (the bin read in
+      `src/fleet/resident.ts`), and AC5's stop latch ends the resident at its first OOM-kill, so a
+      Leg A crossing leaves nothing for Leg B to arm. **Each leg is therefore its own in-box
+      dispatch on its own box, ordered Leg A first** — the zero-spend leg's crossing is the
+      cheapest falsifier, and a Leg A failure ends the round before Leg B spends a µ$. The AC6
+      replay guard refuses a second run on a settled box, which is the second reason the legs
+      cannot share one box or one run record.
+      **Leg A — the crossing (proves AC1's enforcement clause: the kernel kills a cgroup the engine
+      never signals, with the engine's pi code not running).** A synthetic allocator binary is
+      installed on the box as **that leg's `QDS_PI_BIN`** — it allocates past the fixture bound in a
+      loop and exits; the cgroup machinery, the `memory.max` write and the `oom.group=1` write are
+      the production ones. This leg costs **≈zero spend** (it never calls the model) and is
+      *producible by construction*: its falsifier is `memory.events`' `oom_kill` count `0` or the
+      leaf surviving `rmdir` — a crossing that does not fire falsifies the story. **Leg B — the
+      attachment (proves the real-pi precondition: a normal solicitation runs inside a real leaf,
+      under the bound, and the telemetry reads are live).** The round's real solicitation
+      (~401 µ$ measured on the tier's host-side leg — the ~25 µ$/$0.000025 figure is the tier-2
+      **in-box** solicitation measurement) asserts `memory.peak` < the bound, `memory.events`' `oom_kill` count `0`,
+      the leaf removed after the call, and `resident.exitStatus` unset — a normal call MUST NOT
+      fire. Legs A and B together are what AC1 claims; neither substitutes for the other, and a leg
+      that cannot say which clause it proves proves nothing. **Sited on the dedicated in-box
+      dispatches** (E2E Slice) — `fleet run` rounds under `qds-run@.service`, one box per leg, **not**
+      fourth legs in the host-side `tier4-resident.live.test.ts` file, whose every leg runs
+      `pipeline-run.ts` on the darwin operator host where no cgroup exists. The host-side file's
+      `runLeg` harness, isolated-HOME and fixture-catalog setup are reused where they transfer;
+      the enforcement assertions run against the in-box round's harvested journal and
+      `memory.peak`/`memory.events` reads. **Gate:**
+      `QDS_E2E_LIVE` + `QDS_E2E_TIER=2` — the file calls `liveGate("2")`, and "tier 4" is a roster
+      label, never an env value (`.claude/skills/qds-live-e2e/SKILL.md`); exporting
+      `QDS_E2E_TIER=4` throws. **Setup inherited from the tier:** isolated `HOME` (gotcha #2 — host
+      `~/.pi/agent/auth.json` shadows `OPENROUTER_API_KEY`), `QDS_PI_CATALOG_DIR` at
+      `tests/phase-engine/fixtures/pi-catalog`, teardown in `finally` — a leaked box on an OOM path
+      is a leaked box that bills. **A host-side unit test cannot substitute — darwin has no cgroups
+      — and the story is not done without this round.**
+- [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's 512 MiB default in `src/phase-engine/manifest.ts` — that one constant is in this story's Files to Modify** (W6-C-H4: the value lived in the merged half while the measurement lived here, with no file budget to change it — an unowned drive-by waiting to happen). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. Marginal spend: zero — it reads a file from a solicitation the round already makes.
 - [ ] **Test (cgroup scoping, AC2):** a `dispatch_task` phase running beside a small resident does **not** trip the bound — the workers are not in the resident's cgroup. An implementation setting `MemoryMax=` on `qds-run@<runId>.service` passes a synthetic-allocator "does it fire?" test and MUST fail this one.
 - [ ] **Test (fail-closed unenforceable, AC3/INV-MEM-2):** with `Delegate=memory` absent from the unit, the resident is **not started**, the journal records `resident.status:"disabled"`, the log line carries `cause:"unenforceable"`, no tripwire row is emitted, and the run still completes deterministically — never an unbounded resident.
-- [ ] **Test (image contract):** the Dockerfile unit scan fails the build when `Delegate=memory` is removed from `qds-run@.service` — the assertion is the fence, the same shape as `RuntimeDirectoryPreserve=yes` (`oci/exedev/Dockerfile:809`).
-- [ ] **Test (fail-closed placement, AC4):** with the leaf removed (or `+memory` disabled) between arming and the `cgroup.procs` write, the wrapper exits **97** and pi is never `exec`'d; the solicitation records `cause:"unenforceable"` and the resident is stopped. A wrapper joining the commands with `;` execs pi unbounded and records a clean call, and MUST fail.
+- [ ] **Test (image contract):** the Dockerfile unit scan fails the build when `Delegate=memory` is removed from `qds-run@.service` — the assertion is the fence, the same shape as the Dockerfile's existing `RuntimeDirectoryPreserve=yes` check.
+- [ ] **Test (fail-closed placement, AC4):** with the leaf removed (or `+memory` disabled) between arming and the `cgroup.procs` write, the wrapper exits **97** and pi is never `exec`'d; the engine's catch classifies the failure through the typed `PlacementRefusedError` rejection — never the `"degraded"` latch; the `onBoundBreach` callback carries `{bound:"rss", allowed:false, cause:"unenforceable", exitCode: 97}`; the fleet `warn` line records that payload; `residentSpawn.stop()` is awaited; and **no subsequent solicitation is issued** for that resident. A wrapper joining the commands with `;` execs pi unbounded and records a clean call, and MUST fail.
 - [ ] **Test (OOM stops the resident, AC5):** after a kernel OOM-kill the journal reads `status:"stopped"` **and** `exitStatus:"overflow"`, `stop()` has been called via `onBoundBreach`, and no further solicitation is issued. An implementation leaning on the `"degraded"` status gate leaves `stopped === false` and MUST fail; so MUST one that leaves `status:"degraded"` beside `exitStatus:"overflow"`.
 - [ ] **Test (host-side seam, INV-MEM-2 Scope):** omitting `residentRssBytes` arms a resident with **no** cgroup calls (this is what keeps `tests/fleet/resident.test.ts`'s 42 arming sites and DF3.3's INV-RES-3 exhibit green on darwin); supplying it on a host without cgroup v2 refuses to start. Both asserted.
 - [ ] **Test (reclaimable pressure is not a silent miss, M1):** a solicitation driven to `memory.max` by **file-backed** (reclaimable) growth thrashes rather than OOMs, and the run records a **timeout** (`SOLICIT_TIMEOUT_MS = 60_000`, `src/phase-engine/steering.ts:26`) — not a `watchdog_kill`, and not a silent pass. Asserts the classification, so a missing `oom_kill` count on that path reads as "the other backstop fired", never as "the bound is absent". Host-side where cgroups exist; skipped, not faked, where they do not.
