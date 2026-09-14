@@ -68,16 +68,23 @@ The load-bearing ones, with the parent's verification notes:
   attempt-1 append owner is that same DF6.1a row (W9-D-3 closed in the same stroke).
 - **W9-D-2 (HIGH, DF6.1b AC2/DoD) — APPLIED 2026-09-14 (CodeRabbit round, this branch):** the uncharged-attempt ceiling of 3, the per-attempt
   classification list, and `out-of-scope-diff`'s cap of 1 need **storage** no declared state can
-  hold (record vocab closed; ledger = runIds only; `fixOutcome` write-once-at-terminal;
-  `dispatch-refused` provisions nothing). Resolution applied: the per-attempt lifecycle states
-  (awaiting-approval / charged-terminal / poll-interrupted-recovery / orphaned) are **derived on
-  the driver's read from the fix run's own record** — approval extension ⇒ awaiting-approval
-  (uncharged, uncounted, continuation), `fixContext` without approval or terminal ⇒ poll
-  recovery within the window, neither ⇒ orphaned (counts toward the uncharged ceiling) — no new
+  hold (record vocab closed; ledger = `fixAttemptRunIds` only; `fixOutcome` write-once-at-terminal).
+  Resolution applied (amended by the second 2026-09-14 CodeRabbit round): the per-attempt lifecycle
+  states (awaiting-approval / terminal / poll-interrupted-recovery / orphaned) are **derived on
+  the driver's read from the fix run's own record, in arm order** — a terminal outcome ⇒ terminal,
+  its **classification** deciding the budget (`ci-red`/`ci-verdict-unavailable` charged;
+  `transient`/`lead_failure`/`approval-timed-out`/`dispatch-refused` uncharged-terminal toward the
+  ceiling of 3; `out-of-scope-diff` cap 1 / `scope-requires-privilege` neither); else
+  `extensions.approval.state === "awaiting-approval"` (**the `state` field, not the bare extension**
+  — `approved`/`rejected`/`timed-out` are decided states the terminal/`fixContext` arms classify;
+  `ApprovalState`, `src/reverify/approval.ts`) ⇒ awaiting-approval continuation; else `fixContext`
+  ⇒ poll recovery within the window; else orphaned (counts toward the uncharged ceiling) — no new
   registration, no second ledger field, and a crash cannot strand a half-written state.
-  AC2's "escalates immediately" reconciled: `dispatch-refused` escalates on first occurrence and
-  never accumulates (it provisions nothing and spends nothing); the accumulate-to-3 ceiling
-  covers the spend-bearing uncharged classifications only.
+  `dispatch-refused` is **resource-bearing**: every DF6.2 refusal fires from the in-box
+  `dispatch_task` phase, after the record, box and capped key exist, so it counts toward the
+  uncharged ceiling while still escalating on first occurrence (the loop never dispatches another
+  attempt for it); `fixOutcome.runIds` stays the terminal audit aggregate (AC3) and is never the
+  retry ledger.
 - **W9-D-4 (HIGH, DF6.1a AC2):** the proposal-variation trigger ("run carries a `fixContext`
   brief key") is unobservable in `src/reverify/runner.ts` (zero brief refs; brief consumed
   in-memory in `dispatch.ts`, never persisted host-side; `fixContext` written only after the
