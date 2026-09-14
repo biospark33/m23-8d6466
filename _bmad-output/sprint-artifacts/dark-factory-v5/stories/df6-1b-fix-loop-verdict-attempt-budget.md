@@ -221,12 +221,14 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    and one key cap are already sunk even though no CI ran and no second box is bought. "Charges
    nothing" means no `attempt` increment, never a free invocation: the refusal still enters the
    uncharged ledger (recorded, never counted toward the ceiling), and the loop itself never
-   dispatches another attempt for it (first
-   occurrence escalates immediately, every time) — so it can be recorded **at most once per PR**,
+   dispatches another attempt for it (escalation posts once, on the first occurrence per PR) —
+   so it can be recorded **at most once per PR**,
    and the accumulate-to-3 ceiling governs the classifications a re-invocation can actually
    reproduce (`transient`, `lead_failure`, `approval-timed-out`, `orphaned`), not this one. A
    later invocation that reads a recorded `dispatch-refused` dispatches nothing, provisions
-   nothing, and re-escalates. An attempt classified `transient` or
+   nothing, and exits non-zero reporting the already-recorded refusal — the handoff comment was
+   posted once, at the first occurrence; the later invocation names it in its own exit
+   diagnostic and posts no second escalation comment. An attempt classified `transient` or
    `lead_failure` is likewise not a fix failure: DF1.3 already spent its own separately-bounded parse
    and gate retries inside the run, and this story adds no third retry vocabulary — such an attempt
    escalates with the classification named, and the operator decides whether to re-invoke. Only an
@@ -640,8 +642,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       dispatches nothing, provisions no box, exits non-zero and escalates listing every recorded
       classification; a recorded `dispatch-refused` follows its own bound, not this ceiling — the
       invocation that records it escalates immediately and a subsequent invocation dispatches
-      nothing and re-escalates, so it never appears twice in the ledger and counts toward neither
-      ceiling (AC2); **one** recorded `out-of-scope-diff` → the next invocation escalates without
+      nothing and reports the existing refusal without posting a second escalation comment, so it
+      never appears twice in the ledger and counts toward neither ceiling (AC2); **one** recorded `out-of-scope-diff` → the next invocation escalates without
       dispatching; a last ledger entry whose fix run record carries an approval extension whose
       **`state` is `awaiting-approval`** and no
       terminal outcome is **not** counted — the invocation continues and the
