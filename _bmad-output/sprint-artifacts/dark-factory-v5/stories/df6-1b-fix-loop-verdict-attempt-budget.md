@@ -42,7 +42,7 @@
 ## User Story
 
 As the factory operator,
-I want the fix loop to read its own CI verdict, stop at two attempts, and hand me everything I need
+I want the fix loop to read its own CI verdict, stop at two charged attempts, and hand me everything I need
 when it stops,
 so that the factory maintains its own pull requests without ever looping unattended, misreading
 another commit's green as its own, or stopping silently.
@@ -62,8 +62,11 @@ attempted, the CI failure messages and every contributing runId. `fixOutcome` is
 `src/audit/chain.ts` gains per-contributing-runId hop resolution so `walkAuditChain` on a PR resolves
 the parent's chain **and** each fix run's.
 
-**One invocation drives at most one attempt.** The loop is two invocations, bounded by the attempt
-budget on the record — not one process staying alive across two human approval decisions.
+**One invocation drives at most one attempt leg.** A single attempt may span two invocations around
+the awaiting-approval continuation (DF6.1a AC3): the first ends at the approval gate, the second
+continues that same attempt to its verdict. The loop is bounded by the two attempt budgets on the
+record — **two charged attempts**, and **three uncharged** — never by an invocation count, and never
+by one process staying alive across a human approval decision.
 
 ## E2E Slice
 
@@ -77,7 +80,7 @@ verdict SHA-bound to `attemptSha`; on all-green the run advances to summarize, r
 as `{ prNumber, attempts: 1, outcome: "green", runIds: [<parentRunId>, <fixRunId>] }`. And given
 attempt 1 ended a **charged** failure, When the operator re-invokes `bun scripts/fix-run.ts --pr <n>`,
 Then that invocation reads `attempt = 1` with a non-green outcome, dispatches attempt 2 carrying
-attempt 1's CI failure output and runId, and — given two charged failures — a third invocation
+attempt 1's CI failure output and runId, and — given two charged failures — a further invocation
 dispatches **nothing**, provisions no box, exits non-zero, and posts the escalation comment carrying
 all four diagnostic elements plus the runIds. `walkAuditChain` on that PR resolves the hop set for the
 parent run **and** each fix runId.
@@ -235,21 +238,26 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    attempt that produced a diff, passed re-verify, was approved, pushed, and then failed **CI**
    charges the budget.
 
-   **Uncharged attempts are bounded too, by a separate and smaller ceiling.** A terminal state that
+   **The budget is two ceilings, defined separately.** The **charged budget is two**: only an attempt
+   that reached CI and failed there charges it (the opening rule of this AC), and a second charged
+   failure exhausts it (`:39`, INV-5). The **uncharged ceiling is three per PR**, separate from and
+   independent of the charged budget: a terminal state that
    charges nothing still costs one box, one capped key and one model spend (≈50 000 µ$ by DF6.1a's
    own estimate), so "uncharged" must not mean "unlimited" — otherwise the loop terminates on the path
    where the fixer works and CI disagrees, and runs forever on the cheaper-to-reach path where the
    fixer is refused. At most **3** uncharged attempts are recorded per PR across the
    reproducing uncharged classifications (`transient`, `lead_failure`, `approval-timed-out`,
    `orphaned` — the lifecycle ladder in Technical Notes — "Attempt bookkeeping";
-   `dispatch-refused` is excluded, capped at one by its own first-occurrence escalation); the
-   fourth invocation
+   `dispatch-refused` is excluded, capped at one by its own first-occurrence escalation); once three
+   are recorded, an invocation that would dispatch a fourth uncharged attempt
    dispatches nothing, provisions no box, exits non-zero, and escalates with
    every recorded classification listed. **A last ledger entry whose fix run sits at
    `awaiting-approval` is the continuation state, not an uncharged attempt**: the approval
    extension's **`state` field** reads `awaiting-approval` on the fix run's own record and no
    terminal outcome does, so the invocation
-   continues per DF6.1a AC3 — it consumes neither ceiling and stops nothing. **`out-of-scope-diff` is capped at 1**: it is the *injection*
+   continues per DF6.1a AC3 — it consumes neither ceiling and stops nothing. Both bounds are stated
+   over **attempts**, never over invocations: a single attempt may span two invocations around this
+   continuation, so no invocation count — two, three or four — is the loop's bound. **`out-of-scope-diff` is capped at 1**: it is the *injection*
    outcome, so a second occurrence on the same PR escalates immediately without dispatching — a second
    identical out-of-scope diff on the same comment set is a signal about the comments, not about the
    fixer.
@@ -276,7 +284,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    "correctly" in a named state — it MUST fail this AC.*
 
    And given two **charged** attempts have failed, When the retry budget is exhausted (`:32`, `:54`),
-   Then a third invocation dispatches **nothing**, provisions no box, exits non-zero, records the
+   Then a further invocation dispatches **nothing**, provisions no box, exits non-zero, records the
    failure with `(error log, diff attempted, CI failure messages)`, and **escalates to a human** — a
    comment on the PR carrying that diagnostic set plus the runIds — rather than stopping silently.
 
@@ -299,12 +307,12 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 
 | Trigger | Status | E2E Test | Follow-Up |
 | --- | --- | --- | --- |
-| `bun scripts/fix-run.ts --pr <n>` — the **sole** trigger (DD-1: the operator is the channel). One invocation drives **at most one attempt**; the operator's next invocation drives the next | in-scope — extends DF6.1a's verb additively | `tests/fixloop/cli.test.ts` | — |
+| `bun scripts/fix-run.ts --pr <n>` — the **sole** trigger (DD-1: the operator is the channel). One invocation drives **at most one attempt leg** — a single attempt may span two invocations around the awaiting-approval continuation; the operator's next invocation drives the next leg | in-scope — extends DF6.1a's verb additively | `tests/fixloop/cli.test.ts` | — |
 | Required-check verdict by the three-invocation composition (`gh pr view <n> --json headRefOid,headRefName` before and after + `gh pr checks <n> --required --json name,state,bucket`), SHA-bound to the attempt | in-scope | `tests/fixloop/ci-status.test.ts` | — |
 | Human escalation comment on the PR at budget exhaustion or a non-recoverable terminal state | in-scope | `tests/fixloop/escalation.test.ts` | — |
 | Inbound webhooks (`status` / `check_suite` / `pull_request`) and any host-side receiver | out-of-scope — no webhook ingress in the v5 slate (AC1); P1.18's receiver is not built or depended on here | — | none in v5.0 |
 | Scheduled sweeper that re-polls stale PRs | out-of-scope — no scheduler in v5.0 | — | none derived; the operator re-invokes |
-| A resident process, daemon, PID file or `--loop` flag driving attempt 2 | out-of-scope — the loop is two invocations, never one process across two human approvals | — | — |
+| A resident process, daemon, PID file or `--loop` flag driving attempt 2 | out-of-scope — no invocation spans an approval decision and none drives two attempt legs; never one process across human approvals | — | — |
 
 ## Infra Prerequisites
 
@@ -322,11 +330,17 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 
 ## Technical Notes
 
-- **One invocation, one attempt.** `scripts/fix-run.ts` is a bounded, exiting invocation in the shape
-  DF3.8 fixed for `fleet observe`: it drives a single attempt to a terminal state and exits. It never
+- **One invocation, one attempt leg.** `scripts/fix-run.ts` is a bounded, exiting invocation in the
+  shape DF3.8 fixed for `fleet observe`: it drives at most one attempt leg to a stopping point and
+  exits. On the clean path a single attempt spans two invocations around the awaiting-approval
+  continuation — DF6.1a AC3's invocation 1 ends at the approval gate, and its invocation 2 continues
+  that same attempt through the push and this story's poll to the attempt's verdict — so an
+  invocation does not always end its attempt at a terminal state, and uncharged terminal attempts
+  add invocations beyond any clean-path count. It never
   blocks across an approval decision, never holds the per-run invocation lock across a human wait, and
-  ships no daemon, no PID file and no `--loop` flag. The loop is **two invocations**, bounded by the
-  attempt budget on the record. The alternative reading — one process driving both attempts — would
+  ships no daemon, no PID file and no `--loop` flag. The loop is bounded by the two attempt budgets
+  on the record — two charged, three uncharged — never by an invocation count. The alternative
+  reading — one process driving both attempts — would
   have a CLI stay alive across two human decisions of unbounded duration while holding
   `<runsDir>/<runId>.lock`, refusing every other run-scoped verb exit-5 against that run, and would
   contradict DF3.7/DF3.8's verb discipline (*"a verb and not a process: one bounded pass, a typed
@@ -437,7 +451,15 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   takes its last entry as the latest fix runId, and reads **that fix run's own record** for
   `fixContext`, its approval state and its non-green outcome — a charged attempt-1 failure leaves
   the parent record carrying a populated ledger and no `fixOutcome`, which is precisely the state
-  this lookup must survive. `fixOutcome.runIds` remains the terminal aggregate the audit chain reads
+  this lookup must survive. Two `fixContext` vocabularies share the name and must not be conflated:
+  the **dispatch-time fixContext** is the brief DF6.1a's dispatch hands the attempt's fixer (the
+  allow-listed brief key, DF6.1a's "dispatch input path") — transient, never persisted — and for
+  attempt 2 it carries attempt 1's CI failure output and runId (AC2); prose the record must never
+  hold. The **persisted `extensions.fixLoop.fixContext`** — what this lookup reads — is DF6.1a's
+  seam payload, and stays limited to IDs, digests and bounded metadata (`prNumber`, `prBranch`,
+  `attemptSha`, `attempt`, `pollWindowOpenedAt`, `commentIds`, `omittedCommentIds`, `omittedCount`,
+  `commentsDigest`); CI failure output is excluded from the run record (INV-7), its durable home
+  being the fix run's own trace rows. `fixOutcome.runIds` remains the terminal aggregate the audit chain reads
   (AC3); the ledger is what AC2's driver reads. No second state store; no sweep — the ledger rides
   the parent record the join already resolves.
 
@@ -625,7 +647,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 - [ ] **Impl:** attempt budget (max 2 **charged** attempts) enforced from the parent record's
       attempt-time `fixAttemptRunIds` ledger, resolved via the parent-run join —
       `store.get(parentRunId)` plus `extensions.pr.prNumber === n`; a mismatch refuses before the
-      ledger is read — before any dispatch; one invocation drives at most one attempt, holds no lock
+      ledger is read — before any dispatch; one invocation drives at most one attempt leg, holds no lock
       across a human approval, and ships no daemon, PID file or `--loop` flag.
 - [ ] **Test (concurrent invocations, PR-scoped):** two concurrent `--pr <n>` invocations **that have
       not yet dispatched** — the read-check-increment runs under
@@ -637,8 +659,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       fixture runId does not exercise the mint race and does not satisfy this item. An implementation
       asserting a CAS semantic of `RunRecordStore.set` MUST also fail.*
 - [ ] **Test (uncharged-attempt ceiling):** three recorded uncharged attempts (any mix of
-      `transient`, `lead_failure`, `approval-timed-out`, `orphaned`) → the
-      fourth invocation
+      `transient`, `lead_failure`, `approval-timed-out`, `orphaned`) → an
+      invocation that would dispatch a fourth uncharged attempt
       dispatches nothing, provisions no box, exits non-zero and escalates listing every recorded
       classification; a recorded `dispatch-refused` follows its own bound, not this ceiling — the
       invocation that records it escalates immediately and a subsequent invocation dispatches
@@ -704,9 +726,9 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       a single poll. *An implementation that restarts the full 15-minute window on recovery MUST
       fail.*
 - [ ] **Test (budget exhaustion and the retry exception):** two recorded **charged** failed attempts
-      → a third invocation dispatches nothing, provisions no box, exits non-zero, and posts the
-      escalation with all four diagnostic elements plus the runIds; a first invocation on a PR with no
-      recorded attempt dispatches attempt 1; **a second invocation against an unchanged comment set
+      → a further invocation dispatches nothing, provisions no box, exits non-zero, and posts the
+      escalation with all four diagnostic elements plus the runIds; an invocation on a PR with no
+      recorded attempt dispatches attempt 1; **an invocation against an unchanged comment set
       with a recorded failed attempt 1 dispatches attempt 2** — an implementation whose comment-ID
       dedup refuses the retry MUST fail this test (AC2).
 - [ ] **Test (charging classification, DF6.2/DF1.3):** an attempt whose `dispatch_task` settled
