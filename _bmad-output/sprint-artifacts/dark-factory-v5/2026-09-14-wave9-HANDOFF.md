@@ -21,8 +21,10 @@ anything** — including this handoff. Cite by symbol or section anchor, never b
   record: tracker §"Wave 8 fix — all 48 findings applied in-session (2026-09-14)".
 - **Ownership law updated for the fix wave's new deliverables**: unit-C rows O20/O21 (fill-side
   stamp provisioner — DF3.6a, adds-only in dispatch.ts), unit-D O15 extended + O22 (the
-  attempt-time `fixAttemptRunIds` ledger — DF6.1b, invoked from DF6.1a's invocation, the O5
-  pattern), unit-A O15 renamed (`sweep-box-unreachable`).
+  attempt-time `fixAttemptRunIds` ledger — registration + dispatch-time append **re-homed to
+  DF6.1a** post-wave-9 by W9-D-1, which owns the dispatch code path; DF6.1b's bookkeeping is the
+  reader — authoritative rows in `seam-ownership/unit-D-df6-1ab.md`), unit-A O15 renamed
+  (`sweep-box-unreachable`).
 
 ## 2. Working-tree state (verify before acting)
 
@@ -64,8 +66,9 @@ Charter §5 (`2026-09-10-wave7-HANDOFF.md`) all stand, plus:
 - **W6-D-B1 invocation**: invocation 2 continues into DF6.1b's poll leg.
 - **W6-D-H1/H2**: head-branch parent join; `fix-ceiling-insufficient` in `feedback-run.ts`.
 - **New from the fix wave (Wave-9 verifiers verify, not re-argue)**: DF3.6a owns the fill-side
-  stamp edit in dispatch.ts (O20/O21); DF6.1b owns the `fixAttemptRunIds` dispatch-time ledger
-  and its invocation call site (O15/O22); DF3.8's retirement is in-pass (AC4(d)); `out-of-scope-diff`
+  stamp edit in dispatch.ts (O20/O21); **DF6.1a owns the `fixAttemptRunIds` registration and
+  dispatch-time append** (O15/O22, re-homed from DF6.1b by W9-D-1 — DF6.1b's bookkeeping is the
+  reader); DF3.8's retirement is in-pass (AC4(d)); `out-of-scope-diff`
   charges zero, capped at 1, owned by DF6.1b; sweep event is `sweep-box-unreachable`.
 
 ## 5. What NOT to do

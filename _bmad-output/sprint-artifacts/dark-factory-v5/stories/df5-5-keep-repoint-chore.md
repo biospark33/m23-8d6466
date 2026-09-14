@@ -226,7 +226,7 @@ No deployed component: this story ships markdown only.
   | `p1-3-seeds-decompose-mirror.md` | 22 (×3), 24 (×5), 39, 46, 138 (×3), 142, 147 (×3), 154 (×2), 155 | **19 `P1.1` occurrences across 8 lines** — **per occurrence, not per line** (verified 2026-09-08: `grep -oE 'P1\.1\b' \| wc -l` → 19). **18 repointed** → DF3.1; **`:142` (×1) is PROVENANCE** — keeps `P1.1`, gains `(now DF3.1)`, see below. P1.6 → DF1.6 (L46, ×1). Precede with the `p1-3` header blockquote below. L39/L154/L155 are in-block edits (INV-1) |
   | `p1-7-lsp-diagnostics-gate.md` | 26 | P1.6 → DF1.6 |
   | `p1-9-restart-policy.md` | 25 | P1.8 → DF1.8 — **but see the `p1-9` edge-divergence note below; resolve before applying** |
-  | `p1-11-hindsight-prime-retain.md` | 25, 48, 51 | P1.6 → DF1.6 (25, 51); P1.1 → DF3.1 (48, in-block per INV-1). **At :51 the path is also amended** — `src/protocol/phase-executor.ts` is pre-v5; see amendment F |
+  | `p1-11-hindsight-prime-retain.md` | 25, 48, 51 | P1.6 → DF1.6 (25, 51); P1.1 → DF3.1 (48 — the mention sits in that file's `## Technical Notes`, not a governed block, so it is a plain repoint outside INV-1's in-block budget; the four in-block edits are `p1-3`×3 + `p1-12`×1 — see AC2 item 2). **At :51 the path is also amended** — `src/protocol/phase-executor.ts` is pre-v5; see amendment F |
   | `p1-12-mulch-prime-record.md` | 25, 31, 39 | P1.6 → DF1.6 (31 is in-block per INV-1). **At :39 the path is also amended**, same substitution and note; see amendment F |
   | `p1-14-outcome-record-router.md` | 24, 26 | P1.13 → DF2.8 |
   | `p1-18-pr-comment-polling.md` | 17, 23, 25 (**not 50**) | L25 (dependency edge): P1.15 → DF5.2. L17, L23: repoint **under the shared P1.18 blockquote below**, never bare — the surrounding webhook premise is dead. **L50 (`P1.19`) is handed off to DF6.1a's fix wave** — see the P1.18 disposition note |
@@ -269,9 +269,9 @@ No deployed component: this story ships markdown only.
 
   **The substitutions are not bare** — the gloss rule above applies to every one of them, and
   `p1-3`'s glosses are heavier than `p1-2:26`'s. **The one verbatim quoted gloss is "the A2A
-  delegation layer (P1.1)" (`p1-3:24`); three further phrasings an earlier draft of this note
-  carried ("P1.1's registration schema", "the local-only Transport Contract enforced by P1.1
-  INV-4", "P1.1's envelope helper") appear nowhere in p1-3 and are retracted** — write each line's
+  delegation layer (P1.1)" (`p1-3:24`); the other phrasings are the lines' own glosses —
+  "P1.1's registration schema" (`:154`), "the local-only Transport Contract enforced by P1.1
+  INV-4" (`:24`), "P1.1's envelope helper" (`:147`)** — write each line's
   replacement text from the line's own words (checking for a parenthetical or appositive gloss),
   never from an inventory. The blockquote fixes the *reading*; it does not fix the *text*. First
   occurrence per line becomes `DF3.1 (was P1.1's <gloss>; that A2A surface is historical — see the

@@ -63,8 +63,11 @@ marker; **DF3.7's `observeAndDriveChain`** drives harvest (DF2.5) → teardown �
 holding no lock.**
 
 The operator decides on human time with `fleet approve <run-id>` (DF3.4). A **second**
-`bun scripts/fix-run.ts --pr <n>` invocation resolves this attempt's fix run through **DF6.1b's
-attempt-time `fixAttemptRunIds` ledger on the parent record** — the head-branch join resolves the
+`bun scripts/fix-run.ts --pr <n>` invocation resolves this attempt's fix run through the
+**attempt-time `fixAttemptRunIds` ledger on the parent record** — registered by **this story**
+(adds-only) and appended at that attempt's dispatch, because this story owns the dispatch code
+path; **DF6.1b's** attempt bookkeeping is its reader (W9-D-1: one owner per half of the seam) —
+the head-branch join resolves the
 parent run, the ledger's last entry names the fix run (appended at that attempt's dispatch, so it
 exists before any terminal outcome), and that fix run's own record is what carries an
 approved `ApprovalRecord` bound to this attempt's `ReverifyReport.reportId` and head sha — re-takes
@@ -200,7 +203,8 @@ the harvested diff, the credential probe, and the `fixContext` write.
    releases `<runsDir>/<runId>.lock`, and leaves no child process; a concurrent `fleet harvest` or
    `fleet teardown` against that run is **not** refused exit 5. Given a later invocation of
    `bun scripts/fix-run.ts --pr <n>`, the invocation resolves this attempt's fix run through the
-   parent-run join plus DF6.1b's attempt-time `fixAttemptRunIds` ledger (dispatch-time, so it
+   parent-run join plus the attempt-time `fixAttemptRunIds` ledger (this story's adds-only
+   registration and dispatch-time append; DF6.1b's driver reads it — dispatch-time, so it
    survives a charged attempt-1 failure — `fixOutcome` does not), and a record already carrying an **approved** `ApprovalRecord`
    bound to this attempt's `ReverifyReport.reportId` and head sha, Then that invocation re-takes the
    lock, performs AC6's scope check, calls `pushVerifiedSha`, and writes `fixContext` (AC4), **then
@@ -632,9 +636,14 @@ the harvested diff, the credential probe, and the `fixContext` write.
   DF3.1's brief schema. No existing key, shape or validation rule is changed.
 - `.factory/fix-scope.json` — **new, host-owned, this story's artifact.** AC6's allowed-path list.
   See Technical Notes, "The host-owned scope artifact".
-- `src/providers/run-record.ts` — **no change expected**; listed because the already-registered
-  `fixLoop` registry entry is *read*, and a change to it would be a DF2.1 core edit requiring its own
-  justification.
+- `src/providers/run-record.ts` — **one adds-only registration**: `fixAttemptRunIds: "strings"`
+  joins the already-registered `fixLoop` fields (the attempt-time ledger this story owns the
+  registration and dispatch-time append of — see the Overview and AC3; DF6.1b's driver is the
+  reader). **Forward dependency, stated where the implementer will look:** DF6.1b is sequenced
+  after this story and depends on this registration landing here — its read path resolves a field
+  this diff registers, so neither half may say "no change expected" on this file. Beyond the one
+  registration, the already-registered entry is *read* only; anything further would be a DF2.1
+  core edit requiring its own justification.
 - `src/pr/github.ts` — **adds only**: `listPrReviewComments` (PR **review** comments — the
   `/pulls/{n}/comments` endpoint, a different surface from issue comments) and `getPullRequest`
   (state, head branch, head sha) join the four-member `GitHubApi` interface and its

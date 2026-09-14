@@ -441,8 +441,8 @@ parent-verified at source before this entry.
 | E (DF5.5) | 8 | 4 | 0 | 0 | **0** | **0** | **DF5.5 CONVERGED** (high) |
 | **TOTAL** | **48** | **48** | **2** | **4** | **6** | **11** | **2 of 9 CONVERGED** |
 
-Per-class: C1×15 · C2×6 · C3×11 · C4×16 (B2/H4/M10/L32). Unit A: C1×3/C3×1 · B: C1×2/C3×2 ·
-C: C1×3/C2×4/C3×4 · D: C1×5/C2×2/C3×4 · E: C1×2/C4×2.
+Per-class: C1×15 · C2×6 · C3×11 · C4×16 (B2/H4/M10/L32). Unit A: C1×3/C3×1/C4×6 ·
+B: C1×2/C3×2/C4×4 · C: C1×3/C2×4/C3×4/C4×4 · D: C1×5/C2×2/C3×4 (no C4) · E: C1×2/C4×2.
 
 **Campaign verdict: NOT CONVERGED — the convergence target (C4-dominant residue) is unmet.**
 C4 is now the largest single class (16), and DF3.8 + DF5.5 crossed with zero B/H/C2/C3 — but
@@ -496,7 +496,10 @@ BLOCKERs went 0→2 and both sit on **seams the fix wave itself opened or touche
   fourth point, next phase solicits" is unreachable (`attempt > spec.retries` rethrows — the
   phase fails; AC3's own prose is correct, the DoD regressed to the Wave-5b defect); C's AC4
   projection-charging is unspecified on the DF2.12 attribution row; C's AC5(b) log-line clause is
-  unreachable (status gate precedes the bounds check for a degraded resident); D's escalation
+  unreachable (status gate precedes the bounds check for a degraded resident); C's Leg A delivery
+  channel is unnamed (a synthetic allocator as **that leg's `QDS_PI_BIN`** on the in-box dispatch
+  needs a named route — the engine's process env is read in-box and DF2.10's AC6 image scan admits
+  exactly two `QDS_` directives); D's escalation
   vocabulary omits `scope-requires-privilege` and `bot-response-to-fix`.
 
 **What held (per reports' positive-verification sections):** unit C re-derived the entire demo
@@ -513,9 +516,11 @@ clause "later solicitations keep issuing into the broken placement" is wrong —
 treats a degraded resident as absent, so no further calls are issued; the finding's substance
 (no `onBoundBreach` channel ⇒ no stop, no record) stands.
 
-**Operational note (verifier E, parent-owned):** the yaml meta block's DF totals are stale today
-(claims 37 stories/151 pts; live rows recount 42/169) — DF5.5's DoD recompute-and-halt gate will
-fire at pre-flight by design. Fix the meta block before DF5.5 applies; not a spec defect.
+**Operational note (verifier E, parent-owned):** the yaml meta block's DF totals were stale at
+wave-9 time (claimed 37 stories/151 pts; live rows recount 42/169) — DF5.5's DoD recompute-and-halt
+gate would fire at pre-flight by design. **Fixed 2026-09-14 (PR #255 review round):** the meta
+block lead now carries the recounted 42/169 figures (per-epic and per-sprint-tag reconciliation
+recounted from the rows in the same edit); not a spec defect.
 
 **Next: fix wave on 2 BLOCKER + 4 HIGH + 6 C2 + 11 C3** (B rates its two C3s one-sentence fixes;
 D's BLOCKER resolves if DF6.1a owns registration + dispatch-time append and both halves'

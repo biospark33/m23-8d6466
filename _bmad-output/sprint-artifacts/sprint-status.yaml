@@ -57,10 +57,12 @@ meta:
   adversarial_findings: sprint-artifacts/2026-06-06-v4-pre-dev-adversarial-review.md  # Campaign complete
   convergence: converged   # All 124 findings resolved (47 initial + 77 verification)
   # The totals above cover the v4 Phase 0 + Phase 1 slate only; they are NOT restated for the
-  # Dark Factory v5 backlog. DF totals: 37 stories / 151 points (DF1 10/45, DF2 10/39, DF3 8/32,
-  # DF4 2/10, DF5 5/17, DF6 2/8).
-  # v5 totals verified to reconcile both ways: per-epic 45+39+32+10+17+8 = 151 (10+10+8+2+5+2 = 37
-  # stories), and per-sprint-tag subtotals S1=48/S2=47/S3=56 -> 151 (S1=12/S2=12/S3=13 stories).
+  # Dark Factory v5 backlog. DF totals: 42 stories / 169 points (DF1 10/45, DF2 13/48, DF3 9/35,
+  # DF4 2/10, DF5 5/22, DF6 3/9). Recounted from the per-story rows 2026-09-14 (PR #255 review
+  # round); the former lead read 37/151 and predates the 2026-08-31 and 2026-09-08 additions
+  # recorded in the dated notes below.
+  # v5 totals verified to reconcile both ways: per-epic 45+48+35+10+22+9 = 169 (10+13+9+2+5+3 = 42
+  # stories), and per-sprint-tag subtotals S1=48/S2=47/S3=74 -> 169 (S1=12/S2=12/S3=18 stories).
   # 2026-08-31: +5 stories / +26 pts for the in-box restoration arc (DF2.10, DF1.10, DF1.11,
   # DF3.7, DF3.8 — all v5-S3) per ADR docs/superpowers/specs/2026-08-31-tier2-placement-adr.md;
   # DF3.6 re-sequenced v5-S2 -> v5-S3 (now depends on DF1.10); DF6.2 absorbed (+1 story/+2 pts,
@@ -104,7 +106,7 @@ meta:
   # source can only go stale: the durable fix is the CI consistency check (tracker, follow-up 6),
   # not a fourth hand-correction. Until that lands, recompute — never increment.
   # The v4 fields above are the retired phase-0+1 slate, not a second v5 total. P1.18 is NOT
-  # scheduled in the v5 window and is not counted in the DF 37/151 (see P1.18).
+  # scheduled in the v5 window and is not counted in the DF 42/169 (see P1.18).
   # DF atomicity audits: sprint-artifacts/dark-factory-v5/atomicity-audit-{2026-08-11,2026-08-20,2026-08-31}.md
 
 epics:

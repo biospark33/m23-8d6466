@@ -100,8 +100,9 @@ models.json, never a `cost` key on the roster schema, which is closed and carrie
 **Wiring closed:** On completion of this story, the spend and iteration bounds are enforced by the
 phase engine using only code merged by this story plus DF1.1's lifecycle, DF1.5's roster loading,
 DF2.3's key cap, DF2.8's shipped per-**issue** cap `defaultCapMicroUsd`
-(`src/providers/cost-ledger.ts`) — cited in the config-time sanity chain only, and stamped onto
-the manifest because the in-box engine cannot read `.sandbox/cost-config.json` — and DF3.3's
+(`src/providers/cost-ledger.ts`) — cited as **DF2.13's derivation source only** (it is host-side
+and never a manifest operand; the per-run `capMicroUsd` DF2.13 derives from it is what this
+story stamps), and DF3.3's
 solicitation port. No stub, no `TODO: wire later`. DF3.3 records tripwire telemetry; this story
 raises `spend_ceiling_breach` and widens the `cause` union that DF3.6b's `watchdog_kill` also needs.
 
@@ -319,8 +320,8 @@ nothing), DF3.3.
 |-----------|-------------------------------|-------------------------|
 | DF3.3 solicitation port | in-repo `src/phase-engine/steering.ts` (the engine-owned port; the agent itself is `src/fleet/resident.ts`) | `bun test tests/phase-engine/steering.test.ts` green before this story starts |
 | run-key cap **default** | DF2.3 credential lifecycle (`defaultKeyCapMicroUsd` = 50,000,000 µ$, the provider constant in `src/providers/credentials.ts`) — **stamped onto the frozen manifest at fill by this story's own stamp edit** (Files to Modify: `src/fleet/dispatch.ts`; DF3.1's shipped stamp writes `limitMicroUsd` only), because `credentials.ts` is a provider module the in-box engine is forbidden to import (`src/phase-engine/steering.ts:11-13`) | config-time ordering assertion (AC2a) reads the **stamped configured default**, never a minted value and never the provider module |
-| run-key cap **minted** | DF2.8 mint (`min(default, remaining)`), **carried into the box as `limitMicroUsd` on DF1.1's frozen manifest** — stamped at fill by DF3.1's shipped `stampManifestLimit`, which this story's own stamp edit sits beside in the same fill step — this story reads from the **frozen manifest only**; the host-side `.sandbox/runs/<id>.json` record does not exist inside the box | per-run clamp (AC2b) reads `limitMicroUsd` from the frozen manifest. `runContextFrom` (`runContextFrom` in `scripts/pipeline-run.ts`) refuses on **disagreement** and on a stale witness but **not on plain absence** ("ABSENCE is still the only thing that leaves the field unset"), so the absence refusal is **owned by `loadResidentBounds`** and takes AC2a's terminal-marker shape — never a bare throw. This story adds all three bound fields to the manifest schema but writes no bound *value* at run time beyond the clamp's **trace/log** row; it never stamps or alters `limitMicroUsd` (DF3.1's field — CC-1) |
-| per-**issue** budget cap value | DF2.8 `loadCostConfig().defaultCapMicroUsd` (default **5,000,000 µ$ = $5.00**, DD-9, `src/providers/cost-ledger.ts`) — read from `.sandbox/cost-config.json`, a **host-side** path that does not exist inside the box, so this value too is **stamped onto the frozen manifest at fill** | config-time ordering assertion only (it governs *admission*, not in-run enforcement — see the spend-ceiling precedence in Technical Notes). **Absent from the manifest ⇒ refuse (INV-BND-2)**; a defaulted operand would compare two hardcoded constants that can never disagree — a permanent false green |
+| run-key cap **minted** | DF2.8 mint (`min(default, remaining)`), **carried into the box as `limitMicroUsd` on DF1.1's frozen manifest** — stamped at fill by DF3.1's shipped `stampManifestLimit`, which this story's own stamp edit sits beside in the same fill step — this story reads from the **frozen manifest only**; the host-side `.sandbox/runs/<id>.json` record does not exist inside the box | per-run clamp (AC2b) reads `limitMicroUsd` from the frozen manifest **when present and clamps; when absent the effective ceiling is the resident ceiling unclamped and nothing is written — absence is a normal state, never a refusal (AC2b; the field is deliberately NOT in INV-BND-2's required set)**. `runContextFrom` (`runContextFrom` in `scripts/pipeline-run.ts`) refuses on **disagreement** and on a stale witness but **not on plain absence** ("ABSENCE is still the only thing that leaves the field unset"). This story adds all three bound fields to the manifest schema but writes no bound *value* at run time beyond the clamp's **trace/log** row; it never stamps or alters `limitMicroUsd` (DF3.1's field — CC-1) |
+| per-**issue** budget cap value | DF2.8 `loadCostConfig().defaultCapMicroUsd` (default **5,000,000 µ$ = $5.00**, DD-9, `src/providers/cost-ledger.ts`) — read from `.sandbox/cost-config.json`, a **host-side** path that does not exist inside the box. **It is not a manifest operand**: DF2.13's shipped chain derives the per-run `capMicroUsd` from it host-side, and the **derived** `capMicroUsd` is what this story's fill-side stamp writes onto the frozen manifest (Technical Notes: "not a term in this chain") | config-time ordering assertion over the **stamped derived `capMicroUsd`** only (the per-issue default governs *admission*, not in-run enforcement — see the spend-ceiling precedence in Technical Notes). INV-BND-2's absent-⇒-refuse rule applies to AC2a's **three** stamped operands — `residentSpendCeilingMicros`, `capMicroUsd`, `defaultKeyCapMicroUsd` — never to `defaultCapMicroUsd`, whose host-side absence is DF2.13's wiring concern, not a manifest-load refusal |
 | resident slug rate | **already resolved**: `resolveRate` (`src/phase-engine/roster/validate.ts`) is called once at arming by `startResident` (`src/fleet/resident.ts:410`) and the result is handed to the engine as `ResidentSpawn.rate` → `createSteering({ rate })` (`createSteering` in `src/phase-engine/steering.ts`) | **this story reads `deps.rate.inputPerMTok` / `deps.rate.outputPerMTok` and loads nothing.** One resolution per run, one source. A second models.json reader in `resident-bounds.ts` would be a second rate path that can disagree with the one the resident is billed at — and would disagree first the moment a catalog is staged differently in-box (`QDS_PI_CATALOG_DIR`) |
 | per-role token attribution | **DF2.12** — `kind='tokens'` cost rows written at the dispatcher | the run-total denominator D4's tripwire (a) needs. Without it the numerator (`resident.spendMicros`) has nothing honest to divide by; see Technical Notes |
 
@@ -553,8 +554,9 @@ nothing), DF3.3.
   story owns — W8-C-1) — at the dispatch fill step, beside the shipped `stampManifestLimit` call,
   stamp the bound operands onto the frozen manifest: `residentSpendCeilingMicros` resolved through
   the ceiling ladder (perIssueOverrides → global default → shipped fallback), `capMicroUsd` from
-  DF2.13's shipped mint chain, `defaultKeyCapMicroUsd` imported from the provider constant, and
-  `limitMicroUsd` when present. **Without this edit the schema gains fields nothing writes and
+  DF2.13's shipped mint chain, `defaultKeyCapMicroUsd` imported from the provider constant — and
+  nothing else: `limitMicroUsd` stays DF3.1's shipped stamp's field alone (CC-1), and
+  `defaultCapMicroUsd` is DF2.8's host-side derivation source, never stamped. **Without this edit the schema gains fields nothing writes and
   every resident-arming run refuses `bound-config-invalid` at manifest load while hand-authored
   fixture suites stay green — the `ingestCostEvent` dead-writer shape.** DF3.1 is done and its
   shipped stamp writes `limitMicroUsd` only; the stamp edit is new work in the done story's file,
@@ -592,6 +594,12 @@ nothing), DF3.3.
      to import fleet code (`steering.ts:11-13` — the one boundary claim in this pair that is real).
      There is still **no `residentPid`**: the engine learns whether the kernel killed, never how to
      kill.
+  6. **DF3.6b's typed placement-failure channel** (W9C-6b-2, AC4 of df3-6b): the
+     `ResidentCaller` contract (the interface in `src/phase-engine/steering.ts`) gains the
+     engine-owned `PlacementRefusedError` rejection — exit 97, thrown by fleet's caller
+     implementation (fleet→engine is the allowed import direction) — and the call-failure catch
+     gains its `instanceof` arm beside the degrade arm. Same cross-story amendment shape as
+     item 5's `lastMemory`.
 
   Mirrored in df3-3's Technical Notes and df3-4's Files list.)
 - `src/phase-engine/manifest.ts` — all three bound fields (including `residentRssBytes`, which

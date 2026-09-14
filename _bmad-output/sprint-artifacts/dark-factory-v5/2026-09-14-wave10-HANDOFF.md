@@ -54,24 +54,30 @@ in-pass where the touched line is already open. Do NOT touch converged stories D
 Fix directions live in the wave9 reports (point the fixer at the report section, never relay).
 The load-bearing ones, with the parent's verification notes:
 
-- **W9-D-1 (BLOCKER, DF6.1a AC3):** invocation-2 resolves the fix run through
-  `extensions.fixLoop.fixAttemptRunIds`, which only DF6.1b registers
+- **W9-D-1 (BLOCKER, DF6.1a AC3) — APPLIED 2026-09-14 (CodeRabbit round, this branch):**
+  invocation-2 resolves the fix run through
+  `extensions.fixLoop.fixAttemptRunIds`, which only DF6.1b registered
   (`run-record.ts` `EXTENSION_NAMESPACES.fixLoop` = `fixContext`/`fixOutcome` only), DF6.1b is
-  sequenced after, and DF6.1a's own Files list says `run-record.ts` "no change expected" while
+  sequenced after, and DF6.1a's own Files list said `run-record.ts` "no change expected" while
   claiming buildability "using only code merged by this story plus its predecessors". Read-path
   tolerance (unfamiliar field in a registered namespace) means no runtime crash — it is an
-  ordering/testability seam. Proposed resolution (fix wave owns the call): **DF6.1a owns the
+  ordering/testability seam. Resolution applied: **DF6.1a owns the
   adds-only registration + the dispatch-time append** (it owns the dispatch code path), DF6.1b's
-  O15/O22 rows re-homed accordingly, and both halves' same-file postures reconciled (no story
-  may say "no change expected" beside a sibling's "one adds-only registration" on the same file
-  without a forward-dependency note). Cross-ref W9-D-3: the attempt-1 **append** currently has no
-  owner at all — give it one in the same stroke.
-- **W9-D-2 (HIGH, DF6.1b AC2/DoD):** uncharged-attempt ceiling of 3, the per-attempt
+  O15/O22 rows re-homed accordingly (`seam-ownership/unit-D-df6-1ab.md`), both halves'
+  same-file postures reconciled with the forward-dependency note in DF6.1a's Files list, and the
+  attempt-1 append owner is that same DF6.1a row (W9-D-3 closed in the same stroke).
+- **W9-D-2 (HIGH, DF6.1b AC2/DoD) — APPLIED 2026-09-14 (CodeRabbit round, this branch):** the uncharged-attempt ceiling of 3, the per-attempt
   classification list, and `out-of-scope-diff`'s cap of 1 need **storage** no declared state can
   hold (record vocab closed; ledger = runIds only; `fixOutcome` write-once-at-terminal;
-  `dispatch-refused` provisions nothing). Options the fix wave weighs: widen the ledger entry
-  shape, add a second ledger field, or re-derive uncharged counts from trace rows and say so.
-  Also reconcile AC2's "escalates immediately" against the DoD's accumulate-three reading.
+  `dispatch-refused` provisions nothing). Resolution applied: the per-attempt lifecycle states
+  (awaiting-approval / charged-terminal / poll-interrupted-recovery / orphaned) are **derived on
+  the driver's read from the fix run's own record** — approval extension ⇒ awaiting-approval
+  (uncharged, uncounted, continuation), `fixContext` without approval or terminal ⇒ poll
+  recovery within the window, neither ⇒ orphaned (counts toward the uncharged ceiling) — no new
+  registration, no second ledger field, and a crash cannot strand a half-written state.
+  AC2's "escalates immediately" reconciled: `dispatch-refused` escalates on first occurrence and
+  never accumulates (it provisions nothing and spends nothing); the accumulate-to-3 ceiling
+  covers the spend-bearing uncharged classifications only.
 - **W9-D-4 (HIGH, DF6.1a AC2):** the proposal-variation trigger ("run carries a `fixContext`
   brief key") is unobservable in `src/reverify/runner.ts` (zero brief refs; brief consumed
   in-memory in `dispatch.ts`, never persisted host-side; `fixContext` written only after the
@@ -88,12 +94,15 @@ The load-bearing ones, with the parent's verification notes:
   `journal.ts` is unowned; the ≥4096-byte `unknown`-verdict arm is an adjacent unacknowledged
   risk. Fix: own the writer change or re-site the payload (e.g. `fleet warn` chokepoint + boolean
   marker), and state the 4096 interaction.
-- **W9-C-3 (HIGH, DF3.6b AC4):** the exit-97 `unenforceable` classification has no detection
-  channel — the seam enumeration ("three facts cross, on two objects") carries no such signal;
-  `lastMemory()` yields `oomKilled` only, and the caller boundary delivers an opaque redacted
-  `Error`. Note for the fixer: the report's clause "later solicitations keep issuing into the
+- **W9-C-3 (HIGH, DF3.6b AC4) — APPLIED 2026-09-14 (CodeRabbit round, this branch):** the
+  exit-97 `unenforceable` classification now crosses as an engine-owned typed rejection on the
+  `ResidentCaller.call` contract (thrown by fleet's caller, caught by an `instanceof` arm beside
+  the degrade arm), firing `onBoundBreach` with the classification; the runner's edit-(v) arm
+  records the payload on the fleet `warn` chokepoint and awaits `stop()`. Note for the record:
+  the report's clause "later solicitations keep issuing into the
   broken placement" is WRONG (the status gate treats a degraded resident as absent — no further
-  calls); the finding's substance (no `onBoundBreach` channel ⇒ no stop, no record) stands.
+  calls); the finding's substance (no `onBoundBreach` channel ⇒ no stop, no record) is what the
+  fix closes.
 - **W9-B (2 C3 MEDIUM):** state `recordAuditLink` requiredness once (optional signatures cannot
   deliver the typecheck-loudness guarantee); give the hop-6 refs/sandbox leg a seam (declare the
   ref corroborating-only, or add the git-dir seam) — shared with DF5.4-C9, fix once, mirrored.

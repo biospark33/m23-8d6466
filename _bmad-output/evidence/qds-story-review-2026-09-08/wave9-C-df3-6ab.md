@@ -158,8 +158,8 @@ placement, seam enumeration) verified sound everywhere else.
 | Story | BLOCKER | HIGH | MEDIUM | LOW |
 |-------|---------|------|--------|-----|
 | DF3.6a | 0 | 1 (C3) | 3 (C2, C3, C2) | 5 (C2, C1, C1, C4, C4) |
-| DF3.6b | 1 (C3) | 1 (C3) | 0 | 3 (C2, C1, C4) |
-| **Pair** | **1** | **2** | **3** | **8** |
+| DF3.6b | 1 (C3) | 1 (C3) | 0 | 4 (C2, C1, C4, C4) |
+| **Pair** | **1** | **2** | **3** | **9** |
 
-By class: C1 ×3 · C2 ×5 · C3 ×4 · C4 ×3. Residue is not C4-dominant — two structural ownerless-writer
+By class: C1 ×3 · C2 ×4 · C3 ×4 · C4 ×4 (pair total 15). Residue is not C4-dominant — two structural ownerless-writer
 findings (one of them on the make-or-break AC) keep both stories out of convergence.
