@@ -1,0 +1,99 @@
+# Wave 20 — Verifier A — DF3.7 (Approval-Gate Bridge / Run-Completion Signal)
+
+**Reviewed:** `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df3-7-approval-gate-bridge.md` (branch `dev` @ `4264f546`, current working-tree text). Markdown spec awaiting dev — no implementation exists yet; everything was verified against shipped source on this tree.
+**Primary lens:** the `ChainOutcome` union's completeness and consistency, checked exhaustively.
+**Clean eyes:** no prior review material read.
+
+## Method
+
+Read the story end to end, then opened every named symbol at source and traced call paths. Sources read (whole-function or whole-region reads, not trust-the-citation):
+
+- `src/reverify/runner.ts` — `reverify()` in full; `ReverifyOutcome` union; the `nothing-to-verify` preflight return; the non-green return; the approval-request catch; the `pausing` bound-reportId re-present; `hostRoot`/`runsDir` resolution; confirmed zero `driver` references in the module.
+- `src/reverify/report.ts` — `deriveVerdict` (the one place a verdict comes from): `failure → "error"`, `checks.length === 0 → "red"/"nothing-to-verify"`, no-tests → `"red"`, nondeterministic → `"red"`, else `"green"`.
+- `src/reverify/approval.ts` — `ApprovalState`, `ApprovalOutcome`, `ApprovalPort`, `recordApprovalPort` (teardown seam deliberately absent), `refuseHollowBundle` (plain `Error`).
+- `src/fleet/approval-gate.ts` — `TERMINAL` set, `expiredState`, `requestApproval`'s refusal sites (plain `Error` throws) and its non-null outcome arms; the resume-arm reportId compare.
+- `src/fleet/fanout-primitive.ts` — `classifyMarkerRead`/`MarkerVerdict`/`readMarkerVerdict`/`markerUnusableGivesUp`/`boxMarkerPath`/`BOX_MARKER_PATH_RE` in full, plus `runRace`'s skip/unusable streak handling and the same-tick corroboration rule; the constant block (`DEFAULT_POLL_INTERVAL_MS` 5s, `DEFAULT_PER_CALL_DEADLINE_MS` 10s, `MARKER_UNUSABLE_TICKS_LIMIT` 3, `PROBE_SKIP_TICKS_LIMIT` 6, `DEFAULT_FANOUT_CEILING_MS` 1h) and the full import list.
+- `src/providers/teardown.ts` — `teardownSandbox` signature (returns `Promise<void>`, throws `TeardownError`), the lock-head check, and every step's abort comment (harvest/revoke/destroy abort **pre-close**; close-step ingest throw is post-close).
+- `src/fleet/run.ts` — `unitActivity` (values `active|failed|inactive|unknown`, `default`-branch comment), header contract, `startRun`'s read-only record access.
+- `src/fleet/status.ts` — the `expiredState` import, `readMarkerVerdict` and `unitActivity` call sites.
+- `src/phase-engine/journal.ts` — `runMarkerRoot`, `assertRunIdPathComponent`, `runMarkerPath`, `unidentifiedMarkerPath`, `writeTerminalMarker`, the `QDS_RUN_ROOT` hazard docblock; `src/phase-engine/index.ts` barrel-withhold comment.
+- `src/fleet/index.ts` (barrel: exactly eight star-exported modules including `status.ts`, none of the gate modules), `src/fleet/verbs.ts` (dispatch summary; registry-contract comment), `scripts/lib/run-lock.ts` (`RunLockReentrantError`, `RunLockHandle` brand, `withRunLock`, the reentrancy guard at the head of `acquireRunLock`), `src/reverify/worktree.ts` (`withGuards`, F064 baseline subtraction), `src/providers/reaper.ts` (`aged`, `stale-record → teardown` sites, `record-claim-refused` inside the destroy branch only), `src/providers/quota.ts` (`staleAfterMs` 14_400_000), `scripts/sandbox-reap.ts` (operator CLI, dry-run by default), `oci/exedev/systemd/qds-run@.service` (`Type=simple`, `RuntimeDirectory=qds-run/%i/journal qds-run/%i/trace`, `RuntimeDirectoryPreserve=yes`, `Restart=no`), `src/providers/exedev/transport.ts` (`BoxFileRead` kinds, `readBoxFile`), `scripts/reverify.ts` (the sole production `reverify()` caller), `src/fleet/dispatch.ts` (`stampCorrelation`), `src/fleet/resident.ts` (never mints/borrows), `src/pr/push.ts` (exists).
+- Test-idiom precedent: `tests/fleet/patterns.test.ts` source-text import-fence test (dynamic-import and re-export spellings covered) — the "repo's own idiom" AC1's fence cites. Named test files exist: `tests/fleet/approval-gate.test.ts`, `tests/fleet/fanout-primitive.test.ts`, `tests/providers/exedev/read-box-file.test.ts`, `tests/fleet/skill-contract.test.ts`, `tests/fleet/e2e/tier3-remote-phases.live.test.ts`.
+
+**Positive controls for zero-match claims** (identical machinery, run before asserting absence):
+
+1. "`scripts/pipeline-run.ts` contains the string `approval` zero times" — `grep -c` returned **0**; control: the same grep returns **38** matches in `scripts/fleet.ts`. Real zero, not a broken grep.
+2. "`scripts/pipeline-run-remote.ts` was deleted" — `ls`: absent; control: `scripts/pipeline-run.ts` present.
+3. "`runMarkerPath` withheld from the phase-engine barrel" — `grep` over `src/phase-engine/index.ts` hits only the withholding comment; control: the same grep finds `runMarkerPath` at `journal.ts` and `writeTerminalMarker` at `journal.ts`. Machinery works.
+4. "fan-out deliberately does not import a marker-path symbol" — read the full import block of `fanout-primitive.ts`: it imports `boxRunRoot` from `providers/harvest.ts` and defines `boxMarkerPath`; `runMarkerPath` appears only in docblock prose. Verified, not assumed.
+
+**Arithmetic checks:** `PROBE_SKIP_TICKS_LIMIT × (DEFAULT_POLL_INTERVAL_MS + DEFAULT_PER_CALL_DEADLINE_MS)` = 6 × 15 000 = **90 000 ms = 90 s** — matches AC2(a)'s figure and the constant's own docblock's deadline-burning end.
+
+**Cross-story reads (permitted, named seam claims only):** DF3.8 (`df3-8-host-completion-watcher.md`, grepped: the collected-record refusal **is** unconditional, `completion-unwitnessed`, matching DF3.7's cross-references); DF2.11 (`df2-11-*.md`, grepped: "**The eighth call site is DF3.8's sweep**", matching DF3.7's no-ordinal claim); DF5.1's reverify surface read directly at source (above).
+
+**Forbidden inputs:** none read — no `_bmad-output/evidence/` content (including the probe JSON the Spec Reference names; skipped per the brief), no tracker/HANDOFF files, no seam-ownership dir, no wave/verify/scan reports, no fix recipes. W12/W14/W16 tags inside the story are provenance markers and were left unread.
+
+**Tests:** scoped only — `bun test tests/providers/exedev/read-box-file.test.ts tests/fleet/fanout-primitive.test.ts tests/fleet/approval-gate.test.ts` → tee to `/tmp/w20-df37-substrate.log`, ANSI/CR-stripped: **193 pass / 0 fail** (exit 0). This confirms the Infra Prerequisites table's "already green" premise for all three cited substrate suites on this tree. No `gitnexus analyze`, no bare `bun test`.
+
+## Primary lens — the ChainOutcome union
+
+The union ships seven arms: `driven | unsettled | refused | vetoed | approval-failed | chain-failed | handed-off`. Verified exhaustively against the shipped producers:
+
+**`reverify()`'s complete outcome set** (`ReverifyOutcome = { report, approval }`, approval ∈ `requested | rebound | pause-in-progress | already-decided | null`):
+
+| Producer (shipped code) | Spec arm | Consistent? |
+|---|---|---|
+| green + `requested` | `driven` (exit 0) | yes |
+| green + `rebound` | `handed-off` (exit 6) | yes |
+| green + `pause-in-progress` | `handed-off` (exit 6) | yes |
+| green + `already-decided` | `handed-off` (exit 6) | yes |
+| green + null + `approval-request-failed` flag | `approval-failed` (exit 6) | yes — the flag exists exactly as claimed, pushed in the catch, and only ever on a green report (the non-green return precedes the approval leg), so vetoed/approval-failed producers are provably disjoint |
+| red (incl. `nothing-to-verify`, which `deriveVerdict` makes **red**, not green) + null | `vetoed` (exit 6) | yes for the judgment arms |
+| **`error` verdict + null** | forced into `vetoed` | **no — W20-2** |
+| `reverify()` throws outside its own try (`readReports`, `appendReport`, store resolution — all post-`closedAt` on this chain) | `chain-failed` | yes, reachable as claimed |
+
+**The chain's step outcomes:** harvest → destroy → revoke → `closedAt` via `teardownSandbox`, which returns `Promise<void>` and **throws** `TeardownError` on step failure. Harvest/revoke/destroy/spend/artifacts failures abort **before** `closedAt` (teardown's own step comments: "box alive, record open"; destroy is an "UNCONFIRMED destroy … record open"). Only the close step's box-hours ingest throw lands post-close. → **W20-1**: the union, AC5 and the DoD define `chain-failed` as post-close only and assert "both … post-`closedAt`", leaving the pre-close abort with no arm, no exit slot, and no event.
+
+**Poll outcomes:** `absent`+`active` → continue; `absent`+`failed` → `unsettled.terminal` `run-engine-dead` (exit 5) — matches `unitActivity`'s shipped values and the unit's `Type=simple`/`Restart=no`; `absent`+`inactive`/`unknown` → skip streak (correct — the `default` branch covers never-loaded units); skip-streak fill → `unsettled.terminal` `box-unreachable` (exit 1, "transient pair"); unusable-streak fill and window expiry → `unsettled.terminal` `run-completion-unobserved` (exit 1); `maxTicks` cut → `unsettled` without `terminal` (producer: DF3.8's sweep). All one-to-one. The classifier's `skip`-on-any-non-1-probe-exit, `unusable` enumeration, `expectedRunId` mismatch and `BoxFileRead`-fifth-arm `skip` all match AC2(a)/(b) as written. No stale vocabulary survives anywhere in the story (`markerWitnessed` appears only inside its deliberate-absence explanations; no `armUnknown`/`claim-failed`/`race-*`/`probe-unanswered` residue).
+
+**Union ∪ exit table ∪ AC5 ∪ Observability ∪ DoD ∪ negative controls:** the Observability `kind` list is the same seven arms; `approval-already-registered`/`run-already-closed` are consistently excluded from the event vocabulary and consistently carried under `refused`; the DoD item and AC5's control list state the same mapping; the exit assignments (`0/1/2/4/5/6`) agree across union text, AC5, DoD and the exit-table item, with two prose-level nits (W20-3, W20-4). Pre-flight order (lock → record read → extension refusal → `pausing` branch → `closedAt` refusal → poll) is stated once and consistently; the `pausing`-carries-`closedAt` ordering argument is real (a crashed chain's record is post-teardown by INV-APPROVE-6's no-seam refusal). The `deps` shape's normative list is unambiguous; one justification clause misstates `TeardownDeps` optionality (W20-6). The typed-terminal payload's producer and per-code exits match the exit table.
+
+## Findings
+
+| ID | Class | Sev | Finding |
+|---|---|---|---|
+| DF3.7-W20-1 | C3 | **HIGH** | **The union has no arm for a pre-close chain-step throw, and its justification asserts the opposite of the shipped producer.** `chain-failed` is defined three times as "threw **after the record closed**" (union text, AC5 tail, DoD AC5), with the parenthetical "(`teardownSandbox`'s step failures, `reverify()`'s report leg — **both reachable, both post-`closedAt`**…)". Shipped: `teardownSandbox` throws `TeardownError` on every step failure, and its harvest step aborts "BEFORE revoke/destroy (AC3): box alive, record open, remediation printed"; destroy aborts as an "UNCONFIRMED destroy … with the record open"; revoke "aborts with the key possibly still live". Only the close step's box-hours ingest throw is post-`closedAt`. So the chain's most likely failure mode — harvest failing to reach a live box, or an unconfirmed destroy — produces a throw with `closedAt` unset and is assigned **no union arm, no exit code** (0 = driven, 1 = window/transient, 5 = refused-before-mutation, 6 = post-close all misfit) and no event kind. A dev implementing the letter of the three post-close statements must let the error escape `observeAndDriveChain(runId, deps): Promise<ChainOutcome>` untyped, or widen `chain-failed` and contradict the spec's own definition — and the exit-table item gives no slot for "chain began, box alive, record open". This sits on the story's main failure path and on the exact INV-IBOX-15 fail-open posture (box alive, listable, evidence intact) whose operator-facing contract the union exists to state. Fix: drop the post-close qualifier and the "both post-`closedAt`" claim — make `chain-failed` "a chain step other than the approval leg threw" — or add an explicit arm/exit for the pre-close abort carrying the box-alive/record-open aftermath. |
+| DF3.7-W20-2 | C2 | **MEDIUM** | **`vetoed`'s stated producer conflates the `error` verdict (a host failure) with a judgment.** The union defines `vetoed` as "a `reverify()` null from a judgment arm (non-`green` verdict, `nothing-to-verify`)" and "the re-verifier's independent judgment said no on its own verdict". Shipped: `deriveVerdict` yields verdict `"error"` with `reason = failure.code` whenever `failure` is set — reachable from preflight `ReverifyError`s (`no-base-sha`, `no-host-plan`), guard trips, worktree/install/test crashes — and the runner's own comment says "an `error` is a host failure, not a verdict about the tree". That null is forced into `vetoed` by AC5's "a null is never a gate registration" control, exit 6. The carried `reason` (the failure code) lets a reading operator distinguish it, and the exit is arguably right — but the arm's definition and its operator message ("the judgment said no") are false for a toolchain/worktree failure, and a test author following "judgment arm" literally has no instruction to cover the error arm. Fix: name the `error`-verdict arm explicitly inside `vetoed` (with its distinct remediation: re-run `reverify`, don't abandon the run) or split it out. |
+| DF3.7-W20-3 | C4 | LOW | Exit-table prose under-specifies its own codes: exit 5's named list omits two of this story's own exit-5 codes (`run-already-closed` per AC5, `reverify-host-root-unusable` per Technical Notes); exit 6's description "the chain landed and what failed came after it" reads failure-only while AC5/DoD route `handed-off` (an already-in-flight answer, nothing failed) to 6; exit 5's word "refused" loosely covers `run-engine-dead`, which the union carries under `unsettled`, not `refused`. No code assignment is wrong. |
+| DF3.7-W20-4 | C4 | LOW | AC5's parenthetical "AC3's `run-completion-unobserved` (window expiry or the unusable streak — **the two fills stay distinct codes**, never conflated)" is self-undermining: the two fills it just named share one code; the distinctness meant (and stated by the negative control) is window-fill vs skip-streak-fill. A literal reader could mint two codes for window/unusable against AC3/AC2/exit-table. Wording only. |
+| DF3.7-W20-5 | C4 | LOW | `unsettled.verdict` is typed `MarkerVerdict`, whose `settled` arm is unreachable in an unsettled outcome (a settled marker drives the chain). `Exclude<MarkerVerdict, "settled">` would make the impossible state unrepresentable. Cosmetic. |
+| DF3.7-W20-6 | C4 | LOW | "`keyApi` … `requestId` … `costLedger` — the three non-optional additions are what `teardownSandbox`'s `TeardownDeps` **requires**" misstates the shipped interface: all three are `?`-optional in `TeardownDeps` (`keyApi` "required iff the record carries keyHash"; `requestId` falls back to `newRequestId()`; `costLedger` gates the ingest). The story's own `deps` list correctly pins them non-optional for fail-closed wiring, so the normative contract is unambiguous — only the justification clause is loose. |
+
+## What HELD
+
+Verified against source, with positive controls where the story asserts absence:
+
+- **The consumption claim is real code, not restated mapping.** `readMarkerVerdict(driver, vm, boxMarkerPath(runId), deadlineMs, expectedRunId)` exists with exactly that signature; `fleet status` (`status.ts`) and `probeArm` call it as claimed; `classifyMarkerRead` produces exactly the four verdicts, with `skip` on every non-1 probe exit, the `marker-read-budget-exhausted` (`exitCode === -1`) sentinel, `marker-run-mismatch`/`marker-run-id-invalid`, the null/primitive body arm, and the unclassified-`BoxFileRead` → `skip` arm — every case AC2(a)/(b) enumerates. `markerUnusableGivesUp` is single-sourced at 3; `PROBE_SKIP_TICKS_LIMIT` = 6 with the same-tick corroboration rule present in `runRace`; the 90 s figure is arithmetically correct; the fan-out constants are exported and importable (never mirrored).
+- **AC4's derivation story is exact.** `boxMarkerPath` derives from `boxRunRoot(runId)` host-side and is immune to ambient `QDS_RUN_ROOT` by construction; `runMarkerPath`/`writeTerminalMarker` are withheld from the phase-engine barrel; `assertRunIdPathComponent` and `BOX_MARKER_PATH_RE` exist; fan-out imports no marker-path symbol; the unit sets no `QDS_*` run-root variable (`RuntimeDirectory=qds-run/%i/journal qds-run/%i/trace`, `Preserve=yes`, `Restart=no`, `Type=simple` — every line citation exact).
+- **The gate-refusal flatten is real.** `requestApproval` throws plain `Error` on its refusal sites; `reverify()`'s catch pushes exactly one flag, `approval-request-failed`, on a green report, returning `approval: null` — so "the shipped contract cannot distinguish gate refusal from transport failure" and the `approval-failed` carrier (flag off the returned report) are both accurate, and the vetoed/approval-failed producers are provably disjoint. The `pausing` bound-reportId re-present and the byte-for-byte resume compare are as cited; `TERMINAL = {approved, rejected, timed-out}` matches AC5's vocabulary; `expiredState` genuinely maps an expired `awaiting-approval` to `timed-out`, so "applying it could only change the label" is correct.
+- **`promoteStrandedPause`'s zero-driver claim is supportable**: `reverify()` contains no `driver` reference at all, and the observer skips the observe and teardown legs on that path — the FakeDriver call-log test is implementable as written.
+- **INV-IBOX-14's fence mechanics are implementable**: the barrel star-exports exactly eight fleet modules including `status.ts`, whose `expiredState` import reaches `approval-gate.ts` — the "name no barrel" rule and the "direct specifiers, transitive `ApprovalPort` reach permitted" carve-out are both consistent with the shipped import graph, and the source-grep fence idiom exists (`tests/fleet/patterns.test.ts`).
+- **AC3's hazard chain is accurate**: `record-claim-refused` guards the destroy branch only; `stale-record` classifies to `teardown` at one site per enumeration loop via `aged()`/`staleAfterMs` (14 400 000 at the cited site); `sandbox-reap` is an operator CLI, dry-run by default — the "no existing timer covers this run" statement and the witness-less-collection description hold.
+- **Reaper/DF3.8 interlock**: DF3.8's story confirms its collected-record arm refuses unconditionally, and DF2.11's record assigns the eighth `teardownSandbox` call site to DF3.8's sweep — both cross-references in DF3.7 are correct.
+- **Infra premises**: all three cited substrate suites green on this tree (193/193); every named test file exists; `src/pr/push.ts` exists; `stampCorrelation` lives where cited.
+
+## Verdict
+
+**NOT CONVERGED** — 1 HIGH (C3), 1 C2. Confidence: **high**.
+
+Every symbol, constant, line citation, quote, cross-story interlock, arithmetic figure and zero-match claim in the spec survived verification — the citation layer is fully clean. The two non-convergent findings are both in the story's core contract: the `ChainOutcome` union assigns no arm (and the exit table no code) to the pre-close chain-step abort that `teardownSandbox` documents as its designed behavior on its most probable failure path (W20-1), and `vetoed`'s producer statement mislabels the shipped `error` verdict as a judgment (W20-2). Both are one-paragraph spec edits; neither disturbs the story's architecture.
+
+## Summary counts
+
+| | C1 | C2 | C3 | C4 | total |
+|---|---|---|---|---|---|
+| BLOCKER | 0 | 0 | 0 | 0 | 0 |
+| HIGH | 0 | 0 | 1 (W20-1) | 0 | **1** |
+| MEDIUM | 0 | 1 (W20-2) | 0 | 0 | **1** |
+| LOW | 0 | 0 | 0 | 4 (W20-3…6) | **4** |
+| **total** | **0** | **1** | **1** | **4** | **6** |

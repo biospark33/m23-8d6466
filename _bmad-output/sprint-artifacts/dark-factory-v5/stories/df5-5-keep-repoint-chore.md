@@ -315,9 +315,11 @@ No deployed component: this story ships markdown only.
   `sprint-status.yaml`'s P1.18 row (cited by story key) agrees: *"DF6.1a/DF6.1b do not depend on it, and each
   denies it for a DIFFERENT reason … DF6.1a denies the receiver as an INTAKE channel …, DF6.1b
   denies it as a VERDICT channel"*. **Note that row's own 2026-09-08 correction:** its earlier
-  "v5.0 polls `gh pr checks`" wording is **retracted as wrong** — DF6.1b specifies a two-call
-  composition (`gh pr view --json statusCheckRollup` for SHA binding + `gh pr checks --required`
-  for requiredness) — which does not disturb the severance. Do not re-quote the retracted string.
+  "v5.0 polls `gh pr checks`" wording is **retracted as wrong** — DF6.1b specifies a
+  three-invocation composition (`gh pr view --json headRefOid,headRefName` before and after the
+  poll for SHA binding, and `gh pr checks --required` for requiredness; `statusCheckRollup`
+  appears only as the negative control, carrying no commit sha — W14E-3 corrected against
+  DF6.1b's live text) — which does not disturb the severance. Do not re-quote the retracted string.
   Writing a webhook-fed edge at `p1-18:50` would send a developer to build the
   receiver for a consumer that reads the API directly. **Register DD-2's "P1.18 (KEEP) repoints to
   DF6.1" (`register:47`) is the stale source, superseded by both halves' shipped text under the
@@ -387,16 +389,16 @@ No deployed component: this story ships markdown only.
     gate-violation retries re-entering the same agent session — is **DF1.3's**, separately bounded.
     In-box process supervision is neither: DF2.10 ships `qds-run@.service` with **`Restart=no`**
     (`df2-10:106,173`) and DF1.10 owns reclaim semantics (`df1-10:91,143`), so a crashed in-box
-    engine is **not** restarted by systemd and is not P1.9's cross-run classification either.
+    engine is **not** restarted by systemd and is not P1.9's cross-run classification either. <!-- v5 amendment (DF5.5) -->
   - `p1-5-model-router-hindsight.md`: P1.5 owns **router scoring against outcome records** (step
     6). The roster **config schema and dual slug validation** (pi's bundled catalog AND the
-    provider API, plus `~/.pi/agent/models.json`) is **DF1.5's**.
+    provider API, plus `~/.pi/agent/models.json`) is **DF1.5's**. <!-- v5 amendment (DF5.5) -->
 - **Amendment D — DD-7 SwarmClaw role line.** One blockquote below the H1 of
   `p0-7-swarmclaw-agent-mcp-hindsight.md`: *SwarmClaw's v5 role is the host-side service chassis
   for factory query surfaces — the natural HTTP home for DF5.3's audit-chain query if it ever needs
   one (DF2.8 shipped its cost view as a CLI surface, `qds cost`, 2026-08-21). It is **not** the
   factory front door; that is the tier-1 CLI
-  (DD-1/DD-7). P0.7 assets stay frozen; no AC changes.*
+  (DD-1/DD-7). P0.7 assets stay frozen; no AC changes.* <!-- v5 amendment (DF5.5) -->
 - **Amendment E — the DF2.3 ceiling-chain tightening is ALREADY-SATISFIED; record, do not rewrite.**
   E formerly instructed a single-line wording amendment to `dark-factory-v5/stories/df2-3-*.md`,
   tightening a non-strict chain (`run-key cap ≥ DF2.8 budget cap ≥ DF3.6 per-run ceiling`) so the
@@ -601,8 +603,11 @@ list: zero hits, never opened.
       reads its count from a stale block records a number its own source contradicts. A mismatch
       stops the chore: fix the meta block first (parent-owned, outside this story's diff), then
       re-run.
-- [ ] **Hand-off:** `p1-18:50` (`P1.19`) is confirmed **annotated by DF6.1a's fix wave** — this
-      story asserts the line is annotated, not that it annotated it. The hand-off and the DD-2
+- [ ] **Hand-off:** `p1-18:50` (`P1.19`) is confirmed **annotated — by DF6.1a's fix wave, or by
+      this story's own pre-authorised fallback edit** (the P1.18 disposition sanctions either
+      hand; the fallback path makes the tripwire read *sixth* and requires the amendment log to
+      record that it was taken) — this
+      story asserts the line is annotated, not which of the two sanctioned hands annotated it. The hand-off and the DD-2
       supersession are recorded in the amendment log; the DD-2 register addendum is routed to the
       campaign's register-amendment output, not resolved here (INV-3).
 - [ ] **Contract:** Every edit carries the literal marker `v5 amendment (DF5.5)`; the
@@ -621,9 +626,22 @@ list: zero hits, never opened.
 - [ ] **Test (regression, all four assertions):** `tests/scripts/keep-repoints.test.ts` runs under
       plain `bun test` (never excluded from a gate) and asserts, resolving the repo root from
       `import.meta.dir` and never `process.cwd()`: (1) a **count-based** retired-ID occurrence scan
-      across the 12 story files — zero surviving forward-looking occurrences, each provenance
-      occurrence annotated within 20 chars on its line; **never a line-membership check**, which
-      `p1-3`'s 19-occurrences-on-8-lines would defeat; (2) table-driven per-pair correctness — a retired ID
+      across the 12 story files — zero surviving forward-looking occurrences, and every provenance
+      occurrence's annotation duty discharged **on its own line, in any of this story's sanctioned
+      forms** — a `(now DF…)` annotation, a `was P1.x …` gloss or parenthetical, the header
+      blockquote whose `v5 amendment (DF5.5)` marker names the repoint, or the inline
+      `<!-- v5 amendment (DF5.5) -->` marker on the repointed line itself — **no character window**
+      (W12E-1, generalized per W14E-1: the
+      p1-2 replacement's gloss and the p1-3 header blockquote's meta-references are sanctioned
+      provenance forms that a 20-char `(now …)` window cannot classify, and p1-9's `(was P1.6…)`/
+      `(was P1.8…)` parentheticals with the inline marker are the same duty discharged in the
+      blockquote's own idiom); the pre-authorised
+      `p1-18:50` fallback, when taken, is a fourth provenance site whose annotation duty rides the
+      fallback's own rules; **never a line-membership check**, which
+      `p1-3`'s 19-occurrences-on-8-lines would defeat; and **every touched line in every amended file
+  carries the marker** — including the bare-repoint files (`p1-7`, `p1-14`, `p0-9`) whose
+  amendments prescribe directions rather than replacement text: the dev appends the marker to each
+  repointed line, so the as-prescribed marker set is the declared eleven (W14E-2); (2) table-driven per-pair correctness — a retired ID
       annotated with the **wrong** DF successor MUST fail, which the plain `grep -v 'DF[0-9]'`
       would pass (AC1); (3) the sorted 11-path marker set deep-equals the literal array **and
       `sprint-status.yaml` carries no `v5 amendment (DF5.5)` marker** — the count holds only
@@ -633,8 +651,9 @@ list: zero hits, never opened.
 - [ ] **Test (missing successor):** A synthetic map entry pointing at a nonexistent `DF9.9` story
       file → the chore halts and logs, and writes no reference (AC4).
 - [ ] **Test (negative control — provenance):** a fixture line rewriting a shipped-PR reference
-      ("shipped PR #40/#87") into a DF ID **passes assertion (1) and MUST fail assertion (2)'s
-      provenance arm** — forward-looking references are repointed, provenance references are
+      ("shipped PR #40/#87") into a DF ID **passes the plain retired-ID grep and MUST fail
+      review** — the provenance catch is a review-time judgment, not an assertion sub-part (the
+      four-assertion enumeration defines no provenance arm; W10E-2) — forward-looking references are repointed, provenance references are
       annotated. Without this fixture the per-pair assertion is untested against the one rewrite
       that looks correct to every grep.
 - [ ] **Test (e2e demo — MANDATORY):** Run all three verification greps on a clean checkout after

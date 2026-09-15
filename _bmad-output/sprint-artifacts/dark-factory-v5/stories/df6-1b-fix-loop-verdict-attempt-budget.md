@@ -102,11 +102,12 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 > `fleet status` reads the marker but composes nothing, and `src/fleet/run-completion.ts` does not
 > exist until DF3.7 delivers it (`observeAndDriveChain` has zero occurrences in `src/` and
 > `scripts/` until then). And **DF5.3 is declared but unbuilt**: `src/audit/`
-> does not exist, and `recordAuditLink`/`walkAuditChain` appear in `src/` exactly once, in a comment
+> does not exist, and `walkAuditChain` appears nowhere in `src/` while `recordAuditLink` appears
+> exactly once, in a comment
 > at `src/providers/teardown.ts:12`. AC3 and the `src/audit/chain.ts` edit are **unbuildable until
 > DF5.3 merges**, so this story is sequenced strictly after it. DF5.3's own Technical Notes already
 > anticipate the edit (DF5.3's Technical Notes, "Ten hops *per contributing runId*": "DF6.1 … extends `src/audit/chain.ts`
-> **additively**"; its Files-to-Modify lists it at `:168`) — the writer↔reader contract is agreed,
+> **additively**"; its Files-to-Modify lists `src/audit/chain.ts`) — the writer↔reader contract is agreed,
 > only the ordering was at issue.
 >
 > ```
@@ -202,7 +203,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    names a different PR number than the requested one, refuses here,
    before `fixAttemptRunIds` is read or the parent record is read any further. The invocation then observes `attempt = 1` with a
    non-green outcome, and dispatches attempt 2 with `fixContext.attempt = 2` carrying attempt 1's CI
-   failure output and runId.
+   failure output and runId — the output **pattern-redacted before it enters the brief**
+   (`redactSecrets` from `src/providers/step-log.ts`, the same frozen-`SECRET_PREFIXES` machinery
+   the escalation comment runs): the brief is the one channel that hands content to the box, CI
+   output routinely echoes tokens, and the canonical `ghs_` clone-URL shape is exactly what that
+   scanner exists for — box ingress gets the same discipline as public egress (W12's HIGH).
 
    **The comment-ID dedup does not apply to a re-attempt on an unchanged comment set.** DF6.1a's
    dedup refuses a *fresh first attempt* on comments already fixed; it never refuses a *retry* of a
@@ -210,7 +215,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 
    **The attempt budget is charged only by attempts that reached CI.** An attempt whose
    `dispatch_task` phase settled `fail` with `exitStatus: "logic"` — DF6.2's refusal class:
-   `QDS_TEAM_RUNNER` refusal, missing provider key, INV-5 roster/task refusal, unreadable or
+   `QDS_TEAM_RUNNER` refusal, missing provider key, empty `QDS_RUN_ROOT`, INV-5 roster/task refusal, unreadable or
    under-provisioned roster, dual-gate rejection, manifest-schema or manifest-dir refusal — is a
    **deterministic** failure that a second identical dispatch cannot fix. It does **not** increment
    `attempt`; it escalates immediately with the refusal's own message as the diagnostic, naming the
@@ -227,7 +232,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    dispatches another attempt for it (escalation posts once, on the first occurrence per PR) —
    so it can be recorded **at most once per PR**,
    and the accumulate-to-3 ceiling governs the classifications a re-invocation can actually
-   reproduce (`transient`, `lead_failure`, `approval-timed-out`, `orphaned`), not this one. A
+   reproduce (`transient`, `lead_failure`, `approval-timed-out`, `overflow`, `orphaned`), not this one. A
    later invocation that reads a recorded `dispatch-refused` dispatches nothing, provisions
    nothing, and exits non-zero reporting the already-recorded refusal — the handoff comment was
    posted once, at the first occurrence; the later invocation names it in its own exit
@@ -247,7 +252,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    where the fixer works and CI disagrees, and runs forever on the cheaper-to-reach path where the
    fixer is refused. At most **3** uncharged attempts are recorded per PR across the
    reproducing uncharged classifications (`transient`, `lead_failure`, `approval-timed-out`,
-   `orphaned` — the lifecycle ladder in Technical Notes — "Attempt bookkeeping";
+   `overflow`, `orphaned` — the lifecycle ladder in Technical Notes — "Attempt bookkeeping";
    `dispatch-refused` is excluded, capped at one by its own first-occurrence escalation); once three
    are recorded, an invocation that would dispatch a fourth uncharged attempt
    dispatches nothing, provisions no box, exits non-zero, and escalates with
@@ -269,9 +274,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    privileged path: a CI-config bug, a roster change, or the verification surface). The second is a
    **correct refusal**: the agent behaved properly and no retry can ever succeed, so it charges zero
    attempts, does **not** count against the uncharged ceiling either, and escalates on first
-   occurrence naming the denied paths and the matched deny rule with its `reason`. DF6.1a AC6
-   distinguishes a diff that *wandered* (`out-of-scope-diff` — agent error, retry may help, charges
-   zero, capped at 1 here) from *Negative control:
+   occurrence naming the denied paths and the matched deny rule with its `reason` — and **no later
+   invocation re-dispatches it**: like `dispatch-refused`, the refusal is deterministic, so the
+   loop records it at most once per PR and its own first-occurrence escalation is its bound (its
+   box still reserves against the per-issue ceiling, which is why the sizing union's "+3" counts
+   all three zero-charge reservations — dispatch-refused, out-of-scope-diff and this one). *Negative control:
    an implementation that charges an attempt for it, or retries it, burns budget on something no retry
    can fix and MUST fail.* `out-of-scope-diff` — the *wandered* diff DF6.1a refuses — sits in the
    same zero-charge family: the budget is charged **only by attempts that reached CI** (the opening
@@ -357,7 +364,12 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   recorded `attemptSha` is escalated as `classification: "bot-response-to-fix"`, so the operator can
   see the loop is arguing with the reviewer rather than fixing the PR. Without this, the loop and the
   review bot alternate indefinitely with the operator as an unwitting clock — the trigger argument
-  covers the loop's own commit and its own CI run, but not a third party's reaction to them.
+  covers the loop's own commit and its own CI run, but not a third party's reaction to them. When **no
+  `attemptSha` is recorded yet**, the comparison is treated as all-newer **for re-invocations
+  only** (W20-1): a PR's first comment set is the loop's ordinary input — attempt 1 dispatches on
+  it per AC1 and is never escalated by this clause; the all-newer reading fires only when an
+  invocation re-runs against a PR the loop has already acted on without recording an attempt (the
+  dedup/first-attempt-refusal paths), and a DoD leg pins that branch explicitly.
 - **Guards/limits (`_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:39`, the limbs this half carries):** max **2** charged
   fix attempts per PR; the CI check must be a **required** check — non-required checks are ignored; a
   PR whose required-check set is empty is refused at attempt start rather than counted green, because
@@ -401,7 +413,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   the PR (DF5.2's `extensions.pr` carries that PR), which is exactly the record DF5.3's chain reaches
   from the PR at **hop 1**. `runIds` is the aggregate the parent holds — the parent's own runId
   followed by every fix runId in attempt order — so one lookup from a PR yields the whole attempt set.
-  DF2.1's twelve-field core stays closed and unchanged, so DF5.3's audit chain and DF5.2's
+  DF2.1's thirteen-field core (thirteen since `requestId` joined it — `8008e4bb`) stays closed and unchanged, so DF5.3's audit chain and DF5.2's
   `extensions.pr` correlation key are unaffected.
 - **No third-party prose enters the run record from this half either (DF6.1a INV-7).** `fixOutcome`
   is identifiers and counts, so `assertNoSecret`'s prefix scan (`src/providers/run-record.ts`) has nothing
@@ -416,6 +428,13 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   `SECRET_PREFIX_RE` — driven by the same frozen `SECRET_PREFIXES` list `assertNoSecret` enforces, and
   `ghs_` is in it (`src/providers/run-record.ts:580`, whose comment names exactly this clone-URL shape) — and
   `LONG_TOKEN_RE`.
+- **Box ingress gets the same redactor (W12's HIGH).** Attempt 2's brief carries attempt 1's CI
+  failure output (AC2) — the one channel that hands content to the box — and it is
+  pattern-redacted by the same `redactSecrets` call, on the host, **before** the dispatch-time
+  brief is built. The pair's INV-3/D8/R5-§6-fact-17 invariants bind "no push credential in any
+  box"; `ghs_` is in `SECRET_PREFIXES` precisely because that clone-URL shape is what CI emits, so
+  an unredacted CI payload into a freshly provisioned box would be the containment failure those
+  invariants exist to prevent — not merely an egress leak.
 
   **Not `cli-anything/src/redact.ts:62`.** That `redactSecrets(text, parentEnv)` redacts only literal
   values already present in the supplied map; it has no pattern knowledge at all. On this surface it
@@ -474,13 +493,19 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   normal resting state, because `awaiting-approval` is exactly an entry with no terminal
   outcome):
 
-  - **`terminal`** — the fix run's record carries a terminal outcome classification, and the
+  - **`terminal`** — the fix run's record carries `extensions.fixLoop.fixOutcomeClass`, the
+    per-attempt terminal-outcome classification DF6.1b's terminal transition wrote under the
+    parent lock (registered by DF6.1a's adds-only edit; the carrier Wave-10 D's BLOCKER demanded),
+    and the
     **classification** — not the bare presence of an outcome — decides which budget it consumes:
     - **charged** (`ci-red`, `ci-verdict-unavailable`): the attempt reached CI and failed there;
       consumes the charged budget it earned.
-    - **uncharged-terminal** (`transient`, `lead_failure`, `approval-timed-out`): the attempt
+    - **uncharged-terminal** (`transient`, `lead_failure`, `approval-timed-out`, `overflow`): the attempt
       terminated before CI but is resource-bearing, so each counts toward AC2's uncharged ceiling
-      of 3 and never the charged budget.
+      of 3 and never the charged budget. (`overflow` — the attempt's own per-attempt spend cap
+      firing, a shipped `InBoxExit` member — is dispositioned here deliberately: resource-bearing
+      and deterministic like its siblings, and charging it would double-bill an attempt the cap
+      already stopped.)
     - **`dispatch-refused`** — escalates on first occurrence and is never dispatched again by the
       loop (its box and capped key were already provisioned when the in-box `dispatch_task` phase
       refused). Never dispatched again means never recorded again: it can appear in the ledger at
@@ -488,15 +513,33 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       its bound (AC2).
     - the zero-charge refusals with their own caps — `out-of-scope-diff` (cap 1),
       `scope-requires-privilege` (never retried) — consume neither ceiling, per AC2.
-  - **`awaiting-approval`** — the fix run's record carries an approval extension whose **`state`
-    field reads `awaiting-approval`** (`extensions.approval.state`; `ApprovalState` in
-    `src/reverify/approval.ts`) and no terminal outcome: the loop's normal
-    resting state between invocations 1 and 2. **Continuation, never charged, never counted** —
-    the invocation continues per DF6.1a AC3, and the state survives across invocations without
-    consuming the uncharged budget. **The bare presence of an approval extension is not this
-    state**: `approved`, `rejected` and `timed-out` are decided states — an `approved` record
-    with a terminal outcome is classified by the terminal arm above, and an `approved` record
-    with `fixContext` but no terminal outcome is poll recovery below.
+  - **`awaiting-approval` and the decided approval states** — the fix run's record carries an
+    approval extension whose **`state` field** (`extensions.approval.state`; `ApprovalState` in
+    `src/reverify/approval.ts`) decides, with no terminal outcome (`fixOutcomeClass` unset). The
+    `state` field has five readings and the ladder names all five (W12's decided-states gap):
+    **`awaiting-approval`** ⇒ the loop's normal resting state between invocations 1 and 2 —
+    **continuation, never charged, never counted** (the invocation continues per DF6.1a AC3, and
+    the state survives across invocations without consuming the uncharged budget);
+    **`pausing`** ⇒ **continuation, never counted** — a real persisted state (DF3.4's teardown
+    window, reachable via `attach`), not a dead attempt, and mischarging it as `orphaned` would
+    burn the uncharged ceiling on the loop's own mid-transition (the re-entry path is DF3.7 AC5's
+    `promoteStrandedPause`); **`timed-out`** ⇒ **uncharged-terminal, classified
+    `approval-timed-out`** — the approval window expired, the attempt is resource-bearing, and it
+    counts toward the uncharged ceiling of 3 (the named classification, never an `orphaned`
+    fallthrough); **`rejected`** ⇒ **terminal, classified `approval-rejected`, charging zero**
+    (W14's HIGH: AC2's own rule charges only attempts that **pushed and then failed CI** — a
+    rejected attempt never pushed, so charging it would bill a decision, not a spend) — the loop
+    **escalates and stops** (an operator rejection is a decision, never
+    retried; `push.ts` refuses any state but `approved`, so nothing was pushed and nothing further is);
+    **`approved`** with `fixContext` but no terminal outcome ⇒ poll recovery below, and an
+    `approved` record **with** a terminal outcome is classified by the terminal arm above;
+    **`approved` with no `fixContext` and no terminal outcome** ⇒ **continuation — the sanctioned
+    re-attempt** (W14's HIGH): DF6.1a AC3 explicitly re-runs the scope-check→push leg on an
+    approved record, so this is the loop's own path, not a dead attempt — an invocation-2 refusal
+    or crash here must not strand an operator-approved fix by burning the uncharged ceiling;
+    charges nothing, counts nothing. **The
+    bare presence of an approval extension is not any one of these states — the `state` field
+    decides.**
   - **`poll-interrupted` (recovery)** — the record carries `fixContext` (the push happened) but no
     terminal outcome and no `awaiting-approval` approval state (the push happens only after the
     approval decides — `src/pr/push.ts` refuses on any state but `approved`): invocation 2 died
@@ -509,7 +552,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
     **no poll at all** — classified `ci-verdict-unavailable`, a charged failure. The
     classification is still never stored — the poll yields it fresh — but the window's opening
     must be, because a recovering invocation has no other way to know when `pushVerifiedSha`
-    returned: the record store stamps `createdAt` once per record (run-record.ts:104), never per
+    returned: the record store stamps `createdAt` once per record (`IMMUTABLE_FIELDS`,
+    `src/providers/run-record.ts`), never per
     write, so nothing else on disk carries the push moment. A `fixContext` whose anchor is
     missing or unparseable refuses the recovery non-zero — fail closed (INV-6): never a
     restarted window, never a green.
@@ -526,8 +570,8 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   writes already guarantee exists — plus the `pollWindowOpenedAt` anchor above, which rides
   `fixContext`'s single write rather than adding one, so it inherits that write's crash-safety —
   and the parent lock makes the read serial, so no prior attempt
-  is mid-flight when it runs. The terminal transition — the fix run's own outcome classification
-  and, when terminal, the parent's `fixOutcome` — is written under the **same parent lock** the
+  is mid-flight when it runs. The terminal transition — the fix run's `fixOutcomeClass` (its
+  registered field, written here) and, when terminal, the parent's `fixOutcome` — is written under the **same parent lock** the
   dispatch was taken under.
   Pending retention lives in the ledger alone; **`fixOutcome` is not extended to carry pending
   attempts** — it stays write-once-at-terminal, which is the shape DF5.3's audit chain (hop 1, AC3)
@@ -581,7 +625,15 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 - Terminal outcomes log `outcome: "green" | "escalated"` with `attempts` and every `runId`, so the
   audit chain (DF5.3) can reconstruct the loop from the PR alone. An escalation additionally logs its
   classification: `ci-red`, `ci-verdict-unavailable`, `approval-timed-out`, `dispatch-refused`
-  (DF6.2 `logic`), `transient`, `lead_failure`, or `out-of-scope-diff` — and whether it charged the
+  (DF6.2 `logic`), `transient`, `lead_failure`, `out-of-scope-diff`, `scope-requires-privilege`
+  (AC2's first-occurrence escalation, charging zero), `fix-scope-missing` (the pre-dispatch
+  allowlist-refusal stop — provisions nothing, escalates on every invocation until the operator
+  creates the artifact: deterministic repetition, never a continuation, never a once-per-PR
+  record),
+  `bot-response-to-fix` (the no-ping-pong
+  stop), `approval-rejected` (the operator's decision — terminal, zero-charge, loop stops), `overflow`
+  (the attempt's own spend cap), or `orphaned` (the ladder's fourth state — the uncharged-ceiling exhaustion escalates
+  with every recorded classification listed, and `orphaned` entries are among them) — and whether it charged the
   budget.
 - Sub-timings follow the sibling convention: `poll_ms`, `ci_settle_ms`, `escalation_ms`, each
   **absent, not `0`**, on a leg that did not run.
@@ -609,14 +661,17 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   refusing with nothing provisioned)**, the `fixContext.attempt` value handed to DF6.1a's write path,
   **the post-push CI poll call — invoked in the same invocation, immediately after DF6.1a's
   `fixContext` write, because the 15-minute window is measured from `pushVerifiedSha`'s return and a
-  third invocation would find it expired before its first poll (Wave 6 W6-D-B1: this call site was
+  third invocation would gamble the window on the persisted anchor's remaining time instead of
+  polling while it is certainly open (Wave 6 W6-D-B1: this call site was
   owned by neither half)** — and the escalation call. Beyond that call site, DF6.1a's two-invocation
   drive path is unchanged.
-- `src/providers/run-record.ts` — **no change expected**; the `fixAttemptRunIds: "strings"`
-  registration on the already-registered `fixLoop` fields is **DF6.1a's** adds-only edit
-  (W9-D-1: DF6.1a owns the dispatch path the append rides, and it is sequenced first — see
-  Technical Notes, "Attempt bookkeeping"). This story's driver *reads* the ledger; a change to
-  the registration here would be a DF2.1 core edit requiring its own justification.
+- `src/providers/run-record.ts` — **registration read, not made**: the `fixAttemptRunIds`/`fixRun`/
+  `fixOutcomeClass` registrations on the already-registered `fixLoop` fields are **DF6.1a's**
+  adds-only edit (W9-D-1 + the pair's forward-dependency note: DF6.1a owns the dispatch path the
+  append rides, is sequenced first, and its Files list says neither half may say "no change
+  expected" on this file — this line is the reader's disclosure of that dependency, not a posture
+  dispute; W10-D-SEAM-1). This story's driver *reads* the ledger and the classification; a change
+  to the registration here would be a DF2.1 core edit requiring its own justification.
 - `tests/fixloop/{ci-status,escalation,cli}.test.ts`
 
 ## Security Invariants
@@ -659,7 +714,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       fixture runId does not exercise the mint race and does not satisfy this item. An implementation
       asserting a CAS semantic of `RunRecordStore.set` MUST also fail.*
 - [ ] **Test (uncharged-attempt ceiling):** three recorded uncharged attempts (any mix of
-      `transient`, `lead_failure`, `approval-timed-out`, `orphaned`) → an
+      `transient`, `lead_failure`, `approval-timed-out`, `overflow`, `orphaned`) → an
       invocation that would dispatch a fourth uncharged attempt
       dispatches nothing, provisions no box, exits non-zero and escalates listing every recorded
       classification; a recorded `dispatch-refused` follows its own bound, not this ceiling — the
@@ -679,6 +734,25 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       set posted after `attemptSha` → the invocation dispatches nothing and escalates with
       `classification: "bot-response-to-fix"`. *An implementation that resets the budget on a fresh
       comment set MUST fail.*
+- [ ] **Test (fresh-PR attempt 1 dispatches):** a PR with **no** recorded attempt and a first bot
+      comment set → the invocation **dispatches attempt 1 normally** (AC1) — the all-newer
+      `bot-response-to-fix` reading is a **re-invocation predicate only** and never escalates a
+      first dispatch. *An implementation that escalates attempt 1 by the fresh-PR clause MUST fail
+      (W20's HIGH).*
+- [ ] **Test (fix-scope-missing stops the loop):** a re-invocation whose `.factory/fix-scope.json`
+      read refuses `fix-scope-missing` → the invocation provisions nothing and escalates with the
+      classification named — **on every invocation, until the operator creates the artifact**
+      (the bound is deterministic repetition, not a once-per-PR record: no run record is minted on
+      this path, `fixOutcome` is write-once-at-terminal, and no registered field carries a
+      seen-it marker — so the story claims exactly the repetition and no durability). A subsequent
+      invocation refuses again rather than dispatching.
+      *An implementation that treats the missing artifact as a continuation — re-arming forever
+      against an allowlist nobody can read — MUST fail (AC2/AC6).*
+- [ ] **Test (scope-requires-privilege stops the loop):** an attempt classified
+      `scope-requires-privilege` escalates on first occurrence and **a subsequent invocation
+      dispatches nothing** — the refusal is deterministic and recorded at most once per PR, its
+      reservation counted in the sizing union like its two zero-charge siblings. *An implementation
+      that re-dispatches it, or omits its reservation from the sizing union, MUST fail (AC2).*
 - [ ] **Security (escalation egress):** an escalation fixture whose CI output contains
       `https://x-access-token:ghs_…@github.com/org/repo`, an `sk-…` literal, and a PEM block posts a
       comment containing **none** of the three. *An implementation calling
@@ -738,6 +812,12 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
       attempt that pushed and then failed CI charges the budget. *An implementation that treats every
       non-green run as a fix failure spends a second box on a deterministic refusal and posts an
       escalation whose "CI failure messages" element is empty — it MUST fail this test (AC2).*
+- [ ] **Test (attempt-2 brief redaction, box ingress):** a fixture whose attempt-1 CI-failure
+      output embeds the three credential shapes (`ghs_` clone URL, `sk-` literal, PEM block — the
+      escalation fixture's set) reaches attempt 2's in-box brief **pattern-redacted** — every
+      shape replaced, the non-credential prose intact — mirroring the escalation-redaction leg;
+      an implementation that redacts the escalation comment but ships the raw CI output into the
+      dispatch brief MUST fail this test (AC2, Security "box ingress gets the same redactor").
 - [ ] **Test (fix-run audit chain):** each attempt emits its own `recordAuditLink` rows at DF5.3's
       event sites under its own runId, the parent record's `extensions.fixLoop.fixOutcome.runIds`
       lists every contributing runId in attempt order, and `walkAuditChain` on the PR resolves the
@@ -788,7 +868,8 @@ posting a comment is this half's one irreversible act. `assertNoSecret` is untou
 **DF6.1-M1** — the attempt-budget check-and-increment now takes the per-run invocation lock the fleet
 already ships (`acquireRunLock`) with DF3.1's exit-5 mapping, instead of asserting a CAS semantic
 `RunRecordStore.set` does not document. It is the **same** lock DF6.1a holds for DF3.7's
-`observeAndDriveChain` precondition, so the loop takes one lock, not two, and introduces no new
+`observeAndDriveChain` precondition, so the loop takes one lock, not two (a claim the Wave-5c
+entry below withdraws — superseded, retained for provenance), and introduces no new
 primitive and no second lock file.
 
 **Cost-attribution honesty (DF5.3 alignment).** This half consumes DF5.3's hop 3 exactly as DF5.3 now
@@ -811,8 +892,8 @@ invocations share **no** runId, so the fix run's own lock could never serialize 
 dispatch, two boxes, two keys, two pushes. Now keyed on the **parent** run (`extensions.pr.prNumber`,
 DF5.3's hop-1 join). The loop takes **two** locks with two scopes, not one; my "one lock, not two"
 claim is withdrawn. Also corrected: the lock is **not** taken "by every run-scoped verb" — there are
-exactly two `acquireRunLock` sites in `scripts/fleet.ts` (`:1976` key-mint, `:4257` in
-`runDestructive`), and the gate verbs (`GATE_VERBS`, `:3005-3007`) take none. That is *why* an
+exactly two `acquireRunLock` sites in `scripts/fleet.ts` (the dispatch key-mint on the just-minted
+id, and `runDestructive`), and the gate verbs (`GATE_VERBS`) take none. That is *why* an
 approval is never blocked by a held lock — and why it must never be relied on to be serialized by one.
 This also resolves **V-DF6.1b-M1**: the parent-run join is the lookup, so no `list()` sweep is needed.
 

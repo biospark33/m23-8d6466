@@ -30,13 +30,13 @@ written into by both).
 | O3 | The `meter` zero/`{0,0}` charging arm | DF3.6a |
 | O4 | The `cause`-union widening + `telemetry.status="stopped"` internal writer | DF3.6a |
 | O5 | `scripts/pipeline-run.ts` pair edits (i)–(ii) | DF3.6a |
-| O6 | `scripts/pipeline-run.ts` pair edits (iii)–(vi) — `residentRssBytes` pass, `lastMemory` wiring, `onBoundBreach`→`stop()` handler, **the arming try/catch classification beside the rate-refusal arm** | DF3.6b |
+| O6 | `scripts/pipeline-run.ts` pair edits (iii)–(vii) — `residentRssBytes` pass, `lastMemory` wiring, `onBoundBreach`→`stop()` handler, **the arming try/catch classification beside the rate-refusal arm**, **the run-down refresh precedence (engine's `exitStatus:"overflow"` survives the final refresh)** | DF3.6b |
 | O7 | The cgroup mechanism (`resident.ts`, unit, Dockerfile scan) | DF3.6b |
 | O8 | The AC1 live proof — **two legs**: synthetic allocator as the leg's `QDS_PI_BIN` (zero spend; proves kernel-kill-without-signal) + the tier's real solicitation (proves real-pi-under-bound, attachment, telemetry, removal) | DF3.6b |
 | O9 | `src/phase-engine/manifest.ts` — the three bound fields + AC2a operands (DF3.6a); **the 512 MiB constant re-set from DF3.6b's measured baseline** (DF3.6b, scoped to that one value) | split per constant |
 | O10 | The e2e demo's env contract (`FAKE_RESIDENT_USAGE`, `spawnRunner` inheritance) | DF3.6a |
 | O11 | yaml DF3.6a row (`DF2.13` dep edge) | parent (W6-C-M4) |
-| O20 | The fill-side stamp provisioner — the dispatch fill-step edit stamping `residentSpendCeilingMicros`/`capMicroUsd`/`defaultKeyCapMicroUsd` onto the frozen manifest, beside DF3.1's shipped `stampManifestLimit` (adds-only in the DF3.1-owned file; DF5.3 setup-gate precedent). `limitMicroUsd` stays DF3.1's stamp's field alone (CC-1) and `defaultCapMicroUsd` is DF2.8's host-side derivation source — neither is a DF3.6a operand (W8-C-1; W9-review correction) | DF3.6a |
+| O20 | The fill-side stamp provisioner — the dispatch fill-step edit stamping `residentSpendCeilingMicros`/`capMicroUsd`/`defaultKeyCapMicroUsd`**/`residentRssBytes`** onto the frozen manifest, beside DF3.1's shipped `stampManifestLimit` (adds-only in the DF3.1-owned file; DF5.3 setup-gate precedent). The fourth operand resolves manifest-declared → `PROVISIONAL_RESIDENT_RSS_BYTES` (512 MiB, re-set by DF3.6b per W6-C-H4) — the production provisioner W12C-6a-1 demanded. `limitMicroUsd` stays DF3.1's stamp's field alone (CC-1) and `defaultCapMicroUsd` is DF2.8's host-side derivation source — neither is a DF3.6a operand (W8-C-1; W9-review correction) | DF3.6a |
 | O21 | `src/fleet/dispatch.ts` — the fill-side stamp edit's only permitted scope (no other dispatch change) | DF3.6a |
 
 ## Reconciliations applied (Wave 6 → spec)
@@ -52,7 +52,7 @@ written into by both).
 | W6-C-H3 (C2) | AC1's margin + the two soft ceilings recorded as a deviation. |
 | W6-C-H4 (C3) | 512 MiB marked provisional-pending-DF3.6b; `manifest.ts` in DF3.6b's Files to Modify scoped to that constant. |
 | W6-C-H5 (C3) | **Arming refusal classified**: typed error handled in the arming try/catch beside the rate arm, emitting the shipped `resident_disabled` shape — never an unclassified rethrow, never the `onBoundBreach` region (which is not constructed on the arming path). |
-| W6-C-M2 (C1) | **Pair-total edit count stated once: six** on `scripts/pipeline-run.ts` — no half's "no other change" can reject the other's. |
+| W6-C-M2 (C1) | **Pair-total edit count stated once: seven** on `scripts/pipeline-run.ts` — no half's "no other change" can reject the other's. (Six through Wave 9; edit (vii), the run-down refresh precedence, added by the Wave-9 fix — W9-C-1's clobbered `exitStatus:"overflow"` observable.) |
 | W6-C-M3 (C1) | The stale "1,000× the 50,000 µ$ ceiling" bullet corrected (backstop named, 6,250× the fallback). |
 | W6-C-M4 (C3) | `DF2.13` added to the yaml DF3.6a deps (parent). |
 | W6-C-M5 (C1) | Citations by symbol/row key; line numbers stripped in touched text. |
