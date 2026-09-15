@@ -970,6 +970,37 @@ describe("the skip streak and its 90 s wall-clock conjunct (AC2a)", () => {
       s.cleanup();
     }
   }, 120_000);
+
+  test("an UNUSABLE tick resets the skip streak: the box answered (present + cat), so skips cannot bridge across it", async () => {
+    const s = store();
+    try {
+      seedRun(s.store, "run-s3");
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      // Ticks 1-5: five 255 skips (streak 5, fake wall +20 s each). Tick 6:
+      // present-at-test + failed cat — the box answered BOTH legs, so the
+      // streak resets (the race's own doctrine, fanout-primitive.ts: the
+      // unusable tick is `anyArmAnswered`) and lastReachMs moves to now.
+      // Ticks 7-10: four more skips. Pre-fix the streak counted 5+4=9 across
+      // the unusable and fired box-unreachable at tick 10 ("answered nothing
+      // on six consecutive ticks" — factually wrong: tick 6 answered); with
+      // the reset the post-unusable streak tops out at four, under the limit,
+      // and the window expires with the OTHER code.
+      driver.advanceMs = 20_000;
+      driver.plan = [
+        ...Array.from({ length: 5 }, () => ({ forcedProbeExit: 255 } as MarkerPlan)),
+        { catExit: 2 },
+        ...Array.from({ length: 4 }, () => ({ forcedProbeExit: 255 } as MarkerPlan)),
+      ];
+      armFakeClock();
+      const out = await observeAndDriveChain("run-s3", baseDeps("run-s3", { driver, store: s.store, runsDir: s.dir, windowMs: 190_000 }));
+      expect(out.kind).toBe("unsettled");
+      expect(terminalOf(out)?.code).not.toBe("box-unreachable"); // the answered tick broke the streak
+      expect(terminalOf(out)?.code).toBe("run-completion-unobserved"); // window fill, not transport death
+      expect(driver.destroyed).toEqual([]); // box alive and listable either way
+    } finally {
+      s.cleanup();
+    }
+  }, 120_000);
 });
 
 // ─── the chain and the ChainOutcome arms (AC2c, AC5, #245) ──────────────────

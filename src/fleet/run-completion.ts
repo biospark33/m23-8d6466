@@ -488,7 +488,15 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
     } else {
       // Present but unjudgeable — the box answered, so this is counted on the
       // corruption streak (temp+rename makes persistence corruption), never a
-      // free tick and never a skip.
+      // free tick and never a skip. The read also settles the TRANSPORT arm:
+      // the streaks are consecutive, and the race treats the same verdict as
+      // `anyArmAnswered` (fanout-primitive.ts), so a tick the box demonstrably
+      // answered resets the skip streak and moves lastReachMs — or skips left
+      // over from an earlier blip would combine with later ones into a
+      // box-unreachable that asserts the box "answered nothing" on ticks it
+      // answered.
+      skipStreak = 0;
+      lastReachMs = Date.now();
       unusableStreak += 1;
       observeLine(requestId, {
         runId,
