@@ -91,9 +91,9 @@ Per the stated bar (any C2 or C3 breaks convergence), neither story converges th
 
 | | BLOCKER | HIGH | MEDIUM | LOW | C4 | Total |
 | --- | --- | --- | --- | --- | --- | --- |
-| DF6.1a | 0 | 1 | 1 | 4 | 2 | 8 |
-| DF6.1b | 0 | 0 | 1 | 1 | 2 | 4 |
-| **Both** | **0** | **1** | **2** | **5** | **4** | **12** |
+| DF6.1a | 0 | 1 | 1 | 6 | 3 | 8 |
+| DF6.1b | 0 | 0 | 1 | 3 | 2 | 4 |
+| **Both** | **0** | **1** | **2** | **9** | **5** | **12** |
 
 By class: C1 ×2, C2 ×2, C3 ×3, C4 ×5.
 

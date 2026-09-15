@@ -1236,33 +1236,6 @@ Both Wave-19 verifiers returned NOT CONVERGED on small, precise items; all appli
 **Next: Wave 20 — targeted confirming verifiers on the same three stories (the six converged
 stories remain untouched), then the Phase-3 operator gate.**
 
-### Wave 21 verifier findings + same-session fixes (DF3.7 · DF6.1a · DF6.1b)
-
-The union design held everywhere probed (A7: "complete and one-to-one"; D: the sizing formula
-byte-identical at all three statements and covering every sanctioned box). Residue applied
-in-session:
-
-- **DF3.7 (3 M, all fixed before the Wave-22 check dispatched):** the `run-completion-unobserved`
-  parenthetical de-conflated (either fill yields the one code; it stays distinct from
-  `box-unreachable`); the exit-table glosses completed (exit 1 + `box-unreachable`; exit 4 names
-  the verb's pre-flight record assert as its producer; exit 5 + `run-already-closed` and the
-  host-root-unusable `reverify()`; exit 6 enumerates all four post-chain arms); `refused` claims
-  the exit-4 producer.
-- **DF6.1a-W21-1 (HIGH C2+C3):** AC6 now states the **dual-read design** — the enforcement read on
-  the harvested diff (invocation 2) plus the **attempt-start probe** host-side in
-  `feedback-run.ts` before attempt 1's dispatch (the placement the e2e demo and DF6.1b's stop-leg
-  mandate) — one artifact, this story's own code, no second implementation sanctioned.
-  DF6.1a-W21-2 (C1 L): "seven resource-bearing boxes" → **eight** (the corrected formula's
-  arithmetic).
-- **DF6.1b-W21-6 (C2 M):** `fix-scope-missing`'s bound restated as **deterministic repetition,
-  no durability claimed** — no run record is minted on that path, `fixOutcome` is
-  write-once-at-terminal, no registered field carries a seen-it marker, so the story claims the
-  repetition and nothing more. DF6.1b-W21-2/3 (C3 L): `scope-requires-privilege`'s DoD leg added;
-  the `bot-response-to-fix` fresh-PR case stated.
-
-**Next: Wave 22 — two targeted confirming verifiers (DF3.7 · DF6.1a+DF6.1b), then the Phase-3
-operator gate.**
-
 ## Wave 20 result + same-session fixes — the union design is settling; three prose-class items left. VERDICT: NOT CONVERGED.
 
 Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave20-{A,D}-*.md` (targeted: DF3.7 ·
@@ -1292,6 +1265,33 @@ All five applied in-session, gate green:
   never a continuation — with its DoD leg and a place in the escalation enumeration.
 
 **Next: Wave 21 — two targeted confirming verifiers (DF3.7 · DF6.1a+DF6.1b), then the Phase-3
+operator gate.**
+
+### Wave 21 verifier findings + same-session fixes (DF3.7 · DF6.1a · DF6.1b)
+
+The union design held everywhere probed (A7: "complete and one-to-one"; D: the sizing formula
+byte-identical at all three statements and covering every sanctioned box). Residue applied
+in-session:
+
+- **DF3.7 (3 M, all fixed before the Wave-22 check dispatched):** the `run-completion-unobserved`
+  parenthetical de-conflated (either fill yields the one code; it stays distinct from
+  `box-unreachable`); the exit-table glosses completed (exit 1 + `box-unreachable`; exit 4 names
+  the verb's pre-flight record assert as its producer; exit 5 + `run-already-closed` and the
+  host-root-unusable `reverify()`; exit 6 enumerates all four post-chain arms); `refused` claims
+  the exit-4 producer.
+- **DF6.1a-W21-1 (HIGH C2+C3):** AC6 now states the **dual-read design** — the enforcement read on
+  the harvested diff (invocation 2) plus the **attempt-start probe** host-side in
+  `feedback-run.ts` before attempt 1's dispatch (the placement the e2e demo and DF6.1b's stop-leg
+  mandate) — one artifact, this story's own code, no second implementation sanctioned.
+  DF6.1a-W21-2 (C1 L): "seven resource-bearing boxes" → **eight** (the corrected formula's
+  arithmetic).
+- **DF6.1b-W21-6 (C2 M):** `fix-scope-missing`'s bound restated as **deterministic repetition,
+  no durability claimed** — no run record is minted on that path, `fixOutcome` is
+  write-once-at-terminal, no registered field carries a seen-it marker, so the story claims the
+  repetition and nothing more. DF6.1b-W21-2/3 (C3 L): `scope-requires-privilege`'s DoD leg added;
+  the `bot-response-to-fix` fresh-PR case stated.
+
+**Next: Wave 22 — two targeted confirming verifiers (DF3.7 · DF6.1a+DF6.1b), then the Phase-3
 operator gate.**
 
 ## Waves 20–23 — the targeted convergence loop. CAMPAIGN VERDICT: **CONVERGED — 9 of 9.**

@@ -633,11 +633,9 @@ list: zero hits, never opened.
       `<!-- v5 amendment (DF5.5) -->` marker on the repointed line itself — **no character window**
       (W12E-1, generalized per W14E-1: the
       p1-2 replacement's gloss and the p1-3 header blockquote's meta-references are sanctioned
-      provenance forms a 20-char `(now …)` window cannot classify, and p1-9's `(was P1.6…)`/
+      provenance forms that a 20-char `(now …)` window cannot classify, and p1-9's `(was P1.6…)`/
       `(was P1.8…)` parentheticals with the inline marker are the same duty discharged in the
       blockquote's own idiom); the pre-authorised
-      p1-2 replacement's gloss and the p1-3 header blockquote's meta-references are sanctioned
-      provenance forms a 20-char `(now …)` window cannot classify); the pre-authorised
       `p1-18:50` fallback, when taken, is a fourth provenance site whose annotation duty rides the
       fallback's own rules; **never a line-membership check**, which
       `p1-3`'s 19-occurrences-on-8-lines would defeat; and **every touched line in every amended file

@@ -148,7 +148,8 @@ suite was run (nothing to gate). No `bun test` invocation at all.
 - **Amendment B, C, C-erratum, D, E, F, G are all factually grounded**: the audit/register do
   carry the drift the errata correct; `df2-3` carries the operator-corrected chain and the
   retired old chain survives only inside a blockquote; the yaml matches the G table and its
-  fourteen-change arithmetic (6 written arrays + 8 comments + 1 other-hand array).
+  fourteen-change arithmetic (14 unique changes: 6 written arrays + 8 comments — the one
+  other-hand array excluded from the count, per the story's own P1.18 note).
 - **The P1.18 hand-off is real and executable**: both DF6.1 halves carry the severance at the
   named search anchors, for the two different reasons the story claims; `p1-18:36` carries the
   payload shape; the fallback text is pre-authored, markered, and sanctioned inside INV-1's
