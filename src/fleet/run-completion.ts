@@ -44,8 +44,13 @@ import { unitActivity } from "./run.ts";
  * would silently abandon exactly the runs this module exists for).
  * Operator-settable on the verb (`--window-ms`); this default is provisional.
  */
-// ponytail: 2 h placeholder — repriced from the live e2e's measured
-// dispatch→terminal duration at a stated multiple before merge (story :113).
+// ponytail: 2 h — repriced per story :113 from live round T2.8 (2026-09-15,
+// sha a1314720, evidence 2026-09-15-184348-…-5wmt0b.json): the minimum t3
+// workload measured dispatch 79 s + in-box run ≈ 10 s + chain 40 s, so
+// dispatch→terminal ≈ 130 s and the default sits at ~55× that minimum —
+// sized for real unattended runs (which run hours, not seconds), never
+// inherited from fan-out's race-shaped 1 h. Raise the multiple only with
+// measured evidence; the operator's --window-ms always wins.
 export const DEFAULT_OBSERVATION_WINDOW_MS = 7_200_000;
 
 /**
