@@ -15,10 +15,10 @@ second caller. Crossing surface: `observeAndDriveChain(runId, deps)` + `promoteS
 
 | # | Deliverable | Owner (exactly one) |
 |---|---|---|
-| O1 | `src/fleet/run-completion.ts` — `observeAndDriveChain`, `promoteStrandedPause`, the `ChainOutcome` union (`driven` / `unsettled` / `refused` / `gate-refused`), the deps shape `{driver, store, runsDir, hostRoot, runLock, maxTicks?, windowMs?}` | DF3.7 |
+| O1 | `src/fleet/run-completion.ts` — `observeAndDriveChain`, `promoteStrandedPause`, the `ChainOutcome` union (`driven` / `unsettled` / `refused` / `vetoed` / `approval-failed` / `chain-failed` / `handed-off` — the `approval-failed` arm is what DF3.8's `runs_approval_failed` counter counts), the deps shape `{driver, store, runsDir, hostRoot, runLock, keyApi, requestId, costLedger, maxTicks?, windowMs?}` | DF3.7 |
 | O2 | `fleet observe <run-id>` verb descriptor + full exit table `[0,1,2,4,5,6]` in `src/fleet/verbs.ts` (DF3.1-owned file; adds-only) | DF3.7 |
 | O3 | The single-run verb's own `withRunLock` acquisition in the `scripts/fleet.ts` `observe` block, producing `deps.runLock` (W6-A-M5) | DF3.7 |
-| O4 | The typed refusal prints for the single-run form (`run-completion-unobserved`, `run-engine-dead`, `box-unreachable`, `gate-refused-live-infra`, `approval-already-registered`) | DF3.7 |
+| O4 | The typed refusal prints for the single-run form (`run-completion-unobserved`, `run-engine-dead`, `box-unreachable`, `approval-already-registered`, `run-already-closed`) — the approval leg's failure is not a refusal print: it reports as the `approval-failed` outcome (counted `runs_approval_failed` by O14) | DF3.7 |
 | O5 | `tests/fleet/run-completion.test.ts` — classifier verdicts, both streaks, liveness arm, `boxMarkerPath` derivation, unobserved arm, pre-flight refusal incl. `pausing`, AC1 import fence, the verb's lock-before-preflight ordering | DF3.7 |
 | O6 | `tests/fleet/e2e/tier2-run-completion.live.test.ts` | DF3.7 |
 | O7 | The AC1 static import fence **definition** (over `src/fleet/run-completion.ts`) | DF3.7 |
