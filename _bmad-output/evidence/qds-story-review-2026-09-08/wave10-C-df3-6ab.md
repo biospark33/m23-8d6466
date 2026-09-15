@@ -65,7 +65,7 @@
 
 ## Verdicts
 
-- **DF3.6a: NOT CONVERGED** — zero BLOCKER, zero HIGH, but **one C2 (W10C-6a-2, MEDIUM)** fails the bar; residue 1×C1-MEDIUM, 4×C1-LOW, 2×C4-LOW. Confidence: **0.8** (the C2 rests on a closed key list and a typed map read directly from source; the residual uncertainty is whether a second ad-hoc parse inside the listed dispatch.ts counts as "the existing seam" — the story's words don't say).
+- **DF3.6a: NOT CONVERGED** — zero BLOCKER, zero HIGH, but **one C2 (W10C-6a-2, MEDIUM)** fails the bar; residue 1×C1-MEDIUM, 3×C1-LOW, 3×C4-LOW. Confidence: **0.8** (the C2 rests on a closed key list and a typed map read directly from source; the residual uncertainty is whether a second ad-hoc parse inside the listed dispatch.ts counts as "the existing seam" — the story's words don't say).
 - **DF3.6b: NOT CONVERGED** — zero BLOCKER, zero HIGH, but **one C2 (W10C-6b-1, MEDIUM)** fails the bar; residue 1×C4-LOW, 1×C1-LOW. Confidence: **0.85** (every status writer in the shipped path was read; no writer for the unenforceable path exists in either half's edit list).
 - **Pair contract: FAILS the C3 bar** on W10C-PAIR-1 (MEDIUM); all other paired checks (cause union, stopped/degraded precedence, residentRssBytes, exitStatus vocabulary, edit-list coverage) verified consistent. Confidence: **0.9** (the double-claim is verbatim in both Files lists).
 
