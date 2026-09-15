@@ -1711,8 +1711,27 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
       // an unused one throws on first use rather than minting silently.
       const keyApi = deps?.keyApi ?? (rec.keyHash !== undefined ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
       // The write-path ledger teardown's box-hours ingest settles into — the
-      // same constructor shape dispatch/teardown build beside the records dir.
-      const costLedger = asUsage(() => new CostLedger({ ...costLedgerOpts(store.dir), runsDir: store.dir }));
+      // same constructor shape dispatch/teardown build beside the records dir,
+      // WITH dispatch's readRunRecord seam (makeLedgerFactory's wiring): the
+      // ingest re-reads the record at close time, and the CostLedger default
+      // (`() => ({ createdAt: "" })`) reads as a phantom record whose closedAt
+      // is never set — box-hours-record-open on EVERY driven run (T2.8 red
+      // rounds 1-2, 2026-09-15).
+      const costLedger = asUsage(
+        () =>
+          new CostLedger({
+            ...costLedgerOpts(store.dir),
+            runsDir: store.dir,
+            readRunRecord: (id: string) => {
+              try {
+                return store.get(id);
+              } catch (e) {
+                if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+                throw e;
+              }
+            },
+          }),
+      );
       let chainOutcome: ChainOutcome;
       try {
         chainOutcome = await observeAndDriveChain(runIdArg, {
