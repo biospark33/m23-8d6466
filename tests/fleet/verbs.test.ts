@@ -50,6 +50,10 @@ import {
 } from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
+// The marker-path GRAMMAR, not a path copy: the observe exit-6 probe's double
+// keys its interception on the shape of the box marker path exactly as
+// patterns.test.ts's and cli.test.ts's marker doubles do.
+import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import { liveForeignPid, rejection } from "../helpers.ts";
 // DF3.2 probe wiring: the full fanout path needs a key client, a ledger, and
 // the fan-out record store the auto-rank reads.
@@ -517,6 +521,17 @@ describe("verbs.ts (registry)", () => {
       { name: "--driver", required: true, valueType: "string" },
       { name: "--help", required: false, valueType: "boolean" },
     ],
+    observe: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+      {
+        name: "--window-ms",
+        required: false,
+        valueType: "string",
+        note: "observation window in ms; the default is 7200000 — both exit-1 outcomes (run-completion-unobserved, box-unreachable) are transient, so re-invoke and the poll starts over",
+      },
+    ],
     teardown: [
       { name: "--dir", required: false, valueType: "path" },
       { name: "--driver", required: true, valueType: "string" },
@@ -764,6 +779,16 @@ describe("verbs.ts (registry)", () => {
     // result line would not print. No 3: that is dispatch's setup gate, and
     // this verb provisions nothing.
     run: [0, 1, 2, 4, 5, 6],
+    // DF3.7. 0 = driven (or a non-terminal unsettled return — maxTicks is the
+    // sweep's, not this verb's). 1 = the TRANSIENT pair (window fill
+    // `run-completion-unobserved`, skip-streak fill `box-unreachable`): the
+    // box is alive, the marker is the state, and a re-invocation is the
+    // designed recovery. 5 = every refused-before-mutation arm —
+    // run-engine-dead, the pre-flight refusals, a lock refusal — identical on
+    // every retry. 6 = the chain LANDED and the failure came after it
+    // (vetoed/approval-failed/chain-failed/handed-off). 4 is produced by this
+    // verb itself (no such run record) before the module is ever entered.
+    observe: [0, 1, 2, 4, 5, 6],
   };
 
   // Every entry in the snapshot records, iterated. A hand-written list was the
@@ -1247,6 +1272,49 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    */
   const corroborated: string[][] = [];
 
+  /**
+   * The shared driver with the observe exit-6 probe's ONE addition: the box's
+   * completion marker reads as SETTLED. `readBoxFile` issues `sh -c "test -f
+   * '<marker>'"` then `sh -c "cat '<marker>'"` — both matched by
+   * BOX_MARKER_PATH_RE — so the double answers the probe with exit 0 and the
+   * cat with the bytes the probe planted inside the box directory
+   * (`<boxesRoot>/<vm>/journal/final.json`, the same mapping patterns.test.ts's
+   * RaceFakeDriver uses). Everything else delegates to the shared driver, so
+   * the chain the probe then drives (harvest → destroy → close) runs against
+   * the genuinely provisioned box exactly as teardown's own probes do.
+   *
+   * BOTH channels: `readBoxFile` prefers `execTimed` when the double has one,
+   * and the shared joinOnly driver's `execTimed` is deliberately undefined — so
+   * the double defines both and routes non-marker argv to `driver.exec`, the
+   * one channel the shared driver ever had.
+   */
+  const settledMarkerDriver = (): FakeDriver =>
+    Object.assign(Object.create(driver) as FakeDriver, {
+      exec: (vm: string, argv: string[]): Promise<ExecResult> => answerMarkerRead(vm, argv),
+      execTimed: (vm: string, argv: string[]): Promise<ExecResult> => answerMarkerRead(vm, argv),
+    });
+
+  const answerMarkerRead = (vm: string, argv: string[]): Promise<ExecResult> => {
+    if (
+      argv.length >= 3 &&
+      argv[0] === "sh" &&
+      argv[1] === "-c" &&
+      typeof argv[2] === "string" &&
+      BOX_MARKER_PATH_RE.test(argv[2])
+    ) {
+      if ((argv[2] as string).includes("cat ")) {
+        return Promise.resolve({
+          stdout: readFileSync(join(driver.root, vm, "journal", "final.json"), "utf8"),
+          stderr: "",
+          exitCode: 0,
+        });
+      }
+      // The presence probe: the planted marker is there.
+      return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+    }
+    return driver.exec(vm, argv);
+  };
+
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
     dispatch: [
@@ -1382,6 +1450,66 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         // 5 and not 1 is at its sharpest here: the holder is GONE, so no retry
         // can ever clear this lock. The remediation is the `rm` that can.
         stderr: ["run-locked", "no live process holds it"],
+      },
+    ],
+    observe: [
+      { argv: ["observe"], code: 2, stderr: "requires <run-id>" },
+      // --window-ms rides every probe that means to get PAST argv parsing: the
+      // verb parses it unconditionally (no absent-flag default arm in
+      // parseDecimalFlag), so an omitted window is itself a usage exit 2.
+      { argv: ["observe", "--window-ms", "60000", "no-such-run"], code: 4, stderr: "no run record for no-such-run" },
+      { argv: ["observe", "INVALID_ID"], code: 2, stderr: "INVALID_ID" },
+      { argv: ["observe", "--no-harvest", "some-run"], code: 2, stderr: "does not take --no-harvest" },
+      { argv: ["observe", "some-run"], code: 2, deps: () => ({ store }), stderr: "observe requires --driver" },
+      // 5, the module's own cheapest pre-flight refusal: a record that already
+      // carries an approval state is the gate's, and the refusal fires before
+      // any box is touched — ZERO driver/exec calls past the worktree assert.
+      // The stderr pin is the MESSAGE, not the typed code: every observe
+      // outcome prints a one-line stdout summary whose JSON carries the code
+      // string, and a stderr want may never ride stdout.
+      {
+        argv: ["observe", "--window-ms", "60000", "observe-approval"],
+        code: 5,
+        provision: "observe-approval",
+        before: () =>
+          void store.set("observe-approval", {
+            extensions: { approval: { state: "awaiting-approval" } },
+          } as RunRecordPatch),
+        // Quote-free on purpose: the typed envelope is JSON, so the state's
+        // quotes arrive backslash-escaped and a quoted want never matches.
+        stderr: "already carries approval state",
+      },
+      // 1, the window fill: the marker is cleanly ABSENT (the fake substrate
+      // has no /run) and the unit probe answers unknown, so with a 1 ms window
+      // the deadline is already past when the first tick ends —
+      // run-completion-unobserved, the TRANSIENT arm whose remediation is
+      // "re-invoke". One tick, no 5 s sleep (the deadline check precedes it).
+      {
+        argv: ["observe", "--window-ms", "1", "observe-window"],
+        code: 1,
+        provision: "observe-window",
+        stderr: "observation window expired",
+      },
+      // 6, the chain arm: the settled-marker double above makes tick 1 read
+      // the planted marker as settled{ok:true}, so the verb drives the real
+      // chain against the genuinely provisioned box. The teardown lands (same
+      // shape teardown-ok proves) and reverify then judges the harvested tree
+      // host-side — with no commit beyond base it comes back nothing-to-verify,
+      // the `vetoed` arm of the exit-6 family (the live T2.8 header documents
+      // exactly this verdict for a workload that commits nothing).
+      {
+        argv: ["observe", "--window-ms", "60000", "observe-chain"],
+        code: 6,
+        provision: "observe-chain",
+        before: () => {
+          mkdirSync(join(driver.root, "observe-chain", "journal"), { recursive: true });
+          writeFileSync(
+            join(driver.root, "observe-chain", "journal", "final.json"),
+            `${JSON.stringify({ runId: "observe-chain", ok: true, completedAt: "2026-09-15T00:00:00.000Z" })}\n`,
+          );
+        },
+        deps: () => ({ driver: settledMarkerDriver(), store }),
+        stderr: "reverify-vetoed",
       },
     ],
     teardown: [
@@ -2096,6 +2224,25 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         why: "needs a STARTED engine and a stdout sink that throws EAGAIN — run.test.ts",
         coveredBy: "exit 6: the engine STARTED and the result line could not be written — landed, not retryable",
         file: "run.test.ts",
+      },
+    ],
+    // DF3.7. The probes above reach {1, 2, 4, 5, 6}; 0 is `driven`, and driven
+    // needs the FULL chain green end to end — a marker written by DF1.10's
+    // real in-box engine, a teardown whose harvested bundle re-verifies GREEN
+    // host-side, and a gate registration landing as `requested`. The fake box
+    // can reach every FAILURE arm of the chain but never that one: its
+    // workload commits nothing beyond base, so reverify always judges
+    // nothing-to-verify (the exit-6 probe above rides exactly that). AC6's
+    // make-or-break claim is that this evidence is a real box whose marker was
+    // never planted — which is the live tier-2 round's subject, not a unit
+    // fixture's.
+    observe: [
+      {
+        code: 0,
+        why: "needs the full chain green — a real engine's marker, a green host-side reverify and a gate registration — live e2e only",
+        coveredBy:
+          "T2.8 DF3.7 AC6: dispatch→fleet run→fleet observe (blocks)→engine marker, never planted→chain harvest/teardown/reverify→awaiting-approval — real box, real spend ≤ 50,000 µ$ + box-hours",
+        file: "e2e/tier2-run-completion.live.test.ts",
       },
     ],
   };

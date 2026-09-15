@@ -27,6 +27,13 @@
  * requiring a flag nothing consumes would train operators to paste magic
  * values. It is also why rank is absent from assertDriverChosen's callers.
  */
+// DF3.7: the observation window's DEFAULT, imported so `--help` prints the
+// real number rather than a string copy of it that drifts on the repricing
+// the story requires before merge. This module's ONLY import — the registry
+// stays data-first, and nothing in run-completion.ts's graph imports this
+// file back (no cycle).
+import { DEFAULT_OBSERVATION_WINDOW_MS } from "./run-completion.ts";
+
 export interface VerbFlag {
   name: string;
   required: boolean;
@@ -476,6 +483,52 @@ export function listVerbs(): VerbEntry[] {
       // file's standing definition — billable work landed, the CLI's own output
       // failed after it — and emphatically not 1: automation reading `transient`
       // would go start a run that is already walking phases.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    // ── DF3.7's additive entry. No predecessor edited — the property this
+    // registry's docblock names as what keeps DF3.5's skill contract stable.
+    {
+      verb: "observe",
+      summary: "Watch a dispatched run's terminal marker and drive the harvest→teardown→reverify→gate chain",
+      flags: [
+        // REQUIRED: this verb reads INTO the box (marker polls through the
+        // driver port) and drives a teardown — it must never default a driver.
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--dir", required: false, valueType: "path" },
+        // "string", like --port: the CLI range-checks it as a positive number
+        // of milliseconds rather than trusting Number()'s coercions. The note
+        // is where `--help` documents the default — there is no verb-specific
+        // help text (see renderHelp), so this line IS the operator surface for
+        // the one number Technical Notes says must be recorded there.
+        {
+          name: "--window-ms",
+          required: false,
+          valueType: "string",
+          note: `observation window in ms; the default is ${DEFAULT_OBSERVATION_WINDOW_MS} — both exit-1 outcomes (run-completion-unobserved, box-unreachable) are transient, so re-invoke and the poll starts over`,
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // The six exits, one producer each (DF3.7 AC5; the story's exit table):
+      // 0 = observed and driven (the chain landed and the gate registered),
+      // and the non-terminal unsettled return (maxTicks — the foreground verb
+      // never sets it; DF3.8's sweep does).
+      // 1 = TRANSIENT, both arms re-runnable with the box left alive and
+      // listable: run-completion-unobserved (window expiry or unusable-streak
+      // fill) and box-unreachable (skip-streak fill). The marker is the state,
+      // so re-observing is idempotent.
+      // 2 = usage.
+      // 4 = no such run record — produced by THIS verb's own pre-flight record
+      // assert, before the module is ever entered.
+      // 5 = refused before anything was mutated and identical on every retry:
+      // the module's refusals (run-engine-dead, run-already-closed,
+      // approval-already-registered, record-names-no-box,
+      // record-not-pausing), the verb's own reverify-host-root-unusable
+      // start-up refusal, and this verb's run-lock refusal.
+      // 6 = the chain LANDED and what failed came after it: a vetoed
+      // re-verification, the approval leg failing (approval-failed), a
+      // chain-failed throw at ANY chain step pre- or post-close, or a
+      // handed-off gate outcome — plus the standing 6 (a driven run whose
+      // result line would not print).
       exitCodes: [0, 1, 2, 4, 5, 6],
     },
   ];

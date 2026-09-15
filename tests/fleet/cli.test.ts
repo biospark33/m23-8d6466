@@ -424,6 +424,9 @@ const EXPECTED_VERBS = [
   // DF1.10's `run`, dispatched by the `verb === "run"` arm at fleet.ts. Additive
   // like every entry before it — appended, editing no predecessor.
   "run",
+  // DF3.7's `observe`, dispatched by the `verb === "observe"` arm at fleet.ts.
+  // Additive like every entry before it.
+  "observe",
 ] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
@@ -440,6 +443,7 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   enrol: 2, // missing --approver
   unlock: 2, // missing <run-id>
   run: 2, // missing <run-id> — refused before any box is reached
+  observe: 2, // missing <run-id> — refused before any box is reached
 };
 
 /**
