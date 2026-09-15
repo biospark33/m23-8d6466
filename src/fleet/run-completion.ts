@@ -25,7 +25,7 @@
  * closure wired into the approval port passes the SAME handle — never a
  * `withRunLock` wrap, which would throw on re-entry.
  */
-import type { RunLockHandle } from "../../scripts/lib/run-lock.ts";
+import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { KeyApi } from "../providers/credentials.ts";
 import type { ProviderDriver } from "../providers/driver.ts";
@@ -177,6 +177,37 @@ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): Teardown
   };
 }
 
+/**
+ * The chain's destructive window, wrapped the way the `fleet teardown` verb
+ * wraps its own (DF2.11's mark-before/clear-after dance): the lock is marked
+ * destructive IMMEDIATELY before `teardownSandbox` begins and cleared only on
+ * its success — never armed on the poll-only paths, where nothing has been
+ * mutated. A signal (through `releaseHeldRunLocks`) or a mid-teardown throw
+ * then leaves the lock and the mark for the operator instead of handing a
+ * half-torn-down run to the next teardown; withRunLock preserves the
+ * already-marked lock when the caller's callback resolves around this failure
+ * (`chain-failed`).
+ */
+async function guardedTeardown(
+  deps: RunCompletionDeps,
+  teardownDeps: TeardownDeps,
+  runId: string,
+  opts?: Parameters<typeof teardownSandbox>[3],
+): Promise<void> {
+  markRunLockDestructive(deps.runLock);
+  let tornDown = false;
+  try {
+    await teardownSandbox(teardownDeps, runId, deps.runLock, opts);
+    tornDown = true;
+  } finally {
+    // Cleared only on completion; on a throw the mark stays — whether the box,
+    // key and record actually landed is exactly what the operator must judge
+    // before the lock is released (withRunLock preserves the marked lock on
+    // both settle arms).
+    if (tornDown) clearRunLockDestructive(deps.runLock);
+  }
+}
+
 // ─── the chain (composition only — every step already exists) ─────────────────
 
 /** How the terminating observation line is shaped: the event name, plus the observe path's own facts. */
@@ -235,7 +266,7 @@ async function reverifyAndMap(
   // lock it runs under is this chain's own).
   const port = recordApprovalPort(deps.store, {
     bundleDir: deps.runsDir,
-    teardown: (id, opts) => teardownSandbox(teardownDeps, id, deps.runLock, opts),
+    teardown: (id, opts) => guardedTeardown(deps, teardownDeps, id, opts),
   });
   let result: ReverifyOutcome;
   try {
@@ -388,8 +419,9 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
       try {
         // Harvest is teardown's own first internal step — never a separate
         // orchestration stage here. An abort leaves the record open and the
-        // box alive, and lands below as chain-failed {step:"teardown"}.
-        await teardownSandbox(teardownDeps, runId, deps.runLock);
+        // box alive, and lands below as chain-failed {step:"teardown"} — with
+        // the destructive mark left in place for the operator (guardedTeardown).
+        await guardedTeardown(deps, teardownDeps, runId);
       } catch (e) {
         const outcome: ChainOutcome = { kind: "chain-failed", step: "teardown", error: errText(e) };
         emitTerminal(requestId, runId, { event: "run-complete", markerPollMs }, outcome, Date.now() - chainStartMs);

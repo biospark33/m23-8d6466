@@ -28,6 +28,7 @@ import {
   acquireRunLock,
   clearRunLockDestructive,
   hostTag,
+  isRunLockDestructive,
   markRunLockDestructive,
   releaseHeldRunLocks,
   releaseRunLock,
@@ -150,6 +151,47 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
       // Operator-judged clear + release, so the mark and the `held` entry do
       // not leak into the next test in this process. Both are safe no-ops if
       // the assertions above never got the lock acquired.
+      clearRunLockDestructive(lockPath());
+      releaseRunLock(lockPath());
+    }
+  });
+
+  test("a mark the CALLBACK armed survives fn's RESOLUTION (chain-failed posture)", async () => {
+    try {
+      // The observe chain's shape: fn marks around its own teardown, the
+      // teardown fails, and fn RESOLVES with a chain-failed outcome instead of
+      // throwing. The wrapper must return that outcome untouched — a release
+      // attempt here would be refused (the mark) and replace the caller's
+      // result with a lock error — and preserve lock file AND mark.
+      const outcome = await withRunLock(dir, RUN_ID, "test", async (handle) => {
+        markRunLockDestructive(handle);
+        return { kind: "chain-failed" as const };
+      });
+      expect(outcome).toEqual({ kind: "chain-failed" });
+      expect(existsSync(lockPath())).toBeTrue();
+      expect(isRunLockDestructive(lockPath())).toBeTrue();
+      // The exit path's posture: releaseHeldRunLocks skips the marked lock.
+      releaseHeldRunLocks();
+      expect(existsSync(lockPath())).toBeTrue();
+    } finally {
+      // Operator-judged clear + release — the same cleanup the destructive
+      // tests above perform, so neither the mark nor the held entry leaks.
+      clearRunLockDestructive(lockPath());
+      releaseRunLock(lockPath());
+    }
+  });
+
+  test("a mark the CALLBACK armed survives fn THROWING, and the original error is the one that propagates", async () => {
+    try {
+      await expect(
+        withRunLock(dir, RUN_ID, "test", async (handle) => {
+          markRunLockDestructive(handle);
+          throw new Error("destroyed mid-flight");
+        }),
+      ).rejects.toThrow("destroyed mid-flight");
+      expect(existsSync(lockPath())).toBeTrue();
+      expect(isRunLockDestructive(lockPath())).toBeTrue();
+    } finally {
       clearRunLockDestructive(lockPath());
       releaseRunLock(lockPath());
     }

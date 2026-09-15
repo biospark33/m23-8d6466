@@ -40,6 +40,7 @@ import { createRun, type ExecResult } from "../../src/providers/driver.ts";
 import { RunRecordStore, type ExtensionEntry } from "../../src/providers/run-record.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { setLogSink } from "../../src/swarmclaw/log.ts";
+import { clearRunLockDestructive, isRunLockDestructive } from "../../scripts/lib/run-lock.ts";
 import {
   BOX_MARKER_PATH_RE,
   DEFAULT_PER_CALL_DEADLINE_MS,
@@ -91,6 +92,21 @@ function stepClock(ms: number): void {
 }
 
 afterEach(disarmFakeClock);
+
+/**
+ * The chain tests silence the process-global log sink (a real teardown →
+ * reverify → gate run logs as it goes). `setLogSink` hands back the restore;
+ * capturing each install here lets the afterEach below put the sink back —
+ * an un-restored silencing sink would swallow every later test's log output
+ * for the rest of the process (CodeRabbit round 2, run-completion.test.ts:963).
+ */
+const quietLogRestores: Array<() => void> = [];
+function quietLogs(): void {
+  quietLogRestores.push(setLogSink(() => undefined));
+}
+afterEach(() => {
+  for (const restore of quietLogRestores.splice(0)) restore();
+});
 
 /** Per-tick marker-read plan; index = marker PROBE count (each tick opens with `test -f`). */
 type MarkerPlan =
@@ -960,7 +976,7 @@ describe("the skip streak and its 90 s wall-clock conjunct (AC2a)", () => {
 
 describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify → gate)", () => {
   test("settled ok:true drives the WHOLE chain to a registered pause — driven{markerOk:true} (AC1)", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -987,7 +1003,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
   }, 120_000);
 
   test("settled ok:false STILL drives the chain; the marker's ok never reaches reverify — its own verdict decides (AC2c)", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1011,7 +1027,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
   }, 120_000);
 
   test("reverify's error verdict → vetoed naming its reason (the chain landed; the host said no)", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1035,7 +1051,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
   }, 60_000);
 
   test("nothing-to-verify → vetoed (zero commits beyond base is a judgment arm, exit 6)", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1066,7 +1082,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
 
 describe("chain-failed: a step other than the approval leg threw (W16-2)", () => {
   test("destroy fails PRE-close → chain-failed{step:teardown}, the record stays open", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1081,14 +1097,19 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
       expect(out).toMatchObject({ kind: "chain-failed", step: "teardown" });
       expect((out as { error: string }).error).toContain("destruction");
       expect(s.store.get("run-c1").closedAt).toBeUndefined(); // abort ⇒ record open
+      // The destructive window was entered and did not complete, so the mark
+      // the chain armed survives the outcome (guardedTeardown) — the lock is
+      // the operator's to judge, exactly the teardown verb's posture.
+      expect(isRunLockDestructive(lockHandle(s.dir, "run-c1"))).toBe(true);
     } finally {
+      clearRunLockDestructive(lockHandle(s.dir, "run-c1")); // keep the mark out of later tests
       host.cleanup();
       s.cleanup();
     }
   }, 60_000);
 
   test("a reverify-leg throw POST-close → chain-failed{step:reverify}, the record stays closed", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1121,7 +1142,7 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
 
 describe("approval-failed and handed-off (AC5)", () => {
   test("green report + a gate leg that throws → approval-failed carrying approval-request-failed — never driven, never refused", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1162,7 +1183,7 @@ describe("approval-failed and handed-off (AC5)", () => {
     ["awaiting-approval under another report", "awaiting-approval", "rebound"],
   ] as const) {
     test(`a decision landing between pre-flight and gate (${label}) → handed-off{outcome:${expectedOutcome}}`, async () => {
-      setLogSink(() => undefined);
+      quietLogs();
       const s = store();
       const host = gitHost();
       try {
@@ -1187,7 +1208,7 @@ describe("approval-failed and handed-off (AC5)", () => {
   }
 
   test("a stranded pausing extension bound to ANOTHER report → handed-off{outcome:pause-in-progress}", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {
@@ -1221,7 +1242,7 @@ describe("approval-failed and handed-off (AC5)", () => {
 
 describe("#245 — the production closure carries the chain's RunLockHandle (Closes #245)", () => {
   test("a driven outcome proves BOTH teardown call sites accepted the SAME caller handle — and the module source re-acquires nothing", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const src = await moduleSource();
     // The source half: no withRunLock anywhere (a wrap here throws
     // RunLockReentrantError), no acquireRunLock import.
@@ -1253,7 +1274,7 @@ describe("#245 — the production closure carries the chain's RunLockHandle (Clo
   }, 120_000);
 
   test("negative: a MISMATCHED handle is refused at teardown's head check → chain-failed{teardown}, nothing touched", async () => {
-    setLogSink(() => undefined);
+    quietLogs();
     const s = store();
     const host = gitHost();
     try {

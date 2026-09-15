@@ -385,6 +385,17 @@ export function clearRunLockDestructive(lock: string): void {
 }
 
 /**
+ * Whether `lock` is currently inside a destructive window — the one-bit
+ * observable the mark's other consumers (`releaseRunLock`, `releaseHeldRunLocks`,
+ * `withRunLock`) all branch on. Exported so a caller that armed the mark
+ * mid-callback (the observe chain) and its tests can read the posture back
+ * without reaching into module state.
+ */
+export function isRunLockDestructive(lock: string): boolean {
+  return moduleState().destructive.has(lock);
+}
+
+/**
  * Full write to fd 2, the same loop `scripts/fleet.ts` uses for its own
  * diagnostics. `console.error` bypassed that sink: its line could interleave
  * with a partially written JSON log line, and a short write silently truncated
@@ -1073,6 +1084,15 @@ function logRunLockAcquire(
  *    is touched. `releaseRunLock` would refuse the release anyway, and the
  *    operator line comes from `releaseHeldRunLocks` on the way out — an
  *    interrupted destructive window stays an operator decision.
+ *  - `fn` RESOLVED with a mark the CALLBACK armed inside it and did not clear
+ *    (the observe chain marks around `teardownSandbox`, never for poll-only
+ *    outcomes) → the lock and the mark are preserved untouched. Resolution is
+ *    not completion: a `chain-failed` outcome means the destructive window was
+ *    entered and did not finish, and the same operator judgment applies — a
+ *    refused release here would only mask the caller's own outcome (the same
+ *    reason `releaseRunLock` cannot infer success from being reached).
+ *    The signal and exit cleanup paths already honor the mark through
+ *    `releaseHeldRunLocks`, which skips marked locks on every path.
  *
  * `fn` receives the handle, so its body can reach the release primitives only
  * with the lock this invocation actually holds.
@@ -1115,13 +1135,24 @@ export async function withRunLock<T>(
   // in-flight error (the failure mode noUnsafeFinally names) nor dead-code the
   // arm that follows.
   let finished = false;
+  // Set by `finish` from the mark the moment either arm settles — the catch
+  // arm reads it back to attach the operator remediation (same lock, no await
+  // in between, so the mark cannot have moved).
+  let markedInside = false;
   const finish = (): void => {
     if (finished) return;
     finished = true;
     // A throw past the destructive mark leaves BOTH the mark and the lock file
     // in place — the operator-judgment posture, delivered by not calling rather
-    // than by calling and being refused.
-    const leaveForOperator = destructive && !completed;
+    // than by calling and being refused. The same posture on a mark the
+    // CALLBACK armed inside `fn` (the observe chain's teardown window): the
+    // mark still being set at settle means that window was entered and did not
+    // complete, so the lock is preserved whether `fn` resolved (chain-failed —
+    // a refused release here would throw over the caller's own outcome) or
+    // threw. The signal and exit handlers need no counterpart: they read the
+    // same mark through `releaseHeldRunLocks`.
+    markedInside = !destructive && moduleState().destructive.has(lock);
+    const leaveForOperator = (destructive && !completed) || markedInside;
     if (leaveForOperator) return;
     // Success only: the clear is what un-refuses the release below (the mark's
     // own contract — never cleared as a side effect of releasing).
@@ -1171,7 +1202,11 @@ export async function withRunLock<T>(
     // `try` — and one thrown BY `fn` already has its remediation. A non-Error
     // throw gets no property (assignment on a primitive throws in strict
     // mode); its message is still what the caller prints.
-    if (destructive && !completed && e instanceof Error && (e as { remediation?: unknown }).remediation === undefined) {
+    if (
+      ((destructive && !completed) || markedInside) &&
+      e instanceof Error &&
+      (e as { remediation?: unknown }).remediation === undefined
+    ) {
       (e as Error & { remediation: string }).remediation =
         `the destructive window for ${lock} was interrupted — the run lock was left in place on purpose; judge it (live holder? half-torn-down run?) and rm it before re-running any sweep`;
     }
