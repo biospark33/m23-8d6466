@@ -1,0 +1,69 @@
+# Wave 16 — Verifier B: DF5.3 (Audit Chain Extended) + DF5.4 (Lights-On Gate)
+
+**Verifier:** wave16-B (clean eyes — no prior review material read)
+**Tree reviewed:** branch `dev` @ 4264f546 plus current uncommitted spec text
+**Date:** 2026-09-14
+**Scope:** the two story files only; cross-story reads limited to named seam claims (df2-11 story file; sprint-status.yaml for dependency-status claims).
+
+## Method
+
+Every named symbol, constant, flag, event, fixture, path and line citation in both stories was
+opened at source. Call paths traced by grep, not trusted from prose. Test run: scoped only.
+
+- Full reads: `src/gate/gate-runner.ts`, plus targeted reads of `src/providers/{credentials,harvest,teardown,reaper,driver,cost-ledger,run-record,budget-gate}.ts`, `src/fleet/{dispatch,approval-gate,fanout-primitive}.ts`, `src/pr/push.ts`, `src/reverify/{report,runner}.ts`, `src/phase-engine/trace/{schema,migrations}.ts`, `scripts/{phase0-exit-gate,fleet,sandbox-teardown,sandbox-reap,cap-hit-demo}.ts`, `src/gate/verifier-child.ts`, `package.json`.
+- Caller enumeration: `createRun(`, `harvestRun(`, `teardownSandbox(`, `provisionAdmittedRun(`, `fillRun(`, `sweep(` call sites plus every construct site of `TeardownDeps` / `HarvestDeps` / `CredentialDeps` / `SweepDeps` / `CreateRunOptions` / `ProvisionAdmittedRunOptions` across `src/`, `scripts/`, `tests/`.
+- Positive controls for every zero-match claim (identical grep machinery, control symbol that resolves): `runCredentialLifecycle(` (zero defs) vs `CredentialLifecycleError` (resolves); `.sandbox/approvals/` (zero in src/scripts) vs `reverify` (resolves in `push.ts` ×18, `report.ts` ×9); reverify env seam (none) vs `QDS_COST_LEDGER_FILE` (resolves); new files absent vs `src/gate/` listing resolves.
+- Test run: `bun test tests/gate/phase0-exit-gate.test.ts` → tee `/tmp/w16b-phase0.log`, ANSI/CR-stripped: **45 pass / 0 fail, exit 0** — confirms the "45 cases" claim by execution, not just by count (`grep -cE "^\s*test\("` = 45, same number).
+- Cross-story reads (named seam claims only): `df2-11-teardown-lock-readonly-ledger.md` (`openReadOnly` ranges), `sprint-status.yaml` (P0.11 gate verdict, DF2.11/DF2.12 done, DF3.7/DF3.8 ready-for-dev, P1.1-R5-3).
+- **Not read (forbidden):** R2/R5 round docs live only inside tracker material; their section-number citations were therefore not independently verified — but every concrete line citation they carry (p1-16/p1-17, chassis, design doc, ADR, derivation decisions) was verified directly at source.
+
+## Findings — DF5.3 (audit-chain-extended)
+
+| ID | Cat | Sev | Finding |
+|----|-----|-----|---------|
+| W16B-1 | C3 | MEDIUM | The threading blast-radius Files row omits **`tests/providers/quota.test.ts`**, which constructs `createRun`'s options three times (fresh literals at its three call sites). W12B-1 makes `recordAuditLink` a **required** field on `CreateRunOptions`, so those three sites break at compile time — and by the story's own criterion ("a required field the Files list mandates but whose breakage no row owns would make the story unbuildable as written") the break is unowned. The hop-5 caller-enumeration prose is likewise incomplete: it names cap-hit-demo / approval-gate.test / tier1-provision-status.live but omits quota.test (and driver-contract.test, which *is* in the Files row). Every other createRun/provisionAdmittedRun/fillRun/harvestRun/teardownSandbox call site and every construct site of the four `*Deps` interfaces checked out inside a Files row (attach, run, verbs, gate-verbs, patterns, approval-gate incl. its inline literal, dispatch, fanout-primitive, reaper internal, fleet.ts, sandbox-teardown.ts, sandbox-reap.ts assembly, cap-hit-demo, and all touched tests/providers files). Partial<SweepDeps> test constructions (reaper.test, sandbox-reap.test) do not break — correctly not listed. Confidence: high. |
+| W16B-2 | C1 | MEDIUM | **`runCredentialLifecycle` is a phantom composition site.** The Scope note names it one of the four loud composition surfaces ("`provisionAdmittedRun`, `teardownSandbox`, `runCredentialLifecycle` and `harvestRun`"), and the Integration DoD repeats "the four composition sites named in the Scope note". No such function exists anywhere in the tree; the only mention is a stale comment in `src/fleet/dispatch.ts`'s admission block listing it among non-dispatch mint callers. The real CredentialDeps compose sites (dispatch's credential step, `teardown.ts`'s `cred` literal, the reaper's `credDeps` literal, cap-hit-demo, credentials.test) are all in owned files, so the compile-time loudness property survives — but the enumeration is wrong 1-of-4 and gives the dev no target. Secondary, same class: the SweepDeps compose site (the sandbox-reap assembly) is unnamed in the four-site enumeration (owned only via the Files row). Confidence: high. |
+| W16B-2b | C4 | LOW | The reaper no-op-sink rationale says the `CredentialDeps` literal is constructed "with a run-less step context (`runId: null`)"; the literal at `reaper.ts` carries no runId field at all — the `runId: null` lives inside `credentials.ts`'s internal StepContext. Substance holds (record-less leaked-key revocation, `audit_links.run_id` NOT NULL, deliberate no-op). Confidence: high. |
+
+## Findings — DF5.4 (lights-on-gate)
+
+| ID | Cat | Sev | Finding |
+|----|-----|-----|---------|
+| W16B-3 | C4 | LOW | The Infra row calls DF3.7's `fleet observe <run-id>` "the **delivered** single-run verb"; the verb does not exist in `scripts/fleet.ts` today and DF3.7/DF3.8 are both `ready-for-dev` (sprint-status). The story states the dependency honestly elsewhere ("This story cannot demonstrate AC1 until DF3.7 has merged"; scheduled last), so this is wording inherited from DF3.8's status note, not a false dependency claim. Confidence: high. |
+| W16B-4 | C4 | LOW | The V1 bullet says "A test asserts the imported constant equals the report's `void_reason`" — the report has no `void_reason` field (AC1 itself asserts `GateAssertionResult` and `GateReportSchema` carry none, verified at `gate-runner.ts`). The chassis renders `detail: "VOID — <reason>"`; AC1 and the DoD parity item phrase it correctly. One sentence names the wrong object. Confidence: high. |
+
+No BLOCKER, HIGH, C2 or C3 findings on DF5.4. No shared findings — W16B-1/W16B-2 belong to DF5.3 as threading owner (C9 imports `ChainReport` and threads no interface); W16B-3/W16B-4 are DF5.4-local.
+
+## What HELD (verified at source)
+
+**DF5.3**
+- All new artifacts correctly absent: `src/audit/`, `scripts/qds-audit.ts`, `scripts/df5-lights-on-gate.ts`, `scripts/dev/capture-run-of-record.ts`, `tests/audit/`, `tests/scripts/qds-audit.test.ts`, `tests/gate/fixtures/`. `package.json` declares no `bin`.
+- Driver citations exact: `provisionAdmittedRun` / `createRun` / `fillRun` / `setupRun` / `executeRun` / `observeRun` at the six cited positions; `createRun` composes `provisionAdmittedRun` (internal production caller); `extensions.budget` written only when `opts.budget` is set; `setupRun` zero production callers (driver-contract.test only); exactly one `observeRun` call; `executeRun` demo-only (cap-hit-demo); `CreateRunOptions` and the named options type exist; dispatch's create/fill/setup-gate steps call what the hop table says (`:2797`, `:3100`, step 9 setup gate).
+- Emitter files: `CredentialDeps`/`mintRunKey`/`deliverRunKey`/`revokeRunKey`/`verifyRevoked`/`captureSpend` all present; cap validated at mint and recorded as `limitMicroUsd` via `store.set` (no cap event — INV-AUDIT-4 premise sound). `TeardownDeps`/`noHarvest`/`runBoxStep` abort contract/artifacts non-fatal catch/`teardownSandbox`; two ledger ingest points routed through `ingestHarvestedTokensIfWired`; `cred: CredentialDeps` literal. `reaper`: `SweepDeps`, `sweep`, the seven-member `RowClass` union exactly as listed, 12-hex `keyHashPrefix`, "reap what nobody owns" header, `credDeps` literal. `HarvestDeps`/`harvestRun`/`pullArtifacts` and every harvest.ts line citation (`:18-19`, `:174-182`, `:184-212`, `:215-217`, `:245`, `:631-639`, `:1014`, `:1068`) exact — trace.db-wal shipped, `-shm` deliberately omitted, `trace/` prefix collision comment verbatim, `trace/events.jsonl` a `BOX_RUN_SOURCES` member.
+- Ledger: `CostLedger` class with `readRunCost`/`readIssueCost`; `CostView` carries `totalMicroUsd`/`perRole`/`hasEvents`/`hasTokenRows`; constructor side-effect list exactly as described (mkdir 0700, chmod, creating `Database`, WAL pragma); `openReadOnly` static factory with `ledger-absent`/`ledger-identity-changed`/`ledger-wal-recovery-required` — live in merged code (DF2.11 done), matching the df2-11 story ranges cited.
+- Trace: `sessions` PK'd on `request_id`, `gate_results.request_id` NOT NULL, `passed INTEGER` nullable; migrations add nullable `sessions.repo_slug TEXT` / `issue_id INTEGER` with the DF1.8 NULL comment; budget's `issueId` registered `"string"` — the INTEGER-vs-string coercion premise of hop 2 is real.
+- Run record: `ExtensionValue = string | number | string[]`, `fixOutcome` registered `"string"`, `supersededReportIds`, approval registration binding `reportId` to a `ReverifyReport.reverifyId`, `resolveRunsDir`, and the **stale docblock sentence exists verbatim** while `run-record.ts` is correctly absent from Files to Modify.
+- Re-verify: `appendReport` at the cited position; module header "the last line authoritative for DF5.2"; `readReports` returns an array; verdict sites at the four cited positions in `runner.ts`; reverify dir resolved from deps `reverifyDir ?? hostRoot/cwd` — **no environment seam**, exactly as the Trigger Surface rationale requires.
+- `push.ts` preflight: non-strict `decided < completed` with refusal code `approval-precedes-report` — AC7's tightening premise and DoD are accurate; `INV-PR-5` is real.
+- `dispatchRequestId` appears only in `approval-gate.ts` and `fleet.ts` log paths; no `dispatch_request_id` column in any store the walker opens (trace schema and run-record read confirm `request_id`/`requestId` only).
+- p1-16 citations `:29–:32`, `:36`, `:39`, `:51–53`, `:63` and p1-17 citations `:30`, `:31`, `:35`, `:38`, `:48–50` — every one lands on the claimed content exactly.
+- Design/decision citations: D8 (`mint→cap→use→revoke→verify`, central append-only audit log), §6 item 4 (verbatim), §5.3, §8 step 5, F10, DD-1/4/7/8/9, derivation §4 row 3 (VOID retain link), OQ-4 components (DD-4: arm64 libpq/openssl@3 + port off 8888; disposition audit: "port 8888 collides with a local Jupyter"), tier-2 ADR `:61-64` (two-layer trust domain), `:81-82` (`/run` tmpfs, reboot wipes), consequence 2 (in-box engine), sprint-status P0.11 `PHASE_0_GATE: FAIL` + "45 tests", P1.1-R5-3 precedent, DF2.11 and DF2.12 both `done` (AC5's post-bridge premise holds; `ingestCostEvent` sole token-row writer verified).
+
+**DF5.4**
+- Chassis: every line citation exact (`:8-13`, `:39`, `:45`, `:51`, `:66-68`, `:77-86`, `:88`, `:117`, `:117-128`, `:130`, `:144`, `:167-178`, `:174`, `:208-215`, `:211-212`, `:324-326`); defaults 30s/600s/concurrency 4; the preflight fail-fast detail string matches AC5 verbatim; `GateAssertionResult`/`GateReportSchema` carry no `void_reason`; `verifier-child.ts` evidence field at the cited position; `parseValueFlags` exists and the phase0 driver mirrors the claimed shape (exit 0/1/2); `p0-3-mixed-model.ts` exports a pure auditor as the module-shape model claims. **45 cases verified by execution** (45 pass / 0 fail).
+- Pairing contract, end to end: the four qds-audit path seams (`--runs-dir/--audit-db/--ledger/--reverify-dir`) are identical on both sides and threaded from the gate's own flags, with `--git-dir`/`--pr-body` added for C5/C8; OQ-4 byte-identity is by construction (single `OQ4_VOID_REASON` export, chassis renders `VOID — ${void_reason}` at the cited line); hop ownership is disjoint and complete (hops 1,3,5,6,7,8,9 carried by C8/C10/C2/C5/C6/C7/C4, all ten walked by C9, C1/C3 hop-less by stated design); the audit.db DELETE-journal choice makes DF5.4's exact file-set assertion coherent on both sides (three-pass snapshot incl. absent-file and identity-window passes; the walker's inode-bound opener is specified identically in both stories); frozen-fixture mechanics are sound (checkpoint before copy, hot-WAL capture refusal, bare `refs.git` + `--git-dir`, mkdtemp scratch, two-walk same-scratch tamper test matching the second-and-later-walk digest semantics, 0644-checkout rationale); budget arithmetic holds (11 live + 1 void; 4 × 60s = 240s ≤ 300s; C9's 30s fits its slot); the delete-arm strand (C6 skip / C7 skip / C9 fail) is consistent with the chassis's skip/fail distinction; `extensions.gate` is confirmed failure-only in code; the `worker_output` envelope-branch claim resolves in `team-event-adapter.ts`/`dispatch-task.ts`; the approval-location negative claim holds (zero `.sandbox/approvals/` references, positive control passed); DF3.7/DF3.8 `ready-for-dev` matches sprint-status.
+
+## Verdicts
+
+| Story | Verdict | Blocking residue | Confidence |
+|-------|---------|------------------|------------|
+| DF5.3 | **NOT CONVERGED** | W16B-1 (C3/MEDIUM), W16B-2 (C1/MEDIUM) | high (0.85) |
+| DF5.4 | **CONVERGED** | none (C4-LOW: W16B-3, W16B-4) | high (0.85) |
+
+## Summary counts
+
+- Findings: 4 (W16B-1..W16B-4) + 1 C4 sub-note (W16B-2b).
+- By category: C1 ×1, C3 ×1, C4 ×3 (incl. 2b). By severity: MEDIUM ×2, LOW ×2 (+1 LOW sub-note).
+- BLOCKER 0 · HIGH 0 · C2 0 across both stories.
+- DF5.3: 1 C3 + 1 C1-MEDIUM → fails the convergence bar. DF5.4: C4 residue only → converges.
+- Highest-value fixes: (1) add `tests/providers/quota.test.ts` to the threading blast-radius row (and complete the hop-5 caller enumeration); (2) replace the phantom `runCredentialLifecycle` with the real credential compose sites (dispatch's credential step; `teardown.ts`; the reaper's named no-op sink; cap-hit-demo) and name the SweepDeps assembly as a fifth surface.

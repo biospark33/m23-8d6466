@@ -41,7 +41,7 @@ defaults and refuses the run if their ordering is wrong, then clamps the residen
 run's minted key cap when the mint came in lower. During the run, `checkBounds(point)` runs
 immediately before every DF3.3 solicitation: it rejects the call when the phase's solicitation
 budget is spent, or when the projected worst-case cost would carry cumulative resident spend past
-the effective ceiling. Every breach stops the **resident**, records the cause, and lets the
+the effective ceiling. Every **spend or memory** breach stops the **resident**, records the cause, and lets the
 deterministic phase walk continue to completion. No bound is readable or writable from anything the
 agent controls.
 
@@ -144,7 +144,8 @@ nothing), DF3.3.
    that arms no resident — INV-BND-5's own first clause (W6-C-H2). `boundsPolicy` is this story's
    shorthand for the manifest's stamped bound set
    `{residentSpendCeilingMicros, capMicroUsd, defaultKeyCapMicroUsd}` — flat `.strict()` schema
-   fields, no nested policy object; DF3.6b cites this definition (W6-C-M1).
+   fields, no nested policy object; the definition is self-contained here (W10C-6a-5: no other
+   half cites it).
    <br />**(a) config-time, over static defaults.** Given a manifest whose stamped bound set
    violates `residentSpendCeilingMicros ≤ capMicroUsd ≤ defaultKeyCapMicroUsd`, or a ceiling
    expressed as a percentage, ratio, or share of any run total, When `loadResidentBounds` runs, Then
@@ -169,8 +170,16 @@ nothing), DF3.3.
    prevent. The check runs where the engine and the manifest actually live — at **manifest load
    inside the box, before the resident is spawned and before the first solicitation** — because
    "before a box exists" is structurally unreachable for engine code. The refusal writes the
-   **terminal marker** with `{ ok:false, code:"bound-config-invalid", message, remediation }` —
-   the house rule of DF3.1 AC3: an error code is payload, never a process exit code — which
+   **terminal marker** through the existing marker writer **in that writer's shipped shape** —
+   `ok:false`, the boolean a marker reader actually needs — and carries the typed triple
+   `{ code:"bound-config-invalid", message, remediation }` on the engine's structured fd-2
+   diagnostic line (harvested with the box, like every other `warn`-shape record), never inside
+   the marker: `writeTerminalMarker`'s payload vocabulary is closed (`{runId, ok, completedAt}`,
+   `RunOutcome`, `src/phase-engine/journal.ts` — a file this story does not edit), and a marker
+   carrying a full `remediation` risks `MARKER_MAX_BYTES = 4096`'s oversized arm, which reads an
+   over-large marker as carrying **no verdict** — the observable would surface `unknown`, not
+   `not-ok`, and defeat the marker's whole purpose. The house rule of DF3.1 AC3 holds: the error
+   code travels as payload (on the diagnostic line), never as a process exit code — which
    `fleet status` surfaces as **`not-ok`** (`src/fleet/status.ts`, the settled-marker reading; `engine-failed` is the
    **marker-absent** state, `:91,1311`, and must not be the observable here — writing the marker is
    the whole point) and `fleet harvest` carries out before teardown; the
@@ -235,7 +244,17 @@ nothing), DF3.3.
    **Producible trigger (the bound must fire, not merely exist):** given a phase declaring
    `retries: 5` whose gate **fails on attempts 1–4 and passes on attempt 5** —
    `tests/phase-engine/fixtures/pipeline.bounds.json` declares it, adapting the `build` phase of
-   `tests/phase-engine/fixtures/pipeline.resident.json` to `test "$n" -ge 5` — When the **fourth**
+   `tests/phase-engine/fixtures/pipeline.resident.json` to `test "$n" -ge 5`, **raising the
+   fixture's `runBudgetMs` to 120,000** — the retries:5 adaptation computes
+   `requiredBudgetMs` = **106,000 ms** (attempts 96,000 + the routing margin 2 × 5,000; W16C-6a-2
+   corrected the decomposition), which exceeds the shipped 50,000
+   and would refuse the manifest at load before any bound is demonstrated; 120,000 funds it with
+   headroom; the budget fields are
+   named here because no shipped value is stated elsewhere (W14C-6a-2) — **run against the
+   default pi catalog** — the E2E Slice's frontier-priced `pi-catalog-bounds` slug cannot produce
+   this trigger on the same fixture (two calls at 760,960 µ$ cross its 2M ceiling at the **second**
+   point, and the spend bound stops the resident before the iteration counter reaches 3), while
+   the default catalog's ~504 µ$/call funds all four points far inside the ceiling — When the **fourth**
    `post_gate_failure` solicitation point in that phase is reached, Then the engine does not
    solicit, attempt 5 runs and passes on the deterministic path, the phase completes, and the next
    phase solicits normally. A gate that failed on *every* attempt would exhaust `retries` and
@@ -255,7 +274,13 @@ nothing), DF3.3.
    `{inputTokens: 0, outputTokens: 0}` (the reachable meter-zeroing path: a pi reply with no
    harvestable `message_end`, which `resident.ts` detects via `turnCount === 0` and returns anyway,
    metering zero) — When the engine meters, Then the call is charged
-   the **projected worst case**, never zero (INV-BND-3). *Negative control: the shipped `meter`
+   the **projected worst case** into the ceiling accumulator (`telemetry.spendMicros` and the
+   bound comparison), never zero (INV-BND-3), while the DF2.12 attribution row keeps the shipped
+   metered disposition (a no-usage reply is recorded **unpriced** — `unpricedTurns = 1`, the
+   shipped `emitResidentAttribution` disposition: absent usage meters as zero but records
+   UNPRICED, fail-closed; only the literal `{0,0}` reply is priced-zero): the projection is
+   ceiling-side protection and never enters the ledger — a projected figure recorded as if
+   metered would poison the one-spend-truth below. *Negative control: the shipped `meter`
    does the opposite — a reply carrying no usage object meters as zero rather than throwing (the
    `clampTerm` arms in `steering.ts`'s `meter`) — so an
    implementation that leaves that arm untouched lets a resident zero its own meter by returning a
@@ -264,7 +289,7 @@ nothing), DF3.3.
    production (every shipped caller normalises to numbers), and the zero-shape reply is the path
    INV-BND-3 exists to close.*
 5. **Precedence against an already-degraded resident, stated once because it is otherwise
-   undefined.** DF3.3 degrades OPEN at four points and `telemetry.status` is a **one-way latch** —
+   undefined.** DF3.3 degrades OPEN at **three** points (render failure, call failure, malformed limit — the one-way-latch comment's own count) and `telemetry.status` is a **one-way latch** —
    nothing writes `"active"` back (the one-way latch in `src/phase-engine/steering.ts`), and
    degradation is therefore routine rather than an edge: any single transient degradation is
    permanent for the run — the fact this precedence rule exists for. Therefore: (a)
@@ -273,8 +298,11 @@ nothing), DF3.3.
    resident that cannot call cannot spend, and hoisting the check above the gate would evaluate a
    bound against a resident with no future calls; (b) `"degraded"` and `"stopped"` are both terminal
    and **`"stopped"` wins only when this story's enforcement is the proximate cause** — a bound that
-   fires after a degradation already latched leaves `"degraded"` standing and records the bound on
-   the bounds-check log line alone. AC1's `resident.status:"stopped"` assertion is therefore scoped
+   fires after a degradation already latched leaves `"degraded"` standing. The log-line-only wording
+   is belt-and-braces for an implementation that hoists the check (which AC5(a) forbids): under
+   AC5(a)'s placement the status gate precedes the bounds check, so a degraded resident produces
+   **no further bounds evaluations at all** — no bound fires and no log line exists to record one
+   on; the mechanism's guarantee is the absence. AC1's `resident.status:"stopped"` assertion is therefore scoped
    to a run whose resident was `active` at the breach. *Negative control: an implementation that
    overwrites `"degraded"` with `"stopped"` MUST fail.*
 6. **The ceiling is checked against the rate it will be compared to, once, where the rate exists.**
@@ -339,18 +367,29 @@ nothing), DF3.3.
   applying to all repos/projects/tasks, plus a per-task custom amount — and the counter it guards is
   the honest meter.** Resolution ladder, evaluated once at fill and stamped onto the frozen manifest
   as the single resolved value:
-  1. **Per-task override** — a `perIssueOverrides` entry for the pinned issue carrying
-     `residentSpendCeilingMicros`: the same config surface DF2.13's `--cap` flows through, and the
-     factory substrate's realization of "a custom amount per task". (A factory UI would be a
-     separate product story; the config seam exists and is the one this story specs — no new surface
-     is invented here.)
-  2. **Global default** — the user-set default in the cost config, applying to every
-     repo/project/task that declares no override.
-  3. **Shipped fallback** — **8,000 µ$ ($0.008) per run**, documented as a *fallback for cheap
+  1. **Per-task override** — the task's own DF1.1 manifest declaring
+     `residentSpendCeilingMicros` (this story's schema field): the factory substrate's realization
+     of "a custom amount per task", and the E2E Slice's `pipeline.bounds.json` is the worked
+     example. (A factory UI authoring the value would be a separate product story; the manifest
+     seam exists and is the one this story specs — no new surface is invented here.)
+  2. **Shipped fallback** — **8,000 µ$ ($0.008) per run**, documented as a *fallback for cheap
      rosters*, never as a derivation: at the shipped fixture-catalog rates the projection is ~504
      µ$/call, so the fallback buys roughly sixteen projected calls; at frontier rates it cannot buy
      one, AC6's `below_one_call` refuses, and that is the ladder working as designed — a task priced
      above the fallback needs its override set.
+
+  *The operator ruling's **global default** rung has no carrier in the shipped cost config, and
+  this story says so rather than faking one (W10C-6a-2): `CONFIG_KEYS` is exactly
+  `[defaultCapMicroUsd, perIssueOverrides, boxHourRateMicroUsd]`, `perIssueOverrides` is
+  `Record<string, number>` — the **admission cap** DF2.8/DF2.13 consume, not a ceiling — and
+  `src/providers/cost-ledger.ts` is not this story's file to edit. A
+  `residentSpendCeilingMicros` config key is a DF2.8-owned schema addition, recorded as a named
+  follow-up (the same config-surface direction the DF13 handoff holds); until it lands, the
+  shipped fallback **is** the effective global default, and `dispatch.ts`'s stamp edit invents no
+  second parse of the config file to pretend otherwise.*
+
+*Thus the ladder is two rungs with real carriers — manifest declaration → shipped fallback —
+  evaluated once at fill and stamped onto the frozen manifest as the single resolved value.*
 
   **The metering basis — stated once because three derivations died conflating it (W6-C-B1).**
   The engine meters **actual** usage: `meter(reply.usage)` sums integer µ$ per call. The pre-call
@@ -364,14 +403,27 @@ nothing), DF3.3.
   call") the code cannot reach that way. What *is* pre-checked is **reachability** (AC6:
   `binding` / `unreachable` / `below_one_call` over the projected rate and the structural maximum
   `2 + maxSteeringIterations × phaseCount`), and what *is* enforced is the pre-call refusal itself.
-  The accumulator is the same quantity DF2.12's landed `kind='tokens'` rows record: one spend
-  truth, auditable at DF5.3 hop 3.
+  The accumulator is deliberately **not** the ledger's quantity: DF2.12's landed `kind='tokens'` rows
+  record metered actuals (a no-usage reply is recorded **unpriced** there — `unpricedTurns = 1`,
+  the shipped disposition), while
+  this accumulator charges AC4's projection so a silent resident cannot spend unbounded. The
+  divergence is by design — the ledger is the auditable truth at DF5.3 hop 3, the ceiling is
+  protection — and one spend truth **per basis** is the invariant: a projected figure never
+  masquerades as a metered one.
   `residentRssBytes` = **512 MiB** is declared on the same manifest and validated by this story's
   loader, but **enforced by DF3.6b**; nothing here reads or acts on it. **The default is
   provisional-pending-DF3.6b** (W6-C-H4): DF3.6b's live round measures pi's baseline RSS and owns
-  re-setting the constant — `src/phase-engine/manifest.ts` is in DF3.6b's Files to Modify, scoped to
-  that one value. It survives verbatim from the 2026-08-20 text and is the one default nobody has
-  re-derived.
+  re-setting the constant — the constant lives in this story's own `resident-bounds.ts`
+  (`PROVISIONAL_RESIDENT_RSS_BYTES`), and DF3.6b's live round re-sets it **there**; `manifest.ts`
+  itself carries no default, because a schema default would make AC2a's missing-value refusal
+  unobservable (W14C-PAIR-1: the W6-C-H4 file assignment predates the required-field design and is
+  superseded by it). It survives verbatim from the 2026-08-20 text and is the one default nobody has
+  re-derived. **And it has a production provisioner (W12C-6a-1):** a manifest that declares no
+  `residentRssBytes` is stamped at the dispatch fill step with
+  `PROVISIONAL_RESIDENT_RSS_BYTES` (512 MiB, declared in this story's `resident-bounds.ts`,
+  re-set by DF3.6b's measurement) — the fourth fill-stamp operand above — so a real dispatched
+  run never arms against an unstamped required field, while the loader's missing-value refusal
+  stays the fail-closed backstop for any manifest that bypasses the fill step.
   All bounds live in the DF1.1 manifest, are frozen with it at load, and are carried by value for
   the run. This DF3 story therefore ships **engine** code (`src/phase-engine/`, not the `src/fleet/`
   root its siblings use): F12's enforcement locus is the whole point, and a bound owned by the fleet
@@ -452,7 +504,7 @@ nothing), DF3.3.
 
   `≤` throughout, not strict `<`. `loadResidentBounds` asserts against **the mint-time cap carried
   on the frozen manifest**, never against a name of its own; the earlier `runBudgetCapMicros` is an
-  evidence-artifact field (`scripts/cap-hit-demo.ts:97`,`:148`,`:1305` — a `--budget-cap` flag,
+  evidence-artifact field (`runBudgetCapMicros`, `scripts/cap-hit-demo.ts` — a `--budget-cap` flag,
   *"artifact field only"*) and enforces nothing. **DF2.13** wires `capMicroUsd` from DF2.8's
   remaining issue budget as `min(remaining, policy ceiling)` — derived, so admission and in-run
   enforcement cannot disagree — and is a predecessor of this story.
@@ -512,7 +564,7 @@ nothing), DF3.3.
   provider's reported usage on each reply (DF3.3's meter, integer µ$ per DD-9). The agent never
   reports its own spend, and this meter is independent of `team-lead-driver.ts`'s final-turn
   overwrite (R5 §6 fact 7) — a bug in the tier-3 driver cannot move this number.
-- **Breach behavior is uniform and narrow:** a breach stops the **resident** and nothing else —
+- **Breach behavior is uniform and narrow:** a **spend or memory** breach stops the **resident** and nothing else —
   never fails the run, a phase, or a gate, and never shortens a budget. A run whose resident was
   stopped finished deterministically, which is exactly D4's fallback ("demote tier 2 to code-only
   dispatch") happening for one run.
@@ -553,9 +605,14 @@ nothing), DF3.3.
 - `src/fleet/dispatch.ts` (DF3.1-owned file; **adds only** the fill-side stamp provisioner this
   story owns — W8-C-1) — at the dispatch fill step, beside the shipped `stampManifestLimit` call,
   stamp the bound operands onto the frozen manifest: `residentSpendCeilingMicros` resolved through
-  the ceiling ladder (perIssueOverrides → global default → shipped fallback), `capMicroUsd` from
-  DF2.13's shipped mint chain, `defaultKeyCapMicroUsd` imported from the provider constant — and
-  nothing else: `limitMicroUsd` stays DF3.1's shipped stamp's field alone (CC-1), and
+  the ceiling ladder (manifest declaration → shipped fallback), `capMicroUsd` from
+  DF2.13's shipped mint chain, `defaultKeyCapMicroUsd` imported from the provider constant,
+  **and `residentRssBytes`** — resolved manifest-declared → else
+  `PROVISIONAL_RESIDENT_RSS_BYTES` (512 MiB, the provisional constant this story declares in its
+  own `resident-bounds.ts`; DF3.6b's live round owns re-setting it per W6-C-H4) — the fourth
+  operand without which every dispatched arming run would refuse `bound-config-invalid`
+  (W12C-6a-1: a required field with no production provisioner). Beyond the four, nothing else:
+  `limitMicroUsd` stays DF3.1's shipped stamp's field alone (CC-1), and
   `defaultCapMicroUsd` is DF2.8's host-side derivation source, never stamped. **Without this edit the schema gains fields nothing writes and
   every resident-arming run refuses `bound-config-invalid` at manifest load while hand-authored
   fixture suites stay green — the `ingestCostEvent` dead-writer shape.** DF3.1 is done and its
@@ -579,7 +636,9 @@ nothing), DF3.3.
      a public setter is a path the resident's own tier could reach and INV-BND-1 forbids it.
      (`telemetry.exitStatus = "overflow"` is the same shape and is **DF3.6b's** writer.);
   4. `meter`'s zero-usage arm (the `clampTerm` arms in `steering.ts`'s `meter`): a reply with no usage object is charged the
-     projected worst case, never zero (INV-BND-3, AC4). **This reverses a documented DF3.3
+     projected worst case on the **ceiling accumulator**, never zero (INV-BND-3, AC4) — while the
+     DF2.12 attribution emit keeps the metered disposition, so the ledger never carries the
+     projection. **This reverses a documented DF3.3
      disposition** (the shipped zero-usage disposition in `src/phase-engine/steering.ts`) and must be recorded in DF3.3's deviation ledger, not
      merely done;
   5. the **three** new `createSteering` deps on the deps object DF3.3 already marked additive for
@@ -606,14 +665,17 @@ nothing), DF3.3.
   DF3.6b applies) plus AC2a's two stamped operands. `PipelineManifestSchema` is `.strict()`
   (`src/phase-engine/manifest.ts:317`), so a field not added to the schema makes `pipeline.bounds.json` fail parse
   with `unrecognized_keys`.
-- `scripts/pipeline-run.ts` — **the pair takes six edits on this file, stated once here so neither
+- `scripts/pipeline-run.ts` — **the pair takes seven edits on this file, stated once here so neither
   half's "no other change" can reject the other's** (W6-C-M2): **DF3.6a lands (i)** the
   `loadResidentBounds(manifest)` call at manifest load, scoped to runs that arm a resident (AC2a),
   **before** the `startResident` call site — AC2a requires it "before the resident is spawned", and
   DF3.6b needs the validated `residentRssBytes` at that call — and on refusal writes the terminal
-  marker `{ ok:false, code:"bound-config-invalid", message, remediation }` through the existing
-  marker writer and returns without arming a resident; **(ii)** passing
-  `bounds`/`onBoundBreach`/`lastMemory` at the sole `createSteering` call site. **DF3.6b lands
+  marker `ok:false` through the existing marker writer (the writer's shipped shape, nothing added —
+  the typed `{code, message, remediation}` triple goes on the engine's fd-2 diagnostic line;
+  inlining a full remediation could cross `MARKER_MAX_BYTES = 4096`'s oversized arm and read as
+  `unknown`) and returns without arming a resident; **(ii)** passing
+  `bounds`/`onBoundBreach` at the sole `createSteering` call site (`lastMemory` is edit (iv),
+  DF3.6b's — not claimed here; W10C-PAIR-1). **DF3.6b lands
   (iii)** `residentRssBytes` on the `startResident` call, **(iv)** `lastMemory:
   spawned.lastMemory` at the `createSteering` call, **(v)** the `onBoundBreach` handler arm that
   calls `residentSpawn.stop()` on `cause:"watchdog_kill"` **and on the placement wrapper's exit-97
@@ -625,17 +687,37 @@ nothing), DF3.3.
   reason:"rss_unenforceable" }` line through the existing disabled-shape branch — **never an
   unclassified rethrow** (which produces a tracer-closed, marker-absent box and
   `fleet status: engine-failed`, the outcome AC2a's negative control forbids) and **never emitted
-  from the `onBoundBreach` region**, which on the arming path is not constructed (W6-C-H5).
+  from the `onBoundBreach` region**, which on the arming path is not constructed (W6-C-H5), and
+  **(vii)** **DF3.6b's run-down refresh precedence**: the final telemetry refresh (the run-down
+  finally-block's last `writeResident`, which today overwrites `exitStatus` from the process probe
+  under the shipped "the process's word is telemetry" policy) keeps the **engine's** `exitStatus`
+  when the engine wrote one of this pair's bound-status values — `"overflow"` (DF3.6b AC1) — and
+  fills the process-probe word only when the engine wrote none: the probe's `lastExit` vocabulary
+  is `success`/`transient`/`logic` and is never `"overflow"`, so without this edit a kernel
+  OOM-kill's journal reads `exitStatus:"transient"` beside the engine's `status:"stopped"` and
+  DF3.6b's make-or-break observable is unreachable.
   Without (i) `loadResidentBounds` is an exported function with no caller and AC2a never
   runs in a real pipeline — the same dead-writer shape `sprint-status.yaml` records for
   `ingestCostEvent`.
 - `src/providers/credentials.ts` — **no edit; already corrected by the parent (2026-09-08).** The
   docstring at `:46-55` now reads "Provider-side BACKSTOP cap — the ceiling on what `mintRunKey` may
-  request, not the run's operating budget", names `deps.capMicroUsd` at `:281` as the per-run
+  request, not the run's operating budget", names `deps.capMicroUsd` (the mint-time cap read,
+  `deps.capMicroUsd ?? defaultKeyCapMicroUsd`) as the per-run
   budget, points at DF2.13 for the wiring, and carries the corrected `≤` chain verbatim. Listed here
   only so a reader does not re-derive that it was once wrong; this story changes nothing in it.
 - `tests/phase-engine/resident-bounds.test.ts`
 - `tests/phase-engine/fixtures/pipeline.bounds.json`
+- `tests/phase-engine/fixtures/pipeline.resident.json` — **gains the full required bound-operand
+  set** — `residentSpendCeilingMicros`, `capMicroUsd`, `defaultKeyCapMicroUsd`,
+  `residentRssBytes` (W14C-6a-1 as deepened by W16C-6a-1: AC2a requires **all four** on every
+  armed hand-authored manifest, and this fixture arms beside a witnessed brief in every
+  `resident-e2e` leg, so "one field" would still refuse at load): the hand-authored manifests
+  bypass the dispatch fill stamp, so each declares the four operands explicitly; a DF3.3-owned
+  fixture gains one bounded edit, owned here. The E2E Slice's `pipeline.bounds.json` declares the
+  same four (its enumeration below gains `capMicroUsd`/`defaultKeyCapMicroUsd`).
+- `tests/phase-engine/resident-e2e.test.ts` and `tests/phase-engine/pipeline-run.test.ts` — the
+  armed-witness legs that load those hand-authored manifests (W14C-6a-1); listed so the
+  fixture-field edit's blast radius is owned, not discovered
 - `tests/phase-engine/fixtures/pi-catalog-bounds/openrouter.json` — the priced catalog the mandatory
   e2e demo's arithmetic closes against (E2E Slice).
 
@@ -671,8 +753,9 @@ nothing), DF3.3.
 - **INV-BND-4 (the ceiling is absolute):** the ceiling is an integer µ$ value compared
   against cumulative spend. It is never a percentage, ratio, or share of the run total, and
   no such field exists in the schema to be populated later (gates report §3.3, R5 §6 fact 12).
-- **INV-BND-5 (fail-closed, and closed toward determinism):** a spend or iteration breach stops the
-  resident only — never a gate, a phase, or the run's determinism. A refusal at bounds load refuses
+- **INV-BND-5 (fail-closed, and closed toward determinism):** a spend or memory breach stops the
+  resident only; an **iteration** breach refuses the solicitation and lets the phase continue
+  deterministically (AC3 — the one bound that does not stop the resident) — never a gate, a phase, or the run's determinism. A refusal at bounds load refuses
   the whole run before a resident exists (AC2a); a breach mid-run stops one component and the phase
   walk continues. *(DF3.6b carries the memory path's own fail-closed rule, INV-MEM-2, because a
   bound that cannot be enforced is a different condition from a bound that fired.)*
@@ -685,12 +768,12 @@ nothing), DF3.3.
 - [ ] **Integration:** a spend breach emits a DF3.3 `residentTripwire` row with `cause:"spend_ceiling_breach"` and a `detail` carrying the projected and cumulative figures; the `cause` union widening (both new members) and the `meter` zero-usage reversal are recorded in DF3.3's deviation ledger (Files to Modify).
 - [ ] **Security:** no bound is readable or writable from any path the resident controls; no public setter for `telemetry.status` is added — the controller keeps its snapshot-only getter (cited by symbol in `src/phase-engine/steering.ts`); the engine imports **no fleet module** (`steering.ts:11-13`, the shipped boundary) and imports **neither `src/providers/credentials.ts` nor `src/providers/cost-ledger.ts`** and reads **neither `.sandbox/runs/` nor `.sandbox/cost-config.json`** — the gate greps the four **import-specifier/path forms** `providers/credentials`, `providers/cost-ledger`, `.sandbox/runs/`, `.sandbox/cost-config.json` over `src/phase-engine/` and requires zero hits; the bare tokens are NOT the gate (`credentials` and `cost-ledger` appear in shipped comment prose). Positive control: `bounded-exec` hits exactly the three shipped importer files. *(A blanket "no provider import" grep is NOT the gate and would fail on shipped code: `gates/command-gate.ts:17`, `roster/validate.ts:34` and `phases/test-results.ts:37` already import `../../providers/bounded-exec.ts`, and `roster/validate.ts` is this story's own `resolveRate` source.)*
 - [ ] **Test (pre-flight ceiling, AC1):** spend at `ceiling − ε` → next call never issued; recorded spend stays under ceiling; post-hoc-metering implementation MUST fail.
-- [ ] **Test (config refusal, AC2a):** `ceiling > capMicroUsd` refuses (`ceiling == capMicroUsd` is **admitted** — the chain is `≤`); `capMicroUsd > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse; a missing or non-positive `residentRssBytes` refuses; **a manifest missing any of the three stamped operands refuses** — no operand ever defaults to a documented constant. Each at manifest load, writing the terminal marker with `{ ok:false, code:"bound-config-invalid" }` — the code is payload, never a process exit code.
+- [ ] **Test (config refusal, AC2a):** `ceiling > capMicroUsd` refuses (`ceiling == capMicroUsd` is **admitted** — the chain is `≤`); `capMicroUsd > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse; a missing or non-positive `residentRssBytes` refuses; **a manifest missing any of the three stamped operands refuses** — no operand ever defaults to a documented constant. Each at manifest load, writing the terminal marker `ok:false` (the writer's shipped shape; the `code` travels on the fd-2 diagnostic line) — the code is payload, never a process exit code.
 - [ ] **Test (per-run clamp, AC2b):** run whose manifest declares ceiling 2,000,000 with minted `limitMicroUsd` 1,500,000 runs with effective ceiling 1,500,000 and a `{bound:"spend", action:"clamped"}` **trace/log** row — not a journal `resident` key, whose set DF3.3 closed.
 - [ ] **Test (no host-side cap read, INV-BND-2):** grep of `src/phase-engine/` finds **no** read of `.sandbox/runs/` and no read of `.sandbox/cost-config.json`. A manifest reaching `loadResidentBounds` with no `limitMicroUsd` runs **unclamped** — no clamp row, no refusal: the field bounds the provider key, not the resident bound, and an implementation that refuses on its absence (or bare-throws, producing an unclassified crash and a marker-absent box) MUST fail.
-- [ ] **Test (per-phase iteration bound fires, AC3):** a phase declaring `retries: 5` whose gate fails every attempt stops soliciting at the **fourth** `post_gate_failure` point, completes on the deterministic path, and the next phase solicits normally. Counter is this story's own, not `telemetry.steeringIterations`: a resident replying `proceed` on every solicitation is still bounded, and an implementation bounding `steeringIterations` MUST fail.
-- [ ] **Test (zero-usage charging, AC4/INV-BND-3):** a reply with no usage object is charged the projected worst case; an implementation leaving `meter`'s `clampTerm`-to-zero arm untouched MUST fail.
-- [ ] **Test (degraded precedence, AC5):** a resident that degrades at solicitation 2 and would have breached at solicitation 4 ends the run `"degraded"`, not `"stopped"`; the bound is recorded on the log line only. An implementation overwriting `"degraded"` with `"stopped"` MUST fail.
+- [ ] **Test (per-phase iteration bound fires, AC3):** a phase declaring `retries: 5` whose gate **fails on attempts 1–4 and passes on attempt 5** stops soliciting at the **fourth** `post_gate_failure` point, attempt 5 runs and passes on the deterministic path, the phase completes, and the next phase solicits normally. A gate failing **every** attempt exhausts `retries` and rethrows `GateFailureError` (the retry loop's exit in `scripts/pipeline-run.ts`), failing the phase — there is no next phase to solicit, and a test whose Given promises one is unreachable from its own words (W12C-6a-2; the same defect AC3's prose already names). Counter is this story's own, not `telemetry.steeringIterations`: a resident replying `proceed` on every solicitation is still bounded, and an implementation bounding `steeringIterations` MUST fail.
+- [ ] **Test (zero-usage charging, AC4/INV-BND-3):** a reply with no usage object is charged the projected worst case in the ceiling accumulator, and the DF2.12 attribution row stays **unpriced** (`unpricedTurns = 1`, the shipped emit's disposition — the ledger never carries the projection); an implementation leaving `meter`'s ceiling-side zero-usage arm untouched, or writing the projected charge into the ledger row, MUST fail.
+- [ ] **Test (degraded precedence, AC5):** a resident that degrades at solicitation 2 and would have breached at solicitation 4 ends the run `"degraded"`, not `"stopped"`, and no bounds evaluation fires after the latch (the status gate precedes the check — there is no post-latch bound line to read). An implementation evaluating a bound for a degraded resident, or overwriting `"degraded"` with `"stopped"`, MUST fail.
 - [ ] **Test (ceiling reachability, AC6):** at the shipped fixture rate the reachability row reports `binding` for the default 8,000 µ$ ceiling on a five-phase `retries: 3` manifest and `unreachable` for 50,000 µ$ on the same manifest; at a frontier-priced fixture slug it reports `below_one_call` and the resident is stopped with `code:"bound-config-invalid"`. An implementation reporting `spend_ceiling_breach` at `run_start` for a ceiling below one call's projection MUST fail.
 - [ ] **Test (`loadResidentBounds` is actually called, AC2a):** a pipeline run with an ordering-invalid manifest refuses **through `scripts/pipeline-run.ts`**, not only through a direct unit call — the marker is written and no resident is armed. An implementation that exports `loadResidentBounds` without wiring it passes every direct unit test and MUST fail this one.
 - [ ] **Test (e2e demo — MANDATORY):** `pipeline.bounds.json` + `pi-catalog-bounds/openrouter.json` run writes `out.json` with `resident.status:"stopped"`, `resident.spendMicros` strictly below the ceiling at every point, a full-shape `{runId, cause:"spend_ceiling_breach", phase:"build", detail}` tripwire row, and all remaining phases/gates executed deterministically. The refusal must be **projection-driven**: an implementation comparing metered spend after the call reproduces the outcome and MUST fail AC1's control.
@@ -749,7 +832,7 @@ itself incomplete** — it missed DF2.8 `:201` and DF5.5 `:360`; the list is now
 DF2.4 `:138`/`:145`, DF2.8 `:201`, DF5.5 `:360` and `credentials.ts:46`, with DF2.7 `:134` and
 DF2.12 `:25` excluded as prose rather than copies. **M3 also turned out to be bigger than a naming
 defect and is now an open question, not a closed finding:** `runBudgetCapMicros` *is* declared
-(`scripts/cap-hit-demo.ts:97`,`:148`) but only as an evidence-artifact field behind a
+(`runBudgetCapMicros`, `scripts/cap-hit-demo.ts`) but only as an evidence-artifact field behind a
 `--budget-cap` flag — it enforces nothing, so the chain's middle term has no production home and a
 production docstring claims this story asserts against it. Stated in Technical Notes with both
 options and **awaiting an operator ruling; owner: campaign lead — RULED 2026-09-08/09-13:

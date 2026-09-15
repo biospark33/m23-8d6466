@@ -527,6 +527,826 @@ D's BLOCKER resolves if DF6.1a owns registration + dispatch-time append and both
 same-file postures reconcile; C's BLOCKER needs the final refresh in an enumerated edit), then
 **Wave 10 fresh verify**. Target unchanged: C4-dominant residue.
 
+## Wave 9 fix — all B/H/C2/C3 findings applied or verified-applied in-session (2026-09-14)
+
+Executed by the parent session, sequential in-session A → B → C → D (the Wave-8 precedent:
+parallel fix agents die pre-edit on provider 429s), same protocol: every finding verified at
+source before editing, fixers pointed at report sections, self-proving greps, the consistency
+gate green after every unit. **Several findings were already fixed post-wave-9 by the PR-#255
+CodeRabbit rounds on this branch — verified at source, not redone**: W9-D-1 (DF6.1a owns the
+`fixAttemptRunIds` adds-only registration + dispatch-time append, forward-dependency note in its
+Files list, commit `e6f5db3d`), W9-D-2 (per-attempt lifecycle states derived on the driver's read
+from the fix run's own record in arm order; `dispatch-refused` resource-bearing but excluded from
+the accumulate-to-3 ceiling), W9-D-3 (append owner = the same DF6.1a row), W9-C-3 (exit-97
+`unenforceable` crosses as an engine-owned typed rejection; `onBoundBreach` fires with the
+classification; the runner's edit-(v) arm records on the fleet `warn` chokepoint), and unit A's
+only C3 (DF3.7 now claims no `teardownSandbox` ordinal, citing DF2.11's record — `e6f5db3d`).
+
+**The load-bearing fixes applied this wave:**
+- **W9-C-1 (BLOCKER, closed):** the pair's `pipeline-run.ts` edit list grows six → **seven** —
+  edit **(vii)**, the run-down refresh precedence: the final telemetry refresh keeps the engine's
+  `exitStatus:"overflow"` and fills the process-probe word only when the engine wrote none. The
+  probe's `lastExit` vocabulary is `success`/`transient`/`logic`, never `"overflow"` (verified at
+  source), so without the edit AC1's make-or-break journal observable is clobbered to
+  `"transient"` on a kernel OOM-kill. Count and (vii) mirrored in both halves' Files lists;
+  ownership rows O6/W6-C-M2 updated (`seam-ownership/unit-C-df3-6ab.md`).
+- **W9-C-2 (HIGH, closed by re-siting):** AC2a's refusal keeps the marker in the writer's shipped
+  shape — `ok:false` is the whole `fleet status: not-ok` observable — and the typed
+  `{code, message, remediation}` triple moves to the engine's fd-2 diagnostic line; `journal.ts`
+  stays unowned, and the 4096 interaction is now stated (a full `remediation` inlined into the
+  marker risks `MARKER_MAX_BYTES`'s oversized arm, which reads as `unknown`, not `not-ok`).
+  Mirrored in AC2a, DoD edit (i), and the DoD config-refusal test item.
+- **W9-D-4 (HIGH, closed by re-siting):** the proposal-variation trigger moves off the unobservable
+  `fixContext` brief key onto a **mint-time `fixRun: "string"` marker** on each fix attempt's own
+  record (`extensions.fixLoop.fixRun = "true"`, written by DF6.1a's dispatch before the chain
+  runs; same adds-only registration edit, O22 extended). `runner.ts` already holds the record at
+  approval time (its `store.get(runId)` read precedes `requestApproval`), so the variation reads a
+  value in hand — no new I/O, "no other behavior changes" intact.
+- **W9-B (2 C3, closed):** W9B-1 was already resolved at source (the scope note and driver
+  paragraph now say `required` everywhere — `recordAuditLink` required on the four `*Deps`
+  interfaces, required on `provisionAdmittedRun`'s options, trailing required on `fillRun`);
+  W9B-2 resolved by declaring hop 6's decisive evidence the bundle + its `bundle-verify` link row
+  (sufficient alone — the walker carries no git-dir seam and never resolves a ref), with
+  `refs/sandbox/<run-id>` corroborating only, identity asserted by DF5.4-C5 through the frozen
+  fixture's bare `refs.git`; mirrored in the Reconstructable definition.
+- **C2 residue (6, all closed):** DF6.1a-3 — the inherited DF13 briefing's "Re-verified TRUE at
+  `fa7d0e26`" rewritten: the race was closed by `99f591e3` (re-verified ancestor via
+  `git merge-base --is-ancestor`); the old red-by-design pin no longer exists; the surviving half
+  (`FleetLock` single instantiation, per-run lock framing) kept. C's DoD-mirror unreachable
+  trigger aligned to AC3's prose (fails 1–4, passes 5); the every-attempt case named as the
+  `GateFailureError` phase failure. C's AC4: the projection charge is ceiling-side only; DF2.12's
+  attribution row keeps the metered disposition — one spend truth **per basis**, and the
+  "same quantity" sentence inverted accordingly. C's AC5(b) log-line clause reworded as
+  belt-and-braces (the mechanism guarantees no post-latch bound evaluation exists); DoD test
+  updated. C's Leg A: the allocator's `QDS_PI_BIN` route named — the leg's dispatch writes it into
+  that box's `/home/exedev/app/.env`, the unit's mandatory `EnvironmentFile=` (box-local, never
+  image content, outside DF2.10's baked `QDS_` allow-list). D's escalation vocabulary gains
+  `scope-requires-privilege` and `bot-response-to-fix`.
+- **Unit C's remaining C3s:** AC3's trigger leg now names its catalog (the default pi catalog —
+  the frontier-priced slug stops the same fixture at the second point); AC4's ledger-side
+  classification fixed as above.
+- **In-pass extras (per open-the-file rule):** DF3.7 `unitActivity` param name (`timeoutMs`),
+  `BoxFileRead` symbol cite, AC1 fence import-scoping wording; DF5.3 harvest-caller enumeration
+  (three sites, the teardown-internal one flows through `TeardownDeps`), `createRun` callers
+  (cap-hit-demo **and** approval-gate.test.ts), "file this story did not originally touch"
+  narrative residue, six drifted `run-record.ts` cites → symbol cites, 8-char hash-prefix
+  divergence remarked against the reaper's 12-hex precedent; DF5.4 `openReadOnly` read-path cites
+  re-anchored to `src/providers/cost-ledger.ts::openReadOnly`; DF6.1a `review_feedback_detected`
+  protocol-state claims corrected (webhook-era, no state machine), single-fixer roster line
+  aligned with the shipped two-role yaml, the "survived seven review rounds" clause marked as
+  this story's paraphrase (not an ADR quotation), two stale `fleet.ts`/`team-lead-driver.ts`
+  cites → symbol cites; DF6.1b escalation vocabulary completed, stale `acquireRunLock`/
+  `GATE_VERBS` cites → symbol cites (the `headRefName` fetch was already fixed by the CodeRabbit
+  rounds — verified).
+
+**Not touched:** DF3.8 and DF5.5 (converged). **Next: Wave 10 — five fresh verifiers, one
+message, scope files only, no recipes/prior reports/tracker/tables. Target unchanged:
+C4-dominant residue.**
+
+## Wave 10 result — the class fell again; one BLOCKER remains, on the pair's own seam. VERDICT: NOT CONVERGED.
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave10-{A,B,C,D,E}-*.md`. Fresh eyes,
+scope files only, no recipes/tracker/tables/prior reports; blocking findings parent-verified at
+source before this entry.
+
+| Unit | Wave 9 | Wave 10 | BLOCKERs | HIGHs | C2 | C3 | Verdicts |
+|---|---|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 10 | 8 | 0 | 0 | 4 | **0** | both NOT (high) |
+| B (DF5.3+DF5.4) | 8 | 8 | 0 | 0 | **0** | 1 | DF5.3 NOT (high) · **DF5.4 CONVERGED** (high) |
+| C (DF3.6a+DF3.6b) | 15 | 12 | 0 | 0 | 2 | 1 | both NOT (0.8/0.85; pair seam 0.9) |
+| D (DF6.1a+DF6.1b) | 11 | 11 | **1** | 0 | 3 | 1* | both NOT (0.7/0.9) |
+| E (DF5.5) | 4 | 8 | 0 | 0 | 3 | **0** | NOT (high) |
+| **TOTAL** | **48** | **47** | **1** | **0** | **12** | **3** | **1 of 9 CONVERGED** |
+
+Per-class: C1×14 · C2×12 · C3×3 (+1 counted under C2) · C4×14 (B0/H0/M15/L30).
+
+**Campaign verdict: NOT CONVERGED — BLOCKERs 2→1, HIGHs 4→0, C3s 11→3(+1), C2s 6→12.**
+The severity classes collapsed onto the seam classes: what remains is contradictions and
+ownerless state, not broken mechanisms. Both formerly-converged stories (DF3.8, DF5.5) were
+re-opened by fresh eyes — the protocol working as designed.
+
+**The one BLOCKER (parent-verified at source):** **DF6.1b-W10-1** — the attempt ladder's
+terminal arm reads "the fix run's record **carries a terminal outcome classification**", but no
+registered field can hold one (`fixLoop` = `fixContext`/`fixOutcome` only, `run-record.ts:219`;
+`fixOutcome` is parent-record-only, write-once-at-terminal, outcome ∈ `green|escalated`), and
+neither half's closed edit list adds one — charged/uncharged/dispatch-refused underivable on
+read, and `poll-interrupted` byte-indistinguishable from a completed charged failure. Remedy
+(verifier-offered, parent-selected): DF6.1a's adds-only registration grows a third field
+(`fixOutcomeClass: "string"`, written by DF6.1b's terminal transition — the same-lock write the
+story already specifies — read by arm 1), which also resolves the SEAM-1 "no change expected"
+letter violation.
+
+**Unit blocking sets (all parent-verified or one-clause):**
+- **A:** DF3.7-A1 (C2) — AC5 routes every `reverify()` `approval: null` into `gate-refused`, but
+  the shipped runner returns null from three non-gate arms (`nothing-to-verify` :291, the
+  non-green verdict :421 — AC2(c)'s own legitimate veto — and the flagged catch :474; docblock:
+  "null on a red/error verdict"); a red run would take a misattributed cause + teardown
+  remediation on a closed record. DF3.8-A1 (C2) — `run-engine-dead` sits in the sweep's own event
+  vocabulary **and** the inherited "every event DF3.7's module emits" clause: one dead run, two
+  differently-shaped lines, vs AC4(d)'s once-per-pass (the `sweep-box-unreachable` rename
+  precedent applied to box-unreachable but not engine-dead). Plus DF3.7-A2 / DF3.8-A3 C2 LOWs
+  (untyped `closedAt` refusal code; seconds/millis mix in the Technical-Notes lag restatement).
+- **B:** W10B-1 (C3) — the required-`recordAuditLink` threading breaks `scripts/cap-hit-demo.ts`
+  and ~11 test files (~20 files reference the interfaces; verified by grep), but the Files list
+  owns no fake/test entries and claims fakes are "already listed". W10B-2 (C1 MEDIUM, **the fix
+  wave's own error**) — the corrected harvest-caller sentence says the two script-level sites do
+  not flow `TeardownDeps`; at source all three do (`fleet.ts` `const tdeps: TeardownDeps`,
+  `sandbox-teardown.ts` `const deps: TeardownDeps`, `teardown.ts`'s internal step). DF5.4
+  CONVERGED (its W10B-8 is C4: shared-scratch-copy wording).
+- **C:** W10C-PAIR-1 (C3) — the seven-edit list double-claims `lastMemory` (6a edit (ii) vs 6b
+  edit (iv); pre-existing, not introduced by (vii)). W10C-6a-2 (C2) — the ceiling ladder's rungs
+  1–2 have no carrier (`CostConfig` closed at three keys; `cost-ledger.ts` unlisted; "no new
+  surface invented here"). W10C-6b-1 (C2) — nothing sets `telemetry.status` on the unenforceable
+  path (the stopped-writer is oomKilled-gated; `stop()` writes no telemetry), so the next
+  solicitation passes the gate and the latch throw re-degrades — recreating the misclassification
+  edit (v) exists to prevent. W10C-6a-1 (C1, **the fix wave's own wording**) — AC4's ledger-side
+  label "priced-zero" is wrong against shipped `emitResidentAttribution` (records **unpriced**,
+  `unpricedTurns=1`).
+- **D:** the BLOCKER above; DF6.1a-W10-1 (C2) — INV-7's "validate-only mode" names a store API
+  the shipped surface does not expose (`assertNoSecret`/`assertKind` unexported; the fence permits
+  only `RunRecordStore`/`RunRecord`) — route: a scratch store in a temp dir through the permitted
+  constructor, or scope validation to the fixloop parser; DF6.1b-W10-2 (C2) — `orphaned` missing
+  from the escalation-classification enumeration.
+- **E:** W10E-1 (C2) — amendment C's `p1-5` text and amendment D's `p0-7` blockquote prescribe
+  insert text without the load-bearing `v5 amendment (DF5.5)` marker (`p1-5` is boundary-only, so
+  verbatim pasting yields 10 marker paths, not the declared 11 — AC1 fails). W10E-2 (C2) — the
+  provenance negative control routes to "assertion (2)'s provenance arm", an arm the
+  four-assertion enumeration never defines. Plus 1 C2 LOW (yaml row comment narrower than the
+  canonical set). Both C2s parent-verified true at source.
+
+**Parent corrections to verifier messages (open-the-file law):** none this wave — every
+load-bearing claim spot-checked landed (runner.ts null arms, `fixLoop` registration, DF3.8 event
+vocabularies, harvestRun `TeardownDeps` flow, amendment C/D marker absence, ladder arm-1 wording
+verbatim).
+
+**Next: Wave 11 fix wave** on 1 BLOCKER + 12 C2 + 3 C3 (all one-clause to one-paragraph fixes;
+D's BLOCKER completes an existing design sentence rather than redesigning), sequential in-session
+A→B→C→D→E, then **Wave 12 fresh verify**. Target unchanged: C4-dominant residue.
+
+## Wave 11 fix — every BLOCKER/C2/C3 finding applied in-session (2026-09-14)
+
+Sequential in-session A→B→C→D→E, same protocol; the consistency gate green after every unit.
+
+- **The BLOCKER (DF6.1b-W10-1, closed):** DF6.1a's adds-only registration grows to **three**
+  fields — `fixOutcomeClass: "string"` joins `fixAttemptRunIds`/`fixRun` on the `fixLoop`
+  namespace — and DF6.1b's terminal transition (the same-lock write the story already specified)
+  is named as its writer; the ladder's terminal arm now reads the registered field instead of the
+  carrierless "terminal outcome classification" phrase. Charged/uncharged/dispatch-refused are
+  derivable on read; `poll-interrupted` (fixContext + no `fixOutcomeClass`) is distinguishable
+  from a completed charged failure. DF6.1b's `run-record.ts` Files line rewritten from "**no
+  change expected**" to "registration read, not made" — also resolving W10-D-SEAM-1's
+  letter violation. O22 extended.
+- **Unit A:** DF3.7's `gate-refused` arm scoped to a null **on a `green` verdict**; the three
+  non-gate null arms (non-green verdict, `nothing-to-verify`, approval-request catch) get a new
+  truthful `ChainOutcome` arm — `{ kind: "vetoed"; reason }`, same post-chain exit 6, never a
+  teardown remediation on a closed record — mirrored in the union, the Observability `kind` list,
+  AC5, and the DoD test + negative controls. The mandated `closedAt` refusal named:
+  `{code: "run-already-closed"}`, exit 5. DF3.8's sweep line renamed **`sweep-engine-dead`** (the
+  `sweep-box-unreachable` treatment applied to the second dual-vocabulary name), rationale
+  mirrored in AC4(d)/exit-table/Observability/DoD, O15 extended; Technical-Notes lag restated in
+  `uptimeMs`; AC1's fence enumeration gains the barrel limb + the DoD Security box "first four"
+  fixed. F106's "as DF5.1 scoped it" attribution corrected in all three sites (the id exists in
+  no story; the `withGuards` note in `worktree.ts` is the real anchor); the barrel range cite →
+  symbol.
+- **Unit B:** DF5.3's Files list gains the **threading blast-radius row** (W10B-1): `cap-hit-demo.ts`
+  + the ten `tests/providers/` fakes/contract suites + five `tests/fleet/` suites the required
+  fields break, "the completion criterion is the typecheck itself — the breaking compile IS the
+  loudness working"; "fake already listed" corrected. The Wave-9 fix's own false claim repaired
+  (W10B-2, parent-verified at source): all three `harvestRun` sites **do** flow `TeardownDeps`
+  (`fleet.ts` `const tdeps`, `sandbox-teardown.ts` `const deps`, `teardown.ts`'s internal step) —
+  the script-level loudness comes from `TeardownDeps`' required field; `HarvestDeps` needs its own
+  because `harvestRun` is its own composition surface and `teardown.ts` forwards a `HarvestDeps`
+  view (DF1.10 AC4). DF5.4's C9 two-walk test pinned to one shared scratch copy (C4, in-pass).
+- **Unit C:** the seven-edit list's `lastMemory` double-claim struck from 6a's edit (ii) —
+  `lastMemory` is (iv), DF3.6b's (W10C-PAIR-1). The ceiling ladder re-grounded on real carriers
+  (W10C-6a-2): **two rungs** — the manifest's own `residentSpendCeilingMicros` declaration → the
+  shipped 8,000 µ$ fallback — with the operator ruling's *global default* explicitly recorded as
+  carrierless (`CONFIG_KEYS` closed at three keys; `perIssueOverrides` is the admission cap; a
+  config key is a DF2.8-owned schema addition recorded as a named follow-up) and no second config
+  parse invented in `dispatch.ts`; the fill-stamp summary line synced. The unenforceable path
+  gained its terminal status (W10C-6b-1): the engine's `instanceof PlacementRefusedError` arm
+  writes `telemetry.status = "stopped"` (AC5's proximate-cause rule licenses it) **before**
+  firing `onBoundBreach` — the status gate now holds and the stop-latch throw can never fall into
+  the degrade arm. AC4's ledger label corrected: absent usage records **unpriced**
+  (`unpricedTurns = 1`), not "priced-zero" (three sites; W10C-6a-1, the Wave-9 fix's own wording
+  error). In-pass C1s: `boundsPolicy`'s false "DF3.6b cites this definition" cross-ref removed;
+  6b's "DF3.3's closed three-cause set" attribution corrected.
+- **Unit D:** beyond the BLOCKER — INV-7's validate-only mode **names its route** (W10-W10-1): a
+  scratch `RunRecordStore` on a `mkdtempSync` temp dir through the fence-permitted constructor,
+  with the shipped store's exact public surface recorded; `orphaned` added to the
+  escalation-classification enumeration; `overflow` dispositioned into uncharged-terminal
+  (resource-bearing, deterministic, the cap already stopped it); empty `QDS_RUN_ROOT` added to
+  DF6.2's refusal-class list; the corrupted `scope-requires-privilege` duplication repaired; the
+  superseded "one lock, not two" Wave-2 sentence marked; the stale DF5.3 `:168` cite → symbol.
+- **Unit E:** the load-bearing `v5 amendment (DF5.5)` marker added to amendment C's `p1-5`
+  prescribed text and amendment D's `p0-7` blockquote (verbatim pasting now lands 11 marker
+  paths, matching the declared set); the provenance negative control re-routed from the undefined
+  "assertion (2)'s provenance arm" to review, where assertion 1's own control puts it; the
+  Hand-off item now names both sanctioned paths (DF6.1a's fix wave **or** the pre-authorised
+  fallback edit with its sixth-tripwire + amendment-log duties).
+
+**Accepted residue (optional tiers, per target):** C1/C4 LOWs in all units (cite drift, wording),
+DF3.6a's remaining C1 cite-rot cluster (`runContextFrom`/cap-hit-demo/driver ranges), DF6.1a's
+C4 LOWs, DF5.5's W10E-4..8. **Next: Wave 12 — five fresh verifiers, one message, scope files
+only.**
+
+## Wave 12 result — severity collapsed to seams; two stories crossed; one parent error caught. VERDICT: NOT CONVERGED.
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave12-{A,B,C,D,E}-*.md`. Fresh eyes,
+scope files only; blocking findings parent-verified at source before this entry.
+
+| Unit | Wave 10 | Wave 12 | BLOCKERs | HIGHs | C2 | C3 | Verdicts |
+|---|---|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 8 | 8 | 0 | 0 | 3 | 1 | both NOT (high) |
+| B (DF5.3+DF5.4) | 8 | 11 | 0 | 0 | **0** | 2 | DF5.3 NOT (high) · **DF5.4 CONVERGED** (high) |
+| C (DF3.6a+DF3.6b) | 12 | 14 | 0 | **1** | 2 | 3 | both NOT (high) |
+| D (DF6.1a+DF6.1b) | 11 | 8 | 0 | **1** | 2 | 0 | **DF6.1a CONVERGED*** (high) · DF6.1b NOT |
+| E (DF5.5) | 8 | 5 | 0 | 0 | 0 | 2 | NOT (high) |
+| **TOTAL** | **47** | **46** | **0** | **2** | **7** | **8** | **2 of 9 CONVERGED** |
+
+Per-class: C1×8 · C2×7 · C3×8 · C4×~20 (B0/M13/L~25). *Verifier D marked DF6.1a CONVERGED with
+the pair's HIGH assigned to the seam (DF6.1ab-W12-1); the parent attributes the HIGH's fix to
+DF6.1a's AC4 (it owns the dispatch-time `fixContext` build) and conservatively holds DF6.1a at
+NOT until the fix lands and Wave 14 confirms. Verifier D also marked DF6.1b "CONVERGED" while
+counting a C2-MEDIUM on it — resolved mechanically per the bar: a C2-MEDIUM is NOT CONVERGED.
+
+**Parent error, caught by the protocol (recorded per the open-the-file law):** the Wave-9 fix
+section's claim that "C's DoD-mirror unreachable trigger [was] aligned to AC3's prose" was
+**false** — the disposition was recorded but the edit was never applied. Wave-12's W12C-6a-2
+caught the residual at line-level. The fix is applied now (Wave 13), and the Wave-9 section's
+claim stands corrected by this note: the rollup asserted more than the diff contained. Lesson:
+every disposition gets a grep or a diff receipt, not a memory.
+
+**The two HIGHs (both parent-verified or source-quoted):**
+- **W12C-6a-1/6b-1:** `residentRssBytes` has **no production provisioner** — the fill-side stamp
+  edit enumerates three operands and closes "and nothing else", while both halves assert the value
+  is never absent in production: every dispatched arming run would refuse `bound-config-invalid`,
+  taking out DF3.6b's own AC1 proof leg; and W12C-6a-4's shipped-fixture breakage
+  (`resident-e2e` steered legs on the DF3.3-owned `pipeline.resident.json`) is the same defect.
+  Remedy (parent-selected from the verifier's two): the stamp edit enumerates a **fourth operand**
+  — `residentRssBytes`, resolved manifest-declared → else the provisional constant
+  (`PROVISIONAL_RESIDENT_RSS_BYTES` = 512 MiB, declared in this story's `resident-bounds.ts`,
+  re-set by DF3.6b's live measurement per the standing W6-C-H4 ruling) — preserving AC2a's
+  missing-value refusal (the loader still refuses an unstamped manifest; hand-authored fixtures
+  bypassing fill still fail) while real dispatched runs arm. The schema-default alternative was
+  rejected: it makes AC2a's refusal unobservable.
+- **DF6.1ab-W12-1:** attempt 2's brief carries attempt 1's CI-failure output in-box with **no
+  redaction mandate** — the pair's own canonical `ghs_` clone-URL shape rides the box-ingress
+  channel against INV-3/D8/fact 17. Remedy: one clause pattern-redacting the payload before the
+  dispatch-time `fixContext` build + a DoD leg mirroring the escalation-redaction fixture.
+
+**Unit blocking sets (all bounded):**
+- **A:** DF3.7-W12-1 (C2) — the approval-request-failure catch is assigned to both `gate-refused`
+  ("null on a green verdict") and `vetoed`; disambiguate (a request error is not a gate decision).
+  DF3.7-W12-2 (C2) — `driven.markerOk` has no truthful producer on the `promoteStrandedPause`
+  path (absent, not false — the story's own not-pretending rule). DF3.7-W12-3 (C3 LOW) — the
+  declared `deps` shape cannot feed `TeardownDeps`' `keyApi`/`requestId`/`costLedger` (fail-closed
+  on every keyed record). DF3.8-W12-1 (C2) — the `sweep-complete` counter identity has no home for
+  post-chain `gate-refused`/`vetoed` outcomes.
+- **B:** W12B-2 (C3) — the threading mandate breaks files the Wave-11 row still does not own:
+  production `src/fleet/fanout-primitive.ts` (TeardownDeps construction) and
+  `scripts/sandbox-reap.ts` (SweepDeps assembly), plus `tests/fleet/approval-gate.test.ts`
+  (inline TeardownDeps literal — a file the story itself names), `tests/providers/exedev/driver.test.ts`,
+  four `tests/fleet/e2e/` live files, `tests/providers/reaper.test.ts`. W12B-1 (C3) — `createRun`
+  is an internal production caller of `provisionAdmittedRun` with no stated carrier for the
+  required field (widen `CreateRunOptions`; no no-op sink); plus the cap-hit-demo wording slip
+  (it calls `createRun`).
+- **C:** the HIGH above; W12C-6a-2 (C2) — the DoD iteration-bound item, applied immediately on
+  verification (see the parent-error note); W12C-6a-3 (C2) — "every breach stops the resident"
+  contradicts AC3's non-stopping iteration refusal (scope to the spend/memory bounds);
+  W12C-6a-4 (C3) — resolved by the fourth-operand stamp.
+- **D:** the HIGH above; DF6.1b-W12-1 (C2) — the attempt ladder has no arm for decided approval
+  states other than `approved`: `rejected` classifies nowhere, `timed-out` falls to `orphaned`
+  instead of `approval-timed-out`, and `pausing` (a real persisted state, `attach.ts`) is
+  mischarged as a dead attempt. DF6.1b-W12-2 (C2 LOW) — `overflow` (and the rejected
+  classification) missing from the Observability enumeration.
+- **E:** W12E-1 (C3) — Test assertion (1)'s provenance definition ("the three enumerated",
+  `(now DF…)` within 20 chars) cannot classify the story's own prescribed texts (the p1-2
+  "was P1.1…" gloss; the p1-3 header blockquote's meta-references; the pre-authorised p1-18
+  fallback's fourth site). W12E-2 (C3) — amendment C's `p1-9` boundary blockquote lacks the
+  marker (the `p1-5` sibling got it in Wave 11; `p1-9` missed).
+
+**What held (per reports):** zero C1 in unit A; every arithmetic re-derived exactly in C
+(760,960/1,521,920/2,282,880; 504.32; 136,800; $0.0089 crossover) with steering.test.ts 91/0 and
+resident.test.ts 39/0; unit B re-ran the 45-case chassis suite exit 0 and verified OQ-4
+byte-identity programmatically; D verified the three-field registration, write/read timing,
+INV-7's scratch-store route, and the gh 2.93.0 surface; E re-derived the occurrence table and
+all successor mappings.
+
+**Next: Wave 13 fix wave** on 2 HIGH + 7 C2 + 8 C3 (all one-clause to one-paragraph), sequential
+A→B→C→D→E, then **Wave 14 fresh verify**. Target unchanged: C4-dominant residue.
+
+## Wave 13 fix — every BLOCKER/HIGH/C2/C3 finding applied in-session (2026-09-14)
+
+Sequential in-session A→B→C→D→E, same protocol; the consistency gate green after every unit.
+W12C-6a-2 was applied immediately on verification (see the parent-error note above) — the rest
+follow.
+
+- **Unit A:** DF3.7's `gate-refused` scoping tightened to a null **as a gate decision** on a green
+  verdict — no request error flagged — and the approval-request-failure catch explicitly assigned
+  to `vetoed` (a request **error** is not a gate **decision**, even when the flagged report's
+  verdict reads green; W12-1). `ChainOutcome.driven`'s `markerOk` made **optional-absent** on the
+  `promoteStrandedPause` re-entry — absent, not `false`, the same not-pretending rule that keeps
+  `markerWitnessed` out (W12-2). The declared `deps` shape gains the three fields
+  `TeardownDeps` requires — `keyApi` (caller-resolved, fail-closed pre-box on a keyed record),
+  `requestId` (pre-flight read), `costLedger` (ordinary constructor) (W12-3). DF3.8's
+  `sweep-complete` line gains `runs_gate_refused` + `runs_vetoed` — post-chain outcomes counted,
+  never folded into `run-observed` or `candidates_skipped` (W12-1).
+- **Unit B:** DF5.3's threading row extended with the production sites (`fanout-primitive.ts`'s
+  internal `TeardownDeps` construction; `sandbox-reap.ts`'s full `SweepDeps` assembly) and the
+  unenumerated test files (`approval-gate.test.ts`'s inline literal, `exedev/driver`, `reaper`,
+  the four `tests/fleet/e2e/` live files) (W12B-2). `CreateRunOptions` gains the same required
+  field — `createRun` threads it verbatim, no no-op sink — and the cap-hit-demo wording slip
+  fixed (its create arm constructs `createRun`'s options) (W12B-1).
+- **Unit C:** the fill-side stamp enumerates a **fourth operand** — `residentRssBytes`,
+  manifest-declared → else `PROVISIONAL_RESIDENT_RSS_BYTES` (512 MiB, declared in this story's
+  `resident-bounds.ts`, re-set by DF3.6b per W6-C-H4) — giving the field its production
+  provisioner while the loader's missing-value refusal stays the fail-closed backstop for
+  manifests that bypass fill (W12C-6a-1 HIGH; W12C-6a-4's fixture breakage resolves with it —
+  `pipeline.resident.json` needs no edit). Technical Notes' residentRssBytes paragraph names the
+  provisioner; O20 updated. "Every breach stops the resident" scoped to **spend or memory**
+  breaches in the Overview, the Breach-behavior note, and INV-BND-5 (the iteration bound refuses
+  without stopping — W12C-6a-3).
+- **Unit D:** the HIGH closed in DF6.1b — attempt 2's CI-failure output is **pattern-redacted
+  before it enters the dispatch-time brief** (AC2 carrying clause + a new Security bullet: box
+  ingress gets the same `redactSecrets` discipline as public egress — INV-3/D8/fact-17 bind "no
+  push credential in any box") + a DoD leg mirroring the escalation fixture's three credential
+  shapes. The ladder names all five `ApprovalState` readings (W12-1): `awaiting-approval`
+  continuation; `pausing` continuation-never-counted (a real persisted state, not a dead
+  attempt); `timed-out` → uncharged-terminal `approval-timed-out` (no orphaned fallthrough);
+  `rejected` → charged-terminal `approval-rejected`, loop escalates and stops; `approved` per the
+  existing arms. The escalation enumeration gains `approval-rejected` and `overflow` (W12-2).
+  *Rollup correction: the Wave-12 section provisionally attributed this HIGH's fix to DF6.1a's
+  AC4 — the carrying clause is DF6.1b's, and that is where the fix landed.*
+- **Unit E:** the load-bearing marker appended to amendment C's `p1-9` boundary blockquote (the
+  sibling W10E-1 missed) (W12E-2). Test assertion (1)'s provenance definition widened from the
+  20-char `(now …)` window to **any sanctioned same-line form** — `(now DF…)` annotation, a
+  `was P1.1 …` gloss, or the header blockquote's marker-named repoint — with the pre-authorised
+  `p1-18:50` fallback named as the fourth provenance site whose annotation rides the fallback's
+  own rules (W12E-1).
+
+**Accepted residue:** C1/C4 LOWs per unit (register hygiene, drifted ranges, the DD-2 schedule
+line, the four-value-sweep wording). **Next: Wave 14 — five fresh verifiers, one message, scope
+files only.**
+
+## Wave 14 result — DF5.4 and DF6.1a cross and hold; residue is spec-text precision. VERDICT: NOT CONVERGED.
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave14-{A,B,C,D,E}-*.md`. Fresh eyes,
+scope files only; blocking findings parent-verified or source-quoted before this entry.
+
+| Unit | Wave 12 | Wave 14 | BLOCKERs | HIGHs | C2 | C3 | Verdicts |
+|---|---|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 8 | 8 | 0 | **1** | 1 | 3 | both NOT (high) |
+| B (DF5.3+DF5.4) | 11 | 8 | 0 | 0 | 2 | **0** | DF5.3 NOT (high, close) · **DF5.4 CONVERGED** (high) |
+| C (DF3.6a+DF3.6b) | 14 | 8 | 0 | **2** | 1 | 2 | both NOT (0.85/0.80) |
+| D (DF6.1a+DF6.1b) | 8 | 8 | 0 | **2** | 2 | 0 | **DF6.1a CONVERGED** (0.9) · DF6.1b NOT (0.9) |
+| E (DF5.5) | 5 | 6 | 0 | 0 | 1 | 1 | NOT (high) |
+| **TOTAL** | **46** | **39** | **0** | **5** | **8** | **6** | **2 of 9 CONVERGED** |
+
+**Campaign verdict: NOT CONVERGED — but the two converged stories are new and holding** (DF5.4
+converged in Waves 12+14; DF6.1a in Waves 12+14 — DF6.1a carries 3 C1-LOW residue, accepted).
+BLOCKERs 0 for the third straight wave; the 5 HIGHs are all C3/C2 specification-precision items
+on seams the Wave-13 fixes opened, each with a verifier-offered one-line remedy.
+
+**Parent counter-correction (open-the-file law):** W14-3's "zero matches in tracked source" for
+`withGuards` is **false** — `withGuards` exists (`src/reverify/worktree.ts`, definition + the
+F064 guard-baseline comment region). The true rot is narrower: Wave-13's characterization of that
+comment as a "residual-exposure acknowledgment" over-read it; the note is the F064 baseline
+comment. The Wave-15 fix corrects the attribution wording; this note corrects the verifier's
+zero-match claim.
+
+**The blocking sets (all bounded, most one-line):**
+- **A:** DF3.7-W14-1 (HIGH C3) — `requestApproval` never returns null; every gate refusal is a
+  **throw**, so Wave-13's "null as a gate decision" scoping specified a producer that cannot
+  fire, and the hand-run live-box `pausing` case arrives via the approval-request-failure flag,
+  indistinguishable in the returned contract. Remedy: drive `gate-refused` off the **typed gate
+  refusal throw** (the gate's `{code, message, remediation}` payload is the discriminator); every
+  other approval-request failure and every non-green verdict stays `vetoed`. DF3.7-W14-2 (C3 M) —
+  the union has no arm for the non-null `pause-in-progress`/`rebound` outcomes the admitted
+  unfenced hand-run can produce. DF3.8-W14-1 (C2 M) — `candidates_skipped` has no producer; pin
+  it to the partial-pass truncation arm (the count left behind). DF3.7-W14-3 (C1 M) — the F106
+  attribution wording (see the counter-correction above).
+- **B:** W14B-3 (C2 M) — the reaper's internal credential-deps literal (runId-less step context)
+  cannot emit against `audit_links.run_id` NOT NULL; remedy: the one **named** no-op sink, with
+  INV-AUDIT-4's no-manufactured-links rationale (a run-less revocation has no hop to serve).
+  W14B-2 (C2 L) — hop-5 prose omits `tier1-provision-status.live` from `createRun`'s callers.
+  W14B-1 (C1 L) — `patterns` listed under `tests/providers/`, file is `tests/fleet/`.
+  **Pairing enumeration verified EXHAUSTIVE against the verifier's own grep** — the Wave-11/13
+  threading rows hold.
+- **C:** W14C-6a-1 (HIGH C3) — the fail-closed loader refusal fires on shipped **armed fixtures**
+  no story owns (`resident-e2e.test.ts`, `pipeline-run.test.ts` arm on hand-authored manifests
+  that bypass the fill stamp). Remedy: the fixtures + test files enter DF3.6a's Files list; the
+  fixtures declare the field. W14C-PAIR-1 (HIGH C3) — the provisional constant has **two
+  contradictory homes** (6a says `resident-bounds.ts` twice; the older W6-C-H4 text in 6a's
+  provisional note + 6b's Files/DoD says `manifest.ts` three times; `manifest.ts` is empty by
+  6a's own required-field design). Remedy: re-home consistently to `resident-bounds.ts`.
+  W14C-6a-2 (C2 M) — the mandatory e2e fixture refuses at load (`requiredBudgetMs` 96,000 >
+  `runBudgetMs` 50,000 under the retries:5 adaptation); specify the budget fields.
+- **D:** DF6.1b-W14-2 (HIGH C3) — `approved` + no `fixContext` + no terminal has no ladder arm
+  and is absorbed by `orphaned`, but it is **DF6.1a AC3's own sanctioned continuation**
+  (scope-check→push re-run on an approved record). Remedy: a sixth reading — continuation,
+  charges nothing. DF6.1b-W14-1 (HIGH C2) — Wave-13's `rejected` = charged-terminal contradicts
+  AC2's own charging rule: a rejected attempt **never pushed** → charges **zero**; terminal,
+  loop escalates and stops. DF6.1b-W14-3 (C2 M) — `overflow` missing from AC2's reproduce-set and
+  the DoD uncharged-mix list.
+- **E:** W14E-1 (C2 M) — assertion-1's sanctioned forms still cannot classify the prescribed
+  `p1-9:25` text (`(was P1.6…)`/`(was P1.8…)` parentheticals + inline marker); generalize to
+  `was P1.x` and admit the inline marker. W14E-2 (C3 M) — `p1-7`/`p1-14`/`p0-9` have no
+  marker-bearing prescribed text (8 marker paths as-prescribed vs the 11 AC1 asserts); mandate
+  the marker on every touched line. W14E-3 (C1 M) — the DF6.1b composition correction misrecords
+  the live text (three `gh` invocations; `statusCheckRollup` only as negative control) — and the
+  **yaml P1.18 row shares the misrecord** (parent-owned edit, this wave).
+
+**Next: Wave 15 fix wave** on 5 HIGH + 8 MEDIUM (all one-line-class), sequential A→B→C→D→E, then
+**Wave 16 fresh verify**. Target unchanged: C4-dominant residue.
+
+## Wave 15 fix — every BLOCKER/HIGH/C2/C3 finding applied in-session (2026-09-14)
+
+Sequential in-session A→B→C→D→E, same protocol; the consistency gate green after every unit.
+
+- **Unit A:** the `gate-refused` producer **re-grounded on the throw** (W14-1's HIGH):
+  `requestApproval` never returns a refusal — every gate refusal throws — so the discriminator is
+  the thrown error carrying the gate's typed refusal code; every other approval-leg failure, the
+  non-green verdict and `nothing-to-verify` stay `vetoed`; the shipped non-null
+  `pause-in-progress`/`already-decided`/`rebound` outcomes get their own **`handed-off`** arm
+  (W14-2) — union, Observability `kind` list, AC5, DoD item and negative controls all aligned.
+  `candidates_skipped`'s producer pinned: the partial-pass truncation arm (the count the
+  partial-pass line names as left behind) (W14-1). The F106 attribution wording corrected to the
+  F064 guard's actual content (`withGuards` sweeps the verify body's descendants — a second
+  concurrent re-verify's processes land in the sweep, not behind a fence), across DF3.7 AC5,
+  INV-IBOX-16 and DF3.8 INV-IBOX-17 (W14-3) — with the parent counter-correction recorded: the
+  verifier's "zero matches" claim was false, `withGuards` exists.
+- **Unit B:** the reaper's internal credential-deps literal named as **the one deliberate no-op
+  sink** — a run-less revocation has no hop to serve, `audit_links.run_id` is NOT NULL, and
+  INV-AUDIT-4's no-manufactured-links rule is the rationale (W14B-3). Hop-5 prose gains the third
+  `createRun` caller (`tier1-provision-status.live`); `patterns` re-listed under `tests/fleet/`
+  (W14B-2/-1).
+- **Unit C:** the shipped **armed fixtures gain a Files row** — `pipeline.resident.json` declares
+  `residentRssBytes` (one field, the same single-value budget shape DF3.6b holds on the bounds
+  constant), and the two armed-witness test files are listed so the blast radius is owned, not
+  discovered (W14C-6a-1 HIGH). The provisional constant **re-homed consistently to
+  `resident-bounds.ts`** in all five mentions (6a's provisional note, 6b's Files entry, 6b's DoD
+  test) — `manifest.ts` carries no default, because a schema default would kill AC2a's refusal;
+  the W6-C-H4 rationale stands, the file moved with the required-field design (W14C-PAIR-1
+  HIGH). The e2e fixture adaptation now specifies `runBudgetMs` = 120,000 against the computed
+  96,000 ms required budget (W14C-6a-2).
+- **Unit D:** the ladder gains the **sixth reading** — `approved` + no `fixContext` + no terminal
+  ⇒ **continuation, the sanctioned re-attempt** (DF6.1a AC3's scope-check→push re-run; charges
+  nothing, counts nothing) (W14-2 HIGH). `rejected` re-fated to **terminal, `approval-rejected`,
+  charging zero** — AC2's own rule charges only pushed-then-CI-failed attempts, and a rejected
+  attempt never pushed (W14-1 HIGH); the escalation enumeration's phrasing synced. `overflow`
+  added to AC2's reproduce-set and the DoD uncharged-mix list (W14-3).
+- **Unit E:** assertion-1's sanctioned forms generalized — `was P1.x …` gloss **or parenthetical**,
+  and the **inline marker on the repointed line itself** admitted as a form (p1-9's
+  `(was P1.6…)`/`(was P1.8…)` idioms now classify) (W14E-1). The Contract DoD mandates **the
+  marker on every touched line**, covering the bare-repoint files `p1-7`/`p1-14`/`p0-9` whose
+  amendments prescribe directions — the as-prescribed marker set is the declared eleven
+  (W14E-2). The DF6.1b composition misrecord corrected to the live three-invocation text, and the
+  **yaml's P1.18 + DF6.1b row comments re-corrected** (parent-owned, appended not rewritten)
+  (W14E-3).
+
+**Accepted residue:** C1/C4 LOWs per unit. **Next: Wave 16 — five fresh verifiers, one message,
+scope files only.**
+
+## Wave 16 result — three cross and hold; the residue narrows to one design decision and prose. VERDICT: NOT CONVERGED.
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave16-{A,B,C,D,E}-*.md`. Fresh eyes,
+scope files only; blocking findings source-quoted before this entry.
+
+| Unit | Wave 14 | Wave 16 | BLOCKERs | HIGHs | C2 | C3 | Verdicts |
+|---|---|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 8 | 8 | 0 | **2** | 1 | 1 | both NOT (0.95/0.92) |
+| B (DF5.3+DF5.4) | 8 | 6 | 0 | 0 | 0 | 1 | DF5.3 NOT (0.85) · **DF5.4 CONVERGED** (3rd wave) |
+| C (DF3.6a+DF3.6b) | 8 | 8 | 0 | **1** | 1 | 0 | DF3.6a NOT (0.9) · **DF3.6b CONVERGED** (0.9) |
+| D (DF6.1a+DF6.1b) | 8 | 6 | 0 | **1** | 0 | 0 | both NOT (0.9/0.85) — DF6.1a drops on the cross-half HIGH |
+| E (DF5.5) | 6 | 4 | 0 | 0 | **0** | **0** | **DF5.5 CONVERGED** (high) |
+| **TOTAL** | **39** | **32** | **0** | **4** | **3** | **1** | **3 of 9 CONVERGED** |
+
+**Campaign verdict: NOT CONVERGED — DF5.4, DF3.6b, DF5.5 cross and hold; DF6.1a drops on a real
+cross-half sizing defect the fresh eyes caught.** Zero BLOCKERs fourth straight wave. The
+remaining 4 HIGHs are one design decision (below) plus three counter/enumeration completions.
+
+**The design decision (DF6.1b-W16-1, cross-half C2-HIGH, fix text in DF6.1a):** DF6.1a's resolved
+Open Question sizes the per-issue override at `parentSpend + 2 × perAttemptCap` — the **charged**
+budget only — while DF6.1b's ceilings sanction up to **7 resource-bearing boxes per PR** (2
+charged + 3 uncharged + 1 dispatch-refused + 1 out-of-scope-diff), and `admitIssue` consumes the
+same ceiling on every dispatch. Consequences: one zero-charge out-of-scope box plus one charged
+box starves the designed second charged attempt; the uncharged ceiling of 3 is unreachable live
+(its named escalation can never fire while the fixture-only DoD test passes). Remedy
+(verifier-offered, parent-selected): the override is sized to the **worst-case union** — 2 charged
+attempts at `perAttemptCap` plus each uncharged/resource-bearing attempt at its own per-attempt
+spend cap — and the loop's issue-ceiling pre-flight **asserts that coverage**, refusing
+`issue-ceiling-insufficient` when the declared override cannot fund it.
+
+**Unit blocking sets:**
+- **A:** DF3.7-W16-1 (HIGH C2) — the Wave-15 discriminator is still unimplementable: every shipped
+  gate refusal **throws a plain Error** (codes exist only as prose in the message) and
+  `reverify()`'s catch flattens any refusal to `approval: null` + one generic
+  `approval-request-failed` flag — there is no field to discriminate on, and the story's own
+  misattribution MUST-fail test is unwritable. Remedy (parent-selected, honest collapse): **one
+  truthful `approval-failed` arm** replaces the gate-refused/vetoed split for the approval leg —
+  the shipped contract cannot distinguish gate-declined from transport-failed without re-opening
+  DF5.1's contract (out of scope); the arm carries the error, its remediation names both
+  `fleet teardown <runId>` and gate-log investigation. DF3.8-W16-1 (HIGH C2) — the sweep counters
+  fund two post-chain arms; the union (after the collapse + `handed-off`) has three. DF3.7-W16-2
+  (C2 M) — no arm for reachable chain throws (`teardownSandbox` step failures, the report leg
+  outside `reverify()`'s try blocks), both post-`closedAt`; add `chain-failed`. DF3.7-W16-3
+  (C3 M) — AC5's pre-flight order (extension then `closedAt`) strands the crashed-chain `pausing`
+  record; `pausing` must precede the `closedAt` refusal. DF3.7-W16-4 (C1 M) — `startResident`
+  uses no KeyApi; the chain is `openRouterKeyApi`.
+- **B:** W16B-1 (C3 M) — `tests/providers/quota.test.ts` (three fresh `CreateRunOptions`
+  literals) missing from the threading row; hop-5 prose also omits it and `driver-contract.test`.
+  W16B-2 (C1 M) — **`runCredentialLifecycle` is a phantom composition site** (named as one of the
+  four loud surfaces; no such function exists — only a stale `dispatch.ts` comment); the real
+  `CredentialDeps` compose sites sit in owned files, and the `SweepDeps` assembly is a fifth
+  unnamed surface. Sub-note: `runId: null` lives in `credentials.ts` internals, not the reaper
+  literal — the no-op-sink substance holds.
+- **C:** W16C-6a-1 (HIGH C3) — AC2a requires **four** fields on every armed hand-authored
+  manifest, but the `pipeline.resident.json` Files row authorizes "(one field)" — the shipped
+  DF3.3 armed e2e (verified 12-green today) would refuse at load, needing an unauthorized edit
+  depth; the E2E Slice's `pipeline.bounds.json` enumeration omits the two chain operands too.
+  Remedy: the row authorizes the **full required set**. W16C-6a-2 (C2 M) — the budget arithmetic
+  re-derives to **106,000 ms** (attempts 96,000 + routing margin 2×5,000), not 96,000; the
+  stated 120,000 still funds. C1 cluster: cap-hit-demo cites, `deriveBuildId`'s real home
+  (`scripts/build-exedev-image.ts` — shared with the yaml), `pipeline-run.ts:3294` drift.
+- **D:** the cross-half HIGH above. LOWs: "twelve-field core" (13 — `requestId` added by
+  `8008e4bb`); `walkAuditChain` zero-in-src (not once); AC3's "third invocation" overstatement
+  against the persisted-anchor recovery; AC2's two uncharged enumerations disagree on `overflow`.
+
+**What held:** DF5.4's pairing enumeration verified EXHAUSTIVE against B's own grep; DF3.6b
+converged (status vocabulary, cause union, exitStatus chain, tier-4 figures — 401 µ$ re-derived);
+E verified all nine prescribed inserts carry the marker and the four provenance forms classify
+every prescribed artifact; A ran 481 pass/0 fail across six scoped suites; B ran 45 chassis cases;
+D re-measured the gh surface live. All arithmetic in C re-derived.
+
+**Next: Wave 17 fix wave** on 4 HIGH + 3 MEDIUM (+ the C1 clusters in-pass), sequential
+A→B→C→D→E, then **Wave 18 fresh verify**. Target unchanged: C4-dominant residue.
+
+## Wave 17 fix — every BLOCKER/HIGH/C2/C3 finding applied in-session (2026-09-14)
+
+Sequential in-session A→B→C→D→E, same protocol; the consistency gate green after every unit.
+
+- **Unit A (the arm design, settled on source truth):** the Wave-15 discriminator was still
+  unimplementable — the shipped gate refusal **throws a plain `Error`** (codes only as prose in
+  the message) and `reverify()`'s catch flattens any refusal to `approval: null` + one generic
+  `approval-request-failed` flag. Resolved by **honest collapse**: the approval leg reports **one
+  `approval-failed` arm** (`{kind, error}`, exit 6, remediation naming both `fleet teardown
+  <runId>` and the gate log) — no gate-vs-transport classification the shipped contract cannot
+  carry, and no message-sentinel contract this story refuses to specify; `vetoed` now means only
+  the re-verifier's own judgment (non-green verdict, `nothing-to-verify`); a new **`chain-failed`**
+  arm carries the reachable post-`closedAt` chain-step throws (`teardownSandbox` step failures,
+  the report leg outside `reverify()`'s try blocks — W16-2); `handed-off` retained for the
+  gate's non-null outcomes. Union, Observability `kind` list, AC5, DoD item and negative controls
+  aligned; the AC5 misattribution MUST-fail test is now writable (it fails any implementation
+  claiming a discriminator the contract does not carry). DF3.8's sweep line funds **all four
+  post-chain arms** (`runs_vetoed`/`runs_approval_failed`/`runs_chain_failed`/`runs_handed_off`)
+  and the accounting identity is stated to reconcile `candidates_enumerated` for every reachable
+  arm (W16-1's HIGH). AC5's pre-flight **reordered**: `pausing` → extension → `closedAt` — a
+  crashed chain's `pausing` record carries `closedAt` by design and must reach
+  `promoteStrandedPause`, not the closure refusal (W16-3). The `keyApi` source corrected to the
+  shipped `openRouterKeyApi` chain (`resident.ts` mints nothing; W16-4).
+- **Unit B:** the threading row gains `tests/providers/quota.test.ts` (three fresh
+  `CreateRunOptions` literals) and hop-5's caller prose gains `quota.test` +
+  `driver-contract.test` (W16B-1). **Parent counter-correction:** W16B-2's "phantom
+  `runCredentialLifecycle`" claim is **false** — the function exists, exported at
+  `src/providers/credentials.ts` (taking exactly `CredentialDeps`), and W14-B's own report
+  verified it as "a genuine single composition surface for all four credential events"; the
+  verifier's grep missed it. Applied kernel: the no-op-sink sentence's `runId: null` location
+  re-attributed to `credentials.ts`'s internals (W14B-3's substance held).
+- **Unit C:** the `pipeline.resident.json` Files row now authorizes the **full required
+  bound-operand set** (four fields, not "one field") — AC2a requires all four on every armed
+  hand-authored manifest, and the fixture arms beside a witnessed brief in every `resident-e2e`
+  leg; the E2E Slice's `pipeline.bounds.json` enumeration synced (W16C-6a-1 HIGH). The e2e
+  budget arithmetic corrected to **106,000 ms** (attempts 96,000 + routing margin 2 × 5,000);
+  120,000 still funds (W16C-6a-2). C1 cluster: the cap-hit-demo cites → symbol
+  (`runBudgetCapMicros`), the `pipeline-run.ts:3294` cite → symbol.
+- **Unit D:** the cross-half sizing HIGH closed in DF6.1a — the per-issue override is sized to
+  the **worst-case union of both ceilings** (`parentSpend + 2 × perAttemptCap +
+  unchargedCeiling × perAttemptSpendCap`, each uncharged attempt bounded by the per-attempt
+  spend cap whose exhaustion classifies it `overflow`), and the loop's issue-ceiling pre-flight
+  **asserts that coverage**; both sizing sentences (Scope/Technical-Notes + the answered Open
+  Question) updated. LOWs: "twelve-field core" → **thirteen** (`requestId`, `8008e4bb`) in both
+  halves; `walkAuditChain`'s "exactly once in src/" split (it appears **zero** times — parent
+  verified: `grep -rn walkAuditChain src/` = 0, `recordAuditLink` = 1); AC3's "third invocation
+  would find it expired" overstatement reworded to the persisted-anchor's remaining-time
+  semantics; DF6.1b's second uncharged enumeration gains `overflow` (W14-3's remainder); and the
+  **yaml's DF3.6b row** `deriveBuildId` cite re-homed to `scripts/build-exedev-image.ts`
+  (parent-owned; a first-pass edit briefly corrupted the row's title field and was reverted in
+  the same session — the gate confirms the yaml parses and the title is intact).
+
+**Accepted residue:** C1/C4 LOWs per unit. **Next: Wave 18 — five fresh verifiers, one message,
+scope files only.**
+
+## Wave 18 result — five cross; one design deletion and one arithmetic widen remain. VERDICT: NOT CONVERGED.
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave18-{A,B,C,D,E}-*.md`. Fresh eyes,
+scope files only; blocking findings source-verified before this entry.
+
+| Unit | Wave 16 | Wave 18 | BLOCKERs | HIGHs | C2 | C3 | Verdicts |
+|---|---|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 8 | 8 | 0 | **1** | 0 | 0 | DF3.7 NOT (0.85) · **DF3.8 CONVERGED** (0.80) |
+| B (DF5.3+DF5.4) | 6 | 3 | 0 | 0 | **0** | **0** | **DF5.3 CONVERGED** (0.9) · **DF5.4 CONVERGED** (3rd wave) |
+| C (DF3.6a+DF3.6b) | 8 | 6 | 0 | 0 | **0** | **0** | **both CONVERGED** (0.90/0.88) |
+| D (DF6.1a+DF6.1b) | 6 | 12 | 0 | **1** | 2 | 0 | both NOT (0.85/0.75, marginal) |
+| E (DF5.5) | 4 | 8 | 0 | 0 | **0** | **0** | **DF5.5 CONVERGED** (2nd wave) |
+| **TOTAL** | **32** | **37** | **0** | **2** | **3** | **0** | **6 of 9 CONVERGED** |
+
+**Campaign verdict: NOT CONVERGED — but six of nine crossed, five of them holding across waves.**
+Zero BLOCKERs fifth straight wave. The two remaining blocking items:
+
+- **DF3.7-W18-1 (HIGH C2):** the `gate-refused` arm survived Wave 17's collapse in the union, the
+  exit table and two reference lists — and A's evidence sealed its fate: the shipped chain sets
+  `closedAt` **before** `reverify()` runs while the gate's live-infra refusal is conditioned on
+  `closedAt === undefined`, so the arm had **no reachable producer on any path**. Remedy applied
+  immediately (the verifier's first option): **deleted** — arm, exit-table case, and all
+  references; `approval-failed` (with both remediations) is the one truthful report of an
+  approval-leg failure. Zero `gate-refused` mentions remain (grep-verified).
+- **DF6.1a-W18-1 (HIGH C2, cross-half):** Wave 17's sizing union covered 5 of the **7**
+  resource-bearing boxes — the **dispatch-refused** and **out-of-scope-diff** boxes also reserve
+  against the per-issue ceiling (`admitIssue` reserves on every dispatch; both boxes sink real
+  box-hours and a capped key before their zero-charge classification), so attempt 2 / the third
+  uncharged attempt could hit `budget-exceeded` on exactly the path the sizing exists to keep
+  open. Remedy applied: the union is now **`parentSpend + 2 × perAttemptCap + (unchargedCeiling +
+  2) × perAttemptSpendCap`**, the DoD's issue-ceiling leg asserts the union (a charged-only
+  threshold MUST fail), and DF6.1b's `scope-requires-privilege` clause gains the explicit
+  later-invocation stop its siblings state, with its reservation counted (W18-1's C3 MEDIUM).
+  Plus DF6.1a-W18-2 (C2 M): the DoD leg's stale charged-only threshold replaced.
+
+**Parent counter-corrections:** none this wave — but one parent editing error, self-caught: the
+yaml DF3.6b row's title field was briefly corrupted by a mis-anchored cite edit and was reverted
+in the same session (the consistency gate confirms the yaml parses and the title is intact; the
+`deriveBuildId` cite re-home landed correctly in the row's comment).
+
+**Next: Wave 19 — targeted re-verify of the three stories fixed since their Wave-18 verdicts**
+(DF3.7 · DF6.1a+DF6.1b; the six converged stories were untouched in Wave 19 and hold), then the
+Phase-3 operator gate if all three land CONVERGED.
+
+## Wave 19 fix — the three open stories' blockers applied (2026-09-14)
+
+Applied immediately on Wave-18 verification, before dispatching the targeted re-verify:
+
+- **DF3.7-W18-1 (HIGH C2):** the `gate-refused` arm **deleted** — from the `ChainOutcome` union,
+  the verbs.ts exit-table exit-6 case, the test-file list, and the Observability head (zero
+  `gate-refused` mentions remain, grep-verified; DF3.8 already carried none). `approval-failed`
+  is the one truthful report of an approval-leg failure; the union is
+  driven · unsettled · refused · vetoed · approval-failed · chain-failed · handed-off, and every
+  arm now has a producer the shipped contract can actually reach.
+- **DF6.1a-W18-1/W18-2 (HIGH C2 + C2 M):** the sizing union widened to
+  `parentSpend + 2 × perAttemptCap + (unchargedCeiling + 2) × perAttemptSpendCap` — counting the
+  dispatch-refused and out-of-scope-diff boxes' per-issue reservations (re-derived against
+  `admitIssue`/`issueBudgetSnapshot`, committed = spent + reserved) — in both the Scope/Technical
+  Notes sentence and the answered Open Question; the DoD issue-ceiling leg asserts the union and
+  MUST-fails a charged-only threshold.
+- **DF6.1b-W18-1 (C3 M):** `scope-requires-privilege` gains the explicit later-invocation stop
+  (recorded at most once per PR, its own first-occurrence escalation is its bound), with its
+  reservation counted in the sizing union's "+2".
+
+The six converged stories (DF3.6a, DF3.6b, DF5.3, DF5.4, DF3.8, DF5.5) were untouched. **Next:
+Wave 19 — two targeted verifiers (DF3.7 · DF6.1a+DF6.1b), then the Phase-3 operator gate.**
+
+### Wave 19 verifier findings + same-session fixes (DF3.7 · DF6.1a · DF6.1b)
+
+Both Wave-19 verifiers returned NOT CONVERGED on small, precise items; all applied in-session:
+
+- **DF3.7-W19-1 (BLOCKER C3):** the union never gave the story's own three typed terminal
+  outcomes an arm. Fixed: **`unsettled` gains `terminal?: {code, message, remediation}`** —
+  present exactly when the invocation ends on a typed terminal arm (AC2(a)'s `box-unreachable`
+  skip-streak fill, AC2(d)'s `run-engine-dead`, AC3's `run-completion-unobserved` window-or-streak
+  — the two fills stay distinct codes), absent mid-window; producer named (the observer at the
+  terminal tick); exit derives from the code. Negative controls added (streak-fill as `driven`
+  fails; conflating window-expiry with skip-streak-fill fails). W19-2: `vetoed` pinned to
+  **exit 6**. W19-3: `approval-failed`'s error carrier named — the caller's own hands (a thrown
+  message, or the runner's `approval-request-failed` flag off the flagged report `reverify()`
+  returns), not an unwired log sink.
+- **DF6.1a-W19-1 (C2, root defect, cross-half):** the "+2" was **wrong twice** — three zero-charge
+  boxes reserve (dispatch-refused, out-of-scope-diff **and scope-requires-privilege**), and the
+  per-attempt rate is the shipped **uniform** per-dispatch reservation. Fixed:
+  `parentSpend + 2 × perAttemptCap + (unchargedCeiling + 3) × perDispatchSpendCap`, both terms
+  defined at first use (`perAttemptCap` = the budget DF6.1b's AC2 charges; `perDispatchSpendCap` =
+  the shipped uniform reservation, `admittedCeiling = min(keyCap, remaining)`), the reachable
+  maximum stated as 5–6 boxes with the union kept conservative, and DF6.1b's attribution sentence
+  synced ("+3 counts all three"). DF6.1a-W19-2 (C1): the answered Open Question's exit name
+  unified to `fix-ceiling-insufficient`.
+- **DF6.1b-W19-2/3 (C3 LOW):** `scope-requires-privilege` gains its DoD leg (a subsequent
+  invocation dispatches nothing; omitting its reservation from the union fails); the
+  `bot-response-to-fix` predicate's fresh-PR case stated (no `attemptSha` ⇒ treated as
+  all-newer). W19-5: the "registers exactly `fixContext` and `fixOutcome`" claim reworded to the
+  pre-registered set plus this story's three additions.
+
+**Next: Wave 20 — targeted confirming verifiers on the same three stories (the six converged
+stories remain untouched), then the Phase-3 operator gate.**
+
+### Wave 21 verifier findings + same-session fixes (DF3.7 · DF6.1a · DF6.1b)
+
+The union design held everywhere probed (A7: "complete and one-to-one"; D: the sizing formula
+byte-identical at all three statements and covering every sanctioned box). Residue applied
+in-session:
+
+- **DF3.7 (3 M, all fixed before the Wave-22 check dispatched):** the `run-completion-unobserved`
+  parenthetical de-conflated (either fill yields the one code; it stays distinct from
+  `box-unreachable`); the exit-table glosses completed (exit 1 + `box-unreachable`; exit 4 names
+  the verb's pre-flight record assert as its producer; exit 5 + `run-already-closed` and the
+  host-root-unusable `reverify()`; exit 6 enumerates all four post-chain arms); `refused` claims
+  the exit-4 producer.
+- **DF6.1a-W21-1 (HIGH C2+C3):** AC6 now states the **dual-read design** — the enforcement read on
+  the harvested diff (invocation 2) plus the **attempt-start probe** host-side in
+  `feedback-run.ts` before attempt 1's dispatch (the placement the e2e demo and DF6.1b's stop-leg
+  mandate) — one artifact, this story's own code, no second implementation sanctioned.
+  DF6.1a-W21-2 (C1 L): "seven resource-bearing boxes" → **eight** (the corrected formula's
+  arithmetic).
+- **DF6.1b-W21-6 (C2 M):** `fix-scope-missing`'s bound restated as **deterministic repetition,
+  no durability claimed** — no run record is minted on that path, `fixOutcome` is
+  write-once-at-terminal, no registered field carries a seen-it marker, so the story claims the
+  repetition and nothing more. DF6.1b-W21-2/3 (C3 L): `scope-requires-privilege`'s DoD leg added;
+  the `bot-response-to-fix` fresh-PR case stated.
+
+**Next: Wave 22 — two targeted confirming verifiers (DF3.7 · DF6.1a+DF6.1b), then the Phase-3
+operator gate.**
+
+## Wave 20 result + same-session fixes — the union design is settling; three prose-class items left. VERDICT: NOT CONVERGED.
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave20-{A,D}-*.md` (targeted: DF3.7 ·
+DF6.1a+DF6.1b). DF3.8/DF5.3/DF5.4/DF3.6a/DF3.6b/DF5.5 hold converged, untouched.
+
+| Story | Wave 18 | Wave 20 | Blocking |
+|---|---|---|---|
+| DF3.7 | NOT (1 H) | NOT (0.95) — 1 C3-H + 1 C2-M | W20-1: `chain-failed` was post-`closedAt`-only, but `teardownSandbox`'s harvest/destroy abort **with the record open**; W20-2: `vetoed` must name the `error`-verdict case |
+| DF6.1a | NOT (2 items) | NOT — 1 C2-BLOCKER + 2 C2-M | W20-1: the DoD leg carried Wave-18's stale `(+2) × perAttemptSpendCap` — a Wave-19 partial sync (parent error, self-caught); W20-3: `writes !== []` is a reference compare that counts the shipped lead as write-capable; W20-4: `.factory/fix-scope.json`'s read never names the shipped shared guard |
+| DF6.1b | NOT (marginal) | NOT — 1 C2-H + 1 C2-M | W20-1: the fresh-PR clause read as an intake predicate kills attempt 1; W20-2: `fix-scope-missing` has no terminal classification |
+
+All five applied in-session, gate green:
+- **DF3.7:** `chain-failed` **widened** — "a chain step other than the approval leg threw, at any
+  point in the chain" (harvest/destroy abort with the record open; box-hours ingest post-close;
+  the report leg — every one lands here); `vetoed` names the `error` verdict with its own
+  remediation line.
+- **DF6.1a:** the DoD issue-ceiling leg synced to Technical Notes' formula —
+  `(unchargedCeiling + 3) × perDispatchSpendCap`, with "any formula whose constant or rate term
+  diverges" as the MUST-fail; the single-fixer guard's spelling corrected to the shipped
+  three-state expression (`writes !== null ? writes.length > 0 : true` — a bare `writes !== []`
+  reference-compare counted the shipped lead as write-capable); `.factory/fix-scope.json`'s read
+  path **named**: `readGuardedFile` (`src/providers/allowlist-path.ts` — parent-verified exported),
+  the same guarded config-read the other two security-deciding files go through.
+- **DF6.1b:** the fresh-PR `bot-response-to-fix` clause scoped to **re-invocations only** (a
+  first comment set is the loop's ordinary input; attempt 1 dispatches per AC1) + a DoD leg
+  pinning it; `fix-scope-missing` classified — pre-dispatch, provisions nothing, escalates once,
+  never a continuation — with its DoD leg and a place in the escalation enumeration.
+
+**Next: Wave 21 — two targeted confirming verifiers (DF3.7 · DF6.1a+DF6.1b), then the Phase-3
+operator gate.**
+
+## Waves 20–23 — the targeted convergence loop. CAMPAIGN VERDICT: **CONVERGED — 9 of 9.**
+
+Reports: `_bmad-output/evidence/qds-story-review-2026-09-08/wave20-*` (DF3.7 · DF6.1a/b),
+`wave21-*` (same), `wave22-*` (same), `wave23-final-df37-df61.md` (all three). The six stories
+that crossed earlier (DF3.6a, DF3.6b, DF5.3, DF5.4, DF3.8, DF5.5) held converged, untouched, per
+the no-prose-past-converged-verdict rule; the targeted loop ran only on DF3.7, DF6.1a and
+DF6.1b.
+
+| Story | Converged in | Final residue (accepted per target) |
+|---|---|---|
+| DF3.6a | Wave 18 | C1×2, C4×3 LOW |
+| DF3.6b | Wave 18 | C1×1, C4×1 LOW |
+| DF3.7 | **Wave 23** | C4×2 LOW |
+| DF3.8 | Wave 18 | C4×4 LOW |
+| DF5.3 | Wave 18 | C4×2 LOW |
+| DF5.4 | Wave 12 | C1×1, C4×1 LOW |
+| DF5.5 | Wave 16 | C1×1, C4×7 LOW |
+| DF6.1a | **Wave 23** | C4×1 LOW |
+| DF6.1b | **Wave 23** | C4×1 LOW |
+
+**Every story: zero BLOCKER, zero HIGH, zero C2, zero C3 — the C4-dominant target met.** Wave
+23's final pass found zero blocking items across all three open stories (4 C4-LOW total), and its
+positive set held the entire settled surface: the seven-arm ChainOutcome union ↔ exit table ↔ AC5
+↔ Observability ↔ DoD one mapping (three distinct terminal fills, pre-flight order consistent at
+every statement); the sizing formula character-identical at all three statements with the +3
+counting all three zero-charge reservers and the eight-box sum correct; every zero-match claim
+positively controlled; every cross-story seam (DF3.8 Deviation 1, DF2.11 eighth call site, DF5.1
+cap, DF5.2 INV-PR-1/5/6/7, DF5.3 INV-AUDIT-6/Ten hops, DF5.5 P1.18 handoff, DF6.2 refusal list,
+DD-1/2/2a/8/10) verified real.
+
+**How the loop closed (Waves 19–23, the tail):** Wave 19 caught a **parent error** — the Wave-9
+rollup had recorded W9C-6a-2 as fixed without applying the edit; fixed and the lesson recorded
+(every disposition gets a grep/diff receipt). Waves 20–22 then converged the union design by
+deletion and precision: the `gate-refused` arm (no reachable producer — the chain closes
+`closedAt` before `reverify()` runs and the gate's refusal requires it undefined) was **deleted**
+in favor of the one truthful `approval-failed` arm; `chain-failed` widened to any chain step
+(teardown aborts with the record open); the sizing union settled at
+`parentSpend + 2 × perAttemptCap + (unchargedCeiling + 3) × perDispatchSpendCap` (three
+zero-charge reservers, one uniform rate — terms defined at first use); the fresh-PR
+`bot-response-to-fix` clause scoped to re-invocations; `fix-scope-missing` and
+`scope-requires-privilege` given terminal classifications, stop rules and DoD legs; AC6's
+dual-read design sanctioned; and the exit-table glosses completed. Two verifier claims were
+counter-corrected at source (W16B-2's "phantom `runCredentialLifecycle`" — exported at
+`credentials.ts`; W14-3's "zero matches" for `withGuards` — exists; the rot was the attribution
+wording, and both corrections are recorded above).
+
+**Operational state at convergence:** all edits uncommitted on `dev` (story specs, 3
+seam-ownership tables, tracker, 2 yaml comment corrections, evidence dir); `bun
+scripts/check-story-consistency.ts` green; sprint-status yaml rows unchanged in status
+(ready-for-dev). **Next: the Phase-3 operator gate** — commit + PR (`feature/`, base and target
+`dev`) on operator confirmation, then dev-phase implementation via `qds-dev` in dependency order
+(DF5.5 last; its yaml meta-block recompute precondition already verified at 42/169).
+
 ## Wave 5 result — the protocol predicted 30–50%; we got 93%
 
 | Verifier | B | H | M | L | Total |

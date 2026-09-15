@@ -149,7 +149,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
    `checkBounds` lives inside `createSteering` (DF3.6a's Files list), and on this path
    `createSteering` is never called, so a bounds-check line is structurally unavailable and asserting one
    would force a second bounds-telemetry emitter into existence. No `residentTripwire` row is
-   emitted, leaving DF3.3's closed three-cause set unchanged. The run proceeds deterministic rather than
+   emitted, leaving DF3.3's closed union unchanged as shipped — the three members exist only
+   after 6a's widening, which includes this story's own `watchdog_kill` (W10C-6b-2). The run proceeds deterministic rather than
    running an agent whose memory nobody can bound. The check runs at **arming**, against a cgroup
    the engine either can or cannot create — not against a process that does not yet exist
    (`startResident` spawns nothing).
@@ -168,7 +169,13 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
    contracted record shape carries a mid-call placement failure: the bounds-check line cannot
    observe a failure inside `caller.call`, and the tripwire union has no member for it) — and
    **awaits `residentSpawn.stop()`** on the handle it holds, so the resident is stopped, **no
-   further solicitation is issued for it** (the stop latch and the status gate hold), and the run
+   further solicitation is issued for it** — the stop latch holds, and the status gate holds
+   because the engine's `instanceof PlacementRefusedError` arm **first writes
+   `telemetry.status = "stopped"`** (the one-way-latch write AC5's proximate-cause rule licenses:
+   an unenforceable bound is this pair's enforcement being the proximate cause) **before** firing
+   `onBoundBreach`, so the next engine solicitation point is refused by the status gate — the
+   opaque stop-latch throw can never fall into the degrade arm and re-create the misclassification
+   edit (v) exists to prevent — and the run
    continues deterministic. AC3's arming check is once per run; this is the per-solicitation half of
    the same invariant. *Negative control: a wrapper joining the two commands with `;` execs pi with
    no `memory.max`, and the resulting journal is indistinguishable from a bounded solicitation —
@@ -182,7 +189,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
    `telemetry.exitStatus` is written `"overflow"`, and no further solicitation is issued. The engine
    detects and records; it does **not** call `stop()` and cannot, because `stop()` is on
    `ResidentSpawn`, which the engine never receives. It fires `onBoundBreach`, and the runner —
-   which holds the handle (`scripts/pipeline-run.ts:3294`) — calls `stop()`. Without
+   which holds the handle (`residentSpawn = spawned`, `scripts/pipeline-run.ts`) — calls `stop()`. Without
    this, an OOM-killed pi is a signal death (`src/fleet/resident.ts:606-627`) that sets
    `lastExit = "transient"` and throws, the engine's call-failure path writes `"degraded"`, nothing
    calls `stop()`, and the journal reads `status:"degraded"` beside `exitStatus:"overflow"` — a
@@ -389,7 +396,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   placement-failure channel (W9C-6b-2, AC4): the `ResidentCaller` contract gains the engine-owned
   `PlacementRefusedError` rejection (exit 97, thrown by fleet's caller when the placement wrapper
   fails before `exec`) and the call-failure catch gains its `instanceof` arm beside the
-  degrade arm, firing `onBoundBreach({ bound:"rss", cause:"unenforceable", … })` instead of
+  degrade arm, writing `telemetry.status = "stopped"` (AC5's proximate-cause rule licenses it here)
+  and then firing `onBoundBreach({ bound:"rss", cause:"unenforceable", … })` instead of
   writing the `"degraded"` latch. DF3.6a's enumerated list is amended accordingly (item 6, this
   story's — the same cross-story amendment shape that put `lastMemory` in item 5). The `lastMemory` dep
   lands in **DF3.6a's** diff (its Files list item 5), because the deps object is one literal and two
@@ -399,11 +407,14 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   `ResidentSpawn`, which the engine never receives — the same reason `lastMemory` had to become a
   dep. `onBoundBreach` is the channel out; the runner, which does hold the handle
   (`residentSpawn = spawned` at the sole `createSteering` call site), is what calls `stop()`.
-- `src/phase-engine/manifest.ts` — **the `residentRssBytes` default constant only** (W6-C-H4):
-  DF3.6a marks the shipped 512 MiB default provisional-pending this story's measured baseline, and
-  this story's Files budget carries re-setting that one constant from the live measurement. No other
-  field, no schema change — the three bound fields and their validation are DF3.6a's.
-- `scripts/pipeline-run.ts` — **the pair takes six edits on this file; the count is stated once, in
+- `src/phase-engine/resident-bounds.ts` — **the `PROVISIONAL_RESIDENT_RSS_BYTES` constant only**
+  (W6-C-H4 as re-homed by W14C-PAIR-1): DF3.6a marks the 512 MiB provisional-pending this story's
+  measured baseline, and this story's Files budget carries re-setting **that constant, in
+  DF3.6a's `resident-bounds.ts`** — not `manifest.ts`, which carries no default at all (a schema
+  default would make DF3.6a AC2a's missing-value refusal unobservable; the W6-C-H4 file assignment
+  predates that design). No other field, no schema change — the three bound fields and their
+  validation are DF3.6a's.
+- `scripts/pipeline-run.ts` — **the pair takes seven edits on this file; the count is stated once, in
   DF3.6a's Files to Modify, and mirrored here so neither half's "no other change" can reject the
   other's** (W6-C-M2): DF3.6a lands (i)–(ii); **this story adds (iii)** `residentRssBytes` on the
   `startResident` call, **(iv)** `lastMemory: spawned.lastMemory` at the `createSteering` call,
@@ -416,9 +427,14 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   would then treat the resident as absent so no further calls issue, but nothing stops the spawn
   handle and nothing records why),
   recording the failed solicitation `{bound:"rss", allowed:false, cause:"unenforceable"}` on the
-  fleet `warn` chokepoint (harvested via fd-2), and **(vi)** the arming-refusal classification — the typed
+  fleet `warn` chokepoint (harvested via fd-2), **(vi)** the arming-refusal classification — the typed
   cgroup-refusal error handled beside the rate arm in the arming `try/catch`, emitting
-  `resident_disabled` / `rss_unenforceable` through the existing disabled-shape branch (AC3).
+  `resident_disabled` / `rss_unenforceable` through the existing disabled-shape branch (AC3), and
+  **(vii)** **the run-down refresh precedence** (full text in DF3.6a's Files list): the final
+  telemetry refresh keeps the engine's `exitStatus:"overflow"` when the engine wrote it and fills
+  the process-probe word only when the engine wrote none — the probe's `lastExit` is never
+  `"overflow"`, so without this edit the shipped refresh overwrites AC1's make-or-break journal
+  observable with `"transient"` on a kernel OOM-kill.
   Rebases onto DF3.6a. Nothing else in the file changes.
 - `oci/exedev/systemd/qds-run@.service` — add `Delegate=memory`. One directive; it is what makes the
   cgroup writable by `User=exedev` without root, D-Bus or polkit.
@@ -489,7 +505,12 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       cannot share one box or one run record.
       **Leg A — the crossing (proves AC1's enforcement clause: the kernel kills a cgroup the engine
       never signals, with the engine's pi code not running).** A synthetic allocator binary is
-      installed on the box as **that leg's `QDS_PI_BIN`** — it allocates past the fixture bound in a
+      installed on the box as **that leg's `QDS_PI_BIN`** — staged by the leg's dispatch setup and
+      named through that box's `/home/exedev/app/.env`, the unit's mandatory `EnvironmentFile=`
+      (`AssertPathExists`), which reaches the engine's process env without touching DF2.10's
+      image-baked `QDS_` allow-list (the `.env` is box-local, never image content); the leg's
+      dispatch writes the `QDS_PI_BIN=<allocator path>` line beside the provisioned key, and Leg B's
+      box carries no such line, so the production pi runs there. It allocates past the fixture bound in a
       loop and exits; the cgroup machinery, the `memory.max` write and the `oom.group=1` write are
       the production ones. This leg costs **≈zero spend** (it never calls the model) and is
       *producible by construction*: its falsifier is `memory.events`' `oom_kill` count `0` or the
@@ -514,7 +535,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       `tests/phase-engine/fixtures/pi-catalog`, teardown in `finally` — a leaked box on an OOM path
       is a leaked box that bills. **A host-side unit test cannot substitute — darwin has no cgroups
       — and the story is not done without this round.**
-- [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's 512 MiB default in `src/phase-engine/manifest.ts` — that one constant is in this story's Files to Modify** (W6-C-H4: the value lived in the merged half while the measurement lived here, with no file budget to change it — an unowned drive-by waiting to happen). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. Marginal spend: zero — it reads a file from a solicitation the round already makes.
+- [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's `PROVISIONAL_RESIDENT_RSS_BYTES` in `resident-bounds.ts` — that one constant is in this story's Files to Modify** (W6-C-H4 as re-homed by W14C-PAIR-1: the value lives in DF3.6a's bounds module, `manifest.ts` carries no default — the W6-C-H4 rationale stands, the file moved with the required-field design). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. Marginal spend: zero — it reads a file from a solicitation the round already makes.
 - [ ] **Test (cgroup scoping, AC2):** a `dispatch_task` phase running beside a small resident does **not** trip the bound — the workers are not in the resident's cgroup. An implementation setting `MemoryMax=` on `qds-run@<runId>.service` passes a synthetic-allocator "does it fire?" test and MUST fail this one.
 - [ ] **Test (fail-closed unenforceable, AC3/INV-MEM-2):** with `Delegate=memory` absent from the unit, the resident is **not started**, the journal records `resident.status:"disabled"`, the log line carries `cause:"unenforceable"`, no tripwire row is emitted, and the run still completes deterministically — never an unbounded resident.
 - [ ] **Test (image contract):** the Dockerfile unit scan fails the build when `Delegate=memory` is removed from `qds-run@.service` — the assertion is the fence, the same shape as the Dockerfile's existing `RuntimeDirectoryPreserve=yes` check.

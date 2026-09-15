@@ -51,9 +51,11 @@ or putting a push credential in a box.
 ## Overview
 
 `bun scripts/fix-run.ts --pr <n>` reads the PR's review comments through the GitHub API with the
-host's own token reader, keeps the bot-authored ones, and puts the run in `review_feedback_detected`
-with a `botComments[]` payload (the shape P1.18 defines, `p1-18-pr-comment-polling.md:36`, without its
-receiver). `src/fixloop/feedback-run.ts` turns that payload into an ordinary factory brief pinned to
+host's own token reader, keeps the bot-authored ones, and carries them as a `botComments[]`
+payload (the shape P1.18 defines, `p1-18-pr-comment-polling.md:36`, without its
+receiver — P1.18's `review_feedback_detected` is a webhook-era protocol state that exists nowhere
+in shipped code, and this story adds no state machine: the loop's input is the comment set itself,
+not a run-state transition). `src/fixloop/feedback-run.ts` turns that payload into an ordinary factory brief pinned to
 the PR branch head, refuses a roster with more than one write-capable worker **before any box is
 billed**, and dispatches it through the **DF3.1 dispatcher** — a fix run is a normal run, not a
 special dispatch path. `fleet run <run-id>` starts `qds-run@<run-id>.service` and returns; DF1.6's
@@ -96,7 +98,7 @@ owned by neither half).
 When `bun scripts/fix-run.ts --pr <n>` runs, it reads the PR's bot comments and builds a brief
 carrying the comment body and `commitSha` = PR head → `fleet dispatch` mints `qds-…` and provisions a
 box → `fleet run <run-id>` starts `qds-run@<run-id>.service` and returns → `dispatch_task` runs the
-single-fixer roster (lead + one write-capable fixer + read-only analyst) **in-box** → the engine
+single-fixer roster (lead + one write-capable fixer — the shipped two-role `config/rosters/roster.yaml`; no analyst is added, though AC5's guard permits one) **in-box** → the engine
 writes `/run/qds-run/<run-id>/journal/final.json` → **DF3.7's `observeAndDriveChain(runId, deps)`**
 reads that marker through `readBoxFile` and drives harvest → teardown → host-side re-verify green →
 the gate's `requestApproval` leaves the record `awaiting-approval` → **invocation 1 exits 0 with
@@ -171,7 +173,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
 ## Acceptance Criteria
 
-1. **(make-or-break — was DF6.1 AC1)** Given a run in `review_feedback_detected` with ≥1 bot review
+1. **(make-or-break — was DF6.1 AC1)** Given a PR carrying ≥1 bot review
    comment, When the fix run is dispatched, Then it goes through the DF3.1 dispatcher as a normal
    factory run pinned to the PR branch head, the single-fixer team **reads the comment and implements
    a fix in-box** whose commits reach the PR branch in AC2
@@ -188,7 +190,11 @@ the harvested diff, the credential probe, and the `fixContext` write.
    green verdict, decided by the operator *after* that run's `ReverifyReport` completed, and bound to
    that report's `reportId` and head sha — and the proposal the operator approves **names the act
    this loop performs**: an adds-only edit to `src/reverify/runner.ts` (Files to Modify) varies
-   `requestApproval`'s proposal when the run carries a `fixContext` brief key, so the one human
+   `requestApproval`'s proposal when the run's own record carries `extensions.fixLoop.fixRun` —
+   the mint-time marker this story's dispatch writes on every fix attempt's record before the chain
+   runs; `runner.ts` already holds that record (its `store.get(runId)` read precedes the
+   `requestApproval` call), so the variation reads a value in hand — no new I/O, no new dependency,
+   and no reliance on the brief, which travels in-box and is never host-side — so the one human
    consent in an otherwise autonomous loop is prompted with *"append a verified fix commit to the
    PR's branch"*, never with a description of a different act. An approval from a previous attempt never authorizes this
    one. When the host then pushes via `pushVerifiedSha(runId, { targetRef: <PR branch ref> })` —
@@ -282,7 +288,14 @@ the harvested diff, the credential probe, and the `fixContext` write.
    contributed — When the
    host compares every path in it against `.factory/fix-scope.json`'s allow-list, deny-list and
    permitted action set, Then a diff touching anything outside that scope **blocks
-   `pushVerifiedSha`** — nothing is pushed and the attempt refuses. In-box scoping is **advisory
+   `pushVerifiedSha`** — nothing is pushed and the attempt refuses. **AC6 is this pair's only
+   normative scope read, and it is read twice by design** (W21's HIGH): the enforcement read here,
+   on the harvested diff in invocation 2, and the **attempt-start probe** — the same allowlist
+   read, run host-side in `feedback-run.ts` **before attempt 1's dispatch** (the placement the
+   mandatory e2e demo's "refuses `fix-scope-missing` before any box is provisioned" legs and
+   DF6.1b's stop-leg mandate), so a missing or unreadable artifact refuses before any box spend
+   rather than after re-verify and approval. Both reads are this story's own code against the one
+   artifact; the probe sanctions no second implementation. In-box scoping is **advisory
    only**: a skip-permissions agent controls everything the box does, so a rule the box enforces on
    itself is a claim (F10, fact 15).
 
@@ -322,7 +335,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
 | Trigger | Status | E2E Test | Follow-Up |
 | --- | --- | --- | --- |
 | `bun scripts/fix-run.ts --pr <n>` — operator-initiated fix run, the **sole** trigger (DD-1: the operator is the channel). One invocation drives **at most one attempt** | in-scope | `tests/fixloop/cli.test.ts` | DF6.1b extends this verb additively to drive attempt 2 |
-| Bot-comment read: the CLI fetches the PR's review comments and state through the **new `GitHubApi` members this story declares** — `listPrReviewComments` and `getPullRequest`, added to the interface and `httpGitHubApi` as an adds-only `src/pr/github.ts` edit — authenticated via `readHostToken` and filtered to bot authors → `review_feedback_detected` with `botComments[]` | in-scope | `tests/fixloop/feedback-run.test.ts` | — |
+| Bot-comment read: the CLI fetches the PR's review comments and state through the **new `GitHubApi` members this story declares** — `listPrReviewComments` and `getPullRequest`, added to the interface and `httpGitHubApi` as an adds-only `src/pr/github.ts` edit — authenticated via `readHostToken` and filtered to bot authors → the bot-authored comment set carried as `botComments[]` (no protocol state — `review_feedback_detected` is P1.18's webhook-era state, absent from shipped code and from this story's edit list) | in-scope | `tests/fixloop/feedback-run.test.ts` | — |
 | Completion of the in-box fix run | in-scope — observed through **DF3.7's** `observeAndDriveChain(runId, deps)` under `<runsDir>/<runId>.lock`; this story implements no observer | `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` | — |
 | The real fix attempt end to end on a real box (DOD e2e) | in-scope | `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` | — |
 | Human (non-bot) review comment | out-of-scope — the comment filter keeps bot authors only; a human asks the operator | — | — |
@@ -359,7 +372,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   returns nothing, and the nearest shipped allowlist — `resolveRepoEntry` (`src/pr/repos.ts`, called
   from `src/pr/push.ts`; `DEFAULT_REPOS_FILE = ".factory/repos.json"` lives beside the function) —
   allowlists **repositories and base branches**, not paths, as the calling section's comment in `src/pr/push.ts` says
-  (*"the allowlist — remote and base branch, never the harvested config"*).
+  (*"the allowlist — remote and base branch, never the harvested config"*). The artifact's **read path is the shipped shared guard**, not a bespoke open: `.factory/fix-scope.json` is the third security-deciding config file in the factory (beside `.factory/repos.json` and the cost config), and it is read through `readGuardedFile` (`src/providers/allowlist-path.ts`) — the same no-create, identity-checked config-read discipline the other two go through — so AC6's enforcement never re-derives a private file-read.
 
   This story adds `.factory/fix-scope.json`:
   `{ schemaVersion: 1, allowedPathGlobs: string[], deniedPathGlobs: [{ glob, reason }],
@@ -433,7 +446,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   `assertKind` throws `schema-rejected: extensions.fixLoop.fixContext must be a string` on any object.
   So **both payloads are stored JSON-encoded as `"string"` values** and this story owns the *encoded*
   shape of `fixContext` (`schemaVersion: 1`), validated by `src/fixloop/`'s own parser on read and
-  write. DF2.1's twelve-field core and its `FieldKind` set stay closed and unchanged.
+  write. DF2.1's thirteen-field core (thirteen since `requestId` joined it) and its `FieldKind` set stay closed and unchanged.
   - `fixContext: { prNumber, prBranch, attemptSha, attempt, pollWindowOpenedAt,
     commentIds: string[],
     omittedCommentIds: string[] (capped at 20), omittedCount: number, commentsDigest }` —
@@ -560,8 +573,27 @@ the harvested diff, the credential probe, and the `fixContext` write.
   aggregate on one identity and DF5.3's chain joins them on the key it already uses. The cost of that
   choice is stated rather than discovered: parent + up to 2 attempts accumulate on **one** per-issue
   ceiling, so the fix run's admission declares its aggregate the way F15 makes fan-out declare its own
-  — `perIssueOverrides` for that issue must cover `parentSpend + 2 × perAttemptCap` before attempt 1 is
-  dispatched. **The check is this story's own, not a borrowed refusal:** it runs host-side in
+  — `perIssueOverrides` for that issue must cover **the worst-case union of both ceilings**
+  (W16's sizing HIGH: `parentSpend + 2 × perAttemptCap` sized the charged budget only, while
+  DF6.1b's ceilings sanction up to eight resource-bearing boxes per PR — 2 charged + 3 uncharged +
+  1 dispatch-refused + 1 out-of-scope-diff + 1 scope-requires-privilege — and `admitIssue` consumes the same per-issue ceiling
+  on every dispatch, so a charged-only aggregate starves the second charged attempt after one
+  zero-charge box and makes DF6.1b's uncharged ceiling unreachable live): the override must cover
+  **every resource-bearing box the ceilings sanction** —
+  `parentSpend + 2 × perAttemptCap + (unchargedCeiling + 3) × perDispatchSpendCap` — the two
+  charged attempts at `perAttemptCap` (the per-attempt budget DF6.1b's AC2 charges); every other
+  resource-bearing box at `perDispatchSpendCap` — the **uniform** per-dispatch reservation the
+  shipped gate computes (`admittedCeiling = min(keyCap, remaining)`; one rate, not two — W19-3) —
+  and the `+3` counts **all three zero-charge boxes that still reserve**: dispatch-refused,
+  out-of-scope-diff **and scope-requires-privilege** (W19-1: three zero-charge reservations, not
+  two; the reachable maximum is five-to-six boxes, so the union stays conservative rather than
+  being trimmed to it); each uncharged, resource-bearing attempt is itself bounded by
+  `perDispatchSpendCap` (whose exhaustion classifies it `overflow`); **plus the dispatch-refused
+  and out-of-scope-diff boxes, which also reserve against the per-issue ceiling** (`admitIssue`
+  reserves on every dispatch, and both boxes sink real box-hours and a capped key before their
+  zero-charge classification — W18's sizing re-derivation against `admitIssue`/`issueBudgetSnapshot`,
+  where committed = spent + reserved) — and **the loop's issue-ceiling pre-flight asserts that coverage**
+  before attempt 1 is dispatched. **The check is this story's own, not a borrowed refusal:** it runs host-side in
   `src/fixloop/feedback-run.ts` **before dispatch**, reading the ledger snapshot for the pinned
   `${repoSlug}#${issueId}`, and an insufficient ceiling refuses at **exit 5 `fix-ceiling-insufficient`
   with nothing provisioned**, naming the exact `perIssueOverrides` line. The shipped
@@ -647,13 +679,22 @@ the harvested diff, the credential probe, and the `fixContext` write.
   DF3.1's brief schema. No existing key, shape or validation rule is changed.
 - `.factory/fix-scope.json` — **new, host-owned, this story's artifact.** AC6's allowed-path list.
   See Technical Notes, "The host-owned scope artifact".
-- `src/providers/run-record.ts` — **one adds-only registration**: `fixAttemptRunIds: "strings"`
+- `src/providers/run-record.ts` — **one adds-only registration, three fields**: `fixAttemptRunIds: "strings"`
   joins the already-registered `fixLoop` fields (the attempt-time ledger this story owns the
   registration and dispatch-time append of — see the Overview and AC3; DF6.1b's driver is the
-  reader). **Forward dependency, stated where the implementer will look:** DF6.1b is sequenced
+  reader), and `fixRun: "string"` joins the same namespace as the **mint-time fix-run marker** —
+  this story's dispatch writes `"true"` on every fix attempt's own record when it mints it, before
+  the chain runs, which is the host-side observable the AC2 proposal variation keys on (the brief
+  travels in-box and is never host-side, and `fixContext` is only written post-push — after
+  `requestApproval` has fired), and `fixOutcomeClass: "string"` joins the same namespace as the
+  **per-attempt terminal-outcome classification carrier** — the field DF6.1b's terminal transition
+  writes under the parent lock and its attempt ladder's terminal arm reads; without a registered
+  home for the classification, charged/uncharged/dispatch-refused are underivable on read and
+  `poll-interrupted` is byte-indistinguishable from a completed charged failure (Wave-10 D's
+  BLOCKER — this registration is its remedy). **Forward dependency, stated where the implementer will look:** DF6.1b is sequenced
   after this story and depends on this registration landing here — its read path resolves a field
-  this diff registers, so neither half may say "no change expected" on this file. Beyond the one
-  registration, the already-registered entry is *read* only; anything further would be a DF2.1
+  this diff registers, so neither half may say "no change expected" on this file. Beyond the three
+  registrations, the already-registered entries are *read* only; anything further would be a DF2.1
   core edit requiring its own justification.
 - `src/pr/github.ts` — **adds only**: `listPrReviewComments` (PR **review** comments — the
   `/pulls/{n}/comments` endpoint, a different surface from issue comments) and `getPullRequest`
@@ -666,7 +707,9 @@ the harvested diff, the credential probe, and the `fixContext` write.
   `tests/pr/` gain them in this story — a DoD leg asserts DF5.2's `tests/pr` suite green with its
   assertions unchanged.
 - `src/reverify/runner.ts` — **adds only**: the `requestApproval` proposal string varies when the
-  run carries a `fixContext` brief key, reading *"append a verified fix commit to PR \<n\>'s
+  run's own record carries `extensions.fixLoop.fixRun` (the mint-time fix-run marker DF6.1a's
+  dispatch writes before the chain runs — observable in the record the runner already fetched at
+  its `store.get(runId)` read, so no new I/O), reading *"append a verified fix commit to PR \<n\>'s
   branch"* instead of the hard-coded *"open a PR for run …"* — the loop's one human consent must
   describe the act actually being authorized (AC2). No other behavior changes.
 - `src/fleet/run-completion.ts` — **not modified.** DF3.7 owns it; this story calls
@@ -758,7 +801,14 @@ the harvested diff, the credential probe, and the `fixContext` write.
   false-green on the story's highest-severity invariant. The sink list is stated so the claim and the
   test agree.
 - INV-7: **Any validation that can refuse MUST run before the irreversible action.** The record write
-  is pre-flighted in validate-only mode before `pushVerifiedSha`, never after it. A validator that can
+  is pre-flighted in validate-only mode before `pushVerifiedSha`, never after it — and
+  **validate-only has a named route** (W10-W10-1): a **scratch `RunRecordStore`** constructed on a
+  `mkdtempSync` temp dir with `create: true`, the same `set()` applied there and the directory
+  discarded. That is the route the import fence's permitted `RunRecordStore`/`RunRecord` import
+  actually reaches — the shipped store's public surface is exactly
+  `path`/`lockPath`/`create`/`get`/`set`/`close`/`list`/`listWithAnomalies`, `assertNoSecret` and
+  `assertKind` are unexported, and this story's fence forbids importing them directly — so the
+  scratch store is how "the same validation the write will apply" runs for real. A validator that can
   throw — `assertNoSecret`, `assertKind`, this story's own `fixContext` parser — placed after an
   outward-facing act converts a *refusal* into a *published commit with no record*, which is strictly
   worse than either outcome the validator was written to produce.
@@ -850,7 +900,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
       treats `pushed: false` as "nothing happened" strands a run whose fix is already on the PR branch
       and MUST fail.*
 - [ ] **Test (issue-ceiling declaration):** a fix dispatch whose parent issue ceiling is below
-      `parentSpend + 2 × cap` refuses **exit 5 `fix-ceiling-insufficient`** in
+      the worst-case union — `parentSpend + 2 × perAttemptCap + (unchargedCeiling + 3) ×
+      perDispatchSpendCap` (Technical Notes; a charged-only `parentSpend + 2 × cap` threshold — or
+      any formula whose constant or rate term diverges from Technical Notes' — is
+      the deficient implementation and MUST fail this test) — refuses **exit 5 `fix-ceiling-insufficient`** in
       `feedback-run.ts` **before dispatch** — the host-side ledger-snapshot check, not the fan-out
       primitive's `issue-ceiling-insufficient` (whose n-arms message cannot fire on a single
       dispatch) — naming the `perIssueOverrides` line, with nothing provisioned and no ledger row
@@ -893,9 +946,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
       *An implementation probing only what `systemd-run` can see MUST fail this leg — the file is the
       one env source the unit loads that a transient unit cannot inherit.*
 - [ ] **Test (single-fixer guard):** write capability is counted from DF1.5's per-role `writes` list
-      in `feedback-run.ts` before dispatch, where **write-capable ⟺ `writes !== []` — i.e. `null` OR a
+      in `feedback-run.ts` before dispatch, where **write-capable ⟺ `writes !== null ? writes.length > 0 : true` — i.e. `null` OR a
       non-empty array; `null` is UNRESTRICTED, not absent, so neither `writes.length > 0` nor
-      `writes?.length > 0` is a correct spelling.** A roster with two write-capable workers → exits
+      `writes?.length > 0` — and not a bare `writes !== []`, which is a reference compare that
+      counts the shipped roster's lead (`writes: []`) as write-capable — is a correct spelling.** A roster with two write-capable workers → exits
       non-zero and provisions nothing; **a roster whose two workers both declare `writes: null` →
       exits non-zero and provisions nothing**; a single-fixer roster passes; a fixture whose read-only
       analyst is *named* like a fixer still passes, so a name-based implementation MUST fail. An
@@ -921,8 +975,9 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `pushVerifiedSha` is never called, nothing reaches the PR branch, and the attempt logs
       `flags: ["out-of-scope-diff"]` with the offending paths. An implementation relying only on the
       brief's in-box scoping MUST fail this test (AC6). *(`flags` is an **observability field on the
-      `fix-attempt-refused` log line**, never a run-record field: `src/providers/run-record.ts` registers
-      exactly `fixContext` and `fixOutcome`, and AC4 forbids a record for an attempt that published no
+      `fix-attempt-refused` log line**, never a run-record field: `src/providers/run-record.ts` pre-registers
+      exactly `fixContext` and `fixOutcome` (this story's adds-only edit adds
+      `fixAttemptRunIds`/`fixRun`/`fixOutcomeClass` on top — W19-5), and AC4 forbids a record for an attempt that published no
       sha. Same for `scope-requires-privilege`.)*
 - [ ] **Test (e2e demo — MANDATORY):** `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` (new),
       calling **`liveGate("2")`** under `test.todoIf(!process.env.QDS_E2E_LIVE)` like every other live
@@ -977,9 +1032,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
       whole chain by exec'ing the worker argv from the host passes every other test in this story and
       MUST fail this one.* This is the ADR's own failure mode, stated in its forensics — in the ADR's
       own words: *"Seven review rounds (~260 findings) missed it: e2e tests ran a fake pi on the host
-      and no AC tested locality"* — the host-side
-      placement having *"survived seven review rounds precisely because no AC tested locality"*
-      (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md:46-48`). AC1's negative control names
+      and no AC tested locality"* — and, in this story's paraphrase of the same point, the host-side
+      placement survived those seven review rounds precisely because no AC tested locality (only the
+      first sentence is the ADR's verbatim text, `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`;
+      the "survived" phrasing is not an ADR quotation). AC1's negative control names
       the wrong shape; this item is what makes it observable at runtime.
 
 ## Dev Agent Record
@@ -1077,7 +1133,7 @@ now two bounded invocations split at the gate, new AC3, no residency across a hu
 **V-CC-H6** (locality proven by three runtime observations, not asserted by implementation shape) ·
 **V-CC-H7** (the disposable repo is retained until DF6.1b's demo runs) · **V-DF6.1a-L1** (DF3.7's
 INV-IBOX-16 already carries the reworded clause; quoted rather than described as pending) ·
-**V-DF6.1a-L3** (`fleet.ts:1976` is the key-mint lock on the just-minted runId — stated, because it
+**V-DF6.1a-L3** (`scripts/fleet.ts`'s key-mint `acquireRunLock` on the just-minted runId — stated, because it
 was reading as support for a claim that was false).
 
 **V-CC-M7** is **closed, not deferred**: `commentsDigest`'s absence of a reader is now stated as
@@ -1135,7 +1191,7 @@ What does NOT exist anywhere (verified by grep across `src/`): a producer of
 `testResults{passed,failed}` counts — per DF1.6's contract note
 (`src/fleet/rank.ts:26-28`) no `testsPassed` shape exists, and no production code
 emits pass/fail counts at all. `changedFiles` half-exists: the worker reply
-contract carries it (SCHEMA_INSTRUCTION, `cli-anything/scripts/team-lead-driver.ts:365`),
+contract carries it (SCHEMA_INSTRUCTION, `cli-anything/scripts/team-lead-driver.ts`),
 but in T2.1 that reply landed in `/tmp/t2-pi-out.txt` **in the box** and only the
 harness parsed it — nothing host-side captures it as an artifact. Consequence for
 this story's fix runs: if any consumer wants structured per-run output (attempt
@@ -1209,8 +1265,11 @@ decide at dev time because it decides whether the loop fits the default ceiling.
 > **ANSWERED 2026-09-08 (DF6.1-H2) — see Technical Notes, "The fix brief pins the parent run's
 > `issueId`".** The OPEN QUESTION is closed in the spec rather than at dev time, because it decided
 > whether the loop fits the default ceiling. The brief pins the **parent** run's `issueId`; the
-> aggregate `parentSpend + 2 × perAttemptCap` is declared in `perIssueOverrides` before attempt 1, and
-> an insufficient ceiling refuses exit 5 `issue-ceiling-insufficient` with nothing provisioned. Two
+> aggregate `parentSpend + 2 × perAttemptCap + (unchargedCeiling + 3) × perDispatchSpendCap` (the
+> worst-case union of both ceilings **plus the three zero-charge boxes that still reserve** — see
+> Technical Notes; the charged-only sizing was corrected by Wave 16's sizing HIGH, the
+> reservation count by Waves 18–19) is declared in `perIssueOverrides` before attempt 1, and
+> an insufficient ceiling refuses exit 5 `fix-ceiling-insufficient` with nothing provisioned. Two
 > facts sharpened it: `issueId` is a **required** BriefSchema field (`src/fleet/brief-schema.ts:305`,
 > no `.optional()`), so "leave it out" was never available; and the issue ref is load-bearing on the
 > **push**, not just the budget — `createRun` writes it into `extensions.budget`, which
@@ -1218,25 +1277,24 @@ decide at dev time because it decides whether the loop fits the default ceiling.
 > (`src/pr/push.ts:340-346`).
 
 **5. Other inherited constraints.**
-- **DF13 fleet-ceiling TOCTOU** (handoff appended to `df3-2-fanout-best-of-n.md:799`):
-  plain `dispatch()` holds NO fleet lock — two concurrent dispatches can both sample
-  `liveVms === ceiling - 1` and both create (pinned red-by-design in
-  `tests/fleet/dispatch.test.ts`; do not delete the pin). The fan-out half is closed
-  by AC8's `.sandbox/fleet.lock`.
-
-  > **Re-verified 2026-09-08 at `fa7d0e26` — the residue is substantively TRUE; only its citations
-  > were stale.** `src/fleet/fleet-lock.ts` now exists, but `FleetLock` is instantiated in exactly
-  > **one** place — `src/fleet/fanout-primitive.ts:360` — and neither `src/fleet/dispatch.ts` nor
-  > `scripts/fleet.ts` references it. So plain `dispatch()` still holds no fleet lock and the ceiling
-  > race is still open; the fan-out half is still the only half closed. The lock `fleet dispatch`
-  > *does* take (`acquireRunLock`, `scripts/fleet.ts:1976`) is **per-run**, so it serializes
-  > invocations against one run and cannot cover a ceiling race between two *different* runs.
-  >
-  > **What this half inherits, precisely:** under one-invocation-one-attempt (DF6.1b) a fix attempt
-  > is an ordinary single dispatch, so it carries exactly the same inherited ceiling race every other
-  > dispatch does — no more, and none specific to the loop. This story neither closes it nor widens
-  > it; the quota-layer intent-record direction in the DF13 handoff is where a closure would land.
-  > Do not delete the red-by-design pin in `tests/fleet/dispatch.test.ts`.
+- **DF13 fleet-ceiling TOCTOU — CLOSED at source; the prior re-verification briefing was WRONG and
+  is corrected here (Wave-9 fix, parent-verified).** The earlier briefing ("Re-verified at
+  `fa7d0e26` — the residue is substantively TRUE; plain `dispatch()` still holds no fleet lock and
+  the ceiling race is still open; do not delete the red-by-design pin") was false at that commit:
+  the in-process admission race was closed 2026-08-25 by `99f591e3` ("close the in-process
+  fleet-ceiling admission TOCTOU"), a verified ancestor of this branch (`git merge-base
+  --is-ancestor`). The current `tests/fleet/dispatch.test.ts` concurrent-dispatch block asserts
+  exactly **one** winner — the loser exits 5 `no-headroom`/`vm-ceiling`, one record, one box — and
+  its comment names "the overshoot precondition **the old pin** relied on": the red-by-design pin
+  no longer exists; there is nothing to delete or work around. The briefing's invalid step was
+  inferring "no `FleetLock` in `dispatch` ⇒ race open" — the closure came from the admission logic,
+  not from a dispatch-side fleet lock. The surviving true half: `FleetLock` is instantiated in
+  exactly one place (`src/fleet/fanout-primitive.ts`), and `fleet dispatch`'s `acquireRunLock` is
+  **per-run**, so it serializes invocations against one run and cannot itself cover a ceiling race
+  between two different runs. **What this half inherits, precisely:** under
+  one-invocation-one-attempt (DF6.1b) a fix attempt is an ordinary single dispatch and inherits the
+  post-closure admission behavior every other dispatch has — nothing specific to the loop, no pin,
+  no workaround owed.
 - **Race pattern + reapRuns remain never-proven-live** (run-report §Known-residual) —
   do not cite them as proven machinery in tests or DOD.
 - **commitSha stamping now happens post-gate** (money-identity fix `536c23b`): a
