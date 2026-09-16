@@ -1741,10 +1741,13 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
           hostRoot,
           runLock: h,
           keyApi,
-          // The RECORD's dispatch stamp is the join key, never this
-          // invocation's id — the sweep case dispatches nothing and cannot
-          // mint it (observability contract).
-          requestId: rec.requestId ?? requestId,
+          // The RECORD's dispatch stamp is the join key whenever it carries
+          // one — the module's recordRequestId applies that truthiness rule,
+          // so this invocation's mint is what is passed: `??` here would let
+          // a record stamped "" win, and the sweep case (which dispatches
+          // nothing and mints no stamp) must not invent one (observability
+          // contract).
+          requestId,
           costLedger,
           windowMs,
         });

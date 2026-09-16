@@ -170,9 +170,16 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
       expect(outcome).toEqual({ kind: "chain-failed" });
       expect(existsSync(lockPath())).toBeTrue();
       expect(isRunLockDestructive(lockPath())).toBeTrue();
-      // The exit path's posture: releaseHeldRunLocks skips the marked lock.
-      releaseHeldRunLocks();
+      // The exit path's posture (releaseHeldRunLocks skips the marked lock) is
+      // proven by STATE, not by performing the sweep: the sweep is process-wide
+      // and would release every other held entry in this suite, so order
+      // dependence for a lock another test holds. The state the skip arm
+      // presumes — the marked entry still registered in `held`, its file and
+      // mark untouched — is exactly what a re-acquire of the same path sees:
+      // refused re-entrant, nothing rewritten.
+      expect(() => acquireRunLock(dir, RUN_ID, "test")).toThrow(RunLockReentrantError);
       expect(existsSync(lockPath())).toBeTrue();
+      expect(isRunLockDestructive(lockPath())).toBeTrue();
     } finally {
       // Operator-judged clear + release — the same cleanup the destructive
       // tests above perform, so neither the mark nor the held entry leaks.
@@ -191,6 +198,61 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
       ).rejects.toThrow("destroyed mid-flight");
       expect(existsSync(lockPath())).toBeTrue();
       expect(isRunLockDestructive(lockPath())).toBeTrue();
+    } finally {
+      clearRunLockDestructive(lockPath());
+      releaseRunLock(lockPath());
+    }
+  });
+
+  test("a mark the CALLBACK armed AND cleared inside fn: the wrapper releases normally (the green observe round)", async () => {
+    // The healthy posture the two surviving tests above shadow: the observe
+    // chain arms the mark around its own teardown window and CLEARS it when
+    // the window completed, so at settle the mark is gone and `finish`'s
+    // markedInside read is false. The sibling tests drive the primitives
+    // directly; this one goes through the wrapper, because the posture being
+    // pinned is the wrapper's — a cleared mark must NOT leave the lock for the
+    // operator on a green round.
+    const outcome = await withRunLock(dir, RUN_ID, "test", async (handle) => {
+      markRunLockDestructive(handle);
+      expect(isRunLockDestructive(lockPath())).toBeTrue();
+      clearRunLockDestructive(handle);
+      return { kind: "driven" as const };
+    });
+
+    expect(outcome).toEqual({ kind: "driven" });
+    // Released normally — the file is gone, the mark is gone, and the path
+    // acquires again immediately (the held entry dropped with the release).
+    expect(existsSync(lockPath())).toBeFalse();
+    expect(isRunLockDestructive(lockPath())).toBeFalse();
+    releaseRunLock(acquireRunLock(dir, RUN_ID, "test"));
+    expect(existsSync(lockPath())).toBeFalse();
+  });
+
+  test("a mark armed on a NOT-held path pins the NEXT acquire of that path (documented; the operator-wedge shape)", async () => {
+    try {
+      // DOCUMENTED behavior, pinned on purpose — the primitive is deliberately
+      // NOT guarded against a not-held path, because the run-245n
+      // mismatched-handle scenario arms the mark on a path this process does
+      // not hold. markRunLockDestructive adds to the process-global mark set
+      // with no validation against `held`, so arming the mark AFTER the lock
+      // was released (a stale handle outside the window) leaves the bit on the
+      // path, not on any claim.
+      releaseRunLock(acquireRunLock(dir, RUN_ID, "test"));
+      expect(existsSync(lockPath())).toBeFalse();
+      markRunLockDestructive(lockPath());
+      expect(isRunLockDestructive(lockPath())).toBeTrue();
+
+      // The wedge: the next acquisition of that path settles with the mark
+      // still set, which the wrapper reads as "the destructive window was
+      // entered and did not finish" — lock AND mark are preserved on the
+      // resolve arm (a throw arm preserves them the same way), and the
+      // exit-handler sweep skips the entry. The mitigation is the caller's
+      // judgment call: clearRunLockDestructive, as the cleanup here performs.
+      const outcome = await withRunLock(dir, RUN_ID, "test", async () => ({ kind: "driven" as const }));
+      expect(outcome).toEqual({ kind: "driven" });
+      expect(existsSync(lockPath())).toBeTrue();
+      expect(isRunLockDestructive(lockPath())).toBeTrue();
+      expect(() => acquireRunLock(dir, RUN_ID, "test")).toThrow(RunLockReentrantError);
     } finally {
       clearRunLockDestructive(lockPath());
       releaseRunLock(lockPath());

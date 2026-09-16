@@ -73,6 +73,7 @@ import { join } from "node:path";
 // read the same constant, so this file and the verbs address one path by
 // construction.
 import { boxMarkerPath, classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from "../../../src/fleet/fanout-primitive.ts";
+import { runUnitName } from "../../../src/fleet/run.ts";
 import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 // Verb tails are pre-redacted (B24: a tail slice can CUT a credential
@@ -83,6 +84,7 @@ import type { LiveCtx } from "./live-harness.ts";
 import {
   EVIDENCE_DIR,
   REPO_ROOT,
+  awaitWithCeiling,
   destroyQuietly,
   emittedRunId,
   fleetCleanupProblems,
@@ -90,6 +92,7 @@ import {
   fleetPartialOutput,
   keyLeakProblems,
   lastJsonLine,
+  ledgerRows,
   listedKeyHashes,
   liveGate,
   liveTodoOff,
@@ -107,6 +110,30 @@ import {
 const T28_CAP_MICRO_USD = 50_000;
 /** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
 const T28_BOX_HOUR_RATE_MICRO_USD = 230_000;
+
+/**
+ * The bun runner ceiling for this whole test — the budget audit at the foot of
+ * the file prices every inner ceiling up to this total plus margin, and it is
+ * also what the box-hours assertion below bounds against (the box cannot
+ * outlive the round except on the abort that skips the `finally`, where no
+ * assertion runs anyway).
+ */
+const T28_RUNNER_TIMEOUT_MS = 8_500_000;
+
+/** The box-hours ceiling: the WHOLE runner ceiling at the configured rate —
+ * 8 500 000 ms ≈ 2.36 h × 230 000 µ$/h ≈ 543 056 µ$, the figure the SPEND
+ * header prices as "~543,000 µ$". */
+const T28_BOX_HOURS_CEILING_MICRO_USD = Math.ceil((T28_RUNNER_TIMEOUT_MS / 3_600_000) * T28_BOX_HOUR_RATE_MICRO_USD);
+
+/**
+ * The scratchClone ceiling, named so the budget audit's scratchClone row names
+ * it too. Belt-and-braces: scratchClone runs its git steps synchronously
+ * (`spawnSync`), so while a fetch is wedged the event loop is blocked and a
+ * ceiling cannot fire mid-call — the load-bearing guard for this test is the
+ * pre-dispatch http(s)-origin refusal in the body. The named ceiling keeps the
+ * audit row honest and bounds any FUTURE async shape of the helper.
+ */
+const T28_CLONE_TIMEOUT_MS = 180_000;
 
 /**
  * The manifest `fleet dispatch` delivers and the IN-BOX ENGINE walks. t3's,
@@ -155,18 +182,29 @@ const T28_OBSERVE_VERB_TIMEOUT_MS = T28_OBSERVE_WINDOW_MS + T28_OBSERVE_CHAIN_AL
 /** The cleanup `fleet teardown` ceiling (T2.2's finally figure). */
 const T28_CLEANUP_TEARDOWN_TIMEOUT_MS = 180_000;
 
-/** Every `{…}` JSON line a fleet verb wrote on a stream, parsed defensively. */
-function jsonLines(text: string): Record<string, unknown>[] {
-  return text
-    .split("\n")
-    .filter((l) => l.startsWith("{"))
-    .flatMap((l) => {
-      try {
-        return [JSON.parse(l) as Record<string, unknown>];
-      } catch {
-        return []; // a torn/interleaved line is noise, never a verdict
-      }
-    });
+/**
+ * Every `{…}` JSON line a fleet verb wrote on a stream, parsed defensively and
+ * REDACTED at parse (the file's B24 rule applied to structured lines: a
+ * secret-like field inside a parsed line reaches the evidence write raw, and
+ * `writeEvidence`'s scrub REFUSAL on it would leave a paid round with no
+ * evidence file at all). Lines starting with `{` that do not parse are
+ * counted, never dropped silently: the count and the first failing raw text
+ * (redacted, capped) ride the evidence entry that consumes them.
+ */
+function jsonLines(text: string): { lines: Record<string, unknown>[]; dropped: { count: number; first: string } } {
+  const lines: Record<string, unknown>[] = [];
+  let droppedCount = 0;
+  let firstDropped = "";
+  for (const l of text.split("\n")) {
+    if (!l.startsWith("{")) continue;
+    try {
+      lines.push(JSON.parse(redactSecrets(l)) as Record<string, unknown>);
+    } catch {
+      droppedCount += 1;
+      if (firstDropped === "") firstDropped = redactSecrets(l.trim().slice(0, 300));
+    }
+  }
+  return { lines, dropped: { count: droppedCount, first: firstDropped } };
 }
 
 test.todoIf(liveTodoOff())(
@@ -185,6 +223,20 @@ test.todoIf(liveTodoOff())(
         `QDS_RUN_ROOT is exported host-side as ${JSON.stringify(hostRunRoot)}. It is a HOST-side test lever the box never sets, and no live round should inherit one — unset it and re-run.`,
       );
     }
+    // Same tripwire class, two more levers: a stray QDS_COST_CONFIG_FILE /
+    // QDS_COST_LEDGER_FILE export wins over the cost config this file writes
+    // into its own workspace below, so dispatch would admit under a FOREIGN
+    // cap and the chain's box-hours close would settle into an OUTSIDE ledger
+    // — both silently defeating the 50,000 µ$ / 230,000 µ$/h figures this
+    // round is approved for.
+    for (const name of ["QDS_COST_CONFIG_FILE", "QDS_COST_LEDGER_FILE"]) {
+      const value = (process.env[name] ?? "").trim();
+      if (value !== "") {
+        throw new Error(
+          `${name} is exported host-side as ${JSON.stringify(value)}. This round must admit under the cost config it writes into its own workspace and settle box-hours into the ledger beside its records — unset it and re-run.`,
+        );
+      }
+    }
     const evidence: Record<string, unknown>[] = [];
     let ctx: LiveCtx | undefined;
     let workspace = "";
@@ -197,6 +249,12 @@ test.todoIf(liveTodoOff())(
     let failure: unknown;
     /** The record's own dispatch correlation stamp — the pause event's join key. */
     let recordRequestId = "";
+    /**
+     * The out-of-band reaper's handle (P11): created BEFORE dispatch, filled
+     * at the ack, kept on failure, gone only on a fully green round — which is
+     * the workspace rmSync below, because the file lives inside the workspace.
+     */
+    let orphanRecoveryPath = "";
     /** Destroys that FAILED (#189) — asserted AFTER the finally, never only recorded. */
     const destroyFailures: string[] = [];
     /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
@@ -207,10 +265,41 @@ test.todoIf(liveTodoOff())(
     let hashesBefore: Set<string> | undefined;
     try {
       ctx = await preflight("2");
+      // REFUSED BEFORE DISPATCH (P1): a box is already owned by clone time,
+      // and scratchClone's transfer-stall switch is git's HTTP-transport
+      // config — an ssh:// (or any non-http(s)) origin IGNORES it, so a wedged
+      // fetch there is bounded only by the runner timeout: the one abort that
+      // skips the finally and leaks the box + the minted key. scratchClone
+      // itself only NOTES the caveat (an ssh pin is legitimate elsewhere);
+      // this round does not need one badly enough to buy that leak path, so it
+      // refuses while nothing is owned yet.
+      if (!/^https?:\/\//i.test(ctx.repoUrl)) {
+        const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(ctx.repoUrl)?.[1] ?? "(no scheme)";
+        throw new Error(
+          `QDS_EXEDEV_REPO_URL origin scheme is ${JSON.stringify(scheme)} — this test refuses a non-http(s) origin BEFORE dispatch, because a box is already owned by clone time and scratchClone's http.lowSpeed* stall switch does not apply to that transport. Pin an http(s) origin and re-run.`,
+        );
+      }
       hashesBefore = await listedKeyHashes();
       workspace = tmpWorkspace("t28");
       const recordsDir = join(workspace, "runs");
       mkdirSync(recordsDir, { recursive: true });
+      // P11: the reaper's well-known scratch file, created BEFORE dispatch so
+      // a process death mid-dispatch still marks a round in flight. It is
+      // rewritten with {runId, vmName, keyHash} the moment the dispatch ack
+      // lands (keyHash added at the record read — all before any spend-heavy
+      // leg), so an out-of-band reaper / post-mortem can destroy the orphan
+      // box and revoke the key from these three fields if THIS process dies
+      // owning them. It is KEPT on failure (it IS the recovery artifact, and
+      // the workspace is kept on every non-green posture) and removed only on
+      // a fully green round, riding the workspace rmSync at the foot of the
+      // finally.
+      orphanRecoveryPath = join(workspace, "orphan-recovery.json");
+      writeFileSync(orphanRecoveryPath, `${JSON.stringify({ phase: "pre-dispatch" })}\n`);
+      evidence.push({
+        phase: "orphan-recovery-file",
+        path: orphanRecoveryPath,
+        note: "{runId, vmName, keyHash} for an out-of-band reaper if this process dies owning a box or key — kept on failure, removed only on full green success",
+      });
       // BESIDE the records dir (costLedgerOpts → dirname(recordsDir)): without
       // it admission falls back to defaultCapMicroUsd 5,000,000 µ$ ($5!) and
       // the chain's box-hours close fail-louds `box-hour-rate-unconfigured`.
@@ -270,6 +359,9 @@ test.todoIf(liveTodoOff())(
       vmName = ack.vmName;
       expect(ack.state).toBe("ready");
       evidence.push({ phase: "ack", runId, vmName });
+      // The ack landed and a real box now exists — arm the reaper's file
+      // IMMEDIATELY (P11), before any spend-heavy leg can begin.
+      writeFileSync(orphanRecoveryPath, `${JSON.stringify({ runId, vmName, keyHash: null })}\n`);
       // POSITIVE CONTROL for the final-ls verdict (T5.1's shape): prove the
       // listing CAN see this run's box before the end of the round asserts
       // no box of ours survives.
@@ -288,6 +380,9 @@ test.todoIf(liveTodoOff())(
       expect(typeof rec.requestId).toBe("string");
       expect(rec.requestId ?? "").not.toBe("");
       recordRequestId = rec.requestId as string;
+      // The minted key's hash completes the reaper's triple — still before any
+      // spend-heavy leg (the clone, the run, the observe all come later).
+      writeFileSync(orphanRecoveryPath, `${JSON.stringify({ runId, vmName, keyHash: rec.keyHash })}\n`);
       // The slug the RECORD carries — dispatch canonicalizes case, and
       // `resolveHostPlan` matches the operator index EXACTLY by this value,
       // so the host plan below is keyed by the record, never by the brief.
@@ -309,7 +404,14 @@ test.todoIf(liveTodoOff())(
       // clone is also observe's cwd: the verb asserts hostRoot is a git
       // worktree at start-up, teardown's harvest fetches the sandbox ref into
       // it, and reverify's quarantine worktree is cut from it.
-      const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
+      // The named ceiling (P1): see T28_CLONE_TIMEOUT_MS — belt-and-braces on
+      // the http(s) transports scratchClone's own http.lowSpeed* switch
+      // already bounds, and the audit row's honest named ceiling.
+      const hostRepo = await awaitWithCeiling(
+        scratchClone(ctx.repoUrl, ctx.sha, workspace),
+        T28_CLONE_TIMEOUT_MS,
+        "t2.8-scratch-clone",
+      );
       const factoryDir = join(hostRepo, ".factory");
       mkdirSync(factoryDir, { recursive: true, mode: 0o700 });
       chmodSync(factoryDir, 0o700);
@@ -377,7 +479,63 @@ test.todoIf(liveTodoOff())(
       expect(start.exitCode).toBe(0);
       expect(start.stdout).toContain(`started: ${runId}`);
 
-      // ── 5. AC6's NEVER-PLANTED proof, through the shared primitives ──────
+      // ── 5. POSITIVE LIVENESS CONTROL — the unit at least armed ───────────
+      // The `absent` reading at step 6 is legitimate (engine still walking)
+      // but it cannot by itself tell "walking" from "never armed": a `fleet
+      // run` that exited 0 with a unit that never started would otherwise
+      // spend the whole 45-minute window before failing generically. One
+      // cheap `systemctl show` through the sibling idiom (tier2-in-box-engine's
+      // unit probe) proves the unit armed before observe is allowed to wait:
+      // ACTIVE states are armed-and-running, and inactive/success/0 is
+      // armed-and-already-done (the engine writes its marker BEFORE it exits,
+      // so a very fast engine can already be finished here). `inactive` on any
+      // other result — or `failed` — never armed, and this leg fails by name.
+      const { driver } = ctx; // narrowed here; the closure below cannot keep the outer `let` narrowed
+      const unitShow = (): Promise<string> =>
+        driver
+          .execTimed(
+            vmName,
+            ["systemctl", "show", runUnitName(runId), "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus"],
+            30_000,
+          )
+          .then((r) => r.stdout);
+      let unitStdout = "";
+      try {
+        unitStdout = await unitShow();
+      } catch {
+        // ONE retry for the cold first-ssh multiplex (the marker read's own
+        // idiom below): a probe that cannot answer once is not a dead unit.
+        evidence.push({ phase: "unit-liveness-retry", note: "first probe did not answer — one retry before failing" });
+        try {
+          unitStdout = await unitShow();
+        } catch (retryErr) {
+          throw new Error(
+            `unit-liveness control could not probe ${runUnitName(runId)} on ${vmName} after one retry: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+          );
+        }
+      }
+      const activeState = /ActiveState=(\S*)/.exec(unitStdout)?.[1] ?? "";
+      const probeResult = /Result=(\S*)/.exec(unitStdout)?.[1] ?? "";
+      const mainStatus = /ExecMainStatus=(\S*)/.exec(unitStdout)?.[1] ?? "";
+      const armed =
+        ["activating", "active", "reloading"].includes(activeState) ||
+        (activeState === "inactive" && probeResult === "success" && mainStatus === "0");
+      evidence.push({
+        phase: "unit-liveness",
+        runId,
+        unit: runUnitName(runId),
+        activeState,
+        result: probeResult,
+        mainStatus,
+        armed,
+      });
+      if (!armed) {
+        throw new Error(
+          `unit-liveness control failed: ${runUnitName(runId)} never armed (ActiveState=${activeState} Result=${probeResult} ExecMainStatus=${mainStatus}) — fleet run exited 0 without a running engine`,
+        );
+      }
+
+      // ── 6. AC6's NEVER-PLANTED proof, through the shared primitives ──────
       // One tolerant read (ONE retry on `unreadable` only — E1-10's cold
       // first-ssh multiplex; a retry cannot fabricate presence), classified
       // with `expectedRunId`. This file writes no marker, so whatever observe
@@ -401,7 +559,7 @@ test.todoIf(liveTodoOff())(
       expect(["absent", "settled"]).toContain(preObserve.kind);
       if (preObserve.kind === "settled") expect(preObserve.ok).toBe(true);
 
-      // ── 6. THE STORY'S OWN VERB: `fleet observe`, blocking ────────────────
+      // ── 7. THE STORY'S OWN VERB: `fleet observe`, blocking ────────────────
       // cwd is the host clone (hostRoot): observe asserts a git worktree at
       // start-up and the chain's teardown/reverify legs run against it. The
       // call BLOCKS until the engine settles inside the window and the chain
@@ -438,21 +596,28 @@ test.todoIf(liveTodoOff())(
       });
       expect(observe.exitCode).toBe(0);
 
-      // ── 7. the observer's own terminal line ──────────────────────────────
+      // ── 8. the observer's own terminal line ──────────────────────────────
       // The CLI's structured lines stream as JSON on STDERR (scripts/fleet.ts
       // import.meta.main: "stdout = output only"), so both streams are parsed
       // and the stream that carried each line is irrelevant to the claim: the
       // verb emitted `{event: "run-complete", runId, marker_poll_ms}` when it
       // witnessed the marker (the Observability Contract's terminal line).
-      const observeLines = jsonLines(`${observe.stdout}\n${observe.stderr}`);
+      const { lines: observeLines, dropped } = jsonLines(`${observe.stdout}\n${observe.stderr}`);
       const runCompleteLines = observeLines.filter((l) => l.event === "run-complete" && l.runId === runId);
-      evidence.push({ phase: "run-complete-line", lines: runCompleteLines });
+      evidence.push({
+        phase: "run-complete-line",
+        lines: runCompleteLines,
+        // P5: a `{`-prefixed line that did not parse is counted, never dropped
+        // silently — the count and the first failing raw text (already
+        // redacted and capped by jsonLines) ride here for forensics.
+        ...(dropped.count > 0 ? { unparseableLines: dropped } : {}),
+      });
       expect(runCompleteLines.length).toBeGreaterThanOrEqual(1);
       // STRICTLY positive, not >= 0: a poll that took no time is a timing
       // field that stopped being measured (the PauseTimings rule).
       expect(Number(runCompleteLines[0]?.marker_poll_ms)).toBeGreaterThan(0);
 
-      // ── 8. ONE gate `pause` event, joined on the record's dispatch id ────
+      // ── 9. ONE gate `pause` event, joined on the record's dispatch id ────
       // The event is the GATE's (emitPause), not the observer's — AC1's "one
       // `event: "pause"` line carrying dispatchRequestId, emitted by the gate,
       // not by this story". Exactly one: a second would be a second
@@ -470,12 +635,16 @@ test.todoIf(liveTodoOff())(
         dispatchRequestId: recordRequestId,
       });
 
-      // ── 9. the record rests at the pause, through the chain alone ────────
+      // ── 10. the record rests at the pause, through the chain alone ───────
       const driven = new RunRecordStore({ dir: recordsDir }).get(runId);
       evidence.push({
         phase: "driven-record",
         closedAt: driven.closedAt,
-        approval: driven.extensions?.approval,
+        // Redacted BEFORE the push (the same B24 rule jsonLines applies to the
+        // verb lines): a secret-shaped field anywhere in the gate's approval
+        // object would refuse the evidence write — a paid round left with no
+        // evidence. A redacted JSON string, not the raw object.
+        approvalJson: redactSecrets(JSON.stringify(driven.extensions?.approval ?? null)),
         spendMicroUsd: driven.spendMicroUsd,
       });
       expect(driven.closedAt ?? "").not.toBe("");
@@ -497,21 +666,52 @@ test.todoIf(liveTodoOff())(
       expect(tip.exitCode).toBe(0);
       expect(String(driven.extensions?.approval?.headSha)).toBe(tip.stdout.toString().trim());
 
-      // ── 10. the bundle the approval is bound to (INV-APPROVE-6) ──────────
+      // ── 11. the bundle the approval is bound to (INV-APPROVE-6) ──────────
       const bundlePath = join(recordsDir, `${runId}.bundle`);
       const bundleBytes = existsSync(bundlePath) ? statSync(bundlePath).size : 0;
       evidence.push({ phase: "bundle", bundlePath, bundleBytes });
       expect(bundleBytes).toBeGreaterThan(0);
 
-      // ── 11. spend captured under the cap; the key revoked and verified ───
+      // ── 12. spend captured under the cap; the key revoked and verified ───
       // TYPE first, then the ceiling (T2.2's L9): a missing spendMicroUsd is
       // a capture defect, not "the run spent nothing" — different facts.
+      // LEDGER (P4): `spendMicroUsd` is the provider-authoritative KEY usage
+      // captureSpend wrote at close — TOKENS, and nothing else (teardown.ts's
+      // reportSpendDivergence subtracts the ledger's box-hours bucket back out
+      // to compare like for like). So this ceiling is the 50,000 µ$ KEY cap,
+      // and the box-hours bound the title's "+ box-hours" names is asserted
+      // separately below, against the row the close step ingested at the rate
+      // in this round's own cost-config.json.
       expect(typeof driven.spendMicroUsd).toBe("number");
       expect(driven.spendMicroUsd ?? 0).toBeLessThanOrEqual(T28_CAP_MICRO_USD);
       evidence.push({ phase: "spend", capMicroUsd: T28_CAP_MICRO_USD, actualMicroUsd: driven.spendMicroUsd });
+      // The box-hours half, machine-checked: the close step ingests ONE
+      // box_hours row (its digest dedups a re-ingest), priced at
+      // T28_BOX_HOUR_RATE_MICRO_USD, whose total cannot exceed the whole
+      // round's runner ceiling — a box cannot outlive the round except on the
+      // abort that skips the finally, where no assertion runs anyway.
+      const boxHourRows = ledgerRows<{ cost_micro_usd: number }>(
+        recordsDir,
+        "SELECT cost_micro_usd FROM cost_events WHERE run_id = ? AND kind = 'box_hours'",
+        runId,
+      );
+      const boxHoursMicroUsd = boxHourRows.reduce((sum, r) => sum + Number(r.cost_micro_usd), 0);
+      evidence.push({
+        phase: "box-hours",
+        rows: boxHourRows.length,
+        rateMicroUsdPerHour: T28_BOX_HOUR_RATE_MICRO_USD,
+        actualMicroUsd: boxHoursMicroUsd,
+        ceilingMicroUsd: T28_BOX_HOURS_CEILING_MICRO_USD,
+        ceilingDerivedFrom: "T28_RUNNER_TIMEOUT_MS (the round's whole runner ceiling) at the configured rate",
+      });
+      expect(boxHourRows.length).toBeGreaterThanOrEqual(1);
+      expect(boxHoursMicroUsd).toBeLessThanOrEqual(T28_BOX_HOURS_CEILING_MICRO_USD);
       // The chain's own teardown revoked the key; this is the machine-checked
       // half (F17) — in-body here, and again as a population delta in the
       // finally.
+      // TYPE the hash first (P7): a chain defect that nulled keyHash would
+      // otherwise make the `not.toContain` below pass vacuously.
+      expect(typeof driven.keyHash).toBe("string");
       expect(await listedKeyHashes()).not.toContain(driven.keyHash);
     } catch (e) {
       outcome = "fail";
@@ -565,7 +765,32 @@ test.todoIf(liveTodoOff())(
           evidence,
           { at: "t2.8-cleanup", runId },
         );
-        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
+        if (!torn.ok) {
+          // The chain-failed posture (P10) DELIBERATELY leaves the run lock on
+          // disk, so this cleanup teardown hits the preserved lock and refuses
+          // — a spurious cleanup failure on a round whose real failure is the
+          // chain step. Detect that exact posture (record still open + the
+          // lock file present) and record the refusal as expected instead of a
+          // destroyFailures entry; the box itself is still destroyed below.
+          let recordStillOpen = false;
+          try {
+            recordStillOpen = (recordStore?.get(runId) as { closedAt?: string } | undefined)?.closedAt === undefined;
+          } catch {
+            // unreadable record — the posture cannot be proven, keep the failure
+          }
+          if (recordStillOpen && existsSync(join(workspace, "runs", `${runId}.lock`))) {
+            evidence.push({
+              phase: "finally-teardown",
+              ok: true,
+              at: "t2.8-cleanup",
+              runId,
+              expected: "lock left by the chain-failed posture",
+              note: "the cleanup teardown's refusal is the posture working — the chain deliberately left the run lock; the box destroy below is unaffected",
+            });
+          } else {
+            destroyFailures.push(`${runId}: ${torn.error}`);
+          }
+        }
       }
       if (vmName !== "" && ctx !== undefined) {
         const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
@@ -600,24 +825,37 @@ test.todoIf(liveTodoOff())(
           evidence.push({ phase: "key-leak-sweep-failed", ok: false, error: keyProblems[0] });
         }
       }
-      // B25: the workspace holds the only host-side copy of the bundle and
-      // records once the box is gone — kept on a RED round for forensics.
-      if (workspace !== "" && failure !== undefined) {
-        evidence.push({ phase: "workspace-kept", workspace, reason: "RED round — forensics kept (bundle + records under runs/)" });
-        try {
-          process.stderr.write(
-            `[T2.8] RED round: workspace ${workspace} KEPT for forensics; delete by hand once triaged\n`,
-          );
-        } catch {
-          // dead stderr under an aborting runner — the evidence entry still lands
-        }
-      }
       const evidencePath = writeEvidenceQuietly(
         "T2.8",
         "df3-7-run-completion",
         { test: "T2.8", outcome, runId, capMicroUsd: T28_CAP_MICRO_USD, windowMs: T28_OBSERVE_WINDOW_MS, evidenceDir: EVIDENCE_DIR, phases: evidence },
         destroyFailures,
       );
+      // B25: the workspace holds the only host-side copy of the bundle and
+      // records once the box is gone — kept on a RED round for forensics.
+      // ALSO loud when the evidence write was refused on an otherwise green
+      // round (P6): the rmSync below then skips and the workspace — clone,
+      // bundle, records, reaper file included — survives silently, so the
+      // note fires whenever the workspace is kept, whatever the posture.
+      if (workspace !== "" && (failure !== undefined || evidencePath === "")) {
+        evidence.push({
+          phase: "workspace-kept",
+          workspace,
+          reason:
+            failure !== undefined
+              ? "RED round — forensics kept (bundle + records under runs/)"
+              : "GREEN round but the evidence write was refused — workspace kept (bundle + records under runs/); delete by hand once triaged",
+        });
+        try {
+          process.stderr.write(
+            failure !== undefined
+              ? `[T2.8] RED round: workspace ${workspace} KEPT for forensics; delete by hand once triaged\n`
+              : `[T2.8] EVIDENCE WRITE REFUSED: workspace ${workspace} KEPT (bundle + records under runs/); delete by hand once triaged\n`,
+          );
+        } catch {
+          // dead stderr under an aborting runner — the evidence entry still lands
+        }
+      }
       if (workspace !== "" && failure === undefined && evidencePath !== "") {
         try {
           rmSync(workspace, { recursive: true, force: true });
@@ -642,8 +880,11 @@ test.todoIf(liveTodoOff())(
   //   pre-try keys       listedKeyHashes BEFORE the try (F17 baseline)     240 s
   //   dispatch verb      T28_DISPATCH_TIMEOUT_MS                          900 s
   //   positive control   one driver.list (the final-ls arm's proof)       120 s
-  //   scratchClone       one real clone of the pinned sha                 180 s
+  //   scratchClone       awaitWithCeiling T28_CLONE_TIMEOUT_MS (named
+  //                      ceiling; scratchClone's own http.lowSpeed* switch
+  //                      is the in-git backstop on http transports)      180 s
   //   run verb           T28_RUN_VERB_TIMEOUT_MS                          180 s
+  //   unit liveness      one systemctl show (execTimed 30 s), 1 retry      60 s
   //   marker read        readMarkerTolerant shape, 2 × 10 s (retry arm)    20 s
   //   observe verb       window 2 700 s + chain allowance 900 s         3 600 s
   //                      (the chain: teardown ~300 + reverify ~420, T5.1's
@@ -652,7 +893,7 @@ test.todoIf(liveTodoOff())(
   //   post keys          listedKeyHashes (revoke verify)                  240 s
   //   local reads        record/bundle/rev-parse, local                     ~0 s
   //                                                            body ────────
-  //                                                             5 600 s
+  //                                                             5 660 s
   //   teardownQuietly    timeoutMs 180_000                               180 s
   //   destroyQuietly     CODE-WORST: 2 rm + 3 confirming list at the
   //                      DEFAULT_EXEC_TIMEOUT_MS class (driver.ts's
@@ -665,12 +906,13 @@ test.todoIf(liveTodoOff())(
   //                                                           finally ────────
   //                                                             2 510 s
   //                                                                    ────────
-  //                                                             8 110 s
+  //                                                             8 170 s
   //
-  // Hence 8 500 000 ms (390 s of margin over the audit). The observe verb's
+  // Hence T28_RUNNER_TIMEOUT_MS (8 500 000 ms — 330 s of margin over the
+  // audit). The observe verb's
   // 3 600 s term is the window this file CHOSE (T28_OBSERVE_WINDOW_MS): raise
   // the window and this ceiling must rise with it, and the HEADER's box-time
   // line too. WHOEVER RAISES AN INNER CEILING OR LENGTHENS A CLEANUP STEP
   // MUST RE-ADD IT HERE.
-  8_500_000,
+  T28_RUNNER_TIMEOUT_MS,
 );

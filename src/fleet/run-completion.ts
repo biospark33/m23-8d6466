@@ -33,6 +33,7 @@ import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { recordApprovalPort } from "../reverify/approval.ts";
+import { runRedactionMap } from "../reverify/redaction.ts";
 import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
 import { log } from "../swarmclaw/log.ts";
 import { DEFAULT_PER_CALL_DEADLINE_MS, DEFAULT_POLL_INTERVAL_MS, PROBE_SKIP_TICKS_LIMIT, boxMarkerPath, markerUnusableGivesUp, readMarkerVerdict, type MarkerVerdict } from "./fanout-primitive.ts";
@@ -275,13 +276,19 @@ async function reverifyAndMap(
       runsDir: deps.runsDir,
       hostRoot: deps.hostRoot,
       approval: port,
+      // INV-RV-4: the sealed report is redacted against the run's OWN known
+      // secrets — the same map both shipped CLI callers assemble. Without it
+      // `sealReport` identity-scrubs and the report at
+      // `<hostRoot>/.sandbox/reverify/<runId>.jsonl` carries its inputs
+      // verbatim (DF5.2 renders those into PR bodies).
+      redaction: runRedactionMap(runId, deps.runsDir),
     });
   } catch (e) {
     const outcome: ChainOutcome = { kind: "chain-failed", step: "reverify", error: errText(e) };
-    emitTerminal(requestId, runId, line, outcome, Date.now() - chainStartMs);
+    emitTerminal(requestId, runId, line, outcome, Math.max(0, Date.now() - chainStartMs));
     return outcome;
   }
-  const chainMs = Date.now() - chainStartMs;
+  const chainMs = Math.max(0, Date.now() - chainStartMs);
   let outcome: ChainOutcome;
   if (result.report.verdict !== "green") {
     // The re-verifier's independent judgment — including the `error` verdict a
@@ -374,12 +381,32 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
     // polling can only produce skip ticks against a destroyed box.
     return promoteStrandedPause(runId, deps);
   }
+  if (rec.extensions?.approval !== undefined) {
+    // Fail-closed (the gate's own posture, moved one tier up): any PRESENT
+    // approval extension that is none of the five states above — a hand-edit,
+    // a schema drift, or a non-string `state` that `approvalExtensionState`
+    // flattens to undefined — must not fall through to the poll, or the chain
+    // would drive a destructive teardown over a namespace nobody can read and
+    // the gate would decide it only after the box is gone.
+    return {
+      kind: "refused",
+      code: "approval-state-unrecognized",
+      message: `run ${runId} carries an approval extension this module cannot classify (state ${approvalState === undefined ? "is not a string" : `"${approvalState}"`}) — refusing rather than driving the chain over an unreadable gate namespace`,
+      remediation:
+        "correct or clear the record's extensions.approval entry deliberately, then re-run fleet observe; this refusal fires before any box is touched",
+    };
+  }
   if (typeof rec.closedAt === "string") {
+    // Unreachable while an approval extension is present — every state is
+    // answered above — so this arm IS the "teardown landed, the tail
+    // (reverify → gate) didn't" shape: a `chain-failed{reverify}` or a signal
+    // during the tail leaves exactly this record behind. "Dispatch a new run"
+    // would discard harvested work; the honest re-entry is reverify itself.
     return {
       kind: "refused",
       code: "run-already-closed",
-      message: `run ${runId} is already closed (closedAt ${rec.closedAt}) — the chain already ran`,
-      remediation: "dispatch a new run; a second teardown of a closed record is refused before any box is touched",
+      message: `run ${runId} is already closed (closedAt ${rec.closedAt}) — teardown landed with no approval state behind it, so the chain's tail never ran`,
+      remediation: `re-enter the gate with bun scripts/reverify.ts ${runId} (it re-presents the sealed report to the approval), or dispatch a new run`,
     };
   }
   const vmName = rec.vmName;
@@ -404,6 +431,11 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
   let lastReachMs = Date.now();
   let lastEvidence = "no tick yet";
   let ticks = 0;
+  // Measured elapsed work, a FLOOR that survives a backward wall-clock step
+  // (NTP correction, a resumed laptop): the wall deadline alone can be pushed
+  // out forever by a step back, but accumulated real work already spent only
+  // ever grows. Expiry fires on EITHER.
+  let elapsedMs = 0;
 
   for (;;) {
     ticks += 1;
@@ -411,7 +443,9 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
     // expectedRunId on EVERY read — a marker naming another run is unusable,
     // never this run's settlement (the wrong-box defect the classifier records).
     const verdict = await readMarkerVerdict(deps.driver, vmName, markerPath, DEFAULT_PER_CALL_DEADLINE_MS, runId);
-    const markerPollMs = Date.now() - pollStarted;
+    // Clamped: a clock stepped backward mid-read must not mint a negative
+    // duration into the observability line or the outcome.
+    const markerPollMs = Math.max(0, Date.now() - pollStarted);
 
     if (verdict.kind === "settled") {
       const teardownDeps = chainTeardownDeps(deps, requestId);
@@ -424,7 +458,7 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
         await guardedTeardown(deps, teardownDeps, runId);
       } catch (e) {
         const outcome: ChainOutcome = { kind: "chain-failed", step: "teardown", error: errText(e) };
-        emitTerminal(requestId, runId, { event: "run-complete", markerPollMs }, outcome, Date.now() - chainStartMs);
+        emitTerminal(requestId, runId, { event: "run-complete", markerPollMs }, outcome, Math.max(0, Date.now() - chainStartMs));
         return outcome;
       }
       return reverifyAndMap(runId, deps, requestId, teardownDeps, chainStartMs, {
@@ -530,7 +564,10 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
         verdict,
         terminal: {
           code: "box-unreachable",
-          message: `box ${vmName} for run ${runId} answered nothing on ${skipStreak} consecutive ticks (last evidence: ${lastEvidence})`,
+          // "no usable answer", not "answered nothing": an `unknown` liveness
+          // word or a corruption read is an answer this module cannot act on,
+          // and the cited lastEvidence may well be one of those.
+          message: `box ${vmName} for run ${runId} gave no usable answer on ${skipStreak} consecutive ticks (last evidence: ${lastEvidence})`,
           remediation: `transient — re-run fleet observe ${runId} later; the box is left alive and listable, and no record field was mutated`,
         },
       };
@@ -549,7 +586,8 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
     if (deps.maxTicks !== undefined && ticks >= deps.maxTicks) {
       return { kind: "unsettled", verdict };
     }
-    if (Date.now() >= deadline) {
+    elapsedMs += Math.max(0, Date.now() - pollStarted);
+    if (elapsedMs >= windowMs || Date.now() >= deadline) {
       return unobservedTerminal(
         requestId,
         runId,

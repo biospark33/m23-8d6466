@@ -189,3 +189,45 @@ All seven predecessors verified shipped at source before implementation (DF1.10 
 
 Closes #245 on merge (criterion 3: PR references the issue; DF2.11's "Still deferred" updated with this PR number at merge time).
 
+
+## Review Findings (post-PR adversarial round 1, 2026-09-15)
+
+Seven parallel reviewers (3 blind + 3 edge-case + 1 acceptance auditor) over the PR diff: 49 raw findings → triaged 40 patch / 4 dismissed / rest merged. All 40 patched (incl. every LOW). Full ledger: `/tmp/pr257-review/triage.md`.
+
+### Patched — source (`src/fleet/run-completion.ts`)
+- [x] **Fail-closed unrecognized approval extension (new `approval-state-unrecognized` refusal, exit 5)** — any PRESENT `extensions.approval` not in the five known states (incl. `""` and non-string hand-edits, which `store.set`'s write-time schema rejects but a hand-edited file can carry) refused before the poll, mirroring the gate's own fail-closed arm. Driver-added arm D2, like D1 — outside AC5's enumerated set, fail-closed, cheap, exit 5 via the generic refused arm.
+- [x] **INV-RV-4 closed for the second shipped reverify caller** — the chain now passes `redaction: runRedactionMap(runId, deps.runsDir)` (explicit `--dir`-aware form); sealed reports are no longer identity-scrubbed.
+- [x] **`run-already-closed` remediation names the real re-entry** — `bun scripts/reverify.ts <runId>` (the teardown-landed-tail-didn't state); message no longer claims "the chain already ran".
+- [x] **`box-unreachable` message wording** — "answered nothing" → "gave no usable answer" (an `unknown`-answering box is cited as its own last evidence).
+- [x] **Window expiry floor** — per-tick accumulated measured `elapsedMs` expires the window even after a backward wall-clock step; `marker_poll_ms`/`chain_ms` clamped non-negative.
+
+### Patched — verb wiring (`scripts/fleet.ts`)
+- [x] **Empty-string join key** — the verb now passes the invocation's `requestId` and lets the module's `recordRequestId` truthiness rule decide (a record stamped `""` can no longer win the join key on every `fleet.observe` line and ledger row).
+
+### Patched — tests (`tests/fleet/run-completion.test.ts`, `tests/fleet/verbs.test.ts`, `tests/scripts/run-lock.test.ts`, live e2e)
+- [x] Promotable stranded-pause **`driven` green path** (previously zero coverage — the module's second export had only refusal/veto tests) + its `handed-off` mid-flight variant.
+- [x] AC5 order pin restructured: structural slice of the observe dispatch arm (lock < read < worktree < chain call) instead of an 8000-char `lastIndexOf` window that could match a sibling verb's wiring.
+- [x] Fence teeth (every `FORBIDDEN_DIRECT` entry bites; run-record writer symbol rejected) + dynamic-import regex arm; inline-`type` import form accepted.
+- [x] Observability: per-kind terminal-line field maps, redaction of verdict errors, 200-char cap, raising-sink guard.
+- [x] Malformed marker shapes (`rawBody` plan variant ×5), liveness transport failures (probe exit 255/137 never run-engine-dead), streak boundaries (skipStreak==5 near-miss, 90 s conjunct equality, skip-does-not-reset-unusable interleave), window arm markerTicks===1, fake-clock arm-time capture, real-sleep race removed.
+- [x] `guardedTeardown` clear-on-success asserted (`isRunLockDestructive === false` after a driven chain); run-245n's foreign-lock mark now asserted AND cleared in `finally`.
+- [x] Lock wrapper: mark-armed-then-cleared-inside-fn releases through `withRunLock` (the green observe posture); mark-on-a-not-held-path behavior pinned + documented (deliberately NOT guarded — run-245n's mismatched-handle scenario depends on it); process-global `releaseHeldRunLocks()` sweep removed from a single test.
+- [x] Verb probes: `--window-ms 0/86400001/abc/bare-trailing` → 2; failed unit → 5; contended lock → 5; `approval-state-unrecognized` → 5; non-worktree cwd → 5 with zero driver calls; vetoed probe pins its real reason (`no-base-sha` — the fixture never reached `nothing-to-verify`; a lying fixture was not shipped); exit-table comment corrected (absent `--window-ms` defaults, never exits 2) and made honest about the live-e2e-excused ledger-close arm.
+- [x] Live e2e (all compile-gated, live not run): pre-dispatch http(s) origin refusal + `awaitWithCeiling` wrap (caveat in code: `scratchClone` is synchronous — the load-bearing guard is the origin refusal); `orphan-recovery.json` `{runId, vmName, keyHash}` sentinel written before any spend-heavy leg; `QDS_COST_CONFIG_FILE`/`QDS_COST_LEDGER_FILE` tripwires; redaction over every structured evidence line + the approval object; key-cap ledger stated and box-hours bucket machine-checked (≤ 543,056 µ$ from the runner ceiling); dropped-JSON-line forensics; workspace-kept note on evidence-refused green rounds; `typeof driven.keyHash === "string"` before the revocation diff; positive liveness control (~60 s fail-fast instead of the 45-min window) keeping `absent` legitimate after liveness; chain-failed cleanup teardown recorded as expected, not a failure.
+
+### Dismissed (verified against source, not dropped blind)
+- `markedInside` stale-in-catch — false: the catch arm's FIRST statement is `finish()` (`run-lock.ts:1192`), which latches the mark before the :1206 read; invariant comment added.
+- Unkeyed record strands lock via `unusedKeyApi` — false: `src/providers/teardown.ts:791` skips spend/revoke for keyless records (the keyApi proxy is never invoked); the gate's keyless-pause refusal is typed.
+- verbs.ts importing `DEFAULT_OBSERVATION_WINDOW_MS` / the D1 refusal codes — kept (acyclic, documented).
+
+### Reviewer-premise corrections recorded
+- "Missing runId → unusable" is false: the classifier settles a marker with no `runId` + `ok:true` by design (ownership check gated on runId PRESENCE, `fanout-primitive.ts:927-941`) — real behavior pinned.
+- AC1's "extension present" split at the `closedAt` arm is unreachable once the fail-closed refusal exists above it — single arm with the proof in a comment.
+
+### Story-record notes
+- `scripts/lib/run-lock.ts` (mark survives callback resolution on the resolve arm + `isRunLockDestructive`) is a **DF2.11 contract amendment** carried by this PR — load-bearing for the chain-failed teardown window, directly tested (`run-c1`, `run-c2`, the green-pause and not-held-pin tests).
+- Pre-existing (not this round's): hint-level TS diagnostics `await`-on-non-promise in `tests/scripts/run-lock.test.ts:81,128,193` — same idiom verbatim on `origin/dev`; tsc exits 0.
+
+### Round-1 gates
+- `bun test tests/fleet/ tests/scripts/run-lock.test.ts tests/reverify/ tests/providers/ tests/phase-engine/` — focal suites green (result recorded in the push commit message trailer).
+- `bunx biome check` on all eight touched files — clean; `bunx tsc --noEmit` — exit 0 tree-wide.

@@ -365,6 +365,11 @@ function installSignalRelease(): void {
  * throw leave the run in the same uncertain state; only the exit path differed.
  * `releaseRunLock` refuses the same way now, and the mark is cleared by the
  * caller that KNOWS the destructive phase completed.
+ *
+ * The mark is process-global and is not validated against `held`: arming a
+ * path this process does not currently hold is legal (the run-245n
+ * mismatched-handle path depends on it) and pins the bit to the NEXT acquire
+ * of that path in this process — only `clearRunLockDestructive` removes it.
  */
 export function markRunLockDestructive(lock: string): void {
   moduleState().destructive.add(lock);
@@ -1137,7 +1142,9 @@ export async function withRunLock<T>(
   let finished = false;
   // Set by `finish` from the mark the moment either arm settles — the catch
   // arm reads it back to attach the operator remediation (same lock, no await
-  // in between, so the mark cannot have moved).
+  // in between, so the mark cannot have moved). The catch arm's FIRST
+  // statement is `finish` itself, so the latched value is always fresh at the
+  // read below — never a stale sample from an earlier settle.
   let markedInside = false;
   const finish = (): void => {
     if (finished) return;

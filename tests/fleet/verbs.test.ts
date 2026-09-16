@@ -1315,6 +1315,44 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     return driver.exec(vm, argv);
   };
 
+  /**
+   * The observe dead-unit probe's ONE answer: `unitActivity` reads the WORD on
+   * stdout, not the exit code, so the double answers `systemctl` with `failed`
+   * (exit 3, systemctl's own code for a failed unit) and routes everything
+   * else — the marker reads — to the shared driver, whose box carries no
+   * planted marker. Only `exec` is shadowed because the shared joinOnly
+   * driver's `execTimed` is deliberately undefined: both readers fall back to
+   * this channel.
+   */
+  const failedUnitDriver = (): FakeDriver =>
+    Object.assign(Object.create(driver) as FakeDriver, {
+      exec: (vm: string, argv: string[]): Promise<ExecResult> =>
+        argv[0] === "systemctl"
+          ? Promise.resolve({ stdout: "failed\n", stderr: "", exitCode: 3 })
+          : driver.exec(vm, argv),
+    });
+
+  /**
+   * The observe non-worktree probe's recording and its cwd return address.
+   * The verb derives hostRoot from `process.cwd()`, so the probe chdirs to a
+   * fresh tmpdir — a directory that is not a git worktree — and `after` (which
+   * the runner calls in a `finally`, so the restore survives a failed
+   * assertion) returns the suite to `SUITE_CWD` and removes the dir. The
+   * shadow driver RECORDS every exec so the probe can pin ZERO calls: the
+   * worktree assert precedes any box touch, and a regression that reaches the
+   * box first must fail here rather than pass on the code alone.
+   */
+  const SUITE_CWD = process.cwd();
+  let nonWorktreeProbeDir = "";
+  const nonWorktreeCalls: string[][] = [];
+  const nonWorktreeDriver = (): FakeDriver =>
+    Object.assign(Object.create(driver) as FakeDriver, {
+      exec: (vm: string, argv: string[]): Promise<ExecResult> => {
+        nonWorktreeCalls.push(argv);
+        return driver.exec(vm, argv);
+      },
+    });
+
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
     dispatch: [
@@ -1454,10 +1492,30 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     ],
     observe: [
       { argv: ["observe"], code: 2, stderr: "requires <run-id>" },
-      // --window-ms rides every probe that means to get PAST argv parsing: the
-      // verb parses it unconditionally (no absent-flag default arm in
-      // parseDecimalFlag), so an omitted window is itself a usage exit 2.
+      // An ABSENT --window-ms is the registry's documented default
+      // (DEFAULT_OBSERVATION_WINDOW_MS), never a usage refusal — only a
+      // PRESENT-but-invalid value exits 2, and the four rows below pin that.
+      // Every probe here that means to get PAST argv parsing still rides an
+      // explicit --window-ms, so these grammar rows stay about the grammar.
       { argv: ["observe", "--window-ms", "60000", "no-such-run"], code: 4, stderr: "no run record for no-such-run" },
+      // The window is parseDecimalFlag's contract on this verb's one
+      // operator-settable number (F050), and the refusals are the shapes an
+      // operator can type: zero, past the 86,400,000 ms ceiling, a word
+      // Number() would coerce, and the bare trailing flag the TOKENIZER
+      // refuses before the range check ever runs. Code plus MESSAGE each — a
+      // widened range or a regex loosened enough to admit "0" must fail HERE,
+      // not ride a code-only pass. (Reach: a valid run id and the default
+      // deps' driver carry the row past assertFleetRunId and
+      // assertDriverChosen, so the refusal is the window's, not an earlier
+      // argv arm's.)
+      { argv: ["observe", "--window-ms", "0", "no-such-run"], code: 2, stderr: "not a positive number of milliseconds" },
+      {
+        argv: ["observe", "--window-ms", "86400001", "no-such-run"],
+        code: 2,
+        stderr: "not a positive number of milliseconds",
+      },
+      { argv: ["observe", "--window-ms", "abc", "no-such-run"], code: 2, stderr: "not a positive number of milliseconds" },
+      { argv: ["observe", "--window-ms"], code: 2, stderr: "--window-ms requires a non-empty value" },
       { argv: ["observe", "INVALID_ID"], code: 2, stderr: "INVALID_ID" },
       { argv: ["observe", "--no-harvest", "some-run"], code: 2, stderr: "does not take --no-harvest" },
       { argv: ["observe", "some-run"], code: 2, deps: () => ({ store }), stderr: "observe requires --driver" },
@@ -1479,6 +1537,29 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         // quotes arrive backslash-escaped and a quoted want never matches.
         stderr: "already carries approval state",
       },
+      // Fail-closed on a present-but-UNRECOGNIZED approval state: the
+      // underscore spelling of awaiting-approval — the typo a hand-edit makes —
+      // is none of the gate's five states, so the chain must refuse before the
+      // poll rather than fall through the pre-flight and drive over a
+      // namespace the gate may already own. Same refusal family as the probe
+      // above: 5, before any box is touched, with a 1 ms window so a
+      // regression that REACHES the poll fails fast instead of idling.
+      {
+        argv: ["observe", "--window-ms", "1", "observe-approval-typo"],
+        code: 5,
+        provision: "observe-approval-typo",
+        before: () =>
+          void store.set("observe-approval-typo", {
+            extensions: { approval: { state: "awaiting_approval" } },
+          } as RunRecordPatch),
+        // Same rule the probe above states: a stderr want is the MESSAGE, not
+        // the typed code, because every observe outcome's stdout summary line
+        // carries that code string and a stderr want may never ride stdout.
+        // The code is therefore pinned in the summary line itself, where it
+        // belongs.
+        stderr: ["cannot classify", "awaiting_approval"],
+        stdout: '"code":"approval-state-unrecognized"',
+      },
       // 1, the window fill: the marker is cleanly ABSENT (the fake substrate
       // has no /run) and the unit probe answers unknown, so with a 1 ms window
       // the deadline is already past when the first tick ends —
@@ -1490,13 +1571,71 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         provision: "observe-window",
         stderr: "observation window expired",
       },
+      // 5, the terminal liveness arm: the marker is absent AND the unit probe
+      // answers the WORD `failed` — Type=simple with Restart=no sits failed and
+      // never writes a marker — so tick 1 returns the run-engine-dead death
+      // certificate before the deadline is even consulted, and the exit map
+      // prices that identical-on-every-retry verdict at 5. The stderr pin is
+      // the MESSAGE (the typed code rides the stdout summary line — the rule
+      // the observe-approval probe states), and it keeps `failed` from being
+      // satisfied by a probe that answered anything else: the dead-unit driver
+      // is the only thing in this file that says it.
+      {
+        argv: ["observe", "--window-ms", "1", "observe-dead-unit"],
+        code: 5,
+        provision: "observe-dead-unit",
+        deps: () => ({ driver: failedUnitDriver(), store }),
+        stderr: ["is failed (Restart=no)", "the engine died without writing a marker"],
+        stdout: '"code":"run-engine-dead"',
+      },
+      // 5, the lock refusal: withRunLock throws before the pre-flight record
+      // read, the verb's catch maps RunLockedError to 5 (identical on every
+      // retry while the holder lives), and the remediation pin is what
+      // separates this HELD branch from the stale branch the harvest and
+      // teardown probes pin.
+      {
+        argv: ["observe", "--window-ms", "60000", "observe-locked"],
+        code: 5,
+        provision: "observe-locked",
+        before: () => holdRunLock("observe-locked"),
+        stderr: ["run-locked", "wait for that invocation to finish"],
+      },
+      // 5, the verb's own start-up refusal: hostRoot IS process.cwd(), and a
+      // cwd that is not a git worktree cannot host reverify — refused before
+      // any box is touched. `after` both restores the suite's cwd and pins
+      // ZERO driver calls through the recording driver, so a regression that
+      // reaches the box before the assert fails here rather than passing on
+      // the exit code alone.
+      {
+        argv: ["observe", "--window-ms", "60000", "observe-nonworktree"],
+        code: 5,
+        provision: "observe-nonworktree",
+        before: () => {
+          nonWorktreeProbeDir = mkdtempSync(join(tmpdir(), "qds-verb-nonwt-"));
+          process.chdir(nonWorktreeProbeDir);
+        },
+        deps: () => ({ driver: nonWorktreeDriver(), store }),
+        stderr: ["reverify-host-root-unusable", "is not a git worktree"],
+        after: () => {
+          process.chdir(SUITE_CWD);
+          expect(nonWorktreeCalls).toEqual([]);
+          rmSync(nonWorktreeProbeDir, { recursive: true, force: true });
+        },
+      },
       // 6, the chain arm: the settled-marker double above makes tick 1 read
       // the planted marker as settled{ok:true}, so the verb drives the real
       // chain against the genuinely provisioned box. The teardown lands (same
-      // shape teardown-ok proves) and reverify then judges the harvested tree
-      // host-side — with no commit beyond base it comes back nothing-to-verify,
-      // the `vetoed` arm of the exit-6 family (the live T2.8 header documents
-      // exactly this verdict for a workload that commits nothing).
+      // shape teardown-ok proves) and reverify then judges the tree host-side
+      // — and refuses, because the provisioned record carries NO pinned base
+      // and no budget repoSlug: seeding either is not an option here, since a
+      // commitSha sends harvest's Step A into the in-box bundle protocol no
+      // fake substrate speaks (bundle-create over the driver exec double). So
+      // the fixture's arm is `no-base-sha`, and the probe pins the WHOLE veto
+      // envelope — code AND the reason, in the envelope's own wording so the
+      // reason pin cannot also ride stdout (the JSON summary line carries the
+      // bare reason string). Any other veto reason (or the nothing-to-verify
+      // verdict the live round documents, a different fixture: a record with a
+      // real pinned base and no ref beyond it) fails these pins.
       {
         argv: ["observe", "--window-ms", "60000", "observe-chain"],
         code: 6,
@@ -1509,7 +1648,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
           );
         },
         deps: () => ({ driver: settledMarkerDriver(), store }),
-        stderr: "reverify-vetoed",
+        stderr: ["reverify-vetoed", "re-verification refused observe-chain: no-base-sha"],
       },
     ],
     teardown: [
@@ -2230,16 +2369,26 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // needs the FULL chain green end to end — a marker written by DF1.10's
     // real in-box engine, a teardown whose harvested bundle re-verifies GREEN
     // host-side, and a gate registration landing as `requested`. The fake box
-    // can reach every FAILURE arm of the chain but never that one: its
-    // workload commits nothing beyond base, so reverify always judges
-    // nothing-to-verify (the exit-6 probe above rides exactly that). AC6's
+    // can reach every FAILURE arm of the chain but never that one: its record
+    // carries no pinned base and no budget repoSlug, so reverify refuses at
+    // preflight (`no-base-sha` — the exit-6 probe pins exactly that envelope),
+    // and a seeded commitSha is not an escape: it sends harvest's Step A into
+    // the in-box bundle protocol, which no fake substrate speaks. AC6's
     // make-or-break claim is that this evidence is a real box whose marker was
     // never planted — which is the live tier-2 round's subject, not a unit
     // fixture's.
+    //
+    // The exit map's ledger-close upgrade (`6 (never 0)` when the chain had
+    // landed) is NOT separately probed, and the same excuse covers it: the
+    // upgrade can only fire on an exit-0 outcome, the foreground verb's only
+    // exit-0 outcome is this driven arm (maxTicks is never set), and so the
+    // wedged close on a driven observe is reachable nowhere a fake box gets
+    // to. The close-throws arm itself IS probed at exit 6 for teardown in
+    // this file — no green chain needed there.
     observe: [
       {
         code: 0,
-        why: "needs the full chain green — a real engine's marker, a green host-side reverify and a gate registration — live e2e only",
+        why: "needs the full chain green — a real engine's marker, a green host-side reverify and a gate registration — live e2e only; the ledger-close 0→6 upgrade rides this same excuse (its only exit-0 arm is the driven one probed by the live round; the close-throws arm itself is probed at exit 6 for teardown in this file)",
         coveredBy:
           "T2.8 DF3.7 AC6: dispatch→fleet run→fleet observe (blocks)→engine marker, never planted→chain harvest/teardown/reverify→awaiting-approval — real box, real spend ≤ 50,000 µ$ + box-hours",
         file: "e2e/tier2-run-completion.live.test.ts",
