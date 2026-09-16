@@ -46,6 +46,8 @@ import { newId, RunRecordStore, type RunRecord } from "../src/providers/run-reco
 // rule is how a sink drifts out of sync with it.
 import { redactSecrets } from "../src/providers/step-log.ts";
 import { shQuote } from "../src/providers/exedev/transport.ts";
+import type { ProviderAuditLink } from "../src/providers/driver.ts";
+import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   classifyRunExit,
@@ -87,6 +89,13 @@ export interface CapHitDemoDeps {
    * (production — the provider the key lives on).
    */
   probe?: (key: string, model: string) => Promise<{ status: number; body: string }>;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. The demo's runs are budget-less, so its emitters skip the
+   * links — the seam is threaded regardless (compile-time loudness), bound by
+   * main() to `openAuditStore().record` and closed in its finally.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export interface CapHitDemoOptions {
@@ -571,7 +580,7 @@ export async function runCapHitDemo(
                 // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
               }
               await teardownSandbox(
-                { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+                { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
                 runId,
                 h,
               );
@@ -624,7 +633,7 @@ export async function runCapHitDemo(
     }
   };
 
-  const vm = await createRun(deps.driver, deps.store, { runId });
+  const vm = await createRun(deps.driver, deps.store, { runId, recordAuditLink: deps.recordAuditLink });
   const vmName = vm.vmName ?? runId;
 
   // Per-phase elapsed trackers. setupMs is declared here — before finishEarly,
@@ -658,7 +667,7 @@ export async function runCapHitDemo(
         "cap-hit-demo teardown",
         (h) =>
           teardownSandbox(
-            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
             runId,
             h,
           ),
@@ -756,7 +765,7 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       const minted = await mintRunKey(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile, recordAuditLink: deps.recordAuditLink },
         runId,
       );
       key = minted.key;
@@ -809,7 +818,9 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       await deliverRunKey(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile, recordAuditLink: deps.recordAuditLink },
+        // DF5.3: the deliver link needs the run identity beside the deps.
+        runId,
         vmName,
         key,
       );
@@ -881,7 +892,13 @@ export async function runCapHitDemo(
         return finishEarly("models-json-missing");
       }
       const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
-      await fillRun(deps.driver, vmName, files);
+      await fillRun(deps.driver, vmName, files, {
+      // DF5.3: no repoSlug — the demo's runs are budget-less, so the fill link
+      // is (correctly) not emitted; the seam is still threaded, loud.
+      recordAuditLink: deps.recordAuditLink,
+      runId,
+      requestId,
+    });
       await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha, workdir: LIVE_WORKDIR });
       // Warm pi's streaming path BEFORE the gate: on a FRESH box the first pi
       // calls nondeterministically stall (no request timeout in pi's client);
@@ -1240,7 +1257,7 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       spendMicroUsd = await captureSpend(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, recordAuditLink: deps.recordAuditLink },
         runId,
       );
       captureSpendMs = Date.now() - started;
@@ -1331,7 +1348,7 @@ export async function runCapHitDemo(
         "cap-hit-demo teardown",
         (h) =>
           teardownSandbox(
-            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
             runId,
             h,
           ),
@@ -1650,19 +1667,36 @@ async function main(argv: readonly string[]): Promise<number> {
   // Register signal handlers before the run starts.
   registerHandlers();
 
-  const result = await runCapHitDemo(
-    { driver, keyApi, store, requestId, evidenceDir },
-    {
-      capMicroUsd: positiveInt(args.capMicroUsd, "cap"),
-      wallClockMs: positiveInt(args.wallClockMs, "wall-clock-ms"),
-      runBudgetCapMicros: positiveInt(args.runBudgetCapMicros, "budget-cap"),
-      residentCeilingMicros: positiveInt(args.residentCeilingMicros, "ceiling"),
-      repoUrl: args.repoUrl,
-      commitSha: args.commitSha,
-      rosterPath: args.rosterPath,
-      registerCleanup: (cleanup, cleanupNote) => { currentCleanup = cleanup; currentCleanupNote = cleanupNote; },
-    },
-  );
+  // DF5.3: the demo's composition root opens the audit-link store ONCE (the
+  // default path; QDS_AUDIT_DB resolves inside the store) and closes it on
+  // every exit of the run. A store that cannot open fails the process loud,
+  // before anything billable — the main() catch prints it with the residual.
+  const auditStore: AuditStoreWriter = openAuditStore();
+  let result: CapHitDemoResult;
+  try {
+    result = await runCapHitDemo(
+      {
+        driver,
+        keyApi,
+        store,
+        requestId,
+        evidenceDir,
+        recordAuditLink: (link) => auditStore.record(link),
+      },
+      {
+        capMicroUsd: positiveInt(args.capMicroUsd, "cap"),
+        wallClockMs: positiveInt(args.wallClockMs, "wall-clock-ms"),
+        runBudgetCapMicros: positiveInt(args.runBudgetCapMicros, "budget-cap"),
+        residentCeilingMicros: positiveInt(args.residentCeilingMicros, "ceiling"),
+        repoUrl: args.repoUrl,
+        commitSha: args.commitSha,
+        rosterPath: args.rosterPath,
+        registerCleanup: (cleanup, cleanupNote) => { currentCleanup = cleanup; currentCleanupNote = cleanupNote; },
+      },
+    );
+  } finally {
+    auditStore.close();
+  }
 
   // Normal completion: unregister signal handlers so a late signal doesn't re-trigger cleanup.
   unregisterHandlers?.();

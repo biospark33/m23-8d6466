@@ -4245,7 +4245,7 @@ describe("GateDeps.teardown closure pattern (D6): own-lock closure works; withRu
     try {
       const driver = new FakeDriver(path.join(s.dir, "boxes"));
       const runId = "df337-tdlock-1";
-      await createRun(driver, s.store, { runId }); // box + record, keyless
+      await createRun(driver, s.store, { runId, recordAuditLink: () => {} }); // box + record, keyless
 
       // The documented harness shape: the closure holds NO lock when the gate
       // invokes it, so it acquires its own INSIDE and hands the real handle to
@@ -4254,7 +4254,7 @@ describe("GateDeps.teardown closure pattern (D6): own-lock closure works; withRu
       const closure = async (id: string, opts: { noHarvest: true }): Promise<void> => {
         const h = acquireRunLock(s.store.dir, id, "gate-teardown-harness");
         try {
-          await teardownSandbox({ driver, store: s.store }, id, h, opts);
+          await teardownSandbox({ driver, store: s.store, recordAuditLink: () => {} }, id, h, opts);
         } finally {
           releaseRunLock(h);
         }

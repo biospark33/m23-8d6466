@@ -2522,7 +2522,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       const observed: number[] = [];
       for (const probe of probes) {
         if (probe.provision !== undefined) {
-          await provisionAdmittedRun(driver, store, { runId: probe.provision });
+          await provisionAdmittedRun(driver, store, { runId: probe.provision, recordAuditLink: () => {} });
         }
         await probe.before?.();
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
@@ -2583,7 +2583,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // finally then held the run lock over a run with nothing billable left:
     // the operator had to rm the lock by hand for an already-dead run.
     const runId = "teardown-f5-unpriced";
-    await provisionAdmittedRun(driver, store, { runId });
+    await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
     store.set(runId, {
       extensions: {
         budget: {
@@ -2621,7 +2621,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // The lock's real job: guarding a HALF-torn-down run. A destroy failure
     // leaves the record open and the box possibly alive — the lock must stay.
     const runId = "teardown-f5-halfdead";
-    await provisionAdmittedRun(driver, store, { runId });
+    await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
     const exploding = Object.create(driver) as FakeDriver;
     exploding.destroy = () => Promise.reject(new Error("rm exploded"));
 
@@ -2655,7 +2655,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // itself. The prototype is patched for exactly this call and restored in a
     // `finally`; the real `close()` still runs first, so nothing is leaked.
     const runId = "ledger-wedged";
-    await provisionAdmittedRun(driver, store, { runId });
+    await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
     // CLOSED first, so `keyUnattributable` cannot be what produces the 6: with a
     // closed record teardownSandbox short-circuits (first-close-wins) and the
     // verb's own code is 0, which makes the cleanup the sole cause.
@@ -2694,7 +2694,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // hiding the original failure under a crash. Same route as the sibling
     // above, minus the Error.
     const runId = "ledger-wedged-null";
-    await provisionAdmittedRun(driver, store, { runId });
+    await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
     store.close(runId);
     const realClose = CostLedger.prototype.close;
     CostLedger.prototype.close = function wedgedNull(this: CostLedger): void {
@@ -2992,6 +2992,7 @@ describe("status.ts (statusAll join logic)", () => {
     const { record } = await provisionAdmittedRun(driver, store, {
       runId,
       ...(port === undefined ? {} : { port }),
+      recordAuditLink: () => {},
     });
     return patch === undefined ? record : store.set(runId, patch);
   }
@@ -3678,7 +3679,7 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
       },
     });
 
-    const err = await rejection(provisionAdmittedRun(failing, store, { runId, budget }));
+    const err = await rejection(provisionAdmittedRun(failing, store, { runId, budget, recordAuditLink: () => {} }));
     expect(err.message).toContain("substrate refused the create");
 
     const rec = store.get(runId);
@@ -3714,7 +3715,7 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     // the moment `store` stops being rebuilt in beforeEach.
     let err: Error;
     try {
-      err = await rejection(provisionAdmittedRun(failing, store, { runId, budget }));
+      err = await rejection(provisionAdmittedRun(failing, store, { runId, budget, recordAuditLink: () => {} }));
     } finally {
       store.set = realSet;
     }
@@ -3760,7 +3761,7 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
 
     let err: Error | undefined;
     try {
-      err = await rejection(provisionAdmittedRun(failing, store, { runId, budget }));
+      err = await rejection(provisionAdmittedRun(failing, store, { runId, budget, recordAuditLink: () => {} }));
     } finally {
       store.set = realSet;
     }
@@ -3800,7 +3801,7 @@ describe("status.ts (list timeout)", () => {
     // refusing) is the contract: the largest real budget replaces an impossible
     // one. Pinned through the same timer-observation seam the default case
     // uses, because resolveTimeoutMs is module-private.
-    await provisionAdmittedRun(driver, store, { runId: "clamp-run" });
+    await provisionAdmittedRun(driver, store, { runId: "clamp-run", recordAuditLink: () => {} });
     const boxes = await driver.list();
     let release!: (vms: ProviderVm[]) => void;
     const gate = new Promise<ProviderVm[]>((resolve) => {
@@ -3848,7 +3849,7 @@ describe("status.ts (list timeout)", () => {
     // arm timers of their own, and any one of them landing in `armed` would
     // make the single-30s-timer assertion below pass or fail for reasons that
     // have nothing to do with the status timeout under test.
-    await provisionAdmittedRun(driver, store, { runId: "default-timeout-run" });
+    await provisionAdmittedRun(driver, store, { runId: "default-timeout-run", recordAuditLink: () => {} });
     // The driver's real answer, taken before the patch goes in, so the GATED
     // driver used below does no I/O of its own inside the observation window.
     const boxes = await driver.list();
@@ -3948,7 +3949,7 @@ describe("status.ts (list timeout)", () => {
 
   test("a named lookup that ERRORS FAST still gets its unfiltered retry", async () => {
     const runId = "retry-after-fast-error";
-    await provisionAdmittedRun(driver, store, { runId });
+    await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
 
     const calls: (string | undefined)[] = [];
     const list = (name?: string): Promise<ProviderVm[]> => {
@@ -3972,7 +3973,7 @@ describe("status.ts (list timeout)", () => {
 
   test("a named lookup that EXHAUSTS the budget does not start the fallback", async () => {
     const runId = "no-retry-after-timeout";
-    await provisionAdmittedRun(driver, store, { runId });
+    await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
 
     const calls: (string | undefined)[] = [];
     const list = (name?: string): Promise<ProviderVm[]> => {
@@ -4014,7 +4015,7 @@ describe("status.ts (statusRun)", () => {
   });
 
   async function provision(runId: string, patch?: RunRecordPatch): Promise<RunRecord> {
-    const { record } = await provisionAdmittedRun(driver, store, { runId });
+    const { record } = await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
     return patch === undefined ? record : store.set(runId, patch);
   }
 

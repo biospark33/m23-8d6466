@@ -32,7 +32,7 @@ import {
 } from "../../src/providers/reaper.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { SBX_OWNERSHIP_TAG, type ExecResult } from "../../src/providers/driver.ts";
+import { SBX_OWNERSHIP_TAG, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import type { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { seedFleet, type FleetState, type SeededFleet } from "./fixtures/fleet-state.ts";
 import { runLocal } from "./fixtures/git-fixture.ts";
@@ -100,6 +100,9 @@ afterEach(() => {
 const iso = (ms: number): string => new Date(ms).toISOString();
 const keyName = (runId: string): string => `sbx-${runId}`;
 
+/** DF5.3: capture of the sweep's audit links (see the orphan-path test). */
+let auditLinks: ProviderAuditLink[] = [];
+
 function deps(fleet: SeededFleet, overrides: Partial<SweepDeps> = {}): SweepDeps {
   return {
     driver: fleet.driver,
@@ -109,6 +112,9 @@ function deps(fleet: SeededFleet, overrides: Partial<SweepDeps> = {}): SweepDeps
     reapDir: join(dir, "reap"),
     requestId: "req-df26-test",
     now: () => NOW,
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
     ...overrides,
   };
 }
@@ -1467,5 +1473,35 @@ describe("DF2.6 sweep", () => {
     // The OLDEST stamp-shaped seeds went, not an arbitrary slice.
     expect(after).not.toContain(seedName(0));
     expect(after).toContain(seedName(seeded - 1));
+  });
+});
+
+describe("DF5.3 — the reap link is the orphan path's emit", () => {
+  test("apply mode destroying a leaked owned VM emits one `reap` link (hop run-box); a dry run emits nothing", async () => {
+    const runId = "df53-reap-20260915-000001";
+    // A CLOSED record claims the VM: leaked-vm by classification (the destroy
+    // never landed), yet resolvable — so the link has a run identity to serve.
+    const fleet = await seedFleet(
+      dir,
+      {
+        vms: [{ name: runId }],
+        records: [{ runId, closed: true }],
+      },
+      NOW,
+    );
+    // The record's DF2.8 attribution is the only repoSlug an emitter may use.
+    fleet.store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    auditLinks = [];
+    await sweep(deps(fleet)); // dry run: zero calls, zero links
+    expect(auditLinks).toHaveLength(0);
+
+    await sweep(deps(fleet), { yes: true });
+    expect(auditLinks.map((l) => `${l.hop}.${l.event}`)).toEqual(["run-box.reap"]);
+    const link = auditLinks[0]!;
+    expect(link.runId).toBe(runId);
+    expect(link.repoSlug).toBe("qds/demo");
+    expect(link.subjectId).toBe(runId);
+    expect(link.subjectKind).toBe("box");
   });
 });

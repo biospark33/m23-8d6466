@@ -130,6 +130,7 @@ async function admitAndProvision(
       reservedMicroUsd: decision.reservedMicroUsd,
       admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
     },
+    recordAuditLink: () => {},
   });
   return record;
 }
@@ -393,6 +394,7 @@ describe("AC3: under cap proceeds and clamps the mint", () => {
       store,
       requestId: "req-mint",
       capMicroUsd: decision.admittedCeilingMicroUsd,
+      recordAuditLink: () => {},
     }, runId);
 
     expect(keyApi.keys).toHaveLength(2); // the seed run's key + this run's
@@ -534,6 +536,7 @@ describe("no-issue createRun untouched", () => {
 
     const rec = await createRun(driver, store, {
       runId: "noissue-20260820-000001",
+    recordAuditLink: () => {},
     });
 
     expect(rec.runId).toBe("noissue-20260820-000001");
@@ -569,7 +572,7 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     });
     const ceiling = rec1.extensions?.budget?.admittedCeilingMicroUsd;
     expect(ceiling).toBe(100_000);
-    await mintRunKey({ keyApi, driver, store, requestId: "req-e2e-1", capMicroUsd: typeof ceiling === "number" ? ceiling : 0 }, run1);
+    await mintRunKey({ keyApi, driver, store, requestId: "req-e2e-1", capMicroUsd: typeof ceiling === "number" ? ceiling : 0, recordAuditLink: () => {} }, run1);
     expect(keyApi.keys[keyApi.keys.length - 1]!.limitUsd).toBe(0.1);
 
     // The lead+2-worker run emits three cost events totalling 300,000 µ$.

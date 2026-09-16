@@ -326,9 +326,14 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   // An approval of an EARLIER verdict never authorizes a later re-harvest, so
   // the decision must post-date the report it claims to authorize. Both stamps
   // are host clocks (DF5.1 and DF3.4 both write host-side), so they compare.
+  // DF5.3 (AC7) tightened the boundary from `decided < completed` to
+  // `decided <= completed`: an ordering that cannot distinguish the decision
+  // from the evidence has not demonstrated the decision FOLLOWED it, and the
+  // audit chain's own strict comparison (same host clocks) refuses the pair
+  // this used to admit.
   const decided = Date.parse(decidedAt);
   const completed = Date.parse(report.completedAt);
-  if (!Number.isFinite(decided) || !Number.isFinite(completed) || decided < completed) {
+  if (!Number.isFinite(decided) || !Number.isFinite(completed) || decided <= completed) {
     throw new PrRefusalError(
       "approval-precedes-report",
       `approval for ${runId} was decided at ${decidedAt}, before report ${report.reverifyId} completed at ${report.completedAt}`,

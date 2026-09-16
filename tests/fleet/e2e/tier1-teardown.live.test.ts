@@ -237,7 +237,7 @@ test.todoIf(liveTodoOff())(
         if (recordKeyHash === undefined) {
           for (const h of stranded) {
             try {
-              await revokeAndVerify({ keyApi: openRouterKeyApi(), driver: ctx.driver, store }, h);
+              await revokeAndVerify({ keyApi: openRouterKeyApi(), driver: ctx.driver, store, recordAuditLink: () => {} }, h);
               evidence.push({ phase: "finally-delta-revoke", ok: true, keyHash: h });
             } catch (e) {
               evidence.push({ phase: "finally-delta-revoke", ok: false, keyHash: h, error: (e as Error).message });

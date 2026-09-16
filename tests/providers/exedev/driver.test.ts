@@ -1122,7 +1122,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
       },
     };
     const store = new RunRecordStore({ dir: join(tempDir, "deliver-runs") });
-    await deliverRunKey({ keyApi: unusedKeyApi, driver, store }, "deliver-default", "sk-or-test-not-a-real-key");
+    await deliverRunKey({ keyApi: unusedKeyApi, driver, store, recordAuditLink: () => {} }, "deliver-default", "deliver-default", "sk-or-test-not-a-real-key");
     const envPath = join(fake.boxDir("deliver-default"), "app", ".env");
     const st = statSync(envPath);
     expect((st.mode & 0o777).toString(8)).toBe("600");

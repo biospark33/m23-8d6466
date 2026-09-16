@@ -456,7 +456,7 @@ describe("FakeDriver accountability and boundaries", () => {
       await d.create("fill-escape-box");
       // The workload can plant this itself before a later fillRun call runs.
       symlinkSync(host, join(boxes, "fill-escape-box", "out"));
-      await expect(fillRun(d, "fill-escape-box", [{ path: "out/pwned.txt", content: "escaped\n" }])).rejects.toThrow(
+      await expect(fillRun(d, "fill-escape-box", [{ path: "out/pwned.txt", content: "escaped\n" }], { recordAuditLink: () => {}, runId: "fill-escape-box", requestId: "test" })).rejects.toThrow(
         /fill failed|symlink/,
       );
       expect(existsSync(join(host, "pwned.txt"))).toBe(false);
@@ -475,7 +475,7 @@ describe("FakeDriver accountability and boundaries", () => {
       // Dangling symlink: the target does not exist yet, which is exactly the
       // case a textual/existence-based check would miss.
       symlinkSync(join(host, "pwned.txt"), join(boxes, "fill-target-box", "link.txt"));
-      await expect(fillRun(d, "fill-target-box", [{ path: "link.txt", content: "escaped\n" }])).rejects.toThrow(
+      await expect(fillRun(d, "fill-target-box", [{ path: "link.txt", content: "escaped\n" }], { recordAuditLink: () => {}, runId: "fill-target-box", requestId: "test" })).rejects.toThrow(
         /fill failed|symlink/,
       );
       expect(existsSync(join(host, "pwned.txt"))).toBe(false);
@@ -495,7 +495,7 @@ describe("FakeDriver accountability and boundaries", () => {
       const d = new FakeDriver(boxes);
       await d.create("fill-codes-box");
       // (`escape` shadows a restricted global name — named `escapeAttempt`.)
-      const escapeAttempt = fillRun(d, "fill-codes-box", [{ path: "/etc/pwned", content: "x" }]);
+      const escapeAttempt = fillRun(d, "fill-codes-box", [{ path: "/etc/pwned", content: "x" }], { recordAuditLink: () => {}, runId: "fill-codes-box", requestId: "test" });
       await expect(escapeAttempt).rejects.toThrow(/fill path escapes the box: \/etc\/pwned/);
       const escapeErr = (await escapeAttempt.catch((e: unknown) => e)) as { code?: string; remediation?: string };
       expect(escapeErr.code).toBe("fill-path-escape");
@@ -504,7 +504,7 @@ describe("FakeDriver accountability and boundaries", () => {
       // The exec-failure arm (the real driver refuses, the fake's script
       // surfaces a nonzero exit through the same wrap) stays a DIFFERENT code.
       symlinkSync(join(boxes, "elsewhere"), join(boxes, "fill-codes-box", "linked"));
-      const failed = fillRun(d, "fill-codes-box", [{ path: "linked/x", content: "x" }]);
+      const failed = fillRun(d, "fill-codes-box", [{ path: "linked/x", content: "x" }], { recordAuditLink: () => {}, runId: "fill-codes-box", requestId: "test" });
       await expect(failed).rejects.toThrow(/fill failed for linked\/x/);
       const failedErr = (await failed.catch((e: unknown) => e)) as { code?: string };
       expect(failedErr.code).toBe("fill-failed");
@@ -547,7 +547,7 @@ describe("FakeDriver accountability and boundaries", () => {
       // traversal opens and holds the fd for "a" and before it opens the
       // final target "c.txt" relative to that fd — exactly the window
       // CodeRabbit named ("between the component check and `cat > "$p"`").
-      const fillPromise = fillRun(d, "race-box", [{ path: "a/c.txt", content: "payload\n" }]);
+      const fillPromise = fillRun(d, "race-box", [{ path: "a/c.txt", content: "payload\n" }], { recordAuditLink: () => {}, runId: "race-box", requestId: "test" });
 
       const readyMarker = join(sync, "ready.a");
       const deadline = Date.now() + 10_000;
@@ -776,6 +776,7 @@ describe("provisioning refusals and fail-safe reap", () => {
         createRun(t.driver, t.store, {
           runId: "admit-elsewhere-run",
           issue: { repoSlug: "qds/demo", issueId: "42" },
+          recordAuditLink: () => {},
         }),
       );
       expect(err).toBeInstanceOf(ProvisionRefusedError);
@@ -792,7 +793,7 @@ describe("provisioning refusals and fail-safe reap", () => {
   test("an invalid port refuses with a typed code, before the record exists", async () => {
     const t = tmp();
     try {
-      const err = await rejection(provisionAdmittedRun(t.driver, t.store, { runId: "bad-port-run", port: 0 }));
+      const err = await rejection(provisionAdmittedRun(t.driver, t.store, { runId: "bad-port-run", port: 0, recordAuditLink: () => {} }));
       // Typed, not a bare Error: the fleet CLI classifies on `code` and prints
       // `remediation`, and `port: 0` used to be accepted (persisted as ports:[0]).
       expect(err).toBeInstanceOf(ProvisionRefusedError);
@@ -830,6 +831,7 @@ describe("provisioning refusals and fail-safe reap", () => {
               reservedMicroUsd: 0,
               admittedCeilingMicroUsd: 5_000_000,
             },
+            recordAuditLink: () => {},
           }),
         );
       } finally {
@@ -858,7 +860,7 @@ describe("provisioning refusals and fail-safe reap", () => {
         expose: async (): Promise<string> => undefined as unknown as string,
         setPublic: async (): Promise<void> => {},
       });
-      const out = await provisionAdmittedRun(quiet, t.store, { runId: "quiet-expose-run", port: 8080 });
+      const out = await provisionAdmittedRun(quiet, t.store, { runId: "quiet-expose-run", port: 8080, recordAuditLink: () => {} });
       // The store cannot unset a field, so "clear both" is unavailable — both
       // keep the create-time URL rather than the return dropping one the record
       // still carries.
@@ -876,7 +878,7 @@ describe("provisioning refusals and fail-safe reap", () => {
         create: (): Promise<ProviderVm> => new Promise<ProviderVm>(() => {}),
       });
       const err = await rejection(
-        provisionAdmittedRun(hung, t.store, { runId: "hung-create-run", actionTimeoutMs: 5 }),
+        provisionAdmittedRun(hung, t.store, { runId: "hung-create-run", actionTimeoutMs: 5, recordAuditLink: () => {} }),
       );
       expect(err.message).toContain("driver.create(hung-create-run) timed out after 5ms");
       // OPEN, because a timed-out create may still have stood a box up and the
@@ -934,7 +936,7 @@ describe("provisioning refusals and fail-safe reap", () => {
         const hung = Object.assign(Object.create(t.driver) as FakeDriver, override);
         const runId = `hung-${step.toLowerCase()}-run`;
         const err = await rejection(
-          provisionAdmittedRun(hung, t.store, { runId, port: 8080, actionTimeoutMs: 5 }),
+          provisionAdmittedRun(hung, t.store, { runId, port: 8080, actionTimeoutMs: 5, recordAuditLink: () => {} }),
         );
         expect(err).toBeInstanceOf(ProvisionRefusedError);
         expect((err as ProvisionRefusedError).code).toBe(code);
@@ -980,7 +982,7 @@ describe("provisioning refusals and fail-safe reap", () => {
           },
         });
         const err = await rejection(
-          provisionAdmittedRun(noUrl, t.store, { runId: "no-url-run", port: 8080 }),
+          provisionAdmittedRun(noUrl, t.store, { runId: "no-url-run", port: 8080, recordAuditLink: () => {} }),
         );
         expect(err).toBeInstanceOf(ProvisionRefusedError);
         expect((err as ProvisionRefusedError).code).toBe("expose-no-url");
@@ -1060,7 +1062,7 @@ describe("provisioning refusals and fail-safe reap", () => {
   test("reap refuses outright when a run record file was skipped by the listing", async () => {
     const t = tmp();
     try {
-      await provisionAdmittedRun(t.driver, t.store, { runId: "claimed-run" });
+      await provisionAdmittedRun(t.driver, t.store, { runId: "claimed-run", recordAuditLink: () => {} });
       await t.driver.create("orphan-box");
       // The record listing skips a `.json` whose stem fails the id grammar
       // (INV-4's one exception). A skipped file can hold an OPEN record naming a

@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGzip, gzipSync } from "node:zlib";
 
-import type { ExecResult, ProviderDriver, ProviderVm } from "../../src/providers/driver.ts";
+import type { ExecResult, ProviderAuditLink, ProviderDriver, ProviderVm } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { EXEC_MAX_OUTPUT_BYTES } from "../../src/providers/bounded-exec.ts";
 import { ExeDevDriver } from "../../src/providers/exedev/driver.ts";
@@ -107,6 +107,8 @@ afterEach(() => {
 });
 
 /** Harvest deps over the shared fixtures. */
+let auditLinks: ProviderAuditLink[] = [];
+
 function hd(gitCwd: string, overrides: Partial<HarvestDeps> = {}): HarvestDeps {
   return {
     driver,
@@ -116,6 +118,9 @@ function hd(gitCwd: string, overrides: Partial<HarvestDeps> = {}): HarvestDeps {
     workdir: "app",
     boxRunRoot,
     boxHome: emptyBoxHome,
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
     ...overrides,
   };
 }
@@ -428,7 +433,7 @@ async function harvestWithArtifacts(
   let err: unknown = undefined;
   try {
     await harvestRun(
-      { driver: new BoxTmpDriver(driver, evilTgz), store, gitCwd: hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome },
+      { driver: new BoxTmpDriver(driver, evilTgz), store, gitCwd: hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) },
       runId,
     );
   } catch (e) {
@@ -896,7 +901,7 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     const tgz = join(driver.root, runId, "evil-artifacts.tgz");
     writeFileSync(tgz, gzipSync(buildTar([{ name: "./sub//ok.txt", data: Buffer.from("payload") }])));
     const res = await harvestRun(
-      { driver: new BoxTmpDriver(driver, tgz), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome },
+      { driver: new BoxTmpDriver(driver, tgz), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) },
       runId,
     );
     expect(mustHarvest(res).count).toBe(1);
@@ -920,7 +925,7 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     const padded = Buffer.concat([base, Buffer.alloc(512)]); // one block of zero padding
     writeFileSync(tgz, gzipSync(padded));
     const res = await harvestRun(
-      { driver: new BoxTmpDriver(driver, tgz), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome },
+      { driver: new BoxTmpDriver(driver, tgz), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) },
       runId,
     );
     expect(mustHarvest(res).count).toBe(1);
@@ -937,7 +942,7 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     );
 
     const res = await harvestRun(
-      { driver: new BoxTmpDriver(driver, evil), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome },
+      { driver: new BoxTmpDriver(driver, evil), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) },
       runId,
     );
     expect(mustHarvest(res).count).toBe(1);
@@ -1154,7 +1159,7 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     );
     let err: unknown = undefined;
     try {
-      await harvestRun({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome }, runId);
+      await harvestRun({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) }, runId);
     } catch (e) {
       err = e;
     }
@@ -1177,7 +1182,7 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     );
     let err: unknown = undefined;
     try {
-      await harvestRun({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome }, runId);
+      await harvestRun({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) }, runId);
     } catch (e) {
       err = e;
     }
@@ -1209,7 +1214,7 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     );
     let err: unknown = undefined;
     try {
-      await harvestRun({ driver: failing, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome }, runId);
+      await harvestRun({ driver: failing, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) }, runId);
     } catch (e) {
       err = e;
     }
@@ -1297,7 +1302,7 @@ describe("DF2.5 harvest — round 4 hardening", () => {
 
     let err: unknown = undefined;
     try {
-      await harvestRun({ driver: failingDriver, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome }, runId);
+      await harvestRun({ driver: failingDriver, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome: emptyBoxHome, recordAuditLink: (l) => auditLinks.push(l) }, runId);
     } catch (e) {
       err = e;
     }
@@ -1954,7 +1959,7 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     })(driver);
 
     // No boxRunRoot/boxHome override — exactly what production passes.
-    await pullArtifacts({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" }, runId);
+    await pullArtifacts({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app", recordAuditLink: (l) => auditLinks.push(l) }, runId);
 
     // OMITTED, not empty — five elements, no sixth.
     //
@@ -2399,5 +2404,49 @@ describe("DF1.10 INV-IBOX-8 — the harvested tar carries no sk-or- material", (
       `${runId}.resident.jsonl`,
     ]);
     for (const h of hits) expect(h).toContain(FAKE_KEY);
+  }, 30_000);
+});
+
+describe("DF5.3 — the bundle links are emitted at their own steps", () => {
+  test("bundle-verify then bundle-fetch, hop run-bundle, subject = the bundle path", async () => {
+    const runId = "hvst-df53-links";
+    const s = await boxSetup(runId, 1);
+    // The record's DF2.8 attribution is the only repoSlug an emitter may use.
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    auditLinks = [];
+    const res = mustHarvest(await harvestRun(hd(s.hostDir), runId));
+    expect(res.count).toBe(1);
+
+    expect(auditLinks.map((l) => l.event)).toEqual(["bundle-verify", "bundle-fetch"]);
+    const verify = auditLinks[0]!;
+    const fetch = auditLinks[1]!;
+    expect(verify.hop).toBe("run-bundle");
+    expect(fetch.hop).toBe("run-bundle");
+    const bundlePath = join(store.dir, `${runId}.bundle`);
+    expect(verify.subjectId).toBe(bundlePath);
+    expect(fetch.subjectId).toBe(bundlePath);
+
+    // hops 4/5/6 digest = the emitted link's OWN detail_json — byte-agreement
+    // with the store's canonicalisation is what keeps the walker's
+    // evidence-mismatch check honest.
+    const { canonicalJson, sha256Hex } = await import("../../src/audit/link-store.ts");
+    for (const l of auditLinks) {
+      expect(l.evidenceDigest).toBe(sha256Hex(canonicalJson(l.detail)));
+      expect(l.occurredAt).toBe(l.recordedAt);
+    }
+    // The verify row's detail.sha256 is the bundle FILE's sha256 — the subject
+    // the walker recomputes and compares against the row (chain.ts key).
+    const fileDigest = new Bun.CryptoHasher("sha256").update(readFileSync(bundlePath)).digest("hex");
+    expect((verify.detail as { sha256: string }).sha256).toBe(fileDigest);
+    // AC7 ordering: verify ≤ fetch (non-decreasing; shared ms allowed).
+    expect(Date.parse(fetch.occurredAt) >= Date.parse(verify.occurredAt)).toBeTrue();
+  }, 30_000);
+
+  test("an unattributed record emits nothing (INV-AUDIT-4 — no invented repoSlug)", async () => {
+    const runId = "hvst-df53-nolinks";
+    const s = await boxSetup(runId, 1);
+    auditLinks = [];
+    mustHarvest(await harvestRun(hd(s.hostDir), runId));
+    expect(auditLinks).toHaveLength(0);
   }, 30_000);
 });

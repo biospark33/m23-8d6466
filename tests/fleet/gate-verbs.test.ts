@@ -1299,7 +1299,7 @@ describe("fleet attach", () => {
     const boxes = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-gate-boxes-"));
     try {
       const fake = new FakeDriver(boxes);
-      const run1 = await provisionAdmittedRun(fake, store, { runId: RUN });
+      const run1 = await provisionAdmittedRun(fake, store, { runId: RUN, recordAuditLink: () => {} });
       const s = streams();
       // Nothing is listening in the box, so the ack never comes. A 300 ms
       // ceiling stands in for the real 30_000 ms (attach.test.ts's idiom).

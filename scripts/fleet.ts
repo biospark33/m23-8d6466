@@ -121,6 +121,11 @@ import {
   observeAndDriveChain,
   type ChainOutcome,
 } from "../src/fleet/run-completion.ts";
+// DF5.3: the composition roots in this script open the host-side audit-link
+// store and bind its `record` into the provider emit seam (never the reverse —
+// src/providers takes the seam, not this import).
+import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
+import type { ProviderAuditLink } from "../src/providers/driver.ts";
 // DF3.7: the whole-verb acquire/release wrapper for the observer verb — the
 // same primitive fan-out's loser teardowns and the reaper hold their locks
 // through. Named import from the same module as the DF2.11 block deliberately:
@@ -1732,6 +1737,13 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
             },
           }),
       );
+      // DF5.3: the chain's teardown emits its `teardown` link — this verb is
+      // the composition root, so the store opens beside the ledger handle and
+      // closes in the same finally.
+      const chainAudit = openAuditStore();
+      const recordChainAuditLink = (link: ProviderAuditLink): void => {
+        chainAudit.record(link);
+      };
       let chainOutcome: ChainOutcome;
       try {
         chainOutcome = await observeAndDriveChain(runIdArg, {
@@ -1741,6 +1753,7 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
           hostRoot,
           runLock: h,
           keyApi,
+          recordAuditLink: recordChainAuditLink,
           // The RECORD's dispatch stamp is the join key whenever it carries
           // one — the module's recordRequestId applies that truthiness rule,
           // so this invocation's mint is what is passed: `??` here would let
@@ -1764,6 +1777,20 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
             note,
             "ledger-close-failed",
             `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+            "the handle dies with the process; re-run to confirm it still reads",
+          );
+        }
+        // DF5.3: the audit store closes on the same discipline — every link it
+        // wrote is already committed, so a close fault is bookkeeping, not a
+        // verb to retry.
+        try {
+          chainAudit.close();
+        } catch (e) {
+          const x = (e ?? {}) as { message?: string };
+          printError(
+            note,
+            "audit-store-close-failed",
+            `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
             "the handle dies with the process; re-run to confirm it still reads",
           );
         }
@@ -2264,6 +2291,8 @@ interface VerbCtx {
  */
 interface DestructiveState {
   ledger?: CostLedger;
+  /** DF5.3: the verb's audit-link store, closed in the finally beside the ledger. */
+  audit?: AuditStoreWriter;
   destructiveInFlight: boolean;
 }
 
@@ -2786,20 +2815,42 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
         ),
       );
     }
-    const result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
-      ...seams,
-      driver,
-      keyApi,
-      store,
-      ledgerFactory: deps?.ledgerFactory ?? makeLedgerFactory(store),
-      requestId: fanRequestId,
-      ...(injectedCostLedger === undefined ? {} : { costLedger: injectedCostLedger }),
-      ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
-      ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
-      ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
-      ...(rosterIds === undefined ? {} : { rosterIds: rosterIds }),
-      ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
-    });
+    // DF5.3: a race's loser disposal tears down through teardownSandbox, whose
+    // `teardown` link flows through this seam — the fanout verb is the root,
+    // so the store opens here and closes on every exit of the call.
+    const fanoutAudit = openAuditStore();
+    let result: Awaited<ReturnType<typeof fanout>>;
+    try {
+      result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
+        ...seams,
+        driver,
+        keyApi,
+        store,
+        ledgerFactory: deps?.ledgerFactory ?? makeLedgerFactory(store),
+        requestId: fanRequestId,
+        ...(injectedCostLedger === undefined ? {} : { costLedger: injectedCostLedger }),
+        ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
+        ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
+        ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
+        ...(rosterIds === undefined ? {} : { rosterIds: rosterIds }),
+        ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
+        recordAuditLink: (link: ProviderAuditLink): void => {
+          fanoutAudit.record(link);
+        },
+      });
+    } finally {
+      // Every link is already committed; a close fault is bookkeeping only.
+      try {
+        fanoutAudit.close();
+      } catch (e) {
+        printError(
+          note,
+          "audit-store-close-failed",
+          `could not close the audit-link store: ${redactSecrets((e as { message?: string }).message ?? e)}`,
+          "the handle dies with the process; re-run to confirm it still reads",
+        );
+      }
+    }
     fanoutId = result.fanoutId;
 
     // One JSON line PER ARM — the status-row idiom: stdout is what a caller
@@ -5144,6 +5195,11 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       throw notFound(e);
     }
 
+    // DF5.3: the destructive verbs are their own composition root — the store
+    // opens beside the ledger handle (`state.ledger`) and closes in the same
+    // finally, so every teardown/harvest of this invocation emits its links.
+    const audit = openAuditStore();
+    state.audit = audit;
     const tdeps: TeardownDeps = {
       driver,
       store,
@@ -5153,6 +5209,7 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // default` chain: the lock guards `<store.dir>/<runId>.lock`, so the
       // bundle/artifact paths must be under exactly that directory.
       runsDir: store.dir,
+      recordAuditLink: (link) => audit.record(link),
     };
     if (verb === "harvest") {
       code = await runHarvest(ctx, tdeps, runIdArg);
@@ -5195,6 +5252,23 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
           note,
           "ledger-close-failed",
           `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+          "the handle dies with the process; re-run to confirm it still reads",
+        );
+        cleanupFailed();
+      }
+    }
+    // DF5.3: the verb's audit store closes on the same cleanup policy — the
+    // links are already committed, so a close fault is a leftover, not a
+    // retriable failure.
+    if (state.audit !== undefined) {
+      try {
+        state.audit.close();
+      } catch (e) {
+        const x = (e ?? {}) as { message?: string };
+        printError(
+          note,
+          "audit-store-close-failed",
+          `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
         cleanupFailed();

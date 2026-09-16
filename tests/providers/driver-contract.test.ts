@@ -25,8 +25,8 @@ import {
   SBX_OWNERSHIP_TAG,
   setupRun,
   teardownRun,
-  type ProviderDriver,
-} from "../../src/providers/driver.ts";
+  type ProviderDriver, emitAuditLink, type ProviderAuditLink } from "../../src/providers/driver.ts";
+import { canonicalJson, sha256Hex } from "../../src/audit/link-store.ts";
 import { RunRecordStore, newId } from "../../src/providers/run-record.ts";
 
 /**
@@ -148,7 +148,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
     test("copyFile is box → host", async () => {
       const name = track(nextId());
       await driver.create(name);
-      await fillRun(driver, name, [{ path: "out/report.txt", content: "harvested\n" }]);
+      await fillRun(driver, name, [{ path: "out/report.txt", content: "harvested\n" }], { recordAuditLink: () => {}, runId: name, requestId: "test" });
       const local = join(hostDir, `${name}.txt`);
       await driver.copyFile(name, "out/report.txt", local);
       expect(readFileSync(local, "utf8")).toBe("harvested\n");
@@ -174,7 +174,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
           };
         },
       });
-      await createRun(watched, store, { runId: id });
+      await createRun(watched, store, { runId: id, recordAuditLink: () => {} });
       expect(recordExistedAtCreate).toBe(true);
       await teardownRun(driver, store, id);
     }, 30_000);
@@ -220,7 +220,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // No `tag` here by design: the ownership tag is createRun's alone (D1 —
       // not caller-displaceable), and exedev's `ls --json` reports no tag
       // field at all, so a tag assertion has no place in the shared suite.
-      const rec = await createRun(driver, store, { runId: id, port: 8080 });
+      const rec = await createRun(driver, store, { runId: id, port: 8080, recordAuditLink: () => {} });
       expect(rec.vmName).toBe(id);
       expect(rec.httpsUrl).toMatch(/^https:\/\//);
       expect(rec.ports).toEqual([8080]);
@@ -229,7 +229,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await fillRun(driver, id, [
         { path: "work/input.txt", content: "payload\n" },
         { path: "work/nested/deep.txt", content: "deep\n" },
-      ]);
+      ], { recordAuditLink: () => {}, runId: id, requestId: "test" });
 
       // 3. setup — provisioning steps, failing loudly on the first bad one.
       await setupRun(driver, id, [["sh", "-c", "mkdir -p out"]]);
@@ -267,7 +267,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       const orphan = track(nextId());
       await driver.create(orphan, SBX_OWNERSHIP_TAG);
       const keeper = track(nextId());
-      await createRun(driver, store, { runId: keeper });
+      await createRun(driver, store, { runId: keeper, recordAuditLink: () => {} });
       const listedOrphan = (await driver.list(orphan))[0];
       // The declaration must match the substrate: a driver declaring "my listing
       // proves tags" has to actually carry the tag it was created with, and one
@@ -325,7 +325,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // destroy. One keeper run claims its box; the sweep has to finish,
       // destroy nothing, and leave it running.
       const id = track(nextId());
-      await createRun(driver, store, { runId: id });
+      await createRun(driver, store, { runId: id, recordAuditLink: () => {} });
       let destroyed: string[] | undefined;
       let refused: unknown;
       try {
@@ -353,3 +353,36 @@ export function runDriverContract(opts: DriverContractOptions): void {
 // so importing this module must not spawn boxes, mutate env, or register tests
 // of its own. The `fake` driver's own run of the suite lives in
 // tests/providers/fake-driver.test.ts.
+
+describe("DF5.3 — the emit digest is link-store's canonicalisation, byte for byte", () => {
+  // driver.ts copies canonicalJson/sha256Hex because src/providers must not
+  // import src/audit (DF4.2 direction). The walker recomputes hops 4/5/6
+  // digests with link-store's canonicaliser, so a drift here would report
+  // evidence-mismatch on every healthy link. THIS test is the drift alarm.
+  test("emitAuditLink's evidenceDigest === sha256Hex(canonicalJson(detail)) from the store module", () => {
+    const detail = {
+      limitMicroUsd: 50_000,
+      z: { y: 1, a: undefined }, // undefined member drops; key order must not matter
+      b: "second",
+      arr: [3, 1, 2],
+      nul: null,
+    };
+    let link: ProviderAuditLink | undefined;
+    emitAuditLink(
+      (l) => {
+        link = l;
+      },
+      { runId: "r", repoSlug: "qds/demo", requestId: "req", hop: "run-box", event: "create", detail },
+    );
+    expect(link).toBeDefined();
+    expect(link!.evidenceDigest).toBe(sha256Hex(canonicalJson(detail)));
+    // One clock read: the event's own timestamp, both columns.
+    expect(link!.occurredAt).toBe(link!.recordedAt);
+    // Digest-only detail: `detail ?? null` — an absent detail digests "null".
+    let empty: ProviderAuditLink | undefined;
+    emitAuditLink((l) => {
+      empty = l;
+    }, { runId: "r", repoSlug: "qds/demo", requestId: "req", hop: "run-box", event: "fill" });
+    expect(empty!.evidenceDigest).toBe(sha256Hex(canonicalJson(null)));
+  });
+});

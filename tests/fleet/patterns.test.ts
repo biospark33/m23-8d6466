@@ -435,6 +435,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       perCallDeadlineMs: DEADLINE_MS,
       clock: () => Date.now(),
       monotonic: () => performance.now(),
+      recordAuditLink: () => {},
       ...overrides,
     };
   }

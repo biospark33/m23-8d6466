@@ -440,11 +440,11 @@ test.todoIf(liveTodoOff())(
       await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha, workdir: "src" });
       evidence.push({ phase: "fill", ok: true, commitSha: ctx.sha, workdir: "src" });
 
-      const creds = { keyApi: openRouterKeyApi(), driver: ctx.driver, store, capMicroUsd: CAP_MICRO_USD };
+      const creds = { keyApi: openRouterKeyApi(), driver: ctx.driver, store, capMicroUsd: CAP_MICRO_USD, recordAuditLink: () => {} };
       const minted = await mintRunKey(creds, runId);
       mintedHash = minted.hash; // the HASH is an identifier; the plaintext never leaves this scope
       evidence.push({ phase: "mint", keyHash: minted.hash, capMicroUsd: CAP_MICRO_USD });
-      await deliverRunKey(creds, vm, minted.key);
+      await deliverRunKey(creds, runId, vm, minted.key);
       evidence.push({ phase: "deliver", ok: true });
 
       const gate = await ctx.driver.setup(vm, {

@@ -97,6 +97,40 @@ function writeReportWithId(
 }
 
 describe("INV-PR-5 — there is no push path that skips the gate", () => {
+  test("AC7 (DF5.3): a decision AT the report's completion instant is a violation — decided <= completed refuses", async () => {
+    // The tightening is the story's: the old `decided < completed` boundary
+    // admitted a millisecond-equal pair and opened the PR, while the audit
+    // chain's strict comparison (same host clocks) called it order-violation.
+    // Admission and chain must agree — equality is now a refusal here too.
+    const runId = "run-push-equal";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    const completedAt = "2026-08-25T10:10:00.000Z";
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", completedAt), {
+      decidedAt: completedAt,
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-precedes-report");
+  }, 20_000);
+
+  test("AC7 (DF5.3): strictly-after still passes the tightened boundary", async () => {
+    const runId = "run-push-strictly-after";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    const completedAt = "2026-08-25T10:10:00.000Z";
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", completedAt), {
+      decidedAt: new Date(Date.parse(completedAt) + 1).toISOString(), // +1ms: strictly after
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(true);
+  }, 20_000);
+
   test("a red report refuses the push, with the refusal recorded durably", async () => {
     const runId = "run-push-red";
     const host = await makeHost(runId);

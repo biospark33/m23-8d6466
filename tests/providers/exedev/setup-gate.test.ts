@@ -1957,6 +1957,7 @@ describe("setup gate — input contract (D9/D10/D14)", () => {
             new RunRecordStore(join(storeRoot, `runs-${String(bad).replace(".", "")}`)),
             {
               runId: "timeout-invalid-run",
+              recordAuditLink: () => {},
               budget: {
                 repoSlug: "qds/demo",
                 issueId: "42",

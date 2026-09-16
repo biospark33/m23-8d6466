@@ -40,7 +40,7 @@ import { join, resolve } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
-import { stopVisualizer, type ProviderDriver } from "./driver.ts";
+import { auditRepoSlug, emitAuditLink, stopVisualizer, type ProviderAuditLink, type ProviderDriver } from "./driver.ts";
 import { ingestHarvestedTokens } from "./cost-ledger-bridge.ts";
 import type { BoxHoursCtx, CostWireEvent, IngestCtx, IngestResult } from "./cost-ledger.ts";
 import {
@@ -52,7 +52,7 @@ import {
   rmBestEffort,
   type GitRunner,
 } from "./harvest.ts";
-import { resolveRunsDir, type RunRecordStore } from "./run-record.ts";
+import { resolveRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { ProviderError } from "./errors.ts";
 // DF2.11: type-only — this keeps THIS module's runtime dependency graph free
@@ -138,6 +138,14 @@ export interface TeardownDeps {
    * (exactly once — the deterministic event_id makes a repeated close a no-op).
    */
   costLedger?: CostLedgerHook;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. It serves the `teardown` link here AND — via the artifacts
+   * step's verbatim `HarvestDeps` forwarding (DF1.10 AC4) and the credential
+   * deps built below — the revoke/verify-revoked and bundle emits of the steps
+   * this sequence drives.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export interface TeardownOptions {
@@ -794,7 +802,16 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   const cred: CredentialDeps | undefined =
     deps.keyApi === undefined
       ? undefined
-      : { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId: ctx.requestId };
+      : {
+          keyApi: deps.keyApi,
+          driver: deps.driver,
+          store: deps.store,
+          requestId: ctx.requestId,
+          // DF5.3: the spend→revoke→verify steps below are THIS sequence's
+          // credential emits — the seam forwards so revoke/verify-revoked
+          // land while the run still owns its box.
+          recordAuditLink: deps.recordAuditLink,
+        };
 
   // 1. spend — read usage from the live key BEFORE the DELETE makes it
   // unrecoverable (INV-4). captureSpend writes spendMicroUsd itself (DF2.3).
@@ -890,6 +907,11 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // tokenIngestRefusalLog and the step continues (PR #253 review — a
   // deterministic refusal would resurface on every healing re-run and keep
   // the box-hours row from ever landing behind it).
+  // DF5.3: the close-step read (below) is shared — the teardown emit reuses
+  // it and NEVER issues a second post-close `get`. A read added here would
+  // silently shift every later reader's record state (the close→reverify→gate
+  // read order is load-bearing; see OverlayStore in run-completion.test.ts).
+  let closedRec: RunRecord | undefined;
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
     // DF2.8: price box hours into the cost ledger, now that the record's
@@ -897,7 +919,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     // operation — a second "close" step line marked skipped would contradict
     // the close that just succeeded above.
     if (deps.costLedger) {
-      const closedRec = deps.store.get(runId);
+      closedRec = deps.store.get(runId);
       // DF2.12: the harvested engine log's cost_attribution lines become token
       // rows HERE — immediately before the box-hours ingest, at the same point
       // DF2.8 established, so a teardown that aborts before close writes
@@ -926,4 +948,26 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       reportSpendDivergence(ctx, deps.costLedger, closedRec, runId);
     }
   });
+
+  // DF5.3: the `teardown` link (hop 5, run-box) — after destroy AND close both
+  // landed. Only the fresh-close path reaches here: the first-close-wins
+  // re-run above performed no teardown, so there is no event to link
+  // (INV-AUDIT-4). A record with no DF2.8 budget attribution emits nothing
+  // (NOT NULL columns; an invented attribution is what INV-AUDIT-4 forbids).
+  const teardownRepoSlug = auditRepoSlug(rec);
+  if (teardownRepoSlug !== undefined) {
+    // The unwired-ledger path never read the record post-close; read it once
+    // HERE, for the emit only. (Wired: closedRec is the close-step's own read.)
+    if (closedRec === undefined) closedRec = deps.store.get(runId);
+    emitAuditLink(deps.recordAuditLink, {
+      runId,
+      repoSlug: teardownRepoSlug,
+      requestId: rec.requestId ?? ctx.requestId,
+      hop: "run-box",
+      event: "teardown",
+      subjectId: destroyTarget,
+      subjectKind: "box",
+      detail: { closedAt: closedRec.closedAt },
+    });
+  }
 }

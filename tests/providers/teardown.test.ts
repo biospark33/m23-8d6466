@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createRun, neverPublicDriver, startVisualizer, stopVisualizer, VIZ_PIDFILE } from "../../src/providers/driver.ts";
-import type { ExecResult, ProviderDriver } from "../../src/providers/driver.ts";
+import type { ExecResult, ProviderAuditLink, ProviderDriver } from "../../src/providers/driver.ts";
 import { HarvestError } from "../../src/providers/harvest.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -78,6 +78,7 @@ afterEach(() => {
   // the failure look like a teardown bug rather than a fixture leak.
   for (const lock of locks.values()) releaseRunLock(lock);
   locks.clear();
+  auditLinks = [];
   restoreLog?.();
   rmSync(dir, { recursive: true, force: true });
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -85,9 +86,28 @@ afterEach(() => {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * DF5.3: every deps() construction captures its audit links here; suites that
+ * assert lifecycle behavior read `auditLinks` after the call. Reset per test
+ * in beforeEach like the recording driver.
+ */
+let auditLinks: ProviderAuditLink[] = [];
+
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
   // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
-  return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...overrides };
+  return {
+    driver: recording,
+    store,
+    keyApi: api,
+    runsDir: store.dir,
+    workdir: "app",
+    boxRunRoot,
+    boxHome,
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
+    ...overrides,
+  };
 }
 
 /**
@@ -218,7 +238,7 @@ async function fillBox(
  * wrapped call. The unwrapped originals still receive every call, so the
  * FakeKeyApi/RecordingDriver state stays authoritative.
  */
-function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: TeardownDeps } {
+function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; links: ProviderAuditLink[]; deps: TeardownDeps } {
   const calls: string[] = [];
   const keyW = Object.create(api) as FakeKeyApi;
   keyW.getKeyEntry = (hash: string, maxPages?: number) => {
@@ -243,7 +263,25 @@ function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: T
     calls.push("close");
     return store.close(runId, now);
   };
-  return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...base } };
+  // DF5.3: the wrap captures the teardown link alongside the step labels.
+  const links: ProviderAuditLink[] = [];
+  return {
+    calls,
+    links,
+    deps: {
+      driver: driverW,
+      store: storeW,
+      keyApi: keyW,
+      runsDir: store.dir,
+      workdir: "app",
+      boxRunRoot,
+      boxHome,
+      recordAuditLink: (link) => {
+        links.push(link);
+      },
+      ...base,
+    },
+  };
 }
 
 /**
@@ -297,7 +335,7 @@ function assertTeardownOrder(calls: string[]): void {
 }
 
 async function makeRun(runId: string): Promise<void> {
-  await createRun(recording, store, { runId });
+  await createRun(recording, store, { runId, recordAuditLink: (l) => auditLinks.push(l) });
 }
 
 // ─── DF2.11: the teardown lock — AC1 required branded handle, AC2 mismatch ────
@@ -390,6 +428,8 @@ describe("DF2.5 teardownSandbox", () => {
     const host = await makeHostRepo();
     await makeRun(runId);
     await mintFor(runId);
+    // DF5.3: the emit needs the DF2.8 attribution — the ONLY repoSlug source.
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } } });
     const h = orderDeps({ gitCwd: host });
     const lock = lockFor(runId);
 
@@ -397,6 +437,15 @@ describe("DF2.5 teardownSandbox", () => {
 
     assertTeardownOrder(h.calls);
     expect(store.get(runId).closedAt).toBeString();
+    // DF5.3: the revoke+verify-revoked links ride the forwarded credential
+    // deps (steps 4–5), and exactly one teardown link lands AFTER close — the
+    // event completed, and the detail carries the closedAt it stamped.
+    expect(h.links.map((l) => `${l.hop}.${l.event}`)).toEqual([
+      "run-credential.revoke",
+      "run-credential.verify-revoked",
+      "run-box.teardown",
+    ]);
+    expect(h.links[2]?.detail).toMatchObject({ closedAt: store.get(runId).closedAt });
     // destroy really ran: the fake box directory is gone
     expect(existsSync(boxDir(runId))).toBeFalse();
     // DF2.11 AC1's read-only half, on disk rather than through the memoized
@@ -958,7 +1007,7 @@ describe("DF2.5 teardownSandbox", () => {
     await makeRun(runId);
     store.set(runId, { commitSha: "0123456789abcdef0123456789abcdef01234567" });
     // no keyHash, and deps carries NO keyApi field at all — works offline
-    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome };
+    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome, recordAuditLink: (l) => auditLinks.push(l) };
 
     await teardownSandbox(keyless, runId, lockFor(runId));
 
@@ -2333,7 +2382,7 @@ describe("DF2.5 teardownSandbox", () => {
       // without --dir the CLI would fail no-record against $QDS_RUNS_DIR.
       const altDir = join(dir, "alt-runs");
       const altStore = new RunRecordStore(altDir);
-      await createRun(recording, altStore, { runId });
+      await createRun(recording, altStore, { runId, recordAuditLink: (l) => auditLinks.push(l) });
       altStore.set(runId, { commitSha: origin.baseSha });
       await fillBox(runId, runId, origin.originDir, 3, true);
 

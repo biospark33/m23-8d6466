@@ -304,7 +304,7 @@ describe("DF2.6 quota limits", () => {
 
     let err: unknown;
     try {
-      await createRun(driver, store, { runId: "df26ref-20260820-000003" });
+      await createRun(driver, store, { runId: "df26ref-20260820-000003", recordAuditLink: () => {} });
     } catch (e) {
       err = e;
     }
@@ -326,8 +326,8 @@ describe("DF2.6 quota limits", () => {
     const driver = new FakeDriver(join(dir, "boxes"));
     const store = new RunRecordStore(join(dir, "runs"));
 
-    await createRun(driver, store, { runId: "df26tag-20260820-000001" });
-    await createRun(driver, store, { runId: "df26tag-20260820-000002" });
+    await createRun(driver, store, { runId: "df26tag-20260820-000001", recordAuditLink: () => {} });
+    await createRun(driver, store, { runId: "df26tag-20260820-000002", recordAuditLink: () => {} });
 
     const vms = await driver.list();
     // The ownership marker is canonical and non-displaceable: a factory box

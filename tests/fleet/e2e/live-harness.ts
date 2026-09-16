@@ -888,7 +888,7 @@ export async function mintCappedKey(
   capMicroUsd: number,
 ): Promise<{ hash: string }> {
   const keyApi: KeyApi = openRouterKeyApi();
-  const res = await mintRunKey({ store, keyApi, driver, capMicroUsd }, runId);
+  const res = await mintRunKey({ store, keyApi, driver, capMicroUsd, recordAuditLink: () => {} }, runId);
   return { hash: res.hash };
 }
 
@@ -1036,7 +1036,7 @@ export async function revokeQuietly(
       return; // no key was ever minted — nothing to revoke
     }
     const keyApi: KeyApi = openRouterKeyApi();
-    const result = await revokeRunKey({ keyApi, driver, store }, runId);
+    const result = await revokeRunKey({ keyApi, driver, store, recordAuditLink: () => {} }, runId);
     evidence.push({ phase: "finally-revoke", runId, result, ok: result !== "none" });
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);

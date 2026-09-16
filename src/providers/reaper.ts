@@ -32,11 +32,14 @@ import {
   type KeyEntry,
 } from "./credentials.ts";
 import {
+  auditRepoSlug,
   driverListing,
+  emitAuditLink,
   ProvisionRefusedError,
   RUN_ID_SHAPE,
   SBX_OWNERSHIP_TAG,
   unverifiedVmListingRefusal,
+  type ProviderAuditLink,
   type ProviderDriver,
   type ProviderVm,
 } from "./driver.ts";
@@ -184,6 +187,13 @@ export interface SweepDeps {
    * never restored). Optional only so non-CLI embedders keep compiling.
    */
   costLedger?: TeardownDeps["costLedger"];
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. It serves the orphan-path `reap` link here and rides the
+   * sweep's `teardownDeps` so a reaper-initiated `teardownSandbox` emits its
+   * own `teardown` link. See `ProviderAuditLink` (driver.ts).
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export interface SweepOptions {
@@ -737,9 +747,24 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     requestId,
     gitCwd: process.cwd(),
     runsDir: deps.store.dir,
+    // DF5.3: a reaper-initiated teardown emits its own `teardown` link through
+    // the same seam the orphan-path `reap` emit below uses.
+    recordAuditLink: deps.recordAuditLink,
     ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
   };
-  const credDeps: CredentialDeps = { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId };
+  // W14B-3 — THE NAMED NO-OP SINK. `revokeAndVerify` runs under a run-less
+  // step context (`runId: null`, credentials.ts) and `audit_links.run_id` is
+  // NOT NULL: a run-less revocation — the record-less leaked key — has no hop
+  // to serve, and INV-AUDIT-4 forbids manufacturing links. `revokeAndVerify`
+  // is itself deliberately not an emit site for the same reason; this literal
+  // makes that posture structural instead of pretending an emit exists.
+  const credDeps: CredentialDeps = {
+    keyApi: deps.keyApi,
+    driver: deps.driver,
+    store: deps.store,
+    requestId,
+    recordAuditLink: () => {},
+  };
   // R4-9: the lock path resolves through the SAME expression teardownSandbox's
   // head check uses (`deps.runsDir ?? deps.store.dir`) — the acquire below and
   // the head check inside the call must name one file, however the teardownDeps
@@ -885,6 +910,28 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           } else {
             executed.destroy.push(unit.id);
             await withTimeout(deps.driver.destroy(unit.id), actionTimeoutMs, `driver.destroy(${unit.id})`);
+            // DF5.3: the `reap` link (hop 5, run-box) — the ORPHAN PATH ONLY.
+            // A cleanly torn-down run never reaches this arm (AC5 resolves
+            // `reap` as not-applicable there), so an emitted link exists only
+            // for a box the reaper actually collected. Emitted only when a
+            // record resolves with a DF2.8 attribution: a record-less leak has
+            // no runId/repoSlug/requestId to serve the NOT NULL columns, and
+            // manufacturing a link for it is exactly what INV-AUDIT-4 forbids
+            // (the credDeps no-op sink above is the same posture).
+            const reapRec = recordError === undefined ? claimed : undefined;
+            const reapRepoSlug = auditRepoSlug(reapRec);
+            if (reapRec !== undefined && reapRepoSlug !== undefined) {
+              emitAuditLink(deps.recordAuditLink, {
+                runId: reapRec.runId,
+                repoSlug: reapRepoSlug,
+                requestId: reapRec.requestId ?? requestId,
+                hop: "run-box",
+                event: "reap",
+                subjectId: unit.id,
+                subjectKind: "box",
+                detail: { vm: unit.id, class: "leaked-vm" },
+              });
+            }
           }
         } else if (unit.hash !== undefined) {
           executed.revoke.push(unit.id);

@@ -64,7 +64,7 @@ afterEach(() => {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function deps(overrides: Partial<CapHitDemoDeps> = {}): CapHitDemoDeps {
-  return { driver: recording, keyApi: api, store, evidenceDir, envFile: "app/.env", ...overrides };
+  return { driver: recording, keyApi: api, store, evidenceDir, envFile: "app/.env", recordAuditLink: () => {}, ...overrides };
 }
 
 /** Default opts for fake substrate (driver.name !== "exedev"). */

@@ -113,6 +113,78 @@ export class FillError extends ProviderError {
 }
 
 /**
+ * The provider-facing audit emit seam (DF5.3). Structural on purpose: providers
+ * must not import src/audit (DF4.2 direction); the composition root binds this
+ * to an AuditStoreWriter.record.
+ */
+export interface ProviderAuditLink {
+  runId: string; repoSlug: string; requestId: string;
+  hop: string; event: string;
+  subjectId?: string; subjectKind?: string; evidencePath?: string;
+  evidenceDigest: string; detail?: unknown; occurredAt: string; recordedAt: string;
+}
+
+/**
+ * The emit-time digest half. These two behave byte-identically to
+ * `src/audit/link-store.ts`'s `canonicalJson`/`sha256Hex` — the store's own
+ * exports — and MUST stay that way: hops 4/5/6's `evidence_digest` is the
+ * digest of the emitted link's own `detail_json` (story Technical Notes), and
+ * the walker re-canonicalises the stored `detail_json` with link-store's
+ * canonicaliser before comparing. A drift here would report `evidence-mismatch`
+ * on every healthy link. They are copied rather than imported because
+ * `src/providers/*` must not import `src/audit/*` (the DF4.2 direction this
+ * file's seam exists to keep); the agreement is pinned in
+ * tests/providers/driver-contract.test.ts against link-store's exports.
+ */
+function auditCanonicalJson(value: unknown): string {
+  if (value === undefined || value === null) return "null";
+  if (typeof value !== "object") return JSON.stringify(value) as string;
+  if (Array.isArray(value)) return `[${value.map(auditCanonicalJson).join(",")}]`;
+  const entries = Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${v === undefined ? "null" : auditCanonicalJson(v)}`).join(",")}}`;
+}
+
+function auditSha256Hex(text: string): string {
+  return new Bun.CryptoHasher("sha256").update(text).digest("hex");
+}
+
+/** Everything an emitter supplies; the helper stamps digest + both clocks. */
+export type AuditEmitInput = Omit<ProviderAuditLink, "evidenceDigest" | "occurredAt" | "recordedAt">;
+
+/**
+ * One audit link, emitted by the event's own emitter at the moment of the
+ * event (AC3/INV-AUDIT-4): digests `detail` canonically (the caller-computed
+ * digest the store never computes), stamps `occurredAt` = `recordedAt` = now
+ * (one clock read for both — the event's own timestamp), and hands the result
+ * to the caller-bound seam. A store refusal (typed `AuditStoreError`)
+ * propagates: for the credential/box/bundle emits the write IS part of the
+ * lifecycle. The store's `record` already logs the one structured
+ * `audit-link.record` line per emit, so no emitter adds a second.
+ */
+export function emitAuditLink(record: (link: ProviderAuditLink) => void, input: AuditEmitInput): void {
+  const occurredAt = new Date().toISOString();
+  record({
+    ...input,
+    evidenceDigest: auditSha256Hex(auditCanonicalJson(input.detail ?? null)),
+    occurredAt,
+    recordedAt: occurredAt,
+  });
+}
+
+/**
+ * The record's DF2.8 budget attribution — the ONLY repoSlug source an emitter
+ * may use (never a placeholder). `undefined` means the run carries no
+ * attribution, and an emitter that finds none emits nothing: `audit_links`
+ * columns are NOT NULL, so a link without the identity to attribute it cannot
+ * be written, and manufacturing one for an unadmitted run is exactly what
+ * INV-AUDIT-4 forbids.
+ */
+export function auditRepoSlug(rec: Pick<RunRecord, "extensions"> | undefined): string | undefined {
+  const slug = rec?.extensions?.budget?.repoSlug;
+  return typeof slug === "string" && slug.length > 0 ? slug : undefined;
+}
+
+/**
  * Per-call provider budget for the provisioning sequence — the same 60s the
  * DF2.6 reaper gives each of its per-unit provider ops. A bare `await` on a
  * provider API that never answers hangs the whole dispatch: the record stays
@@ -294,6 +366,12 @@ export interface CreateRunOptions {
     issueId: string;
     requestId?: string;
   };
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. `createRun` emits nothing itself — the create link lives at
+   * `provisionAdmittedRun` — and threads this verbatim to it.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 /** DF2.8 budget-admission facts, as they land on the record's budget extension. */
@@ -335,6 +413,39 @@ export interface ProvisionAdmittedRunOptions {
    * wait out the production value.
    */
   actionTimeoutMs?: number;
+  /**
+   * DF5.3: the correlation the `create` link carries. The record's own
+   * `requestId` stamp happens only after provisioning returns
+   * (`store.set(runId, { requestId })` at the dispatch create step), so at
+   * emit time this is the only place it can come from; absent, the link falls
+   * back to its own emit-context id.
+   */
+  requestId?: string;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. The composition root binds it to `AuditStoreWriter.record`
+   * (src/fleet/dispatch.ts is that root; see `ProviderAuditLink`).
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
+}
+
+/**
+ * `fillRun`'s trailing audit argument (DF5.3). Required in full — an unwired
+ * construction fails at compile time — and it carries the link's identity
+ * fields beside the seam because `fillRun`'s only other inputs are a driver
+ * handle and file payloads: `audit_links`'s NOT NULL `runId`/`repoSlug`/
+ * `requestId` can only come from the caller's composition context.
+ */
+export interface FillRunAuditOptions {
+  recordAuditLink: (link: ProviderAuditLink) => void;
+  runId: string;
+  requestId: string;
+  /**
+   * The record's DF2.8 budget attribution — the only repoSlug an emitter may
+   * use, never a placeholder. Absent ⇒ the run is unattributed and `fillRun`
+   * emits nothing (`audit_links`' columns are NOT NULL; INV-AUDIT-4).
+   */
+  repoSlug?: string;
 }
 
 /**
@@ -803,6 +914,25 @@ export async function provisionAdmittedRun(
     },
     "box handle (vmName/ports)",
   );
+  // DF5.3: the box `create` link (hop 5, run-box), emitted HERE — the moment
+  // the box exists and is named on the record — never retroactively (AC3).
+  // A run with no budget attribution carries no repoSlug to serve the link, so
+  // it emits nothing: the columns are NOT NULL and manufacturing a link for an
+  // unadmitted run is what INV-AUDIT-4 forbids (AC5 already refuses to vouch
+  // for such a run one hop later).
+  const createRepoSlug = auditRepoSlug(record);
+  if (createRepoSlug !== undefined) {
+    emitAuditLink(opts.recordAuditLink, {
+      runId: opts.runId,
+      repoSlug: createRepoSlug,
+      requestId: opts.requestId ?? record.requestId ?? newRequestId(),
+      hop: "run-box",
+      event: "create",
+      subjectId: vm.name,
+      subjectKind: "box",
+      detail: { vmName: vm.name, provider: driver.name },
+    });
+  }
   // Only NOW is the create-time URL validated. `address` still rejects a null
   // (any non-string, non-undefined) httpsUrl — that seam lie is what it exists
   // for — but the refusal now lands on a record that already names the box and
@@ -924,6 +1054,9 @@ export async function createRun(
     await provisionAdmittedRun(driver, store, {
       runId: opts.runId,
       ...(opts.port === undefined ? {} : { port: opts.port }),
+      // W12B-1: the seam threads verbatim — the create emit lives at
+      // `provisionAdmittedRun`, not here.
+      recordAuditLink: opts.recordAuditLink,
     })
   ).record;
 }
@@ -932,7 +1065,12 @@ export async function createRun(
  * Lifecycle verb `fill` — place files inside the box. Substrate-independent:
  * `copyFile` is box → host only, so content arrives on `exec` stdin.
  */
-export async function fillRun(driver: ProviderDriver, vm: string, files: readonly BoxFile[]): Promise<void> {
+export async function fillRun(
+  driver: ProviderDriver,
+  vm: string,
+  files: readonly BoxFile[],
+  audit: FillRunAuditOptions,
+): Promise<void> {
   for (const file of files) {
     // Quoting "$1" in the shell command only stops word-splitting; it does not
     // stop the path itself from resolving outside the box. Reject that here.
@@ -976,6 +1114,20 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
         `inspect the box by hand: the fill script exited ${res.exitCode} writing ${sanitizeBoxOutput(file.path)}`,
       );
     }
+  }
+  // DF5.3: the `fill` link (hop 5, run-box), after every file landed. An
+  // unattributed run (`repoSlug` absent) emits nothing — INV-AUDIT-4.
+  if (audit.repoSlug !== undefined) {
+    emitAuditLink(audit.recordAuditLink, {
+      runId: audit.runId,
+      repoSlug: audit.repoSlug,
+      requestId: audit.requestId,
+      hop: "run-box",
+      event: "fill",
+      subjectId: vm,
+      subjectKind: "box",
+      detail: { fileCount: files.length },
+    });
   }
 }
 

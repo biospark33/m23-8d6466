@@ -23,8 +23,8 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
-import type { ProviderDriver } from "./driver.ts";
-import type { RunRecordStore } from "./run-record.ts";
+import { auditRepoSlug, emitAuditLink, type ProviderAuditLink, type ProviderDriver } from "./driver.ts";
+import type { RunRecord, RunRecordStore } from "./run-record.ts";
 // INV-4: the plaintext key exists in the mint return and nowhere else. Every
 // sink below logs a CAUGHT error's free text, and `deliverRunKey` writes the
 // key through `driver.exec` — an exec wrapper that echoes the argv it ran (the
@@ -200,6 +200,45 @@ export interface CredentialDeps {
    * location and this knob goes away.
    */
   envFile?: string;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. The composition root binds it to `AuditStoreWriter.record`
+   * (see `ProviderAuditLink` in driver.ts). A run whose record carries no
+   * DF2.8 budget attribution emits nothing — the link's columns are NOT NULL
+   * and an invented attribution is exactly what INV-AUDIT-4 forbids.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
+}
+
+/**
+ * The DF5.3 link emit shared by this module's four credential events (hop 4,
+ * run-credential: mint/deliver/revoke/verify-revoked). The record is the ONLY
+ * repoSlug source (DF2.8's budget attribution — never a placeholder), and its
+ * `requestId` is the correlation the chain joins on, with the §5.2-propagated
+ * `deps.requestId` and the emit context as fallbacks. Never key material —
+ * `keyHash` only (INV-AUDIT-2); the store's own `record` logs the one
+ * structured line per emit.
+ */
+function emitCredentialLink(
+  deps: CredentialDeps,
+  rec: RunRecord,
+  runId: string,
+  event: string,
+  detail: Record<string, unknown>,
+  keyHash: string,
+): void {
+  const repoSlug = auditRepoSlug(rec);
+  if (repoSlug === undefined) return;
+  emitAuditLink(deps.recordAuditLink, {
+    runId,
+    repoSlug,
+    requestId: rec.requestId ?? deps.requestId ?? newRequestId(),
+    hop: "run-credential",
+    event,
+    subjectId: keyHash,
+    subjectKind: "credential-key",
+    detail: { keyHash, ...detail },
+  });
 }
 
 // ─── observability ───────────────────────────────────────────────────────────
@@ -515,6 +554,11 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // would throw away a usable run over a store hiccup; the write failure
   // propagates instead, and the caller's teardown revokes by hash.
   deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
+  // DF5.3: the `mint` link — emitted after both record writes landed. The cap
+  // has NO event of its own (INV-AUDIT-4): it is an argument to mint, carried
+  // here as the mint row's `detail.limitMicroUsd` — the APPLIED figure (the
+  // provider's granted µ$, what the record carries), not the requested one.
+  emitCredentialLink(deps, deps.store.get(runId), runId, "mint", { limitMicroUsd: grantedMicroUsd }, res.hash);
   return { key: res.key, hash: res.hash };
 }
 
@@ -558,8 +602,18 @@ function assertEnvFileSafe(envFile: string): void {
   }
 }
 
-export async function deliverRunKey(deps: CredentialDeps, vm: string, key: string): Promise<void> {
-  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId: null };
+/**
+ * Deliver the secret over the driver's stdin channel into `KEY_ENV_FILE`
+ * (mode 0600). The argv carries only the fixed script — the value never
+ * appears in `ps` on either side (fill.just:147-155). Confirmation is by
+ * `stat` mode, never by echoing the value back.
+ *
+ * DF5.3: `runId` is a parameter (was implicit at the one lifecycle caller) —
+ * the `deliver` link needs the run identity to be attributable, and the
+ * keyHash it digests is read off the record the mint already wrote.
+ */
+export async function deliverRunKey(deps: CredentialDeps, runId: string, vm: string, key: string): Promise<void> {
+  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId };
   const envFile = deps.envFile ?? KEY_ENV_FILE;
   assertEnvFileSafe(envFile);
   const stdin = `${KEY_ENV_VAR}=${key}\n`;
@@ -571,6 +625,22 @@ export async function deliverRunKey(deps: CredentialDeps, vm: string, key: strin
       `key delivery to ${vm}:${envFile} failed (exit ${res.exitCode}, mode ${mode || "unknown"})`,
       "inspect the box by hand, then re-run teardown for the run",
     );
+  }
+  // DF5.3: the `deliver` link, after mode-600 confirmation. keyHash comes off
+  // the record (mint persisted it before delivery) — never from the plaintext.
+  // The record is read BEST-EFFORT: a caller delivering against a run with no
+  // record has nothing to attribute the link to, and the delivery itself has
+  // already succeeded — a store fault here must not turn a delivered key into
+  // a reported delivery failure. A genuine store-write refusal (the emit) is
+  // NOT caught: it propagates typed, per the lifecycle-fail-loud posture.
+  let rec: RunRecord | undefined;
+  try {
+    rec = deps.store.get(runId);
+  } catch {
+    rec = undefined; // unattributable — no link is manufactured (INV-AUDIT-4)
+  }
+  if (rec !== undefined && typeof rec.keyHash === "string") {
+    emitCredentialLink(deps, rec, runId, "deliver", { envFile }, rec.keyHash);
   }
 }
 
@@ -644,12 +714,26 @@ export async function revokeRunKey(deps: CredentialDeps, runId: string): Promise
   const rec = deps.store.get(runId);
   if (!rec.keyHash) return "none"; // no key was ever minted — nothing to revoke
   ctx.keyHash = rec.keyHash;
-  return revokeHash(deps, ctx, rec.keyHash);
+  const outcome = await revokeHash(deps, ctx, rec.keyHash);
+  // DF5.3: the `revoke` link — emitted for BOTH outcomes. `revoked` is the
+  // DELETE landing; `already-gone` is the provider confirming the key is not
+  // live, which is the same event (the key left the live set) resolved at a
+  // different provider answer. The `none` arm above emits NOTHING: no key
+  // ever existed, so no event happened to link (INV-AUDIT-4).
+  emitCredentialLink(deps, rec, runId, "revoke", { outcome }, rec.keyHash);
+  return outcome;
 }
 
 /**
  * Record-free variant for DF2.6's orphan sweep: same DELETE → re-list →
  * assert-absent gate against a hash alone. Writes no record, captures no spend.
+ *
+ * Deliberately NOT an emit site (DF5.3): this path runs under a run-less step
+ * context (`runId: null` — the reaper's record-less leaked key, and this
+ * module's own mint/delivery compensation), and `audit_links.run_id` is NOT
+ * NULL. A run-less revocation has no hop to serve, so no link is manufactured
+ * for it; the reaper's own deps literal carries the named no-op sink for the
+ * same reason (W14B-3).
  */
 export async function revokeAndVerify(deps: CredentialDeps, keyHash: string): Promise<void> {
   const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId: null, keyHash };
@@ -701,6 +785,9 @@ export async function verifyRevoked(deps: CredentialDeps, runId: string): Promis
   if (!rec.keyHash) return;
   const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId, keyHash: rec.keyHash };
   await verifyHash(deps, ctx, rec.keyHash);
+  // DF5.3: the `verify-revoked` link — the list-authoritative proof, emitted
+  // only after the authoritative list confirmed absence.
+  emitCredentialLink(deps, rec, runId, "verify-revoked", {}, rec.keyHash);
 }
 
 async function verifyHash(deps: CredentialDeps, ctx: StepContext, keyHash: string): Promise<void> {
@@ -743,7 +830,7 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
   assertEnvFileSafe(deps.envFile ?? KEY_ENV_FILE);
   const minted = await mintRunKey(deps, runId);
   try {
-    await deliverRunKey(deps, rec.vmName, minted.key);
+    await deliverRunKey(deps, runId, rec.vmName, minted.key);
   } catch (e) {
     // A minted key must never outlive a failed delivery: the mint and revoke
     // guarantees must bracket the unhappy path too, or a spend-capable key is

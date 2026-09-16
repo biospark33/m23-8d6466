@@ -38,7 +38,12 @@ import {
   stampManifestLimit,
   stripAuthoredLimit,
 } from "../phase-engine/manifest.ts";
-import { fillRun, provisionAdmittedRun, type ProviderDriver } from "../providers/driver.ts";
+import { emitAuditLink, fillRun, provisionAdmittedRun, type ProviderAuditLink, type ProviderDriver } from "../providers/driver.ts";
+// DF5.3: dispatch is THE composition root for this run's provider-side audit
+// links — the one src/fleet file that opens the store itself and binds
+// `AuditStoreWriter.record` into the `recordAuditLink` seam. Every provider
+// module takes the seam, never this import (DF4.2 direction).
+import { openAuditStore, type AuditStoreWriter } from "../audit/link-store.ts";
 import { defaultKeyCapMicroUsd, mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
@@ -1655,9 +1660,11 @@ async function mintAndDeliverKey(
     runId: string;
     vm: Awaited<ReturnType<typeof provisionAdmittedRun>>["vm"];
     effectiveCeilingMicros: number;
+    /** DF5.3: the bound audit seam, threaded into both credential deps below. */
+    recordAuditLink: (link: ProviderAuditLink) => void;
   },
 ): Promise<number> {
-  const { requestId, runId, vm, effectiveCeilingMicros } = args;
+  const { requestId, runId, vm, effectiveCeilingMicros, recordAuditLink } = args;
   // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ─
   const tMint = ctx.now();
   const credEnvFile = envFileFor(deps.driver);
@@ -1684,6 +1691,7 @@ async function mintAndDeliverKey(
             store: deps.store,
             requestId,
             capMicroUsd: effectiveCeilingMicros,
+            recordAuditLink,
             ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
           },
           runId,
@@ -1713,8 +1721,12 @@ async function mintAndDeliverKey(
             driver: deps.driver,
             store: deps.store,
             requestId,
+            recordAuditLink,
             ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
           },
+          // DF5.3: the deliver link needs the run identity, so `deliverRunKey`
+          // now takes it beside the deps (it had only the vm handle).
+          runId,
           vm.name,
           key,
         ),
@@ -2079,6 +2091,23 @@ export async function dispatch(
       join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
   );
   const timings: Record<string, number> = {};
+
+  /**
+   * DF5.3: this dispatch IS the composition root for the run's provider-side
+   * audit links. The store is opened ONCE per dispatch — right before
+   * provisioning, after admission, so a refused dispatch opens nothing — and
+   * closed at the end of the provisioning section (the `finally` on the
+   * create→expose try below). `QDS_AUDIT_DB` / `.sandbox/audit.db` is
+   * resolved by the store itself. On the narrow refusal window between the
+   * open and that `finally`, the handle dies with the process: every
+   * `record` is its own committed transaction, so no emitted link is lost.
+   */
+  let auditStore: AuditStoreWriter | undefined;
+  // The seam every provider-side emit of this run flows through (create at
+  // `provisionAdmittedRun`, fill, setup-gate, mint/deliver at their steps).
+  const recordAuditLink = (link: ProviderAuditLink): void => {
+    auditStore?.record(link);
+  };
 
   const ctx = new DispatchContext(now, wallStart, timeoutMs, dispatchLog, timings);
   const phase = ctx.phase.bind(ctx);
@@ -2744,6 +2773,20 @@ export async function dispatch(
     // below, where the reservation is retained deliberately and for as long as the
     // box lives.
     const tCreate = now();
+    // DF5.3: opening is a typed refusal BEFORE anything billable — a run whose
+    // box-lifecycle links cannot be written is a run this chain can never
+    // vouch for, so it refuses here instead of provisioning an unlinked box.
+    try {
+      auditStore = openAuditStore();
+    } catch (e) {
+      throw refuse(
+        1,
+        "audit-store-unavailable",
+        `the audit-link store could not be opened: ${errorMessage(e)} — the run's box/credential links could not be written, so nothing was provisioned`,
+        "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the dispatch",
+        {},
+      );
+    }
     // Wrapped, because this step STRADDLES the record: `provisionAdmittedRun`
     // writes the run record first (INV-1) and only then creates the box, so a
     // throw from the budget-extension write or from `driver.create` leaves a real
@@ -2808,6 +2851,10 @@ export async function dispatch(
               reservedMicroUsd: decision.reservedMicroUsd,
               admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
             },
+            // DF5.3: the record's own correlation stamp happens after this call
+            // returns, so the create link takes the id from here.
+            requestId,
+            recordAuditLink,
           });
         },
         (p) => {
@@ -2978,6 +3025,7 @@ export async function dispatch(
       runId,
       vm,
       effectiveCeilingMicros,
+      recordAuditLink,
     });
 
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
@@ -3097,7 +3145,12 @@ export async function dispatch(
         () => ({ vmName: vm.name, clonedLate: true }),
       );
     }
-    await within("fill", () => fillRun(deps.driver, vm.name, files));
+    await within("fill", () => fillRun(deps.driver, vm.name, files, {
+      recordAuditLink,
+      runId,
+      requestId,
+      repoSlug,
+    }));
     phase("fill_ms", now() - tFill);
 
     // ── 9. setup gate (AC3: failure keeps record open, box alive — INV-5) ────
@@ -3281,6 +3334,23 @@ export async function dispatch(
         isSubstrateFailure(gate) ? ("transient" as ExitStatus) : undefined,
       );
     }
+    // DF5.3: the `setup-gate` link (hop 5, run-box) — the gate PASSED, which
+    // is the event; a failed gate refuses above and never reaches this emit.
+    // Detail carries a summary of the gate's own result, nothing box-derived
+    // that is not already redacted elsewhere.
+    emitAuditLink(recordAuditLink, {
+      runId,
+      repoSlug,
+      requestId,
+      hop: "run-box",
+      event: "setup-gate",
+      subjectId: vm.name,
+      subjectKind: "box",
+      detail: {
+        ready: gate.ready,
+        assertions: Array.isArray(gate.assertions) ? gate.assertions.length : 0,
+      },
+    });
     // The gate PROVED this box — stamp the money identity on the record: the
     // exact SHA the box was filled to and gated against (T2.1 live 2026-08-25:
     // the ack carried vmName but `fleet status`/audit could not answer "which
@@ -3317,6 +3387,24 @@ export async function dispatch(
         ...providerCodePayload(e),
       },
     );
+  } finally {
+    // DF5.3: the composition-root store dies with the provisioning section —
+    // every emit (create/fill/setup-gate/mint/deliver) has landed by now and
+    // nothing past this point writes links. A close failure must not mask the
+    // section's own outcome: the rows are already committed (each `record` is
+    // its own transaction), so this is a handle-release fault, reported and
+    // never a refusal.
+    if (auditStore !== undefined) {
+      try {
+        auditStore.close();
+      } catch (e) {
+        try {
+          process.stderr.write(`audit store close failed: ${redact(errorMessage(e))}\n`);
+        } catch {
+          // stdout/stderr gone — the rows are already on disk
+        }
+      }
+    }
   }
 
   // ── 11. ack (AC2: synchronous, "provisioned", never "succeeded") ───────────

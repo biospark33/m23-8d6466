@@ -665,6 +665,7 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
       pollIntervalMs: TICK_MS,
       perCallDeadlineMs: DEADLINE_MS,
       ceilingMs: 10_000,
+      recordAuditLink: () => {},
       ...overrides,
     };
   }

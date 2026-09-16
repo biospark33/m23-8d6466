@@ -28,6 +28,7 @@ import {
 } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
+import type { ProviderAuditLink } from "../providers/driver.ts";
 import { type BoxFileRead, readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { RunLockedError, withRunLock } from "../../scripts/lib/run-lock.ts";
@@ -142,6 +143,12 @@ export interface FanoutDeps extends Omit<DispatchDeps, "requestId"> {
    * Wired beside the records dir by the CLI, like teardown's own.
    */
   costLedger?: TeardownDeps["costLedger"];
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time — a loser's teardown emits its `teardown` link through it.
+   * The CLI binds it to `AuditStoreWriter.record` beside its other handles.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export interface ArmOutcome {
@@ -1407,6 +1414,9 @@ async function disposeLosers(
     store: deps.store,
     keyApi: deps.keyApi,
     requestId: deps.requestId,
+    // DF5.3: the fan-out race's own TeardownDeps construction threads the
+    // required audit seam, so a loser's teardown emits its `teardown` link.
+    recordAuditLink: deps.recordAuditLink,
     // DF2.8: a loser's close step must price its box hours like any teardown,
     // or the ledger under-counts spend and a later assertWithinBudget
     // over-admits against the cap.

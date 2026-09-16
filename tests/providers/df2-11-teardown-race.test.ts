@@ -160,7 +160,7 @@ async function fillBox(vmName: string, runId: string): Promise<void> {
 /** Open record + live fake box + minted key + pinned base — the pre-teardown world. */
 async function seedRun(runId: string): Promise<{ baseSha: string; vmName: string }> {
   const baseSha = seedHostRepo();
-  await createRun(recording, store, { runId });
+  await createRun(recording, store, { runId, recordAuditLink: () => {} });
   const vmName = store.get(runId).vmName as string;
   await fillBox(vmName, runId);
   const mint = await api.createKey(`${SBX_KEY_PREFIX}${runId}`, 50);
@@ -179,6 +179,7 @@ function deps(driver: ProviderDriver, gitCwd: string): TeardownDeps {
     workdir: "app",
     boxRunRoot: boxRunRootDir,
     boxHome: boxHomeDir,
+    recordAuditLink: () => {},
   };
 }
 
@@ -391,7 +392,7 @@ describe("DF2.11 e2e teardown race", () => {
       // under test — exactly one lock claim, one harvest, one destroy, one
       // close — do not involve the key lifecycle.
       const baseSha = seedHostRepo();
-      await createRun(recording, store, { runId: RUN_ID });
+      await createRun(recording, store, { runId: RUN_ID, recordAuditLink: () => {} });
       const vmName = store.get(RUN_ID).vmName as string;
       await fillBox(vmName, RUN_ID);
       store.set(RUN_ID, { commitSha: baseSha });

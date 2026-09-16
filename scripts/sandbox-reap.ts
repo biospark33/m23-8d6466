@@ -34,6 +34,10 @@ import {
 } from "../src/providers/index.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { getRecord } from "../src/providers/harvest.ts";
+// DF5.3: opened for an APPLY only — a dry run performs zero calls and emits
+// nothing, so it must not materialise audit.db either (the same file-set
+// discipline F044 set for the ledger).
+import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -151,11 +155,17 @@ export async function run(
   // fleet, write the report, delete nothing" — left three new files behind on
   // every invocation. A dry run settles nothing, so it needs no ledger.
   let ledger: CostLedger | undefined;
+  // DF5.3: opened below for an APPLY only; the closure no-ops while it is
+  // undefined (a dry run reaches no emit site, so nothing is silently dropped).
+  let auditStore: AuditStoreWriter | undefined;
   // D6 (round 3): set by the finally when the ledger handle failed to release.
   let ledgerCloseFailed = false;
   try {
     const store = deps.store ?? new RunRecordStore({ requestId });
     if (parsed.yes) {
+      // DF5.3: apply mode is this CLI's composition root for the sweep's links
+      // (the orphan-path `reap` and each teardown unit's `teardown`).
+      auditStore = openAuditStore();
       // DF2.8 (see SweepDeps.costLedger): the sweep's teardown units must
       // settle box hours into the SAME ledger dispatch reserved against —
       // costLedgerOpts(store.dir), exactly the sandbox-teardown wiring.
@@ -191,6 +201,7 @@ export async function run(
         ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
         ...(deps.now !== undefined ? { now: deps.now } : {}),
         requestId,
+        recordAuditLink: (link) => auditStore?.record(link),
       },
       { yes: parsed.yes },
     );
@@ -208,6 +219,16 @@ export async function run(
     // already-failed sweep stays a warning (the sweep's failure takes
     // precedence and already drives exit 1). ledgerCloseFailed feeds the exit
     // decision below; a dry run builds no ledger and is unaffected.
+    try {
+      auditStore?.close();
+    } catch (e) {
+      fail(
+        out,
+        "audit-store-close-failed",
+        `could not close the audit-link store: ${(e as Error).message}`,
+        "the handle dies with the process; re-run to confirm it still reads",
+      );
+    }
     try {
       ledger?.close();
     } catch (e) {

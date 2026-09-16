@@ -58,7 +58,7 @@ import { createGunzip } from "node:zlib";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { assertRunIdPathComponent } from "../phase-engine/journal.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
-import type { ExecResult, ProviderDriver } from "./driver.ts";
+import { auditRepoSlug, emitAuditLink, type ExecResult, type ProviderAuditLink, type ProviderDriver } from "./driver.ts";
 import {
   assertExistingRunId,
   resolveRunsDir as resolveExportedRunsDir,
@@ -398,6 +398,13 @@ export interface HarvestDeps {
    * silent fall-back to the box's own `$HOME`.
    */
   boxHome?: string;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. `harvestRun` is its own composition surface — its
+   * bundle-verify and bundle-fetch emits live HERE, on `HarvestDeps`, and the
+   * `TeardownDeps` callers reach it by forwarding their own required field.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export type HarvestResult =
@@ -688,6 +695,58 @@ echo "TARBUILT \${out##*/} $(( $(wc -c < "$out") ))"
 // ─── preflight ───────────────────────────────────────────────────────────────
 
 /**
+ * sha256 of a file's bytes, streamed in 64 KiB chunks — the bundle can be
+ * `BUNDLE_MAX_BYTES` (512 MiB), and hashing it must not buffer the file whole.
+ * This is the hop-6 subject digest: the walker recomputes it from the bundle
+ * at `<runsDir>/<runId>.bundle` and compares against the `bundle-verify`
+ * link's `detail.digest` (story Technical Notes).
+ */
+function sha256File(path: string): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  const chunk = Buffer.alloc(64 * 1024);
+  const fd = openSync(path, "r");
+  try {
+    for (;;) {
+      const n = readSync(fd, chunk, 0, chunk.length, null);
+      if (n <= 0) break;
+      hasher.update(n === chunk.length ? chunk : chunk.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hasher.digest("hex");
+}
+
+/**
+ * The DF5.3 bundle link emit (hop 6, run-bundle). The record is the ONLY
+ * repoSlug source (DF2.8's budget attribution — never a placeholder); an
+ * unattributed run emits nothing, because `audit_links`' columns are NOT NULL
+ * and an invented attribution is what INV-AUDIT-4 forbids. `subjectId` is the
+ * bundle path, whose presence at `<runsDir>/<runId>.bundle` IS the harvest
+ * record (this module's own header).
+ */
+function emitBundleLink(
+  deps: HarvestDeps,
+  rec: RunRecord,
+  ctx: StepCtx,
+  event: string,
+  detail: Record<string, unknown>,
+): void {
+  const repoSlug = auditRepoSlug(rec);
+  if (repoSlug === undefined) return;
+  emitAuditLink(deps.recordAuditLink, {
+    runId: rec.runId,
+    repoSlug,
+    requestId: rec.requestId ?? ctx.requestId,
+    hop: "run-bundle",
+    event,
+    subjectId: join(resolveRunsDir(deps), `${rec.runId}.bundle`),
+    subjectKind: "bundle",
+    detail,
+  });
+}
+
+/**
  * Read a run record with the ONE shared absence/read-failure classification:
  * genuine ENOENT absence → HarvestError "no-record" (+ create-the-run
  * guidance); every other read failure (malformed JSON, EACCES, …) →
@@ -895,7 +954,12 @@ export async function harvestRun(
           `run git bundle verify ${hostBundle} by hand in the host repo, then re-run`,
         );
       }
-    });
+      // DF5.3: the `bundle-verify` link (hop 6) — emitted the moment the host
+      // verify passed. `detail.sha256` is the bundle file's own sha256, the
+      // subject the walker re-checks the row against (chain.ts reads
+      // `detail_json.sha256` — keep the two names in lockstep).
+      emitBundleLink(deps, rec, ctx, "bundle-verify", { sha256: sha256File(hostBundle) });
+    }, () => ({ audit: "emitted" }));
 
     // Step D — fetch into the quarantine namespace ONLY. --force makes a
     // re-harvest update in place instead of failing on non-fast-forward (AC5).
@@ -911,7 +975,11 @@ export async function harvestRun(
           `run git fetch --force ${hostBundle} refs/heads/${branch}:refs/sandbox/${runId} by hand in the host repo, then re-run`,
         );
       }
-    });
+      // DF5.3: the `bundle-fetch` link (hop 6) — after the quarantine ref
+      // landed. Ordering AC7 asserts is verify ≤ fetch, which this site order
+      // guarantees.
+      emitBundleLink(deps, rec, ctx, "bundle-fetch", { tip: stepA.tip });
+    }, () => ({ audit: "emitted" }));
     result = { outcome: "harvested", count: stepA.count ?? 0, tip: stepA.tip ?? "" };
   } else if (stepA.protocol === "NOCOMMITS") {
     // AC4: an empty range is a successful no-op — no ref, no bundle file left.

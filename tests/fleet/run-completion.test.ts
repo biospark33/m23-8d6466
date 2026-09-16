@@ -286,6 +286,7 @@ function baseDeps(
     costLedger: (over.costLedger ?? quietLedger().hook) as RunCompletionDeps["costLedger"],
     maxTicks: over.maxTicks,
     windowMs: over.windowMs,
+    recordAuditLink: () => {},
   };
 }
 
@@ -455,7 +456,7 @@ async function seedGreenRun(
   runId: string,
   marker: { ok: boolean },
 ): Promise<string> {
-  const rec = await createRun(driver, s, { runId });
+  const rec = await createRun(driver, s, { runId, recordAuditLink: () => {} });
   seedBoxGit(driver, rec.vmName!, host, runId);
   s.set(runId, {
     commitSha: host.baseSha,
@@ -1426,7 +1427,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-v1" });
+      await createRun(driver, s.store, { runId: "run-v1", recordAuditLink: () => {} });
       // vmName set, NO commitSha: harvest short-circuits "none", teardown
       // completes, reverify throws no-base-sha inside its own try → error
       // report → approval null.
@@ -1454,7 +1455,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      const rec = await createRun(driver, s.store, { runId: "run-v2" });
+      const rec = await createRun(driver, s.store, { runId: "run-v2", recordAuditLink: () => {} });
       // The box has no git at all → harvest Step A answers NOREPO → outcome
       // none; the record pins a base the host knows, but no sandbox ref
       // exists → reverify's nothing-to-verify preflight (runner.ts:280-291).
@@ -1485,7 +1486,7 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-c1" });
+      await createRun(driver, s.store, { runId: "run-c1", recordAuditLink: () => {} });
       driver.plan = [{ body: { runId: "run-c1", ok: true } }];
       driver.destroyThrows = true;
       const out = await observeAndDriveChain(
@@ -1516,7 +1517,7 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-c2" });
+      await createRun(driver, s.store, { runId: "run-c2", recordAuditLink: () => {} });
       s.store.set("run-c2", {
         commitSha: host.baseSha,
         requestId: "req-df37",
@@ -1690,7 +1691,7 @@ describe("#245 — the production closure carries the chain's RunLockHandle (Clo
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-245n" });
+      await createRun(driver, s.store, { runId: "run-245n", recordAuditLink: () => {} });
       driver.plan = [{ body: { runId: "run-245n", ok: true } }];
       const out = await observeAndDriveChain(
         "run-245n",
@@ -1855,7 +1856,7 @@ describe("malformed marker payloads (F): present + unjudgeable is unusable, stre
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-f2" });
+      await createRun(driver, s.store, { runId: "run-f2", recordAuditLink: () => {} });
       driver.plan = [{ body: { ok: true } }];
       const out = await observeAndDriveChain(
         "run-f2",
@@ -1941,7 +1942,7 @@ describe("the reverify redaction map (I)", () => {
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-i1" });
+      await createRun(driver, s.store, { runId: "run-i1", recordAuditLink: () => {} });
       s.store.set("run-i1", {
         commitSha: host.baseSha,
         keyHash: "key-hash-for-the-redaction-test",
@@ -1984,7 +1985,7 @@ describe("the stranded-pause promotion (B): a promotable pausing record, driven 
   ): Promise<{ vmName: string; driver: ProbeDriver; reportId: string; head: string }> {
     const head = quarantine(host, runId);
     const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-    const rec = await createRun(driver, s.store, { runId });
+    const rec = await createRun(driver, s.store, { runId, recordAuditLink: () => {} });
     seedBoxGit(driver, rec.vmName!, host, runId);
     s.store.set(runId, {
       commitSha: host.baseSha,
@@ -2101,7 +2102,7 @@ describe("veto arms (O13): a genuine RED, and the flag-less approval-null string
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      const rec = await createRun(driver, s.store, { runId: "run-red1" });
+      const rec = await createRun(driver, s.store, { runId: "run-red1", recordAuditLink: () => {} });
       s.store.set("run-red1", {
         commitSha: host.baseSha,
         requestId: "req-df37",

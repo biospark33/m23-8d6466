@@ -38,6 +38,7 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
+import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
@@ -183,6 +184,10 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   });
   const store = new RunRecordStore({ ...(parsed.dir === undefined ? {} : { dir: parsed.dir }), requestId });
 
+  // DF5.3: this CLI is the composition root for the links the teardown/harvest
+  // emits — the store opens ONCE here (default path; QDS_AUDIT_DB resolves
+  // inside the store) and closes in the finally below, beside the ledger.
+  const audit: AuditStoreWriter = openAuditStore();
   const deps: TeardownDeps = {
     driver,
     store,
@@ -192,6 +197,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // default` chain: the lock guards `<store.dir>/<runId>.lock`, so the
     // bundle/artifact paths must be under exactly that directory.
     runsDir: store.dir,
+    recordAuditLink: (link) => audit.record(link),
   };
   // Branded: only a lock THIS invocation acquired may reach teardownSandbox's
   // head check (and the release primitives) — a hand-joined path string would
@@ -325,6 +331,14 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     const cleanupFailed = (): void => {
       if (outcome === 0) outcome = 1;
     };
+    // DF5.3: the audit store closes on the same cleanup discipline — every
+    // emitted link is already committed, so a close fault is bookkeeping only.
+    try {
+      audit.close();
+    } catch (e) {
+      reportFailure(out, "audit-store-close-failed", `could not close the audit-link store: ${(e as Error).message}`, "the handle dies with the process; re-run to confirm it still reads");
+      cleanupFailed();
+    }
     // Close the ledger handle here so every exit path (success, teardown
     // failure, harvest return) releases it.
     if (ledger !== undefined) {

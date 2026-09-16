@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createRun } from "../../src/providers/driver.ts";
+import { createRun , type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
@@ -43,6 +43,7 @@ let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 
 beforeEach(() => {
+  auditLinks = [];
   dir = mkdtempSync(join(tmpdir(), "qds-cred-"));
   store = new RunRecordStore(join(dir, "runs"));
   api = new FakeKeyApi();
@@ -57,9 +58,21 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** DF5.3: every deps() captures its links here — see the DF5.3 lifecycle test. */
+let auditLinks: ProviderAuditLink[] = [];
+
 function deps(overrides: Partial<CredentialDeps> = {}): CredentialDeps {
   // fake boxes are plain host dirs — deliver to a box-relative path
-  return { keyApi: api, driver: recording, store, envFile: "app/.env", ...overrides };
+  return {
+    keyApi: api,
+    driver: recording,
+    store,
+    envFile: "app/.env",
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
+    ...overrides,
+  };
 }
 
 /** Any >=8-char substring of the secret found in any corpus, else null. */
@@ -74,11 +87,43 @@ function leakScan(secret: string, ...corpora: string[]): string | null {
 }
 
 async function makeRun(runId: string): Promise<string> {
-  const rec = await createRun(recording, store, { runId });
+  const rec = await createRun(recording, store, { runId, recordAuditLink: (l) => auditLinks.push(l) });
   return rec.vmName ?? runId;
 }
 
 describe("DF2.3 credential lifecycle", () => {
+  test("DF5.3: the credential links land in lifecycle order — mint → deliver → revoke → verify-revoked (hop run-credential, keyHash subject)", async () => {
+    const runId = "df53-links";
+    await makeRun(runId);
+    // The record's DF2.8 attribution is the ONLY repoSlug source an emitter may use.
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    await runCredentialLifecycle(deps(), runId);
+
+    expect(auditLinks.map((l) => l.event)).toEqual(["mint", "deliver", "revoke", "verify-revoked"]);
+    const hash = store.get(runId).keyHash as string;
+    for (const l of auditLinks) {
+      expect(l.hop).toBe("run-credential");
+      expect(l.runId).toBe(runId);
+      expect(l.repoSlug).toBe("qds/demo");
+      expect(l.subjectKind).toBe("credential-key");
+      expect(l.subjectId).toBe(hash); // NEVER key material — keyHash only (INV-AUDIT-2)
+      // No plaintext anywhere in the emitted link: detail carries identifiers only.
+      expect(JSON.stringify(l.detail)).not.toMatch(/sk-/i);
+    }
+    // The cap has no event of its own: it rides the MINT row's detail.limitMicroUsd.
+    expect(auditLinks[0]?.detail).toMatchObject({ limitMicroUsd: expect.any(Number) });
+    // AC7: non-decreasing occurred_at (≤ — two links may share a millisecond).
+    const stamps = auditLinks.map((l) => Date.parse(l.occurredAt));
+    for (let i = 1; i < stamps.length; i++) expect(stamps[i]!).toBeGreaterThanOrEqual(stamps[i - 1]!);
+  });
+
+  test("DF5.3: an unattributed run emits nothing (INV-AUDIT-4 — no invented repoSlug)", async () => {
+    const runId = "df53-nolinks";
+    await makeRun(runId);
+    await runCredentialLifecycle(deps(), runId);
+    expect(auditLinks).toHaveLength(0);
+  });
+
   test("defaultKeyCapMicroUsd is the documented 50_000_000 µ$ backstop", () => {
     expect(defaultKeyCapMicroUsd).toBe(50_000_000);
   });
@@ -423,7 +468,7 @@ describe("DF2.3 credential lifecycle", () => {
     for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", "", "-x"]) {
       let err: unknown;
       try {
-        await deliverRunKey(deps({ envFile: bad }), "vm-df23-envfile", minted.key);
+        await deliverRunKey(deps({ envFile: bad }), runId, "vm-df23-envfile", minted.key);
       } catch (e) {
         err = e;
       }
@@ -452,7 +497,7 @@ describe("DF2.3 credential lifecycle", () => {
       },
     } as unknown as typeof recording;
 
-    await expect(deliverRunKey(deps({ driver: echoing }), `vm-${runId}`, minted.key)).rejects.toThrow();
+    await expect(deliverRunKey(deps({ driver: echoing }), runId, `vm-${runId}`, minted.key)).rejects.toThrow();
 
     const deliverLines = logs.filter((l) => l.operation === "credential.deliver");
     expect(deliverLines.length).toBeGreaterThan(0);
