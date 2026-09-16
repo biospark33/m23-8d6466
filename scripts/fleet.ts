@@ -111,6 +111,21 @@ import {
   RunLockedError,
   type RunLockHandle,
 } from "./lib/run-lock.ts";
+// DF3.7: the run-completion observer `fleet observe` drives. The module
+// acquires NO lock itself — the verb's withRunLock (below) is the acquire,
+// and the handle it hands out is the one the chain's teardown and the gate's
+// #245 closure reuse. A separate statement, not an extension of the DF2.11
+// import above: this file's DF3.7 edits are adds-only.
+import {
+  DEFAULT_OBSERVATION_WINDOW_MS,
+  observeAndDriveChain,
+  type ChainOutcome,
+} from "../src/fleet/run-completion.ts";
+// DF3.7: the whole-verb acquire/release wrapper for the observer verb — the
+// same primitive fan-out's loser teardowns and the reaper hold their locks
+// through. Named import from the same module as the DF2.11 block deliberately:
+// extending THAT block would edit its lines.
+import { withRunLock } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
 import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
 import {
@@ -1592,6 +1607,282 @@ export function observingMint(store: RunRecordStore, onMinted: (runId: string) =
   });
 }
 
+/**
+ * `fleet observe <run-id>` — DF3.7's approval-gate bridge.
+ *
+ * Watches one dispatched run's terminal marker through the shipped classifier
+ * and, on a settled reading, drives the chain the operator runs by hand today
+ * (harvest → teardown → reverify → the gate). Everything marker-shaped lives
+ * in `src/fleet/run-completion.ts`; this block is the argv/exit-code surface
+ * over it, exactly as `run` is over `src/fleet/run.ts` and teardown is over
+ * DF2.5.
+ *
+ * The BLOCK ORDER is binding (AC5): argv → driver → records dir → THE LOCK,
+ * with the pre-flight record read and everything after it (worktree assert,
+ * key/ledger wiring, the poll, the chain) INSIDE the callback — no
+ * check-then-act straddles the lock boundary. The module acquires nothing
+ * itself: the handle `withRunLock` hands the callback is the one the chain's
+ * teardown and the gate's #245 closure reuse, and a second acquire inside
+ * would throw `RunLockReentrantError`.
+ */
+async function runObserve(ctx: VerbCtx): Promise<number> {
+  const { deps, verb, positionals, flags, dir, storeOpts, note, finish, reportCompletion, outputIncomplete } = ctx;
+  const runIdArg = positionals[1];
+  const driverName = flags.get("--driver");
+  const windowRaw = flags.get("--window-ms");
+  const requestId = newRequestId();
+  const usage = "fleet observe <run-id> --driver <name> [--window-ms <ms>]";
+  /** 6, not 0, when the chain landed but the ledger would not close (fanout's one cleanup policy). */
+  let ledgerCloseFailed = false;
+  try {
+    if (positionals.length > 2) throw usageError("observe takes exactly one <run-id>", usage);
+    if (runIdArg === undefined) throw usageError("observe requires <run-id>", usage);
+    assertFleetRunId(runIdArg);
+    // This verb reads INTO the box (marker polls through the driver port) and
+    // drives a teardown — attach's placement: no driver default, ever.
+    assertDriverChosen(verb, driverName, deps?.driver);
+    // The window is operator-settable precisely because fan-out's 1 h ceiling
+    // is race-shaped and an unattended run routinely outlives it; the default
+    // is the module's own (provisional until the live e2e reprices it). An
+    // ABSENT flag means that default — the registry declares --window-ms
+    // optional and its note names the default, so refusing `undefined` here
+    // would make the documented invocation `fleet observe <id> --driver d`
+    // exit 2 (the one bug the exit-4 probe caught on its first run).
+    const windowMs =
+      windowRaw === undefined
+        ? DEFAULT_OBSERVATION_WINDOW_MS
+        : parseDecimalFlag(
+            "--window-ms",
+            windowRaw,
+            1,
+            86_400_000,
+            "a positive number of milliseconds",
+            `pass --window-ms <ms> between 1 and 86400000 — the default is ${DEFAULT_OBSERVATION_WINDOW_MS}`,
+          );
+    // Cleanup posture, teardown's: the chain this verb drives destroys the
+    // box, so an operator collecting a run must not be blocked by the
+    // create-time driver gates on the way to it.
+    const driver =
+      deps?.driver ?? asUsage(() => resolveCleanupDriver(driverName as string, { requestId, runId: runIdArg }));
+    assertRecordsDirUsable(dir, deps?.store);
+    // The chain WRITES through this store (`closedAt`, the gate's approval
+    // extension), so this is the writable construction — with runDestructive's
+    // round-11 guard: a NAMED --dir is never created by a refused invocation.
+    let store: RunRecordStore =
+      deps?.store ??
+      asUsage(() => new RunRecordStore({ ...storeOpts, ...(dir === undefined ? {} : { create: false }), requestId }));
+
+    // AC5 lock-before-preflight: the verb registered as "observe" holds
+    // <runsDir>/<runId>.lock across the whole bounded poll AND the chain it
+    // drives; the pre-flight record read and everything after it run inside
+    // the callback. A refusal to acquire is this verb's exit 5.
+    const outcome = await withRunLock(store.dir, runIdArg, "fleet observe", async (h) => {
+      // exit 4 for a genuine absence, 5 for an unreadable record — the shared
+      // classifier every other single-run verb probes through.
+      assertRunExists(store, runIdArg);
+      // The probe passed, so the directory is one the run legitimately owns:
+      // NOW the writable store the chain acts through (round-11 twin).
+      if (dir !== undefined && deps?.store === undefined) {
+        store = asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+      }
+      const rec = getRecord({ store }, runIdArg);
+      // reverify() re-judges the tree host-side, so the repo root is asserted
+      // BEFORE any box is touched: a non-repo cwd is a start-up refusal, never
+      // a `verdict:"error"` after the box is gone (Technical Notes). stdout
+      // must be "true" AND exit 0 — inside `.git/` prints "false" WITH exit 0.
+      const hostRoot = process.cwd();
+      const worktree = Bun.spawnSync(["git", "rev-parse", "--is-inside-work-tree"], {
+        cwd: hostRoot,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (worktree.exitCode !== 0 || worktree.stdout.toString().trim() !== "true") {
+        throw new FleetError(
+          5,
+          "reverify-host-root-unusable",
+          `${hostRoot} is not a git worktree — the re-verification this verb drives needs a repo root`,
+          "run fleet observe from the repo the run was dispatched against (the cwd is its hostRoot) — nothing was mutated",
+          { runId: runIdArg, hostRoot: bounded(hostRoot) },
+        );
+      }
+      // Fail-closed BEFORE any box touch on a keyed record: the chain's
+      // teardown revokes through this client. Unkeyed: no client is built —
+      // an unused one throws on first use rather than minting silently.
+      const keyApi = deps?.keyApi ?? (rec.keyHash !== undefined ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
+      // The write-path ledger teardown's box-hours ingest settles into — the
+      // same constructor shape dispatch/teardown build beside the records dir,
+      // WITH dispatch's readRunRecord seam (makeLedgerFactory's wiring): the
+      // ingest re-reads the record at close time, and the CostLedger default
+      // (`() => ({ createdAt: "" })`) reads as a phantom record whose closedAt
+      // is never set — box-hours-record-open on EVERY driven run (T2.8 red
+      // rounds 1-2, 2026-09-15).
+      const costLedger = asUsage(
+        () =>
+          new CostLedger({
+            ...costLedgerOpts(store.dir),
+            runsDir: store.dir,
+            readRunRecord: (id: string) => {
+              try {
+                return store.get(id);
+              } catch (e) {
+                if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+                throw e;
+              }
+            },
+          }),
+      );
+      let chainOutcome: ChainOutcome;
+      try {
+        chainOutcome = await observeAndDriveChain(runIdArg, {
+          driver,
+          store,
+          runsDir: store.dir,
+          hostRoot,
+          runLock: h,
+          keyApi,
+          // The RECORD's dispatch stamp is the join key whenever it carries
+          // one — the module's recordRequestId applies that truthiness rule,
+          // so this invocation's mint is what is passed: `??` here would let
+          // a record stamped "" win, and the sweep case (which dispatches
+          // nothing and mints no stamp) must not invent one (observability
+          // contract).
+          requestId,
+          costLedger,
+          windowMs,
+        });
+      } finally {
+        // The ledger owns a SQLite handle: closed on every path, guarded, and
+        // 6 (never 0) when the chain had landed — teardown's and fanout's one
+        // cleanup-failure policy.
+        try {
+          costLedger.close();
+        } catch (e) {
+          ledgerCloseFailed = true;
+          const x = (e ?? {}) as { message?: string };
+          printError(
+            note,
+            "ledger-close-failed",
+            `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+            "the handle dies with the process; re-run to confirm it still reads",
+          );
+        }
+      }
+      return chainOutcome;
+    });
+
+    /**
+     * The outcome → exit map (the registry's declared table, DF3.7 AC5):
+     * driven 0 · terminal run-engine-dead 5 · the transient pair
+     * (run-completion-unobserved, box-unreachable) 1 · non-terminal unsettled
+     * 0 (maxTicks — the foreground verb never sets it) · every refusal 5 ·
+     * vetoed/approval-failed/chain-failed/handed-off 6.
+     */
+    let code: number;
+    /** The stdout summary line: `kind` always, `code`/`chainMs` when the kind carries one. */
+    const line: Record<string, unknown> = { runId: runIdArg, kind: outcome.kind };
+    // An if/else chain, deliberately not a `switch`: this file's `case "…"`
+    // arms are reserved for the dispatched VERBS (cli.test.ts's armed-arm
+    // guard reads them back against the registry), and these literals are
+    // ChainOutcome kinds, not verbs.
+    if (outcome.kind === "driven") {
+      line.chainMs = outcome.chainMs;
+      if (outcome.markerOk !== undefined) line.markerOk = outcome.markerOk;
+      code = 0;
+    } else if (outcome.kind === "unsettled") {
+      const t = outcome.terminal;
+      if (t === undefined) {
+        code = 0;
+      } else {
+        line.code = t.code;
+        printError(note, t.code, redactSecrets(t.message), t.remediation);
+        // run-engine-dead is a death certificate — identical on every retry,
+        // so 5. Every other terminal arm is the TRANSIENT pair (the window
+        // fill and the skip-streak fill, `run-completion-unobserved` and
+        // `box-unreachable`): the box is left alive and the marker IS the
+        // state, so a re-invocation is the designed recovery — 1. A terminal
+        // code this table does not name keeps the transient posture: every
+        // terminal arm fires in the poll phase, before any mutation.
+        code = t.code === "run-engine-dead" ? 5 : 1;
+      }
+    } else if (outcome.kind === "refused") {
+      line.code = outcome.code;
+      printError(note, outcome.code, redactSecrets(outcome.message), outcome.remediation);
+      code = 5;
+    } else if (outcome.kind === "vetoed") {
+      const reason = redactSecrets(outcome.reason);
+      line.reason = reason;
+      printError(
+        note,
+        "reverify-vetoed",
+        `re-verification refused ${runIdArg}: ${reason}`,
+        "the chain landed — box torn down, record closed — and the re-verifier judged the tree no; read the run's reverify report, nothing re-runs",
+        { runId: runIdArg },
+      );
+      code = 6;
+    } else if (outcome.kind === "approval-failed") {
+      const error = redactSecrets(outcome.error);
+      line.error = error;
+      printError(
+        note,
+        "approval-failed",
+        `the approval leg failed for ${runIdArg}: ${error}`,
+        // The contract-fixed formatter over {kind, error}: names BOTH the
+        // teardown verb and the gate's own log — no new field.
+        `run \`fleet teardown ${runIdArg}\` if the box is still live, and read the approval gate's own log for this request failure (${error})`,
+        { runId: runIdArg },
+      );
+      code = 6;
+    } else if (outcome.kind === "chain-failed") {
+      const step = sanitizeLabel(outcome.step, 64);
+      line.step = step;
+      printError(
+        note,
+        "chain-failed",
+        `the chain for ${runIdArg} failed at step ${step}: ${redactSecrets(outcome.error)}`,
+        step === "teardown"
+          ? "the teardown aborted with the record still open and the box possibly alive — inspect the run (`fleet status`) and re-run teardown before anything else"
+          : "the box is gone and the record may be closed — `fleet status <run-id>` says which; read the failure above before acting",
+        { runId: runIdArg, step },
+      );
+      code = 6;
+    } else {
+      const gate = sanitizeLabel(outcome.outcome, 64);
+      line.outcome = gate;
+      printError(
+        note,
+        "approval-handed-off",
+        `the gate did not register a new request for ${runIdArg}: ${gate}`,
+        "the run is already in the pause flow or its approval is already decided — decide it with `fleet approve`/`fleet reject`, or read the gate log for the superseding report",
+        { runId: runIdArg, outcome: gate },
+      );
+      code = 6;
+    }
+    // ONE stdout summary line for every outcome, through `reportCompletion`
+    // with the `&& !outputIncomplete()` rule: a DRIVEN run whose line would
+    // not print is the standing 6, never a silent 0 — on a failing arm the
+    // typed envelope above is authoritative and a lost summary changes nothing.
+    const printed =
+      reportCompletion(
+        [`${JSON.stringify(line)}\n`],
+        code === 0
+          ? undefined
+          : "the typed outcome envelope on stderr is authoritative — this stdout line was a summary; re-check with `fleet status`",
+      ) && !outputIncomplete();
+    if (code === 0 && (ledgerCloseFailed || !printed)) code = 6;
+    return finish(requestId, verb, runIdArg, code);
+  } catch (e) {
+    // AC5: a lock refusal is this verb's exit 5 — refused before anything was
+    // mutated, and for a STALE lock identical on every retry (runDestructive's
+    // acquire-side reasoning).
+    if (e instanceof RunLockedError) {
+      printError(note, e.code, e.message, e.remediation, { runId: runIdArg });
+      return finish(requestId, verb, runIdArg, 5);
+    }
+    return finish(requestId, verb, runIdArg, reportCode(note, e));
+  }
+}
+
 export async function run(
   argv: readonly string[],
   out: (s: string) => void,
@@ -1907,6 +2198,10 @@ export async function run(
   // DF1.10's `run`: its own handler, not `runDestructive`'s fall-through — it
   // takes no run lock and destroys nothing (see runRun).
   if (verb === "run") return runRun(ctx);
+  // DF3.7's observe: its own handler too, but for the opposite reason — it
+  // takes the run lock ITSELF (inside runObserve, before the pre-flight
+  // record read) and drives the teardown-bearing chain from a settled marker.
+  if (verb === "observe") return runObserve(ctx);
   // DF3.4's gate verbs: one handler over five registry entries (see runGateVerbs).
   if (GATE_VERBS.has(verb)) return runGateVerbs(ctx);
   return runDestructive(ctx);
