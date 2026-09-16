@@ -488,7 +488,10 @@ test.todoIf(liveTodoOff())(
       // unit probe) proves the unit armed before observe is allowed to wait:
       // ACTIVE states are armed-and-running, and inactive/success/0 is
       // armed-and-already-done (the engine writes its marker BEFORE it exits,
-      // so a very fast engine can already be finished here). `inactive` on any
+      // so a very fast engine can already be finished here). `deactivating` is
+      // that same fast exit caught mid-cleanup — the engine winds its own
+      // children down before the cgroup empties (KillMode=mixed), and a unit
+      // can only deactivate what it first activated. `inactive` on any
       // other result — or `failed` — never armed, and this leg fails by name.
       const { driver } = ctx; // narrowed here; the closure below cannot keep the outer `let` narrowed
       const unitShow = (): Promise<string> =>
@@ -518,7 +521,7 @@ test.todoIf(liveTodoOff())(
       const probeResult = /Result=(\S*)/.exec(unitStdout)?.[1] ?? "";
       const mainStatus = /ExecMainStatus=(\S*)/.exec(unitStdout)?.[1] ?? "";
       const armed =
-        ["activating", "active", "reloading"].includes(activeState) ||
+        ["activating", "active", "reloading", "deactivating"].includes(activeState) ||
         (activeState === "inactive" && probeResult === "success" && mainStatus === "0");
       evidence.push({
         phase: "unit-liveness",
