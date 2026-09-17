@@ -1050,6 +1050,56 @@ describe("structured lines for the REFUSED paths", () => {
     expect(rowCount(p)).toBe(0);
   });
 
+  test("a refusal with a PRESENT but hostile requestId bounds it like the join columns — or mints when only control bytes survive", () => {
+    // The one column the original INV-AUDIT-2 fix missed: a non-empty
+    // `requestId` passed through RAW while every join column took
+    // `refusalField`. Present-but-unvalidated is the same trust position on
+    // this path (the validator already threw), so it takes the same strip+cap
+    // — and a control-only string sanitises to empty, which is the minted-id
+    // branch's own shape, so the fallback fires for sanitize-to-empty too.
+    const hostile = `req\u001b[2J${"y".repeat(400)}`;
+    const controlOnly = "\u001b[2J\u0007";
+
+    const p1 = join(dir, "audit-reqid-1.db");
+    const store1 = openAuditStore(p1);
+    const lines1 = capturedLines(() => {
+      expect(() => store1.record(validLink({ requestId: hostile, evidenceDigest: "not-a-digest" }))).toThrow(
+        AuditStoreError,
+      );
+    });
+    store1.close();
+
+    const p2 = join(dir, "audit-reqid-2.db");
+    const store2 = openAuditStore(p2);
+    const lines2 = capturedLines(() => {
+      expect(() => store2.record(validLink({ requestId: controlOnly, evidenceDigest: "not-a-digest" }))).toThrow(
+        AuditStoreError,
+      );
+    });
+    store2.close();
+
+    // Both refused, nothing written to either store.
+    expect(rowCount(p1)).toBe(0);
+    expect(rowCount(p2)).toBe(0);
+
+    // Arm 1: the PRESENT string stays (greppable) but bounded and stripped —
+    // the same two invariants the join columns carry.
+    const line1 = lines1.find((l) => l.operation === "audit-link.record");
+    expect(line1).toBeDefined();
+    expect(line1?.status).toBe("error");
+    expect(String(line1?.requestId).length).toBeLessThanOrEqual(120);
+    expect(String(line1?.requestId)).toStartWith("req");
+    expect(String(line1?.requestId)).not.toContain("\u001b");
+
+    // Arm 2: control-only sanitises to empty, which is the empty-input
+    // branch's own shape — the line carries a MINTED id, never "".
+    const line2 = lines2.find((l) => l.operation === "audit-link.record");
+    expect(line2).toBeDefined();
+    expect(typeof line2?.requestId).toBe("string");
+    expect(String(line2?.requestId).length).toBeGreaterThan(0);
+    expect(String(line2?.requestId)).not.toBe(controlOnly);
+  });
+
   test("openAuditStoreForWalk emits an audit-store.open error line when the PROBE fails", () => {
     // `audit-store-absent` is the commonest refusal this opener has, and it was
     // the ONE that emitted no open line: the walk's structured log jumped

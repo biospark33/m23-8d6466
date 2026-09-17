@@ -435,8 +435,16 @@ function recordLink(stmts: { insert: Statement; storedDigest: Statement }, link:
       operation: "audit-link.record",
       // The link's own correlation when it HAS one — but an empty/non-string
       // `requestId` is itself a validation failure this arm reports, and
-      // `emitLine` must not be handed it.
-      requestId: typeof link.requestId === "string" && link.requestId.length > 0 ? link.requestId : newRequestId(),
+      // `emitLine` must not be handed it. A PRESENT string is still unvalidated
+      // on this path (the validator threw), so it takes the same bounded
+      // pass `refusalField` gives the join columns below — and because a
+      // control-only string sanitises to empty (the very shape the minted-id
+      // branch exists for), the fallback covers sanitize-to-empty too, not
+      // just empty input.
+      requestId:
+        (typeof link.requestId === "string" && link.requestId.length > 0
+          ? refusalField(link.requestId)
+          : "") || newRequestId(),
       durationMs: Date.now() - started,
       status: "error",
       // The JOIN COLUMNS stay: INV-AUDIT-2 admits "ids, digests, hops, paths
