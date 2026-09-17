@@ -38,12 +38,17 @@ import {
   stampManifestLimit,
   stripAuthoredLimit,
 } from "../phase-engine/manifest.ts";
-import { auditRepoSlug, emitAuditLink, fillRun, provisionAdmittedRun, type ProviderAuditLink, type ProviderDriver } from "../providers/driver.ts";
+// `auditNonEmpty` is `audit_links`' NOT NULL + non-empty identity rule as a
+// predicate (C-3): an empty string passes a `!== undefined` guard, reaches the
+// store's own check and throws `audit-link-invalid` AFTER the attested action
+// already happened. It is imported, never re-declared — one predicate for every
+// emit site in the tree is the whole point of the rule.
+import { auditNonEmpty, auditRepoSlug, emitAuditLink, fillRun, provisionAdmittedRun, type ProviderAuditLink, type ProviderDriver } from "../providers/driver.ts";
 // DF5.3: dispatch is THE composition root for this run's provider-side audit
 // links — the one src/fleet file that opens the store itself and binds
 // `AuditStoreWriter.record` into the `recordAuditLink` seam. Every provider
 // module takes the seam, never this import (DF4.2 direction).
-import { openAuditStore, type AuditStoreWriter } from "../audit/link-store.ts";
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../audit/link-store.ts";
 import { defaultKeyCapMicroUsd, mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
@@ -2114,6 +2119,41 @@ export async function dispatch(
   // states are NOT interchangeable at the seam below, and the variable is
   // cleared on close so a post-close emit cannot reach a closed `Database`.
   let auditStoreClosed = false;
+  // The ONE structured line for a link this dispatch did not write — every
+  // drop below files it, so an operator greps one shape (`phase` and `step` are
+  // fixed; only the code and its sentence differ).
+  //
+  // Its OWN phase, not `abandoned`: that one means "a step outran the deadline"
+  // and `within` files exactly one such line per expired step (which is what
+  // makes those lines countable). A post-close line accompanies one of them and
+  // names the link the late step could no longer file.
+  const dropAuditLink = (link: ProviderAuditLink, code: string, message: string): void => {
+    let durationMs = 0;
+    try {
+      durationMs = now() - wallStart;
+    } catch {
+      durationMs = 0;
+    }
+    try {
+      log({
+        requestId: ctx.requestId ?? UNRESOLVED_REQUEST_ID,
+        operation: "fleet.dispatch",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: durationMs,
+        durationMs,
+        status: "error",
+        error: { code, message },
+        runId: ctx.runId,
+        verb: "dispatch",
+        phase: "audit-dropped",
+        step: link.event,
+        exitStatus: "transient" as ExitStatus,
+      });
+    } catch {
+      // a throwing sink must not become the failure of an already-refused run
+    }
+  };
   // The seam every provider-side emit of this run flows through (create at
   // `provisionAdmittedRun`, fill, setup-gate, mint/deliver at their steps).
   //
@@ -2133,8 +2173,42 @@ export async function dispatch(
   // refusal) under an audit-plumbing error. So that case is a deliberate,
   // logged drop.
   const recordAuditLink = (link: ProviderAuditLink): void => {
+    // INV-AUDIT-4, enforced HERE and only here: `audit_links`' identity columns
+    // are NOT NULL and non-empty, and an unattributed run emits nothing. Every
+    // emit of this run flows through this seam, so the rule lives at the seam
+    // rather than in each callee (`fillRun`, `mintRunKey`, `deliverRunKey`,
+    // `provisionAdmittedRun` and the setup-gate site below each held their own
+    // copy, and the `fill` one was reached through an unguarded pass-through).
+    // Skip-and-log, never the store's `audit-link-invalid` throw (C-3): an
+    // unattributed run is a lawful no-emit, not a programming error.
+    if (!auditNonEmpty(link.runId) || !auditNonEmpty(link.repoSlug) || !auditNonEmpty(link.requestId)) {
+      dropAuditLink(
+        link,
+        "audit-link-unattributed",
+        `the ${link.hop}/${link.event} link carries no run/repo/request identity — the run is unattributed (INV-AUDIT-4) and the link is NOT in the chain`,
+      );
+      return;
+    }
     if (auditStore !== undefined) {
-      auditStore.record(link);
+      try {
+        auditStore.record(link);
+      } catch (e) {
+        // `audit-link-invalid` is a MALFORMED emit — a programming error at the
+        // emit site — and keeps throwing. Every other failure is the store's
+        // (SQLITE_BUSY from a concurrent fan-out arm on the DELETE-journal
+        // whole-file lock, SQLITE_FULL, SQLITE_IOERR): those reach this seam
+        // only AFTER the box exists, so letting them out converts a
+        // successfully-gated run into a dispatch failure and leaves a created,
+        // filled, key-delivered box behind. The chain degrades (one hop reads
+        // `unlinked`); the run does not. The fail-closed refusal at OPEN time
+        // is the counterpart and stays — it happens before anything billable.
+        if (e instanceof AuditStoreError && e.code === "audit-link-invalid") throw e;
+        dropAuditLink(
+          link,
+          "audit-link-write-failed",
+          `the ${link.hop}/${link.event} link could not be written to the audit store (${errorMessage(e)}) — the step it witnesses DID happen and is NOT in the chain`,
+        );
+      }
       return;
     }
     if (!auditStoreClosed) {
@@ -2142,38 +2216,11 @@ export async function dispatch(
         `audit link ${link.hop}/${link.event} was emitted before the audit store was opened — this is a dispatch ordering bug`,
       );
     }
-    let durationMs = 0;
-    try {
-      durationMs = now() - wallStart;
-    } catch {
-      durationMs = 0;
-    }
-    try {
-      log({
-        requestId: ctx.requestId ?? UNRESOLVED_REQUEST_ID,
-        operation: "fleet.dispatch",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: durationMs,
-        durationMs,
-        status: "error",
-        error: {
-          code: "audit-link-dropped-after-close",
-          message: `the ${link.hop}/${link.event} link arrived after the dispatch closed the audit store — the step it witnesses ran LATE (see the abandoned-step line for the same step) and is NOT in the chain`,
-        },
-        runId: ctx.runId,
-        verb: "dispatch",
-        // Its OWN phase, not `abandoned`: that one means "a step outran the
-        // deadline" and `within` files exactly one such line per expired step
-        // (which is what makes those lines countable). This line accompanies
-        // one of them and names the link the late step could no longer file.
-        phase: "audit-dropped",
-        step: link.event,
-        exitStatus: "transient" as ExitStatus,
-      });
-    } catch {
-      // a throwing sink must not become the failure of an already-refused run
-    }
+    dropAuditLink(
+      link,
+      "audit-link-dropped-after-close",
+      `the ${link.hop}/${link.event} link arrived after the dispatch closed the audit store — the step it witnesses ran LATE (see the abandoned-step line for the same step) and is NOT in the chain`,
+    );
   };
   /**
    * Close the handle and put the seam above into its post-close state. Called
@@ -2185,8 +2232,13 @@ export async function dispatch(
   const closeAuditStore = (): void => {
     const store = auditStore;
     auditStore = undefined;
-    auditStoreClosed = true;
+    // BEFORE the flag: a refusal between admission and the open (`run-id-in-use`,
+    // a headroom refusal, an admission failure) reaches the `.catch` below
+    // having opened nothing, and setting `auditStoreClosed` there made "never
+    // opened" indistinguishable from "opened then closed" — degrading the
+    // mis-ordered-emit hard error above into a silent drop line.
     if (store === undefined) return;
+    auditStoreClosed = true;
     try {
       store.close();
     } catch (e) {
@@ -2892,7 +2944,7 @@ export async function dispatch(
     // handler between here and the caller is `withAdmissionSingleFlight`'s
     // `finally` (lock release, no catch) — the create→expose classifier's `try`
     // begins after this section returns — so the operator gets the typed code
-    // and its "fix or clear QDS_AUDIT_DB" hint verbatim. The `.catch` on the
+    // and the store's own remediation verbatim. The `.catch` on the
     // single-flight call closes the handle on every path below.
     try {
       auditStore = openAuditStore();
@@ -2901,7 +2953,17 @@ export async function dispatch(
         1,
         "audit-store-unavailable",
         `the audit-link store could not be opened: ${errorMessage(e)} — the run's box/credential links could not be written, so nothing was provisioned`,
-        "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the dispatch",
+        // The STORE's own remediation when it typed the failure (C-1). The
+        // generic hint below says "fix or CLEAR the store path", which for a
+        // merely corrupt or truncated store directly contradicts the walk
+        // path's "do NOT delete or overwrite — it may still hold recoverable
+        // evidence" — and this is the advice an operator hits first, because it
+        // blocks every run. Deleting is unrecoverable: the rows are append-only
+        // and the file is the only copy. Only an `AuditStoreError` is trusted
+        // to carry one; a bare fs errno has no remediation to forward.
+        e instanceof AuditStoreError
+          ? e.remediation
+          : "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the dispatch",
         {},
       );
     }
@@ -3113,7 +3175,10 @@ export async function dispatch(
   // (a hop-5 set that reads as "the box was filled before it was created"), and
   // let a normalisation difference split one run's chain across two slug values
   // so the walker's join never sees a complete hop. `undefined` ⇒ the run is
-  // unattributed and all three sites emit nothing (INV-AUDIT-4).
+  // unattributed and all three sites emit nothing (INV-AUDIT-4) — a rule now
+  // ENFORCED at the `recordAuditLink` seam every one of them flows through, so
+  // the `fill` pass-through (whose callee guards) cannot be the only thing
+  // standing between an unattributed run and an `audit-link-invalid` throw.
   const auditSlug = auditRepoSlug(provisioned.record);
   phase("create_ms", now() - tCreate);
   ctx.vmName = vm.name;
@@ -3501,25 +3566,48 @@ export async function dispatch(
     // Skipped for an unattributed run, on the SAME slug the `create` and `fill`
     // links used (C6) — never the dispatch-local `repoSlug`.
     if (auditSlug !== undefined) {
-      emitAuditLink(recordAuditLink, {
-        runId,
-        repoSlug: auditSlug,
-        requestId,
-        hop: "run-box",
-        event: "setup-gate",
-        subjectId: vm.name,
-        subjectKind: "box",
-        detail: {
-          ready: gate.ready,
-          // OMITTED when the seam returned a non-array, never collapsed to `0`:
-          // `0` is what "the gate ran no assertions" records, and an audit row
-          // that cannot tell a gate which proved nothing from one which proved
-          // nothing AND lied about its result shape is a row that reads the
-          // safer of the two. Absence says "this gate did not report a countable
-          // assertion list".
-          ...(Array.isArray(gate.assertions) ? { assertions: gate.assertions.length } : {}),
-        },
-      });
+      // CLASSIFIED, exactly like the `fill` half of hop 5 (`fillRun`'s
+      // `audit-link-write-failed` wrap) and for the reason its comment spells
+      // out: an unwrapped throw here lands in the create→expose classifier
+      // below as a generic `dispatch-failed`, so the two halves of one hop
+      // failed with two different shapes. The seam already degrades a store
+      // FAULT to a drop line, so what reaches this catch is a malformed emit —
+      // which still must not reach the operator as an unclassified failure of a
+      // box that is live and billing.
+      try {
+        emitAuditLink(recordAuditLink, {
+          runId,
+          repoSlug: auditSlug,
+          requestId,
+          hop: "run-box",
+          event: "setup-gate",
+          subjectId: vm.name,
+          subjectKind: "box",
+          detail: {
+            ready: gate.ready,
+            // OMITTED when the seam returned a non-array, never collapsed to
+            // `0`: `0` is what "the gate ran no assertions" records, and an
+            // audit row that cannot tell a gate which proved nothing from one
+            // which proved nothing AND lied about its result shape is a row
+            // that reads the safer of the two. Absence says "this gate did not
+            // report a countable assertion list".
+            ...(Array.isArray(gate.assertions) ? { assertions: gate.assertions.length } : {}),
+          },
+        });
+      } catch (e) {
+        // The capability shape (`{code, remediation}`) the classifier below
+        // already reads, so this refusal comes out identical to the `fill`
+        // half's — same code in `providerCode`, same literal next command.
+        throw Object.assign(
+          new Error(
+            `the setup-gate audit link for run ${runId} could not be recorded (${errorMessage(e)}) — the gate PASSED and box ${vm.name} is live and billing, and the record is left OPEN`,
+          ),
+          {
+            code: "audit-link-write-failed",
+            remediation: `tear the run down: bun scripts/fleet.ts teardown ${runId}`,
+          },
+        );
+      }
     }
     // The gate PROVED this box — stamp the money identity on the record: the
     // exact SHA the box was filled to and gated against (T2.1 live 2026-08-25:

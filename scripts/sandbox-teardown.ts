@@ -38,7 +38,7 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
-import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
@@ -199,16 +199,30 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   // Nothing is leaked by returning here: the store is closed in the `finally`
   // below only once it has been successfully OPENED, and this line precedes
   // both the lock and the ledger, so no handle and no lock file exists yet.
+  //
+  // Nor by any LATER exit: every step from the record probe onwards — the lock
+  // acquire included — runs INSIDE the try whose `finally` closes this handle,
+  // so a lock refusal (the one early-exit an operator meets routinely) unwinds
+  // through the close like any other failure. The file SET is the deliberate
+  // half: `audit.db` (+ -wal/-shm) does appear for an invocation that then
+  // refuses, which is the price of refusing before the lock rather than after.
   let audit: AuditStoreWriter;
   try {
     audit = openAuditStore();
   } catch (e) {
-    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    // C-1: `err.code` is this CLI's closed code vocabulary ONLY when the store
+    // classified the failure. A bare fs errno took that slot and printed
+    // `!! EACCES: …` for this hunk's own worked example (a sealed
+    // QDS_AUDIT_DB) — ENOSPC/EROFS/EISDIR the same — so a consumer matching
+    // the documented codes saw none of them. The errno stays in the MESSAGE,
+    // where it is diagnosis rather than classification.
+    const typed = e instanceof AuditStoreError ? e : undefined;
+    const err = (e ?? {}) as { message?: string };
     reportFailure(
       out,
-      err.code ?? "audit-store-unavailable",
+      typed?.code ?? "audit-store-unavailable",
       `the audit-link store could not be opened: ${err.message ?? String(e)} — the teardown's box/bundle links could not be written, so nothing was torn down`,
-      err.remediation ?? "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the teardown",
+      typed?.remediation ?? "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the teardown",
     );
     return 1;
   }

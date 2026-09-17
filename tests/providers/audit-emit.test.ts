@@ -15,7 +15,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { canonicalJson, sha256Hex } from "../../src/audit/link-store.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { canonicalJson, openAuditStore, openAuditStoreForWalk, sha256Hex } from "../../src/audit/link-store.ts";
 import { emitAuditLink, type ProviderAuditLink } from "../../src/providers/driver.ts";
 
 /** Capture the one link an emit produces. */
@@ -42,7 +45,34 @@ describe("DF5.3 — the emit digest is link-store's canonicalisation, byte for b
     // One clock read: the event's own timestamp, both columns.
     expect(link.occurredAt).toBe(link.recordedAt);
     // Digest-only detail: `detail ?? null` — an absent detail digests "null".
-    expect(emitted().evidenceDigest).toBe(sha256Hex(canonicalJson(null)));
+    // The LITERAL, like every other assertion in this file: computing the
+    // expected value with the same `canonicalJson`/`sha256Hex` pair under test
+    // is the one place the byte-for-byte alarm checked itself against itself.
+    expect(emitted().evidenceDigest).toBe(sha256Hex("null"));
+  });
+
+  test("the key sort is by CODE UNIT in both copies — never localeCompare (C1)", () => {
+    // Every fixture in this file and in link-store.test.ts is lowercase-initial
+    // (`a`/`b`/`z`/`é`/`arr`/`nul`/`at`/`outer`), and `a` sorts before `é` under
+    // both comparators — so a `localeCompare`/`Intl.Collator` implementation in
+    // EITHER copy passed the whole suite. Mixed case is the discriminator:
+    // `"B" < "a"` by code unit (0x42 < 0x61), `"a" < "B"` by locale.
+    //
+    // It matters because `localeCompare` is ICU/locale-sensitive: a detail
+    // object like `{Box: …, appId: …}` would canonicalise, and therefore
+    // digest, differently depending on `LANG`/ICU build between the emitting
+    // host and the walking host — a permanent, unfixable `evidence-mismatch` on
+    // an append-only store.
+    expect(canonicalJson({ a: 1, B: 2 })).toBe('{"B":2,"a":1}');
+    expect(emitted({ a: 1, B: 2 }).evidenceDigest).toBe(sha256Hex('{"B":2,"a":1}'));
+    // Code UNIT, not code POINT: U+1F600's lead surrogate is 0xD83D, which is
+    // BELOW U+FFFF, so the non-BMP key sorts FIRST — the opposite of what a
+    // code-point comparator (`[...a]` / `Intl.Collator`'s numeric order) gives.
+    // The two copies must agree on this too, and only a non-BMP key can tell.
+    expect(canonicalJson({ "\u{1F600}": 1, "￿": 2 })).toBe('{"\u{1F600}":1,"￿":2}');
+    expect(emitted({ "\u{1F600}": 1, "￿": 2 }).evidenceDigest).toBe(
+      sha256Hex('{"\u{1F600}":1,"￿":2}'),
+    );
   });
 
   // CONTRACT C1: both copies were changed this round to DROP `undefined` object
@@ -109,5 +139,63 @@ describe("DF5.3 — the emit digest is link-store's canonicalisation, byte for b
     expect(canonicalJson(arr)).toBe(`"X"`);
     expect(canonicalJson(arr)).toBe(JSON.stringify(arr));
     expect(emitted(arr).evidenceDigest).toBe(sha256Hex(`"X"`));
+  });
+
+  test("the emitted stamps are the canonical UTC ISO-8601 form the STORE requires", () => {
+    // The stamp format is a SECOND independent copy of a contract, exactly like
+    // the canonicaliser: `driver.ts` cannot import `src/audit/*` (the DF4.2
+    // seam), so nothing but this file compares the two. `occurredAt ===
+    // recordedAt` alone is satisfied by `""`, by `undefined`, by a number, and
+    // by `"2026-09-16T00:00:00+00:00"` — every one of which `link-store`'s
+    // validator refuses with `audit-link-invalid`. If the emitter ever drifts
+    // to a non-canonical spelling, EVERY hop-4/5/6 emit is refused at record()
+    // time, the chain is silently empty, and the designated alarm stays green.
+    const link = emitted({ a: 1 });
+    expect(link.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(link.recordedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    // The store's own rule, restated the way `validateAndBind` states it.
+    expect(new Date(link.occurredAt).toISOString()).toBe(link.occurredAt);
+    expect(new Date(link.recordedAt).toISOString()).toBe(link.recordedAt);
+  });
+
+  test("a real emitted link ROUND-TRIPS into a real store — format, vocabulary and digest at once", () => {
+    // The strongest form of the alarm: the emitted link is handed to the actual
+    // validator rather than to a regex. One assertion covers the stamp format,
+    // the hop/event vocabulary, the digest shape and the 8 KiB cap — and it
+    // fails the moment either copy drifts from the other.
+    const dir = mkdtempSync(join(tmpdir(), "qds-df53-emit-"));
+    try {
+      const p = join(dir, "audit.db");
+      const store = openAuditStore(p);
+      let recorded = false;
+      try {
+        emitAuditLink(
+          (l) => {
+            store.record({ ...l, subjectId: "box-1", subjectKind: "box", evidencePath: p });
+            recorded = true;
+          },
+          { runId: "r", repoSlug: "qds/demo", requestId: "req", hop: "run-box", event: "create", detail: { a: 1 } },
+        );
+      } finally {
+        store.close();
+      }
+      expect(recorded).toBe(true);
+
+      const reader = openAuditStoreForWalk(p);
+      try {
+        const [row] = reader.linksForRun("r");
+        expect(row).toBeDefined();
+        const stored = row as NonNullable<typeof row>;
+        expect(stored.hop).toBe("run-box");
+        expect(stored.event).toBe("create");
+        expect(stored.evidenceDigest).toBe(sha256Hex(canonicalJson({ a: 1 })));
+        expect(stored.occurredAt).toBe(stored.recordedAt);
+        expect(new Date(stored.occurredAt).toISOString()).toBe(stored.occurredAt);
+      } finally {
+        reader.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

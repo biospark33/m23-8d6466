@@ -29,7 +29,6 @@ import { Database } from "bun:sqlite";
 
 import {
   type AuditLinkRow,
-  type AuditStoreWriter,
   openAuditStore,
   openAuditStoreForWalk,
 } from "../../../src/audit/link-store.ts";
@@ -98,13 +97,21 @@ export function liveTodoOff(): boolean {
  *
  * `QDS_E2E_EVIDENCE_DIR` moves it with the evidence, for the same reason
  * `writeEvidence` honours that variable.
+ *
+ * ONE file per evidence directory, and it ACCUMULATES: `openAuditStore` appends,
+ * so round N+1's links pile onto round N's. Per-`runId` reads stay correct (every
+ * assertion here is `linksForRun`), so the growth is the only cost — and because
+ * this repo does track `.db` files under `_bmad-output/evidence/`, the file would
+ * otherwise be offered for commit as an opaque growing binary. The choice made
+ * (DF5.3 D9): `.gitignore` carries an `audit-links.db` glob under
+ * `_bmad-output/evidence/` (spelled out there — the pattern's own `*`s cannot
+ * be written inside a block comment).
+ * Per-round naming (`audit-links-<roundId>.db`) is deliberately DEFERRED — it
+ * would split one round's links across files the moment a round is resumed.
  */
 export function liveAuditStorePath(): string {
   return join(process.env.QDS_E2E_EVIDENCE_DIR?.trim() || EVIDENCE_DIR, "audit-links.db");
 }
-
-/** Opened on the first link of the round; closed when the process exits. */
-let roundAuditStore: AuditStoreWriter | undefined;
 
 /**
  * The audit seam every credential/box helper in this harness passes down.
@@ -120,14 +127,26 @@ let roundAuditStore: AuditStoreWriter | undefined;
  * `test.todoIf(liveTodoOff())` body, and this returns before opening anything
  * when `QDS_E2E_LIVE !== "1"`. A plain `bun test` therefore creates no store,
  * touches no evidence directory and reaches no paid path through this seam.
+ *
+ * OPEN → record → CLOSE, per link, rather than a memoised round-long handle.
+ * The handle was cached with a docblock promising it was "closed when the
+ * process exits" and no `process.on("exit")` anywhere to back that up, and the
+ * cache also froze `liveAuditStorePath()` at first-link time — so a later
+ * `QDS_E2E_EVIDENCE_DIR` change kept writing to the old store while
+ * {@link liveAuditLinksFor} read the new path and reported `[]`. Writer and
+ * reader now resolve the path the same way on every call, and nothing is left
+ * open. The cost is one SQLite open per link on a path whose peers are real ssh
+ * round trips.
  */
 export function recordLiveAuditLink(link: ProviderAuditLink): void {
   if (liveTodoOff()) return;
-  if (roundAuditStore === undefined) {
-    mkdirSync(dirname(liveAuditStorePath()), { recursive: true });
-    roundAuditStore = openAuditStore(liveAuditStorePath());
+  mkdirSync(dirname(liveAuditStorePath()), { recursive: true });
+  const store = openAuditStore(liveAuditStorePath());
+  try {
+    store.record(link);
+  } finally {
+    store.close();
   }
-  roundAuditStore.record(link);
 }
 
 /**

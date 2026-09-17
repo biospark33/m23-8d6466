@@ -2627,14 +2627,21 @@ describe("pipeline-run DF5.3: a dispatched run records the issue its witness nam
     expect(stderr).not.toContain("run_correlated");
   }, 60_000);
 
-  test("a MALFORMED or HALF correlation refuses the run (exit 2) — never a silent degrade to NULL", async () => {
-    // The refusal is the whole point of the change: a half-correlated run is
-    // the ambiguity this reader exists to remove, and issue identity is the
-    // (repoSlug, issueId) PAIR (INV-RUN-3) — `#7` exists in every repo the
-    // factory touches, so neither half is ever defaulted from the other.
-    // Degrading any of these to the bare row would put an uncorrelated session
-    // beside a host record that names an issue: the exact divergence the audit
-    // walker would then read as tampering.
+  // The refusal is the whole point of the change: a half-correlated run is
+  // the ambiguity this reader exists to remove, and issue identity is the
+  // (repoSlug, issueId) PAIR (INV-RUN-3) — `#7` exists in every repo the
+  // factory touches, so neither half is ever defaulted from the other.
+  // Degrading any of these to the bare row would put an uncorrelated session
+  // beside a host record that names an issue: the exact divergence the audit
+  // walker would then read as tampering.
+  //
+  // Driven by `test.each`, not by a loop inside one `test()`. Every case is a
+  // real `Bun.spawn` of the engine, so a sequential loop that aborts on the
+  // first failing `expect` hid the other fifteen behind a minutes-long re-run
+  // each time. The per-case `c.name` threaded through every assertion showed
+  // the author already wanted per-case attribution; `test.each` gives it for
+  // free AND isolates the failures.
+  {
     const cases: { name: string; correlation: Record<string, unknown>; says: string }[] = [
       // The half-pair arm says WHICH half is missing, and that is what is
       // pinned: greping for "half a correlation" alone let the two ternaries
@@ -2685,8 +2692,52 @@ describe("pipeline-run DF5.3: a dispatched run records the issue its witness nam
         correlation: { repoSlug: "owner/repo", issueId: "7", requestId: "1b4c2d6e-0000-4000-8000-00000000df53" },
         says: "was written for requestId 1b4c2d6e-0000-4000-8000-00000000df53 but this invocation carries",
       },
+      // A PRESENT non-string requestId. The mismatch check above is
+      // `typeof === "string" && !==`, so every OTHER present shape fell straight
+      // through it and was read as "no requestId to disagree with" — the run
+      // then recorded its correlation under THIS invocation's id from a witness
+      // naming a different one, which is exactly what the row above refuses. A
+      // JSON number is not hypothetical: it is the spelling `issueId` explicitly
+      // accepts, so a hand-repaired witness carries it. `repoSlug`, `issueUrl`
+      // and `issueId` all reject their non-string shapes; requestId did not.
+      {
+        name: "requestId a number",
+        correlation: { repoSlug: "owner/repo", issueId: "7", requestId: 12345 },
+        says: "carries a number requestId",
+      },
+      // The JSON-NUMBER arm of `issueId`, which had no gate at all until this
+      // PR — `issueId = w.issueId`, delegating entirely to
+      // `resolveRunCorrelation` — while the string arm was gated by `/^\d+$/`
+      // right here. Every row above spells `issueId` as a STRING, so the
+      // "both carriers accept and refuse exactly the same strings" parity
+      // claim had no number-side test whatsoever and the only number ever
+      // exercised was the passing `7`.
+      //
+      // `-1` and `7.5` are refused LOCALLY (the digits-only rule, in its
+      // number spelling: a non-negative integer) …
+      { name: "issue a negative number", correlation: { repoSlug: "owner/repo", issueId: -1 }, says: "malformed issueId" },
+      { name: "issue a fractional number", correlation: { repoSlug: "owner/repo", issueId: 7.5 }, says: "malformed issueId" },
+      // … while `0` and an over-MAX value pass the local gate and are refused
+      // DOWNSTREAM by `resolveRunCorrelation`, exactly as their string
+      // spellings `"0"` and `"2147483648"` are. That asymmetry is deliberate
+      // and is the parity: bounds live in one place, not two.
+      { name: "issue zero as a number", correlation: { repoSlug: "owner/repo", issueId: 0 }, says: "carries an invalid correlation: issueId must be a positive integer" },
+      { name: "issue over MAX_ISSUE_ID as a number", correlation: { repoSlug: "owner/repo", issueId: 2_147_483_648 }, says: "carries an invalid correlation: issueId must be a positive integer" },
+      // A witness carrying ONLY the URL. Absence is all THREE fields absent,
+      // so this is half a correlation too — the shape a truncated-then-flushed
+      // write or a partial hand edit leaves. It used to return before
+      // `issueUrl` was ever examined and start the bare session with NULL
+      // columns and no diagnostic, indistinguishable from a legitimately
+      // witness-less run, while a witness missing only one of the PAIR refused
+      // loudly.
+      {
+        name: "issueUrl alone",
+        correlation: { issueUrl: "https://github.com/owner/repo/issues/7" },
+        says: "beside an issueUrl that names an issue neither half identifies",
+      },
     ];
-    for (const c of cases) {
+
+    test.each(cases)("a MALFORMED or HALF correlation refuses the run (exit 2) — never a silent degrade to NULL: $name", async (c) => {
       const ws = dispatchedWorkspace(c.correlation);
       const proc = spawnRunner(ws.args, ws.markerRoot, REPO_ROOT, NO_RESIDENT_ENV(ws.dir));
       const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
@@ -2703,9 +2754,58 @@ describe("pipeline-run DF5.3: a dispatched run records the issue its witness nam
       expect(sessionCorrelation(ws.markerRoot, ws.runId, ws.requestId) ?? null, c.name).toBeNull();
       // And the Tracer was CLOSED on the way out (the cap-refusal discipline):
       // a checkpointed WAL is zero bytes, an abandoned handle's is not.
-      expect(fs.statSync(`${traceDb(ws.markerRoot, ws.runId)}-wal`).size, c.name).toBe(0);
-    }
-  }, 300_000);
+      //
+      // Existence and size together: a bare `statSync(...).size` threw an
+      // unattributed ENOENT if a correlation refusal ever moved AHEAD of the
+      // Tracer construction (a plausible simplification — this reader needs
+      // only `resolvedPath` and `runRoot`), so the case reported as an
+      // unhandled error instead of as "the tracer was never opened".
+      const wal = `${traceDb(ws.markerRoot, ws.runId)}-wal`;
+      expect([fs.existsSync(wal), fs.existsSync(wal) ? fs.statSync(wal).size : -1], c.name).toEqual([true, 0]);
+    }, 60_000);
+  }
+
+  test("INV-RUN-5: a token-shaped witness value refuses without forging a log line and without an unbounded echo", async () => {
+    // The `sanitizeForMessage(...).slice(0, 200)` wrapper on the correlation
+    // reader's refusals exists because this message rides the engine log into
+    // DF2.5's harvest tar. Every other case in this block plants a BENIGN value
+    // ("owner repo/x/y"), so the wrapper was exercised only by a slug that
+    // proves nothing about what it bounds — while the sibling qds-audit suite
+    // plants its secrets INSIDE the walked data precisely to avoid that.
+    //
+    // `witnessEcho` is `redactSecrets` THEN `sanitizeForMessage` THEN a bound,
+    // and all three halves are asserted: the token is REDACTED (it used to
+    // ride through whole — sanitizeForMessage escapes control characters and
+    // does not remove credential-shaped substrings), control characters are
+    // escaped so there is NO LOG FORGING (`resolveRunCorrelation` echoes the
+    // offending slug, so a newline in it would otherwise inject a whole fake
+    // JSON event into the stream the harness parses), and the echo is CAPPED.
+    // Redaction before sanitization, or the redactor stops matching the bytes
+    // it was escaping.
+    const token = `sk-or-v1-${"D".repeat(40)}`;
+    const forged = '{"event":"run_correlated","recorded":true,"issueId":9999}';
+    const ws = dispatchedWorkspace({
+      // A value that is at once credential-shaped, newline-bearing and long:
+      // all three properties of the thing this wrapper is for.
+      repoSlug: `${token}\n${forged}\n${"E".repeat(4_000)}`,
+      issueId: "7",
+    });
+    const proc = spawnRunner(ws.args, ws.markerRoot, REPO_ROOT, NO_RESIDENT_ENV(ws.dir));
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("carries an invalid correlation");
+    // REDACTED: the credential-shaped substring never reaches the engine log,
+    // and so never reaches the harvest tar.
+    expect(stderr).not.toContain(token);
+    // NO LOG FORGING: the planted line never appears as a line of its own, and
+    // no parsed event carries its payload.
+    expect(stderr.split("\n")).not.toContain(forged);
+    expect(jsonLines(stderr).some((r) => r.issueId === 9999)).toBe(false);
+    // BOUNDED: the 4 000-char tail is truncated, not echoed.
+    expect(stderr).not.toContain("E".repeat(300));
+    // And the run refused before any row was written.
+    expect(sessionCorrelation(ws.markerRoot, ws.runId, ws.requestId) ?? null).toBeNull();
+  }, 60_000);
 
   test("the LADDER path is untouched: a run resolved through the flags ignores the witness entirely", async () => {
     // Requirement, not an accident of ordering: a DF1.8 correlated run must

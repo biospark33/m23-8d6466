@@ -1246,10 +1246,57 @@ describe("buildIdFileInputs", () => {
       // adopted AFTER the last fixer landed, per the discipline named above.
       // `scripts/qds-audit.ts` and the test files are NOT walked COPY inputs.
       //
+      // ^ CORRECTED, review round 2. That attribution list is WRONG about most
+      // of its members, and a provenance note that names the wrong cause sends
+      // the next re-pinner to bisect files that cannot move this hash. Verified
+      // by calling `buildIdFileInputs(realDockerfile())` directly and testing
+      // membership (75 inputs): of the files named above, ONLY
+      // `src/fleet/{dispatch,fanout-primitive,run-completion}.ts` are walked.
+      // `src/audit/` is NOT a COPY at all (grep the Dockerfile: there is no
+      // `COPY src/audit/` line — the new module reaches the box through the
+      // engine bundle, not the context), and `src/providers/` contributes
+      // exactly `bounded-exec.ts` (:282) and `timeout.ts` (:302) — never
+      // `credentials/driver/harvest/reaper/teardown.ts`. `src/pr/push.ts` is
+      // not walked either. The `src/fleet/` half of the claim stands and is
+      // sufficient to explain the move; the rest was inferred, not measured.
+      //
+      // 6fe02cde: moved by review round 2, by exactly ONE walked input —
+      // `scripts/pipeline-run.ts` (COPY :277), the `witnessCorrelationBeside`
+      // refusal for a present non-string `requestId`. Measured, not inferred:
+      // every other file this round touched (`scripts/qds-audit.ts`,
+      // `scripts/sandbox-{reap,teardown}.ts`, `src/audit/link-store.ts`,
+      // `src/providers/{driver,teardown}.ts`, and all test files) was checked
+      // against the live walk and is absent from it.
+      //
+      // f145ef42: moved by review round 3, by exactly TWO walked inputs.
+      // Measured the same way (`buildIdFileInputs(realDockerfile())`, membership
+      // tested against this round's 48 changed files — 2 hits, 46 misses):
+      //   · `scripts/pipeline-run.ts` (COPY :277) — the N1 witness-read split
+      //     (an environment fault degrades to a bare session, a malformed
+      //     correlation still refuses), the guarded `startSession` fallback, the
+      //     number-spelling `issueId` gate, the `issueUrl`-alone refusal, and
+      //     the new `witnessEcho` helper that closes INV-RUN-5.
+      //   · `src/fleet/dispatch.ts` (COPY :279) — the forwarded store
+      //     remediation, the caught transient emit, the `closeAuditStore`
+      //     ordering fix, the hoisted `auditSlug` guard, the wrapped setup-gate
+      //     emit, the redacted open refusal, and the deleted private
+      //     `auditNonEmpty` duplicate.
+      // Everything else this round touched is absent from the live walk:
+      // `src/audit/{chain,link-store}.ts`, `src/providers/{credentials,driver,
+      // harvest,reaper,teardown}.ts`, `src/pr/push.ts`, `scripts/{qds-audit,
+      // fleet,cap-hit-demo,sandbox-reap,sandbox-teardown}.ts`, and every test
+      // file. Same measurement, same conclusion as the round-2 correction above.
+      //
+      // Adopted LAST, after the final fixer landed and on the same tree the
+      // close gate ran (5,972 pass / 1 fail, the 1 being this pin before the
+      // re-adoption) — the discipline the LIMITATION paragraph names.
+      //
       // Still the FILE-INPUT hash, never the published image digest: no
       // republish is owed to make this pin honest, and DEFAULT_IMAGE_REF is
-      // untouched by this PR.
-      "122c7c0ae928639c81ff314f6fa94307cba43c3e6e9c93479d77f09a73fdad66",
+      // untouched by this PR. The box-side provenance debt that IS owed — the
+      // published image ships the pre-DF5.3 `pipeline-run.ts` — is unchanged in
+      // kind from the entries above and settles on the next adoption.
+      "f145ef42a9bfa551ce05f6b5b8921b689d08ce0c4464bad811358b9dabea827e",
     );
   });
 });

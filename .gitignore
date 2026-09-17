@@ -84,3 +84,11 @@ _bmad-output/workflow-state/**/*.patch
 # commands naming specific short-lived VMs from past live rounds. Local noise,
 # not shared config.
 /.claude/settings.json
+
+# DF5.3 D9: the live E2E round's audit-link store. `liveAuditStorePath()`
+# (tests/fleet/e2e/live-harness.ts) puts it beside the round's evidence, where
+# this repo DOES track `.db` files — and `openAuditStore` appends, so round N+1
+# piles onto round N in the same file forever. Per-`runId` reads stay correct;
+# the growing opaque binary offered for commit does not. Per-round naming is
+# deferred (it would split a resumed round's links across files).
+_bmad-output/evidence/**/audit-links.db

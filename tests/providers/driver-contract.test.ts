@@ -11,7 +11,7 @@
  * through a `ProviderDriver` primitive.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import {
   SBX_OWNERSHIP_TAG,
   setupRun,
   teardownRun,
+  type ProviderAuditLink,
   type ProviderDriver } from "../../src/providers/driver.ts";
 import { RunRecordStore, newId } from "../../src/providers/run-record.ts";
 
@@ -63,6 +64,24 @@ export function runDriverContract(opts: DriverContractOptions): void {
     let runsDir: string;
     let hostDir: string;
     const created: string[] = [];
+    /**
+     * DF5.3: every `createRun`/`fillRun` in this suite runs over a FRESH,
+     * unattributed record (no DF2.8 budget, and the fill sites declare
+     * `repoSlug: undefined`), so the contract is that NOTHING is emitted. The
+     * sinks used to be blind `() => {}`, which cannot observe an absence: an
+     * emitter that manufactured a repoSlug to fill the NOT NULL columns —
+     * exactly what INV-AUDIT-4 forbids — passed every test here. One
+     * file-wide sweep instead of one assertion per site.
+     */
+    const contractLinks: ProviderAuditLink[] = [];
+    const auditSink = (l: ProviderAuditLink): void => {
+      contractLinks.push(l);
+    };
+
+    afterEach(() => {
+      const seen = contractLinks.splice(0);
+      expect(seen.map((l) => `${l.hop}.${l.event}`)).toEqual([]);
+    });
 
     const track = (id: string): string => {
       created.push(id);
@@ -147,7 +166,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
     test("copyFile is box → host", async () => {
       const name = track(nextId());
       await driver.create(name);
-      await fillRun(driver, name, [{ path: "out/report.txt", content: "harvested\n" }], { recordAuditLink: () => {}, runId: name, requestId: "test", repoSlug: undefined });
+      await fillRun(driver, name, [{ path: "out/report.txt", content: "harvested\n" }], { recordAuditLink: auditSink, runId: name, requestId: "test", repoSlug: undefined });
       const local = join(hostDir, `${name}.txt`);
       await driver.copyFile(name, "out/report.txt", local);
       expect(readFileSync(local, "utf8")).toBe("harvested\n");
@@ -173,7 +192,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
           };
         },
       });
-      await createRun(watched, store, { runId: id, recordAuditLink: () => {} });
+      await createRun(watched, store, { runId: id, recordAuditLink: auditSink });
       expect(recordExistedAtCreate).toBe(true);
       await teardownRun(driver, store, id);
     }, 30_000);
@@ -219,7 +238,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // No `tag` here by design: the ownership tag is createRun's alone (D1 —
       // not caller-displaceable), and exedev's `ls --json` reports no tag
       // field at all, so a tag assertion has no place in the shared suite.
-      const rec = await createRun(driver, store, { runId: id, port: 8080, recordAuditLink: () => {} });
+      const rec = await createRun(driver, store, { runId: id, port: 8080, recordAuditLink: auditSink });
       expect(rec.vmName).toBe(id);
       expect(rec.httpsUrl).toMatch(/^https:\/\//);
       expect(rec.ports).toEqual([8080]);
@@ -228,7 +247,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await fillRun(driver, id, [
         { path: "work/input.txt", content: "payload\n" },
         { path: "work/nested/deep.txt", content: "deep\n" },
-      ], { recordAuditLink: () => {}, runId: id, requestId: "test", repoSlug: undefined });
+      ], { recordAuditLink: auditSink, runId: id, requestId: "test", repoSlug: undefined });
 
       // 3. setup — provisioning steps, failing loudly on the first bad one.
       await setupRun(driver, id, [["sh", "-c", "mkdir -p out"]]);
@@ -266,7 +285,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       const orphan = track(nextId());
       await driver.create(orphan, SBX_OWNERSHIP_TAG);
       const keeper = track(nextId());
-      await createRun(driver, store, { runId: keeper, recordAuditLink: () => {} });
+      await createRun(driver, store, { runId: keeper, recordAuditLink: auditSink });
       const listedOrphan = (await driver.list(orphan))[0];
       // The declaration must match the substrate: a driver declaring "my listing
       // proves tags" has to actually carry the tag it was created with, and one
@@ -324,7 +343,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // destroy. One keeper run claims its box; the sweep has to finish,
       // destroy nothing, and leave it running.
       const id = track(nextId());
-      await createRun(driver, store, { runId: id, recordAuditLink: () => {} });
+      await createRun(driver, store, { runId: id, recordAuditLink: auditSink });
       let destroyed: string[] | undefined;
       let refused: unknown;
       try {

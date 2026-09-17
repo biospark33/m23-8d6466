@@ -16,8 +16,11 @@
  * posture): a failed preflight reaps nothing. A missing
  * $OPENROUTER_PROVISIONING_KEY fails the same way — the sweep cannot list
  * keys without it. Exit codes: 0 dry-run / clean apply / empty fleet; 1 hard
- * SweepError (malformed record, unenumerable list, config error), any
- * apply-mode action failure, or an apply-mode success-path close failure of
+ * SweepError (malformed record, unenumerable list, config error), an
+ * unopenable audit-link store on an apply (`audit-store-unavailable`, or the
+ * store's own typed code — nothing is reaped), a mis-ordered link emit
+ * (`audit-link-misordered`), any apply-mode action failure, or an apply-mode
+ * success-path close failure of
  * EITHER handle — the cost ledger or the audit-link store. A store that did not
  * close cleanly may not have flushed, so an audit-store close failure is exit 1
  * even when every link the sweep emitted was already committed and every unit
@@ -42,7 +45,7 @@ import { getRecord } from "../src/providers/harvest.ts";
 // DF5.3: opened for an APPLY only — a dry run performs zero calls and emits
 // nothing, so it must not materialise audit.db either (the same file-set
 // discipline F044 set for the ledger).
-import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -168,12 +171,37 @@ export async function run(
   // C10: the audit store's close obeys the SAME policy as the ledger's — one
   // fault class must not produce two exit codes across the four CLIs.
   let auditCloseFailed = false;
+  // Set by the emit seam when a link arrives before the apply-mode open — a
+  // programming error, paid for in the exit code rather than in aborted units.
+  let auditMisordered = false;
   try {
     const store = deps.store ?? new RunRecordStore({ requestId });
     if (parsed.yes) {
       // DF5.3: apply mode is this CLI's composition root for the sweep's links
       // (the orphan-path `reap` and each teardown unit's `teardown`).
-      auditStore = openAuditStore();
+      //
+      // CLASSIFIED, C10 — the same refusal `sandbox-teardown` reports for the
+      // same fault. Unwrapped, an unwritable `QDS_AUDIT_DB` reached the sweep
+      // catch below as `!! EACCES: …` with NO `next:` line at all (fail() omits
+      // it when remediation is undefined), so the one knob that caused it was
+      // never named, and one fault class produced two diagnoses across two
+      // CLIs. C-1: `code` is taken only from an `AuditStoreError` — a bare fs
+      // errno is not part of this CLI's code vocabulary; it stays in the
+      // message. The sweep has enumerated nothing and deleted nothing yet.
+      try {
+        auditStore = openAuditStore();
+      } catch (e) {
+        const typed = e instanceof AuditStoreError ? e : undefined;
+        const x = (e ?? {}) as { message?: string };
+        fail(
+          out,
+          typed?.code ?? "audit-store-unavailable",
+          `the audit-link store could not be opened: ${x.message ?? String(e)} — nothing was reaped`,
+          typed?.remediation ??
+            "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the sweep",
+        );
+        return 1;
+      }
       // DF2.8 (see SweepDeps.costLedger): the sweep's teardown units must
       // settle box hours into the SAME ledger dispatch reserved against —
       // costLedgerOpts(store.dir), exactly the sandbox-teardown wiring.
@@ -215,13 +243,25 @@ export async function run(
           // W14B-3/INV-AUDIT-4) and this is not it: a dry run reaches no emit
           // site at all, so an emit arriving before the apply-mode open is a
           // MIS-ORDERED emit — a programming error to be loud about, not a
-          // condition to swallow. The window is unreachable today; the throw is
+          // condition to swallow. The window is unreachable today; this arm is
           // what keeps it unreachable when an emit site moves one line earlier.
+          //
+          // Loud, but NOT paid for with live infrastructure. This seam is
+          // called from inside `emitAuditLink`, which PROPAGATES by design
+          // (driver.ts), so a throw here aborted the sweep unit that raised it
+          // — an ordering bug settled by leaving a box alive and billing.
+          // Record it, let the unit finish, and fail the verb's exit code
+          // afterwards: the same shape the close-failure flags already use.
           const store = auditStore;
           if (store === undefined) {
-            throw new Error(
-              `audit link ${link.hop}/${link.event} was emitted before the audit store was opened — this is a sweep ordering bug`,
+            auditMisordered = true;
+            fail(
+              out,
+              "audit-link-misordered",
+              `audit link ${link.hop}/${link.event} was emitted before the audit store was opened — this is a sweep ordering bug, and the link was dropped`,
+              "file it against the emit site: only an apply opens the store, so no emit may run before that open — the sweep's own units are unaffected",
             );
+            return;
           }
           store.record(link);
         },
@@ -297,6 +337,11 @@ export async function run(
       `${runLockedCount} unit(s) refused run-locked — refusals are not failures; the sweep executed ${executedUnits} unit(s)\n`,
     );
   }
+  // A mis-ordered emit is a dropped evidence row on EITHER mode (a dry run
+  // opens no store at all), so it is not folded into the apply-only clause
+  // below: the sweep's units all landed, and the exit code is where the
+  // ordering bug is now paid for.
+  if (auditMisordered) return 1;
   // D6 (round 3): a success-path close failure on an APPLY is exit 1, not a
   // diagnostic-then-0 — the box-hour settles the close was releasing may not
   // be durably committed, and the cron consumer keying on the exit code must

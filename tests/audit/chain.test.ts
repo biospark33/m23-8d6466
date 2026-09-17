@@ -119,7 +119,15 @@ function correlationOf(omit: RecordSpec["omitCorrelation"]): Record<string, stri
   return { repoSlug: SLUG, issueId: ISSUE };
 }
 
-/** Real RunRecordStore writes: create → set (core + extensions) → close. */
+/**
+ * Real RunRecordStore writes: create → set (core + extensions) → close.
+ *
+ * No `try/finally` dispose, unlike every other builder here: `RunRecordStore`
+ * is HANDLE-FREE. It holds only `dir`/`requestId`/callbacks and does every read
+ * and write through a one-shot `readFileSync`/atomic rename; `store.close(id)`
+ * closes the RECORD (stamps `closedAt`), not the store, and there is no other
+ * dispose method to call. Constructing several over one directory leaks nothing.
+ */
 function seedRecord(spec: RecordSpec): void {
   const store = new RunRecordStore({ dir: runsDir });
   store.create(spec.runId, new Date(iso(0)));
@@ -254,8 +262,42 @@ function buildHotWalTrace(artifactsDir: string, requestId: string): void {
     copyFileSync(join(staging, "trace.db"), dbPath);
     copyFileSync(join(staging, "trace.db-wal"), `${dbPath}-wal`);
     if (existsSync(`${dbPath}-shm`)) rmSync(`${dbPath}-shm`);
+    assertWalOnly(dbPath, requestId);
   } finally {
     rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The fixture's PREMISE, asserted rather than assumed: `wal-only-gate` must be
+ * unreachable without the `-wal`. SQLite auto-checkpoints (`wal_autocheckpoint`
+ * defaults to 1 000 pages) and `applyMigrations` re-opens, so the row can land
+ * in the main file — at which point "hot-WAL recovery" silently degrades into
+ * an ordinary "reads a trace db" test that passes with zero WAL handling. A
+ * `-wal` file merely EXISTING proves nothing about which file holds the row.
+ */
+function assertWalOnly(dbPath: string, requestId: string): void {
+  const probeDir = mkdtempSync(join(tmpdir(), "qds-df53-walprobe-"));
+  try {
+    const lone = join(probeDir, "trace.db"); // the db WITHOUT its -wal
+    copyFileSync(dbPath, lone);
+    const db = new Database(lone, { readonly: true });
+    try {
+      // Without the -wal the table itself may not exist yet — a stronger form
+      // of "not visible", so an absent table satisfies the premise too.
+      let gates: string[] = [];
+      try {
+        gates = (db.prepare("SELECT gate FROM gate_results WHERE request_id = ?").all(requestId) as { gate: string }[])
+          .map((r) => r.gate);
+      } catch {
+        gates = [];
+      }
+      expect(gates).not.toContain("wal-only-gate");
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
   }
 }
 
@@ -328,6 +370,21 @@ function boxLinks(runId = RUN, requestId = REQ): AuditLinkInput[] {
 }
 
 /**
+ * The reaper's own link row. Absent on every other fixture, so hop 5's
+ * resolved-WITH-reap branch, the conditional ` <= reap` constraint tail and the
+ * reap row's digest check had no coverage at all — only the two ABSENT arms
+ * (`not-applicable` and `unlinked`) were driven.
+ */
+function reapLink(minute: number, runId = RUN, requestId = REQ): AuditLinkInput {
+  return link({
+    runId, requestId, hop: "run-box", event: "reap", subjectId: runId, subjectKind: "box",
+    evidencePath: join(runsDir, `${runId}.json`), detail: { reaped: true },
+    evidenceDigest: sha256Hex(canonicalJson({ reaped: true })),
+    occurredAt: iso(minute), recordedAt: iso(minute),
+  });
+}
+
+/**
  * A BINARY bundle, like the real thing: a git bundle is an ASCII header
  * followed by a packfile whose bytes run the full 0x00–0xff range. An
  * ASCII-only fixture cannot catch a walker that round-trips the file through
@@ -392,12 +449,47 @@ function fetchPullOk(_ref: string): Promise<{ body: string; headRef?: string; pr
   return Promise.resolve({ body: `Automated fix for run ${RUN}\n`, headRef: `qds/${RUN}`, prUrl: PR_URL });
 }
 
-const walkOpts = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+/**
+ * The walker's OWN options type. `Record<string, unknown>` + `as never` erased
+ * the contract: a production rename of `ledger`/`auditDb`/`runsDir`/
+ * `reverifyDir`/`hopCeilingMs` kept compiling here and silently handed the
+ * walker an ignored key, so the suite would have stopped testing the injected
+ * paths and started testing the production defaults without a single red test.
+ */
+type WalkOverrides = Partial<Parameters<typeof walkAuditChain>[1]>;
+
+const walkOpts = (over: WalkOverrides = {}): WalkOverrides => ({
   runsDir, auditDb, ledger: ledgerPath, reverifyDir, fetchPull: fetchPullOk, ...over,
 });
 
-function walk(ref: string, over: Record<string, unknown> = {}): Promise<ChainReport> {
-  return walkAuditChain(ref, walkOpts(over) as never);
+function walk(ref: string, over: WalkOverrides = {}): Promise<ChainReport> {
+  return walkAuditChain(ref, walkOpts(over));
+}
+
+/** The typed refusal a walk raises, narrowed — anything else rethrows. */
+async function refusalOfWalk(ref: string, over: WalkOverrides = {}): Promise<ChainWalkError> {
+  try {
+    await walk(ref, over);
+  } catch (e) {
+    if (e instanceof ChainWalkError) return e;
+    throw e;
+  }
+  throw new Error(`expected a ChainWalkError walking ${ref}, the walk returned a report`);
+}
+
+/**
+ * The sink is proven WIRED to the walk before any "no secret in any log line"
+ * loop runs over it. `for (const entry of lines)` with an empty `lines` asserts
+ * nothing at all, so half of INV-AUDIT-2's clause 12 would evaporate the day
+ * the walker stopped logging — or logged through a different module.
+ */
+function assertWalkLogged(lines: unknown[], runId: string): void {
+  expect(lines.length).toBeGreaterThan(0);
+  const own = lines.filter((e) => {
+    const entry = e as { operation?: unknown; runId?: unknown };
+    return entry.operation === "audit-chain.hop" && entry.runId === runId;
+  });
+  expect(own.length).toBeGreaterThan(0);
 }
 
 function hopOf(report: ChainReport, hop: string): HopOutcome {
@@ -409,10 +501,23 @@ function hopOf(report: ChainReport, hop: string): HopOutcome {
   return out;
 }
 
+/**
+ * Every FILE directly under `root`, by name → sha256 of its bytes.
+ *
+ * `readdirSync` alone threw EISDIR — not a clean assertion failure — the moment
+ * the walker created a subdirectory in there, so directories are recorded by
+ * name with a sentinel instead of read. Callers fingerprint the artifacts ROOT
+ * as well as `trace/`: the root carries `buildDecoyRootTrace`'s `trace.db`, and
+ * a walker that opened THAT read-write (a `-wal`/`-shm` sibling, a checkpoint)
+ * mutates harvested evidence exactly as the immutability claim forbids.
+ */
 function dirFingerprints(root: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const name of readdirSync(root)) {
-    out.set(name, createHash("sha256").update(readFileSync(join(root, name))).digest("hex"));
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    out.set(
+      entry.name,
+      entry.isDirectory() ? "<dir>" : createHash("sha256").update(readFileSync(join(root, entry.name))).digest("hex"),
+    );
   }
   return out;
 }
@@ -476,9 +581,14 @@ describe("complete run (DoD: ten hops, zero nulls, one key)", () => {
 
     const report = await walk(RUN); // the runId form: zero network
 
-    const cost = hopOf(report, "run-cost") as { status: string; detail: { hasTokenRows: boolean; perRole: Record<string, number> } };
+    const cost = hopOf(report, "run-cost") as { status: string; detail: { hasTokenRows: boolean; perRole: Record<string, number>; totalMicroUsd: number } };
     expect(cost.status).toBe("resolved");
     expect(cost.detail.hasTokenRows).toBe(false);
+    // The box-hours-only arithmetic — the single remaining µ$ path — was
+    // declared in the cast and never asserted, so `{}`, `0` or USD-instead-of-µ$
+    // all passed. 30 minutes at 3 600 000 µ$/h is 1 800 000 µ$.
+    expect(cost.detail.perRole).toEqual({ "box-hours": 1_800_000 });
+    expect(cost.detail.totalMicroUsd).toBe(1_800_000);
     expect(report.refKind).toBe("run-id");
     expect(report.timings.prFetchMs).toBe(0);
     expect(report.complete).toBe(true);
@@ -603,6 +713,10 @@ describe("hot-WAL recovery and the trace/ prefix (DoD)", () => {
     const before = dirFingerprints(traceDir);
     expect(before.has("trace.db-wal")).toBe(true);
     expect(before.has("trace.db-shm")).toBe(false);
+    // The ROOT too: `buildDecoyRootTrace` writes trace.db there, and its bytes
+    // were never compared — a walker opening the decoy read-write was unseen.
+    const rootBefore = dirFingerprints(artifacts);
+    expect(rootBefore.has("trace.db")).toBe(true);
 
     const report = await walk(RUN);
 
@@ -611,35 +725,39 @@ describe("hot-WAL recovery and the trace/ prefix (DoD)", () => {
     expect(gates.detail.rows.map((r) => r.gate)).toContain("wal-only-gate");
     expect(gates.evidencePath).toBe(join(traceDir, "trace.db")); // trace/ prefix resolved EXACTLY
     expect(hopOf(report, "run-issue").status).toBe("resolved");
-    // The artifacts directory was never written: same files, same bytes.
+    // The artifacts directory was never written: same files, same bytes — in
+    // `trace/` AND at the root, where the decoy lives.
     const after = dirFingerprints(traceDir);
     expect([...after.keys()].sort()).toEqual([...before.keys()].sort());
     for (const [name, hash] of before) expect(after.get(name)).toBe(hash);
+    const rootAfter = dirFingerprints(artifacts);
+    expect([...rootAfter.keys()].sort()).toEqual([...rootBefore.keys()].sort());
+    for (const [name, hash] of rootBefore) expect(rootAfter.get(name)).toBe(hash);
   });
 });
 
 // ─── 6. the walker never creates the store it audits ─────────────────────────
 
 describe("no-create discipline (DoD: absent store refuses, path still absent)", () => {
-  test("hops 4/5/6 break with the typed refusal; audit.db is still absent afterwards", async () => {
+  test("an absent store is an ENVIRONMENT FAULT, not a broken chain; audit.db is still absent afterwards", async () => {
     seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
     seedLedger();
     // No openAuditStore call — the fixture ships NO audit.db precisely so the branch runs.
     buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
     writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
 
-    const report = await walk(RUN);
+    // N5: the store's refusal is rethrown as ChainWalkError, so NO report is
+    // produced. "I could not look" must never render as "the chain is broken"
+    // — a false BROKEN verdict on this PR's chain is the more damaging error,
+    // and the CLI maps this code to exit 2 with the store's own remediation.
+    const err = await refusalOfWalk(RUN);
+    expect(err.code).toBe("walk-environment-fault");
+    expect(err.message).toContain("audit-store-absent");
+    expect(err.message).toContain(auditDb);
+    expect(err.remediation).toContain(auditDb);
+    expect(err.remediation).toMatch(/the walk never creates one/); // the store's OWN remediation, not a generic hint
 
-    for (const name of ["run-credential", "run-box", "run-bundle"]) {
-      const hop = hopOf(report, name) as { status: string; actual: string; diagnostic: string };
-      expect(hop.status).toBe("broken");
-      expect(hop.actual).toBe("audit-store-absent");
-      expect(hop.diagnostic).toContain("audit-link store");
-    }
-    expect(hopOf(report, "pr-run").status).toBe("resolved"); // digests are file-resolved
-    expect(hopOf(report, "run-approval").status).toBe("resolved");
     expect(existsSync(auditDb)).toBe(false); // the path check, not a log check
-    expect(report.complete).toBe(false);
     // The probe→bind identity window (replace-and-restore, removal) is pinned
     // at the store level in tests/audit/link-store.test.ts and not duplicated.
   });
@@ -659,17 +777,52 @@ describe("authorizing-record tamper (DoD: digest coverage is entry-scoped)", () 
     expect(hopOf(first, "run-reverify").status).toBe("resolved");
 
     const reportFile = join(reverifyDir, `${RUN}.jsonl`);
-    const tampered = readFileSync(reportFile, "utf8").replace('"verdict":"green"', '"verdict":"red"');
+    const before = readFileSync(reportFile, "utf8");
+    const tampered = before.replace('"verdict":"green"', '"verdict":"red"');
     expect(tampered).not.toContain('"verdict":"green"');
     writeFileSync(reportFile, tampered, { mode: 0o600 });
 
     const second = await walk(RUN);
     const hop7 = hopOf(second, "run-reverify") as { status: string; expectedDigest: string; actualDigest: string; evidencePath: string };
     expect(hop7.status).toBe("evidence-mismatch");
-    expect(hop7.expectedDigest).toMatch(/^[0-9a-f]{64}$/);
-    expect(hop7.actualDigest).toMatch(/^[0-9a-f]{64}$/);
+    // The EXACT pre- and post-tamper digests, as the sibling hop-6 test pins
+    // them. Two distinct hex-64 strings satisfy a shape check, so a walker that
+    // baselined the WRONG subject — the whole JSONL file, or the run record
+    // instead of the bound entry — reported a mismatch for the wrong reason and
+    // passed. The digest is over the bound ENTRY (clause 7, entry-scoped).
+    expect(hop7.expectedDigest).toBe(sha256Hex(canonicalJson(JSON.parse(before.trim()))));
+    expect(hop7.actualDigest).toBe(sha256Hex(canonicalJson(JSON.parse(tampered.trim()))));
     expect(hop7.expectedDigest).not.toBe(hop7.actualDigest);
+    expect(hop7.evidencePath).toBe(reportFile);
     expect(second.complete).toBe(false);
+  });
+
+  test("a TRUNCATED final JSONL line does not throw out of the middle of the walk", async () => {
+    // The file is append-only, so a killed write leaves a torn last line. Every
+    // other fixture here is machine-perfect JSONL — even the "append" test
+    // rewrites the whole file — so an unguarded `JSON.parse` per line would
+    // throw a bare SyntaxError out of hop 7: neither a named outcome nor a
+    // ChainWalkError, which is what the DoD promises.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    const bound = mkReport(RUN, REQ, REPORT_ID);
+    // A complete bound line, then a crashed append: no closing brace, no
+    // trailing newline.
+    mkdirSync(reverifyDir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(reverifyDir, `${RUN}.jsonl`),
+      `${JSON.stringify(bound)}\n\n{"reverifyId":"rv-${RUN}-0002","runId":"${RUN}`,
+      { mode: 0o600 },
+    );
+
+    const report = await walk(RUN);
+
+    const hop7 = hopOf(report, "run-reverify") as { status: string; subjectId: string };
+    expect(hop7.status).toBe("resolved"); // the torn tail is dropped; the bound report still resolves
+    expect(hop7.subjectId).toBe(REPORT_ID);
+    expect(report.complete).toBe(true);
   });
 
   test("appending a lawful SECOND report does not mismatch the bound one", async () => {
@@ -746,6 +899,32 @@ describe("ordering (DoD: non-decreasing lifecycle, STRICT authorization)", () =>
     expect(report.complete).toBe(false);
   });
 
+  test("verify-revoked before revoke → order-violation on the FOURTH credential edge", async () => {
+    // The only other hop-4 ordering case moves `revoke` to iso(1), which trips
+    // the `deliver → revoke` edge FIRST — so the fourth edge was never
+    // violated, and `constraint).toContain("mint <= deliver <= revoke")` is a
+    // prefix that matches whether or not ` <= verify-revoked` is even declared.
+    // An `i < events.length - 1` off-by-one leaves exactly this edge unchecked
+    // and ships green: the edge that proves revocation was WITNESSED after it
+    // was requested.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    // mint 2 <= deliver 2.5 <= revoke 3, and the witness stamped at 2.75.
+    const rows = credentialLinks().map((r) => (r.event === "verify-revoked" ? { ...r, occurredAt: iso(2.75) } : r));
+    seedLinks([...rows, ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop4 = hopOf(report, "run-credential") as { status: string; constraint: string; earlier: string; later: string };
+    expect(hop4.status).toBe("order-violation");
+    expect(hop4.constraint).toContain("verify-revoked");
+    expect(hop4.earlier).toBe(iso(3)); // revoke, which the constraint requires first
+    expect(hop4.later).toBe(iso(2.75)); // the witness that preceded it
+    expect(report.complete).toBe(false);
+  });
+
   test("decidedAt before completedAt → order-violation on hop 8", async () => {
     seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
     // Re-stamp the approval EARLIER than the report's completedAt.
@@ -776,9 +955,16 @@ describe("ordering (DoD: non-decreasing lifecycle, STRICT authorization)", () =>
     writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
 
     const report = await walk(RUN);
-    const hop8 = hopOf(report, "run-approval") as { status: string; constraint: string };
+    const hop8 = hopOf(report, "run-approval") as { status: string; constraint: string; earlier: string; later: string };
     expect(hop8.status).toBe("order-violation");
     expect(hop8.constraint).toContain("strict");
+    // WHICH of the two strict constraints fired. `"strict"` appears in both, so
+    // a walker reporting the pr.createdAt pair for a completedAt equality
+    // passed — and the equality boundary this test exists for went untested.
+    expect(hop8.constraint).toContain("completedAt");
+    expect(hop8.earlier).toBe(COMPLETED_AT);
+    expect(hop8.later).toBe(COMPLETED_AT);
+    expect(report.complete).toBe(false);
   });
 
   test("decidedAt EQUAL to pr.createdAt → order-violation (the SECOND strict boundary)", async () => {
@@ -892,6 +1078,71 @@ describe("reap not-applicable (DoD: cleanly torn-down run)", () => {
     expect(hop5.detail.events.reap.reason).toBe(REAP_NOT_APPLICABLE_REASON);
     expect(report.complete).toBe(true);
   });
+
+  test("a PRESENT reap link resolves as emitted and extends the constraint with the ` <= reap` tail", async () => {
+    // The reap arm was only ever driven in its two ABSENT forms. The
+    // resolved-with-reap branch, the conditional constraint tail and the reap
+    // row's own digest check had no coverage at all.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), reapLink(8), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop5 = hopOf(report, "run-box") as {
+      status: string;
+      detail: { events: { reap: { status: string; occurredAt?: string; linkId?: number; reason?: string } } };
+    };
+    expect(hop5.status).toBe("resolved");
+    expect(hop5.detail.events.reap.status).toBe("resolved"); // emitted, never the not-applicable courtesy
+    expect(hop5.detail.events.reap.occurredAt).toBe(iso(8));
+    expect(hop5.detail.events.reap.linkId).toBeGreaterThan(0);
+    expect(hop5.detail.events.reap.reason).toBeUndefined();
+    expect(report.complete).toBe(true);
+  });
+
+  test("a reap stamped BEFORE its teardown → order-violation naming the ` <= reap` tail", async () => {
+    // The ordering edge the conditional tail adds: with no reap row the
+    // constraint string stops at `teardown`, so this edge exists only on a
+    // reaped run and was never exercised in either direction.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    // create 4 <= fill 5 <= setup-gate 6 <= teardown 7, and a reap at 6.5.
+    seedLinks([...credentialLinks(), ...boxLinks(), reapLink(6.5), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop5 = hopOf(report, "run-box") as { status: string; constraint: string; earlier: string; later: string };
+    expect(hop5.status).toBe("order-violation");
+    expect(hop5.constraint).toBe("create <= fill <= setup-gate <= teardown <= reap (non-decreasing)");
+    expect(hop5.earlier).toBe(iso(7)); // teardown, which the constraint requires first
+    expect(hop5.later).toBe(iso(6.5));
+    expect(report.complete).toBe(false);
+  });
+
+  test("a reap row whose detail no longer digests to its evidence_digest → hop 5 evidence-mismatch", async () => {
+    // The digest check runs over EVERY row of the hop, tabled or not. A reap
+    // row was never among them, so the one row the reaper writes had no
+    // tamper coverage.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    const tamperedDigest = sha256Hex(canonicalJson({ tampered: true }));
+    seedLinks([...credentialLinks(), ...boxLinks(), { ...reapLink(8), evidenceDigest: tamperedDigest }, ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop5 = hopOf(report, "run-box") as { status: string; expectedDigest: string; actualDigest: string };
+    expect(hop5.status).toBe("evidence-mismatch");
+    expect(hop5.expectedDigest).toBe(tamperedDigest);
+    expect(hop5.actualDigest).toBe(sha256Hex(canonicalJson({ reaped: true })));
+    expect(report.complete).toBe(false);
+  });
 });
 
 // ─── 9b. unlinked is a FAILING status (INV-AUDIT-4) ──────────────────────────
@@ -923,21 +1174,30 @@ describe("unlinked (DoD: a missing emitter breaks the chain, never completes it)
 // ─── 9c. run-cost fails closed on a run with no provenance (DF5.4-C1) ────────
 
 describe("run-cost fail-closed (DoD: no ledger rows is never zero spend)", () => {
-  test("an absent ledger and a ledger holding only ANOTHER run's rows both break hop 3", async () => {
+  test("an ABSENT ledger is an environment fault, never a broken hop 3", async () => {
     seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
     seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
     buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
     writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
 
-    // (a) no ledger at all — the open itself refuses, by code.
-    const absent = await walk(RUN);
-    const costAbsent = hopOf(absent, "run-cost") as { status: string; actual: string; evidencePath: string };
-    expect(costAbsent.status).toBe("broken");
-    expect(costAbsent.actual).toBe("ledger-absent");
-    expect(costAbsent.evidencePath).toBe(ledgerPath);
-    expect(absent.complete).toBe(false);
+    // N5, same rule as the absent audit store: the OPEN failing is the walker's
+    // own substrate refusing, which is never evidence about this run's spend.
+    const err = await refusalOfWalk(RUN);
+    expect(err.code).toBe("walk-environment-fault");
+    expect(err.message).toContain("ledger-absent");
+    expect(err.message).toContain(ledgerPath);
+    expect(err.remediation.length).toBeGreaterThan(0);
+  });
 
-    // (b) a real ledger that simply carries no row for THIS run.
+  test("a ledger holding only ANOTHER run's rows breaks hop 3 — past the open, it IS evidence", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    // A real, readable ledger that simply carries no row for THIS run. Only the
+    // open is an environment fault; everything past it is about the run, and a
+    // run with no cost provenance is never zero spend (DF5.4-C1).
     seedLedger(RUN_B, REQ_B);
     const report = await walk(RUN);
     const cost = hopOf(report, "run-cost") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
@@ -978,6 +1238,38 @@ describe("evidence-not-harvested (DoD: named cause and path, never a missing lin
     for (const name of ["run-bundle", "run-issue", "run-gate-evidence"]) {
       expect(hopOf(report, name).status).not.toBe("unlinked");
     }
+    expect(report.complete).toBe(false);
+  });
+});
+
+// ─── 10c. hop 9's empty-collection boundary ──────────────────────────────────
+
+describe("zero gate rows (DoD: an unverified run is not a complete chain)", () => {
+  test("a harvested trace with NO gate_results rows is broken, distinct from evidence-not-harvested", async () => {
+    // `buildTrace`'s `gates: []` default was never used: every one of its ~20
+    // call sites passes at least one gate, and the only zero-evidence case
+    // driven anywhere was a MISSING artifacts dir. The in-between shape — the
+    // trace exists, hop 9 reads it, there are no gate rows — is what a run that
+    // crashed before the verify phase harvests, and production could have
+    // returned `resolved` with `count: 0` (a COMPLETE chain over a run with no
+    // gate evidence at all), `unlinked`, or this. Pin the intended one.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop9 = hopOf(report, "run-gate-evidence") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(hop9.status).toBe("broken");
+    expect(hop9.actual).toBe("none");
+    expect(hop9.expected).toContain(REQ);
+    expect(hop9.diagnostic).toContain("not a run this chain vouches for");
+    // NOT evidence-not-harvested: the trace is right there and was read.
+    expect(hop9.evidencePath).toBe(join(runsDir, `${RUN}-artifacts`, "trace", "trace.db"));
+    // Hop 2 reads the same trace and its own correlation is intact.
+    expect(hopOf(report, "run-issue").status).toBe("resolved");
     expect(report.complete).toBe(false);
   });
 });
@@ -1182,21 +1474,86 @@ describe("hop-timeout (DoD: a hop over its ceiling never reports resolved)", () 
       return { body: `run ${RUN}`, headRef: `qds/${RUN}`, prUrl: PR_URL };
     };
 
-    const report = await walk(PR_URL, { hopCeilingMs: 0, fetchPull: slowFetch });
+    // `hopCeilingMs: 1`, not 0: a NON-POSITIVE ceiling now means "already
+    // expired" and reports `elapsedMs: 0` WITHOUT running the hop (pinned in
+    // its own test below), which would measure nothing. A positive 1 ms ceiling
+    // is what the 25 ms sync seam genuinely exceeds, so the post-hoc arm — the
+    // one this test exists for — is the one that fires.
+    const report = await walk(PR_URL, { hopCeilingMs: 1, fetchPull: slowFetch });
 
     const hop1 = hopOf(report, "pr-run") as { status: string; ceilingMs: number; elapsedMs: number };
     expect(hop1.status).toBe("hop-timeout");
-    expect(hop1.ceilingMs).toBe(0);
+    expect(hop1.ceilingMs).toBe(1);
     expect(hop1.elapsedMs).toBeGreaterThanOrEqual(20);
     expect(report.timings.perHopMs["pr-run"]).toBeGreaterThanOrEqual(20);
     expect(report.complete).toBe(false);
     expect(chainVerdict(report).complete).toBe(false);
   });
 
+  test("hopCeilingMs 0 means ALREADY EXPIRED: every hop times out at elapsedMs 0, the seam never runs", async () => {
+    // One option, one meaning. Before this, a zero ceiling depended on whether
+    // the hop body happened to block the event loop: a synchronous hop won the
+    // `raceMs = 0` race (microtask beats macrotask) and resolved normally,
+    // while hop 1's `ghFetchPull` clamped to `max(1, 0)` and did a third thing.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+    let fetched = 0;
+    const countingFetch = async (): Promise<{ body: string; headRef?: string; prUrl: string }> => {
+      fetched += 1;
+      return { body: `run ${RUN}`, headRef: `qds/${RUN}`, prUrl: PR_URL };
+    };
+
+    const report = await walk(PR_URL, { hopCeilingMs: 0, fetchPull: countingFetch });
+
+    const hop1 = hopOf(report, "pr-run") as { status: string; ceilingMs: number; elapsedMs: number; budget: string };
+    expect(hop1.status).toBe("hop-timeout");
+    expect(hop1.ceilingMs).toBe(0);
+    expect(hop1.elapsedMs).toBe(0);
+    expect(hop1.budget).toBe("hop");
+    expect(fetched).toBe(0); // the hop body never ran
+    expect(report.timings.perHopMs["pr-run"]).toBe(0);
+    expect(report.complete).toBe(false);
+  });
+
+  test("a hop whose promise NEVER settles is abandoned at its ceiling (the actual fail-closed case)", async () => {
+    // Every other timeout case here blocks the loop with `Bun.sleepSync` or
+    // fakes the clock, so all of them exercise only the POST-HOC "measure after
+    // the hop returned" arm. A ceiling implemented as a bare `Date.now()`
+    // comparison passes all of them and hangs the CLI forever on a wedged
+    // `gh pr view`. This is the case that needs the race.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(PR_URL, { hopCeilingMs: 50, fetchPull: () => new Promise<never>(() => {}) });
+
+    const hop1 = hopOf(report, "pr-run") as { status: string; ceilingMs: number; budget: string };
+    expect(hop1.status).toBe("hop-timeout");
+    expect(hop1.ceilingMs).toBe(50);
+    expect(hop1.budget).toBe("hop");
+    // Hop 1 named no runId, so the record-joined hops say so rather than
+    // vouching for a run the walk never identified.
+    expect(hopOf(report, "run-approval").status).toBe("broken");
+    expect(report.complete).toBe(false);
+    expect(chainVerdict(report).complete).toBe(false);
+  }, 10_000);
+
   test("the SAME slow hop 1 under a real (non-zero) ceiling stays resolved", async () => {
     // With `hopCeilingMs: 0` every hop taking ≥ 1 ms times out, so that test
     // cannot tell a per-hop measurement from a blanket failure. Same seam,
-    // same ~25 ms, a 50 ms ceiling: this one must resolve.
+    // same ~25 ms, a ceiling well above it: this one must resolve.
+    //
+    // The ceiling is 10 s, not 1 s: the assertions below are wall-clock
+    // readings of a real 25 ms sync sleep, and a GC pause or a contended CI box
+    // can push that past a 1 s ceiling — which flips the hop to `hop-timeout`
+    // and reds the suite for a reason that has nothing to do with the walker.
+    // An intermittent red on the timeout suite trains the team to re-run it,
+    // which is how a genuine fail-closed regression gets waved through.
     seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
     seedLedger();
     seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
@@ -1207,13 +1564,13 @@ describe("hop-timeout (DoD: a hop over its ceiling never reports resolved)", () 
       return { body: `run ${RUN}`, headRef: `qds/${RUN}`, prUrl: PR_URL };
     };
 
-    const report = await walk(PR_URL, { hopCeilingMs: 1_000, fetchPull: slowFetch });
+    const report = await walk(PR_URL, { hopCeilingMs: 10_000, fetchPull: slowFetch });
 
     const hop1 = hopOf(report, "pr-run") as { status: string };
     expect(hop1.status).toBe("resolved");
     expect(report.timings.prFetchMs).toBeGreaterThanOrEqual(20); // the slow seam really ran
     expect(report.timings.perHopMs["pr-run"]).toBeGreaterThanOrEqual(20);
-    expect(report.timings.perHopMs["pr-run"]).toBeLessThan(1_000); // under ITS ceiling, hence resolved
+    expect(report.timings.perHopMs["pr-run"]).toBeLessThan(10_000); // under ITS ceiling, hence resolved
   });
 
   test("the WALK budget, not the hop's, names itself: budget 'total' at the 30 s ceiling", async () => {
@@ -1294,6 +1651,11 @@ describe("redaction (DoD: INV-AUDIT-2, no secret material in report or logs)", (
     for (const secret of [gitToken, minted]) {
       expect(serialized).not.toContain(secret);
     }
+    // The log half of the claim is vacuous when the sink received nothing: the
+    // loop body simply never runs and "no secret in any log line" evaporates
+    // silently. Prove the sink is wired to the code under test — the walk emits
+    // one `audit-chain.hop` line per hop, carrying THIS run's id.
+    assertWalkLogged(lines, RUN);
     for (const entry of lines) {
       const line = JSON.stringify(entry);
       for (const secret of [gitToken, minted]) expect(line).not.toContain(secret);
@@ -1301,11 +1663,27 @@ describe("redaction (DoD: INV-AUDIT-2, no secret material in report or logs)", (
     const hop4 = hopOf(report, "run-credential") as { status: string; detail: { keyHash?: string; keyHashPrefix?: string; keyMaterial?: string } };
     expect(hop4.status).toBe("resolved");
     expect(hop4.detail.keyHash).toBe(KEY_HASH);
-    expect(hop4.detail.keyHashPrefix).toBe(KEY_HASH.slice(0, 8));
+    // The LITERAL, not `KEY_HASH.slice(0, 8)` — an expectation computed by the
+    // same expression the implementation uses pins nothing. `sha256:a` is seven
+    // characters of algorithm label plus ONE hex digit, which is the property:
+    // a prefix that leaked 40 hex chars is a one-character edit from passing.
+    expect(hop4.detail.keyHashPrefix).toBe("sha256:a");
     expect(hop4.detail.keyMaterial).toBeUndefined();
+    // The POSITIVE control for the mint half: the walker demonstrably READ this
+    // row's detail (it reported `keyHash` out of it) and dropped only the key
+    // material. Without it, `not.toContain(minted)` is satisfied by a walker
+    // that never opened the row at all.
+    //
+    // `httpsUrl` has NO equivalent, and cannot: `src/audit/chain.ts` contains
+    // zero references to it, so the clone URL is never projected into any hop's
+    // detail. The `gitToken` assertion above is therefore a REGRESSION guard —
+    // it fires the day a hop starts surfacing box/clone metadata — and the
+    // redaction MECHANISM it would depend on is pinned positively, on a value
+    // that does reach the report, by the `cap() redacts` test below.
+    expect(JSON.stringify(report)).not.toContain("x-access-token");
   });
 
-  test("caller data is PROJECTED (hop 1) and CAPPED (hop 9, head ref) at the walker's boundary", async () => {
+  test("caller data is PROJECTED at hop 1: a retired extensions.pr field has no route into the report", async () => {
     seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
     // A retired key an older build left in extensions.pr, which the store's
     // per-field deep merge re-persists verbatim on every write. Hop 1 spread
@@ -1315,46 +1693,94 @@ describe("redaction (DoD: INV-AUDIT-2, no secret material in report or logs)", (
     plantPrExtras(RUN, { cloneToken: retired });
     seedLedger();
     seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
-    // `gate` and `phase_id` are written INSIDE the box — agent-controlled text,
-    // echoed up to 50 rows deep. Capped at 2 000 chars at the read.
-    const hugeGate = "g".repeat(5_000);
-    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: hugeGate, passed: 1 }] });
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
     writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
 
     const lines: unknown[] = [];
     const restore = setLogSink((entry) => lines.push(entry));
     let report: ChainReport;
-    let prReport: ChainReport;
     try {
       report = await walk(RUN);
-      // The head ref is GitHub's string; a PR whose head is not qds/<runId>
-      // lands it in hop 1's `actual`, where it must arrive capped.
-      prReport = await walk(PR_URL, {
-        fetchPull: async () => ({ body: `run ${RUN}`, headRef: `x/${"h".repeat(5_000)}`, prUrl: PR_URL }),
-      });
     } finally {
       restore();
     }
 
-    // hop 1: the retired field is GONE, not merely capped — and the three
-    // registered fields survive.
     const hop1 = hopOf(report, "pr-run") as { status: string; detail: Record<string, unknown> };
     expect(hop1.status).toBe("resolved");
+    // The three registered fields survive — the projection is a whitelist, not
+    // a deletion of one known-bad key.
     expect(Object.keys(hop1.detail).sort()).toEqual(["createdAt", "prNumber", "prUrl"]);
     expect(JSON.stringify(report)).not.toContain(retired);
+    assertWalkLogged(lines, RUN);
     for (const entry of lines) expect(JSON.stringify(entry)).not.toContain(retired);
+  });
 
-    // hop 9: the box's own gate string, capped.
+  test("cap() REDACTS before it bounds: a secret-shaped gate string arrives as «redacted», not as 2 000 chars of it", async () => {
+    // C-4: `cap()` is the walker's ONE diagnostic chokepoint and runs
+    // `redactSecrets` first, so a 5 000-char opaque token never reaches the
+    // 2 000-char bound at all. Capping such a value would have published 2 000
+    // characters of the secret — redaction is the STRONGER guarantee and the
+    // one INV-AUDIT-2 actually claims. This is also the positive control for
+    // the redaction mechanism: a value that genuinely reaches the report.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    // `gate` and `phase_id` are written INSIDE the box — agent-controlled text,
+    // echoed up to 50 rows deep. This one is the long-opaque-token shape.
+    const secretGate = "g".repeat(5_000);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: secretGate, passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const lines: unknown[] = [];
+    const restore = setLogSink((entry) => lines.push(entry));
+    let report: ChainReport;
+    try {
+      report = await walk(RUN);
+    } finally {
+      restore();
+    }
+
+    const hop9 = hopOf(report, "run-gate-evidence") as { status: string; detail: { rows: { gate: string }[] } };
+    expect(hop9.status).toBe("resolved");
+    expect(hop9.detail.rows[0]?.gate).toBe("«redacted»");
+    // Not one character of the token survives anywhere — report or log line.
+    expect(JSON.stringify(report)).not.toContain("gggg");
+    assertWalkLogged(lines, RUN);
+    for (const entry of lines) expect(JSON.stringify(entry)).not.toContain("gggg");
+  });
+
+  test("cap() BOUNDS what redaction leaves alone: hop 9's gate and hop 1's head ref both land at 2 000 chars", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    // Long, but with word boundaries — NOT the opaque-token shape, so
+    // `redactSecrets` returns it untouched and the 2 000-char bound is what
+    // actually fires. (The previous fixture's `"g".repeat(5_000)` collapsed to
+    // ten characters before ever reaching the bound, so the length assertion
+    // was testing redaction under a capping name.)
+    const longGate = "gate step ".repeat(500);
+    expect(longGate.length).toBe(5_000);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: longGate, passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+    // The head ref is GitHub's string; a PR whose head is not qds/<runId>
+    // lands it in hop 1's `actual`, where it must arrive capped.
+    const prReport = await walk(PR_URL, {
+      fetchPull: async () => ({ body: `run ${RUN}`, headRef: `x/${"head ref ".repeat(600)}`, prUrl: PR_URL }),
+    });
+
     const hop9 = hopOf(report, "run-gate-evidence") as { status: string; detail: { rows: { gate: string }[] } };
     expect(hop9.status).toBe("resolved");
     const gate = hop9.detail.rows[0]?.gate as string;
     expect(gate.length).toBe(2_000);
     expect(gate.endsWith("…")).toBe(true);
+    expect(gate.startsWith("gate step ")).toBe(true); // bounded, not replaced
 
-    // hop 1's broken arm: the head ref, capped the same way.
     const brokenHop1 = hopOf(prReport, "pr-run") as { status: string; actual: string };
     expect(brokenHop1.status).toBe("broken");
     expect(brokenHop1.actual.length).toBe(2_000);
+    expect(brokenHop1.actual.endsWith("…")).toBe(true);
   });
 });
 
@@ -1483,7 +1909,10 @@ describe("link rows the store would refuse today (DoD: the read side guards too)
     expect(hop4.status).toBe("broken");
     expect(hop4.expected).toContain("ISO-8601 occurred_at");
     expect(hop4.actual).toMatch(/^link \d+ \(run-credential\.revoke\) carries occurred_at "yesterday-ish"$/);
-    expect(hop4.diagnostic.length).toBeGreaterThan(0);
+    // The DoD clause is a NAMED broken hop, and every sibling pins its own
+    // token (INV-AUDIT-1/-4, DF5.4-C1, DF5.2). `length > 0` accepted `"error"`;
+    // this pins the remediation sentence that makes the hop actionable.
+    expect(hop4.diagnostic).toContain("not permission to skip the ordering check");
     expect(hop4.evidencePath).toBe(join(runsDir, `${RUN}.json`));
     expect(report.complete).toBe(false);
   });

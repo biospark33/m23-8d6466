@@ -32,9 +32,12 @@ import {
   type KeyEntry,
 } from "./credentials.ts";
 import {
+  auditLinkSkip,
+  auditNonEmpty,
   auditRepoSlug,
   driverListing,
   emitAuditLink,
+  isAuditStoreError,
   ProvisionRefusedError,
   RUN_ID_SHAPE,
   SBX_OWNERSHIP_TAG,
@@ -947,7 +950,13 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
             // id — a FALSE join the walker acts on (it JOINs
             // `sessions.request_id` / `gate_results.request_id`), on the path
             // where the record is most likely to be incomplete.
-            if (reapRec !== undefined && reapRepoSlug !== undefined && reapRec.requestId === undefined) {
+            // C3: the shared non-empty predicate, so a `""` identity takes this
+            // skip door instead of the store's `audit-link-invalid` throw. A
+            // record-LESS leak (`reapRec === undefined`) still says nothing: it
+            // has no run to name, and the sweep's own report covers the box.
+            const reapSkip =
+              reapRec === undefined ? undefined : auditLinkSkip(reapRec.runId, reapRepoSlug, reapRec.requestId);
+            if (reapRec !== undefined && reapSkip !== undefined) {
               log({
                 requestId,
                 operation: "providers.audit-link-skipped",
@@ -958,10 +967,13 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
                 runId: reapRec.runId,
                 vm: unit.id,
                 event: "reap",
-                reason: "no-request-id",
-                message: `hop run-box goes unlinked for reaped box ${unit.id}: its record carries no requestId`,
+                // `no-repo-slug` logs too (round 3): it used to return silently
+                // here and at three of the other four emitters, though the skip
+                // line is what the comments tell operators to grep for.
+                reason: reapSkip,
+                message: `hop run-box goes unlinked for reaped box ${unit.id}: its record carries no ${reapSkip === "no-repo-slug" ? "DF2.8 budget attribution" : reapSkip === "no-run-id" ? "runId" : "requestId"}`,
               });
-            } else if (reapRec?.requestId !== undefined && reapRepoSlug !== undefined) {
+            } else if (reapRec !== undefined && auditNonEmpty(reapRepoSlug) && auditNonEmpty(reapRec.requestId)) {
               try {
                 emitAuditLink(deps.recordAuditLink, {
                   runId: reapRec.runId,
@@ -985,7 +997,17 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
                   runId: reapRec.runId,
                   vm: unit.id,
                   error: {
-                    code: err.code ?? "audit-link-write-failed",
+                    // The store's own code when it IS a store refusal;
+                    // otherwise an honest emitter-fault code. `?? "audit-link-
+                    // write-failed"` labelled a `JSON.stringify` TypeError on a
+                    // BigInt/circular `detail` as a store write failure. The
+                    // catch itself stays broad on purpose (unlike the
+                    // driver's): by this line the destroy has SUCCEEDED and the
+                    // box is in `executed.destroy`, and rethrowing would reach
+                    // the unit catch as `destroy-failed` — counting one box as
+                    // both destroyed and failed-to-destroy, the bug this arm's
+                    // separate guard exists to prevent.
+                    code: isAuditStoreError(e) ? e.code : "audit-link-emit-failed",
                     message: scrub(err.message ?? String(e)),
                   },
                 });

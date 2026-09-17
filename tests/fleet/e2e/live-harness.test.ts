@@ -529,19 +529,123 @@ test("keyLeakProblems: with no runIds it does NOT claim a fallback revoke was at
  * the fast suite.
  */
 test("recordLiveAuditLink is INERT unless QDS_E2E_LIVE=1 — the fast suite opens no store", () => {
-  expect(process.env.QDS_E2E_LIVE).not.toBe("1");
-  recordLiveAuditLink({
-    runId: "harness-gate",
-    repoSlug: "acme/widgets",
-    requestId: "req-gate",
-    hop: "run-credential",
-    event: "mint",
-    subjectId: "k",
-    subjectKind: "credential-key",
-    evidenceDigest: "0".repeat(64),
-    occurredAt: "2026-09-17T00:00:00.000Z",
-    recordedAt: "2026-09-17T00:00:00.000Z",
-  });
-  expect(existsSync(liveAuditStorePath())).toBeFalse();
-  expect(liveAuditLinksFor("harness-gate")).toEqual([]);
+  // The inert path is PINNED here, never inherited. `expect(QDS_E2E_LIVE).not.toBe("1")`
+  // as the first assertion made the ambient shell the test's fixture: an
+  // operator running the fast suite from a terminal where the live-e2e round
+  // had exported QDS_E2E_LIVE=1 failed on that line instead of exercising the
+  // inert path — and worse, had the assertion been removed, this very call
+  // would have gone LIVE and written a real store into the evidence tree.
+  // QDS_E2E_EVIDENCE_DIR rides along because `liveAuditStorePath()` reads it:
+  // a stale export would otherwise aim `existsSync` at a directory the
+  // operator's last real round had already filled, and the assertion below
+  // would fail on somebody else's evidence.
+  const saved: Array<[string, string | undefined]> = [
+    ["QDS_E2E_LIVE", process.env.QDS_E2E_LIVE],
+    ["QDS_E2E_EVIDENCE_DIR", process.env.QDS_E2E_EVIDENCE_DIR],
+  ];
+  const evidenceDir = mkdtempSync(join(tmpdir(), "qds-harness-gate-"));
+  try {
+    // Explicitly NOT "1" — the one value the seam treats as live.
+    process.env.QDS_E2E_LIVE = "0";
+    process.env.QDS_E2E_EVIDENCE_DIR = evidenceDir;
+
+    recordLiveAuditLink({
+      runId: "harness-gate",
+      repoSlug: "acme/widgets",
+      requestId: "req-gate",
+      hop: "run-credential",
+      event: "mint",
+      subjectId: "k",
+      subjectKind: "credential-key",
+      evidenceDigest: "0".repeat(64),
+      occurredAt: "2026-09-17T00:00:00.000Z",
+      recordedAt: "2026-09-17T00:00:00.000Z",
+    });
+    // ONE assertion, and it is the whole claim: no store file was created.
+    // `liveAuditLinksFor(...) === []` used to sit beside it and pinned the same
+    // fact twice — the reader early-returns `[]` off this very `existsSync` —
+    // while reading as coverage of the reader. The reader's body is exercised
+    // by the live-path test below, which is where it belongs.
+    expect(existsSync(liveAuditStorePath())).toBeFalse();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(evidenceDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * DF5.3: the LIVE branch of the same seam — the write path and the read path,
+ * executed.
+ *
+ * Without this the only test of either sets `QDS_E2E_LIVE="0"` and asserts
+ * absence, so `mkdirSync` → `openAuditStore` → `record` and
+ * `openAuditStoreForWalk` → `linksForRun` → `close` were dead code as far as
+ * the suite was concerned: a bad link shape, a wrong path, or a `record()` that
+ * throws on the round's first link would surface for the first time DURING a
+ * paid round, mid-flight, after real boxes and real keys exist.
+ *
+ * This costs nothing. Opening a temp SQLite file is not a spendy path — only
+ * the seam's CALLERS are, and none of them is reached here. `QDS_E2E_TIER` and
+ * the substrate variables are never consulted by this seam (`liveTodoOff()` is
+ * its whole gate), so nothing in this test can provision anything.
+ */
+test("recordLiveAuditLink under QDS_E2E_LIVE=1 writes the link, and liveAuditLinksFor reads it back", () => {
+  const saved: Array<[string, string | undefined]> = [
+    ["QDS_E2E_LIVE", process.env.QDS_E2E_LIVE],
+    ["QDS_E2E_EVIDENCE_DIR", process.env.QDS_E2E_EVIDENCE_DIR],
+  ];
+  const evidenceDir = mkdtempSync(join(tmpdir(), "qds-harness-live-link-"));
+  try {
+    process.env.QDS_E2E_LIVE = "1";
+    process.env.QDS_E2E_EVIDENCE_DIR = evidenceDir;
+
+    const link = {
+      runId: "harness-live-run",
+      repoSlug: "acme/widgets",
+      requestId: "req-live",
+      hop: "run-credential" as const,
+      event: "mint" as const,
+      subjectId: "deadbeef",
+      subjectKind: "credential-key" as const,
+      evidenceDigest: "a".repeat(64),
+      occurredAt: "2026-09-17T00:00:00.000Z",
+      recordedAt: "2026-09-17T00:00:01.000Z",
+    };
+    recordLiveAuditLink(link);
+
+    // It landed where the path function says it does — beside the round's
+    // evidence, under QDS_E2E_EVIDENCE_DIR, never `.sandbox/audit.db`.
+    expect(liveAuditStorePath()).toBe(join(evidenceDir, "audit-links.db"));
+    expect(existsSync(liveAuditStorePath())).toBeTrue();
+
+    // …and the READ path returns it, through the same production reader
+    // `scripts/qds-audit.ts` walks with. Every field the chain joins on is
+    // pinned: a link written under the wrong runId reads as `[]` here, which is
+    // exactly how a live round's hop reports `unlinked` while the emit "worked".
+    const rows = liveAuditLinksFor("harness-live-run");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      runId: "harness-live-run",
+      repoSlug: "acme/widgets",
+      requestId: "req-live",
+      hop: "run-credential",
+      event: "mint",
+      subjectId: "deadbeef",
+      subjectKind: "credential-key",
+      evidenceDigest: "a".repeat(64),
+      occurredAt: "2026-09-17T00:00:00.000Z",
+    });
+    // A runId the round never emitted for is `[]`, not "whatever is in the
+    // store" — the scoping every tier assertion depends on.
+    expect(liveAuditLinksFor("harness-live-run-other")).toEqual([]);
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(evidenceDir, { recursive: true, force: true });
+  }
 });

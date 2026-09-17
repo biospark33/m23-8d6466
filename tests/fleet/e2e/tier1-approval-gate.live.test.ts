@@ -50,6 +50,7 @@ import {
   keyLeakProblems,
   ledgerRows,
   listedKeyHashes,
+  liveAuditLinksFor,
   liveGate,
   liveTodoOff,
   mintCappedKey,
@@ -618,6 +619,59 @@ test.todoIf(liveTodoOff())(
         reason: "e2e demo",
       });
       expect(store.get(runId).extensions?.approval).toEqual(before.extensions?.approval);
+
+      // ── DF5.3: the hops this round PERFORMED are in the round's audit store ─
+      // The one assertion that makes the harness's six `recordAuditLink:
+      // recordLiveAuditLink` seams load-bearing. Without it, reverting all six
+      // back to `() => {}` passes the fast suite AND a full paid round — which
+      // is precisely the defect the harness's own doc comment says the change
+      // exists to fix (a walk over a harness-provisioned run reporting
+      // `unlinked` for hops that were in fact performed).
+      //
+      // This leg is the right one to carry it because it is the TIER-1 test
+      // whose record is ATTRIBUTED: the links are skipped, by design and
+      // silently, for a record with no `extensions.budget.repoSlug` — which is
+      // why `createRun`'s seam (T1.2) can never produce one and why asserting
+      // there would pin nothing.
+      //
+      // Every event below is one an assertion above already proved happened:
+      // `mint` (the hash was listed at the provider), `bundle-verify` /
+      // `bundle-fetch` (`harvest.outcome === "harvested"`), and
+      // `revoke` / `verify-revoked` / `teardown` (`order` reached
+      // `teardown-done`, the box is gone and the hash is no longer listed).
+      // A SET, not a sequence: ordering is pinned off-substrate in
+      // tests/fleet/dispatch.test.ts, and re-pinning it here would buy a live
+      // flake rather than coverage.
+      const auditLinks = liveAuditLinksFor(runId);
+      evidence.push({
+        phase: "audit-links",
+        count: auditLinks.length,
+        pairs: auditLinks.map((l) => `${l.hop}/${l.event}`),
+      });
+      expect(new Set(auditLinks.map((l) => `${l.hop}/${l.event}`))).toEqual(
+        new Set([
+          "run-credential/mint",
+          "run-bundle/bundle-verify",
+          "run-bundle/bundle-fetch",
+          "run-credential/revoke",
+          "run-credential/verify-revoked",
+          "run-box/teardown",
+        ]),
+      );
+      // ONE attribution and ONE correlation across all six (C6, INV-4-bis):
+      // three emitters on three call paths, and a chain that cannot join them
+      // is a chain that reports `unlinked`.
+      expect(new Set(auditLinks.map((l) => l.runId))).toEqual(new Set([runId]));
+      expect(new Set(auditLinks.map((l) => l.repoSlug))).toEqual(new Set(["e2e-private/test"]));
+      expect(new Set(auditLinks.map((l) => l.requestId))).toEqual(new Set([DISPATCH_REQUEST_ID]));
+      // The box link names the BOX, the credential links name the key HASH —
+      // a subject swap between the hops is what makes a walk unjoinable.
+      expect(auditLinks.find((l) => l.event === "teardown")?.subjectId).toBe(runId);
+      for (const l of auditLinks.filter((l) => l.hop === "run-credential")) {
+        expect(l.subjectId).toBe(hash);
+      }
+      // INV-AUDIT-2: a link row is an operator-visible sink like any other.
+      expect(JSON.stringify(auditLinks)).not.toContain("sk-or-");
 
       // ── round hygiene: no box of ours survives (skill: final-ls) ───────────
       // Presumes no concurrent live round, which the skill mandates anyway.

@@ -1204,11 +1204,20 @@ describe("sandbox-teardown — the audit store open is a CLASSIFIED refusal", ()
     // remediation, and no mention of the knob that caused it. A harness driving
     // run() directly got a rejected promise where every other refusal in this
     // file returns an exit code.
-    const sealed = join(dir, "sealed");
-    mkdirSync(sealed, { recursive: true });
-    chmodSync(sealed, 0o500); // traversable, NOT writable
+    // The fault is induced at a seam that fails for EVERY uid, not with a
+    // chmod. `chmodSync(sealed, 0o500)` does not stop uid 0, so under root —
+    // which is exactly where CI runs, in Docker — the open SUCCEEDED and run()
+    // walked on into the ordinary teardown path, failing both assertions below
+    // on entirely correct behaviour. `test.skipIf(getuid() === 0)` is the
+    // repo's other convention for chmod fixtures, but as
+    // `tests/fleet/dispatch.test.ts` says outright, it "skips exactly where CI
+    // runs". A store path whose PARENT is a regular file cannot be mkdir'd by
+    // anyone: `openAuditStore`'s write-path mkdir gets EEXIST/ENOTDIR for root
+    // and for everybody else.
+    const blocker = join(dir, "not-a-directory");
+    writeFileSync(blocker, "a regular file, not a directory\n");
     const previous = process.env.QDS_AUDIT_DB;
-    process.env.QDS_AUDIT_DB = join(sealed, "nested", "audit.db");
+    process.env.QDS_AUDIT_DB = join(blocker, "audit.db");
     try {
       store.create("audit-sealed");
 
@@ -1223,9 +1232,14 @@ describe("sandbox-teardown — the audit store open is a CLASSIFIED refusal", ()
       expect(existsSync(join(runs, "audit-sealed.lock"))).toBeFalse();
       expect(store.get("audit-sealed").closedAt).toBeUndefined();
       expect(text).toContain("next: ");
+      // The remediation names the knob that caused it — the whole reason this
+      // refusal is classified rather than a bare errno.
       expect(text).toContain("QDS_AUDIT_DB");
+      // And the typed code, not a raw fs errno: `AuditStoreError.code` is what
+      // the other three composition roots forward too (contract C-1).
+      expect(text).toContain("!! audit-store-unreadable");
     } finally {
-      chmodSync(sealed, 0o700); // so afterEach's rm of `dir` can remove it
+      // biome-ignore lint/performance/noDelete: unsetting an env var requires delete
       if (previous === undefined) delete process.env.QDS_AUDIT_DB;
       else process.env.QDS_AUDIT_DB = previous;
     }
@@ -1238,6 +1252,20 @@ describe("sandbox-teardown — the audit store open is a CLASSIFIED refusal", ()
     const code = await run(["no-such-run", "--dir", runs], sink);
     expect(code).toBe(1);
     expect(lines.join("")).toContain("!! no-record:");
-    expect(auditDb.path()).toContain("qds-fleet-audit-");
+    // The OBSERVABLE, not the helper's own accessor. `auditDb.path()` is
+    // `join(dir, "audit.db")` computed by `useTempAuditStore` itself — a pure
+    // read of its own state — so `toContain("qds-fleet-audit-")` held even with
+    // the helper DELETED from this file, while run() created
+    // `.sandbox/audit.db` at the repo root. The leak guard this PR adds was
+    // inert under that assertion.
+    //
+    // `existsSync(path())` is the check the helper's own docstring prescribes:
+    // the parent temp dir exists and the FILE does not until the run under test
+    // creates it. This CLI opens exactly one store, so a store standing at the
+    // temp seam is the proof that it is not standing anywhere else. (Asserting
+    // `.sandbox/audit.db` is ABSENT would not work: on any machine that has
+    // ever run the factory for real, the operator's store is legitimately there
+    // and the assertion would fail for the wrong reason.)
+    expect(existsSync(auditDb.path())).toBeTrue();
   });
 });

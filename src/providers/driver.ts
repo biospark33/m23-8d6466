@@ -156,6 +156,15 @@ function auditCanonicalJson(value: unknown): string {
   // empty object). Same for URL and anything else carrying a toJSON.
   if (typeof (value as { toJSON?: unknown }).toJSON === "function") return auditCanonicalJson((value as { toJSON(): unknown }).toJSON());
   if (Array.isArray(value)) return `[${value.map(auditCanonicalJson).join(",")}]`;
+  // `v !== undefined` ONLY. A function- or symbol-valued MEMBER keeps its key
+  // and renders `null` here, where `JSON.stringify` would drop it — a
+  // deliberate, pinned divergence (tests/providers/audit-emit.test.ts, "a
+  // non-JSON scalar canonicalises to null"), because link-store's
+  // `canonicalJson` does the identical thing and AGREEMENT BETWEEN THE TWO
+  // COPIES is the invariant that matters: "matches JSON.stringify" is a
+  // property of neither, while a one-sided "fix" is the permanent,
+  // uncorrectable false `evidence-mismatch` this comment block warns about.
+  // Changing it means changing both copies and the pin, in one commit.
   const entries = Object.entries(value)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -166,27 +175,93 @@ function auditSha256Hex(text: string): string {
   return new Bun.CryptoHasher("sha256").update(text).digest("hex");
 }
 
-/** Everything an emitter supplies; the helper stamps digest + both clocks. */
-export type AuditEmitInput = Omit<ProviderAuditLink, "evidenceDigest" | "occurredAt" | "recordedAt">;
+/**
+ * Everything an emitter supplies; the helper stamps the digest and
+ * `recordedAt`, and defaults `occurredAt` to the same clock read.
+ */
+export type AuditEmitInput = Omit<ProviderAuditLink, "evidenceDigest" | "occurredAt" | "recordedAt"> & {
+  /**
+   * The event's own time, for an emitter that is NOT emitting at the moment of
+   * the event. Only the healing arms have one: `teardown.ts`'s first-close-wins
+   * re-run emits a link for a close that already happened, possibly days
+   * earlier, and when the original emit never landed that healing row is the
+   * SOLE row. `occurred_at` is what `linksForRun` sorts by, what
+   * `firstOrderProblem` compares and what AC7's hop-5 constraint is evaluated
+   * on, so a re-run clock there makes every one of those read a fiction.
+   * Omitted ⇒ now, which is correct for every at-the-moment emitter.
+   */
+  occurredAt?: string;
+};
 
 /**
  * One audit link, emitted by the event's own emitter at the moment of the
  * event (AC3/INV-AUDIT-4): digests `detail` canonically (the caller-computed
- * digest the store never computes), stamps `occurredAt` = `recordedAt` = now
- * (one clock read for both — the event's own timestamp), and hands the result
- * to the caller-bound seam. A store refusal (typed `AuditStoreError`)
- * propagates: for the credential/box/bundle emits the write IS part of the
- * lifecycle. The store's `record` already logs the one structured
- * `audit-link.record` line per emit, so no emitter adds a second.
+ * digest the store never computes), stamps `recordedAt` = now — the clock read,
+ * "when we wrote it down" — and `occurredAt` = the event's own time, which
+ * defaults to the same read and is overridable by a healing emitter (see
+ * `AuditEmitInput.occurredAt`). The result goes to the caller-bound seam.
+ * A store refusal (typed `AuditStoreError`) propagates: for the mint/deliver
+ * and box/bundle emits the write IS part of the lifecycle. (The teardown-path
+ * emits catch it instead — an unwritable store must not make teardown
+ * impossible; see `emitTeardownLink`.) The store's `record` already logs the
+ * one structured `audit-link.record` line per emit, so no emitter adds a second.
  */
 export function emitAuditLink(record: (link: ProviderAuditLink) => void, input: AuditEmitInput): void {
-  const occurredAt = new Date().toISOString();
+  const recordedAt = new Date().toISOString();
   record({
     ...input,
     evidenceDigest: auditSha256Hex(auditCanonicalJson(input.detail ?? null)),
-    occurredAt,
-    recordedAt: occurredAt,
+    occurredAt: input.occurredAt ?? recordedAt,
+    recordedAt,
   });
+}
+
+/**
+ * The ONE non-empty predicate every emitter routes `runId`, `repoSlug` and
+ * `requestId` through (C3). Every guard used to be `=== undefined`, so `""` —
+ * schema-legal on a run record, and settable from the record CLI — took the
+ * EMIT arm, reached the store's non-empty check and threw `audit-link-invalid`
+ * AFTER the attested action already happened: key minted, key delivered, box
+ * created, files landed. `fillRun` had already been hardened this way for
+ * `repoSlug` alone; this is that predicate, named once and shared.
+ *
+ * Empty takes the same door absence does: skip the emit, log one
+ * `providers.audit-link-skipped` line, let the hop report `unlinked`.
+ */
+export function auditNonEmpty(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** The `reason` an emitter's skip line carries; `undefined` ⇒ emit. */
+export type AuditSkipReason = "no-run-id" | "no-repo-slug" | "no-request-id";
+
+/**
+ * The shared identity check for `audit_links`' three NOT NULL identity columns,
+ * in the order an operator would diagnose them. Every emitter calls this and
+ * logs one `providers.audit-link-skipped` line carrying the returned `reason`
+ * — including `no-repo-slug`, which four of the five emitters used to skip
+ * SILENTLY even though their own doc comments instruct operators to grep for
+ * that line (the unattributed run is the most frequent skip there is).
+ */
+export function auditLinkSkip(runId: unknown, repoSlug: unknown, requestId: unknown): AuditSkipReason | undefined {
+  if (!auditNonEmpty(runId)) return "no-run-id";
+  if (!auditNonEmpty(repoSlug)) return "no-repo-slug";
+  if (!auditNonEmpty(requestId)) return "no-request-id";
+  return undefined;
+}
+
+/**
+ * The store's own typed refusal, recognised STRUCTURALLY because
+ * `src/providers/*` must not import `src/audit/*` (the DF4.2 direction this
+ * file's seam exists to keep). Used to narrow the emit catches: a
+ * `JSON.stringify` TypeError on a BigInt or a circular `detail` is a
+ * programming error in the emitter, and classifying it as an audit-store write
+ * failure told the operator to tear down a healthy, billing run over a bad
+ * payload. Store faults keep that remediation; anything else propagates as the
+ * bug it is.
+ */
+export function isAuditStoreError(e: unknown): e is Error & { code: string; remediation: string } {
+  return e instanceof Error && e.name === "AuditStoreError";
 }
 
 /**
@@ -199,7 +274,7 @@ export function emitAuditLink(record: (link: ProviderAuditLink) => void, input: 
  */
 export function auditRepoSlug(rec: Pick<RunRecord, "extensions"> | undefined): string | undefined {
   const slug = rec?.extensions?.budget?.repoSlug;
-  return typeof slug === "string" && slug.length > 0 ? slug : undefined;
+  return auditNonEmpty(slug) ? slug : undefined;
 }
 
 /**
@@ -469,7 +544,20 @@ export interface ProvisionAdmittedRunOptions {
 export interface FillRunAuditOptions {
   recordAuditLink: (link: ProviderAuditLink) => void;
   runId: string;
-  requestId: string;
+  /**
+   * The correlation the `fill` link carries — the chain's join key.
+   *
+   * `string | undefined` by the same reasoning as `repoSlug` below, and for a
+   * harder reason: typed `string`, this seam had no way to STATE absence, so a
+   * caller holding a run with no requestId had exactly two moves, and both are
+   * the failure the emit exists to prevent — launder a minted/step-log id into
+   * `audit_links.request_id` (a fabricated join key, INV-AUDIT-4's own
+   * example), or pass `""` and take an `audit-link-invalid` throw past a LIVE,
+   * BILLING box whose files had already landed. Every other emitter in DF5.3
+   * can say "absent" and skip; this one could not. Absent ⇒ skip + one
+   * `providers.audit-link-skipped` line, hop 5 reports `unlinked`.
+   */
+  requestId: string | undefined;
   /**
    * The record's DF2.8 budget attribution — the only repoSlug an emitter may
    * use, never a placeholder. Absent ⇒ the run is unattributed and `fillRun`
@@ -958,12 +1046,24 @@ export async function provisionAdmittedRun(
   // unadmitted run is what INV-AUDIT-4 forbids (AC5 already refuses to vouch
   // for such a run one hop later).
   const createRepoSlug = auditRepoSlug(record);
-  const createRequestId = opts.requestId ?? record.requestId;
-  if (createRepoSlug !== undefined && createRequestId === undefined) {
+  // C3: the non-empty predicate, not `??` — `??` only guards null/undefined, so
+  // a `requestId: ""` (schema-legal on the record, settable from the record
+  // CLI) was carried into the emit and threw `audit-link-invalid` past a live
+  // billing box. Empty on either source falls through to the next, then to the
+  // skip door.
+  const createRequestId = auditNonEmpty(opts.requestId)
+    ? opts.requestId
+    : auditNonEmpty(record.requestId)
+      ? record.requestId
+      : undefined;
+  const createSkip = auditLinkSkip(opts.runId, createRepoSlug, createRequestId);
+  if (createSkip !== undefined) {
     // W2-C5: a MINTED requestId here is a fabricated join key — the same
     // invented evidence `auditRepoSlug` already refuses to produce for
     // repoSlug (INV-AUDIT-4). Skipping leaves hop 5 `unlinked`, which is
     // honest and fail-closed; this line is the only local signal that it did.
+    // The `no-repo-slug` arm logs too (round 3): it used to return silently,
+    // and it is the most common skip of the three.
     log({
       // A log-line correlation id, NOT the link's: the whole reason this arm
       // runs is that no real requestId exists, and the one thing that must not
@@ -978,9 +1078,11 @@ export async function provisionAdmittedRun(
       runId: opts.runId,
       driver: driver.name,
       event: "create",
-      reason: "no-request-id",
+      reason: createSkip,
     });
-  } else if (createRepoSlug !== undefined && createRequestId !== undefined) {
+    // The two predicates re-state what `auditLinkSkip` just decided, because
+    // they are what NARROWS the two locals to `string` for the emit below.
+  } else if (auditNonEmpty(createRepoSlug) && auditNonEmpty(createRequestId)) {
     // Classified like the two record writes above, and for the same reason: a
     // raw store error (ENOSPC, SQLITE_BUSY from a concurrent dispatch, a closed
     // handle) escaping here reaches dispatch's classifier past a LIVE, BILLING
@@ -999,10 +1101,16 @@ export async function provisionAdmittedRun(
         detail: { vmName: vm.name, provider: driver.name },
       });
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
+      // NARROWED to the store's own typed refusal (round 3). A blanket catch
+      // classified a `JSON.stringify` TypeError on a BigInt or circular
+      // `detail` as an audit-store write failure and told the operator to
+      // destroy a healthy run over an emitter bug — masking the real cause
+      // behind a remediation that throws work away. A programming error
+      // propagates as itself.
+      if (!isAuditStoreError(e)) throw e;
       throw new ProvisionRefusedError(
         "audit-link-write-failed",
-        `the create audit link for run ${opts.runId} could not be recorded (${detail}) — box ${vm.name} is live and billing and the record is left OPEN`,
+        `the create audit link for run ${opts.runId} could not be recorded (${e.message}) — box ${vm.name} is live and billing and the record is left OPEN`,
         `tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
       );
     }
@@ -1194,8 +1302,27 @@ export async function fillRun(
   // predicate is `auditRepoSlug`'s own, not `!== undefined`: an EMPTY string
   // passed that weaker guard, reached the store's non-empty check and threw
   // `audit-link-invalid` AFTER every file had already landed in the box —
-  // converting a successful fill into a dispatch failure.
-  if (typeof audit.repoSlug === "string" && audit.repoSlug.length > 0) {
+  // converting a successful fill into a dispatch failure. Round 3: `runId` and
+  // `requestId` take that same predicate (C3), and `requestId` may now STATE
+  // its absence instead of forcing the caller to invent one.
+  const fillSkip = auditLinkSkip(audit.runId, audit.repoSlug, audit.requestId);
+  if (fillSkip !== undefined) {
+    // The skip-and-log door every other emitter has. Hop 5 reports `unlinked`,
+    // which is honest; this line is the run's only local signal that it will.
+    log({
+      // The LOG's own correlation, never the link's — see the create site.
+      requestId: newRequestId(),
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId: audit.runId,
+      driver: driver.name,
+      event: "fill",
+      reason: fillSkip,
+    });
+  } else if (auditNonEmpty(audit.repoSlug) && auditNonEmpty(audit.requestId)) {
     // CLASSIFIED, exactly like the `create` emit in `provisionAdmittedRun` and
     // for the same reason spelled out there: a raw store fault (ENOSPC,
     // SQLITE_BUSY from a concurrent dispatch, a handle closed out from under
@@ -1223,10 +1350,13 @@ export async function fillRun(
         detail: { fileCount: files.length },
       });
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
+      // NARROWED to the store's typed refusal, exactly like the create site:
+      // a serialisation bug in the emitter must not reach the operator as
+      // "the audit store refused — tear the run down".
+      if (!isAuditStoreError(e)) throw e;
       throw new FillError(
         "audit-link-write-failed",
-        `the fill audit link for run ${audit.runId} could not be recorded (${detail}) — every file DID land in box ${vm}, which is live and billing, and the record is left OPEN`,
+        `the fill audit link for run ${audit.runId} could not be recorded (${e.message}) — every file DID land in box ${vm}, which is live and billing, and the record is left OPEN`,
         `tear the run down: bun scripts/fleet.ts teardown ${audit.runId}`,
       );
     }

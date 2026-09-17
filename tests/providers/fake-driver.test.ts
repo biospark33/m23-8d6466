@@ -24,6 +24,7 @@ import {
   createRun,
   createBudgetMs,
   fillRun,
+  FillError,
   type ProviderAuditLink,
   type ProviderVm,
   ProvisionRefusedError,
@@ -1249,6 +1250,22 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
    * still created (so teardown/list stay honest); only the reported name
    * differs.
    */
+  /**
+   * The store's own typed refusal, as the emitters recognise it: `driver.ts`
+   * must not import `src/audit/*`, so `isAuditStoreError` matches
+   * STRUCTURALLY on `name === "AuditStoreError"`. A plain `new Error(...)` is
+   * deliberately NOT classified any more — it reaches the operator as the
+   * emitter bug it is instead of as "the store refused, tear the run down".
+   */
+  function storeRefusal(message: string): Error {
+    const e = Object.assign(new Error(message), {
+      code: "audit-store-unwritable",
+      remediation: "check the uid, the mount and the free space on the store's device",
+    });
+    e.name = "AuditStoreError";
+    return e;
+  }
+
   function boxNamedApart(t: { driver: FakeDriver }): FakeDriver {
     return Object.assign(Object.create(t.driver) as FakeDriver, {
       create: async (name: string): Promise<ProviderVm> => {
@@ -1263,12 +1280,14 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
     const links: ProviderAuditLink[] = [];
     try {
       const runId = "df53-create-run";
+      const before = Date.now();
       const out = await provisionAdmittedRun(boxNamedApart(t), t.store, {
         runId,
         budget: BUDGET,
         requestId: "req-create",
         recordAuditLink: (l) => links.push(l),
       });
+      const after = Date.now();
       expect(links.map((l) => `${l.hop}.${l.event}`)).toEqual(["run-box.create"]);
       const link = links[0]!;
       // The BOX, not the run — the two are distinguishable in this fixture.
@@ -1280,13 +1299,27 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
       expect(link.repoSlug).toBe("qds/demo");
       expect(link.requestId).toBe("req-create");
       expect(link.detail).toEqual({ vmName: `vm-${runId}`, provider: "fake" });
-      expect(link.occurredAt).toBe(link.recordedAt);
+      // INV-AUDIT-4, "never retroactive" — a BOUND check, not
+      // `occurredAt === recordedAt`. The latter cannot fail for anything
+      // routed through `emitAuditLink` (one local is assigned to both fields
+      // when the caller passes no `occurredAt`), so it re-stated the helper's
+      // implementation while reading as coverage of the invariant. The real
+      // retroactivity risk is an emitter that stamps a STORED timestamp — this
+      // catches that, and `tests/providers/audit-emit.test.ts` owns the helper.
+      expect(Date.parse(link.occurredAt)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(link.occurredAt)).toBeLessThanOrEqual(after);
     } finally {
       clean(t);
     }
   });
 
-  test("an unattributed run emits no create link and logs no skip (INV-AUDIT-4)", async () => {
+  test("an unattributed run emits no create link and LOGS the no-repo-slug skip (INV-AUDIT-4)", async () => {
+    // Round 3 inverted the second half of this test. The `no-repo-slug` arm
+    // used to return silently — the most frequent skip of the three, and the
+    // one the emitters' own doc comments tell operators to grep for. An
+    // unattributed run still emits nothing (the columns are NOT NULL and a
+    // manufactured attribution is what INV-AUDIT-4 forbids), but the run now
+    // says so once instead of leaving hop 5 `unlinked` with no local trace.
     const t = tmp();
     const links: ProviderAuditLink[] = [];
     const entries: Array<Record<string, unknown>> = [];
@@ -1298,8 +1331,11 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
         recordAuditLink: (l) => links.push(l),
       });
       expect(links).toEqual([]);
-      // No repoSlug is not a correlation failure — there is nothing to say.
-      expect(entries.filter((e) => e.operation === "providers.audit-link-skipped")).toEqual([]);
+      const skipped = entries.filter((e) => e.operation === "providers.audit-link-skipped");
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]!.reason).toBe("no-repo-slug");
+      expect(skipped[0]!.event).toBe("create");
+      expect(skipped[0]!.runId).toBe("df53-create-unattributed");
     } finally {
       restore();
       clean(t);
@@ -1349,7 +1385,7 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
           budget: BUDGET,
           requestId: "req-create",
           recordAuditLink: () => {
-            throw new Error("audit store is read-only");
+            throw storeRefusal("audit store is read-only");
           },
         }),
       );
@@ -1362,6 +1398,40 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
       // The record is left OPEN naming the box — that IS the cleanup handle.
       expect(t.store.get(runId).vmName).toBe(`vm-${runId}`);
       expect(t.store.get(runId).closedAt).toBeUndefined();
+      // …and the box the remediation names is REALLY still there. The whole
+      // justification for choosing the teardown remediation over the audit
+      // store's own is that the box is live and billing; an implementation
+      // that rolled the box back on this path would make the remediation
+      // misleading and passed here until now. `boxNamedApart` reports
+      // `vm-<runId>` but creates the real box under the run id.
+      expect(existsSync(join(t.boxes, runId))).toBeTrue();
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("a NON-store throw from the create emit propagates unwrapped — not an audit-store refusal", async () => {
+    // The narrowing round 3 added. A blanket catch classified a
+    // `JSON.stringify` TypeError on a BigInt/circular `detail` as an
+    // audit-store write failure and told the operator to DESTROY a healthy
+    // billing run over an emitter bug, with the real cause hidden behind the
+    // remediation. A programming error must surface as itself.
+    const t = tmp();
+    try {
+      const runId = "df53-create-emitbug";
+      const err = await rejection(
+        provisionAdmittedRun(boxNamedApart(t), t.store, {
+          runId,
+          budget: BUDGET,
+          requestId: "req-create",
+          recordAuditLink: () => {
+            throw new TypeError("Do not know how to serialize a BigInt");
+          },
+        }),
+      );
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err).not.toBeInstanceOf(ProvisionRefusedError);
+      expect((err as Error).message).toContain("BigInt");
     } finally {
       clean(t);
     }
@@ -1378,6 +1448,7 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
       const vm = "vm-df53-fill";
       const runId = "df53-fill-run";
       await d.create(vm);
+      const before = Date.now();
       await fillRun(
         d,
         vm,
@@ -1387,6 +1458,7 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
         ],
         { recordAuditLink: (l) => links.push(l), runId, requestId: "req-fill", repoSlug: "qds/demo" },
       );
+      const after = Date.now();
       expect(links).toHaveLength(1);
       const link = links[0]!;
       expect(`${link.hop}.${link.event}`).toBe("run-box.fill");
@@ -1397,7 +1469,9 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
       expect(link.repoSlug).toBe("qds/demo");
       expect(link.requestId).toBe("req-fill");
       expect(link.detail).toEqual({ fileCount: 2 });
-      expect(link.occurredAt).toBe(link.recordedAt);
+      // Bound check, not `occurredAt === recordedAt` — see H1.
+      expect(Date.parse(link.occurredAt)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(link.occurredAt)).toBeLessThanOrEqual(after);
       // …and the files actually landed, so `fileCount` describes real work.
       expect(readFileSync(join(boxes, vm, "nested", "b.txt"), "utf8")).toBe("two\n");
     } finally {
@@ -1425,30 +1499,104 @@ describe("DF5.3 — the run-box links (hop 5)", () => {
     }
   });
 
-  test("an EMPTY repoSlug skips the fill emit instead of throwing after every file landed", async () => {
-    // The guard is `typeof repoSlug === "string" && length > 0`, not
-    // `!== undefined`: an empty string passed the weaker predicate, reached the
-    // store's own non-empty check and threw `audit-link-invalid` AFTER the
-    // files were already in the box — turning a successful fill into a
-    // dispatch failure.
+  test("an EMPTY identity field skips the fill emit instead of throwing after every file landed", async () => {
+    // The guard is `auditNonEmpty`, not `!== undefined`: an empty string passed
+    // the weaker predicate, reached the store's own non-empty check and threw
+    // `audit-link-invalid` AFTER the files were already in the box — turning a
+    // successful fill into a dispatch failure. Round 3 routed ALL THREE
+    // identity fields through that one predicate (C3), so all three are
+    // exercised here — `requestId: ""` is type-legal (the field is
+    // `string | undefined`), which is exactly why it needs a test and not just
+    // a type.
     const boxes = mkdtempSync(join(tmpdir(), "qds-df53-fill-empty-"));
     const links: ProviderAuditLink[] = [];
+    const entries: Array<Record<string, unknown>> = [];
+    const restore = setLogSink((e) => entries.push(e as unknown as Record<string, unknown>));
+    const cases: Array<{ name: string; reason: string; audit: { runId: string; requestId: string | undefined; repoSlug: string | undefined } }> = [
+      { name: "slug-empty", reason: "no-repo-slug", audit: { runId: "df53-fill-empty-run", requestId: "req-fill", repoSlug: "" } },
+      { name: "slug-absent", reason: "no-repo-slug", audit: { runId: "df53-fill-empty-run", requestId: "req-fill", repoSlug: undefined } },
+      { name: "req-empty", reason: "no-request-id", audit: { runId: "df53-fill-empty-run", requestId: "", repoSlug: "qds/demo" } },
+      { name: "req-absent", reason: "no-request-id", audit: { runId: "df53-fill-empty-run", requestId: undefined, repoSlug: "qds/demo" } },
+      { name: "run-empty", reason: "no-run-id", audit: { runId: "", requestId: "req-fill", repoSlug: "qds/demo" } },
+    ];
     try {
       const d = new FakeDriver(boxes);
       await d.create("vm-df53-fill-empty");
-      for (const repoSlug of ["", undefined]) {
+      for (const c of cases) {
         links.length = 0;
-        await fillRun(d, "vm-df53-fill-empty", [{ path: `${repoSlug === "" ? "e" : "u"}.txt`, content: "x\n" }], {
+        entries.length = 0;
+        await fillRun(d, "vm-df53-fill-empty", [{ path: `${c.name}.txt`, content: "x\n" }], {
           recordAuditLink: (l) => links.push(l),
-          runId: "df53-fill-empty-run",
-          requestId: "req-fill",
-          repoSlug,
+          ...c.audit,
         });
-        expect(links).toEqual([]);
+        expect(links, c.name).toEqual([]);
+        const skipped = entries.filter((e) => e.operation === "providers.audit-link-skipped");
+        expect(skipped.map((e) => e.reason), c.name).toEqual([c.reason]);
+        expect(skipped[0]!.event, c.name).toBe("fill");
+        // The fill SUCCEEDED — the skip is a skip, not a refusal.
+        expect(readFileSync(join(boxes, "vm-df53-fill-empty", `${c.name}.txt`), "utf8")).toBe("x\n");
       }
-      // Both fills SUCCEEDED — the skip is silent, not a refusal.
-      expect(readFileSync(join(boxes, "vm-df53-fill-empty", "e.txt"), "utf8")).toBe("x\n");
-      expect(readFileSync(join(boxes, "vm-df53-fill-empty", "u.txt"), "utf8")).toBe("x\n");
+    } finally {
+      restore();
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("a store refusal on the FILL link is a FillError with the TEARDOWN remediation, files already landed", async () => {
+    // The mirror of the create-side test above, and the half this PR fixes:
+    // before it, a raw `AuditStoreError` escaped `fillRun` into dispatch's
+    // classifier with an audit-store remediation, past a LIVE, BILLING box
+    // whose files had all landed — the two halves of hop 5 failing with
+    // different shapes. Nothing asserted it, so reverting the try/catch left
+    // the suite green.
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df53-fill-storefail-"));
+    try {
+      const d = new FakeDriver(boxes);
+      const vm = "vm-df53-fill-storefail";
+      const runId = "df53-fill-storefail-run";
+      await d.create(vm);
+      const err = await rejection(
+        fillRun(d, vm, [{ path: "a.txt", content: "one\n" }, { path: "nested/b.txt", content: "two\n" }], {
+          recordAuditLink: () => {
+            throw storeRefusal("audit store is read-only");
+          },
+          runId,
+          requestId: "req-fill",
+          repoSlug: "qds/demo",
+        }),
+      );
+      expect(err).toBeInstanceOf(FillError);
+      const failed = err as FillError;
+      expect(failed.code).toBe("audit-link-write-failed");
+      expect(failed.message).toContain("audit store is read-only");
+      expect(failed.message).toContain(vm);
+      expect(failed.remediation).toContain(`teardown ${runId}`);
+      // EVERY file landed before the emit — that is what the message claims
+      // and what makes teardown, not a retry, the operator's next move.
+      expect(readFileSync(join(boxes, vm, "a.txt"), "utf8")).toBe("one\n");
+      expect(readFileSync(join(boxes, vm, "nested", "b.txt"), "utf8")).toBe("two\n");
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("a NON-store throw from the fill emit propagates unwrapped — not an audit-store refusal", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df53-fill-emitbug-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("vm-df53-fill-emitbug");
+      const err = await rejection(
+        fillRun(d, "vm-df53-fill-emitbug", [{ path: "a.txt", content: "one\n" }], {
+          recordAuditLink: () => {
+            throw new TypeError("Do not know how to serialize a BigInt");
+          },
+          runId: "df53-fill-emitbug-run",
+          requestId: "req-fill",
+          repoSlug: "qds/demo",
+        }),
+      );
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err).not.toBeInstanceOf(FillError);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
     }

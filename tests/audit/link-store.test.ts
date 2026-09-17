@@ -25,8 +25,10 @@
  * - linksForRun ordering: occurred_at then link_id
  * - the walk handle APPENDS over the one inode-verified connection
  *
- * Every test chdirs into its own tmpdir FIRST so the default store path can
- * never resolve at the repo root — the real `.sandbox/` is never touched.
+ * Every test points `QDS_AUDIT_DB` inside its own tmpdir FIRST (C-5), so an
+ * accidental default-path open can never resolve at the repo root — the real
+ * `.sandbox/` is never touched. Only the one test that exercises the cwd-
+ * relative default chdirs, and it does so inside its own `try/finally`.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -61,23 +63,36 @@ import {
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 
 let dir: string;
-let prevCwd: string;
 let prevAuditEnv: string | undefined;
+let prevUmask: number;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df53-links-"));
-  prevCwd = process.cwd();
   prevAuditEnv = process.env.QDS_AUDIT_DB;
-  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-  delete process.env.QDS_AUDIT_DB;
-  process.chdir(dir);
+  // C-5 backstop. `process.chdir` used to serve this role, but it is
+  // PROCESS-global: bun loads every test file into one process, so for the
+  // duration of this file any other module's relative-path resolution — and
+  // any async work still in flight from an earlier file — resolved against a
+  // directory `afterEach` then deleted, surfacing as an ENOENT attributed to
+  // the wrong suite. Every test here passes an absolute path; this env default
+  // catches the one that ever stops doing so.
+  process.env.QDS_AUDIT_DB = join(dir, "env-default-guard.db");
+  // The create-path mode assertions (dir 0700, file 0600) are checked on paths
+  // the store just created, and `mkdir`/SQLite create at `0777 & ~umask` /
+  // `0644 & ~umask`. Under an inherited `umask 077` — common on hardened CI
+  // images — both land on 0700/0600 with the production `chmod` calls DELETED,
+  // so the inherited value silently decided whether they tested anything. At
+  // umask 0 only an explicit chmod can produce them. (The two PRE-EXISTING-path
+  // mode tests already handle this with explicit `chmodSync`; this is the same
+  // intent for the pair that was left umask-dependent.)
+  prevUmask = process.umask(0o000);
 });
 
 afterEach(() => {
+  process.umask(prevUmask);
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   if (prevAuditEnv === undefined) delete process.env.QDS_AUDIT_DB;
   else process.env.QDS_AUDIT_DB = prevAuditEnv;
-  process.chdir(prevCwd);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -139,7 +154,18 @@ function capturedLines(fn: () => void): LogEntry[] {
   return lines;
 }
 
-/** The one typed refusal a thunk raises, narrowed. */
+/**
+ * The one typed refusal a thunk raises, narrowed.
+ *
+ * `refusalOf` already rethrows anything that is not an `AuditStoreError`, so a
+ * preceding `expect(() => …).toThrow(AuditStoreError)` is redundant — and it
+ * ran the failing operation a SECOND time. For the openers that meant two probe
+ * `Database` handles opened on a corrupt/foreign file and abandoned unclosed on
+ * the throwing path (bun:sqlite handles are only GC-finalised); for `record` it
+ * meant the `audit-link.record` error line emitted twice into the suite's real
+ * log sink, multiplied by 16 in the vocabulary test. Capture ONCE and assert on
+ * the captured value.
+ */
 function refusalOf(fn: () => unknown): AuditStoreError {
   try {
     fn();
@@ -203,7 +229,12 @@ describe("redelivery idempotence", () => {
       subject_key: "key-1",
     });
 
-    const divergent = lines.find((l) => l.outcome === "divergent");
+    // The STRICT form the sibling idempotence test uses: `find` alone passed an
+    // implementation that logged an `inserted` line AND a `divergent` line for
+    // one rejected re-emit — an operator reconstructing a chain from the log
+    // would then see two emits against one row and could not tell which lied.
+    expect(lines.map((l) => [l.outcome, l.status])).toEqual([["divergent", "error"]]);
+    const divergent = lines[0];
     expect(divergent?.status).toBe("error");
     expect(divergent?.storedDigest).toBe(first.evidenceDigest);
     expect(divergent?.incomingDigest).toBe(second.evidenceDigest);
@@ -243,10 +274,19 @@ describe("redelivery idempotence", () => {
     expect(reader.linkExists("run-1", "run-credential", "deliver", "key-1")).toBeTrue();
     expect(reader.linkExists("run-1", "run-credential", "revoke")).toBeFalse();
     expect(reader.linkExists("run-9", "run-credential", "mint")).toBeFalse();
-    // The sentinel IS the key on the read side, by design — the write-side
-    // refusal below is what keeps a real subject from ever reaching it.
-    expect(reader.linkExists("run-1", "run-credential", "mint", "<none>")).toBeTrue();
-    reader.close();
+    try {
+      // The sentinel is now REFUSED on the read side too. The write-side
+      // refusal keeps a real `"<none>"` subject out of the store, but it cannot
+      // stop a CALLER passing the sentinel to the reader — and answering "does
+      // a link exist for subject <none>?" with the subject-LESS row is a true
+      // answer to a different question, shipped as a trap for DF5.4-C9, which
+      // is the only reason `linkExists` is exported at all.
+      const e = refusalOf(() => reader.linkExists("run-1", "run-credential", "mint", "<none>"));
+      expect(e.code).toBe("audit-link-invalid");
+      expect(e.message).toContain("reserved sentinel");
+    } finally {
+      reader.close(); // the throw is mid-test now; the close must stay reachable
+    }
   });
 });
 
@@ -309,7 +349,12 @@ describe("emit-time digest and canonicalisation", () => {
       // Not sha256Hex(canonicalJson(detail)) — the store would then be free
       // to drift from the emitter's own notion of the subject.
       expect(row.evidence_digest).toBe(callersDigest);
-      expect(JSON.parse(row.detail_json)).toEqual({ b: 1, a: 2 });
+      // The EXACT string, not `JSON.parse` + `toEqual`: that pair is order-
+      // blind, so it passed for `'{"b":1,"a":2}'` and `'{"a":2,"b":1}'` alike —
+      // and the fixture `{ b: 1, a: 2 }` was chosen precisely to expose the
+      // sort. A `record()` that stopped canonicalising and persisted insertion
+      // order kept this green while the digest preimage on disk changed.
+      expect(row.detail_json).toBe('{"a":2,"b":1}');
     } finally {
       db.close();
     }
@@ -321,6 +366,15 @@ describe("emit-time digest and canonicalisation", () => {
     expect(canonicalJson({ "é": 1, a: 2 })).toBe('{"a":2,"é":1}');
     // Key order cannot forge a digest difference.
     expect(canonicalJson({ a: 1, b: 2 })).toBe(canonicalJson({ b: 2, a: 1 }));
+    // The sort is by CODE UNIT (`keys.sort()`), not by locale. Every other
+    // fixture in this file and in audit-emit.test.ts is lowercase-initial, and
+    // `a` sorts before `é` under both comparators — so a `localeCompare` or
+    // `Intl.Collator` implementation passed the entire suite. It must not:
+    // `localeCompare` is ICU/locale-sensitive, so `{Box: …, appId: …}` would
+    // digest differently depending on `LANG`/ICU build between the emitting
+    // host and the walking host (or between driver.ts's copy and this one) —
+    // a PERMANENT, unfixable `evidence-mismatch` on an append-only store.
+    expect(canonicalJson({ a: 1, B: 2 })).toBe('{"B":2,"a":1}'); // 0x42 < 0x61
   });
 
   test("canonicalJson agrees with JSON.stringify on undefined: members dropped, ELEMENTS null", () => {
@@ -400,8 +454,8 @@ describe("rowToLink column → field mapping", () => {
 describe("no-create walk opener", () => {
   test("audit-store-absent: typed refusal and the path STILL does not exist", () => {
     const p = join(dir, "never-created.db");
-    expect(() => openAuditStoreForWalk(p)).toThrow(AuditStoreError);
     const e = refusalOf(() => openAuditStoreForWalk(p));
+    expect(e).toBeInstanceOf(AuditStoreError);
     expect(e.code).toBe("audit-store-absent");
     // A remediation that exists is not a remediation: it has to name the next
     // action AND the path that failed.
@@ -519,7 +573,6 @@ describe("no-create walk opener", () => {
     const beforeHash = fileHash(alt);
     renameSync(alt, p);
 
-    expect(() => __auditStoreTestHooks.probeAndBind(p, probe)).toThrow(AuditStoreError);
     expect(refusalOf(() => __auditStoreTestHooks.probeAndBind(p, probe)).code).toBe("audit-store-identity-changed");
     probe.close();
 
@@ -538,7 +591,6 @@ describe("no-create walk opener", () => {
     store.close();
     const probe = __auditStoreTestHooks.probeAuditStore(p);
     rmSync(p);
-    expect(() => __auditStoreTestHooks.probeAndBind(p, probe)).toThrow(AuditStoreError);
     expect(refusalOf(() => __auditStoreTestHooks.probeAndBind(p, probe)).code).toBe("audit-store-identity-changed");
     probe.close();
     expect(existsSync(p)).toBeFalse();
@@ -549,7 +601,6 @@ describe("schema-absent (INV-AUDIT-6 fail-closed)", () => {
   test("a zero-byte store refuses and is left unchanged", () => {
     const p = join(dir, "empty.db");
     writeFileSync(p, "");
-    expect(() => openAuditStoreForWalk(p)).toThrow(AuditStoreError);
     expect(refusalOf(() => openAuditStoreForWalk(p)).code).toBe("audit-store-schema-absent");
     expect(existsSync(p)).toBeTrue();
     expect(statSync(p).size).toBe(0);
@@ -561,7 +612,6 @@ describe("schema-absent (INV-AUDIT-6 fail-closed)", () => {
     other.exec("CREATE TABLE other (x)");
     other.close();
     const beforeHash = fileHash(p);
-    expect(() => openAuditStoreForWalk(p)).toThrow(AuditStoreError);
     expect(refusalOf(() => openAuditStoreForWalk(p)).code).toBe("audit-store-schema-absent");
     expect(fileHash(p)).toBe(beforeHash);
   });
@@ -620,14 +670,24 @@ describe("write-time init", () => {
 
   test("default path is QDS_AUDIT_DB, else cwd-relative .sandbox/audit.db", () => {
     expect(DEFAULT_AUDIT_DB_FILE).toBe(".sandbox/audit.db");
-    const store = openAuditStore();
-    store.close();
-    expect(existsSync(join(dir, ".sandbox", "audit.db"))).toBeTrue();
-    const envPath = join(dir, "env.db");
-    process.env.QDS_AUDIT_DB = envPath;
-    const envStore = openAuditStore();
-    envStore.close();
-    expect(existsSync(envPath)).toBeTrue();
+    // The ONE test that needs the cwd, so it owns the chdir — scoped, restored
+    // in a `finally`, and never left on the process for the rest of the file.
+    const prevCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_AUDIT_DB; // the cwd-relative arm is the no-env one
+      const store = openAuditStore();
+      store.close();
+      expect(existsSync(join(dir, ".sandbox", "audit.db"))).toBeTrue();
+      const envPath = join(dir, "env.db");
+      process.env.QDS_AUDIT_DB = envPath;
+      const envStore = openAuditStore();
+      envStore.close();
+      expect(existsSync(envPath)).toBeTrue();
+    } finally {
+      process.chdir(prevCwd);
+    }
   });
 
   test("an EXPLICIT path beats QDS_AUDIT_DB", () => {
@@ -643,28 +703,73 @@ describe("write-time init", () => {
     expect(existsSync(decoy)).toBeFalse();
   });
 
-  test("two concurrent first-emits both land (BEGIN IMMEDIATE + busy_timeout)", async () => {
+  test("a writer HELD OUT by an open BEGIN IMMEDIATE still lands its row (busy_timeout, deterministically)", async () => {
+    // The old shape spawned two children and asserted both exited 0. Nothing
+    // synchronised them at the write: each paid a cold bun start plus a TS
+    // import before touching SQLite and then wrote one tiny row inside one
+    // transaction, so two sub-millisecond write windows essentially never
+    // overlapped. It was green with `busy_timeout` DELETED — and it asserted
+    // nothing about contention having occurred. A regression that drops the
+    // timeout loses an audit link to SQLITE_BUSY on an append-only store where
+    // it can never be re-added under the same identity.
+    //
+    // Deterministic form: the PARENT holds a write lock open for a fixed
+    // window, the child must wait it out, and the child's row is what proves
+    // it did. With `busy_timeout` removed the child fails immediately with
+    // SQLITE_BUSY and this goes red every time.
     const p = join(dir, "concurrent.db");
+    const seed = openAuditStore(p); // create + migrate first, so the child only writes
+    seed.record(validLink({ subjectId: "key-seed" }));
+    seed.close();
+
     const mod = join(import.meta.dir, "..", "..", "src", "audit", "link-store.ts");
-    const child = (subjectId: string) =>
-      Bun.spawn(
-        [
-          "bun",
-          "-e",
-          `const {openAuditStore}=await import(${JSON.stringify(mod)});` +
-            `const s=openAuditStore(${JSON.stringify(p)});` +
-            `s.record(${JSON.stringify(validLink({ subjectId }))});s.close();`,
-        ],
-        { stdout: "ignore", stderr: "pipe" },
-      );
-    const [a, b] = [child("key-a"), child("key-b")];
-    const [ea, eb] = await Promise.all([a.exited, b.exited]);
-    if (ea !== 0 || eb !== 0) {
-      const err = `${await new Response(a.stderr).text()}${await new Response(b.stderr).text()}`;
-      throw new Error(`concurrent first-emit failed (exit ${ea}/${eb}):\n${err}`);
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        `const {openAuditStore}=await import(${JSON.stringify(mod)});` +
+          `const s=openAuditStore(${JSON.stringify(p)});` +
+          `s.record(${JSON.stringify(validLink({ subjectId: "key-child" }))});s.close();`,
+      ],
+      { stdout: "pipe", stderr: "pipe", env: { ...process.env, QDS_AUDIT_DB: p } },
+    );
+
+    const holder = new Database(p);
+    let held = 0;
+    try {
+      holder.exec("BEGIN IMMEDIATE"); // the parent now owns the write lock
+      const until = Date.now() + 200;
+      while (Date.now() < until) Bun.sleepSync(10); // hold it across the child's write attempt
+      held = Date.now();
+      holder.exec("COMMIT");
+    } finally {
+      holder.close();
     }
+
+    // Drain BOTH pipes BEFORE awaiting exit. A child writing more than the OS
+    // pipe buffer (~64 KiB — a bun resolve/transpile stack, a SQLite
+    // diagnostic) blocks on write, `exited` never resolves, and the test hangs
+    // until timeout with the diagnostic still stuck in the pipe.
+    const [exit, out, err] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    if (exit !== 0) throw new Error(`held-out writer failed (exit ${exit}):\n${out}${err}`);
+
+    expect(held).toBeGreaterThan(0);
+    // The child's row landed despite the ~200 ms lock: contention happened and
+    // `busy_timeout` absorbed it.
     expect(rowCount(p)).toBe(2);
-  });
+    const db = new Database(p);
+    try {
+      const subjects = (db.prepare("SELECT subject_id FROM audit_links ORDER BY link_id").all() as { subject_id: string }[])
+        .map((r) => r.subject_id);
+      expect(subjects).toEqual(["key-seed", "key-child"]);
+    } finally {
+      db.close();
+    }
+  }, 30_000);
 });
 
 describe("write-time refusals (fail loud, nothing written)", () => {
@@ -676,8 +781,8 @@ describe("write-time refusals (fail loud, nothing written)", () => {
   function assertInvalid(p: string, over: Partial<AuditLinkInput>, messageRe: RegExp): void {
     const store = openAuditStore(p);
     try {
-      expect(() => store.record(validLink(over))).toThrow(AuditStoreError);
       const e = refusalOf(() => store.record(validLink(over)));
+      expect(e).toBeInstanceOf(AuditStoreError);
       expect(e.code).toBe("audit-link-invalid");
       expect(e.message).toMatch(messageRe);
     } finally {
@@ -746,9 +851,18 @@ describe("write-time refusals (fail loud, nothing written)", () => {
     assertInvalid(join(dir, "f.db"), { detail: { pad: "x".repeat(8183) } }, /past the 8 KiB cap/);
     const p = join(dir, "g.db");
     const store = openAuditStore(p);
-    store.record(validLink({ detail: { pad: "x".repeat(8182) } }));
+    const atCap = { pad: "x".repeat(8182) };
+    store.record(validLink({ detail: atCap }));
     store.close();
     expect(rowCount(p)).toBe(1);
+    // "never truncated" is in the test NAME and was never asserted: `rowCount`
+    // cannot tell a whole store from one that accepted the detail and wrote
+    // `{"pad":"xxx…[truncated]"}`. A truncated `detail_json` is no longer the
+    // digest preimage, so the walker reports a permanent `evidence-mismatch` on
+    // a link that was legitimately accepted — at the one input size most likely
+    // to trip a truncating path.
+    expect(readRow(p).detail_json).toBe(canonicalJson(atCap));
+    expect(Buffer.byteLength(readRow(p).detail_json as string, "utf8")).toBe(8_192);
   });
 
   test("a detail JSON cannot express is a typed refusal, not a raw TypeError", () => {
@@ -775,6 +889,9 @@ describe("write-time refusals (fail loud, nothing written)", () => {
     store.record(validLink({ detail: atCap }));
     store.close();
     expect(rowCount(p)).toBe(1);
+    // Read back whole, same reason as the ASCII half above.
+    expect(readRow(p).detail_json).toBe(canonicalJson(atCap));
+    expect(Buffer.byteLength(readRow(p).detail_json as string, "utf8")).toBe(8_192);
   });
 });
 

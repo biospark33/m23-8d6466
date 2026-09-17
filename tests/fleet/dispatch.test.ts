@@ -20,6 +20,13 @@
  * - INV-4: no key material in logs, records or the ack
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+// The SABOTEUR connection only (see the setup-gate store-fault test): a second
+// handle on the dispatch's own store is the only way to make `record()` throw
+// on a store that is already open, which is the mid-dispatch fault this suite
+// had no coverage for. Nothing here reads links through it — that is
+// `openAuditStoreForWalk`'s job, and going around the production reader is how
+// a test stops seeing what the walker sees.
+import { Database } from "bun:sqlite";
 import {
   chmodSync,
   copyFileSync,
@@ -4738,7 +4745,16 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(drop.exitStatus).toBe("transient");
     expect(drop.status).toBe("error");
     // Joinable: the line names the run whose link was dropped, not `null`.
-    expect(drop.runId).toBe(readdirSync(store.dir)[0]?.replace(/\.json$/, ""));
+    //
+    // The expected id comes off the REFUSAL LINE, not `readdirSync(store.dir)[0]`.
+    // `readdirSync` order is OS-defined, `<runsDir>/<runId>.lock` and its
+    // `.lktmp` reap temporaries share that directory (run-lock.ts), and
+    // `?.replace(/\.json$/, "")` leaves a lock name intact — so `[0]` could
+    // yield `undefined` or a lock file and the comparison would degrade into
+    // `expect(x).toBe(undefined)` instead of failing loudly on the real id.
+    const refusedRunId = expectSingleRefusalLine("dispatch-timeout").runId;
+    expect(typeof refusedRunId).toBe("string");
+    expect(drop.runId).toBe(refusedRunId);
     // Its OWN phase, never `abandoned`: `abandonedLine` above counts those and
     // asserts exactly one per expired step, and a drop is not a step expiry.
     expect(drop.phase).not.toBe("abandoned");
@@ -5724,6 +5740,43 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(Object.keys(gateRow.detail as object)).not.toContain("assertions");
     });
 
+    test("a FAILED gate writes NO setup-gate link — the links stop at run-box/fill", async () => {
+      // The other half of the success case above, and the one that matters:
+      // `setup-gate` is the row the walker reads as "the gate PROVED this box".
+      // Hoisting the emit above the refusal — or into a `finally` — would write
+      // it for every failed gate, so an unproven box would chain as
+      // linked-and-ready. The success path pins presence and the unattributed
+      // path pins global absence; neither can catch that move.
+      //
+      // The links that PRECEDED the gate must still be there: this is "the gate
+      // did not vouch", not "the run emitted nothing".
+      try {
+        await dispatch(
+          validBrief(),
+          deps({
+            setupGate: async (_d: ProviderDriver, vm: string) => ({
+              ready: false,
+              failedItem: "A" as const,
+              assertions: [{ item: "A" as const, ok: false, note: "the box said no" }],
+              debugCommands: [`inspect ${vm}`],
+              teardownCommand: `td ${vm}`,
+              vm,
+            }),
+          }),
+        );
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect((e as FleetError).exitCode).toBe(3);
+        expect((e as FleetError).code).toBe("setup-gate-failed");
+      }
+      const runId = expectSingleRefusalLine("setup-gate-failed").runId as string;
+      expect(typeof runId).toBe("string");
+      expect(auditRows(runId).map((r) => `${r.hop}/${r.event}`)).toStrictEqual(
+        HOP5_SEQUENCE.slice(0, HOP5_SEQUENCE.indexOf("run-box/setup-gate")),
+      );
+    });
+
     test("an UNATTRIBUTED run emits NO hop-5 links at all — never fill/setup-gate with no create", async () => {
       // A `fill` and a `setup-gate` with no `create` reads as "the box was
       // filled before it was created". All three sites take the SAME slug, from
@@ -5762,42 +5815,48 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // Fail-closed: a run whose box/credential links cannot be written is a run
       // the chain can never vouch for, so it refuses instead of provisioning an
       // unlinked box. Shipped with no test at all.
-      const sealed = realpathSync(mkdtempSync(join(tmpRoot, "sealed-")));
-      chmodSync(sealed, 0o500); // readable and traversable, NOT writable
-      // EVERYTHING from the seal onward is in the try: the 0o700 restore is the
-      // only thing that lets `afterAll` rm -rf `tmpRoot`, so a failing assertion
-      // below used to leave a 0o500 directory behind and turn ONE red test into
-      // a red test PLUS a teardown EACCES that buries it.
-      try {
-        process.env.QDS_AUDIT_DB = join(sealed, "nested", "audit.db");
-        const createSpy = mock(() => Promise.resolve({ name: "x", status: "running" } as ProviderVm));
-        driver.create = createSpy;
-        const originalMint = keyApi.createKey.bind(keyApi);
-        const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
-        keyApi.createKey = mintSpy;
+      //
+      // The fault is induced by GEOMETRY, not by permissions: the store's parent
+      // is an ordinary FILE, so `mkdirSync(dirname(path))` fails EEXIST/ENOTDIR
+      // for every uid. `chmodSync(sealed, 0o500)` was the previous injection and
+      // it is a no-op for root — DAC is bypassed, `openAuditStore` succeeds, the
+      // dispatch provisions and this test fails naming the fail-closed path as
+      // regressed when the only thing that changed was the uid. This repo's CI
+      // is a Docker container, i.e. exactly where that happens; `skipIf(uid===0)`
+      // would have skipped the test precisely where it runs. Nothing to restore
+      // either, so the assertions below need no wrapper to keep `afterAll`'s
+      // sweep of `tmpRoot` working.
+      const notADir = join(outsideDir, "not-a-directory");
+      writeFileSync(notADir, "the audit store's parent is a regular file");
+      process.env.QDS_AUDIT_DB = join(notADir, "audit.db");
+      const createSpy = mock(() => Promise.resolve({ name: "x", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
 
-        try {
-          await dispatch(validBrief(), deps());
-          failUnreachable();
-        } catch (e) {
-          if (e instanceof UnexpectedSuccessError) throw e;
-          expect(e).toBeInstanceOf(FleetError);
-          const err = e as FleetError;
-          expect(err.exitCode).toBe(1);
-          expect(err.code).toBe("audit-store-unavailable");
-          // The typed code is NOT re-wrapped by the create→expose classifier, and
-          // the remediation names the knob the operator has to turn.
-          expect(err.remediation).toContain("QDS_AUDIT_DB");
-        }
-        // "so nothing was provisioned" — the refusal's own claim, asserted.
-        expect(createSpy).not.toHaveBeenCalled();
-        expect(mintSpy).not.toHaveBeenCalled();
-        expect(readdirSync(store.dir)).toHaveLength(0);
-        expect(await driver.list()).toHaveLength(0);
-        expectSingleRefusalLine("audit-store-unavailable");
-      } finally {
-        chmodSync(sealed, 0o700); // so `afterAll`'s sweep of tmpRoot can remove it
+      try {
+        await dispatch(validBrief(), deps());
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(1);
+        expect(err.code).toBe("audit-store-unavailable");
+        // The typed code is NOT re-wrapped by the create→expose classifier, and
+        // the remediation names the knob the operator has to turn. C-1 makes
+        // this the STORE's own remediation (`openWriterStore`'s fallback arm),
+        // not dispatch's generic hint — so this assertion is what keeps the two
+        // texts from drifting apart into an operator-facing contradiction.
+        expect(err.remediation).toContain("QDS_AUDIT_DB");
       }
+      // "so nothing was provisioned" — the refusal's own claim, asserted.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+      expect(await driver.list()).toHaveLength(0);
+      expectSingleRefusalLine("audit-store-unavailable");
     });
 
     test("REGRESSION: a store under a pre-existing directory this process does not own dispatches FINE", async () => {
@@ -5829,6 +5888,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         expect(statSync(shared).mode).toBe(modeBefore);
       } finally {
         rmSync(storePath, { force: true });
+        // RESTORED, not merely asserted. If the regression comes back AND this
+        // process can chmod /tmp (uid 0 in a CI container — this repo's CI),
+        // the regressed chmod SUCCEEDS: /tmp is 0700 for the rest of the job and
+        // every later test, subprocess and tool that touches it fails for an
+        // unrelated-looking reason, burying the one assertion that named the
+        // real bug. The assertion above is the diagnosis; this is the cleanup,
+        // and it has to be in the `finally` because the assertion throws.
+        if (statSync(shared).mode !== modeBefore) chmodSync(shared, modeBefore & 0o7777);
       }
     });
 
@@ -5849,12 +5916,71 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         expect((e as FleetError).exitCode).toBe(1);
       }
       expect(existsSync(auditDb.path())).toBeTrue();
+      // The run id from the REFUSAL LINE, never `readdirSync(store.dir)[0]`:
+      // that listing is OS-ordered and shares the directory with `<runId>.lock`
+      // and its `.lktmp` reap temporaries, and the old `?? ""` degraded a
+      // mismatch into `linksForRun("") === []` — trivially true, so the
+      // assertion could not fail.
+      const refusedRunId = expectSingleRefusalLine("provision-failed").runId;
+      expect(typeof refusedRunId).toBe("string");
       const handle = openAuditStoreForWalk(auditDb.path());
       try {
-        expect(handle.linksForRun(readdirSync(store.dir)[0]?.replace(/\.json$/, "") ?? "")).toStrictEqual([]);
+        expect(handle.linksForRun(refusedRunId as string)).toStrictEqual([]);
       } finally {
         handle.close();
       }
+    });
+
+    test("a store fault at the setup-gate emit DROPS the link and the dispatch still succeeds — the box is not burned for audit plumbing", async () => {
+      // The expensive half of the fail-closed contract, and the one that was
+      // untested: the cheap PRE-provision refusal (above) and the POST-close
+      // drop (the abandoned-mint test) were both covered; a `record()` throw on
+      // an OPEN store, mid-dispatch, with a live box and a delivered key, was
+      // not. It used to become a generic `dispatch-failed` with the box ALIVE
+      // and the key DELIVERED — and the operator's natural retry re-spent the
+      // issue cap. It is now a logged drop and the run continues; the chain
+      // degrades to `unlinked` for that hop, which is recoverable, while an
+      // abandoned billing box is not.
+      //
+      // The fault is induced at the STORE, from a second connection, at the one
+      // moment that matters: the gate runs after create/mint/deliver/fill have
+      // all emitted, so the box is up and the key is in it. `DROP TABLE` is the
+      // "store replaced under the handle" fault in its smallest honest form —
+      // it classifies `audit-store-schema-absent`, i.e. NOT `audit-link-invalid`,
+      // which is the one code that still propagates.
+      const result = await dispatch(
+        validBrief(),
+        deps({
+          setupGate: async (d: ProviderDriver, vm: string) => {
+            const saboteur = new Database(auditDb.path());
+            try {
+              saboteur.exec("DROP TABLE audit_links");
+            } finally {
+              saboteur.close();
+            }
+            return twoAssertionGate(d, vm);
+          },
+        }),
+      );
+
+      // The run landed: gate passed, box exposed, ack shaped as ever.
+      expect(result.state).toBe("ready");
+      expect(await driver.list(result.runId)).toHaveLength(1);
+      expect(store.get(result.runId).closedAt).toBeUndefined();
+      expect(refusalLines()).toHaveLength(0);
+
+      // …and the dropped link is REPORTED, in the one shape an operator greps.
+      const drops = entries.filter((e) => e.phase === "audit-dropped");
+      expect(drops).toHaveLength(1);
+      const drop = drops[0] as LogEntry;
+      expect(drop.step).toBe("setup-gate");
+      expect((drop.error as { code?: string }).code).toBe("audit-link-write-failed");
+      expect(drop.status).toBe("error");
+      expect(drop.exitStatus).toBe("transient");
+      // Joinable to the run whose hop is now unlinked.
+      expect(drop.runId).toBe(result.runId);
+      // INV-4: a drop line is an operator-visible sink like any other.
+      expect(JSON.stringify(drop)).not.toContain(SBX_KEY_PREFIX);
     });
   });
 });

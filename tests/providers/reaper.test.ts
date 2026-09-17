@@ -1528,7 +1528,9 @@ describe("DF5.3 — the reap link is the orphan path's emit", () => {
     await sweep(deps(fleet)); // dry run: zero calls, zero links
     expect(auditLinks).toHaveLength(0);
 
+    const before = Date.now();
     const report = await sweep(deps({ ...fleet, driver: spy }, {}), { yes: true });
+    const after = Date.now();
     expect(report.executed.destroy).toEqual([runId]);
     expect(destroyed).toEqual([runId]);
     expect(auditLinks.map((l) => `${l.hop}.${l.event}`)).toEqual(["run-box.reap"]);
@@ -1544,7 +1546,13 @@ describe("DF5.3 — the reap link is the orphan path's emit", () => {
     // The detail shape, previously unasserted: a link reporting the wrong
     // class (or an empty detail) was indistinguishable from a correct one.
     expect(link.detail).toEqual({ vm: runId, class: "leaked-vm" });
-    expect(link.occurredAt).toBe(link.recordedAt);
+    // INV-AUDIT-4, "never retroactive" — a BOUND check. `occurredAt ===
+    // recordedAt` cannot fail for an emitter that passes no `occurredAt` (one
+    // local is assigned to both in `emitAuditLink`), so it re-stated the
+    // helper rather than the emitter. The reap row's event time IS the emit —
+    // unlike `teardown`, which now passes the record's `closedAt` (C-2).
+    expect(Date.parse(link.occurredAt)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(link.occurredAt)).toBeLessThanOrEqual(after);
   });
 
   // "Orphan path ONLY" is an ABSENCE claim, and the test above proves only the
@@ -1652,6 +1660,40 @@ describe("DF5.3 — the reap link is the orphan path's emit", () => {
     expect(dropped).toHaveLength(1);
     expect(dropped[0]!.runId).toBe(runId);
     expect((dropped[0] as unknown as { vm: string }).vm).toBe(runId);
-    expect((dropped[0] as unknown as { error: { code: string } }).error.code).toBe("audit-link-write-failed");
+    // ROUND 3: the reaper's catch stays BROAD on purpose (rethrowing here hits
+    // the unit catch as `destroy-failed` for a box already in
+    // `executed.destroy` — the double-count above), but its `code` is now
+    // HONEST. This throw is a plain `Error` carrying a `code` property, which
+    // is NOT the store's typed refusal (`isAuditStoreError` matches
+    // structurally on `name === "AuditStoreError"`), so the line no longer
+    // repeats an attacker-or-caller-supplied `code` as if the store had said it.
+    expect((dropped[0] as unknown as { error: { code: string } }).error.code).toBe("audit-link-emit-failed");
+  });
+
+  test("a TYPED AuditStoreError on the reap link is logged with the STORE's own code", async () => {
+    // The other half of the honest-code pair: when the throw really is the
+    // store's typed refusal, its `code` is what the operator needs and it is
+    // forwarded verbatim — so the two arms are distinguishable in the log.
+    const runId = "df53-reapfail-20260915-000003";
+    const fleet = await seedLeak(runId, { requestId: "req-df26-test" });
+
+    const report = await sweep(
+      deps(fleet, {
+        recordAuditLink: () => {
+          const e = Object.assign(new Error("cannot use the audit-link store"), {
+            code: "audit-store-unwritable",
+            remediation: "check the uid, the mount and the free space on the store's device",
+          });
+          e.name = "AuditStoreError";
+          throw e;
+        },
+      }),
+      { yes: true },
+    );
+    expect(report.executed.destroy).toEqual([runId]);
+    expect(report.failures).toEqual([]);
+    const dropped = logs.filter((l) => l.operation === "providers.reap-audit-link-dropped");
+    expect(dropped).toHaveLength(1);
+    expect((dropped[0] as unknown as { error: { code: string } }).error.code).toBe("audit-store-unwritable");
   });
 });

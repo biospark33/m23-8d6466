@@ -15,6 +15,7 @@ import { runDriverContract } from "../driver-contract.test.ts";
 import { registeredDrivers, resolveDriver } from "../../../src/providers/index.ts";
 import { assertValidRunId, RunRecordStore } from "../../../src/providers/run-record.ts";
 import { deliverRunKey, type KeyApi } from "../../../src/providers/credentials.ts";
+import type { ProviderAuditLink } from "../../../src/providers/driver.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS, ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
 import { bundlePushTimeoutMs, PUSH_MIN_THROUGHPUT_BPS, PUSH_TIMEOUT_MARGIN_MS } from "../../../src/providers/exedev/fill.ts";
@@ -1106,7 +1107,13 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     // fake substrate's box dir models it) and stays a SIBLING of the "src"
     // clone dir — the fill.ts separation contract holds.
     const driver = new ExeDevDriver({ run: fake.run });
-    await driver.create("deliver-default");
+    // The BOX name is deliberately unlike the run id. `deliverRunKey`'s
+    // signature is `(deps, runId, vm, key)`, and passing the same literal for
+    // both made a production argument swap — delivering to the box named by
+    // the run id, or attributing the deliver link to the box name — invisible.
+    const runId = "deliver-default-run";
+    const vm = "deliver-default-box";
+    await driver.create(vm);
     const unusedKeyApi: KeyApi = {
       createKey: async () => {
         throw new Error("not used by deliverRunKey");
@@ -1122,11 +1129,35 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
       },
     };
     const store = new RunRecordStore({ dir: join(tempDir, "deliver-runs") });
-    await deliverRunKey({ keyApi: unusedKeyApi, driver, store, recordAuditLink: () => {} }, "deliver-default", "deliver-default", "sk-or-test-not-a-real-key");
-    const envPath = join(fake.boxDir("deliver-default"), "app", ".env");
+    // …and the store really HOLDS this run. It used to hold nothing, so
+    // `deps.store.get(runId)` threw into the emit's best-effort catch and the
+    // DF5.3 deliver link was never exercised on this path at all — the sink
+    // was dead weight rather than coverage.
+    const keyHash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    store.create(runId);
+    store.set(runId, {
+      keyHash,
+      requestId: "req-deliver",
+      extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } },
+    });
+    const links: ProviderAuditLink[] = [];
+    await deliverRunKey(
+      { keyApi: unusedKeyApi, driver, store, recordAuditLink: (l) => links.push(l) },
+      runId,
+      vm,
+      "sk-or-test-not-a-real-key",
+    );
+    // The key landed in the box named by `vm`, not by `runId`.
+    const envPath = join(fake.boxDir(vm), "app", ".env");
     const st = statSync(envPath);
     expect((st.mode & 0o777).toString(8)).toBe("600");
     expect(readFileSync(envPath, "utf8")).toBe("OPENROUTER_API_KEY=sk-or-test-not-a-real-key\n");
+    // …and the link is attributed to the RUN, subject = the keyHash (never key
+    // material, INV-AUDIT-2), with the resolved default envFile in `detail`.
+    expect(links.map((l) => `${l.hop}.${l.event}`)).toEqual(["run-credential.deliver"]);
+    expect(links[0]?.runId).toBe(runId);
+    expect(links[0]?.subjectId).toBe(keyHash);
+    expect(links[0]?.detail).toEqual({ keyHash, envFile: "app/.env" });
   }, 30_000);
 
   test("a re-fill switches to the existing branch and never re-creates it", async () => {

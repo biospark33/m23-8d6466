@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createRun, SBX_OWNERSHIP_TAG } from "../../src/providers/driver.ts";
+import { createRun, SBX_OWNERSHIP_TAG, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -33,11 +33,18 @@ import {
 } from "../../src/providers/quota.ts";
 
 let dir: string;
+/**
+ * DF5.3: the quota gate's arms are "refused ⇒ no link" and "admitted but
+ * unattributed ⇒ no link" — absences a blind `() => {}` sink cannot observe.
+ * Reset per test below.
+ */
+let auditLinks: ProviderAuditLink[] = [];
 let prevCwd: string;
 let prevQuotaEnv: string | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df26-quota-"));
+  auditLinks = [];
   prevCwd = process.cwd();
   // The default quota path (and createRun's loadQuotaLimits()) resolves
   // against cwd — pin it to this test's tmpdir for the whole test. The env
@@ -304,7 +311,7 @@ describe("DF2.6 quota limits", () => {
 
     let err: unknown;
     try {
-      await createRun(driver, store, { runId: "df26ref-20260820-000003", recordAuditLink: () => {} });
+      await createRun(driver, store, { runId: "df26ref-20260820-000003", recordAuditLink: (l) => auditLinks.push(l) });
     } catch (e) {
       err = e;
     }
@@ -319,6 +326,10 @@ describe("DF2.6 quota limits", () => {
     // and the live population is byte-identical
     expect(store.list()).toHaveLength(0);
     expect((await driver.list()).map((v) => v.name).sort()).toEqual(["seed1-20260820-000001", "seed2-20260820-000002"]);
+    // …and no `run-box.create` link vouches for the box that was never made.
+    // The refusal fires before `driver.create`, so this is structurally safe
+    // today — the point is that nothing PROVED it while the sink was blind.
+    expect(auditLinks).toEqual([]);
   });
 
   test("createRun under the ceiling proceeds; every box carries the canonical SBX_OWNERSHIP_TAG", async () => {
@@ -326,8 +337,8 @@ describe("DF2.6 quota limits", () => {
     const driver = new FakeDriver(join(dir, "boxes"));
     const store = new RunRecordStore(join(dir, "runs"));
 
-    await createRun(driver, store, { runId: "df26tag-20260820-000001", recordAuditLink: () => {} });
-    await createRun(driver, store, { runId: "df26tag-20260820-000002", recordAuditLink: () => {} });
+    await createRun(driver, store, { runId: "df26tag-20260820-000001", recordAuditLink: (l) => auditLinks.push(l) });
+    await createRun(driver, store, { runId: "df26tag-20260820-000002", recordAuditLink: (l) => auditLinks.push(l) });
 
     const vms = await driver.list();
     // The ownership marker is canonical and non-displaceable: a factory box
@@ -335,5 +346,9 @@ describe("DF2.6 quota limits", () => {
     // never destroyed) — an unreapable leak by construction.
     expect(vms.map((v) => v.tag)).toEqual([SBX_OWNERSHIP_TAG, SBX_OWNERSHIP_TAG]);
     expect(store.get("df26tag-20260820-000001").vmName).toBe("df26tag-20260820-000001");
+    // Both runs are UNATTRIBUTED (no DF2.8 budget on the record), so hop 5
+    // stays unlinked: an emitter that manufactured a repoSlug to fill the
+    // NOT NULL columns is exactly what INV-AUDIT-4 forbids.
+    expect(auditLinks).toEqual([]);
   });
 });

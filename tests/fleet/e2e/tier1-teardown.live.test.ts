@@ -38,7 +38,6 @@ import {
   liveTodoOff,
   mintCappedKey,
   preflight,
-  recordLiveAuditLink,
   revokeQuietly,
   runFleet,
   runIdFor,
@@ -238,7 +237,12 @@ test.todoIf(liveTodoOff())(
         if (recordKeyHash === undefined) {
           for (const h of stranded) {
             try {
-              await revokeAndVerify({ keyApi: openRouterKeyApi(), driver: ctx.driver, store, recordAuditLink: recordLiveAuditLink }, h);
+              // INV-AUDIT-4: `revokeAndVerify` is the ONE sanctioned silent link
+              // sink (W14B-3). It runs under a run-less step context and
+              // `audit_links.run_id` is NOT NULL, so it emits nothing — wiring
+              // `recordLiveAuditLink` here typechecked and did nothing, reading
+              // as coverage of a stranded-key revoke link that does not exist.
+              await revokeAndVerify({ keyApi: openRouterKeyApi(), driver: ctx.driver, store, recordAuditLink: () => {} }, h);
               evidence.push({ phase: "finally-delta-revoke", ok: true, keyHash: h });
             } catch (e) {
               evidence.push({ phase: "finally-delta-revoke", ok: false, keyHash: h, error: (e as Error).message });

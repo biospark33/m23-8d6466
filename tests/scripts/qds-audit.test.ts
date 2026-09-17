@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -27,7 +27,8 @@ import { applyMigrations, SCHEMA_DDL } from "../../src/phase-engine/trace/schema
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { CostLedger } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { describeHop, run } from "../../scripts/qds-audit.ts";
+import { brokenDetail, describeHop, run } from "../../scripts/qds-audit.ts";
+import { chainVerdict } from "../../src/audit/index.ts";
 import { log, setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/qds-audit.ts");
@@ -141,24 +142,53 @@ interface SpawnResult {
   stderr: string;
 }
 
+/**
+ * A walk of this fixture is milliseconds of work; anything near this is wedged
+ * (a hop budget that stopped firing, a `gh` invocation that blocks). Without it
+ * `Bun.spawnSync` blocks FOREVER and the suite reports a bun-level test timeout
+ * with no stdout, no stderr and no case attribution — the signal diagnostic
+ * below, which exists precisely to name what went wrong, never runs.
+ */
+const SPAWN_TIMEOUT_MS = 30_000;
+
 function spawnAudit(argv: string[]): SpawnResult {
-  const proc = Bun.spawnSync(["bun", SCRIPT, ...argv], {
+  // `process.execPath`, not "bun": `bun test` runs every file in one process,
+  // so a sibling suite that rewrites `process.env.PATH` (or a host with another
+  // `bun` earlier on it) would otherwise decide which runtime audits the
+  // fixture. The same reasoning — and the same fix — as
+  // `tests/phase-engine/pipeline-run.test.ts`'s `spawnRunner`.
+  const proc = Bun.spawnSync([process.execPath, SCRIPT, ...argv], {
     cwd: fx.dir,
     stdout: "pipe",
     stderr: "pipe",
     env: spawnEnv(),
+    timeout: SPAWN_TIMEOUT_MS,
   });
   // `exitCode ?? 1` silently converted a CRASHED CLI (null exit code + a
   // signal) into the exact value the broken-chain tests assert. A crash is
   // never a verdict: surface it as a test error naming the signal.
   if (proc.exitCode === null) {
-    throw new Error(`qds-audit did not exit normally (signal ${String(proc.signalCode)}): ${proc.stderr.toString()}`);
+    const why = proc.exitedDueToTimeout === true
+      ? `wedged — killed after ${SPAWN_TIMEOUT_MS}ms`
+      : `signal ${String(proc.signalCode)}`;
+    throw new Error(`qds-audit did not exit normally (${why}): ${proc.stderr.toString()}`);
   }
   return {
     code: proc.exitCode,
     stdout: proc.stdout.toString(),
     stderr: proc.stderr.toString(),
   };
+}
+
+/**
+ * The fixture dir as the SPAWNED CLI's `process.cwd()` spells it. On macOS
+ * `$TMPDIR` is `/var/folders/…`, a symlink to `/private/var/folders/…`, and the
+ * child's cwd is the realpath — so any assertion on a path the CLI built by
+ * `resolve()`ing a RELATIVE seam value (or a default) must be anchored here,
+ * not on `fx.dir`. Absolute values passed on argv are unaffected.
+ */
+function spawnCwd(): string {
+  return realpathSync(fx.dir);
 }
 
 function auditFlags(): string[] {
@@ -329,6 +359,25 @@ function seedLedger(): void {
   }
 }
 
+/**
+ * A REAL ledger that simply holds no rows for this run — the way to break hop 3
+ * now that the walker rethrows an unopenable ledger as a `ChainWalkError`
+ * (N5). Deleting the file is an ENVIRONMENT fault ("I could not look", exit 2),
+ * not a statement about the chain; a ledger the walk CAN read which records no
+ * spend for the run is the genuine break (`hasEvents: false`, DF5.4-C1) and the
+ * only shape that still reaches exit 1 through hop 3.
+ */
+function seedEmptyLedger(): void {
+  // The WAL sidecars too: a `-wal` left beside a deleted db replays into the
+  // fresh file and the schema create then fails on a table that is half there.
+  for (const p of [fx.ledgerPath, `${fx.ledgerPath}-wal`, `${fx.ledgerPath}-shm`]) rmSync(p, { force: true });
+  new CostLedger({
+    path: fx.ledgerPath,
+    readRunRecord: () => undefined,
+    config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 3_600_000 },
+  }).close();
+}
+
 function writeReverifyReport(): void {
   const report = {
     reverifyId: REPORT_ID, runId: RUN, requestId: REQ, headSha: HEAD, baseSha: "b".repeat(40),
@@ -411,11 +460,17 @@ describe("complete fixture", () => {
 describe("broken chain", () => {
   test("exit 1; human output names hop + expected/actual/diagnostic; --json still prints the report", () => {
     buildCompleteFixture();
-    rmSync(fx.ledgerPath); // run-cost broken, not merely empty
+    // A readable ledger with no rows FOR THIS RUN. Deleting the file instead
+    // now exits 2 (the walker rethrows the failed open as a
+    // `walk-environment-fault` — N5), which is a different contract and is
+    // pinned in `walk faults` below; the exit-1 contract this test owns needs a
+    // break the walk can actually SEE.
+    seedEmptyLedger();
     const human = spawnAudit([RUN, ...auditFlags()]);
     expect(human.code).toBe(1);
     expect(human.stdout).toContain("run-cost");
-    expect(human.stdout).toContain("a readable cost ledger");
+    expect(human.stdout).toContain("ledger rows for the run");
+    expect(human.stdout).toContain("actual: hasEvents: false");
     // The BROKEN verdict names the ref and its kind, and its COUNT is the
     // count of the DEDUPED names it lists — not of the raw broken-hop rows.
     const verdictLine = human.stdout.split("\n").find((l) => l.startsWith("chain: BROKEN")) as string;
@@ -524,10 +579,15 @@ describe("invalid ref", () => {
   });
 
   test("a repeated value flag throws rather than silently last-winning", () => {
-    buildCompleteFixture();
+    // No fixture: this exits during argv parsing, so a full record + trace db +
+    // ledger + link store + reverify report was pure cost. And the decoys are
+    // asserted for the same reason every other usage-error test asserts them —
+    // a regression that opened a store BEFORE validating the grammar would
+    // otherwise still exit 2, indistinguishably.
     const r = spawnAudit([RUN, "--audit-db", fx.auditDb, "--audit-db", join(fx.dir, "other.db"), ...auditFlags().slice(0, 2)]);
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("--audit-db given more than once");
+    expectNoDecoys();
   });
 
   test("--help returns 0 and prints the usage block on stdout", () => {
@@ -535,24 +595,117 @@ describe("invalid ref", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Usage: qds-audit");
     expect(r.stdout).toContain("--reverify-dir <dir>");
+    // Help walks nothing — including none of the four DEFAULT seams, which is
+    // the only state this test leaves them in.
+    expectNoDecoys();
+  });
+
+  test("--json --help puts the help block on STDERR and leaves stdout empty", () => {
+    // `--json` binds stdout to "the ChainReport and NOTHING else": a consumer's
+    // JSON.parse must never be handed a help block. Exit is still 0 — help was
+    // asked for and answered.
+    const r = spawnAudit(["--json", "--help"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("Usage: qds-audit");
+    expectNoDecoys();
+  });
+
+  test("help in a VALUE position is the usage error it always was, never exit 0", () => {
+    // Help used to be matched against raw argv, so a seam missing its value
+    // printed help and returned 0 — which this CLI's binding matrix defines as
+    // "a ChainReport was produced and the chain is COMPLETE". On a tool whose
+    // exit code IS the verdict, a scripted caller read that as a verified
+    // chain. Both spellings: `--help` after a value flag falls to the
+    // missing-value error, and `-h` (which `tokenizeArgs` exempts from the
+    // stray-single-dash rule) survives as a literal seam VALUE and is refused
+    // by the path check with the path echoed.
+    const missingValue = spawnAudit([RUN, "--ledger", "--help"]);
+    expect(missingValue.code).toBe(2);
+    expect(missingValue.stderr).toContain("--ledger requires a non-empty value");
+    expect(missingValue.stdout).toBe("");
+
+    const swallowed = spawnAudit([RUN, "--runs-dir", "-h"]);
+    expect(swallowed.code).toBe(2);
+    expect(swallowed.stderr).toContain("!! seam-unusable");
+    expect(swallowed.stderr).toContain(`--runs-dir ${join(spawnCwd(), "-h")}`);
+    expect(swallowed.stdout).toBe("");
+    expectNoDecoys();
+  });
+
+  test("the --flag=value grammar: honoured when it carries a value, refused when it does not", () => {
+    // `parseValueFlags` has a dedicated `--flag=value` branch that bypasses
+    // `tokenizeArgs`' value pairing AND its empty-value refusal, so the whole
+    // `=` spelling of every seam was uncovered — including the shape that
+    // silently falls back to the operator's real store.
+    buildCompleteFixture();
+    const eq = spawnAudit([
+      RUN, "--json",
+      `--runs-dir=${fx.runsDir}`, `--audit-db=${fx.auditDb}`,
+      `--ledger=${fx.ledgerPath}`, `--reverify-dir=${fx.reverifyDir}`,
+    ]);
+    expect(eq.code).toBe(0);
+    // The seam was HONOURED, not merely accepted: a fallback to the decoys
+    // would exit non-zero, and no seam warning fires when all four are given.
+    expect(eq.stderr).not.toContain("audit-chain.seams");
+    expect((JSON.parse(eq.stdout.trim()) as ChainReport).complete).toBe(true);
+    expectNoDecoys();
+
+    const empty = spawnAudit([RUN, "--audit-db=", ...auditFlags().slice(0, 2)]);
+    expect(empty.code).toBe(2);
+    expect(empty.stderr).toContain("--audit-db requires a non-empty value");
+    expect(empty.stdout).toBe("");
+
+    // The pairing spelling of the same emptiness — one rule, two grammars.
+    const emptyPaired = spawnAudit([RUN, "--audit-db", "", ...auditFlags().slice(0, 2)]);
+    expect(emptyPaired.code).toBe(2);
+    expect(emptyPaired.stderr).toContain("--audit-db requires a non-empty value");
+    expectNoDecoys();
+  });
+
+  test("a BOOL flag given a value, or given twice, is named as itself", () => {
+    // `--json=true` reached `parseValueFlags`' `=` branch, whose membership
+    // test is against the VALUE flags only, and came back `unknown flag:
+    // --json` — sending an operator hunting for a typo in a flag that is spelt
+    // correctly. And a repeated `--json` was silently accepted while a repeated
+    // seam was a usage error: a parser with a rule for half its flags has none.
+    const valued = spawnAudit([RUN, "--json=true", ...auditFlags()]);
+    expect(valued.code).toBe(2);
+    expect(valued.stderr).toContain("--json takes no value");
+    expect(valued.stderr).not.toContain("unknown flag");
+    expect(valued.stdout).toBe("");
+
+    const twice = spawnAudit([RUN, "--json", "--json", ...auditFlags()]);
+    expect(twice.code).toBe(2);
+    expect(twice.stderr).toContain("--json given more than once");
+    expect(twice.stdout).toBe("");
   });
 });
 
 // ─── 4. the seams redirect ───────────────────────────────────────────────────
 
 describe("store-path seams", () => {
-  test("--audit-db at a nonexistent path: typed audit-store-absent refusal, nothing created, exit 1", () => {
+  test("--audit-db at a nonexistent path: typed audit-store-absent refusal, nothing created, exit 2", () => {
+    // N5. A store the walk cannot OPEN is "I could not look", never "this PR's
+    // chain is BROKEN": the walker rethrows the typed refusal as a
+    // `ChainWalkError("walk-environment-fault")`, so no report is produced and
+    // exit 1 — which by contract means walked-and-incomplete — is not
+    // reachable from here. A false BROKEN verdict about a store nobody ever had
+    // is the more damaging of the two errors.
     buildCompleteFixture();
     const parent = join(fx.dir, "subdir");
     const absent = join(parent, "not-there.db");
     const r = spawnAudit([RUN, "--json", ...auditFlags().slice(0, 2), "--audit-db", absent, ...auditFlags().slice(4)]);
-    expect(r.code).toBe(1);
-    const report = JSON.parse(r.stdout.trim()) as ChainReport;
-    const run = Object.values(report.runs)[0]!;
-    expect(run.hops["run-credential"]?.status).toBe("broken");
-    expect((run.hops["run-credential"] as { actual: string }).actual).toBe("audit-store-absent");
-    expect(run.hops["run-box"]?.status).toBe("broken");
-    expect(run.hops["run-bundle"]?.status).toBe("broken");
+    expect(r.code).toBe(2);
+    // Under a 2, stdout is never a report — a `--json` consumer that finds one
+    // there has no rule left to apply.
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("!! walk-environment-fault");
+    // The typed code survives the rethrow, and the path is echoed: the two
+    // facts that make a mis-pointed seam actionable.
+    expect(r.stderr).toContain("audit-store-absent");
+    expect(r.stderr).toContain(absent);
+    expect(r.stderr).toContain("next: ");
     // the walk never materialised the store it audits — NOR its parent. The
     // probe never passes O_CREAT, so a `mkdirSync(…, {recursive:true})` creeping
     // into the walk path leaves the FILE absent while the walk has written to
@@ -561,19 +714,24 @@ describe("store-path seams", () => {
     expect(existsSync(parent)).toBe(false);
   });
 
-  test("a PARTIAL seam override warns once, naming each default seam and its path", () => {
+  test("a PARTIAL seam override warns once, naming each default seam and its RESOLVED path", () => {
     buildCompleteFixture();
     const decoys = decoyPaths();
     const r = spawnAudit([RUN, "--runs-dir", fx.runsDir]);
-    // A report WAS produced (the un-overridden stores are simply absent), so
-    // this is a broken chain, not a usage error.
-    expect(r.code).toBe(1);
+    // The decoy `--audit-db` is absent, so the walk cannot look (N5) — exit 2,
+    // not 1. The subject of this test is the WARNING, which fires before the
+    // walk either way.
+    expect(r.code).toBe(2);
     const warnings = r.stderr.split("\n").filter((l) => l.includes('"operation":"audit-chain.seams"'));
     expect(warnings).toHaveLength(1);
     const warning = warnings[0] as string;
     expect(warning).toContain(`--audit-db → ${decoys.auditDb}`);
     expect(warning).toContain(`--ledger → ${decoys.ledger}`);
-    expect(warning).toContain("--reverify-dir → .sandbox/reverify");
+    // ABSOLUTE, not the bare `.sandbox/reverify` this used to pin. The warning
+    // exists to answer "which directories is this walk joining"; a relative
+    // path printed beside two absolute ones does not answer it. The spawn's cwd
+    // is the fixture dir, so this is also a strictly stronger assertion.
+    expect(warning).toContain(`--reverify-dir → ${join(spawnCwd(), ".sandbox", "reverify")}`);
     expect(warning).not.toContain("--runs-dir →"); // the one that WAS given
     expectNoDecoys();
   });
@@ -598,22 +756,54 @@ describe("store-path seams", () => {
 // ─── 5. a walk that faults produces no report — exit 2, never 1 ──────────────
 
 describe("walk faults", () => {
-  test("a non-ChainWalkError fault is exit 2 with no stack trace and no report", () => {
-    // A PR-URL ref reaches `new RunRecordStore({create:false})` before hop 1,
-    // so a missing runs dir throws a plain ENOENT Error — zero network, no
-    // `gh`. Exit 1 must remain reachable ONLY from a produced report: reporting
-    // an environment fault as "the audit chain is broken" is a false accusation
-    // against the PR under audit.
-    const r = spawnAudit([PR_URL, "--runs-dir", join(fx.dir, "no-such-runs"), "--audit-db", fx.auditDb, "--ledger", fx.ledgerPath, "--reverify-dir", fx.reverifyDir]);
+  test("an overridden --runs-dir that is not there is refused BEFORE the walk: exit 2, no stack trace, no report", () => {
+    // This used to surface as an anonymous `!! walk-failed` from deep inside
+    // the walk (a PR-URL ref reaches `new RunRecordStore({create:false})`
+    // before hop 1, so a missing runs dir threw a plain ENOENT). It is now
+    // caught by the pre-walk seam check, which echoes the FLAG and the resolved
+    // PATH — an explicitly named directory that is not there is a typo.
+    //
+    // The contract this test owns is unchanged and is what every assertion
+    // below is about: exit 2 and NEVER 1, stdout empty, no stack trace, and no
+    // default seam touched. Reporting an environment fault as "the audit chain
+    // is broken" is a false accusation against the PR under audit.
+    const missing = join(fx.dir, "no-such-runs");
+    const r = spawnAudit([PR_URL, "--runs-dir", missing, "--audit-db", fx.auditDb, "--ledger", fx.ledgerPath, "--reverify-dir", fx.reverifyDir]);
     expect(r.code).toBe(2);
     expect(r.stdout).toBe("");
-    expect(r.stderr).toContain("!! walk-failed");
-    expect(r.stderr).toContain("is unreadable: ENOENT");
-    expect(r.stderr).toContain("next: the walk faulted before producing a report — fix the condition above and re-run (this is NOT a broken chain)");
-    expect(r.stderr).toContain('"operation":"audit-chain.verdict"');
-    expect(r.stderr).toContain('"status":"error"');
-    expect(r.stderr).toContain('"error":{"code":"walk-failed"');
+    expect(r.stderr).toContain("!! seam-unusable");
+    expect(r.stderr).toContain(`--runs-dir ${missing}`);
+    expect(r.stderr).toContain("ENOENT");
+    expect(r.stderr).toContain("next: fix the path(s) above — an overridden seam that is not there is a typo, not a broken chain");
     expect(r.stderr).not.toContain("\n    at "); // no stack trace
+    // Refused before the walk: no verdict line was ever logged, because no walk
+    // was ever attempted.
+    expect(r.stderr).not.toContain('"operation":"audit-chain.verdict"');
+    expectNoDecoys();
+  });
+
+  test("an overridden seam of the WRONG KIND is refused with the path echoed", () => {
+    // The other half of the pre-walk check, and the one no exit code alone can
+    // tell apart from a broken chain: `--ledger <a directory>` opened, found no
+    // rows, and reported hop 3 BROKEN about a ledger that was never a ledger.
+    const r = spawnAudit([RUN, "--runs-dir", fx.runsDir, "--audit-db", fx.auditDb, "--ledger", fx.dir, "--reverify-dir", fx.reverifyDir]);
+    expect(r.code).toBe(2);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("!! seam-unusable");
+    expect(r.stderr).toContain(`--ledger ${fx.dir}: not a file`);
+    expectNoDecoys();
+  });
+
+  test("a `~` in a seam value is refused rather than resolved against the CWD", () => {
+    // `resolve()` does not expand `~`, so a quoted `--audit-db "~/fx/audit.db"`
+    // (or one read from a roster, where no shell expands it) became
+    // `$CWD/~/fx/audit.db` — and then a confident verdict about a store nobody
+    // ever had.
+    const r = spawnAudit([RUN, "--audit-db", "~/fixtures/audit.db", ...auditFlags().slice(0, 2)]);
+    expect(r.code).toBe(2);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("--audit-db: ~ is not expanded here");
+    expect(r.stderr).toContain("~/fixtures/audit.db");
     expectNoDecoys();
   });
 });
@@ -627,8 +817,13 @@ describe("run() as a library", () => {
     // `--json` keeps each walk to one line on the runner's own stdout.
     buildCompleteFixture();
     expect(await run([RUN, "--json", ...auditFlags()])).toBe(0);
-    rmSync(fx.ledgerPath);
+    // A readable ledger with no rows for this run — the break the walk can SEE.
+    // An ABSENT ledger is an environment fault and returns 2 (see below), so it
+    // can no longer stand in for the incomplete-chain arm.
+    seedEmptyLedger();
     expect(await run([RUN, "--json", ...auditFlags()])).toBe(1);
+    rmSync(fx.ledgerPath);
+    expect(await run([RUN, "--json", ...auditFlags()])).toBe(2); // N5: could not look
     expect(await run([...auditFlags()])).toBe(2); // no ref
     expect(await run([RUN, "--bogus", ...auditFlags()])).toBe(2);
     expect(await run(["--help"])).toBe(0);
@@ -719,11 +914,36 @@ describe("describeHop", () => {
     },
   ];
 
+  /**
+   * The union's statuses, enumerated ONCE and checked by the compiler.
+   *
+   * `expect(new Set(…).size).toBe(9)` could not detect the thing it claimed to:
+   * it is a property of the `cases` array alone, so a TENTH status added to
+   * `HopOutcome` left the set at 9 and the test green — the exact scenario the
+   * comment said would show up here. The only guard that saw it was the
+   * `const unreachable: never` in `describeHop`, which `bun test` strips.
+   *
+   * A `Record` keyed by the union makes the enumeration itself exhaustive:
+   * adding a status to `HopOutcome` fails `bunx tsc --noEmit` on a missing key
+   * here, and the assertion below then fails until a rendering case exists for
+   * it. Equality both ways, not a count: a case carrying a status the union
+   * does not have fails too.
+   */
+  const ALL_STATUSES: Record<HopOutcome["status"], true> = {
+    resolved: true,
+    void: true,
+    "not-applicable": true,
+    "evidence-not-harvested": true,
+    unlinked: true,
+    "evidence-mismatch": true,
+    "order-violation": true,
+    "hop-timeout": true,
+    broken: true,
+  };
+
   test("every HopOutcome status is covered by a case", () => {
-    // Nine statuses in the union; a case deleted (or a status added without
-    // one) shows up here rather than as an operator reading `undefined` at the
-    // exact moment the chain is broken.
-    expect(new Set(cases.map((c) => c.out.status)).size).toBe(9);
+    const declared = Object.keys(ALL_STATUSES) as HopOutcome["status"][];
+    expect(new Set(cases.map((c) => c.out.status))).toEqual(new Set(declared));
   });
 
   for (const { out, lines } of cases) {
@@ -800,5 +1020,48 @@ describe("run() is exported for a harness — so its log-sink swap must be re-en
     } finally {
       restore();
     }
+  });
+});
+
+describe("brokenDetail — a BROKEN verdict with no broken hops has TWO causes", () => {
+  // `chainVerdict` is `brokenHops.length === 0 && anyResolved`, so a report can
+  // be BROKEN with an empty `brokenHops` either because nothing was walked or
+  // because nothing RESOLVED. Both printed "no runs walked", which is a lie in
+  // the second case — the per-run block sits directly above the summary line
+  // showing the run and its hops.
+  const reportOf = (runs: ChainReport["runs"]): ChainReport =>
+    ({
+      ref: "qds/r", refKind: "branch", generatedAt: "2026-09-17T00:00:00.000Z",
+      complete: false, timings: { prFetchMs: 0, perHopMs: {} }, runs,
+    }) as unknown as ChainReport;
+
+  test("an EMPTY runs map is 'no runs walked'", () => {
+    const report = reportOf({});
+    expect(brokenDetail(report, chainVerdict(report))).toBe("no runs walked");
+  });
+
+  test("a run present with NO resolved hop is 'no hop resolved', not 'no runs walked'", () => {
+    // `void` neither resolves nor breaks the chain — the shape `chainVerdict`
+    // turns into BROKEN-with-no-broken-hops.
+    const report = reportOf({
+      "r-1": {
+        runId: "r-1", complete: false,
+        hops: { "memory-retain-receipt": { status: "void", hop: "memory-retain-receipt", reason: "OQ-4 unresolved" } },
+      },
+    } as unknown as ChainReport["runs"]);
+    const verdict = chainVerdict(report);
+    // The premise: this really is the no-broken-hops branch.
+    expect(verdict).toMatchObject({ complete: false, brokenHops: [] });
+    expect(brokenDetail(report, verdict)).toBe("no hop resolved");
+  });
+
+  test("broken hops win over both, deduped by hop NAME across runs", () => {
+    const broken = (hop: string) => ({ status: "broken", hop, expected: "x", actual: "y", diagnostic: "d", evidencePath: "p" });
+    const report = reportOf({
+      // The SAME hop broken in two runs is one hop NAME, not two.
+      "r-1": { runId: "r-1", complete: false, hops: { "run-cost": broken("run-cost") } },
+      "r-2": { runId: "r-2", complete: false, hops: { "run-cost": broken("run-cost"), "run-box": broken("run-box") } },
+    } as unknown as ChainReport["runs"]);
+    expect(brokenDetail(report, chainVerdict(report))).toBe("2 broken hop(s): run-cost, run-box");
   });
 });

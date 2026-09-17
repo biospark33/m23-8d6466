@@ -30,6 +30,19 @@ import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 import { leakScan } from "./fixtures/leak-scan.ts";
+import { useTempAuditStore } from "../fleet/helpers.ts";
+
+/**
+ * DF5.3 C-5 — MANDATORY. `scripts/cap-hit-demo.ts` became an audit composition
+ * root in this PR: it calls `openAuditStore()`, which resolves
+ * `QDS_AUDIT_DB ?? ".sandbox/audit.db"` RELATIVE TO CWD — and `cli()` below
+ * spawns it with `cwd: REPO_ROOT`. Without this, every run of this file chmods
+ * the operator's live `.sandbox/audit.db`, takes a `BEGIN IMMEDIATE` on it and
+ * execs the schema, and an attributed demo appends real rows to an append-only
+ * store of real-run evidence. `cli()` copies `process.env`, so the child
+ * inherits the temp path for free.
+ */
+useTempAuditStore();
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "cap-hit-demo.ts");
@@ -44,6 +57,7 @@ let driver: FakeDriver;
 let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 let evidenceDir: string;
+let previousRunsDir: string | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df24-"));
@@ -55,10 +69,20 @@ beforeEach(() => {
   auditLinks = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
   evidenceDir = join(dir, "evidence");
+  // The IN-PROCESS tests need this too, not only `cli()`: the demo's two
+  // `teardownSandbox` deps literals pass `gitCwd` but no `runsDir`, so
+  // `harvest.ts`'s `resolveRunsDir()` falls through to `QDS_RUNS_DIR` and then
+  // to `.sandbox/runs` — which it `mkdirSync`s under the operator's repo, with
+  // the bundle path resolving there too.
+  previousRunsDir = process.env.QDS_RUNS_DIR;
+  process.env.QDS_RUNS_DIR = join(dir, "runs");
 });
 
 afterEach(() => {
   restoreLog?.();
+  // biome-ignore lint/performance/noDelete: unsetting an env var requires delete
+  if (previousRunsDir === undefined) delete process.env.QDS_RUNS_DIR;
+  else process.env.QDS_RUNS_DIR = previousRunsDir;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -263,12 +287,23 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
       expect(l.runId).toBe(result.artifact.runId);
       expect(l.repoSlug).toBe("qds/demo");
       expect(l.requestId).toBe("req-df53-demo");
+    }
+    // ROUND 3 (C-2): `occurredAt` is the EVENT's time, `recordedAt` the clock
+    // read. They coincide for every emitter that passes no `occurredAt` — but
+    // NOT for `teardown`, which passes the record's own `closedAt` on BOTH
+    // arms. That is the whole point of the split: the healing re-run may fire
+    // days after the close, and its row is the only row whenever the original
+    // emit never landed, so it must state when the teardown actually happened
+    // — and passing `closedAt` on the fresh arm too is what makes a healed row
+    // byte-identical to a fresh one instead of a `divergent` tamper alarm.
+    for (const l of auditLinks.filter((x) => x.event !== "teardown")) {
       expect(l.occurredAt).toBe(l.recordedAt);
     }
-    // `run-box.fill` is absent because the demo's fill site states
-    // `repoSlug: undefined` outright — the run IS attributed here, so this
-    // absence is the site's own declaration and not a missing forwarding.
-    expect(auditLinks.map((l) => l.event)).not.toContain("fill");
+    const teardownLink = auditLinks.find((l) => l.event === "teardown");
+    const closedAt = store.get(result.artifact.runId).closedAt;
+    expect(closedAt).toBeString();
+    expect(teardownLink?.occurredAt).toBe(closedAt as string);
+    expect(teardownLink?.detail).toEqual({ closedAt, boxSource: "record" });
   });
 
   // ─── 2. AC2 self-report trap ────────────────────────────────────────────────

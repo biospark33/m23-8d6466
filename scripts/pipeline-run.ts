@@ -134,6 +134,10 @@ import { loadRoster } from "../src/phase-engine/roster/schema.ts";
 import { ACKS_READ_CAP_BYTES, acksPath, localSteeringInbox } from "../src/fleet/attach.ts";
 import { DEFAULT_RESIDENT_SLUG, startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
 import { RateError } from "../src/phase-engine/roster/validate.ts";
+// INV-RUN-5: the redactor every witness echo runs through — see `witnessEcho`.
+// `sanitizeForMessage` (phase-engine) escapes control characters; it does NOT
+// remove credential-shaped substrings, and this file quotes its input.
+import { redactSecrets } from "../src/providers/step-log.ts";
 import {
   appendDispatchFailure,
   CorrelationError,
@@ -867,6 +871,27 @@ const witnessPathBeside = (manifestPath: string): string =>
   path.join(path.dirname(manifestPath), "run-context.json");
 
 /**
+ * The single treatment every witness echo gets (INV-RUN-5, review round 3).
+ *
+ * A witness refusal quotes its input — `resolveRunCorrelation`'s message ends
+ * `(got "…")`, and a JSON parse error quotes the offending fragment — and this
+ * message rides the engine log into DF2.5's harvest tar. Three properties, in
+ * this order, because the order is load-bearing:
+ *
+ *   1. `redactSecrets` removes credential-shaped substrings. A token-shaped
+ *      `repoSlug` shorter than the bound was measured surviving verbatim.
+ *   2. `sanitizeForMessage` escapes control characters, so a newline-bearing
+ *      witness cannot forge a log line the harness would parse as an event.
+ *   3. the bound caps an unbounded junk witness.
+ *
+ * Redaction must come FIRST: sanitizing first escapes the very bytes the
+ * redactor pattern-matches on, and the token then rides through in its escaped
+ * spelling.
+ */
+const witnessEcho = (value: unknown, bound = 200): string =>
+  sanitizeForMessage(redactSecrets(value)).slice(0, bound);
+
+/**
  * Is there anything at all where the witness belongs?
  *
  * The ONLY question this answers is whether the no-declared-cap path should
@@ -969,19 +994,23 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
   // sent that fragment into the engine log DF2.5's harvest carries home.
   // Measured, not theorised.
   //
-  // What this BOUNDS and what it does not: `sanitizeForMessage` escapes control
-  // characters (no log-forging) and the `.slice(0, 200)` caps an unbounded junk
-  // witness; neither redacts a credential-shaped substring, and JSC's own quote
-  // of the offending identifier still rides. The residual is small because JSC
-  // stops at the first `-`, and closing it properly means not echoing the parse
-  // error at all — which costs the operator the only clue to WHERE the witness
-  // is malformed. Same treatment as every other echo in this file, deliberately.
+  // What this BOUNDS (review round 3 — this comment used to end by accepting the
+  // credential residual as deliberate; INV-RUN-5 is a claim this story makes, so
+  // the residual is now closed rather than documented): every witness echo goes
+  // through `witnessEcho`, which is `redactSecrets` THEN `sanitizeForMessage`
+  // THEN the bound. `redactSecrets` removes the credential-shaped substring —
+  // `resolveRunCorrelation`'s `(got "sk-or-v1-…")` quote was measured riding into
+  // the engine log verbatim, and DF2.5's harvest carries that log home.
+  // `sanitizeForMessage` escapes control characters, so a newline-bearing witness
+  // cannot forge a log line, and the bound caps an unbounded junk witness. Order
+  // matters: redact first, because sanitizing first would escape the very bytes
+  // the redactor pattern-matches on. The operator still gets the WHERE.
   let bytes: Buffer;
   try {
     ({ bytes } = readArtifactBeneathRoot(witnessPath, runRoot));
   } catch (err) {
     throw new Error(
-      `${because} ${witnessPath} is unreadable: ${sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200)}`,
+      `${because} ${witnessPath} is unreadable: ${witnessEcho(err instanceof Error ? err.message : String(err))}`,
     );
   }
   // S28: FRESHNESS before CONTENT, on BOTH paths. This used to parse and
@@ -1007,7 +1036,7 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
     parsed = JSON.parse(bytes.toString("utf8"));
   } catch (err) {
     throw new Error(
-      `${because} ${witnessPath} is unreadable: ${sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200)}`,
+      `${because} ${witnessPath} is unreadable: ${witnessEcho(err instanceof Error ? err.message : String(err))}`,
     );
   }
   const admitted = (parsed as { effectiveCeilingMicros?: unknown } | null)?.effectiveCeilingMicros;
@@ -1046,6 +1075,26 @@ const errnoOf = (e: unknown): string | undefined => {
   if (own !== undefined) return own;
   return e instanceof Error && e.cause != null ? errnoOf(e.cause) : undefined;
 };
+
+/**
+ * DF5.3 N1: the witness could not be READ — an environment fault (EACCES, EIO,
+ * a full disk, the hardened reader's symlink refusal), not a statement about
+ * the correlation. Distinguished by CLASS rather than by errno because the
+ * symlink refusal arrives as a `ManifestError` carrying no errno at all, so an
+ * `errnoOf(err) !== "ENOENT"` test at the call site would mis-read it.
+ *
+ * The split it carries: this code runs IN THE BOX, after provisioning, fill
+ * and key delivery, so a disk or permissions problem must not kill a run that
+ * has already spent — the call site degrades to the bare session and the
+ * `run_correlated` `recorded: false` line, exactly as the `initiateSession`
+ * catch does for a trace-store fault and as `readResidentBriefSource` does for
+ * the identical errno. A witness that is PRESENT and structurally wrong keeps
+ * the hard refusal (a plain `Error` from every branch below): a forged or
+ * half-written correlation must never silently become a session row.
+ */
+class WitnessUnreadableError extends Error {
+  name = "WitnessUnreadableError";
+}
 
 /**
  * DF5.3: the issue correlation dispatch stamped into the witness, as a
@@ -1096,10 +1145,23 @@ const errnoOf = (e: unknown): string | undefined => {
  * runs the engine otherwise accepts.
  *
  * Unlike `readResidentBriefSource` above this reader REFUSES what it cannot
- * verify, because the cap path's guarantee does not extend to it: a witness
- * with no `limitMicroUsd` on the manifest AND no ceiling of its own never
- * reaches `admittedCeilingBeside` at all, so "the cap path already refused a
- * present-but-invalid witness" is not true of every run that gets here.
+ * verify. The reason is NOT that the cap path leaves gaps in the READ — it
+ * does not: `runContextFrom` sends every present witness through
+ * `admittedCeilingBeside` on both the declared and the undeclared path, and
+ * `witnessPresent` counts every non-ENOENT lstat errno as present, so an
+ * unreadable or unparseable witness is already refused before this function is
+ * called (measured, not assumed — a mode-000 witness on an uncapped manifest
+ * dies at the cap reader). The gap is in WHAT is checked: the cap reader
+ * validates `effectiveCeilingMicros` and nothing else, so a witness with a
+ * perfectly good ceiling can still carry half a correlation, a non-string
+ * repoSlug or a requestId naming a different run. Those are this reader's to
+ * refuse, and they are refusals rather than shrugs because a half-correlated
+ * run is the ambiguity this reader exists to remove.
+ *
+ * An ENVIRONMENT fault reading the file is the one thing that does NOT refuse
+ * here (DF5.3 N1): it raises `WitnessUnreadableError` and the call site
+ * degrades to the bare session plus a `recorded: false` line. Live only on the
+ * `witnessPresent`→read race today, for the reason above.
  *
  * It inherits `runContextFrom`'s KNOWN ASSUMPTION unchanged — the witness is
  * found beside the manifest, so it is dispatch's to write only while the
@@ -1123,15 +1185,21 @@ function witnessCorrelationBeside(
   } catch (err) {
     // ENOENT is the ONLY absence: a run driven by flags alone (tests, library
     // callers) has no witness beside its manifest and must still start a bare
-    // session. Every other errno is a witness we cannot read but cannot rule
-    // out either — the same fail-closed reading `witnessPresent` takes.
+    // session, silently.
     if (errnoOf(err) === "ENOENT") return undefined;
+    // Every OTHER read failure is an ENVIRONMENT fault, not a statement about
+    // the correlation, and it is raised as `WitnessUnreadableError` so the call
+    // site can DEGRADE rather than abort (DF5.3 N1 — see the class above). It
+    // is still fail-closed about the pair: no correlation is fabricated, the
+    // session stays bare with honest NULL columns, and the degradation is
+    // logged `recorded: false` so it is visible in the harvested engine log.
+    //
     // SANITIZED and truncated like the parse refusal below, and for the same
     // reason: the hardened reader's refusals interpolate paths and the wrapped
     // errno, this message rides the engine log into the harvest tar, and
     // nothing here is worth an unbounded echo (INV-RUN-5).
-    throw new Error(
-      `the dispatch witness ${witnessPath} is unreadable, so the issue that authorized this run cannot be recorded: ${sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200)}`,
+    throw new WitnessUnreadableError(
+      `the dispatch witness ${witnessPath} is unreadable, so the issue that authorized this run cannot be recorded: ${witnessEcho(err instanceof Error ? err.message : String(err))}`,
     );
   }
   let parsed: unknown;
@@ -1145,7 +1213,13 @@ function witnessCorrelationBeside(
     // above cannot fire, and the INV-RUN-5 mitigation that actually protects
     // the malformed-witness path is the one on THAT reader, not this one
     // (pinned: a `"{not json"` witness asserts `is unreadable`, never
-    // `is not JSON`). Kept as a CONTRACT GUARD, not as live protection: this
+    // `is not JSON`). BOTH manifest shapes, not just the capped one: the
+    // pinned test's manifest declares no `limitMicroUsd`, and the undeclared
+    // path consults the witness too whenever `witnessPresent` sees anything at
+    // all there — the header's correlation-vs-ceiling note above says which
+    // gap is actually left. The residue is the same lstat→read race the
+    // unreadable branch keeps. Kept as a CONTRACT GUARD, not as live
+    // protection: this
     // function refuses what it cannot verify, and must keep doing so if the
     // read order changes or a second caller appears. Deleting the try instead
     // would let a raw SyntaxError quoting witness bytes reach stderr
@@ -1156,7 +1230,7 @@ function witnessCorrelationBeside(
     // the engine log into the harvest tar (INV-RUN-5: never prompt or
     // credential content, not even by accident).
     throw new Error(
-      `the dispatch witness ${witnessPath} is not JSON (${sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200)})`,
+      `the dispatch witness ${witnessPath} is not JSON (${witnessEcho(err instanceof Error ? err.message : String(err))})`,
     );
   }
   // A witness that parses but is not an OBJECT (`null`, `[]`, `42`, `"qds"`) is
@@ -1181,10 +1255,17 @@ function witnessCorrelationBeside(
   // explicit null for an omitted field (`deriveInBoxArgv` reads `requestId`
   // off this same file the same way).
   const absent = (v: unknown): boolean => v === undefined || v === null;
-  if (absent(w.repoSlug) && absent(w.issueId)) return undefined;
+  // ABSENCE is all THREE correlation fields absent. `issueUrl` counts: a
+  // witness carrying only the URL is half a correlation too — the shape a
+  // truncated-then-flushed write or a partial hand edit leaves — and returning
+  // before it was ever examined started the bare session with NULL columns and
+  // no diagnostic, indistinguishable from a legitimately witness-less run,
+  // while a witness missing only one of the PAIR refused loudly. If any of the
+  // three is present, the full pair is required.
+  if (absent(w.repoSlug) && absent(w.issueId) && absent(w.issueUrl)) return undefined;
   if (absent(w.repoSlug) || absent(w.issueId)) {
     throw new Error(
-      `the dispatch witness ${witnessPath} carries half a correlation (repoSlug ${absent(w.repoSlug) ? "absent" : "present"}, issueId ${absent(w.issueId) ? "absent" : "present"}): issue identity is the (repoSlug, issueId) pair and neither half is ever defaulted from the other (INV-RUN-3)`,
+      `the dispatch witness ${witnessPath} carries half a correlation (repoSlug ${absent(w.repoSlug) ? "absent" : "present"}, issueId ${absent(w.issueId) ? "absent" : "present"})${absent(w.issueUrl) ? "" : " beside an issueUrl that names an issue neither half identifies"}: issue identity is the (repoSlug, issueId) pair and neither half is ever defaulted from the other (INV-RUN-3)`,
     );
   }
   if (typeof w.repoSlug !== "string") {
@@ -1202,9 +1283,24 @@ function witnessCorrelationBeside(
   // walker's record→trace join never reaches — it finds no sessions row, reports
   // `corroboration: "unavailable"` and STILL returns `resolved`, so the run
   // looks correlated while delivering nothing. Refuse, like the half pair.
+  //
+  // A PRESENT non-string requestId is refused FIRST. The mismatch test below is
+  // `typeof === "string" && !==`, so every other present shape — a JSON number
+  // (`12345`, the other honest spelling a hand-repaired witness carries, exactly
+  // as `issueId` accepts), a bool, an object, an array — fell straight through
+  // it and was read as "no requestId to disagree with". The run then recorded
+  // its correlation under THIS invocation's id with a witness that names a
+  // different one, which is precisely the silent mis-join the string check
+  // exists to refuse. `repoSlug`, `issueUrl` and `issueId` all reject their
+  // non-string shapes here; `requestId` was the one field that did not.
+  if (!absent(w.requestId) && typeof w.requestId !== "string") {
+    throw new Error(
+      `the dispatch witness ${witnessPath} carries a ${Array.isArray(w.requestId) ? "array" : typeof w.requestId} requestId: requestId must be a string, and a witness whose correlation key cannot be compared to this invocation's cannot be shown to describe this run`,
+    );
+  }
   if (typeof w.requestId === "string" && w.requestId !== requestId) {
     throw new Error(
-      `the dispatch witness ${witnessPath} was written for requestId ${sanitizeForMessage(w.requestId).slice(0, 200)} but this invocation carries ${sanitizeForMessage(requestId).slice(0, 200)}: the correlation would be recorded under a key the audit walker cannot join back to the run record`,
+      `the dispatch witness ${witnessPath} was written for requestId ${witnessEcho(w.requestId)} but this invocation carries ${witnessEcho(requestId)}: the correlation would be recorded under a key the audit walker cannot join back to the run record`,
     );
   }
   // Dispatch writes `issueId` as a STRING — deliberately, so the witness, the
@@ -1224,15 +1320,28 @@ function witnessCorrelationBeside(
   // into fabricated correlations.) Refusing here makes the two carriers accept
   // and refuse exactly the same strings, which is what the flag-parity claim
   // above is worth.
+  //
+  // BOTH SPELLINGS ARE GATED, and by the same rule. The string arm had the
+  // digits-only test and the number arm had NOTHING — `issueId = w.issueId`,
+  // delegating entirely to `resolveRunCorrelation` — so the parity claim was
+  // half-enforced and the comment's own worry ("a bounds check that ever moved
+  // ahead of the integer test would have coerced…") applied to the unguarded
+  // side. The JSON-number spelling of "decimal digits alone" is a NON-NEGATIVE
+  // INTEGER: `-1`, `7.5` and `1e21` are refused here exactly as `"-1"`, `"7.5"`
+  // and `"1e21"` are. BOUNDS stay `resolveRunCorrelation`'s on both arms and
+  // are deliberately NOT restated: `0` and `2**31` pass this gate in either
+  // spelling and are refused downstream as "invalid correlation", which is what
+  // keeps the two carriers from drifting apart from the flag path.
+  const malformedIssueId = (): Error =>
+    new Error(
+      `the dispatch witness ${witnessPath} carries a malformed issueId: issueId must be a positive integer written in decimal digits alone, the same test \`--issue\` applies (got ${witnessEcho(JSON.stringify(w.issueId), 80)})`,
+    );
   let issueId: number;
   if (typeof w.issueId === "string") {
-    if (!/^\d+$/.test(w.issueId)) {
-      throw new Error(
-        `the dispatch witness ${witnessPath} carries a malformed issueId: issueId must be a positive integer written in decimal digits alone, the same test \`--issue\` applies (got ${sanitizeForMessage(JSON.stringify(w.issueId)).slice(0, 80)})`,
-      );
-    }
+    if (!/^\d+$/.test(w.issueId)) throw malformedIssueId();
     issueId = Number(w.issueId);
   } else if (typeof w.issueId === "number") {
+    if (!Number.isInteger(w.issueId) || w.issueId < 0) throw malformedIssueId();
     issueId = w.issueId;
   } else {
     throw new Error(
@@ -1262,7 +1371,7 @@ function witnessCorrelationBeside(
     // stringify(brief.repoSlug)})`), so a token-shaped slug in a witness would
     // otherwise ride the engine log home verbatim (INV-RUN-5).
     throw new Error(
-      `the dispatch witness ${witnessPath} carries an invalid correlation: ${sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200)}`,
+      `the dispatch witness ${witnessPath} carries an invalid correlation: ${witnessEcho(err instanceof Error ? err.message : String(err))}`,
     );
   }
 }
@@ -1293,9 +1402,15 @@ function readResidentBriefSource(
     // `cause`, so the absence test walks that chain (`errnoOf`, shared with
     // the correlation reader above — one walk, one definition of "absent").
     if (errnoOf(err) !== "ENOENT") {
+      // SANITIZED and truncated on the same rule as every branch of
+      // `witnessCorrelationBeside` (INV-RUN-5): same witness, same stderr sink,
+      // same harvest tar — and this is the one path that CONTINUES rather than
+      // refusing, so it is the one that always reaches the harvest. An
+      // unbounded echo also lets a junk witness flood the engine log through
+      // the wrapped reader's message.
       writeAll(
         2,
-        `pipeline-run: warning: resident brief source ${witnessPathBeside(manifestPath)} is unreadable (${err instanceof Error ? err.message : String(err)}) — continuing without a resident\n`,
+        `pipeline-run: warning: resident brief source ${witnessPathBeside(manifestPath)} is unreadable (${witnessEcho(err instanceof Error ? err.message : String(err))}) — continuing without a resident\n`,
       );
     }
     return undefined;
@@ -3269,13 +3384,50 @@ async function main(argv: readonly string[]): Promise<number> {
   // the ladder path, which is not read at all — a run that resolved through
   // DF1.8's flags behaves precisely as before, down to the reads it makes.
   let witnessedCorrelation: ResolvedRunCorrelation | undefined;
+  // DF5.3 N1: the witness could not be READ (EACCES, EIO, the hardened
+  // reader's symlink refusal) — an environment fault, kept to report the
+  // degradation below rather than to abort. A present-but-malformed witness is
+  // NOT this: it throws a plain Error out of the same call and keeps the hard
+  // refusal.
+  let witnessReadFault: WitnessUnreadableError | undefined;
   try {
     if (resolvedPath === undefined) {
       throw new Error("manifest was derived in memory and has no verified path to anchor the cap witness to");
     }
     ctx = runContextFrom(runId, requestId, manifest, { manifestPath: resolvedPath, runRoot });
     if (!resolved) {
-      witnessedCorrelation = witnessCorrelationBeside(resolvedPath, runRoot, requestId);
+      try {
+        witnessedCorrelation = witnessCorrelationBeside(resolvedPath, runRoot, requestId);
+      } catch (err) {
+        // Only the ENVIRONMENT fault degrades, and it degrades for the same
+        // reason the `initiateSession` catch below does: this code runs in the
+        // box, after provisioning, fill and key delivery, so a disk or
+        // permissions problem must not kill a run that has already spent —
+        // while the sibling `readResidentBriefSource` already shrugs at this
+        // very errno on this very file. A witness that is PRESENT and
+        // structurally wrong (half a pair, bad field types, a requestId that
+        // disagrees with --request-id) still aborts: a forged correlation must
+        // not silently become a session row.
+        //
+        // SHADOWED IN `main` TODAY, and measured, not assumed: `runContextFrom`
+        // one line above sends every PRESENT witness — capped manifest or not —
+        // through `admittedCeilingBeside`, and `witnessPresent` counts every
+        // non-ENOENT lstat errno as present, so an EACCES/EIO/symlinked witness
+        // is refused THERE (`… the dispatch witness … is unreadable`, exit 2)
+        // before this reader opens anything. Verified by running the engine
+        // against a mode-000 witness on an uncapped manifest. That refusal is
+        // deliberate and stays: the witness is also the CAP witness, and a
+        // ceiling that cannot be reconciled must stop the run rather than let
+        // it spawn at the DF1.6 default above what the ledger reserved.
+        //
+        // What is left live here is the lstat→read RACE (a witness that appears
+        // unreadable between `witnessPresent` and this open) — and, like the
+        // JSON.parse guard inside the reader, the CONTRACT: the day the read
+        // order changes or a second caller appears, an environment fault must
+        // not be the thing that kills a paid run.
+        if (!(err instanceof WitnessUnreadableError)) throw err;
+        witnessReadFault = err;
+      }
     }
     // #217 F-D1: the marker is keyed on the invocation's IDENTITY, which for
     // a correlated run is the requestId it will adopt post-resolution, and for
@@ -3317,12 +3469,56 @@ async function main(argv: readonly string[]): Promise<number> {
   // DF1.4: Start session at run start — bare mode only; a correlated run
   // initiated its session through the DF1.8 ladder above instead.
   if (!resolved) {
+    // ONE spelling of the degradation line, for the two paths that reach it:
+    // the witness could not be READ (DF5.3 N1) and the initiation itself
+    // faulted. Both continue on the bare row, and both must SAY so in the
+    // engine log the harvest carries home — a run whose corroboration is
+    // missing is otherwise indistinguishable from one that never had any until
+    // somebody opens the db. `repoSlug`/`issueId` are null on the read-fault
+    // path: nothing was read, so there is no pair to name.
+    const reportUncorrelated = (
+      err: unknown,
+      pair: { repoSlug: string | null; issueId: number | null },
+      // The FALLBACK's own failure, when even the bare session could not be
+      // written. Reported beside the first error rather than folded into it, so
+      // the primary cause keeps its field and a consumer can tell "no
+      // correlation" from "no session row at all".
+      sessionErr?: unknown,
+    ): void => {
+      writeAll(
+        2,
+        `${JSON.stringify({
+          level: "error",
+          event: "run_correlated",
+          source: "witness",
+          recorded: false,
+          runId,
+          requestId,
+          repoSlug: pair.repoSlug,
+          issueId: pair.issueId,
+          error: sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200),
+          ...(sessionErr === undefined
+            ? {}
+            : {
+                sessionError: sanitizeForMessage(
+                  sessionErr instanceof Error ? sessionErr.message : String(sessionErr),
+                ).slice(0, 200),
+              }),
+        })}\n`,
+      );
+    };
     if (witnessedCorrelation === undefined) {
-      // No correlation on the witness (absent file, or one written before the
-      // field existed): the historical bare row, unchanged. Its NULL
-      // repo_slug/issue_id is honest here — nothing told this run which issue,
-      // if any, authorized it.
+      // No correlation on the witness (absent file, one written before the
+      // field existed, or — DF5.3 N1 — one this run could not read): the
+      // historical bare row, unchanged. Its NULL repo_slug/issue_id is honest
+      // here — nothing told this run which issue, if any, authorized it.
       tracer.startSession({ requestId, request: manifest.pipelineId });
+      // An unreadable witness is the one sub-case that is not silent: absence
+      // is normal (flag-driven runs, library callers), an environment fault is
+      // not, and the run continues either way.
+      if (witnessReadFault !== undefined) {
+        reportUncorrelated(witnessReadFault, { repoSlug: null, issueId: null });
+      }
     } else {
       // DF5.3: the dispatched shape records the pair through the SAME
       // initiation gate the ladder uses — including its
@@ -3396,25 +3592,36 @@ async function main(argv: readonly string[]): Promise<number> {
         }
         // Everything else is a trace-store fault, not an identity refusal. The
         // run has already been paid for, so it continues on the same bare row
-        // the no-correlation branch writes (`startSession` swallows its own
-        // SQLITE_WRITE into the trace-error sink) — but the degradation is
-        // LOGGED, `recorded: false`, so a run whose corroboration is missing
-        // says so in the engine log the harvest carries home rather than being
-        // discovered when someone opens the db.
-        tracer.startSession({ requestId, request: manifest.pipelineId });
-        writeAll(
-          2,
-          `${JSON.stringify({
-            level: "error",
-            event: "run_correlated",
-            source: "witness",
-            recorded: false,
-            runId,
-            requestId,
-            repoSlug: witnessedCorrelation.repoSlug,
-            issueId: witnessedCorrelation.issueId,
-            error: sanitizeForMessage(err instanceof Error ? err.message : String(err)).slice(0, 200),
-          })}\n`,
+        // the no-correlation branch writes — and the degradation is LOGGED,
+        // `recorded: false`, so a run whose corroboration is missing says so in
+        // the engine log the harvest carries home rather than being discovered
+        // when someone opens the db.
+        //
+        // THE FALLBACK IS ITSELF GUARDED. `startSession` swallows its own
+        // SQLITE_WRITE into the trace-error sink today, and `emitTraceError`
+        // swallows a throwing sink — but that is the STORE's contract, not this
+        // file's, and the whole point of this branch is that a run which has
+        // already provisioned, filled and spent must not die for a trace write.
+        // A second throw here would escape unlogged and do exactly that, so it
+        // falls through to no session at all and reports both errors.
+        //
+        // No "did the initiation already write a row" test is needed, for two
+        // independent reasons: `initiateSession` does its whole SELECT/INSERT/
+        // UPDATE inside one `db.transaction(...).immediate()`, so a throw rolls
+        // it back, and `sessions.request_id` is the PRIMARY KEY, so a duplicate
+        // INSERT could only raise a constraint error into the trace-error sink
+        // — never a SECOND row that leaves the harvested trace ambiguous about
+        // which one is this run's.
+        let sessionErr: unknown;
+        try {
+          tracer.startSession({ requestId, request: manifest.pipelineId });
+        } catch (fallbackErr) {
+          sessionErr = fallbackErr;
+        }
+        reportUncorrelated(
+          err,
+          { repoSlug: witnessedCorrelation.repoSlug, issueId: witnessedCorrelation.issueId },
+          sessionErr,
         );
       }
     }

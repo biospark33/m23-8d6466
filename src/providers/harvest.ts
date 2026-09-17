@@ -58,7 +58,15 @@ import { createGunzip } from "node:zlib";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { assertRunIdPathComponent } from "../phase-engine/journal.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
-import { auditRepoSlug, emitAuditLink, type ExecResult, type ProviderAuditLink, type ProviderDriver } from "./driver.ts";
+import {
+  auditLinkSkip,
+  auditNonEmpty,
+  auditRepoSlug,
+  emitAuditLink,
+  type ExecResult,
+  type ProviderAuditLink,
+  type ProviderDriver,
+} from "./driver.ts";
 import {
   assertExistingRunId,
   resolveRunsDir as resolveExportedRunsDir,
@@ -704,13 +712,35 @@ echo "TARBUILT \${out##*/} $(( $(wc -c < "$out") ))"
 function sha256File(path: string): string {
   const hasher = new Bun.CryptoHasher("sha256");
   const chunk = Buffer.alloc(64 * 1024);
-  const fd = openSync(path, "r");
+  // TYPED (round 3). There was no try around `openSync` — only a `finally` for
+  // the close — so an EMFILE under a parallel fleet, an EACCES after a mode
+  // change, an ENOENT from a concurrent sweep or an EIO on a bad mount escaped
+  // as a bare `NodeJS.ErrnoException`, bypassing this module's classification
+  // entirely and failing a bundle verify that HAD ALREADY PASSED. Every other
+  // failure in that step carries a code and a remediation; this is pure audit
+  // work and must not be the exception.
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (e) {
+    throw new HarvestError(
+      "bundle-digest-failed",
+      `could not open bundle ${path} to digest it for the hop-6 link: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))} — the bundle itself verified`,
+      `check ${path} and the host's open-file limit, then re-run harvest — the verified bundle is kept`,
+    );
+  }
   try {
     for (;;) {
       const n = readSync(fd, chunk, 0, chunk.length, null);
       if (n <= 0) break;
       hasher.update(n === chunk.length ? chunk : chunk.subarray(0, n));
     }
+  } catch (e) {
+    throw new HarvestError(
+      "bundle-digest-failed",
+      `could not read bundle ${path} to digest it for the hop-6 link: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))} — the bundle itself verified`,
+      `check ${path} and the host's open-file limit, then re-run harvest — the verified bundle is kept`,
+    );
   } finally {
     closeSync(fd);
   }
@@ -721,6 +751,7 @@ type BundleEmitOutcome =
   | "emitted"
   | "skipped-unattributed"
   | "skipped-no-subject"
+  | "skipped-no-run-id"
   | "skipped-no-request-id";
 
 /**
@@ -754,6 +785,15 @@ type BundleEmitOutcome =
 function emitBundleLink(
   deps: HarvestDeps,
   rec: RunRecord,
+  /**
+   * The bundle path, PASSED not recomputed: this used to call
+   * `resolveRunsDir(deps)` purely to build a subject string, and that helper
+   * `mkdirSync`s — so on a read-only mount, after a mid-run mode change, or on
+   * an ENOTDIR, building the subject id THREW and failed the step over a
+   * directory side effect that had nothing to do with the link. `hostBundle`
+   * is the identical path and is already in scope at both call sites.
+   */
+  hostBundle: string,
   event: string,
   detailKey: "sha256" | "tip",
   value: string | undefined,
@@ -769,9 +809,15 @@ function emitBundleLink(
   // where the two differ are the CLI/reaper roots, which mint per invocation.
   // No real id ⇒ no link, and the hop reports `unlinked` — honest, fail-closed.
   const requestId = rec.requestId;
-  if (repoSlug === undefined) return "skipped-unattributed";
-  if (value === undefined || value.length === 0) return "skipped-no-subject";
-  if (requestId === undefined) {
+  // C3: the shared non-empty predicate for the three NOT NULL identity
+  // columns. `=== undefined` let `""` through to the store's own non-empty
+  // check, which throws `audit-link-invalid` — here, after the bundle is
+  // already verified and fetched.
+  const skip = auditLinkSkip(rec.runId, repoSlug, requestId);
+  if (skip === "no-repo-slug") return "skipped-unattributed";
+  if (skip === "no-run-id") return "skipped-no-run-id";
+  if (!auditNonEmpty(value)) return "skipped-no-subject";
+  if (skip === "no-request-id") {
     log({
       // Log-only correlation id — minting one HERE is what this arm refuses to
       // do for the link (same shape as driver.ts's create-link skip).
@@ -789,13 +835,14 @@ function emitBundleLink(
     });
     return "skipped-no-request-id";
   }
+  if (!auditNonEmpty(repoSlug) || !auditNonEmpty(requestId)) return "skipped-unattributed"; // narrowing only
   emitAuditLink(deps.recordAuditLink, {
     runId: rec.runId,
     repoSlug,
     requestId,
     hop: "run-bundle",
     event,
-    subjectId: `${join(resolveRunsDir(deps), `${rec.runId}.bundle`)}#${value}`,
+    subjectId: `${hostBundle}#${value}`,
     subjectKind: "bundle",
     detail: { [detailKey]: value },
   });
@@ -1024,7 +1071,22 @@ export async function harvestRun(
       // verify passed. `detail.sha256` is the bundle file's own sha256, the
       // subject the walker re-checks the row against (chain.ts reads
       // `detail_json.sha256` — keep the two names in lockstep).
-      verifyAudit = emitBundleLink(deps, rec, "bundle-verify", "sha256", sha256File(hostBundle));
+      //
+      // TYPED, like every other failure in this step (round 3): a raw
+      // `AuditStoreError` escaping `harvestRun` is an untyped throw with no
+      // `code`/remediation of this module's shape — exactly what driver.ts's
+      // comment at its own emit sites condemns ("the two halves of hop 5 failed
+      // with different shapes"), left in place at hop 6.
+      try {
+        verifyAudit = emitBundleLink(deps, rec, hostBundle, "bundle-verify", "sha256", sha256File(hostBundle));
+      } catch (e) {
+        if (e instanceof HarvestError) throw e; // sha256File already classified
+        throw new HarvestError(
+          "audit-link-write-failed",
+          `the bundle-verify audit link for run ${runId} could not be recorded: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))} — the bundle at ${hostBundle} verified and is kept`,
+          `repair the audit store, then re-run harvest — the verified bundle is kept at ${hostBundle}`,
+        );
+      }
     }, () => ({ audit: verifyAudit }));
 
     // Step D — fetch into the quarantine namespace ONLY. --force makes a
@@ -1047,7 +1109,16 @@ export async function harvestRun(
       // DF5.3: the `bundle-fetch` link (hop 6) — after the quarantine ref
       // landed. Ordering AC7 asserts is verify ≤ fetch, which this site order
       // guarantees.
-      fetchAudit = emitBundleLink(deps, rec, "bundle-fetch", "tip", stepA.tip);
+      // TYPED, for the reason spelled out at the verify emit above.
+      try {
+        fetchAudit = emitBundleLink(deps, rec, hostBundle, "bundle-fetch", "tip", stepA.tip);
+      } catch (e) {
+        throw new HarvestError(
+          "audit-link-write-failed",
+          `the bundle-fetch audit link for run ${runId} could not be recorded: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))} — refs/sandbox/${runId} DID land`,
+          `repair the audit store, then re-run harvest — the fetch is idempotent (--force) and the bundle is kept at ${hostBundle}`,
+        );
+      }
     }, () => ({ audit: fetchAudit }));
     result = { outcome: "harvested", count: stepA.count ?? 0, tip: stepA.tip ?? "" };
   } else if (stepA.protocol === "NOCOMMITS") {

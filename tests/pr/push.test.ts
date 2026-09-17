@@ -115,6 +115,14 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.refusal.failedPrecondition).toBe("approval-precedes-report");
+    // The equality case is an unrecoverable dead end without this sentence:
+    // neither stamp can be moved (`decidedAt` is written once under the
+    // approval lock, the re-verify report is immutable), so "decided at X,
+    // which does not strictly follow report completed at X" reads as a clock
+    // bug that does not exist and names no next action. N3 keeps the `<=`
+    // tightening and pays for it with an actionable remediation.
+    expect(out.refusal.message).toContain("the two stamps are identical");
+    expect(out.refusal.message).toContain("re-run the re-verify, then re-approve against the new report");
     // The tightening is an ADMISSION rule, so the two things that make it one
     // are pinned here as they are for every sibling refusal: the remote is
     // untouched (a refusal computed after the push would still return this
@@ -122,6 +130,87 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     // leaves the operator with a silent no-op).
     expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
     expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-precedes-report");
+  }, 20_000);
+
+  test("AC7 (DF5.3): strictly-BEFORE refuses — the third leg of the boundary triple", async () => {
+    // The diff pins `0` (equality refuses) and `+1 ms` (strictly-after passes).
+    // Without this leg the rule is pinned on ONE side only: a regression to
+    // "no ordering check at all" is invisible to both of the others, and the
+    // pre-existing test for the old `<` rule is not tied to them as one triple.
+    const runId = "run-push-strictly-before";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    const completedAt = "2026-08-25T10:10:00.000Z";
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", completedAt), {
+      decidedAt: new Date(Date.parse(completedAt) - 1).toISOString(), // -1ms: strictly before
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-precedes-report");
+    // Strictly-before is NOT the dead end — the operator can re-approve — so
+    // the equality remediation must not appear here.
+    expect(out.refusal.message).not.toContain("the two stamps are identical");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-precedes-report");
+  }, 20_000);
+
+  test("AC7 (DF5.3): an offsetless (local-time) APPROVAL stamp is non-canonical, not an ordering fault", async () => {
+    // `"2026-08-25T10:10:01"` passes `z.string().min(1)` AND `Number.isFinite`,
+    // and `Date.parse` reads it as LOCAL time. East of UTC that makes it parse
+    // EARLIER than it is, so `decided <= completed` ADMITS an approval that in
+    // fact preceded its report — the exact defeat AC7's tightening closes. West
+    // of UTC it refuses a correctly-ordered pair. Either way the two stamps
+    // were never on one clock basis, so `approval-precedes-report` would send
+    // an operator hunting for skew in a pair that is not comparable at all.
+    const runId = "run-push-noncanon-decided";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00.000Z"), {
+      decidedAt: "2026-08-25T10:10:01",
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-timestamp-non-canonical");
+    expect(out.refusal.failedPrecondition).not.toBe("approval-precedes-report");
+    // WHICH stamp, the same property the unparseable pair pins.
+    expect(out.refusal.message).toContain(`the approval's decidedAt "2026-08-25T10:10:01"`);
+    expect(out.refusal.message).toContain("canonical UTC timestamp");
+    expect(out.refusal.message).not.toContain("completedAt");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-timestamp-non-canonical");
+  }, 20_000);
+
+  test("AC7 (DF5.3): an offsetless REPORT completedAt refuses too, naming the report's stamp", async () => {
+    // The other half. This refusal is ordered BEFORE the `decided <= completed`
+    // comparison, so a non-canonical stamp can no longer reach it in EITHER
+    // direction — which is what makes the hole un-flippable rather than
+    // merely narrower.
+    const runId = "run-push-noncanon-completed";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    const report = writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00");
+    // Same device as the unparseable-report test: `approve` derives `decidedAt`
+    // from `report.completedAt`, so it gets a corrected COPY while the report
+    // on disk keeps the offsetless stamp.
+    approve(host, runId, { ...report, completedAt: "2026-08-25T10:10:00.000Z" });
+    // ...and the stamp really is still the offsetless one on disk.
+    expect(readFileSync(join(host.reverifyDir, `${runId}.jsonl`), "utf8")).toContain('"completedAt":"2026-08-25T10:10:00"');
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-timestamp-non-canonical");
+    expect(out.refusal.message).toContain(`the report's completedAt "2026-08-25T10:10:00"`);
+    expect(out.refusal.message).toContain("canonical UTC timestamp");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-timestamp-non-canonical");
   }, 20_000);
 
   test("AC7 (DF5.3): strictly-after still passes the tightened boundary", async () => {
@@ -180,6 +269,12 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     // RangeError on NaN before the override applied; the copy keeps the helper's
     // arithmetic on a real stamp while the report ON DISK carries the garbage.
     approve(host, runId, { ...report, completedAt: "2026-08-25T10:10:00.000Z" });
+    // The whole test rests on `approve` only READING that copy. If it ever
+    // re-serialises the report back over the file — or denormalises
+    // `completedAt` into the approval record, which the ordering read might
+    // then prefer — the on-disk stamp becomes valid and this stops exercising
+    // the unparseable path at all. So the premise is asserted, not assumed.
+    expect(readFileSync(join(host.reverifyDir, `${runId}.jsonl`), "utf8")).toContain('"completedAt":"whenever"');
 
     const out = await pushVerifiedSha(runId, deps(host));
     expect(out.ok).toBe(false);

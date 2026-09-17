@@ -2426,7 +2426,9 @@ describe("DF5.3 — the bundle links are emitted at their own steps", () => {
     // The record's DF2.8 attribution is the only repoSlug an emitter may use,
     // and its `requestId` is the only join key (C5 — never a minted one).
     attribute(runId);
+    const before = Date.now();
     const res = mustHarvest(await harvestRun(hd(s.hostDir), runId));
+    const after = Date.now();
     expect(res.count).toBe(1);
 
     expect(auditLinks.map((l) => l.event)).toEqual(["bundle-verify", "bundle-fetch"]);
@@ -2455,7 +2457,13 @@ describe("DF5.3 — the bundle links are emitted at their own steps", () => {
     const { canonicalJson, sha256Hex } = await import("../../src/audit/link-store.ts");
     for (const l of auditLinks) {
       expect(l.evidenceDigest).toBe(sha256Hex(canonicalJson(l.detail)));
-      expect(l.occurredAt).toBe(l.recordedAt);
+      // INV-AUDIT-4 "never retroactive", as a BOUND check. `occurredAt ===
+      // recordedAt` cannot fail for an emitter that passes no `occurredAt`
+      // (one local is assigned to both in `emitAuditLink`), so it re-stated
+      // the helper's implementation while reading as coverage of the
+      // invariant. The bound is the harvest call itself.
+      expect(Date.parse(l.occurredAt)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(l.occurredAt)).toBeLessThanOrEqual(after);
     }
     // The verify row's detail.sha256 is the bundle FILE's sha256 — the subject
     // the walker recomputes and compares against the row (chain.ts key).
@@ -2508,12 +2516,113 @@ describe("DF5.3 — the bundle links are emitted at their own steps", () => {
     expect(subjectsOf("bundle-fetch")[1]).toBe(`${bundlePath}#${second.tip}`);
   }, 60_000);
 
+  /** The `audit:` value each harvest step line reported, in step order. */
+  function stepAudits(): unknown[] {
+    return logs
+      .filter((l) => l.operation === "harvest.verify" || l.operation === "harvest.fetch")
+      .map((l) => (l as unknown as { audit: unknown }).audit);
+  }
+
   test("an unattributed record emits nothing (INV-AUDIT-4 — no invented repoSlug)", async () => {
     const runId = "hvst-df53-nolinks";
     const s = await boxSetup(runId, 1);
     mustHarvest(await harvestRun(hd(s.hostDir), runId));
     expect(auditLinks).toHaveLength(0);
     expect(logs.filter((l) => l.operation === "providers.audit-link-skipped")).toHaveLength(0);
+    // …and the STEP LINES say so. `audit:` was a constant `"emitted"` before
+    // this round — the exact regression this hop's own comment describes
+    // ("asserted a link on every unattributed run") — and only the
+    // no-`requestId` sibling checked it, so the unattributed half would have
+    // gone green.
+    expect(stepAudits()).toEqual(["skipped-unattributed", "skipped-unattributed"]);
+  }, 30_000);
+
+  test("an ATTRIBUTED run whose VERIFY fails emits nothing — a bundle-verify row means the verify PASSED", async () => {
+    // Every other failure test in this file uses an UNATTRIBUTED record, so
+    // `emitBundleLink` returns `skipped-unattributed` before reaching an emit
+    // and an `auditLinks` assertion added there would be vacuous. Attributed,
+    // the absence is load-bearing: hoisting the emit above the `git bundle
+    // verify` exit-code check would ship a row attesting to a verify that
+    // never passed, and nothing in the suite would fail.
+    const runId = "hvst-df53-verify-fails";
+    const s = await boxSetup(runId, 1);
+    attribute(runId);
+    const failing: GitRunner = (argv: readonly string[], cwd: string) =>
+      argv.includes("verify")
+        ? Promise.resolve({ stdout: "", stderr: "injected verify failure", exitCode: 1 })
+        : bunGitRunner(argv, cwd);
+
+    const err = await harvestRun(hd(s.hostDir, { gitRunner: failing }), runId).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect((err as HarvestError).code).toBe("bundle-verify-failed");
+
+    expect(auditLinks).toEqual([]);
+    // The verify step line reports the step's OWN failure, not a link.
+    expect(stepAudits()).toEqual(["step-failed"]);
+  }, 30_000);
+
+  test("an ATTRIBUTED run whose FETCH fails keeps its verify row and emits no fetch row", async () => {
+    // The bundle-fetch row attests that `refs/sandbox/<runId>` LANDED. An emit
+    // hoisted above the `git fetch` exit-code check — or moved into the step's
+    // error arm — would vouch for a ref that does not exist.
+    const runId = "hvst-df53-fetch-fails";
+    const s = await boxSetup(runId, 1);
+    attribute(runId);
+    const failing: GitRunner = (argv: readonly string[], cwd: string) =>
+      argv.includes("fetch")
+        ? Promise.resolve({ stdout: "", stderr: "injected fetch failure", exitCode: 1 })
+        : bunGitRunner(argv, cwd);
+
+    const err = await harvestRun(hd(s.hostDir, { gitRunner: failing }), runId).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect((err as HarvestError).code).toBe("fetch-failed");
+
+    expect(auditLinks.map((l) => l.event)).toEqual(["bundle-verify"]);
+    expect(stepAudits()).toEqual(["emitted", "step-failed"]);
+    // The ref really is absent — which is what makes the missing row correct.
+    await expect(hostGit(s.hostDir, ["rev-parse", "--verify", `refs/sandbox/${runId}`])).rejects.toThrow();
+  }, 30_000);
+
+  test("a THROWING audit sink on the verify emit is a typed HarvestError and the verified bundle is KEPT", async () => {
+    // The harvest path's posture, pinned. It PROPAGATES — unlike the teardown
+    // path, which drops and continues (N2) — because nothing here is
+    // irreversible: the bundle is kept and the fetch is idempotent under
+    // `--force`. What round 3 fixed is the SHAPE: a raw `AuditStoreError`
+    // escaping `harvestRun` was an untyped throw with no `code`/remediation of
+    // this module's kind, exactly what driver.ts's own emit sites condemn.
+    //
+    // Under teardown this is step 3, whose throw aborts BEFORE revoke/destroy
+    // (AC3) — so an unwritable audit store leaves the box alive and the key
+    // live. That is the documented cost of the propagate posture here; the
+    // teardown-path emits themselves take the opposite one.
+    const runId = "hvst-df53-sink-throws";
+    const s = await boxSetup(runId, 1);
+    attribute(runId);
+
+    const err = await harvestRun(
+      hd(s.hostDir, {
+        recordAuditLink: () => {
+          throw new Error("audit store is read-only");
+        },
+      }),
+      runId,
+    ).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("audit-link-write-failed");
+    expect((err as HarvestError).message).toContain("audit store is read-only");
+    expect((err as HarvestError).remediation).toContain("re-run harvest");
+    // The bundle — the only copy of the work — survives, and the message says so.
+    expect(existsSync(bundlePath(runId))).toBeTrue();
+    expect((err as HarvestError).message).toContain(bundlePath(runId));
+    // The verify step failed on the emit, so no fetch step ever ran.
+    expect(stepAudits()).toEqual(["step-failed"]);
   }, 30_000);
 
   test("C5: an attributed record with NO requestId emits nothing and says so once per step", async () => {

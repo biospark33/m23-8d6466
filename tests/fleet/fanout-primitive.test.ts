@@ -1024,14 +1024,26 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     expect(won?.runId).toBe(claimed.get(won?.vmName as string));
     // The loser's box was destroyed, and the chain says so on the loser's own
     // box — never on the winner's, which is still alive and billing.
+    //
+    // THE LOSER IS PINNED FIRST, as the sibling in patterns.test.ts does it.
+    // `loserVms` was `.filter`ed to `string` with nothing asserting a loser
+    // existed, so an arm that never reached a `vmName` (provision refused,
+    // roster exhausted, race short-circuit) made both sides `[]` — `toEqual`
+    // passed with ZERO links observed, and `not.toContain` was vacuous too.
+    // This is the only place `FanoutDeps.recordAuditLink` → `teardownSandbox`
+    // is observable, so a green vacuous assertion here is the whole forward
+    // going unwatched.
+    const losers = res.arms.filter((_, i) => i !== res.winner);
+    expect(losers).toHaveLength(1);
+    for (const loser of losers) {
+      expect(loser.outcome).toBe("lostRace");
+      expect(typeof loser.vmName).toBe("string");
+      expect(boxExists(driver, loser.vmName)).toBe(false);
+    }
     const torndown = links
       .filter((l) => l.hop === "run-box" && l.event === "teardown")
       .map((l) => l.subjectId);
-    const loserVms = res.arms
-      .filter((_, i) => i !== res.winner)
-      .map((a) => a.vmName)
-      .filter((v): v is string => typeof v === "string");
-    expect(torndown.sort()).toEqual(loserVms.sort());
+    expect(torndown.sort()).toEqual(losers.map((l) => l.vmName as string).sort());
     expect(torndown).not.toContain(won?.vmName);
   }, 20_000);
 

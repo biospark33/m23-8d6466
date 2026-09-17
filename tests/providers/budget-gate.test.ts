@@ -21,7 +21,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createRun, provisionAdmittedRun } from "../../src/providers/driver.ts";
+import { createRun, provisionAdmittedRun, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import type { RunRecord } from "../../src/providers/run-record.ts";
 import { assertWithinBudget, mintCapMicroUsd, OverBudgetError } from "../../src/providers/budget-gate.ts";
 import { CostLedger, CostLedgerError, capForIssue } from "../../src/providers/cost-ledger.ts";
@@ -33,12 +33,19 @@ import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { mintRunKey } from "../../src/providers/credentials.ts";
 
 let dir: string;
+/**
+ * DF5.3: the gate's arms are absences — a REFUSED dispatch must emit no
+ * `run-box.create`, and a clamped mint must not vouch for a key the ceiling
+ * check rejected. A blind `() => {}` sink could observe neither. Reset per test.
+ */
+let auditLinks: ProviderAuditLink[] = [];
 let prevCwd: string;
 let prevLedgerEnv: string | undefined;
 let prevConfigEnv: string | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df28-budget-"));
+  auditLinks = [];
   prevCwd = process.cwd();
   // Pin both env tiers so the implicit paths never resolve at the repo root.
   prevLedgerEnv = process.env.QDS_COST_LEDGER_FILE;
@@ -130,7 +137,7 @@ async function admitAndProvision(
       reservedMicroUsd: decision.reservedMicroUsd,
       admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
     },
-    recordAuditLink: () => {},
+    recordAuditLink: (l) => auditLinks.push(l),
   });
   return record;
 }
@@ -394,7 +401,7 @@ describe("AC3: under cap proceeds and clamps the mint", () => {
       store,
       requestId: "req-mint",
       capMicroUsd: decision.admittedCeilingMicroUsd,
-      recordAuditLink: () => {},
+      recordAuditLink: (l) => auditLinks.push(l),
     }, runId);
 
     expect(keyApi.keys).toHaveLength(2); // the seed run's key + this run's
@@ -536,7 +543,7 @@ describe("no-issue createRun untouched", () => {
 
     const rec = await createRun(driver, store, {
       runId: "noissue-20260820-000001",
-    recordAuditLink: () => {},
+    recordAuditLink: (l) => auditLinks.push(l),
     });
 
     expect(rec.runId).toBe("noissue-20260820-000001");
@@ -572,7 +579,7 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     });
     const ceiling = rec1.extensions?.budget?.admittedCeilingMicroUsd;
     expect(ceiling).toBe(100_000);
-    await mintRunKey({ keyApi, driver, store, requestId: "req-e2e-1", capMicroUsd: typeof ceiling === "number" ? ceiling : 0, recordAuditLink: () => {} }, run1);
+    await mintRunKey({ keyApi, driver, store, requestId: "req-e2e-1", capMicroUsd: typeof ceiling === "number" ? ceiling : 0, recordAuditLink: (l) => auditLinks.push(l) }, run1);
     expect(keyApi.keys[keyApi.keys.length - 1]!.limitUsd).toBe(0.1);
 
     // The lead+2-worker run emits three cost events totalling 300,000 µ$.
@@ -614,6 +621,12 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     expect((await driver.list()).map((v) => v.name)).toEqual(boxesBefore);
     expect(() => store.get("e2e-run-2")).toThrow();
     expect(keyApi.keys.length).toBe(keysBefore);
+    // …and no audit link vouches for either. `admitAndProvision` and the mint
+    // above both feed the shared sink, so this is the whole dispatch's link
+    // set: the refusal fires before `provisionAdmittedRun`, and dispatch 1's
+    // record carries no `requestId`, so C5 skips its emits rather than
+    // inventing the chain's join key.
+    expect(auditLinks).toEqual([]);
 
     // qds cost — the cumulative view off the same SUM the gate read.
     const { run: qdsCost } = await import("../../scripts/qds-cost.ts");

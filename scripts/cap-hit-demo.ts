@@ -47,7 +47,7 @@ import { newId, RunRecordStore, type RunRecord } from "../src/providers/run-reco
 import { redactSecrets } from "../src/providers/step-log.ts";
 import { shQuote } from "../src/providers/exedev/transport.ts";
 import type { ProviderAuditLink } from "../src/providers/driver.ts";
-import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   classifyRunExit,
@@ -1620,6 +1620,64 @@ async function main(argv: readonly string[]): Promise<number> {
   // Fake driver uses box-relative paths; live substrate uses absolute contract
   // envFile is substrate-resolved inside runCapHitDemo (live: /home/exedev/.env).
 
+  // DF5.3: the demo's composition root opens the audit-link store ONCE (the
+  // default path; QDS_AUDIT_DB resolves inside the store) and closes it on
+  // every exit of the run — the SIGNAL path included.
+  //
+  // It opens BEFORE the signal handlers are registered, not after: the
+  // handler's cleanup tears the run down through `teardownSandbox`, whose
+  // `teardown` link is written through this handle, so a handler that can fire
+  // while the store is not open (or, worse, already closed) reports a failed
+  // cleanup for a teardown that actually landed. Nothing billable exists yet
+  // at this line, so nothing is lost by refusing here.
+  //
+  // C-1: a store that cannot open fails the process loud, carrying the store's
+  // OWN code and remediation when it has them — `code` is accepted only from an
+  // `AuditStoreError`, because a bare fs errno (EACCES/ENOSPC/EROFS) in that
+  // slot names no knob, and the residual handler then prints no `next:` line at
+  // all. `redactSecrets` (never `String`) coerces the thrown value: it is total
+  // over `unknown` and cannot itself throw while reporting.
+  let auditStore: AuditStoreWriter;
+  try {
+    auditStore = openAuditStore();
+  } catch (e) {
+    const typed = e instanceof AuditStoreError ? e : undefined;
+    const x = (e ?? {}) as { message?: string };
+    const err = new Error(
+      `the audit-link store could not be opened: ${redactSecrets(x.message ?? e)} — nothing was provisioned`,
+    ) as Error & { code: string; remediation: string };
+    err.code = typed?.code ?? "audit-store-unavailable";
+    err.remediation =
+      typed?.remediation ?? "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run";
+    throw err;
+  }
+  /** Set when the handle would not release — feeds the exit below. */
+  let auditCloseFailed = false;
+  let auditClosed = false;
+  /**
+   * Idempotent, because BOTH exits close it: the `finally` below and the signal
+   * path, which never unwinds `main` at all (it ends in `process.exit`). A
+   * SIGINT during the run used to leave this handle closed by nobody — and by
+   * this story's own premise ("a store that did not close cleanly may not have
+   * flushed"), the links most at risk were precisely the interrupt-time
+   * teardown's, documenting a box that really was destroyed.
+   */
+  const closeAuditStore = (): void => {
+    if (auditClosed) return;
+    auditClosed = true;
+    try {
+      auditStore.close();
+    } catch (e) {
+      auditCloseFailed = true;
+      const x = (e ?? {}) as { message?: string };
+      writeSync(
+        2,
+        `!! audit-store-close-failed: could not close the audit-link store: ${redactSecrets(x.message ?? e)}\n`,
+      );
+      writeSync(2, "next: the handle dies with the process; re-run to confirm it still reads\n");
+    }
+  };
+
   // NOTE: signal handling — register cleanup thunk updated as state progresses.
   // Idempotent, never throws, exits 1 with inconclusive log after cleanup. The
   // note getter is what the cleanup actually did (D2, round 3): a refused lock
@@ -1635,6 +1693,10 @@ async function main(argv: readonly string[]): Promise<number> {
         // Cleanup must never throw — already guarded by the thunk, but belt-and-suspenders.
       }
     }
+    // AFTER the cleanup — which writes the interrupt-time teardown's links
+    // through this handle — and before the process goes: this path exits
+    // without unwinding `main`, so the `finally` below never runs for it.
+    closeAuditStore();
     const cleanupNote = currentCleanupNote?.() ?? "no cleanup was registered (nothing had been created yet)";
     process.stderr.write(`!! received ${signal}, ${cleanupNote}, exiting inconclusive\n`);
     process.exitCode = 1;
@@ -1666,16 +1728,10 @@ async function main(argv: readonly string[]): Promise<number> {
     return n;
   };
 
-  // Register signal handlers before the run starts.
+  // Register signal handlers before the run starts — and after the audit store
+  // is open, so the handler's cleanup has somewhere to write its links.
   registerHandlers();
 
-  // DF5.3: the demo's composition root opens the audit-link store ONCE (the
-  // default path; QDS_AUDIT_DB resolves inside the store) and closes it on
-  // every exit of the run. A store that cannot open fails the process loud,
-  // before anything billable — the main() catch prints it with the residual.
-  const auditStore: AuditStoreWriter = openAuditStore();
-  /** Set by the finally when the handle would not release — feeds the exit below. */
-  let auditCloseFailed = false;
   let result: CapHitDemoResult;
   try {
     result = await runCapHitDemo(
@@ -1699,6 +1755,14 @@ async function main(argv: readonly string[]): Promise<number> {
       },
     );
   } finally {
+    // Handlers FIRST, store second, and both in the `finally` so the THROW path
+    // gets them too. `unregisterHandlers?.()` used to sit after this block, so
+    // an exception left the handlers live behind a closed store for the whole
+    // propagation and residual-spend path: a late signal then ran the cleanup's
+    // teardown, whose `record()` throws on a closed bun:sqlite handle — and the
+    // operator was told cleanup FAILED for a teardown that had succeeded (the
+    // emit sits after destroy, revoke and close).
+    unregisterHandlers?.();
     // DF5.3, C10 — the same close discipline as sandbox-teardown/sandbox-reap/
     // fleet: guarded, because a throw raised in a `finally` REPLACES the block's
     // completion value (a completed billable run's `result` discarded, or the
@@ -1706,20 +1770,10 @@ async function main(argv: readonly string[]): Promise<number> {
     // bookkeeping fault). Every link is already committed, so this is a
     // leftover, not a verb to retry — but it still sets the flag the exit
     // decision reads: a store that did not close cleanly may not have flushed.
-    // The error coercion is the guarded form: a thrown null/undefined must not
-    // raise a SECOND error from inside this catch.
-    try {
-      auditStore.close();
-    } catch (e) {
-      auditCloseFailed = true;
-      const x = (e ?? {}) as { message?: string };
-      writeSync(2, `!! audit-store-close-failed: could not close the audit-link store: ${redactSecrets(x.message ?? e)}\n`);
-      writeSync(2, "next: the handle dies with the process; re-run to confirm it still reads\n");
-    }
+    // Idempotent (see `closeAuditStore`): the signal path may already have run
+    // it, and the error coercion there is the guarded, total form.
+    closeAuditStore();
   }
-
-  // Normal completion: unregister signal handlers so a late signal doesn't re-trigger cleanup.
-  unregisterHandlers?.();
 
   // Single-line JSON: stdout's last line is machine-parsed (tests/CI); humans
   // read the stderr step log.

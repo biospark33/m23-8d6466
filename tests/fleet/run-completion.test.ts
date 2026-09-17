@@ -55,6 +55,12 @@ import {
   type ChainOutcome,
   type RunCompletionDeps,
 } from "../../src/fleet/run-completion.ts";
+// The store is opened on a per-test tmp path (never QDS_AUDIT_DB / the
+// operator's `.sandbox/audit.db`): nothing in this file reaches an audit
+// composition root, the links here arrive through the injected
+// `recordAuditLink` seam, and the store is used only to prove the double
+// teardown emit COALESCES to one row.
+import { openAuditStore, openAuditStoreForWalk } from "../../src/audit/link-store.ts";
 import type { ApprovalPort } from "../../src/reverify/approval.ts";
 import { reverify } from "../../src/reverify/runner.ts";
 
@@ -1402,11 +1408,37 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
       // because every copy carries the SAME subject and the SAME evidence
       // digest — which is exactly what the store's
       // `UNIQUE (run_id, hop, event, subject_key)` + `ON CONFLICT DO NOTHING`
-      // coalesces on, so the STORE holds one row. Pin that, not the count: a
-      // second emit whose digest drifted would record as `divergent` instead.
+      // coalesces on, so the STORE holds one row.
+      //
+      // Pinned through the STORE, not through the digests. `evidenceDigest` is
+      // `sha256(canonicalJson(detail ?? null))` and nothing else feeds it
+      // (driver.ts `emitAuditLink`), so "two emits with the same detail share a
+      // digest" is arithmetic, not a property of this chain — the digest-set
+      // check could only fail if `detail` drifted, which the `toMatchObject`
+      // loop below already covers field by field. Replaying both emits into a
+      // real store and reading ONE row back is the actual claim, and it is the
+      // one that fails if the healing arm ever derives `occurredAt` or `detail`
+      // differently (the store records that as `divergent` and keeps the first
+      // row, so the second's facts are lost).
       const teardowns = links.filter((l) => l.event === "teardown");
-      expect(teardowns.length).toBeGreaterThanOrEqual(1);
-      expect(new Set(teardowns.map((l) => l.evidenceDigest)).size).toBe(1);
+      expect(teardowns).toHaveLength(2);
+      const coalesceDir = fs.mkdtempSync(path.join(os.tmpdir(), "qds-df53-coalesce-"));
+      try {
+        const store = openAuditStore(path.join(coalesceDir, "audit.db"));
+        try {
+          for (const l of teardowns) store.record(l);
+        } finally {
+          store.close();
+        }
+        const handle = openAuditStoreForWalk(path.join(coalesceDir, "audit.db"));
+        try {
+          expect(handle.linksForRun("run-d1").filter((r) => r.event === "teardown")).toHaveLength(1);
+        } finally {
+          handle.close();
+        }
+      } finally {
+        fs.rmSync(coalesceDir, { recursive: true, force: true });
+      }
       for (const l of teardowns) {
         expect(l).toMatchObject({
           runId: "run-d1",
@@ -1532,11 +1564,29 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
       await createRun(driver, s.store, { runId: "run-c1", recordAuditLink: () => {} });
       driver.plan = [{ body: { runId: "run-c1", ok: true } }];
       driver.destroyThrows = true;
+      // DF5.3: CAPTURED here too, not only on the happy `driven` path. This is
+      // the file's one failure-shaped teardown, and until it captured, nothing
+      // observed whether a `run-box/teardown` link was written for a box that
+      // was NOT destroyed. A regression that emits the link before
+      // `driver.destroy()` resolves would record "box torn down" for a box
+      // still alive and billing, and the suite would stay green.
+      const links: ProviderAuditLink[] = [];
       const out = await observeAndDriveChain(
         "run-c1",
-        baseDeps("run-c1", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+        baseDeps("run-c1", {
+          driver,
+          store: s.store,
+          runsDir: s.dir,
+          hostRoot: host.dir,
+          recordAuditLink: (link) => links.push(link),
+        }),
       );
       expect(out).toMatchObject({ kind: "chain-failed", step: "teardown" });
+      // NO teardown link: the emit lives inside the `close` step, which the
+      // unconfirmed destroy aborts before. The link vouches for a destroyed
+      // box, so an undestroyed box owes none — the hop reporting `unlinked`
+      // is the honest answer while the record is still open.
+      expect(links.filter((l) => l.hop === "run-box" && l.event === "teardown")).toEqual([]);
       expect((out as { error: string }).error).toContain("destruction");
       expect(s.store.get("run-c1").closedAt).toBeUndefined(); // abort ⇒ record open
       // The destructive window was entered and did not complete, so the mark
