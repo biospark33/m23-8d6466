@@ -115,6 +115,13 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.refusal.failedPrecondition).toBe("approval-precedes-report");
+    // The tightening is an ADMISSION rule, so the two things that make it one
+    // are pinned here as they are for every sibling refusal: the remote is
+    // untouched (a refusal computed after the push would still return this
+    // code), and the refusal reached the durable log (one that never lands
+    // leaves the operator with a silent no-op).
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-precedes-report");
   }, 20_000);
 
   test("AC7 (DF5.3): strictly-after still passes the tightened boundary", async () => {
@@ -129,6 +136,59 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
 
     const out = await pushVerifiedSha(runId, deps(host));
     expect(out.ok).toBe(true);
+    // `ok` alone is not the delivery: a short-circuit, a swallowed push failure
+    // or a wrong target ref all return it. The ref is what publishes.
+    expect((await remoteRefs(host))[`refs/heads/qds/${runId}`]).toBe(host.headSha);
+  }, 20_000);
+
+  test("AC7 (DF5.3): an UNPARSEABLE decidedAt is its own refusal, naming which stamp failed", async () => {
+    // `""` is caught upstream by `approval-incomplete`, so the finiteness guard's
+    // only live inputs are unparseable NON-EMPTY stamps — which nothing
+    // exercised. Dropping the guard does not refuse them: `NaN <= completed` is
+    // FALSE, so a malformed approval would be ADMITTED.
+    const runId = "run-push-baddecided";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00.000Z"), {
+      decidedAt: "not-a-date",
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-timestamp-unparseable");
+    // WHICH stamp is the whole reason this is not `approval-precedes-report`:
+    // reported as an ordering violation it sent an operator hunting for clock
+    // skew between two timestamps, one of which is not a timestamp.
+    expect(out.refusal.message).toContain(`the approval's decidedAt "not-a-date"`);
+    expect(out.refusal.message).toContain("is not a parseable timestamp");
+    expect(out.refusal.message).not.toContain("completedAt");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-timestamp-unparseable");
+  }, 20_000);
+
+  test("AC7 (DF5.3): an unparseable REPORT completedAt refuses and names the report's stamp, not the approval's", async () => {
+    const runId = "run-push-badcompleted";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    // `completedAt` is `z.string().min(1)` on the report schema, so a garbage
+    // stamp seals and reads back intact — the ordering read is where it lands.
+    const report = writeReportWithId(host, runId, "rv-approval-bound", "whenever");
+    // `approve` derives `decidedAt` from `report.completedAt`, which would throw
+    // RangeError on NaN before the override applied; the copy keeps the helper's
+    // arithmetic on a real stamp while the report ON DISK carries the garbage.
+    approve(host, runId, { ...report, completedAt: "2026-08-25T10:10:00.000Z" });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-timestamp-unparseable");
+    expect(out.refusal.message).toContain(`the report's completedAt "whenever"`);
+    expect(out.refusal.message).toContain("is not a parseable timestamp");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("approval-timestamp-unparseable");
   }, 20_000);
 
   test("a red report refuses the push, with the refusal recorded durably", async () => {

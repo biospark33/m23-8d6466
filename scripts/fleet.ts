@@ -1639,6 +1639,8 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
   const usage = "fleet observe <run-id> --driver <name> [--window-ms <ms>]";
   /** 6, not 0, when the chain landed but the ledger would not close (fanout's one cleanup policy). */
   let ledgerCloseFailed = false;
+  /** C10: the audit store's close obeys the SAME policy — one fault, one code. */
+  let auditCloseFailed = false;
   try {
     if (positionals.length > 2) throw usageError("observe takes exactly one <run-id>", usage);
     if (runIdArg === undefined) throw usageError("observe requires <run-id>", usage);
@@ -1740,8 +1742,17 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
       // DF5.3: the chain's teardown emits its `teardown` link — this verb is
       // the composition root, so the store opens beside the ledger handle and
       // closes in the same finally.
-      const chainAudit = openAuditStore();
+      // Opened on the FIRST link, not at the verb's entry: an observation whose
+      // marker never settles inside the window drives nothing and emits
+      // nothing, and must not materialise audit.db (+ its -wal/-shm) — the
+      // file-set discipline F044 set for the ledger and sandbox-reap restates
+      // for its dry run. Nothing is lost by deferring: the run is already
+      // dispatched and BILLING by the time this verb runs, so an eager open
+      // buys no fail-before-spend property (unlike fanout's, which precedes
+      // provisioning and is deliberately kept eager).
+      let chainAudit: AuditStoreWriter | undefined;
       const recordChainAuditLink = (link: ProviderAuditLink): void => {
+        chainAudit ??= openAuditStore();
         chainAudit.record(link);
       };
       let chainOutcome: ChainOutcome;
@@ -1782,10 +1793,13 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
         }
         // DF5.3: the audit store closes on the same discipline — every link it
         // wrote is already committed, so a close fault is bookkeeping, not a
-        // verb to retry.
+        // verb to retry. C10: it still feeds the exit decision (a store that did
+        // not close cleanly may not have flushed). `?.` because a chain that
+        // emitted nothing never opened one.
         try {
-          chainAudit.close();
+          chainAudit?.close();
         } catch (e) {
+          auditCloseFailed = true;
           const x = (e ?? {}) as { message?: string };
           printError(
             note,
@@ -1896,7 +1910,7 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
           ? undefined
           : "the typed outcome envelope on stderr is authoritative — this stdout line was a summary; re-check with `fleet status`",
       ) && !outputIncomplete();
-    if (code === 0 && (ledgerCloseFailed || !printed)) code = 6;
+    if (code === 0 && (ledgerCloseFailed || auditCloseFailed || !printed)) code = 6;
     return finish(requestId, verb, runIdArg, code);
   } catch (e) {
     // AC5: a lock refusal is this verb's exit 5 — refused before anything was
@@ -2573,6 +2587,10 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
   // is unreachable unless `report` itself throws — and then 1 ("substrate
   // failed") is the honest thing to die with.
   let fanoutCode = 1;
+  // C10: set by the inner `finally` when the audit handle would not release.
+  // Escalated in the OUTER finally, not inline: the inner one runs before the
+  // arm outcomes assign `fanoutCode`, which would overwrite it.
+  let auditCloseFailed = false;
   // The error's own retry classification, when it carries one — read in the
   // catch, honored on the completion line below (logVerb derives from exit
   // code alone, and 5 alone would read as do-not-retry "logic").
@@ -2818,7 +2836,16 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
     // DF5.3: a race's loser disposal tears down through teardownSandbox, whose
     // `teardown` link flows through this seam — the fanout verb is the root,
     // so the store opens here and closes on every exit of the call.
-    const fanoutAudit = openAuditStore();
+    //
+    // Race-only wiring, exactly like the loser ledger above: `disposeLosers` is
+    // the ONLY caller of this seam (fanout-primitive.ts, guarded by
+    // `input.pattern === "race"`), so a parallel/sequential fan-out would
+    // otherwise materialise audit.db (+ -wal/-shm) and emit nothing. Kept EAGER
+    // for a race rather than deferred to the first link: this open precedes
+    // admission and provisioning, so an unopenable store refuses before N boxes
+    // are live and billing — the fail-closed property `observe` has nothing to
+    // gain from and this verb does.
+    const fanoutAudit = pattern === "race" ? openAuditStore() : undefined;
     let result: Awaited<ReturnType<typeof fanout>>;
     try {
       result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
@@ -2835,18 +2862,32 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
         ...(rosterIds === undefined ? {} : { rosterIds: rosterIds }),
         ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
         recordAuditLink: (link: ProviderAuditLink): void => {
+          // Not optional-chained: an emit on a non-race pattern is a
+          // MIS-ORDERED emit (only `disposeLosers` reaches this seam), and the
+          // story sanctions exactly one silent no-op link sink — this is not
+          // it. Loud beats a dropped link.
+          if (fanoutAudit === undefined) {
+            throw new Error(
+              `audit link ${link.hop}/${link.event} was emitted by a ${pattern} fan-out, which opens no audit store — this is a fan-out ordering bug`,
+            );
+          }
           fanoutAudit.record(link);
         },
       });
     } finally {
-      // Every link is already committed; a close fault is bookkeeping only.
+      // Every link is already committed, so a close fault is bookkeeping, not a
+      // verb to retry — but C10 still routes it into the exit decision (the
+      // escalation lands in the outer `finally`, which runs after the arm
+      // outcomes set `fanoutCode`, so it can never be overwritten by them).
       try {
-        fanoutAudit.close();
+        fanoutAudit?.close();
       } catch (e) {
+        auditCloseFailed = true;
+        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "audit-store-close-failed",
-          `could not close the audit-link store: ${redactSecrets((e as { message?: string }).message ?? e)}`,
+          `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
       }
@@ -2968,6 +3009,9 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
         if (fanoutCode === 0) fanoutCode = 6;
       }
     }
+    // Same rule for the audit handle the inner finally already reported: never
+    // over an arm failure, only over an otherwise-clean 0.
+    if (fanoutCode === 0 && auditCloseFailed) fanoutCode = 6;
   }
   return finish(
     fanRequestId ?? newRequestId(),

@@ -502,3 +502,88 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+## Status
+
+`in-progress` — code review round 1 complete (PR #258, 2026-09-17). Every finding
+patched; the MANDATORY live e2e demo in the DoD remains **deferred by operator**
+(handoff at `_bmad-output/plans/df5-3-live-e2e-handoff.md`), so the story is not
+`done`.
+
+## Review Findings
+
+Adversarial review round 1 on PR #258 — 12 parallel reviewers (3 blind-hunter, 7
+edge-case/test, 2 acceptance auditors) over a chunked `git diff origin/dev`
+(5,083 insertions / 173 deletions, 52 files). 118 raw findings → 97 after dedupe.
+Fixed in two waves (7 source clusters, then 7 test clusters) plus four follow-up
+rounds raised by the agents against each other.
+
+### Patched — HIGH
+
+- [x] [Review][Patch] Hop 8's strict authorization ordering was skipped ENTIRELY when `pr.createdAt` was absent — fail-OPEN on AC7 [src/audit/chain.ts]. The whole conjunction, including the `reverify.completedAt < approval.decidedAt` half that needs no PR timestamp, was gated on all three stamps. `ghFetchPull` never fetches `createdAt`, so a PR-URL walk whose record carries no `extensions.pr` enforced NOTHING and reported `complete: true`. Each pairwise constraint now has its own guard; a stamp the constraint needs but cannot find is a named `broken` hop. A second cause was found while fixing: `prEntry` was assigned only on hop 1's SUCCESS paths, so any post-fetch hop-1 failure left hop 8 blind to a `createdAt` sitting in the record it also reads.
+- [x] [Review][Patch] Tamper detection on hops 1/7/8 was defeated by editing the field that FORMS the subject id [src/audit/chain.ts]. `authorizingDigest` keyed its prior-row lookup on `subjectId`, so rewriting `extensions.approval.approverId` changed the key, found no prior, appended a NEW first-observation row and resolved clean. Priors are now matched on `(hop, walk-observed)` alone; a differently-keyed prior for a singular hop reports `evidence-mismatch` with new `expectedSubjectId`/`actualSubjectId` fields.
+- [x] [Review][Patch] `ghFetchPull` never drained `stderr`, so a chatty `gh` deadlocked the walk with no working ceiling [src/audit/chain.ts]. Once the pipe buffer filled, `proc.exited` never settled; the per-hop ceiling is measured after `fn()` returns and the total ceiling only between hops. stderr is now drained concurrently, redacted and capped into the `pr-fetch-failed` message, and the spawn has a real kill-on-timeout.
+- [x] [Review][Patch] `canonicalJson` and `JSON.stringify` disagreed on an `undefined` object member, producing a PERMANENT false `evidence-mismatch` [src/audit/link-store.ts, src/providers/driver.ts]. Live sites: harvest's `{ tip: stepA.tip }` and teardown's `{ closedAt }`. The store is append-only with RAISE(ABORT) triggers, so the row could never be corrected. Both canonicalisers now drop `undefined` members; `detail_json` is persisted with the canonicaliser so the stored bytes are the exact digest preimage.
+- [x] [Review][Patch] `openAuditStore` chmod'd the store's PARENT DIRECTORY unconditionally [src/audit/link-store.ts]. `QDS_AUDIT_DB=/tmp/audit.db` chmod'd `/tmp` to 0700; a bare filename chmod'd the CWD. PROVEN live to refuse every dispatch with `audit-store-unavailable: EPERM … chmod '/tmp'`. Only a directory the call actually created is chmod'd now, with a regression test that dispatches against a pre-existing unowned parent.
+- [x] [Review][Patch] A lawful re-harvest made hop 6 permanently `evidence-mismatch` [src/providers/harvest.ts, src/audit/chain.ts]. The bundle link's `subjectId` was the constant path, so the second harvest collided on the UNIQUE key and was dropped while the FILE was overwritten — the walker then recomputed a digest that could never match the frozen `detail.sha256`. Subjects now carry the generation (`<bundlePath>#<sha256>` / `#<tip>`); the walker takes the newest row per event and digest-checks every row.
+- [x] [Review][Patch] The `teardown` link was emitted after the irreversible close, outside every step, on a path that could never re-run [src/providers/teardown.ts]. A store refusal turned a fully successful teardown into a reported failure attributed to no step, and the operator's re-run short-circuited at the first-close-wins guard BEFORE the emit — so hop 5 reported `unlinked` forever. The emit moved inside the `close` step, and a healing emit was added to the first-close-wins arm.
+- [x] [Review][Patch] The `reap` emit could throw mid-sweep after `driver.destroy` succeeded [src/providers/reaper.ts]. The generic catch then pushed `destroy-failed` while the unit was still in `executed.destroy` — one report counting a box as destroyed AND as failed, with a remediation sending the operator after a box that no longer exists. Now wrapped per-unit; a store fault logs and the sweep continues.
+- [x] [Review][Patch] `createRun` dropped `correlation.requestId`, and emitters invented one via `newRequestId()` [src/providers/{credentials,driver,harvest,teardown,reaper}.ts]. An invented join key is the same class of fabricated evidence as an invented `repoSlug` — and the walker JOINs `sessions.request_id` on it, so it is a FALSE correlation, not a weak one. All four emitters now take the id from the record alone and skip when it is absent (CONTRACT C5 option (c)); `provisionAdmittedRun`'s `create` keeps `opts.requestId` as its primary source, because the record provably has no stamp at that point.
+- [x] [Review][Patch] One run's hop-5 links used two different `repoSlug` sources [src/fleet/dispatch.ts, src/providers/driver.ts]. `create` derived it from the record; `fill` and `setup-gate` used the dispatch-local variable, so an unattributed run emitted `fill` + `setup-gate` with no `create` — a set the chain reads as "the box was filled before it was created". Dispatch now derives one record-sourced slug and all three sites skip together.
+- [x] [Review][Patch] Any non-`ChainWalkError` fault exited 1, colliding with "the chain is broken" [scripts/qds-audit.ts]. VERIFIED: a mistyped `--runs-dir` gave exit 1 with 0 bytes on stdout, so a CI gate branching `1 → parse the report` parsed nothing and an environment fault was indistinguishable from a real audit break. Exit 1 is now reachable only from a produced ChainReport.
+- [x] [Review][Patch] `issueId` was cast `as number` with no type check, and the digits-only regex was used as a CONVERSION condition rather than a validation GATE [scripts/pipeline-run.ts]. `" 1"`, `"+1"`, `"1.0"`, `"1e3"` fell through as raw strings; `repoSlug` and `issueUrl` both had explicit refusals while the co-equal half of the INV-RUN-3 pair had none. Now a gate applying `--issue`'s own test character-for-character.
+- [x] [Review][Patch] Hop 2 stopped producing AC6's `evidence-not-harvested` and the hop table's `not-applicable` [src/audit/chain.ts]. Resolved by keeping the record as authority (stronger than the spec, per INV-AUDIT-5) while restoring both spec statuses. **One deviation remains, deliberately**: a record carrying no `extensions.budget` correlation returns `broken` where the hop-2 row says `not-applicable` — the fail-closed reading.
+
+### Patched — MEDIUM / LOW (summary)
+
+- [x] [Review][Patch] `rowsByEvent` silently kept only the LAST row per event, dropping lawful duplicates from both the digest and order checks [src/audit/chain.ts].
+- [x] [Review][Patch] An unparseable `occurred_at` silently DISABLED the ordering check — the cheapest way to switch it off. Now a write-time refusal (canonical UTC ISO required) plus a read-side `broken` for rows already on disk.
+- [x] [Review][Patch] Hops 4/5/6 never checked `recordError`, so an unreadable record produced the false claim "the reaper never collected this run".
+- [x] [Review][Patch] `ChainWalkError` could never escape `walkAuditChain` — `timed`'s catch-all flattened it, making `pr-fetch-failed` unreachable and the CLI's handler dead code.
+- [x] [Review][Patch] Neither ceiling could interrupt a hop; both were measured after the fact. Hops now race a real timer, `hop-timeout` no longer overwrites a `broken`, and a `budget: "hop" | "total"` discriminator distinguishes the two exhaustion causes.
+- [x] [Review][Patch] The walker stamped `occurred_at = now()` for events that happened days earlier, into an append-only store that sorts by that column.
+- [x] [Review][Patch] Unbounded reads: the whole bundle buffered to feed a hasher (the emitter already streams), and an unbounded `gate_results` scan for 50 rows.
+- [x] [Review][Patch] `ON CONFLICT DO NOTHING` silently discarded a DIVERGENT re-emit and logged `status: "ok"`; divergence is now read back and logged `outcome: "divergent"` / `status: "error"` without throwing.
+- [x] [Review][Patch] The walk opened the CREATING-and-MIGRATING constructor for its digest writer, so a store removed mid-walk was silently recreated and migrated. It now appends through the one inode-verified handle.
+- [x] [Review][Patch] `audit-store-corrupt` was unreachable dead code — `bun:sqlite`'s `new Database()` is lazy, so corruption surfaced on the first statement, outside the classifying catch, reaching callers as a bare `SQLiteError` no one could narrow on.
+- [x] [Review][Patch] `canonicalJson` flattened `Date` and every `toJSON` carrier to `{}` — silent EVIDENCE LOSS with a digest faithfully attesting to the empty object. Both copies now honour `toJSON`, ordered BEFORE the array branch (they had drifted onto opposite sides, which would have made an array carrying `toJSON` digest differently in each).
+- [x] [Review][Patch] `BigInt` and cyclic `detail` escaped as raw `TypeError`s; both are now typed `audit-link-invalid` at the store boundary.
+- [x] [Review][Patch] Dispatch's `auditStore?.record(...)` silently swallowed links before the open and threw into a CLOSED handle after it — the two failure modes exactly inverted from the comments. Also: the handle leaked on every provisioning refusal, and the fan-out runs up to 8 dispatches per process.
+- [x] [Review][Patch] Single-dash flags were silently DROPPED by the CLI, so `-runs-dir=/fixtures` walked the developer's real `.sandbox/`; repeated flags silently last-won; empty flag values resolved to CWD; `run()` called `process.exit`, making the exit matrix undrivable in-process.
+- [x] [Review][Patch] `admittedCeilingBeside` echoed witness bytes into the engine log unsanitized and unbounded — and it is the reader that actually FIRES, shadowing the branch whose sanitisation was documented as protecting this path (INV-RUN-5, pre-existing).
+- [x] [Review][Patch] The witness reader degraded SILENTLY to "predates the field" on a structurally malformed witness, never checked its own `requestId` against the invocation's, and aborted an already-paid in-box run on a transient sqlite fault.
+- [x] [Review][Patch] `approval-precedes-report` said "before" for the equality case the AC7 tightening introduces, and shared its branch with the unparseable-timestamp case; the latter is now its own `approval-timestamp-unparseable` refusal. The refusal CODE and the `<=` strictness are unchanged.
+- [x] [Review][Patch] Audit-store close policy unified across four CLIs (guarded, reported, and feeding the exit decision); `cap-hit-demo`'s unguarded `finally` had been discarding a completed run's result.
+- [x] [Review][Patch] `fleet observe` and the fan-out materialised `audit.db` unconditionally, against the file-set discipline `sandbox-reap` states one file over.
+- [x] [Review][Patch] Type/contract tidying: `keyHash`/`keyHashPrefix` escaped the exported `HopOutcome` via spread; `RunChain.runId` held a PR URL when hop 1 resolved no run; `earlier`/`later` meant opposite things in hop 8 vs hops 4/5/6; `FillRunAuditOptions.repoSlug` was optional, letting a caller compile a silently `unlinked` hop.
+
+### Patched — test defects (the suites that would not have caught the above)
+
+- [x] [Review][Patch] **The fleet suite was writing REAL rows into the operator's live `.sandbox/audit.db`.** Measured: 3,528 rows, of which 3,502 carry the fixture slug `owner/repo`, co-resident with the 26 rows from the real DF5.3 round. Six suites were offending (not the one named in review), ~1,038 rows per full run. All now isolate `QDS_AUDIT_DB` per test. **The existing debris was NOT touched** — the table has append-only triggers, so pruning means copying the 26 real rows to a fresh store. Operator's call.
+- [x] [Review][Patch] `unlinked`, the chain's core failing status, had ZERO positive coverage — mutation-proven that reclassifying it as chain-COMPLETE left the suite green.
+- [x] [Review][Patch] `firstDigestMismatch`, the only tamper guard on hops 4/5/6, was unreachable by every fixture — mutation-proven that `return undefined` as its first line broke no test.
+- [x] [Review][Patch] The second strict authorization boundary (`decidedAt === pr.createdAt`) was never asserted — mutation-proven that relaxing it to `<=` left the suite green.
+- [x] [Review][Patch] Nothing asserted dispatch emits ANY audit link; the `run-box.create` and `run-box.fill` emits were asserted by no test in the repository; `cap-hit-demo`'s ~30 lifecycle tests were audit-blind; the live harness dropped every credential and bundle link the live rounds exist to prove.
+- [x] [Review][Patch] Redaction tests asserted against env values the code under test never reads (tautologies passing on empty output); `keyHashPrefix` assertions were prefixes of a full hash the same output already contained; `proc.exitCode ?? 1` converted a CRASHED CLI into the exact value three tests assert.
+
+### False positives — rejected with evidence
+
+- [x] [Review][Dismiss] "Duplicate `revoke`/`verify-revoked` rows on a teardown re-run." The re-emit carries the same `(run_id, hop, event, subject_key)` — `subjectId` is `rec.keyHash`, unchanged — so `ON CONFLICT DO NOTHING` collapses it. A comment now says so at the site.
+- [x] [Review][Dismiss] "`createRun` drops `correlation.requestId`." `CreateRunOptions` has no `correlation` field and no call site passes one; the only requestId-ish field is unreachable behind `assertAdmissionNotDelegated`.
+- [x] [Review][Dismiss] "The reaper emit abandons the loop." The per-unit `try`/`catch` is INSIDE the loop; the sweep always continued. The double-counting half of that finding was real and was fixed.
+- [x] [Review][Dismiss] "`recordAuditLink` is spread after `...seams`, so an injected test seam is overridden." `DispatchDeps` declares no such field; the suggested fix would not compile.
+- [x] [Review][Dismiss] "`sha256File` uses the `node:fs` sync trio with no import added" — blind reviewer without repo access; the imports are present.
+- [x] [Review][Dismiss] "The reaper fixture should seed a box name distinct from the runId." Structurally impossible: the emit looks the record up BY VM NAME and `readRecord` refuses a record whose `runId` differs from its filename stem. The real half (an unasserted `detail` shape) was fixed.
+- [x] [Review][Dismiss] "Assert exactly one captured `run-box.teardown` after both calls." That would red-flag the healing emit, which is emitted unconditionally by design. The real invariant — two emits, ONE row key, equal field-for-field bar timestamps — is pinned instead.
+
+### Deferred
+
+- [x] [Review][Defer] The audit-store WRITER CLIs have no `--audit-db` flag; only the reader got one — deferred to DF5.4-C9, which is the story that needs the frozen fixture. Complete inventory of bare `openAuditStore()` call sites recorded in the review report, including `src/fleet/dispatch.ts`, which a writer-CLI flag alone would not reach.
+
+### Pre-existing / environmental notes
+
+- The `buildIdFileInputs` walked-input digest pin was **already stale on this branch before the review** — verified by re-running against a clean `HEAD` with the working tree stashed. DF5.3 edited Dockerfile-COPY'd inputs and never re-pinned, which would have left `dev` red on merge. No reviewer could see it: the file is not in the PR's diff. Re-pinned last, after the final fixer landed, per the test's own same-commit ritual. It is the FILE-INPUT hash, not the published image digest — no republish is owed and `DEFAULT_IMAGE_REF` is untouched.
+- `bun:sqlite`'s `Database.close()` does not release the underlying file descriptor (probed directly on bun 1.4.0, survives `close()`, `close(true)` and `Bun.gc(true)`). The close-on-refusal fix is still correct and necessary; the in-code comment overstates what closing buys in fd terms.
+- A dropped `reap` link surfaces only as a log line — `SweepReport` has no non-fatal channel, so a JSON-consuming cron/CI reader cannot see it. Inventing a public shape was out of scope for a review round.
+- `sanitizeForMessage` is a control-character escaper, not a redactor. The INV-RUN-5 fix bounds log-forging and unbounded echo; it does not redact a token PREFIX that a JSON parse error quotes. Closing that residual means dropping the parse-error echo entirely.
+- Whole-suite runs on a loaded machine produce ~26 spurious 5000ms timeouts (git fixtures, gitnexus CLI spawns). All verified green in isolation. Focal suites: 4,344 pass.

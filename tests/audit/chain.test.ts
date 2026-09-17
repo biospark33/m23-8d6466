@@ -40,7 +40,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { OQ4_VOID_REASON, chainVerdict, walkAuditChain } from "../../src/audit/index.ts";
+import { ChainWalkError, OQ4_VOID_REASON, chainVerdict, walkAuditChain } from "../../src/audit/index.ts";
 import type { AuditLinkInput, ChainReport, HopOutcome } from "../../src/audit/index.ts";
 import { REAP_NOT_APPLICABLE_REASON } from "../../src/audit/chain.ts";
 import { applyMigrations, SCHEMA_DDL } from "../../src/phase-engine/trace/schema.ts";
@@ -99,10 +99,24 @@ interface RecordSpec {
   requestId: string;
   reportId?: string;
   prUrl?: string;
-  prCreatedAt?: string;
+  /** `null` omits `extensions.pr.createdAt` entirely — hop 8's missing-stamp arm. */
+  prCreatedAt?: string | null;
   httpsUrl?: string;
   closedAt?: Date;
   superseded?: string[];
+  /**
+   * Which half of the budget correlation to withhold. The walker reports three
+   * DIFFERENT `actual` strings ("neither present" / "repoSlug absent" /
+   * "issueId absent"), so a boolean flag could only ever reach the first.
+   */
+  omitCorrelation?: "both" | "repo" | "issue";
+}
+
+function correlationOf(omit: RecordSpec["omitCorrelation"]): Record<string, string> {
+  if (omit === "both") return {};
+  if (omit === "repo") return { issueId: ISSUE };
+  if (omit === "issue") return { repoSlug: SLUG };
+  return { repoSlug: SLUG, issueId: ISSUE };
 }
 
 /** Real RunRecordStore writes: create → set (core + extensions) → close. */
@@ -111,12 +125,15 @@ function seedRecord(spec: RecordSpec): void {
   store.create(spec.runId, new Date(iso(0)));
   const extensions: Record<string, Record<string, string | number | string[]>> = {
     budget: {
-      repoSlug: SLUG, issueId: ISSUE,
+      ...correlationOf(spec.omitCorrelation),
       capMicroUsd: 50_000_000, spentMicroUsd: 0, reservedMicroUsd: 0, admittedCeilingMicroUsd: 50_000_000,
     },
   };
   if (spec.prUrl !== undefined) {
-    extensions.pr = { prUrl: spec.prUrl, prNumber: 57, createdAt: spec.prCreatedAt ?? PR_CREATED };
+    extensions.pr = {
+      prUrl: spec.prUrl, prNumber: 57,
+      ...(spec.prCreatedAt === null ? {} : { createdAt: spec.prCreatedAt ?? PR_CREATED }),
+    };
   }
   if (spec.reportId !== undefined) {
     extensions.approval = {
@@ -134,6 +151,21 @@ function seedRecord(spec: RecordSpec): void {
     extensions,
   });
   if (spec.closedAt !== undefined) store.close(spec.runId, spec.closedAt);
+}
+
+/**
+ * Plant unregistered keys on `extensions.pr` the way an older build did: the
+ * store's WRITE path refuses an unknown key, its READ path keeps whatever a
+ * registered namespace already holds on disk, and the per-field deep merge
+ * re-persists it forever. That is the passthrough hop 1's projection closes.
+ */
+function plantPrExtras(runId: string, extras: Record<string, unknown>): void {
+  const path = join(runsDir, `${runId}.json`);
+  const doc = JSON.parse(readFileSync(path, "utf8")) as { extensions?: Record<string, Record<string, unknown>> };
+  const pr = doc.extensions?.pr;
+  if (pr === undefined) throw new Error(`no extensions.pr on ${path}`);
+  Object.assign(pr, extras);
+  writeFileSync(path, JSON.stringify(doc), { mode: 0o600 });
 }
 
 /** A complete ReverifyReport line the report layer's own schema accepts. */
@@ -246,14 +278,39 @@ function seedLinks(rows: AuditLinkInput[]): void {
   }
 }
 
+/**
+ * A row the STORE would refuse today (FIX-1 validates ISO stamps at write
+ * time) but which sits on disk from before that landed. The walker must still
+ * meet it — the read-side guard is the half this covers. The append-only
+ * triggers block UPDATE/DELETE, never INSERT.
+ */
+function seedRawLink(row: AuditLinkInput): void {
+  const db = new Database(auditDb);
+  try {
+    db.prepare(
+      `INSERT INTO audit_links (run_id, repo_slug, request_id, hop, event, subject_id, subject_kind,
+         evidence_path, evidence_digest, detail_json, occurred_at, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      row.runId, row.repoSlug, row.requestId, row.hop, row.event, row.subjectId ?? null, row.subjectKind ?? null,
+      row.evidencePath ?? null, row.evidenceDigest, row.detail === undefined ? null : canonicalJson(row.detail),
+      row.occurredAt, row.recordedAt,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+/** The exact object every credential row digests — the emitter convention, shared so a test can restate it. */
+const CREDENTIAL_DETAIL = { keyHash: KEY_HASH, limitMicroUsd: 50_000_000 };
+
 function credentialLinks(runId = RUN, requestId = REQ, base = 2): AuditLinkInput[] {
   const events: [string, string][] = [["mint", "m"], ["deliver", "d"], ["revoke", "r"], ["verify-revoked", "v"]];
   return events.map(([event], i) =>
     link({
       runId, requestId, event, subjectId: KEY_HASH, subjectKind: "run-key",
       evidencePath: join(runsDir, `${runId}.json`),
-      detail: { keyHash: KEY_HASH, limitMicroUsd: 50_000_000 },
-      evidenceDigest: sha256Hex(canonicalJson({ keyHash: KEY_HASH, limitMicroUsd: 50_000_000 })),
+      detail: CREDENTIAL_DETAIL,
+      evidenceDigest: sha256Hex(canonicalJson(CREDENTIAL_DETAIL)),
       occurredAt: iso(base + i * 0.5 + 0), recordedAt: iso(base + i),
     }),
   );
@@ -270,9 +327,18 @@ function boxLinks(runId = RUN, requestId = REQ): AuditLinkInput[] {
   );
 }
 
+/**
+ * A BINARY bundle, like the real thing: a git bundle is an ASCII header
+ * followed by a packfile whose bytes run the full 0x00–0xff range. An
+ * ASCII-only fixture cannot catch a walker that round-trips the file through
+ * latin1 before hashing (utf8 re-encodes every byte >= 0x80 into two), which is
+ * exactly how hop 6 reported evidence-mismatch on every harvested bundle.
+ */
 function bundleFile(runId = RUN): string {
   const path = join(runsDir, `${runId}.bundle`);
-  writeFileSync(path, `bundle-bytes-${runId}\n`, { mode: 0o600 });
+  const header = Buffer.from(`# v2 git bundle\n${runId}\n`, "utf8");
+  const pack = Buffer.from([0x50, 0x41, 0x43, 0x4b, 0x00, 0x02, 0x80, 0x81, 0xc3, 0xa9, 0xfe, 0xff, 0x9c, 0x0a]);
+  writeFileSync(path, Buffer.concat([header, pack]), { mode: 0o600 });
   return path;
 }
 
@@ -372,19 +438,31 @@ describe("complete run (DoD: ten hops, zero nulls, one key)", () => {
       "pr-run", "run-issue", "run-cost", "run-credential", "run-box",
       "run-bundle", "run-reverify", "run-approval", "run-gate-evidence", "memory-retain-receipt",
     ];
-    for (const name of hopNames) {
-      const hop = run.hops[name] as HopOutcome | undefined;
-      expect(hop).toBeDefined();
-      expect(hop?.status).not.toBe("broken");
-    }
+    // The hop KEY SET, not membership: the walker backfills every name in its
+    // own HOPS constant with a `broken` placeholder, so a per-name
+    // `toBeDefined()` is structurally guaranteed and a silently added or
+    // renamed hop key passes it. Equality catches both.
+    expect(Object.keys(run.hops).sort()).toEqual([...hopNames].sort());
+    // The exact status of every hop. `.not.toBe("broken")` left the other five
+    // failing statuses (unlinked, evidence-mismatch, order-violation,
+    // hop-timeout, evidence-not-harvested) passing this loop.
+    expect(Object.fromEntries(hopNames.map((n) => [n, (run.hops[n] as HopOutcome).status]))).toEqual({
+      "pr-run": "resolved", "run-issue": "resolved", "run-cost": "resolved", "run-credential": "resolved",
+      "run-box": "resolved", "run-bundle": "resolved", "run-reverify": "resolved", "run-approval": "resolved",
+      "run-gate-evidence": "resolved", "memory-retain-receipt": "void",
+    });
     const memory = run.hops["memory-retain-receipt"] as { status: string; reason: string };
     expect(memory.status).toBe("void");
     expect(memory.reason).toBe(OQ4_VOID_REASON);
     const cost = run.hops["run-cost"] as { status: string; detail: { totalMicroUsd: number; perRole: Record<string, number>; hasTokenRows: boolean } };
     expect(cost.status).toBe("resolved");
-    expect(cost.detail.totalMicroUsd).toBeGreaterThan(0);
     expect(cost.detail.hasTokenRows).toBe(true);
-    expect(Object.keys(cost.detail.perRole).sort()).toEqual(["box-hours", "lead", "worker"]);
+    // EXACT µ$, derived from the fixture's own inputs: $0.012345 → 12_345 µ$,
+    // $0.002 → 2_000 µ$, and a 30-minute lifetime at 3_600_000 µ$/h →
+    // 1_800_000 µ$. Key names alone let all the spend land in one role, and
+    // `> 0` lets a USD→µ$ scale error of 10³ through.
+    expect(cost.detail.perRole).toEqual({ lead: 12_345, worker: 2_000, "box-hours": 1_800_000 });
+    expect(cost.detail.totalMicroUsd).toBe(12_345 + 2_000 + 1_800_000);
     expect(report.complete).toBe(true);
     expect(chainVerdict(report).complete).toBe(true);
   });
@@ -489,6 +567,20 @@ describe("per-run isolation (DoD: side-by-side runs, no cross-run reads)", () =>
     expect(approvalA.detail.reportId).toBe(REPORT_ID);
     const approvalB = hopOf(reportB, "run-approval") as { status: string; detail: { reportId: string } };
     expect(approvalB.detail.reportId).toBe(REPORT_ID_B);
+    // Hop 3 reads only its OWN run's ledger rows: the ledger was seeded for A
+    // alone, so B has no cost provenance and must say so. A `readRunCost` that
+    // ignored its runId would resolve here on A's money.
+    const costA = hopOf(reportA, "run-cost") as { status: string; detail: { totalMicroUsd: number } };
+    expect(costA.status).toBe("resolved");
+    const costB = hopOf(reportB, "run-cost") as { status: string; actual: string };
+    expect(costB.status).toBe("broken");
+    expect(costB.actual).toBe("hasEvents: false");
+    expect(reportB.complete).toBe(false);
+    // Hop 4 likewise: two runs, two distinct mint rows, never one shared row.
+    const credA = hopOf(reportA, "run-credential") as { detail: { linkIds: Record<string, number> } };
+    const credB = hopOf(reportB, "run-credential") as { detail: { linkIds: Record<string, number> } };
+    expect(credA.detail.linkIds.mint).toBeGreaterThan(0);
+    expect(credB.detail.linkIds.mint).not.toBe(credA.detail.linkIds.mint);
     expect(Object.keys(reportA.runs)).toEqual([RUN]);
     expect(Object.keys(reportB.runs)).toEqual([RUN_B]);
   });
@@ -609,6 +701,14 @@ describe("authorizing-record tamper (DoD: digest coverage is entry-scoped)", () 
     const first = await walk(RUN);
     expect(hopOf(first, "pr-run").status).toBe("resolved");
     expect(hopOf(first, "run-approval").status).toBe("resolved");
+    // While the record is still OPEN, AC5's not-applicable has only one of its
+    // two halves: `unlinked` naming the sweep is the fail-closed reading of an
+    // uncollected box, and it must not be reported as a complete chain.
+    const openBox = hopOf(first, "run-box") as { status: string; emitter: string; diagnostic: string };
+    expect(openBox.status).toBe("unlinked");
+    expect(openBox.emitter).toBe("sweep");
+    expect(openBox.diagnostic).toContain("closedAt absent");
+    expect(first.complete).toBe(false);
 
     const store = new RunRecordStore({ dir: runsDir });
     store.set(RUN, { spendMicroUsd: 1_234_567 }); // the lawful captureSpend write (while open)
@@ -659,8 +759,10 @@ describe("ordering (DoD: non-decreasing lifecycle, STRICT authorization)", () =>
     const report = await walk(RUN);
     const hop8 = hopOf(report, "run-approval") as { status: string; constraint: string; earlier: string; later: string };
     expect(hop8.status).toBe("order-violation");
-    expect(hop8.earlier).toBe(iso(9));
-    expect(hop8.later).toBe(COMPLETED_AT);
+    // CONSTRAINT order, as on hops 4/5/6: `earlier` is the event the constraint
+    // requires FIRST (the report's completedAt), `later` the one that preceded it.
+    expect(hop8.earlier).toBe(COMPLETED_AT);
+    expect(hop8.later).toBe(iso(9));
     expect(report.complete).toBe(false);
   });
 
@@ -677,6 +779,85 @@ describe("ordering (DoD: non-decreasing lifecycle, STRICT authorization)", () =>
     const hop8 = hopOf(report, "run-approval") as { status: string; constraint: string };
     expect(hop8.status).toBe("order-violation");
     expect(hop8.constraint).toContain("strict");
+  });
+
+  test("decidedAt EQUAL to pr.createdAt → order-violation (the SECOND strict boundary)", async () => {
+    // The fixture's default stamps are 60 s apart, so no off-by-one on this
+    // comparison could ever register: `<` relaxed to `<=` left every test green.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, prCreatedAt: DECIDED_AT, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop8 = hopOf(report, "run-approval") as { status: string; constraint: string; earlier: string; later: string };
+    expect(hop8.status).toBe("order-violation");
+    expect(hop8.constraint).toContain("pr.createdAt");
+    expect(hop8.constraint).toContain("strict");
+    expect(hop8.earlier).toBe(DECIDED_AT);
+    expect(hop8.later).toBe(DECIDED_AT);
+    expect(report.complete).toBe(false);
+  });
+
+  test("a PR created BEFORE its own approval → order-violation on the pr.createdAt half", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, prCreatedAt: iso(10.5), closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop8 = hopOf(report, "run-approval") as { status: string; constraint: string; earlier: string; later: string };
+    expect(hop8.status).toBe("order-violation");
+    expect(hop8.constraint).toContain("pr.createdAt");
+    expect(hop8.constraint).toContain("strict");
+    // The first half (completedAt < decidedAt) holds here, so this is the
+    // SECOND constraint reporting, in constraint order.
+    expect(hop8.earlier).toBe(DECIDED_AT);
+    expect(hop8.later).toBe(iso(10.5));
+    expect(report.complete).toBe(false);
+  });
+
+  test("teardown stamped before setup-gate → order-violation on hop 5, naming the box constraint", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    // create 4 <= fill 5 <= setup-gate 6, and a teardown stamped at 3.
+    const rows = boxLinks().map((r) => (r.event === "teardown" ? { ...r, occurredAt: iso(3) } : r));
+    seedLinks([...credentialLinks(), ...rows, ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop5 = hopOf(report, "run-box") as { status: string; constraint: string; earlier: string; later: string };
+    expect(hop5.status).toBe("order-violation");
+    // The conditional ` <= reap` tail is absent on a run with no reap row —
+    // the string itself is rendered by no other test in either arm.
+    expect(hop5.constraint).toBe("create <= fill <= setup-gate <= teardown (non-decreasing)");
+    expect(hop5.earlier).toBe(iso(6));
+    expect(hop5.later).toBe(iso(3));
+    expect(report.complete).toBe(false);
+  });
+
+  test("bundle-fetch stamped before bundle-verify → order-violation on hop 6", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    const rows = bundleLinks().map((r) => (r.event === "bundle-fetch" ? { ...r, occurredAt: iso(4) } : r));
+    seedLinks([...credentialLinks(), ...boxLinks(), ...rows]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop6 = hopOf(report, "run-bundle") as { status: string; constraint: string; earlier: string; later: string };
+    expect(hop6.status).toBe("order-violation");
+    expect(hop6.constraint).toContain("bundle-verify <= bundle-fetch");
+    expect(hop6.earlier).toBe(iso(5));
+    expect(hop6.later).toBe(iso(4));
+    expect(report.complete).toBe(false);
   });
 
   test("a shared-millisecond credential pair does NOT violate (non-strict lifecycle)", async () => {
@@ -713,6 +894,61 @@ describe("reap not-applicable (DoD: cleanly torn-down run)", () => {
   });
 });
 
+// ─── 9b. unlinked is a FAILING status (INV-AUDIT-4) ──────────────────────────
+
+describe("unlinked (DoD: a missing emitter breaks the chain, never completes it)", () => {
+  test("a credential lifecycle missing verify-revoked names the emitter and fails the chain", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    // mint, deliver, revoke — and no witness that the revocation took effect.
+    seedLinks([...credentialLinks().slice(0, 3), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop4 = hopOf(report, "run-credential") as { status: string; emitter: string; diagnostic: string };
+    expect(hop4.status).toBe("unlinked");
+    expect(hop4.emitter).toBe("verifyRevoked");
+    expect(hop4.diagnostic).toContain("verify-revoked");
+    expect(hop4.diagnostic).toContain("INV-AUDIT-4");
+    // The whole point of the status: `not-applicable` here would read as a
+    // COMPLETE chain over a run whose key was never proven revoked.
+    expect(report.complete).toBe(false);
+    expect(chainVerdict(report).complete).toBe(false);
+    expect(chainVerdict(report).brokenHops.map((h) => h.hop)).toEqual(["run-credential"]);
+  });
+});
+
+// ─── 9c. run-cost fails closed on a run with no provenance (DF5.4-C1) ────────
+
+describe("run-cost fail-closed (DoD: no ledger rows is never zero spend)", () => {
+  test("an absent ledger and a ledger holding only ANOTHER run's rows both break hop 3", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    // (a) no ledger at all — the open itself refuses, by code.
+    const absent = await walk(RUN);
+    const costAbsent = hopOf(absent, "run-cost") as { status: string; actual: string; evidencePath: string };
+    expect(costAbsent.status).toBe("broken");
+    expect(costAbsent.actual).toBe("ledger-absent");
+    expect(costAbsent.evidencePath).toBe(ledgerPath);
+    expect(absent.complete).toBe(false);
+
+    // (b) a real ledger that simply carries no row for THIS run.
+    seedLedger(RUN_B, REQ_B);
+    const report = await walk(RUN);
+    const cost = hopOf(report, "run-cost") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(cost.status).toBe("broken");
+    expect(cost.actual).toBe("hasEvents: false");
+    expect(cost.diagnostic).toContain("DF5.4-C1");
+    expect(cost.evidencePath).toBe(ledgerPath);
+    expect(report.complete).toBe(false);
+  });
+});
+
 // ─── 10. evidence-not-harvested distinct from unlinked ───────────────────────
 
 describe("evidence-not-harvested (DoD: named cause and path, never a missing link)", () => {
@@ -727,9 +963,14 @@ describe("evidence-not-harvested (DoD: named cause and path, never a missing lin
     const hop6 = hopOf(report, "run-bundle") as { status: string; evidencePath: string };
     expect(hop6.status).toBe("evidence-not-harvested");
     expect(hop6.evidencePath).toBe(join(runsDir, `${RUN}.bundle`));
-    const hop2 = hopOf(report, "run-issue") as { status: string; evidencePath: string };
+    // AC6: hops 2/6/9 all report the unharvested trace as `evidence-not-harvested`
+    // naming the artifacts dir — never a resolved hop with a footnote.
+    const hop2 = hopOf(report, "run-issue") as { status: string; hop: string; reason: string; evidencePath: string; detail?: unknown };
     expect(hop2.status).toBe("evidence-not-harvested");
+    expect(hop2.hop).toBe("run-issue");
+    expect(hop2.reason).toContain(join(runsDir, `${RUN}-artifacts`));
     expect(hop2.evidencePath).toBe(join(runsDir, `${RUN}-artifacts`));
+    expect(hop2.detail).toBeUndefined();
     const hop9 = hopOf(report, "run-gate-evidence") as { status: string; evidencePath: string };
     expect(hop9.status).toBe("evidence-not-harvested");
     expect(hop9.evidencePath).toBe(join(runsDir, `${RUN}-artifacts`));
@@ -737,6 +978,192 @@ describe("evidence-not-harvested (DoD: named cause and path, never a missing lin
     for (const name of ["run-bundle", "run-issue", "run-gate-evidence"]) {
       expect(hopOf(report, name).status).not.toBe("unlinked");
     }
+    expect(report.complete).toBe(false);
+  });
+});
+
+// ─── 10b. hop 6 digests the bundle's RAW BYTES ───────────────────────────────
+
+describe("bundle digest over raw bytes (regression: the latin1 round-trip)", () => {
+  test("a binary bundle resolves and reports the same sha256 the emitter wrote", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const bytes = readFileSync(join(runsDir, `${RUN}.bundle`));
+    expect(bytes.some((b) => b >= 0x80)).toBe(true); // the fixture must be genuinely binary
+    const fileSha = createHash("sha256").update(bytes).digest("hex");
+
+    const report = await walk(RUN);
+
+    const hop6 = hopOf(report, "run-bundle") as { status: string; detail: { sha256: string; bundleBytes: number } };
+    expect(hop6.status).toBe("resolved");
+    expect(hop6.detail.sha256).toBe(fileSha); // a latin1 round-trip reports a different hex here
+    expect(hop6.detail.bundleBytes).toBe(bytes.byteLength);
+    expect(report.complete).toBe(true);
+  });
+});
+
+// ─── 10d. emitted-row tamper on hops 4/5/6 ───────────────────────────────────
+
+describe("emitted-row tamper (DoD: the digest is the guard, on every row)", () => {
+  test("a credential row whose detail no longer digests to its evidence_digest → hop 4 evidence-mismatch", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    // Every OTHER fixture row digests the detail it stores, so the recompute
+    // can never disagree — this is the one row that carries a foreign digest.
+    const tamperedDigest = sha256Hex(canonicalJson({ tampered: true }));
+    const rows = credentialLinks().map((r) => (r.event === "deliver" ? { ...r, evidenceDigest: tamperedDigest } : r));
+    seedLinks([...rows, ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop4 = hopOf(report, "run-credential") as { status: string; expectedDigest: string; actualDigest: string; evidencePath: string };
+    expect(hop4.status).toBe("evidence-mismatch");
+    expect(hop4.expectedDigest).toBe(tamperedDigest);
+    expect(hop4.actualDigest).toBe(sha256Hex(canonicalJson(CREDENTIAL_DETAIL)));
+    expect(hop4.evidencePath).toBe(join(runsDir, `${RUN}.json`));
+    expect(report.complete).toBe(false);
+  });
+
+  test("a bundle whose bytes changed after harvest → hop 6 evidence-mismatch on the claimed sha256", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    // One appended byte AFTER the link rows were written: the rows still
+    // self-digest cleanly, so only hop 6's own file-vs-claim check can see it.
+    const path = join(runsDir, `${RUN}.bundle`);
+    const claimed = createHash("sha256").update(readFileSync(path)).digest("hex");
+    writeFileSync(path, Buffer.concat([readFileSync(path), Buffer.from([0x7f])]), { mode: 0o600 });
+    const actual = createHash("sha256").update(readFileSync(path)).digest("hex");
+
+    const report = await walk(RUN);
+
+    const hop6 = hopOf(report, "run-bundle") as { status: string; expectedDigest: string; actualDigest: string; evidencePath: string };
+    expect(hop6.status).toBe("evidence-mismatch");
+    expect(hop6.expectedDigest).toBe(claimed);
+    expect(hop6.actualDigest).toBe(actual);
+    expect(hop6.evidencePath).toBe(path);
+    expect(report.complete).toBe(false);
+  });
+});
+
+// ─── 10c. hop 2 authority: the record decides, the trace corroborates ────────
+
+describe("run-issue authority (INV-AUDIT-5: the box's trace is a claim)", () => {
+  test("record correlation with an agreeing trace → resolved, corroboration confirmed", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; subjectId: string; evidencePath: string; detail: { repoSlug: string; issueId: string; corroboration: string } };
+    expect(hop2.status).toBe("resolved");
+    expect(hop2.subjectId).toBe(`${SLUG}#${ISSUE}`);
+    expect(hop2.evidencePath).toBe(join(runsDir, `${RUN}.json`)); // the HOST record, not the trace
+    expect(hop2.detail.repoSlug).toBe(SLUG);
+    expect(hop2.detail.issueId).toBe(ISSUE);
+    expect(hop2.detail.corroboration).toBe("confirmed");
+    expect(report.complete).toBe(true);
+  });
+
+  test("NULL in-box correlation (the shape every dispatched run harvests) → resolved, unavailable", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    // The box invoked bare: repo_slug and issue_id are both NULL on its session row.
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: null, issueId: null, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(PR_URL); // the PR-rooted walk, where the old code broke
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; subjectId: string; detail: { corroboration: string; corroborationReason: string } };
+    expect(hop2.status).toBe("resolved");
+    expect(hop2.subjectId).toBe(`${SLUG}#${ISSUE}`);
+    expect(hop2.detail.corroboration).toBe("unavailable");
+    expect(hop2.detail.corroborationReason).toContain("DF1.8 nullability");
+    expect(report.complete).toBe(true);
+  });
+
+  test("record vs trace disagreement → broken with the INV-AUDIT-1 divergence diagnostic", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: "999", gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(hop2.status).toBe("broken");
+    expect(hop2.expected).toContain(`issue ${ISSUE}`);
+    expect(hop2.actual).toContain("issue 999");
+    expect(hop2.diagnostic).toContain("INV-AUDIT-1");
+    expect(hop2.evidencePath).toBe(join(runsDir, `${RUN}-artifacts`, "trace", "trace.db"));
+    expect(report.complete).toBe(false);
+  });
+
+  test("record vs trace REPO disagreement → broken naming both repos (the other half of INV-AUDIT-1)", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    // Identity is the PAIR: the issue agrees, the repo does not. This is the
+    // half that would attribute a run to the wrong repository.
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: "impostor/widgets", issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(hop2.status).toBe("broken");
+    expect(hop2.expected).toContain(`repo ${SLUG}`);
+    expect(hop2.actual).toContain("impostor/widgets");
+    expect(hop2.diagnostic).toContain("INV-AUDIT-1");
+    expect(hop2.evidencePath).toBe(join(runsDir, `${RUN}-artifacts`, "trace", "trace.db"));
+    expect(report.complete).toBe(false);
+  });
+
+  test("a record carrying HALF the correlation → broken naming which half is absent", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)), omitCorrelation: "issue" });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; actual: string; evidencePath: string };
+    expect(hop2.status).toBe("broken");
+    expect(hop2.actual).toBe("issueId absent"); // never the "neither present" arm
+    expect(hop2.evidencePath).toBe(join(runsDir, `${RUN}.json`));
+    expect(report.complete).toBe(false);
+  });
+
+  test("a record carrying no correlation → broken, naming the record path", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)), omitCorrelation: "both" });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    // The box's trace DOES carry a correlation — and it cannot rescue the hop.
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(hop2.status).toBe("broken");
+    expect(hop2.expected).toContain("extensions.budget.repoSlug");
+    expect(hop2.actual).toBe("neither present");
+    expect(hop2.evidencePath).toBe(join(runsDir, `${RUN}.json`));
     expect(report.complete).toBe(false);
   });
 });
@@ -765,72 +1192,327 @@ describe("hop-timeout (DoD: a hop over its ceiling never reports resolved)", () 
     expect(report.complete).toBe(false);
     expect(chainVerdict(report).complete).toBe(false);
   });
+
+  test("the SAME slow hop 1 under a real (non-zero) ceiling stays resolved", async () => {
+    // With `hopCeilingMs: 0` every hop taking ≥ 1 ms times out, so that test
+    // cannot tell a per-hop measurement from a blanket failure. Same seam,
+    // same ~25 ms, a 50 ms ceiling: this one must resolve.
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+    const slowFetch = async (): Promise<{ body: string; headRef?: string; prUrl: string }> => {
+      Bun.sleepSync(25);
+      return { body: `run ${RUN}`, headRef: `qds/${RUN}`, prUrl: PR_URL };
+    };
+
+    const report = await walk(PR_URL, { hopCeilingMs: 1_000, fetchPull: slowFetch });
+
+    const hop1 = hopOf(report, "pr-run") as { status: string };
+    expect(hop1.status).toBe("resolved");
+    expect(report.timings.prFetchMs).toBeGreaterThanOrEqual(20); // the slow seam really ran
+    expect(report.timings.perHopMs["pr-run"]).toBeGreaterThanOrEqual(20);
+    expect(report.timings.perHopMs["pr-run"]).toBeLessThan(1_000); // under ITS ceiling, hence resolved
+  });
+
+  test("the WALK budget, not the hop's, names itself: budget 'total' at the 30 s ceiling", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    // The walk measures its total budget with Date.now(); the hop-1 seam jumps
+    // the clock past the 30 s ceiling rather than the suite waiting for it.
+    const realNow = Date.now;
+    let offset = 0;
+    Date.now = () => realNow() + offset;
+    let report: ChainReport;
+    try {
+      report = await walk(PR_URL, {
+        fetchPull: async () => {
+          offset = 40_000;
+          return { body: `run ${RUN}`, headRef: `qds/${RUN}`, prUrl: PR_URL };
+        },
+      });
+    } finally {
+      Date.now = realNow;
+    }
+
+    const hop2 = hopOf(report, "run-issue") as { status: string; ceilingMs: number; budget: string; elapsedMs: number };
+    expect(hop2.status).toBe("hop-timeout");
+    expect(hop2.budget).toBe("total"); // never "hop": the per-hop ceiling was never reached
+    expect(hop2.ceilingMs).toBe(30_000);
+    expect(hop2.elapsedMs).toBeGreaterThanOrEqual(40_000);
+    expect(report.complete).toBe(false);
+  });
 });
 
 // ─── 12. redaction (INV-AUDIT-2) ─────────────────────────────────────────────
 
 describe("redaction (DoD: INV-AUDIT-2, no secret material in report or logs)", () => {
-  test("token, provisioning-key value and minted key material never reach the report or a log line", async () => {
-    const envKey = "sk-or-v1-SECRETVALUE1234567890";
-    // A clone-URL token whose prefix the run-record store itself does not
-    // refuse (its INV-2 prefix list rejects ghs_/ghp_… on every field, URLs
-    // included) — the point is a secret that legitimately lands on disk and
-    // must still never reach the chain or a log line.
+  test("a clone-URL token and minted key material never reach the report or a log line", async () => {
+    // No OPENROUTER_PROVISIONING_KEY arm: `src/audit/chain.ts` has zero
+    // references to that variable, so the assertion (and the env juggling that
+    // set it up) could never fail whatever the walker did. These two secrets
+    // are the ones the walk genuinely READS — the record's httpsUrl and the
+    // mint row's detail.
     const gitToken = "tok_SECRETTOKENVALUE123456789";
     const minted = "sk-or-v1-MINTEDKEYVALUE999999999";
-    const prevEnv = process.env.OPENROUTER_PROVISIONING_KEY;
-    process.env.OPENROUTER_PROVISIONING_KEY = envKey;
+    seedRecord({
+      runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)),
+      // A clone URL legitimately carries an App token (URL fields skip the shape scan).
+      httpsUrl: `https://x-access-token:${gitToken}@github.com/acme/widgets`,
+    });
+    seedLedger();
+    // The mint row carries key material in its detail — the walker must digest
+    // it, never echo it.
+    const mintDetail = { keyHash: KEY_HASH, limitMicroUsd: 50_000_000, keyMaterial: minted };
+    seedLinks([
+      link({
+        event: "mint", subjectId: KEY_HASH, subjectKind: "run-key", detail: mintDetail,
+        evidenceDigest: sha256Hex(canonicalJson(mintDetail)), evidencePath: join(runsDir, `${RUN}.json`),
+      }),
+      ...credentialLinks().slice(1),
+      ...boxLinks(),
+      ...bundleLinks(),
+    ]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const lines: unknown[] = [];
+    const restore = setLogSink((entry) => lines.push(entry));
+    let report: ChainReport;
     try {
-      seedRecord({
-        runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)),
-        // A clone URL legitimately carries an App token (URL fields skip the shape scan).
-        httpsUrl: `https://x-access-token:${gitToken}@github.com/acme/widgets`,
-      });
-      seedLedger();
-      // The mint row carries key material in its detail — the walker must digest
-      // it, never echo it.
-      const mintDetail = { keyHash: KEY_HASH, limitMicroUsd: 50_000_000, keyMaterial: minted };
-      seedLinks([
-        link({
-          event: "mint", subjectId: KEY_HASH, subjectKind: "run-key", detail: mintDetail,
-          evidenceDigest: sha256Hex(canonicalJson(mintDetail)), evidencePath: join(runsDir, `${RUN}.json`),
-        }),
-        ...credentialLinks().slice(1),
-        ...boxLinks(),
-        ...bundleLinks(),
-      ]);
-      buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
-      writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
-
-      const lines: unknown[] = [];
-      const restore = setLogSink((entry) => lines.push(entry));
-      let report: ChainReport;
-      try {
-        report = await walk(PR_URL);
-      } finally {
-        restore();
-      }
-
-      const serialized = JSON.stringify(report);
-      for (const secret of [envKey, gitToken, minted]) {
-        expect(serialized).not.toContain(secret);
-      }
-      for (const entry of lines) {
-        const line = JSON.stringify(entry);
-        for (const secret of [envKey, gitToken, minted]) expect(line).not.toContain(secret);
-      }
-      const hop4 = hopOf(report, "run-credential") as { status: string; detail: { keyHash?: string; keyHashPrefix?: string; keyMaterial?: string } };
-      expect(hop4.status).toBe("resolved");
-      expect(hop4.detail.keyHash).toBe(KEY_HASH);
-      expect(hop4.detail.keyHashPrefix).toBe(KEY_HASH.slice(0, 8));
-      expect(hop4.detail.keyMaterial).toBeUndefined();
+      report = await walk(PR_URL);
     } finally {
-      if (prevEnv === undefined) {
-        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-        delete process.env.OPENROUTER_PROVISIONING_KEY;
-      } else {
-        process.env.OPENROUTER_PROVISIONING_KEY = prevEnv;
-      }
+      restore();
     }
+
+    const serialized = JSON.stringify(report);
+    for (const secret of [gitToken, minted]) {
+      expect(serialized).not.toContain(secret);
+    }
+    for (const entry of lines) {
+      const line = JSON.stringify(entry);
+      for (const secret of [gitToken, minted]) expect(line).not.toContain(secret);
+    }
+    const hop4 = hopOf(report, "run-credential") as { status: string; detail: { keyHash?: string; keyHashPrefix?: string; keyMaterial?: string } };
+    expect(hop4.status).toBe("resolved");
+    expect(hop4.detail.keyHash).toBe(KEY_HASH);
+    expect(hop4.detail.keyHashPrefix).toBe(KEY_HASH.slice(0, 8));
+    expect(hop4.detail.keyMaterial).toBeUndefined();
+  });
+
+  test("caller data is PROJECTED (hop 1) and CAPPED (hop 9, head ref) at the walker's boundary", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    // A retired key an older build left in extensions.pr, which the store's
+    // per-field deep merge re-persists verbatim on every write. Hop 1 spread
+    // the entry WHOLE into the report; it now projects the three registered
+    // fields, so this value has no route into a --json report.
+    const retired = "tok_RETIREDPRFIELDSECRET0001";
+    plantPrExtras(RUN, { cloneToken: retired });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    // `gate` and `phase_id` are written INSIDE the box — agent-controlled text,
+    // echoed up to 50 rows deep. Capped at 2 000 chars at the read.
+    const hugeGate = "g".repeat(5_000);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: hugeGate, passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const lines: unknown[] = [];
+    const restore = setLogSink((entry) => lines.push(entry));
+    let report: ChainReport;
+    let prReport: ChainReport;
+    try {
+      report = await walk(RUN);
+      // The head ref is GitHub's string; a PR whose head is not qds/<runId>
+      // lands it in hop 1's `actual`, where it must arrive capped.
+      prReport = await walk(PR_URL, {
+        fetchPull: async () => ({ body: `run ${RUN}`, headRef: `x/${"h".repeat(5_000)}`, prUrl: PR_URL }),
+      });
+    } finally {
+      restore();
+    }
+
+    // hop 1: the retired field is GONE, not merely capped — and the three
+    // registered fields survive.
+    const hop1 = hopOf(report, "pr-run") as { status: string; detail: Record<string, unknown> };
+    expect(hop1.status).toBe("resolved");
+    expect(Object.keys(hop1.detail).sort()).toEqual(["createdAt", "prNumber", "prUrl"]);
+    expect(JSON.stringify(report)).not.toContain(retired);
+    for (const entry of lines) expect(JSON.stringify(entry)).not.toContain(retired);
+
+    // hop 9: the box's own gate string, capped.
+    const hop9 = hopOf(report, "run-gate-evidence") as { status: string; detail: { rows: { gate: string }[] } };
+    expect(hop9.status).toBe("resolved");
+    const gate = hop9.detail.rows[0]?.gate as string;
+    expect(gate.length).toBe(2_000);
+    expect(gate.endsWith("…")).toBe(true);
+
+    // hop 1's broken arm: the head ref, capped the same way.
+    const brokenHop1 = hopOf(prReport, "pr-run") as { status: string; actual: string };
+    expect(brokenHop1.status).toBe("broken");
+    expect(brokenHop1.actual.length).toBe(2_000);
+  });
+});
+
+// ─── 13. typed refusals that escape the walk (no report is produced) ─────────
+
+describe("ChainWalkError (DoD: a refusal the CLI handles, never a confident report)", () => {
+  test("a bare ref shaped like a runId with no record refuses invalid-ref, before any hop", async () => {
+    // `RUN_ID_FORM_RE` admits any lowercase word, so `dev` parses as a run id;
+    // the record-existence gate is what turns an operator typo into a refusal
+    // instead of a ten-hop broken-chain report about a run nobody dispatched.
+    let caught: unknown;
+    try {
+      await walk("dev");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ChainWalkError);
+    const err = caught as ChainWalkError;
+    expect(err.code).toBe("invalid-ref");
+    expect(err.message).toContain(join(runsDir, "dev.json"));
+    expect(err.remediation.length).toBeGreaterThan(0);
+  });
+
+  test("a hop-1 PR read failure ESCAPES the walk with its remediation, never flattened into a broken hop", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    const refusal = new ChainWalkError(
+      "pr-fetch-failed",
+      "gh pr view failed for the ref (exit 1): could not resolve to a PullRequest",
+      "authenticate gh (`gh auth status`), or walk the bare runId",
+    );
+
+    let caught: unknown;
+    try {
+      await walk(PR_URL, { fetchPull: () => Promise.reject(refusal) });
+    } catch (e) {
+      caught = e;
+    }
+    // Before C9 the hop's catch-all swallowed this into a generic `broken`,
+    // discarded the remediation and returned a report — exit 0 territory.
+    expect(caught).toBe(refusal);
+    expect((caught as ChainWalkError).code).toBe("pr-fetch-failed");
+    expect((caught as ChainWalkError).remediation).toContain("gh auth status");
+  });
+});
+
+// ─── 14. the rewritten subject (the attack the module header claims) ─────────
+
+describe("rewritten approval subject (DoD: a tamper that MOVES the subject id is still caught)", () => {
+  test("editing extensions.approval.approverId between walks → evidence-mismatch naming both subject ids", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const first = await walk(RUN);
+    const firstHop8 = hopOf(first, "run-approval") as { status: string; subjectId: string };
+    expect(firstHop8.status).toBe("resolved");
+    expect(firstHop8.subjectId).toBe(`alice@${DECIDED_AT}`);
+
+    // The tamper that used to succeed: hop 8's subject id is
+    // `${approverId}@${decidedAt}`, so rewriting the approver MOVED the key the
+    // prior row was looked up under. No prior found → no comparison → a second
+    // first-observation row appended → resolved, complete, exit 0.
+    const store = new RunRecordStore({ dir: runsDir });
+    store.set(RUN, { extensions: { approval: { approverId: "mallory" } } });
+
+    const second = await walk(RUN);
+    const hop8 = hopOf(second, "run-approval") as {
+      status: string; expectedDigest: string; actualDigest: string;
+      expectedSubjectId: string; actualSubjectId: string; evidencePath: string;
+    };
+    expect(hop8.status).toBe("evidence-mismatch");
+    expect(hop8.expectedSubjectId).toBe(`alice@${DECIDED_AT}`);
+    expect(hop8.actualSubjectId).toBe(`mallory@${DECIDED_AT}`);
+    expect(hop8.expectedDigest).not.toBe(hop8.actualDigest);
+    expect(hop8.evidencePath).toBe(join(runsDir, `${RUN}.json`));
+    expect(second.complete).toBe(false);
+  });
+});
+
+// ─── 15. hop 8 needs the stamps its constraint names ─────────────────────────
+
+describe("missing authorization stamps (DoD: a stamp the constraint needs is a named broken hop)", () => {
+  test("extensions.pr with no createdAt → hop 8 broken naming the field, never a skipped constraint", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, prCreatedAt: null, closedAt: new Date(iso(30)) });
+    seedLedger();
+    seedLinks([...credentialLinks(), ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop1 = hopOf(report, "pr-run") as { status: string };
+    expect(hop1.status).toBe("resolved"); // hop 1 tolerates the absent stamp
+    const hop8 = hopOf(report, "run-approval") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(hop8.status).toBe("broken");
+    expect(hop8.expected).toContain("extensions.pr.createdAt");
+    expect(hop8.actual).toContain("no createdAt");
+    expect(hop8.diagnostic).toContain("DF5.2");
+    expect(hop8.evidencePath).toBe(join(runsDir, `${RUN}.json`));
+    expect(report.complete).toBe(false);
+  });
+});
+
+// ─── 16. rows already on disk: unparsable stamps and lawful duplicates ───────
+
+describe("link rows the store would refuse today (DoD: the read side guards too)", () => {
+  test("an unparsable occurred_at is a named broken hop, never a silently skipped order check", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    const [mint, deliver, revoke, verify] = credentialLinks() as [AuditLinkInput, AuditLinkInput, AuditLinkInput, AuditLinkInput];
+    seedLinks([mint, deliver, verify, ...boxLinks(), ...bundleLinks()]);
+    // The row a pre-validation build could write: a garbage stamp between two
+    // good ones. `msOf` returned undefined and the ordering loop continued —
+    // i.e. a bad timestamp was a way to switch the check off.
+    seedRawLink({ ...revoke, occurredAt: "yesterday-ish" });
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop4 = hopOf(report, "run-credential") as { status: string; expected: string; actual: string; diagnostic: string; evidencePath: string };
+    expect(hop4.status).toBe("broken");
+    expect(hop4.expected).toContain("ISO-8601 occurred_at");
+    expect(hop4.actual).toMatch(/^link \d+ \(run-credential\.revoke\) carries occurred_at "yesterday-ish"$/);
+    expect(hop4.diagnostic.length).toBeGreaterThan(0);
+    expect(hop4.evidencePath).toBe(join(runsDir, `${RUN}.json`));
+    expect(report.complete).toBe(false);
+  });
+
+  test("a lawful SECOND row for one event (a re-mint) resolves and is reported as a count", async () => {
+    seedRecord({ runId: RUN, requestId: REQ, reportId: REPORT_ID, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger();
+    // A re-mint under a NEW keyHash: a different subject, so the schema's
+    // UNIQUE (run_id, hop, event, subject_key) admits it. Two rows for one
+    // event are lawful (C3/C4) and the newest is the ordering subject.
+    const reMintDetail = { keyHash: `sha256:${"cd".repeat(32)}`, limitMicroUsd: 50_000_000 };
+    const reMint = link({
+      event: "mint", subjectId: reMintDetail.keyHash, subjectKind: "run-key",
+      evidencePath: join(runsDir, `${RUN}.json`), detail: reMintDetail,
+      evidenceDigest: sha256Hex(canonicalJson(reMintDetail)),
+      occurredAt: iso(2.25), recordedAt: iso(2.25),
+    });
+    seedLinks([...credentialLinks(), reMint, ...boxLinks(), ...bundleLinks()]);
+    buildTrace(join(runsDir, `${RUN}-artifacts`), { requestId: REQ, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN, [mkReport(RUN, REQ, REPORT_ID)]);
+
+    const report = await walk(RUN);
+
+    const hop4 = hopOf(report, "run-credential") as {
+      status: string; detail: { rowsPerEvent?: Record<string, number>; events: Record<string, { occurredAt: string }> };
+    };
+    expect(hop4.status).toBe("resolved");
+    expect(hop4.detail.rowsPerEvent).toEqual({ mint: 2 });
+    expect(hop4.detail.events.mint?.occurredAt).toBe(iso(2.25)); // the NEWEST row orders
+    expect(report.complete).toBe(true);
   });
 });

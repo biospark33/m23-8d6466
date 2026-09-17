@@ -95,8 +95,11 @@ describe("DF2.3 credential lifecycle", () => {
   test("DF5.3: the credential links land in lifecycle order — mint → deliver → revoke → verify-revoked (hop run-credential, keyHash subject)", async () => {
     const runId = "df53-links";
     await makeRun(runId);
-    // The record's DF2.8 attribution is the ONLY repoSlug source an emitter may use.
-    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    // The record's DF2.8 attribution is the ONLY repoSlug source an emitter may
+    // use, and `requestId` is the chain's join key — CONTRACT C5: an emitter may
+    // no longer invent one, so a record without it SKIPS every emit (pinned by
+    // the C5 test below). Both identities are fixture, never manufactured.
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
     await runCredentialLifecycle(deps(), runId);
 
     expect(auditLinks.map((l) => l.event)).toEqual(["mint", "deliver", "revoke", "verify-revoked"]);
@@ -105,13 +108,23 @@ describe("DF2.3 credential lifecycle", () => {
       expect(l.hop).toBe("run-credential");
       expect(l.runId).toBe(runId);
       expect(l.repoSlug).toBe("qds/demo");
+      expect(l.requestId).toBe("req-df53"); // the record's own id, never an invented one (C5)
       expect(l.subjectKind).toBe("credential-key");
       expect(l.subjectId).toBe(hash); // NEVER key material — keyHash only (INV-AUDIT-2)
       // No plaintext anywhere in the emitted link: detail carries identifiers only.
       expect(JSON.stringify(l.detail)).not.toMatch(/sk-/i);
     }
     // The cap has no event of its own: it rides the MINT row's detail.limitMicroUsd.
-    expect(auditLinks[0]?.detail).toMatchObject({ limitMicroUsd: expect.any(Number) });
+    // The EXACT value, not expect.any(Number) — that matcher passes for 0, for
+    // an unclamped request and for deps.capMicroUsd alike, and this number IS
+    // the cap's whole audit trail. The granted-≠-requested case is pinned
+    // separately below (a matcher cannot tell the two figures apart here,
+    // because the default cap is granted in full).
+    expect(auditLinks[0]?.detail).toEqual({ keyHash: hash, limitMicroUsd: defaultKeyCapMicroUsd });
+    // The revoke row resolves its provider answer in `detail.outcome` — a
+    // regression hardcoding "revoked" passes any partial matcher.
+    expect(auditLinks[2]?.detail).toEqual({ keyHash: hash, outcome: "revoked" });
+    expect(auditLinks[3]?.detail).toEqual({ keyHash: hash });
     // AC7: non-decreasing occurred_at (≤ — two links may share a millisecond).
     const stamps = auditLinks.map((l) => Date.parse(l.occurredAt));
     for (let i = 1; i < stamps.length; i++) expect(stamps[i]!).toBeGreaterThanOrEqual(stamps[i - 1]!);
@@ -122,6 +135,222 @@ describe("DF2.3 credential lifecycle", () => {
     await makeRun(runId);
     await runCredentialLifecycle(deps(), runId);
     expect(auditLinks).toHaveLength(0);
+    // ANCHORED: a zero-length array is also what an early no-op return produces,
+    // so the claim "emitted nothing" is only worth anything beside proof that
+    // the lifecycle ran in full. It did: a key was minted and recorded, its
+    // spend captured, and the DELETE issued.
+    const rec = store.get(runId);
+    expect(rec.keyHash).toBeString();
+    expect(rec.spendMicroUsd).toBeNumber();
+    expect(api.keys).toHaveLength(1);
+    expect(api.requests.some((r) => r.method === "DELETE" && r.path === `/keys/${rec.keyHash}`)).toBeTrue();
+  });
+
+  test("CONTRACT C5: an attributed run with NO requestId anywhere emits nothing and logs one audit-link-skipped per event", async () => {
+    // The other half of INV-AUDIT-4. `requestId` is what chain.ts JOINS on
+    // (`sessions.request_id` / `gate_results.request_id`), so a freshly minted
+    // id is not a weak correlation — it is a false one. The emitter used to
+    // invent one; now the emit is SKIPPED and hop 4 reports the run `unlinked`,
+    // which is honest and fail-closed.
+    const runId = "df53-no-request-id";
+    await makeRun(runId);
+    // Attributed — so repoSlug is NOT what suppresses these emits — but no
+    // requestId on the record, and `deps()` propagates none either.
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    await runCredentialLifecycle(deps(), runId);
+
+    expect(auditLinks).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeString(); // the lifecycle really ran
+    const skips = logs.filter((l) => l.operation === "providers.audit-link-skipped");
+    expect(skips.map((l) => l.event)).toEqual(["mint", "deliver", "revoke", "verify-revoked"]);
+    for (const s of skips) {
+      expect(s.status).toBe("error");
+      expect(s.reason).toBe("no-request-id");
+      expect(s.runId).toBe(runId);
+      // The LOG's own correlation is present (a generated id is fine for a
+      // diagnostic line) — it is precisely what must not reach the link.
+      expect(s.requestId).toBeString();
+    }
+  });
+
+  test("CONTRACT C5 option (c): deps.requestId is NOT a fallback — a record without one skips even when deps propagates one", async () => {
+    // The RECORD is the only source. `dispatch.ts` stamps
+    // `store.set(runId, { requestId })` as its first write after provisioning,
+    // so on every dispatch path the record already has it; the callers where
+    // the two differ are the teardown/reap composition roots, which MINT theirs
+    // — so a deps fallback is a laundering channel for a fabricated id, not a
+    // second real source. Pinned so re-adding `?? deps.requestId` (the obvious
+    // "fix" for a run that reports `unlinked`) fails here instead of quietly
+    // stamping the chain's join column with a per-invocation id.
+    const runId = "df53-deps-request-id";
+    await makeRun(runId);
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    await runCredentialLifecycle(deps({ requestId: "req-minted-by-the-cli" }), runId);
+
+    expect(auditLinks).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeString(); // the lifecycle ran in full
+    const skips = logs.filter((l) => l.operation === "providers.audit-link-skipped");
+    expect(skips.map((l) => l.event)).toEqual(["mint", "deliver", "revoke", "verify-revoked"]);
+    // The propagated id still does the job it was added for — the STEP LOG's
+    // correlation — which is exactly where a minted id is legitimate.
+    for (const s of skips) expect(s.requestId).toBe("req-minted-by-the-cli");
+    expect(logs.some((l) => l.operation === "credential.mint" && l.requestId === "req-minted-by-the-cli")).toBeTrue();
+  });
+
+  test("DF5.3: the mint row carries the GRANTED µ$, not the requested cap (the cap's only audit trail)", async () => {
+    // The production comment is explicit that `detail.limitMicroUsd` is the
+    // APPLIED figure. With a provider that clamps DOWN, requested (1_000_000)
+    // and granted (250_000) are different numbers, so the row can no longer be
+    // satisfied by the request, by `deps.capMicroUsd`, or by 0.
+    api = new FakeKeyApi({ returnedLimitUsd: 0.25 });
+    const runId = "df53-mint-granted";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    const minted = await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+
+    expect(auditLinks).toHaveLength(1);
+    expect(auditLinks[0]?.event).toBe("mint");
+    expect(auditLinks[0]?.detail).toEqual({ keyHash: minted.hash, limitMicroUsd: 250_000 });
+    // …which is exactly what the record kept, and NOT the request.
+    expect(store.get(runId).limitMicroUsd).toBe(250_000);
+    expect(api.requests.find((r) => r.method === "POST")?.limitUsd).toBe(1);
+  });
+
+  test("DF5.3: a refused mint (ceiling mismatch) emits NOTHING — AC3's core claim", async () => {
+    // The refusal fires AFTER the provider created a live key, so a `mint` row
+    // emitted before it would vouch for an event that never completed. The
+    // round-4 failure tests capture links and never read them; this one reads.
+    api = new FakeKeyApi({ returnedLimitUsd: 5 }); // 5 USD granted against a 1 USD request
+    const runId = "df53-mint-refused";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    await expect(mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId)).rejects.toThrow();
+
+    expect(auditLinks).toHaveLength(0);
+    // The key IS live and recorded (INV-CRED-1's reachability) — so "nothing
+    // was emitted" is not merely "nothing happened".
+    expect(store.get(runId).keyHash).toBeString();
+    expect(store.get(runId).limitMicroUsd).toBeUndefined();
+  });
+
+  test("DF5.3: the delivery-failure compensation emits mint, then revoke + verify-revoked marked compensation", async () => {
+    // Without these two the chain sees a `mint` with no counterpart and reports
+    // hop 4 `unlinked` for a lifecycle that closed cleanly. `revokeAndVerify`
+    // itself stays the run-less no-op sink (W14B-3/INV-AUDIT-4) — the emit
+    // belongs at this call site, where the run identity is in scope.
+    const runId = "df53-delivery-comp";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const failing = Object.create(recording) as typeof recording;
+    failing.exec = () => Promise.reject(new Error("box unreachable"));
+
+    await expect(runCredentialLifecycle(deps({ driver: failing }), runId)).rejects.toThrow("box unreachable");
+
+    const hash = store.get(runId).keyHash as string;
+    expect(auditLinks.map((l) => l.event)).toEqual(["mint", "revoke", "verify-revoked"]);
+    // No `deliver` row: the delivery is the thing that failed.
+    expect(auditLinks.some((l) => l.event === "deliver")).toBeFalse();
+    // `revokeAndVerify` reports no provider outcome, so the rows say which path
+    // produced them rather than inventing "revoked".
+    expect(auditLinks[1]?.detail).toEqual({ keyHash: hash, compensation: "delivery-failed" });
+    expect(auditLinks[2]?.detail).toEqual({ keyHash: hash, compensation: "delivery-failed" });
+    // …and the compensation really happened: the key is gone from the list.
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+  });
+
+  test("DF5.3: the revoke row's outcome resolves to already-gone when the provider says the key is not live", async () => {
+    // The production comment calls `revoked` and `already-gone` the same event
+    // resolved at two different provider answers — both emit, and the row must
+    // say WHICH. A regression hardcoding "revoked" passes every other test here.
+    const runId = "df53-already-gone";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const hash = (await mintRunKey(deps(), runId)).hash;
+    await api.deleteKey(hash); // revoked out of band — the next DELETE 404s
+    auditLinks.length = 0;
+
+    expect(await revokeRunKey(deps(), runId)).toBe("already-gone");
+
+    expect(auditLinks).toHaveLength(1);
+    expect(auditLinks[0]?.detail).toEqual({ keyHash: hash, outcome: "already-gone" });
+  });
+
+  test("DF5.3: revokeRunKey's keyless arm returns 'none' and emits nothing (the NOT NULL columns)", async () => {
+    // The `none` arm returns before the emit. A link added there would carry an
+    // undefined `subjectId` straight into NOT NULL columns — and no event
+    // happened to link: no key ever existed for this run.
+    const runId = "df53-keyless-revoke";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    auditLinks.length = 0;
+
+    expect(await revokeRunKey(deps(), runId)).toBe("none");
+
+    expect(auditLinks).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeUndefined();
+  });
+
+  test("DF5.3: an audit-store refusal PROPAGATES out of mintRunKey — the write is part of the lifecycle", async () => {
+    // driver.ts documents that a typed AuditStoreError propagates "for the
+    // credential/box/bundle emits". Nothing made `recordAuditLink` throw, so a
+    // plausible `try {} catch {}` "don't let audit break the mint" patch would
+    // turn the chain best-effort with a green suite.
+    const runId = "df53-mint-sink-throws";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    await expect(
+      mintRunKey(
+        deps({
+          recordAuditLink: () => {
+            throw new Error("store refused");
+          },
+        }),
+        runId,
+      ),
+    ).rejects.toThrow("store refused");
+
+    // Blast radius: the key is LIVE, recorded and reachable by hash — the
+    // exposure the production comment declares, and no more.
+    const rec = store.get(runId);
+    expect(rec.keyHash).toBeString();
+    expect(rec.limitMicroUsd).toBe(50_000_000);
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === rec.keyHash)).toBeTrue();
+  });
+
+  test("DF5.3: a store refusal turns a SUCCESSFUL 0600 delivery into a reported failure — deliberate, pinned", async () => {
+    // The severe half of the same posture: the key really did land at mode 600,
+    // and `deliverRunKey` still rejects because the audit row did not. Pinned so
+    // the choice is visible rather than discovered by an operator.
+    const runId = "df53-deliver-sink-throws";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const minted = await mintRunKey(deps(), runId);
+
+    await expect(
+      deliverRunKey(
+        deps({
+          recordAuditLink: () => {
+            throw new Error("store refused");
+          },
+        }),
+        runId,
+        runId,
+        minted.key,
+      ),
+    ).rejects.toThrow("store refused");
+
+    // The delivery SUCCEEDED before the emit: the file is there at 0600.
+    const stat = await driver.exec(runId, [
+      "sh",
+      "-c",
+      `python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' app/.env`,
+    ]);
+    expect(stat.exitCode).toBe(0);
+    expect(stat.stdout.trim()).toBe("600");
   });
 
   test("defaultKeyCapMicroUsd is the documented 50_000_000 µ$ backstop", () => {

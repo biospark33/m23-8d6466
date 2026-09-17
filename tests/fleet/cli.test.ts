@@ -66,7 +66,7 @@ import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import { defaultKeyCapMicroUsd, type KeyApi } from "../../src/providers/credentials.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
-import { goodLedger, overBudgetLedger, type RecordingLedger } from "./helpers.ts";
+import { goodLedger, overBudgetLedger, useTempAuditStore, type RecordingLedger } from "./helpers.ts";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
@@ -531,6 +531,16 @@ function keyApiTripwire(): KeyApi {
 function driverWith(base: FakeDriver, over: Partial<FakeDriver>): FakeDriver {
   return Object.assign(Object.create(base) as FakeDriver, over);
 }
+
+/**
+ * DF5.3 C11: this suite drives a real `dispatch()` (through `scripts/fleet.ts`
+ * or `fanout()`), and `dispatch` is its own audit-store composition root — it
+ * calls `openAuditStore()`, which resolves `QDS_AUDIT_DB ?? .sandbox/audit.db`
+ * RELATIVE TO CWD. Without this the suite appends real rows to the operator's
+ * live store. Registered at file scope so it also covers the `bun
+ * scripts/fleet.ts` subprocesses, which inherit `process.env`.
+ */
+useTempAuditStore();
 
 describe("scripts/fleet.ts (DF3.1 CLI)", () => {
   let dir: string;

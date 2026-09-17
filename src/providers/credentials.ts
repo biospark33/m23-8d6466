@@ -214,10 +214,26 @@ export interface CredentialDeps {
  * The DF5.3 link emit shared by this module's four credential events (hop 4,
  * run-credential: mint/deliver/revoke/verify-revoked). The record is the ONLY
  * repoSlug source (DF2.8's budget attribution — never a placeholder), and its
- * `requestId` is the correlation the chain joins on, with the §5.2-propagated
- * `deps.requestId` and the emit context as fallbacks. Never key material —
+ * `requestId` is the correlation the chain joins on. Never key material —
  * `keyHash` only (INV-AUDIT-2); the store's own `record` logs the one
  * structured line per emit.
+ *
+ * NEITHER identity is ever manufactured. `repoSlug` never was; `requestId`
+ * used to fall back to `deps.requestId ?? newRequestId()`, which stamped a
+ * random join key onto the row the chain JOINS ON — evidence invented at the
+ * emit, the same class INV-AUDIT-4 refuses for `repoSlug`. Both absences now
+ * take the same door: skip the emit, log one line naming the run and the
+ * event, and let the hop report `unlinked` — honest and fail-closed.
+ *
+ * W2-C5 option (c): the RECORD is the only source. `deps.requestId` was
+ * dropped as a fallback because it never supplies a real id the record lacks —
+ * `dispatch.ts` stamps `store.set(runId, { requestId })` as its first write
+ * after provisioning, immediately before the mint, so on every dispatch path
+ * `rec.requestId` is already set. The only callers where the two differ are the
+ * teardown/reap composition roots, which MINT theirs (`fleet.ts`,
+ * `sandbox-teardown.ts`, `reaper.ts`) — so the fallback was purely a laundering
+ * channel for a fabricated id. `deps.requestId` still serves the step log,
+ * which is the job it was added for.
  */
 function emitCredentialLink(
   deps: CredentialDeps,
@@ -229,10 +245,34 @@ function emitCredentialLink(
 ): void {
   const repoSlug = auditRepoSlug(rec);
   if (repoSlug === undefined) return;
+  const requestId = rec.requestId;
+  if (requestId === undefined) {
+    log({
+      // The LOG's own correlation, never the link's: a generated id is fine
+      // for a diagnostic line and is exactly what every other step here logs
+      // under. It is precisely what must not reach `audit_links.request_id`.
+      requestId: deps.requestId ?? newRequestId(),
+      // Shared verbatim with driver.ts's `create`-link skip (and harvest's, if
+      // it lands): one `operation`/`event`/`reason` triple so an operator greps
+      // every C5 skip in the run at once instead of once per emitter.
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId,
+      driver: deps.driver.name,
+      keyHashPrefix: keyHashPrefix(keyHash),
+      event,
+      reason: "no-request-id",
+      message: `run ${runId} carries no requestId and none was propagated — refusing to invent the chain's join key (INV-AUDIT-4); hop 4 reports this run unlinked`,
+    });
+    return;
+  }
   emitAuditLink(deps.recordAuditLink, {
     runId,
     repoSlug,
-    requestId: rec.requestId ?? deps.requestId ?? newRequestId(),
+    requestId,
     hop: "run-credential",
     event,
     subjectId: keyHash,
@@ -322,7 +362,12 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // provider-side identifier (DF2.1 persists it in the plaintext run record);
   // the remediation must be a copy-pasteable command, and only the plaintext
   // key is credential material.
-  const existing = deps.store.get(runId).keyHash;
+  // Read once, kept: the `mint` emit below needs this record's `extensions.budget`
+  // and `requestId` — neither of which mint writes — so re-reading the store
+  // purely to build the link would put a store fault between a LIVE provider key
+  // and the plaintext this function still has to return (see the emit).
+  const rec = deps.store.get(runId);
+  const existing = rec.keyHash;
   if (existing) {
     throw new CredentialLifecycleError(
       "already-minted",
@@ -553,12 +598,22 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // cap), not in the unreachable-key sense. Revoking a key that IS reachable
   // would throw away a usable run over a store hiccup; the write failure
   // propagates instead, and the caller's teardown revokes by hash.
+  //
+  // The DF5.3 emit below shares this exact exposure and no more: it may also
+  // propagate un-compensated (a typed `AuditStoreError`), by which point the
+  // key is live, recorded and reachable by hash — so the same argument holds.
+  // What it must NOT add is a second store READ: building the link from
+  // `deps.store.get(runId)` put a `get` fault on the same line, and THAT one
+  // discards the plaintext in this function's return value after the provider
+  // already created a spend-capable key. The link is built from `rec` instead
+  // (read at the top; mint writes neither the budget attribution nor the
+  // requestId the link needs).
   deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
   // DF5.3: the `mint` link — emitted after both record writes landed. The cap
   // has NO event of its own (INV-AUDIT-4): it is an argument to mint, carried
   // here as the mint row's `detail.limitMicroUsd` — the APPLIED figure (the
   // provider's granted µ$, what the record carries), not the requested one.
-  emitCredentialLink(deps, deps.store.get(runId), runId, "mint", { limitMicroUsd: grantedMicroUsd }, res.hash);
+  emitCredentialLink(deps, rec, runId, "mint", { limitMicroUsd: grantedMicroUsd }, res.hash);
   return { key: res.key, hash: res.hash };
 }
 
@@ -719,7 +774,14 @@ export async function revokeRunKey(deps: CredentialDeps, runId: string): Promise
   // DELETE landing; `already-gone` is the provider confirming the key is not
   // live, which is the same event (the key left the live set) resolved at a
   // different provider answer. The `none` arm above emits NOTHING: no key
-  // ever existed, so no event happened to link (INV-AUDIT-4).
+  // ever existed, so no event happened to link (INV-AUDIT-4) — and a link with
+  // an undefined `subjectId` would hit NOT NULL columns anyway.
+  //
+  // A re-run (teardown aborted after revoke, operator retries) re-emits with
+  // `outcome: "already-gone"` and that is SAFE, not a duplicate row: the
+  // store's UNIQUE key is (run_id, hop, event, subject_key) and `subjectId` is
+  // `rec.keyHash` — unchanged across the re-run — so `ON CONFLICT DO NOTHING`
+  // collapses the second emit onto the first. The chain sees one `revoke`.
   emitCredentialLink(deps, rec, runId, "revoke", { outcome }, rec.keyHash);
   return outcome;
 }
@@ -838,6 +900,21 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
     // delivery error remains the reported failure.
     try {
       await revokeAndVerify(deps, minted.hash);
+      // DF5.3: the compensation's own `revoke` + `verify-revoked` links. The key
+      // really was revoked and really was proven absent from the authoritative
+      // list, so without these the chain sees a `mint` with no counterpart and
+      // reports hop 4 `unlinked` for a lifecycle that closed cleanly.
+      // `revokeAndVerify` itself stays the named no-op sink (W14B-3/INV-AUDIT-4)
+      // — it normally runs run-less — but HERE the run identity is in scope, so
+      // the emit is attributable and belongs at the call site, not in the sink.
+      // `detail` says which path produced it: `revokeAndVerify` reports no
+      // provider outcome, and inventing "revoked" would be a claim this call
+      // cannot make. INSIDE the try on purpose: an audit-store refusal must not
+      // REPLACE the delivery error the caller is being told about (it is logged
+      // by the arm below as a compensation failure, which under-reports a
+      // compensation that did land — the alternative loses the real cause).
+      emitCredentialLink(deps, rec, runId, "revoke", { compensation: "delivery-failed" }, minted.hash);
+      emitCredentialLink(deps, rec, runId, "verify-revoked", { compensation: "delivery-failed" }, minted.hash);
     } catch (compErr) {
       // Log the failed compensation so it's observable; the record still
       // carries keyHash, so DF2.6's orphan sweep or a manual re-run reaches it.

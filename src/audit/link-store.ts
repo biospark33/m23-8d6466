@@ -22,10 +22,14 @@
  * `bun:sqlite`'s `new Database(path)` creates the file when absent: probe →
  * hold the fd → re-open by path → compare inodes → bind. The walk path NEVER
  * migrates and NEVER creates: it asserts the schema and fails closed
- * (`audit-store-schema-absent`, INV-AUDIT-6).
+ * (`audit-store-schema-absent`, INV-AUDIT-6). It returns ONE handle — reader
+ * AND appender (`AuditStoreWalkHandle`) — so the walker's first-observation
+ * digest rows go down the inode-verified connection it already proved, never a
+ * second by-path open that would re-create and re-migrate a store removed
+ * since (which is exactly what `audit-store-identity-changed` exists to catch).
  */
 
-import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, statSync } from "node:fs";
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { Database, type Statement } from "bun:sqlite";
@@ -55,23 +59,25 @@ export type AuditHop = (typeof AUDIT_HOPS)[number];
 /**
  * Per-hop event vocabulary, fail-loud at write time (`audit-link-invalid`).
  * The credential/box/bundle hops are the only EMITTED lifecycle hops and take
- * ONLY their vocabulary above; every other hop takes ONLY `walk-observed` —
- * no emitter exists for it (the pr-run/run-reverify/run-approval lifecycle
- * records are not emitted; their digest rows are the walker's
- * first-observation rows), and manufacturing a link for an event that never
- * occurred is what INV-AUDIT-4 forbids.
+ * ONLY their vocabulary above. `pr-run`/`run-reverify`/`run-approval` take
+ * ONLY `walk-observed`: no emitter exists for them (their lifecycle records
+ * are not emitted; their digest rows are the walker's first-observation rows,
+ * written by `chain.ts`'s `authorizingDigest`). The remaining four carry NO
+ * rows by design — nothing in the tree writes them — and an EMPTY vocabulary
+ * is what makes that a refusal rather than a courtesy: manufacturing a link
+ * for an event that never occurred is what INV-AUDIT-4 forbids.
  */
 const HOP_EVENT_VOCABULARY = {
   "run-credential": ["mint", "deliver", "revoke", "verify-revoked"],
   "run-box": ["create", "fill", "setup-gate", "teardown", "reap"],
   "run-bundle": ["bundle-verify", "bundle-fetch"],
   "pr-run": ["walk-observed"],
-  "run-issue": ["walk-observed"],
-  "run-cost": ["walk-observed"],
   "run-reverify": ["walk-observed"],
   "run-approval": ["walk-observed"],
-  "run-gate-evidence": ["walk-observed"],
-  "memory-retain-receipt": ["walk-observed"],
+  "run-issue": [],
+  "run-cost": [],
+  "run-gate-evidence": [],
+  "memory-retain-receipt": [],
 } as const satisfies Readonly<Record<AuditHop, readonly string[]>>;
 
 /** The walker's first-observation digest rows. */
@@ -116,13 +122,31 @@ export interface AuditStoreWriter {
 export interface AuditStoreReader {
   /** Ordered by occurred_at, then link_id. */
   linksForRun(runId: string): AuditLinkRow[];
+  /**
+   * Presence on the SAME coalesce identity `record()` dedups on. Part of the
+   * reader contract DF5.4-C9 imports — `chain.ts` does its presence checks by
+   * hand off `linksForRun`, so this has no in-tree production caller today.
+   * Do not delete it.
+   */
   linkExists(runId: string, hop: string, event: string, subjectId?: string): boolean;
   close(): void;
   readonly path: string;
 }
 
-type AuditStoreErrorCode =
+/**
+ * What `openAuditStoreForWalk` hands back: the reader PLUS the append of the
+ * walker's first-observation digest rows, both over the one inode-verified
+ * connection. Structurally an `AuditStoreWriter` too, so a caller holding it as
+ * one needs no second open.
+ */
+export interface AuditStoreWalkHandle extends AuditStoreReader {
+  record(link: AuditLinkInput): void;
+}
+
+export type AuditStoreErrorCode =
   | "audit-store-absent"
+  | "audit-store-unreadable"
+  | "audit-store-corrupt"
   | "audit-store-identity-changed"
   | "audit-store-schema-absent"
   | "audit-link-invalid";
@@ -145,15 +169,40 @@ export const DEFAULT_AUDIT_DB_FILE = ".sandbox/audit.db";
 
 /**
  * `JSON.stringify` over recursively key-sorted values (arrays keep order), so
- * key order cannot forge an evidence-mismatch. `undefined` canonicalises to
- * `null`; an `undefined` OBJECT member is dropped as `JSON.stringify` drops it.
+ * key order cannot forge an evidence-mismatch. A top-level or array-element
+ * `undefined` canonicalises to `null`, and an `undefined` OBJECT MEMBER IS
+ * DROPPED — both exactly as `JSON.stringify` treats them, because
+ * `detail_json` is persisted from this function and the walker re-digests what
+ * it reads back: a disagreement here is a permanent, uncorrectable false
+ * `evidence-mismatch` on an append-only store. Byte-identical by contract to
+ * `src/providers/driver.ts`'s `auditCanonicalJson` (there is a drift alarm).
  */
 export function canonicalJson(value: unknown): string {
   if (value === undefined || value === null) return "null";
-  if (typeof value !== "object") return JSON.stringify(value) as string;
+  if (typeof value !== "object") {
+    // JSON.stringify returns undefined for a function/symbol — never cast.
+    const scalar = JSON.stringify(value);
+    return scalar === undefined ? "null" : scalar;
+  }
+  // `toJSON` FIRST, as JSON.stringify does — and that means BEFORE the array
+  // branch, not merely before the object one. A Date is `typeof "object"` and
+  // not an array, so `Object.entries` saw no own enumerable keys and the
+  // timestamp serialised as `{}` — silent evidence LOSS on an append-only
+  // store, not an evidence-mismatch (the digest faithfully attests to the
+  // empty object). Same for URL and anything else carrying a toJSON.
+  //
+  // The ORDER against `Array.isArray` is load-bearing and is the one thing the
+  // drift alarm in tests/providers/audit-emit.test.ts must keep pinned: an
+  // ARRAY carrying its own `toJSON` takes the toJSON branch under
+  // JSON.stringify, so checking `Array.isArray` first would make this copy and
+  // `auditCanonicalJson` in src/providers/driver.ts disagree on a value both
+  // are contractually required to render identically.
+  if (typeof (value as { toJSON?: unknown }).toJSON === "function") return canonicalJson((value as { toJSON(): unknown }).toJSON());
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const entries = Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${v === undefined ? "null" : canonicalJson(v)}`).join(",")}}`;
+  const entries = Object.entries(value)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
 }
 
 /** The one digest primitive every emitter composes with `canonicalJson`. */
@@ -195,6 +244,14 @@ INSERT INTO audit_links (
 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT DO NOTHING`;
 
+/**
+ * The stored row on the UNIQUE identity — the generated `subject_key` column,
+ * the same coalesce identity the constraint and `ON CONFLICT` use, so a
+ * presence check, a divergence check and a write can never disagree.
+ */
+const STORED_DIGEST_SQL =
+  "SELECT evidence_digest FROM audit_links WHERE run_id = ? AND hop = ? AND event = ? AND subject_key = ? LIMIT 1";
+
 function invalidLink(message: string, remediation: string): AuditStoreError {
   return new AuditStoreError("audit-link-invalid", message, remediation);
 }
@@ -218,11 +275,37 @@ function validateAndBind(link: AuditLinkInput): { detailJson: string | null } {
       throw invalidLink(`audit link ${field} must be a non-empty string (got ${JSON.stringify(value)})`, `supply ${field} from the emitter's own context`);
     }
   }
+  // Canonical UTC ISO-8601 or nothing. A stamp the walker's Date.parse cannot
+  // read makes its ordering check `continue` — i.e. a garbage timestamp is a
+  // way to switch the check OFF — and a non-canonical spelling (`+00:00`, a
+  // local offset, epoch millis) sorts wrongly under linksForRun's lexicographic
+  // `ORDER BY occurred_at` before the walker ever sees it. Round-tripping
+  // through Date is the whole rule; the parse guard is load-bearing because
+  // `new Date("nope").toISOString()` throws.
+  for (const [field, value] of [
+    ["occurredAt", link.occurredAt],
+    ["recordedAt", link.recordedAt],
+  ] as const) {
+    if (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
+      throw invalidLink(
+        `audit link ${field} must be a canonical UTC ISO-8601 stamp (new Date(x).toISOString(), Z-suffixed), got ${JSON.stringify(value)}`,
+        `stamp ${field} with new Date().toISOString() at emit time — the walk sorts and orders on these as TEXT`,
+      );
+    }
+  }
+  if (link.subjectId === SUBJECT_NONE_KEY) {
+    throw invalidLink(
+      `subjectId ${JSON.stringify(SUBJECT_NONE_KEY)} is the reserved sentinel the schema's subject_key coalesces a NULL subject to — a literal subject of that name would collide with every subject-less emit on this key`,
+      "emit the real subject id, or omit subjectId entirely for a subject-less event",
+    );
+  }
   const vocabulary: readonly string[] | undefined = (HOP_EVENT_VOCABULARY as Readonly<Record<string, readonly string[] | undefined>>)[link.hop];
   if (vocabulary === undefined) throw invalidLink(`unknown audit hop ${JSON.stringify(link.hop)}`, VOCAB_REMEDIATION);
   if (!vocabulary.includes(link.event)) {
     throw invalidLink(
-      `event ${JSON.stringify(link.event)} is not in hop ${JSON.stringify(link.hop)}'s vocabulary (${vocabulary.join(" | ")})`,
+      vocabulary.length === 0
+        ? `hop ${JSON.stringify(link.hop)} carries no rows by design — nothing emits it, so a link for ${JSON.stringify(link.event)} would be manufactured evidence (INV-AUDIT-4)`
+        : `event ${JSON.stringify(link.event)} is not in hop ${JSON.stringify(link.hop)}'s vocabulary (${vocabulary.join(" | ")})`,
       VOCAB_REMEDIATION,
     );
   }
@@ -234,7 +317,19 @@ function validateAndBind(link: AuditLinkInput): { detailJson: string | null } {
   }
   let detailJson: string | null = null;
   if (link.detail !== undefined) {
-    detailJson = JSON.stringify(link.detail);
+    // The canonicaliser, not bare JSON.stringify: the stored bytes are then the
+    // EXACT preimage of evidence_digest, so the walker's
+    // digestOf(JSON.parse(detail_json)) round trips for every input. A detail
+    // JSON cannot express (a bigint, a cycle) is a typed refusal here rather
+    // than a raw TypeError out of the store — this is the trust boundary.
+    try {
+      detailJson = canonicalJson(link.detail);
+    } catch (e) {
+      throw invalidLink(
+        `detail is not JSON-serialisable (${(e as Error).message}) — a bigint, a cycle, or a toJSON that throws`,
+        "send detail as plain JSON values (a bigint must be stringified by the emitter, which is the only place that knows whether precision or magnitude is the point)",
+      );
+    }
     const bytes = Buffer.byteLength(detailJson, "utf8");
     if (bytes > DETAIL_JSON_MAX_BYTES) {
       throw invalidLink(`detail_json is ${bytes} bytes — past the 8 KiB cap (refused, never truncated)`, "shrink the detail payload or move the bulk to the artefact the evidence_path names");
@@ -253,10 +348,62 @@ function emitLine(entry: { operation: string; requestId: string; durationMs: num
   log({ agentId: null, timestamp: new Date().toISOString(), duration: entry.durationMs, ...entry });
 }
 
+/**
+ * The one insert path, shared by the writer and the walk handle. `changes === 0`
+ * means ON CONFLICT fired on the UNIQUE key — but that alone cannot tell an
+ * identical redelivery from a CONTRADICTORY one, and the store is append-only,
+ * so the dropped row's disagreement would otherwise leave no trace at all. Read
+ * the stored digest back: equal → `duplicate`, `ok`, as before; different →
+ * `divergent`, logged at `error` with both digests. Never a throw — a
+ * bookkeeping disagreement must not abort a live teardown or harvest.
+ */
+function recordLink(stmts: { insert: Statement; storedDigest: Statement }, link: AuditLinkInput): void {
+  const started = Date.now();
+  const { detailJson } = validateAndBind(link);
+  const subjectKey = link.subjectId ?? SUBJECT_NONE_KEY;
+  const { changes } = stmts.insert.run(
+    link.runId,
+    link.repoSlug,
+    link.requestId,
+    link.hop,
+    link.event,
+    link.subjectId ?? null,
+    link.subjectKind ?? null,
+    link.evidencePath ?? null,
+    link.evidenceDigest,
+    detailJson,
+    link.occurredAt,
+    link.recordedAt,
+  );
+  let outcome = "inserted";
+  let status: "ok" | "error" = "ok";
+  let divergence: Record<string, unknown> = {};
+  if (changes !== 1) {
+    const stored = stmts.storedDigest.get(link.runId, link.hop, link.event, subjectKey) as { evidence_digest?: string } | null | undefined;
+    const storedDigest = stored?.evidence_digest;
+    if (typeof storedDigest === "string" && storedDigest !== link.evidenceDigest) {
+      outcome = "divergent";
+      status = "error";
+      divergence = { storedDigest, incomingDigest: link.evidenceDigest, subjectKey };
+    } else {
+      outcome = "duplicate";
+    }
+  }
+  emitLine({
+    operation: "audit-link.record", requestId: link.requestId, durationMs: Date.now() - started, status,
+    runId: link.runId, repoSlug: link.repoSlug, hop: link.hop, event: link.event,
+    subjectKind: link.subjectKind ?? null, outcome, ...divergence,
+    message: outcome === "divergent"
+      ? `audit link divergent: run ${link.runId} hop ${link.hop}.${link.event} subject ${subjectKey} was already recorded with a DIFFERENT evidence digest — the stored row stands (append-only, INV-AUDIT-4) and this emit was dropped`
+      : `audit link ${outcome}: run ${link.runId} hop ${link.hop}.${link.event}`,
+  });
+}
+
 class SqliteAuditStore implements AuditStoreWriter {
   readonly path: string;
   private readonly db: Database;
   private readonly insert: Statement;
+  private readonly storedDigest: Statement;
 
   constructor(path: string) {
     this.path = path;
@@ -264,11 +411,18 @@ class SqliteAuditStore implements AuditStoreWriter {
     // chmod file 0600, SQLite's default DELETE journal (no journal_mode
     // pragma is ever issued), busy_timeout, idempotent schema inside
     // BEGIN IMMEDIATE so two concurrent first-emits cannot race the CREATEs.
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    chmodSync(dirname(this.path), 0o700);
-    const isNew = !statSync(this.path, { throwIfNoEntry: false });
+    // mkdirSync(recursive) returns the FIRST path it created, `undefined` when
+    // it created nothing — chmod only what THIS call made. Tightening a
+    // directory we did not create is not ours to do: `QDS_AUDIT_DB=/tmp/x.db`
+    // would otherwise chmod /tmp to 0700 and break every other user on the host
+    // (and a bare `audit.db` would chmod the process CWD).
+    const createdDir = mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+    if (createdDir !== undefined) chmodSync(createdDir, 0o700);
     this.db = new Database(this.path);
-    if (isNew) chmodSync(this.path, 0o600); // a pre-existing file keeps its mode
+    // Unconditional: a store created once under a permissive umask is otherwise
+    // never corrected, and tightening a file that holds audit evidence is the
+    // safe direction.
+    chmodSync(this.path, 0o600);
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -280,35 +434,11 @@ class SqliteAuditStore implements AuditStoreWriter {
       throw e;
     }
     this.insert = this.db.prepare(INSERT_SQL);
+    this.storedDigest = this.db.prepare(STORED_DIGEST_SQL);
   }
 
   record(link: AuditLinkInput): void {
-    const started = Date.now();
-    const { detailJson } = validateAndBind(link);
-    const { changes } = this.insert.run(
-      link.runId,
-      link.repoSlug,
-      link.requestId,
-      link.hop,
-      link.event,
-      link.subjectId ?? null,
-      link.subjectKind ?? null,
-      link.evidencePath ?? null,
-      link.evidenceDigest,
-      detailJson,
-      link.occurredAt,
-      link.recordedAt,
-    );
-    // changes === 0: ON CONFLICT fired on the UNIQUE key — a redelivered emit
-    // is a no-op on the coalesce sentinel, never an update (there is no
-    // update path in this module to fall into).
-    const outcome = changes === 1 ? "inserted" : "duplicate";
-    emitLine({
-      operation: "audit-link.record", requestId: link.requestId, durationMs: Date.now() - started, status: "ok",
-      runId: link.runId, repoSlug: link.repoSlug, hop: link.hop, event: link.event,
-      subjectKind: link.subjectKind ?? null, outcome,
-      message: `audit link ${outcome}: run ${link.runId} hop ${link.hop}.${link.event}`,
-    });
+    recordLink({ insert: this.insert, storedDigest: this.storedDigest }, link);
   }
 
   close(): void {
@@ -326,6 +456,22 @@ export function openAuditStore(path?: string): AuditStoreWriter {
  * the probe itself cannot create the store) with the fd HELD, plus the
  * recorded inode. Any probe failure is `audit-store-absent`.
  */
+/**
+ * The underlying fault, as a string: `ENOENT`/`EACCES` from node:fs,
+ * `SQLITE_NOTADB`/`SQLITE_CORRUPT`/`SQLITE_CANTOPEN` from bun:sqlite. The
+ * message is folded in because bun has carried the SQLite code in the message
+ * rather than on `.code` across versions.
+ */
+function faultOf(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  const message = (e as { message?: unknown } | null)?.message;
+  return `${typeof code === "string" ? code : ""} ${typeof message === "string" ? message : ""}`;
+}
+
+function anyOf(fault: string, ...needles: string[]): boolean {
+  return needles.some((n) => fault.includes(n));
+}
+
 function probeAuditStore(path: string): { ino: number; close(): void } {
   let fd: number | undefined;
   try {
@@ -338,6 +484,17 @@ function probeAuditStore(path: string): { ino: number; close(): void } {
     };
   } catch (e) {
     try { if (fd !== undefined) closeSync(fd); } catch { /* the refusal below is the diagnosis */ }
+    // A store this process cannot READ is not an ABSENT store: telling an
+    // operator to "record this run's links first" when the evidence is sitting
+    // right there, mode 0600 under another uid, is advice that costs them the
+    // chain.
+    if (anyOf(faultOf(e), "EACCES", "EPERM")) {
+      throw new AuditStoreError(
+        "audit-store-unreadable",
+        `the audit-link store at ${path} exists but this process cannot read it (${(e as Error).message}) — the evidence is there; the permission is not`,
+        `run the walk as the uid that owns ${path} (the store is created 0600 by its emitter), or copy the store somewhere readable and point QDS_AUDIT_DB at the copy; never chmod the original to widen it`,
+      );
+    }
     throw new AuditStoreError(
       "audit-store-absent",
       `no readable audit-link store exists at ${path} (${(e as Error).message}) — an uninitialized store is a refusal, never a zero-byte file the read path materialised (INV-AUDIT-6)`,
@@ -373,18 +530,51 @@ function probeAndBind(path: string, probe: { ino: number }): Database {
         `re-run the walk against ${path}; if replacement is expected, read the replacement, never the pre-open handle`,
       );
     }
+    let hasTable: unknown;
     try {
       // No options object: bun:sqlite maps a bare `{}` onto zero open flags
       // ("flags must include SQLITE_OPEN_READONLY or SQLITE_OPEN_READWRITE").
       db = new Database(path);
+      // `new Database` is LAZY — it does not touch the file, so a corrupt store
+      // surfaces on the first statement that READS the header, not on the open.
+      // Both file-touching statements therefore live inside THIS catch, or
+      // `audit-store-corrupt` is unreachable and the operator gets a raw
+      // SQLiteError that no caller can narrow on.
+      // The walker APPENDS its first-observation digest rows over this handle;
+      // without a busy_timeout a concurrent emitter turns linksForRun into an
+      // immediate SQLITE_BUSY that the walker reports as a BROKEN chain — a
+      // transient lock misread as tampering.
+      db.exec("PRAGMA busy_timeout = 5000;");
+      hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_links'").get();
     } catch (e) {
+      // A failed open is not automatically a SCHEMA failure. Corruption and a
+      // permission/quota fault each get their own code, because
+      // "point QDS_AUDIT_DB at a store created by openAuditStore" told to an
+      // operator whose store is merely truncated invites them to abandon the
+      // file that still holds the evidence.
+      const fault = faultOf(e);
+      if (anyOf(fault, "SQLITE_NOTADB", "SQLITE_CORRUPT", "not a database", "file is encrypted")) {
+        throw new AuditStoreError(
+          "audit-store-corrupt",
+          `the audit-link store at ${path} is not a readable SQLite database (${(e as Error).message}) — it is corrupt, truncated, or not a store at all`,
+          `do NOT delete or overwrite ${path} — it may still hold recoverable evidence; copy it aside, then try \`sqlite3 ${path} ".recover"\` and walk the recovered copy via QDS_AUDIT_DB`,
+        );
+      }
+      if (anyOf(fault, "SQLITE_CANTOPEN", "SQLITE_READONLY", "EACCES", "EPERM", "EROFS", "ENOSPC")) {
+        throw new AuditStoreError(
+          "audit-store-unreadable",
+          `cannot attach the audit-link store at ${path} (${(e as Error).message}) — the file is there but the filesystem or its permissions refused the open`,
+          `check the uid, the mount (read-only or full filesystems fail here too) and the free space on ${path}'s device, then re-run the walk; the store itself is untouched`,
+        );
+      }
       throw new AuditStoreError(
         "audit-store-schema-absent",
         `cannot open the audit-link store at ${path} (${(e as Error).message}) — the store does not carry this module's schema`,
         SCHEMA_ABSENT_REMEDIATION,
       );
     }
-    const hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_links'").get();
+    // A readable store with no audit_links table returns a ROW-LESS .get() —
+    // it never throws — so this stays a schema refusal, not a corruption one.
     if (hasTable === undefined || hasTable === null) {
       throw new AuditStoreError(
         "audit-store-schema-absent",
@@ -404,14 +594,17 @@ function probeAndBind(path: string, probe: { ino: number }): Database {
 /**
  * The read half the walker uses (story "Digest coverage is asymmetric"):
  * read-write (the walker appends first-observation digest rows) but NEVER
- * creating and NEVER migrating. Refusals, in order: `audit-store-absent` (the
- * no-create probe), `audit-store-identity-changed` (removal or
- * replace-and-restore across the probe→attach window), and
- * `audit-store-schema-absent` (the store exists but carries no `audit_links`
- * table). Every refusal closes every fd it opened — and the half-bound
- * database on the schema arm — before the caller sees it.
+ * creating and NEVER migrating — the returned handle appends over the one
+ * connection this function verified. Refusals, in order: `audit-store-absent`
+ * (the no-create probe found nothing), `audit-store-unreadable` (it is there
+ * and the permission/filesystem is not), `audit-store-identity-changed`
+ * (removal or replace-and-restore across the probe→attach window),
+ * `audit-store-corrupt` (it is not a readable SQLite database), and
+ * `audit-store-schema-absent` (it opens but carries no `audit_links` table).
+ * Every refusal closes every fd it opened — and the half-bound database on the
+ * schema arm — before the caller sees it.
  */
-export function openAuditStoreForWalk(path: string): AuditStoreReader {
+export function openAuditStoreForWalk(path: string): AuditStoreWalkHandle {
   const started = Date.now();
   const openLine = (status: "ok" | "error", outcome: string, message: string): void =>
     emitLine({ operation: "audit-store.open", requestId: newRequestId(), durationMs: Date.now() - started, status, auditPath: path, outcome, message });
@@ -444,17 +637,23 @@ function rowToLink(row: Record<string, unknown>): AuditLinkRow {
   };
 }
 
-class SqliteAuditReader implements AuditStoreReader {
+class SqliteAuditReader implements AuditStoreWalkHandle {
   readonly path: string;
   private readonly db: Database;
   private readonly linksForRunStmt: Statement;
-  private readonly existsStmt: Statement;
+  private readonly storedDigestStmt: Statement;
+  /**
+   * Prepared on first append only: the walk asserted that `audit_links` EXISTS,
+   * not that its columns match this module's INSERT, and a store whose write
+   * shape drifted must still be READABLE.
+   */
+  private insertStmt: Statement | undefined;
 
   constructor(db: Database, path: string) {
     this.db = db;
     this.path = path;
     this.linksForRunStmt = db.prepare("SELECT * FROM audit_links WHERE run_id = ? ORDER BY occurred_at, link_id");
-    this.existsStmt = db.prepare("SELECT 1 FROM audit_links WHERE run_id = ? AND hop = ? AND event = ? AND subject_key = ? LIMIT 1");
+    this.storedDigestStmt = db.prepare(STORED_DIGEST_SQL);
   }
 
   linksForRun(runId: string): AuditLinkRow[] {
@@ -468,8 +667,34 @@ class SqliteAuditReader implements AuditStoreReader {
    * no-row .get() on some versions, `undefined` on others — both are absent.
    */
   linkExists(runId: string, hop: string, event: string, subjectId?: string): boolean {
-    const hit = this.existsStmt.get(runId, hop, event, subjectId ?? SUBJECT_NONE_KEY);
+    const hit = this.storedDigestStmt.get(runId, hop, event, subjectId ?? SUBJECT_NONE_KEY);
     return hit !== undefined && hit !== null;
+  }
+
+  /**
+   * The walker's first-observation digest rows, appended over the SAME
+   * inode-verified handle the read path bound — no second by-path open, so a
+   * store removed or replaced since cannot be silently re-created and
+   * re-migrated underneath the walk.
+   */
+  record(link: AuditLinkInput): void {
+    try {
+      this.insertStmt ??= this.db.prepare(INSERT_SQL);
+      recordLink({ insert: this.insertStmt, storedDigest: this.storedDigestStmt }, link);
+    } catch (e) {
+      // A typed refusal from validateAndBind is the caller's own bad link.
+      if (e instanceof AuditStoreError) throw e;
+      // Anything else on THIS handle means the store the walk verified is no
+      // longer writable — SQLite refuses writes on an unlinked inode with
+      // "attempt to write a readonly database". Nothing was re-created at the
+      // path, which is the point; the walker gets that as a typed refusal
+      // rather than a raw driver error.
+      throw new AuditStoreError(
+        "audit-store-identity-changed",
+        `cannot append the walk's first-observation link to ${this.path} (${(e as Error).message}) — the store this walk verified is gone or no longer writable, and nothing was re-created at the path`,
+        `re-run the walk against ${this.path}; if the store was removed or replaced deliberately, treat what is there now as a new chain, never the one this walk began on`,
+      );
+    }
   }
 
   close(): void {

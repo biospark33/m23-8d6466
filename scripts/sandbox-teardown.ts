@@ -336,7 +336,11 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     try {
       audit.close();
     } catch (e) {
-      reportFailure(out, "audit-store-close-failed", `could not close the audit-link store: ${(e as Error).message}`, "the handle dies with the process; re-run to confirm it still reads");
+      // Guarded coercion (C10): a thrown null/undefined would raise a SECOND
+      // error from inside this catch, escaping the `finally` and masking the
+      // outcome the catch exists to report.
+      const x = (e ?? {}) as { message?: string };
+      reportFailure(out, "audit-store-close-failed", `could not close the audit-link store: ${x.message ?? String(e)}`, "the handle dies with the process; re-run to confirm it still reads");
       cleanupFailed();
     }
     // Close the ledger handle here so every exit path (success, teardown
@@ -345,7 +349,8 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
       try {
         ledger.close();
       } catch (e) {
-        reportFailure(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
+        const x = (e ?? {}) as { message?: string };
+        reportFailure(out, "ledger-close-failed", `could not close the cost ledger: ${x.message ?? String(e)}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
         cleanupFailed();
       }
     }

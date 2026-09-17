@@ -190,3 +190,54 @@ export async function deadPid(): Promise<number> {
 export function liveChild(): Bun.Subprocess {
   return Bun.spawn(["sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 }
+
+// ─── audit-store containment (DF5.3 C11) ─────────────────────────────────────
+
+import { afterEach, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * Point `QDS_AUDIT_DB` at a fresh per-test store for every test in the calling
+ * suite, and restore the operator's environment afterwards.
+ *
+ * MANDATORY in any suite that reaches a composition root which opens the audit
+ * store with no argument — `dispatch()` (src/fleet/dispatch.ts), `fleet
+ * dispatch` (scripts/fleet.ts), `sandbox-teardown` (scripts/sandbox-teardown.ts).
+ * `openAuditStore()` resolves `process.env.QDS_AUDIT_DB ?? ".sandbox/audit.db"`
+ * RELATIVE TO CWD, and these suites run with cwd = repo root: without this the
+ * fleet suite appends real rows to the operator's live `.sandbox/audit.db`,
+ * co-resident with the evidence of real runs. (Measured before this landed:
+ * 3,528 rows, 3,502 of them carrying `owner/repo` — this file's fixture slug.)
+ *
+ * The env var, not a cwd change: `dispatch()` takes no store path, several of
+ * these suites assert on `process.cwd()` deliberately, and a spawned
+ * `bun scripts/fleet.ts` child inherits `process.env` but not a per-test chdir.
+ *
+ * The returned `path()` is the store file the run under test will create — the
+ * parent temp dir exists, the file does not, so `existsSync(path())` is also the
+ * assertion that a dispatch refused BEFORE the open created no store at all.
+ */
+export function useTempAuditStore(): { path: () => string } {
+  let dir: string | undefined;
+  let previous: string | undefined;
+  beforeEach(() => {
+    previous = process.env.QDS_AUDIT_DB;
+    dir = mkdtempSync(join(tmpdir(), "qds-fleet-audit-"));
+    process.env.QDS_AUDIT_DB = join(dir, "audit.db");
+  });
+  afterEach(() => {
+    // biome-ignore lint/performance/noDelete: unsetting an env var requires delete
+    if (previous === undefined) delete process.env.QDS_AUDIT_DB;
+    else process.env.QDS_AUDIT_DB = previous;
+    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+  return {
+    path: () => {
+      if (dir === undefined) throw new Error("useTempAuditStore().path() called outside a test");
+      return join(dir, "audit.db");
+    },
+  };
+}

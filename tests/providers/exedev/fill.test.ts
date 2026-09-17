@@ -227,7 +227,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     await fillRun(driver, "fill-qds-2", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
       { path: `work/${QDS_IN_BOX_DIR}/run-context.json`, content: '{"runId":"fill-qds-2"}\n' },
-    ], { recordAuditLink: () => {}, runId: "fill-qds-2", requestId: "test" });
+    ], { recordAuditLink: () => {}, runId: "fill-qds-2", requestId: "test", repoSlug: undefined });
     const work = join(fake.boxDir("fill-qds-2"), "work");
     expect(existsSync(join(work, QDS_IN_BOX_DIR, "pipeline.yaml"))).toBe(true);
     expect(existsSync(join(work, QDS_IN_BOX_DIR, "run-context.json"))).toBe(true);
@@ -363,7 +363,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     expect(branch.stdout.trim()).toBe("sbx/fill-qds-5");
     await fillRun(driver, "fill-qds-5", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: "{}\n" },
-    ], { recordAuditLink: () => {}, runId: "fill-qds-5", requestId: "test" });
+    ], { recordAuditLink: () => {}, runId: "fill-qds-5", requestId: "test", repoSlug: undefined });
     const porcelain = await driver.exec("fill-qds-5", ["git", "-C", "work", "status", "--porcelain"]);
     expect(porcelain.stdout.trim()).toBe("");
   }, 120_000);
@@ -394,7 +394,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     try {
       await fillRun(driver, "fill-qds-6", [
         { path: "work/pipeline.yaml", content: '{"limitMicroUsd":1,"phases":[]}\n' },
-      ], { recordAuditLink: () => {}, runId: "fill-qds-6", requestId: "test" });
+      ], { recordAuditLink: () => {}, runId: "fill-qds-6", requestId: "test", repoSlug: undefined });
     } catch (e) {
       err = e;
     }
@@ -424,7 +424,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     await runLocal(["git", "-C", work, "checkout", "--", "pipeline.yaml"]);
     await fillRun(driver, "fill-qds-6", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
-    ], { recordAuditLink: () => {}, runId: "fill-qds-6", requestId: "test" });
+    ], { recordAuditLink: () => {}, runId: "fill-qds-6", requestId: "test", repoSlug: undefined });
     const clean = await driver.exec("fill-qds-6", ["git", "-C", "work", "status", "--porcelain"]);
     expect(clean.stdout.trim()).toBe("");
   }, 120_000);
@@ -448,7 +448,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     await fillRun(driver, "fill-qds-7", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
       { path: `work/${QDS_IN_BOX_DIR}/run-context.json`, content: '{"runId":"fill-qds-7"}\n' },
-    ], { recordAuditLink: () => {}, runId: "fill-qds-7", requestId: "test" });
+    ], { recordAuditLink: () => {}, runId: "fill-qds-7", requestId: "test", repoSlug: undefined });
     // `fakeExeDev` runs box commands with cwd = the box dir, which is the
     // substrate's stand-in for the ssh HOME `fillRun` resolves against.
     const home = fake.boxDir("fill-qds-7");

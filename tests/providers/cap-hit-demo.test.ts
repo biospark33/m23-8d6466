@@ -23,7 +23,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ProviderDriver } from "../../src/providers/driver.ts";
+import type { ProviderAuditLink, ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore, CORE_FIELDS, type RunRecord } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
@@ -52,6 +52,7 @@ beforeEach(() => {
   recording = new RecordingDriver(driver);
   api = new FakeKeyApi();
   logs = [];
+  auditLinks = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
   evidenceDir = join(dir, "evidence");
 });
@@ -63,8 +64,46 @@ afterEach(() => {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * DF5.3: links captured by `deps()` — the shared factory used by every test in
+ * this file, which is the only suite that drives a whole create→mint→deliver
+ * →revoke→verify→teardown lifecycle in one run. It used to bind a no-op sink,
+ * so all six audit forwardings in scripts/cap-hit-demo.ts could have been
+ * deleted with the suite green. Cleared per test in beforeEach.
+ */
+let auditLinks: ProviderAuditLink[] = [];
+
 function deps(overrides: Partial<CapHitDemoDeps> = {}): CapHitDemoDeps {
-  return { driver: recording, keyApi: api, store, evidenceDir, envFile: "app/.env", recordAuditLink: () => {}, ...overrides };
+  return {
+    driver: recording,
+    keyApi: api,
+    store,
+    evidenceDir,
+    envFile: "app/.env",
+    recordAuditLink: (link) => auditLinks.push(link),
+    ...overrides,
+  };
+}
+
+/**
+ * A store that stamps every record it mints with a DF2.8 attribution and a
+ * requestId — the two things every emitter needs and the demo's own runs
+ * deliberately lack (`createRun` passes no `budget`, so `auditRepoSlug` is
+ * always `undefined` on that path; see the note on the marquee test).
+ *
+ * This is the ONLY way to observe the demo's forwardings end to end without
+ * changing what the demo does: the attribution lands on the record between
+ * `store.create` and the `create` emit's `auditRepoSlug(record)` read, exactly
+ * where a real admitted dispatch would have put it.
+ */
+class AttributedStore extends RunRecordStore {
+  override create(runId: string, now: Date = new Date()): RunRecord {
+    super.create(runId, now);
+    return this.set(runId, {
+      requestId: "req-df53-demo",
+      extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } },
+    });
+  }
 }
 
 /** Default opts for fake substrate (driver.name !== "exedev"). */
@@ -183,6 +222,53 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.timings.reprobe_ms).toBeNumber();
     expect(result.artifact.timings.capture_spend_ms).toBeNumber();
     expect(result.artifact.timings.teardown_ms).toBeNumber();
+
+    // DF5.3 — the HONEST fact about this run, not a silence to be misread as a
+    // bug: the demo's runs are deliberately UNATTRIBUTED. `createRun` passes no
+    // `budget` to `provisionAdmittedRun`, which mints a FRESH record and writes
+    // `extensions.budget` only when one is supplied, so `auditRepoSlug` is
+    // `undefined` for the whole lifecycle and every emitter correctly skips
+    // (INV-AUDIT-4 — the columns are NOT NULL and an invented attribution is
+    // exactly what it forbids). `fillRun`'s site states it outright
+    // (`repoSlug: undefined`, cap-hit-demo.ts). The test below runs the same
+    // lifecycle over an ATTRIBUTED record and pins the full ordered set, so
+    // this zero is a consequence of the demo's inputs and not of a dropped
+    // forwarding.
+    expect(auditLinks).toEqual([]);
+  });
+
+  test("DF5.3: over an ATTRIBUTED record the same lifecycle emits its links in order", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    store = new AttributedStore(join(dir, "runs-attributed"));
+    const result = await runCapHitDemo(
+      deps({ store }),
+      defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\nturn_end\\n'"] }),
+    );
+    expect(result.verdict).toBe("demonstrated");
+
+    // The ORDERED SET for one run, end to end. Any of the six forwardings in
+    // scripts/cap-hit-demo.ts going missing — or emitting under the wrong
+    // hop/event — fails here and nowhere else in the repository.
+    expect(auditLinks.map((l) => `${l.hop}.${l.event}`)).toEqual([
+      "run-box.create",
+      "run-credential.mint",
+      "run-credential.deliver",
+      "run-credential.revoke",
+      "run-credential.verify-revoked",
+      "run-box.teardown",
+    ]);
+    // Every link belongs to THIS run, under the record's own attribution and
+    // its own requestId — never a minted one (C5).
+    for (const l of auditLinks) {
+      expect(l.runId).toBe(result.artifact.runId);
+      expect(l.repoSlug).toBe("qds/demo");
+      expect(l.requestId).toBe("req-df53-demo");
+      expect(l.occurredAt).toBe(l.recordedAt);
+    }
+    // `run-box.fill` is absent because the demo's fill site states
+    // `repoSlug: undefined` outright — the run IS attributed here, so this
+    // absence is the site's own declaration and not a missing forwarding.
+    expect(auditLinks.map((l) => l.event)).not.toContain("fill");
   });
 
   // ─── 2. AC2 self-report trap ────────────────────────────────────────────────

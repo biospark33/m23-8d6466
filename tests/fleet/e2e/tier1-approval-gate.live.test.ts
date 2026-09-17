@@ -54,6 +54,7 @@ import {
   liveTodoOff,
   mintCappedKey,
   preflight,
+  recordLiveAuditLink,
   revokeQuietly,
   runFleet,
   runFleetWithToken,
@@ -296,7 +297,7 @@ test.todoIf(liveTodoOff())(
       ]);
       expect(seedCommit.exitCode).toBe(0);
       const harvest = await harvestRun(
-        { driver: ctx.driver, store, gitCwd: REPO_ROOT, runsDir: store.dir, workdir: "src", recordAuditLink: () => {} },
+        { driver: ctx.driver, store, gitCwd: REPO_ROOT, runsDir: store.dir, workdir: "src", recordAuditLink: recordLiveAuditLink },
         runId,
       );
       const bundlePath = join(recordsDir, `${runId}.bundle`);
@@ -344,7 +345,7 @@ test.todoIf(liveTodoOff())(
         costLedger: ledger,
         gitCwd: REPO_ROOT,
         runsDir: store.dir,
-        recordAuditLink: () => {},
+        recordAuditLink: recordLiveAuditLink,
       };
       // The report this pause binds to. `headSha` is the REAL pinned SHA — the
       // first 40-hex validation in the repo runs against a real commit id.
@@ -1192,7 +1193,7 @@ test.todoIf(liveTodoOff())(
       ]);
       expect(seedCommit.exitCode).toBe(0);
       const harvest = await harvestRun(
-        { driver: ctx.driver, store, gitCwd: REPO_ROOT, runsDir: store.dir, workdir: "src", recordAuditLink: () => {} },
+        { driver: ctx.driver, store, gitCwd: REPO_ROOT, runsDir: store.dir, workdir: "src", recordAuditLink: recordLiveAuditLink },
         runId,
       );
       evidence.push({ phase: "provision", ok: true, vm, keyHash: hash, harvest: harvest.outcome });
@@ -1219,7 +1220,7 @@ test.todoIf(liveTodoOff())(
         costLedger: ledger,
         gitCwd: REPO_ROOT,
         runsDir: store.dir,
-        recordAuditLink: () => {},
+        recordAuditLink: recordLiveAuditLink,
       };
       const reportId = `rv-${runId}`;
       const pause = await requestApproval(

@@ -717,33 +717,89 @@ function sha256File(path: string): string {
   return hasher.digest("hex");
 }
 
+type BundleEmitOutcome =
+  | "emitted"
+  | "skipped-unattributed"
+  | "skipped-no-subject"
+  | "skipped-no-request-id";
+
 /**
  * The DF5.3 bundle link emit (hop 6, run-bundle). The record is the ONLY
  * repoSlug source (DF2.8's budget attribution — never a placeholder); an
  * unattributed run emits nothing, because `audit_links`' columns are NOT NULL
- * and an invented attribution is what INV-AUDIT-4 forbids. `subjectId` is the
- * bundle path, whose presence at `<runsDir>/<runId>.bundle` IS the harvest
- * record (this module's own header).
+ * and an invented attribution is what INV-AUDIT-4 forbids.
+ *
+ * `subjectId` is the bundle path — whose presence at `<runsDir>/<runId>.bundle`
+ * IS the harvest record (this module's own header) — PLUS the generation the
+ * witness actually saw, `#<sha256>` for `bundle-verify` and `#<tip>` for
+ * `bundle-fetch`. The bare path was CONSTANT across harvests, so a lawful
+ * re-harvest (Step D's `--force` exists to support exactly that, AC5) collided
+ * on `UNIQUE (run_id, hop, event, subject_key)` and was dropped by `ON CONFLICT
+ * DO NOTHING` — while the bundle FILE on disk had been overwritten with new
+ * bytes. The walker then recomputed a digest that could never match the first
+ * row's frozen `detail.sha256` and reported `evidence-mismatch` — "the evidence
+ * was tampered with" — on an ordinary second harvest, forever, on an
+ * append-only store. Keyed by generation, the re-harvest writes its OWN row and
+ * the walker checks each against its own subject (chain.ts takes the newest row
+ * per event and digest-checks all of them).
+ *
+ * Returns WHY, not just whether — the `verify`/`fetch` step lines report the
+ * value verbatim, and the constant `audit: "emitted"` they used to carry
+ * asserted a link on runs that never wrote one (and on the error arm, which
+ * `timedLoggedStep` feeds the same `extra`).
+ *
+ * `value` absent ⇒ no emit: a witness with no subject is not a witness (the
+ * `bundle-fetch` case, where the box reported no tip).
  */
 function emitBundleLink(
   deps: HarvestDeps,
   rec: RunRecord,
-  ctx: StepCtx,
   event: string,
-  detail: Record<string, unknown>,
-): void {
+  detailKey: "sha256" | "tip",
+  value: string | undefined,
+): BundleEmitOutcome {
   const repoSlug = auditRepoSlug(rec);
-  if (repoSlug === undefined) return;
+  // The RECORD's requestId, with no `deps`/`ctx` fallback. The walker JOINS
+  // `sessions.request_id` / `gate_results.request_id` on this value, so a
+  // minted one is a FALSE correlation, not a weak one — the fabricated join
+  // key C5 forbids. A `deps.requestId` fallback looks harmless but IS the
+  // laundering channel: dispatch stamps the record at its create step
+  // (`dispatch.ts:3158`, before fill and before any teardown), so whenever
+  // `deps.requestId` is real the record already carries it; the only callers
+  // where the two differ are the CLI/reaper roots, which mint per invocation.
+  // No real id ⇒ no link, and the hop reports `unlinked` — honest, fail-closed.
+  const requestId = rec.requestId;
+  if (repoSlug === undefined) return "skipped-unattributed";
+  if (value === undefined || value.length === 0) return "skipped-no-subject";
+  if (requestId === undefined) {
+    log({
+      // Log-only correlation id — minting one HERE is what this arm refuses to
+      // do for the link (same shape as driver.ts's create-link skip).
+      requestId: newRequestId(),
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId: rec.runId,
+      driver: deps.driver.name,
+      event,
+      reason: "no-request-id",
+      message: `hop run-bundle goes unlinked for run ${rec.runId}: its record carries no requestId`,
+    });
+    return "skipped-no-request-id";
+  }
   emitAuditLink(deps.recordAuditLink, {
     runId: rec.runId,
     repoSlug,
-    requestId: rec.requestId ?? ctx.requestId,
+    requestId,
     hop: "run-bundle",
     event,
-    subjectId: join(resolveRunsDir(deps), `${rec.runId}.bundle`),
+    subjectId: `${join(resolveRunsDir(deps), `${rec.runId}.bundle`)}#${value}`,
     subjectKind: "bundle",
-    detail,
+    detail: { [detailKey]: value },
   });
+  return "emitted";
 }
 
 /**
@@ -927,6 +983,16 @@ export async function harvestRun(
 
     // Step C — cap, then verify STRICTLY BEFORE FETCH (INV-2). The bundle file
     // is kept on every failure here: it is the only copy of the work.
+    //
+    // `audit` is the step line's TRUTHFUL account of the hop-6 emit. It is a
+    // closed-over variable rather than the constant it used to be because
+    // `timedLoggedStep` applies `extra` to BOTH outcome arms: a literal
+    // `"emitted"` asserted a link on error lines, on every unattributed run
+    // (where `emitBundleLink` returns before emitting) and when the store
+    // refused — the one case where this line is the operator's only local
+    // signal that a link is missing. The initial value survives only when the
+    // step threw, which includes a throwing emit.
+    let verifyAudit: BundleEmitOutcome | "step-failed" = "step-failed";
     await timedStep(ctx, "verify", async () => {
       const size = statSync(hostBundle).size;
       if (size > BUNDLE_MAX_BYTES) {
@@ -958,11 +1024,14 @@ export async function harvestRun(
       // verify passed. `detail.sha256` is the bundle file's own sha256, the
       // subject the walker re-checks the row against (chain.ts reads
       // `detail_json.sha256` — keep the two names in lockstep).
-      emitBundleLink(deps, rec, ctx, "bundle-verify", { sha256: sha256File(hostBundle) });
-    }, () => ({ audit: "emitted" }));
+      verifyAudit = emitBundleLink(deps, rec, "bundle-verify", "sha256", sha256File(hostBundle));
+    }, () => ({ audit: verifyAudit }));
 
     // Step D — fetch into the quarantine namespace ONLY. --force makes a
     // re-harvest update in place instead of failing on non-fast-forward (AC5).
+    // `fetchAudit`: see `verifyAudit` above. Here `skipped-no-subject` also
+    // covers a box that reported no tip — `bundle-fetch`'s subject.
+    let fetchAudit: BundleEmitOutcome | "step-failed" = "step-failed";
     await timedStep(ctx, "fetch", async () => {
       const f = await gitRunner(
         ["git", "fetch", "--force", hostBundle, `refs/heads/${branch}:refs/sandbox/${runId}`],
@@ -978,8 +1047,8 @@ export async function harvestRun(
       // DF5.3: the `bundle-fetch` link (hop 6) — after the quarantine ref
       // landed. Ordering AC7 asserts is verify ≤ fetch, which this site order
       // guarantees.
-      emitBundleLink(deps, rec, ctx, "bundle-fetch", { tip: stepA.tip });
-    }, () => ({ audit: "emitted" }));
+      fetchAudit = emitBundleLink(deps, rec, "bundle-fetch", "tip", stepA.tip);
+    }, () => ({ audit: fetchAudit }));
     result = { outcome: "harvested", count: stepA.count ?? 0, tip: stepA.tip ?? "" };
   } else if (stepA.protocol === "NOCOMMITS") {
     // AC4: an empty range is a successful no-op — no ref, no bundle file left.

@@ -31,7 +31,7 @@ import { dirname, join } from "node:path";
 
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { VIZ_PIDFILE, type ExecResult, type ProviderDriver } from "../../src/providers/driver.ts";
+import { VIZ_PIDFILE, type ExecResult, type ProviderAuditLink, type ProviderDriver } from "../../src/providers/driver.ts";
 import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
 // F017: the ONE quoter. The probe rewriting below must quote EXACTLY as the
 // production probe does — a mirrored copy could only ever drift out of
@@ -39,7 +39,7 @@ import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
 import { shellQuote } from "../../src/providers/exedev/transport.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { goodLedger, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
+import { goodLedger, useTempAuditStore, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 // B2-1: `runMarkerPath()` is no longer imported — every interception in this
 // file keys on the `BOX_MARKER_PATH` literal the poller actually probes, so an
@@ -333,6 +333,16 @@ function syncRefuseOf(fn: () => unknown): FleetError {
 }
 
 // ─── suite ─────────────────────────────────────────────────────────────────────
+
+/**
+ * DF5.3 C11: this suite drives a real `dispatch()` (through `scripts/fleet.ts`
+ * or `fanout()`), and `dispatch` is its own audit-store composition root — it
+ * calls `openAuditStore()`, which resolves `QDS_AUDIT_DB ?? .sandbox/audit.db`
+ * RELATIVE TO CWD. Without this the suite appends real rows to the operator's
+ * live store. Registered at file scope so it also covers the `bun
+ * scripts/fleet.ts` subprocesses, which inherit `process.env`.
+ */
+useTempAuditStore();
 
 describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
   let dir: string;
@@ -1032,7 +1042,16 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
           plantMarker(driver, vm, { ok: true });
         }
       };
-      const res = await fanout("race", 3, brief(), raceDeps({ rosterIds: ["r0", "r1", "r2"] }));
+      // DF5.3: the fan-out's audit seam, CAPTURED — `FanoutDeps.recordAuditLink`
+      // is forwarded into each loser's REAL `teardownSandbox`, and no test here
+      // overrode the `() => {}` default, so the forward asserted nothing.
+      const links: ProviderAuditLink[] = [];
+      const res = await fanout(
+        "race",
+        3,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1", "r2"], recordAuditLink: (l) => links.push(l) }),
+      );
       // Deterministic winner: sequential probing guarantees arm index 1 runs
       // probe #2, and we derive the winner from the planted marker rather than
       // hardcoding an index. The winner is WHICHEVER arm owned probe #2.
@@ -1051,6 +1070,14 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         expect(steps.indexOf("harvest")).toBeLessThan(steps.indexOf("destroy"));
         expect(steps).toContain("close");
       }
+      // One teardown link per loser, naming the loser's own box — never the
+      // winner's, which is still alive and billing.
+      const torndown = links
+        .filter((l) => l.hop === "run-box" && l.event === "teardown")
+        .map((l) => l.subjectId)
+        .sort();
+      expect(torndown).toEqual(losers.map((l) => l.vmName).sort());
+      expect(torndown).not.toContain(res.arms[won]?.vmName);
       const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
       expect(rec.winner).toBe(won);
       expect(rec.closedAt).not.toBeNull();

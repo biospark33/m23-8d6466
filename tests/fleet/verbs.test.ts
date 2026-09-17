@@ -58,7 +58,7 @@ import { liveForeignPid, rejection } from "../helpers.ts";
 // DF3.2 probe wiring: the full fanout path needs a key client, a ledger, and
 // the fan-out record store the auto-rank reads.
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { goodLedger } from "./helpers.ts";
+import { goodLedger, useTempAuditStore } from "./helpers.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
 import type { ApproverAuth } from "../../src/fleet/approvers.ts";
@@ -238,6 +238,16 @@ const inOrder = (needle: readonly string[], haystack: readonly string[]): boolea
   }
   return i === needle.length;
 };
+
+/**
+ * DF5.3 C11: this suite drives a real `dispatch()` (through `scripts/fleet.ts`
+ * or `fanout()`), and `dispatch` is its own audit-store composition root — it
+ * calls `openAuditStore()`, which resolves `QDS_AUDIT_DB ?? .sandbox/audit.db`
+ * RELATIVE TO CWD. Without this the suite appends real rows to the operator's
+ * live store. Registered at file scope so it also covers the `bun
+ * scripts/fleet.ts` subprocesses, which inherit `process.env`.
+ */
+useTempAuditStore();
 
 describe("verbs.ts (registry)", () => {
   test("DOCUMENTED_EXIT_CODES is the CLI's table, not a copy of it that can drift", () => {

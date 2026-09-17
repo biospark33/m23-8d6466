@@ -23,10 +23,17 @@
 
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { Database } from "bun:sqlite";
 
+import {
+  type AuditLinkRow,
+  type AuditStoreWriter,
+  openAuditStore,
+  openAuditStoreForWalk,
+} from "../../../src/audit/link-store.ts";
+import type { ProviderAuditLink } from "../../../src/providers/driver.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import { MAX_VERIFY_PAGES, mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
 import type { KeyApi } from "../../../src/providers/credentials.ts";
@@ -81,6 +88,62 @@ export function liveGate(tier: "1" | "2"): void {
 /** The todoIf condition every live test uses: off unless the master flag is set. */
 export function liveTodoOff(): boolean {
   return process.env.QDS_E2E_LIVE !== "1";
+}
+
+// ─── the round's own audit-link store (DF5.3) ────────────────────────────────
+
+/**
+ * Where a live round's `run-credential` / `run-box` links land: beside the
+ * round's evidence, never the operator's `.sandbox/audit.db`.
+ *
+ * `QDS_E2E_EVIDENCE_DIR` moves it with the evidence, for the same reason
+ * `writeEvidence` honours that variable.
+ */
+export function liveAuditStorePath(): string {
+  return join(process.env.QDS_E2E_EVIDENCE_DIR?.trim() || EVIDENCE_DIR, "audit-links.db");
+}
+
+/** Opened on the first link of the round; closed when the process exits. */
+let roundAuditStore: AuditStoreWriter | undefined;
+
+/**
+ * The audit seam every credential/box helper in this harness passes down.
+ *
+ * It used to be `() => {}` at six call sites on the money path, so a live
+ * TIER-1/TIER-2 round minted, delivered and revoked REAL keys with the
+ * `run-credential` hop written nowhere — and an audit walk over a
+ * harness-provisioned run then reported `unlinked` for hops that were in fact
+ * performed. The story sanctions exactly ONE silent link sink (the reaper's
+ * run-less `revokeAndVerify`, INV-AUDIT-4) and none of those six was it.
+ *
+ * GATED, belt and braces: every caller already sits inside a
+ * `test.todoIf(liveTodoOff())` body, and this returns before opening anything
+ * when `QDS_E2E_LIVE !== "1"`. A plain `bun test` therefore creates no store,
+ * touches no evidence directory and reaches no paid path through this seam.
+ */
+export function recordLiveAuditLink(link: ProviderAuditLink): void {
+  if (liveTodoOff()) return;
+  if (roundAuditStore === undefined) {
+    mkdirSync(dirname(liveAuditStorePath()), { recursive: true });
+    roundAuditStore = openAuditStore(liveAuditStorePath());
+  }
+  roundAuditStore.record(link);
+}
+
+/**
+ * Read this round's links back — what a tier test asserts the hops it performed
+ * actually landed. Returns `[]` when no link was ever written (no store, so no
+ * walk): the absence IS the answer, and `openAuditStoreForWalk` refuses to
+ * create one.
+ */
+export function liveAuditLinksFor(runId: string): AuditLinkRow[] {
+  if (!existsSync(liveAuditStorePath())) return [];
+  const handle = openAuditStoreForWalk(liveAuditStorePath());
+  try {
+    return handle.linksForRun(runId);
+  } finally {
+    handle.close();
+  }
 }
 
 // ─── preflight ───────────────────────────────────────────────────────────────
@@ -888,7 +951,10 @@ export async function mintCappedKey(
   capMicroUsd: number,
 ): Promise<{ hash: string }> {
   const keyApi: KeyApi = openRouterKeyApi();
-  const res = await mintRunKey({ store, keyApi, driver, capMicroUsd, recordAuditLink: () => {} }, runId);
+  const res = await mintRunKey(
+    { store, keyApi, driver, capMicroUsd, recordAuditLink: recordLiveAuditLink },
+    runId,
+  );
   return { hash: res.hash };
 }
 
@@ -1036,7 +1102,10 @@ export async function revokeQuietly(
       return; // no key was ever minted — nothing to revoke
     }
     const keyApi: KeyApi = openRouterKeyApi();
-    const result = await revokeRunKey({ keyApi, driver, store, recordAuditLink: () => {} }, runId);
+    const result = await revokeRunKey(
+      { keyApi, driver, store, recordAuditLink: recordLiveAuditLink },
+      runId,
+    );
     evidence.push({ phase: "finally-revoke", runId, result, ok: result !== "none" });
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);

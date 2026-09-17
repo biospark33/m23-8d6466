@@ -893,12 +893,14 @@ export async function runCapHitDemo(
       }
       const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
       await fillRun(deps.driver, vmName, files, {
-      // DF5.3: no repoSlug — the demo's runs are budget-less, so the fill link
-      // is (correctly) not emitted; the seam is still threaded, loud.
-      recordAuditLink: deps.recordAuditLink,
-      runId,
-      requestId,
-    });
+        // DF5.3/C7: stated, not omitted — the demo's runs are deliberately
+        // budget-less, so the fill link is (correctly) not emitted; the seam is
+        // still threaded, loud.
+        repoSlug: undefined,
+        recordAuditLink: deps.recordAuditLink,
+        runId,
+        requestId,
+      });
       await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha, workdir: LIVE_WORKDIR });
       // Warm pi's streaming path BEFORE the gate: on a FRESH box the first pi
       // calls nondeterministically stall (no request timeout in pi's client);
@@ -1672,6 +1674,8 @@ async function main(argv: readonly string[]): Promise<number> {
   // every exit of the run. A store that cannot open fails the process loud,
   // before anything billable — the main() catch prints it with the residual.
   const auditStore: AuditStoreWriter = openAuditStore();
+  /** Set by the finally when the handle would not release — feeds the exit below. */
+  let auditCloseFailed = false;
   let result: CapHitDemoResult;
   try {
     result = await runCapHitDemo(
@@ -1695,7 +1699,23 @@ async function main(argv: readonly string[]): Promise<number> {
       },
     );
   } finally {
-    auditStore.close();
+    // DF5.3, C10 — the same close discipline as sandbox-teardown/sandbox-reap/
+    // fleet: guarded, because a throw raised in a `finally` REPLACES the block's
+    // completion value (a completed billable run's `result` discarded, or the
+    // original exception and its residual-spend reporting swallowed by a
+    // bookkeeping fault). Every link is already committed, so this is a
+    // leftover, not a verb to retry — but it still sets the flag the exit
+    // decision reads: a store that did not close cleanly may not have flushed.
+    // The error coercion is the guarded form: a thrown null/undefined must not
+    // raise a SECOND error from inside this catch.
+    try {
+      auditStore.close();
+    } catch (e) {
+      auditCloseFailed = true;
+      const x = (e ?? {}) as { message?: string };
+      writeSync(2, `!! audit-store-close-failed: could not close the audit-link store: ${redactSecrets(x.message ?? e)}\n`);
+      writeSync(2, "next: the handle dies with the process; re-run to confirm it still reads\n");
+    }
   }
 
   // Normal completion: unregister signal handlers so a late signal doesn't re-trigger cleanup.
@@ -1707,8 +1727,10 @@ async function main(argv: readonly string[]): Promise<number> {
   writeSync(1, `${JSON.stringify(output)}\n`);
 
   // Only a demonstrated run is success: an inconclusive (or unknown) verdict
-  // must fail the process, not just say so in JSON.
-  return result.verdict === "demonstrated" ? 0 : 1;
+  // must fail the process, not just say so in JSON. C10: an audit-store close
+  // failure is the same kind of cleanup failure the other three CLIs fail on —
+  // this CLI's table is 0/1, so it is 1 here where `fleet` can afford its 6.
+  return result.verdict === "demonstrated" && !auditCloseFailed ? 0 : 1;
 }
 
 if (import.meta.main) {

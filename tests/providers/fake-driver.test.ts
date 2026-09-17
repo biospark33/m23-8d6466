@@ -24,6 +24,7 @@ import {
   createRun,
   createBudgetMs,
   fillRun,
+  type ProviderAuditLink,
   type ProviderVm,
   ProvisionRefusedError,
   provisionAdmittedRun,
@@ -456,7 +457,7 @@ describe("FakeDriver accountability and boundaries", () => {
       await d.create("fill-escape-box");
       // The workload can plant this itself before a later fillRun call runs.
       symlinkSync(host, join(boxes, "fill-escape-box", "out"));
-      await expect(fillRun(d, "fill-escape-box", [{ path: "out/pwned.txt", content: "escaped\n" }], { recordAuditLink: () => {}, runId: "fill-escape-box", requestId: "test" })).rejects.toThrow(
+      await expect(fillRun(d, "fill-escape-box", [{ path: "out/pwned.txt", content: "escaped\n" }], { recordAuditLink: () => {}, runId: "fill-escape-box", requestId: "test", repoSlug: undefined })).rejects.toThrow(
         /fill failed|symlink/,
       );
       expect(existsSync(join(host, "pwned.txt"))).toBe(false);
@@ -475,7 +476,7 @@ describe("FakeDriver accountability and boundaries", () => {
       // Dangling symlink: the target does not exist yet, which is exactly the
       // case a textual/existence-based check would miss.
       symlinkSync(join(host, "pwned.txt"), join(boxes, "fill-target-box", "link.txt"));
-      await expect(fillRun(d, "fill-target-box", [{ path: "link.txt", content: "escaped\n" }], { recordAuditLink: () => {}, runId: "fill-target-box", requestId: "test" })).rejects.toThrow(
+      await expect(fillRun(d, "fill-target-box", [{ path: "link.txt", content: "escaped\n" }], { recordAuditLink: () => {}, runId: "fill-target-box", requestId: "test", repoSlug: undefined })).rejects.toThrow(
         /fill failed|symlink/,
       );
       expect(existsSync(join(host, "pwned.txt"))).toBe(false);
@@ -495,7 +496,7 @@ describe("FakeDriver accountability and boundaries", () => {
       const d = new FakeDriver(boxes);
       await d.create("fill-codes-box");
       // (`escape` shadows a restricted global name — named `escapeAttempt`.)
-      const escapeAttempt = fillRun(d, "fill-codes-box", [{ path: "/etc/pwned", content: "x" }], { recordAuditLink: () => {}, runId: "fill-codes-box", requestId: "test" });
+      const escapeAttempt = fillRun(d, "fill-codes-box", [{ path: "/etc/pwned", content: "x" }], { recordAuditLink: () => {}, runId: "fill-codes-box", requestId: "test", repoSlug: undefined });
       await expect(escapeAttempt).rejects.toThrow(/fill path escapes the box: \/etc\/pwned/);
       const escapeErr = (await escapeAttempt.catch((e: unknown) => e)) as { code?: string; remediation?: string };
       expect(escapeErr.code).toBe("fill-path-escape");
@@ -504,7 +505,7 @@ describe("FakeDriver accountability and boundaries", () => {
       // The exec-failure arm (the real driver refuses, the fake's script
       // surfaces a nonzero exit through the same wrap) stays a DIFFERENT code.
       symlinkSync(join(boxes, "elsewhere"), join(boxes, "fill-codes-box", "linked"));
-      const failed = fillRun(d, "fill-codes-box", [{ path: "linked/x", content: "x" }], { recordAuditLink: () => {}, runId: "fill-codes-box", requestId: "test" });
+      const failed = fillRun(d, "fill-codes-box", [{ path: "linked/x", content: "x" }], { recordAuditLink: () => {}, runId: "fill-codes-box", requestId: "test", repoSlug: undefined });
       await expect(failed).rejects.toThrow(/fill failed for linked\/x/);
       const failedErr = (await failed.catch((e: unknown) => e)) as { code?: string };
       expect(failedErr.code).toBe("fill-failed");
@@ -547,7 +548,7 @@ describe("FakeDriver accountability and boundaries", () => {
       // traversal opens and holds the fd for "a" and before it opens the
       // final target "c.txt" relative to that fd — exactly the window
       // CodeRabbit named ("between the component check and `cat > "$p"`").
-      const fillPromise = fillRun(d, "race-box", [{ path: "a/c.txt", content: "payload\n" }], { recordAuditLink: () => {}, runId: "race-box", requestId: "test" });
+      const fillPromise = fillRun(d, "race-box", [{ path: "a/c.txt", content: "payload\n" }], { recordAuditLink: () => {}, runId: "race-box", requestId: "test", repoSlug: undefined });
 
       const readyMarker = join(sync, "ready.a");
       const deadline = Date.now() + 10_000;
@@ -1203,6 +1204,253 @@ describe("provisioning refusals and fail-safe reap", () => {
       expect((await t.driver.list()).map((v) => v.name)).toEqual([id]);
     } finally {
       clean(t);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DF5.3 — hop 5 (run-box), the two links driver.ts emits itself
+// ---------------------------------------------------------------------------
+
+/**
+ * Both emits below were, before this suite existed, asserted by NOTHING in the
+ * repository: every `provisionAdmittedRun`/`fillRun` call site in the tests
+ * passed `recordAuditLink: () => {}`, and `fillRun`'s emit is additionally
+ * guarded on a `repoSlug` no site supplied — so it was structurally
+ * UNREACHABLE. Either emit could have been deleted, or emitted with the runId
+ * in place of the box, or with `fileCount: 0`, and the whole suite stayed
+ * green while hop 5's chain broke at its FIRST link in production.
+ */
+describe("DF5.3 — the run-box links (hop 5)", () => {
+  function tmp(): { boxes: string; runs: string; driver: FakeDriver; store: RunRecordStore } {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df53-boxes-"));
+    const runs = mkdtempSync(join(tmpdir(), "qds-df53-runs-"));
+    return { boxes, runs, driver: new FakeDriver(boxes), store: new RunRecordStore({ dir: runs }) };
+  }
+  function clean(t: { boxes: string; runs: string }): void {
+    rmSync(t.boxes, { recursive: true, force: true });
+    rmSync(t.runs, { recursive: true, force: true });
+  }
+
+  const BUDGET = {
+    repoSlug: "qds/demo",
+    issueId: "42",
+    capMicroUsd: 5_000_000,
+    spentMicroUsd: 0,
+    reservedMicroUsd: 0,
+    admittedCeilingMicroUsd: 5_000_000,
+  };
+
+  /**
+   * A driver whose box is named DIFFERENTLY from the run. FakeDriver names the
+   * box after the runId, which makes `subjectId === vm.name` and
+   * `subjectId === runId` indistinguishable — an assertion that holds for the
+   * correct AND the incorrect implementation proves nothing. The real box is
+   * still created (so teardown/list stay honest); only the reported name
+   * differs.
+   */
+  function boxNamedApart(t: { driver: FakeDriver }): FakeDriver {
+    return Object.assign(Object.create(t.driver) as FakeDriver, {
+      create: async (name: string): Promise<ProviderVm> => {
+        await t.driver.create(name);
+        return { name: `vm-${name}`, httpsUrl: "https://box.example" };
+      },
+    });
+  }
+
+  test("H1: provisionAdmittedRun emits exactly one run-box.create, subject = the BOX", async () => {
+    const t = tmp();
+    const links: ProviderAuditLink[] = [];
+    try {
+      const runId = "df53-create-run";
+      const out = await provisionAdmittedRun(boxNamedApart(t), t.store, {
+        runId,
+        budget: BUDGET,
+        requestId: "req-create",
+        recordAuditLink: (l) => links.push(l),
+      });
+      expect(links.map((l) => `${l.hop}.${l.event}`)).toEqual(["run-box.create"]);
+      const link = links[0]!;
+      // The BOX, not the run — the two are distinguishable in this fixture.
+      expect(link.subjectId).toBe(out.record.vmName);
+      expect(link.subjectId).toBe(`vm-${runId}`);
+      expect(link.subjectId).not.toBe(runId);
+      expect(link.subjectKind).toBe("box");
+      expect(link.runId).toBe(runId);
+      expect(link.repoSlug).toBe("qds/demo");
+      expect(link.requestId).toBe("req-create");
+      expect(link.detail).toEqual({ vmName: `vm-${runId}`, provider: "fake" });
+      expect(link.occurredAt).toBe(link.recordedAt);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("an unattributed run emits no create link and logs no skip (INV-AUDIT-4)", async () => {
+    const t = tmp();
+    const links: ProviderAuditLink[] = [];
+    const entries: Array<Record<string, unknown>> = [];
+    const restore = setLogSink((e) => entries.push(e as unknown as Record<string, unknown>));
+    try {
+      await provisionAdmittedRun(t.driver, t.store, {
+        runId: "df53-create-unattributed",
+        requestId: "req-create",
+        recordAuditLink: (l) => links.push(l),
+      });
+      expect(links).toEqual([]);
+      // No repoSlug is not a correlation failure — there is nothing to say.
+      expect(entries.filter((e) => e.operation === "providers.audit-link-skipped")).toEqual([]);
+    } finally {
+      restore();
+      clean(t);
+    }
+  });
+
+  test("C5: an attributed run with NO requestId SKIPS the emit rather than minting a join key", async () => {
+    const t = tmp();
+    const links: ProviderAuditLink[] = [];
+    const entries: Array<Record<string, unknown>> = [];
+    const restore = setLogSink((e) => entries.push(e as unknown as Record<string, unknown>));
+    try {
+      // No `requestId` in the options, and `store.create` makes a FRESH record
+      // that carries none either. A minted id here would be a fabricated join
+      // key: the walker JOINs `sessions.request_id` on it.
+      await provisionAdmittedRun(t.driver, t.store, {
+        runId: "df53-create-noreq",
+        budget: BUDGET,
+        recordAuditLink: (l) => links.push(l),
+      });
+      expect(links).toEqual([]);
+      const skipped = entries.filter((e) => e.operation === "providers.audit-link-skipped");
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]!.reason).toBe("no-request-id");
+      expect(skipped[0]!.event).toBe("create");
+      expect(skipped[0]!.runId).toBe("df53-create-noreq");
+      // The log line's own correlation id is minted (LogEntry requires one) —
+      // what must never happen is that id reaching `audit_links`, which the
+      // empty `links` above is the assertion for.
+      expect(typeof skipped[0]!.requestId).toBe("string");
+    } finally {
+      restore();
+      clean(t);
+    }
+  });
+
+  test("a store refusal on the create link is a ProvisionRefusedError with the TEARDOWN remediation", async () => {
+    // It fires while the box is LIVE and BILLING. A bare AuditStoreError would
+    // reach dispatch's classifier pointing the operator at the audit store,
+    // while the only correct next action is to tear the run down.
+    const t = tmp();
+    try {
+      const runId = "df53-create-storefail";
+      const err = await rejection(
+        provisionAdmittedRun(boxNamedApart(t), t.store, {
+          runId,
+          budget: BUDGET,
+          requestId: "req-create",
+          recordAuditLink: () => {
+            throw new Error("audit store is read-only");
+          },
+        }),
+      );
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      const refused = err as ProvisionRefusedError;
+      expect(refused.code).toBe("audit-link-write-failed");
+      expect(refused.message).toContain("audit store is read-only");
+      expect(refused.message).toContain(`vm-${runId}`);
+      expect(refused.remediation).toContain(`teardown ${runId}`);
+      // The record is left OPEN naming the box — that IS the cleanup handle.
+      expect(t.store.get(runId).vmName).toBe(`vm-${runId}`);
+      expect(t.store.get(runId).closedAt).toBeUndefined();
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("H2: a happy-path fillRun emits exactly one run-box.fill, subject = the BOX, with the file count", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df53-fill-"));
+    const links: ProviderAuditLink[] = [];
+    try {
+      const d = new FakeDriver(boxes);
+      // Box name DELIBERATELY unlike the runId: `fillRun` takes them as two
+      // separate arguments, so emitting `audit.runId` as the subject would be
+      // invisible under the usual same-name fixture.
+      const vm = "vm-df53-fill";
+      const runId = "df53-fill-run";
+      await d.create(vm);
+      await fillRun(
+        d,
+        vm,
+        [
+          { path: "a.txt", content: "one\n" },
+          { path: "nested/b.txt", content: "two\n" },
+        ],
+        { recordAuditLink: (l) => links.push(l), runId, requestId: "req-fill", repoSlug: "qds/demo" },
+      );
+      expect(links).toHaveLength(1);
+      const link = links[0]!;
+      expect(`${link.hop}.${link.event}`).toBe("run-box.fill");
+      expect(link.subjectId).toBe(vm);
+      expect(link.subjectId).not.toBe(runId);
+      expect(link.subjectKind).toBe("box");
+      expect(link.runId).toBe(runId);
+      expect(link.repoSlug).toBe("qds/demo");
+      expect(link.requestId).toBe("req-fill");
+      expect(link.detail).toEqual({ fileCount: 2 });
+      expect(link.occurredAt).toBe(link.recordedAt);
+      // …and the files actually landed, so `fileCount` describes real work.
+      expect(readFileSync(join(boxes, vm, "nested", "b.txt"), "utf8")).toBe("two\n");
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("a FAILED fill emits nothing — the link means every file landed", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df53-fill-fail-"));
+    const links: ProviderAuditLink[] = [];
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("vm-df53-fill-fail");
+      await expect(
+        fillRun(d, "vm-df53-fill-fail", [{ path: "/etc/pwned", content: "x" }], {
+          recordAuditLink: (l) => links.push(l),
+          runId: "df53-fill-fail-run",
+          requestId: "req-fill",
+          repoSlug: "qds/demo",
+        }),
+      ).rejects.toThrow(/fill path escapes the box/);
+      expect(links).toEqual([]);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("an EMPTY repoSlug skips the fill emit instead of throwing after every file landed", async () => {
+    // The guard is `typeof repoSlug === "string" && length > 0`, not
+    // `!== undefined`: an empty string passed the weaker predicate, reached the
+    // store's own non-empty check and threw `audit-link-invalid` AFTER the
+    // files were already in the box — turning a successful fill into a
+    // dispatch failure.
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df53-fill-empty-"));
+    const links: ProviderAuditLink[] = [];
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("vm-df53-fill-empty");
+      for (const repoSlug of ["", undefined]) {
+        links.length = 0;
+        await fillRun(d, "vm-df53-fill-empty", [{ path: `${repoSlug === "" ? "e" : "u"}.txt`, content: "x\n" }], {
+          recordAuditLink: (l) => links.push(l),
+          runId: "df53-fill-empty-run",
+          requestId: "req-fill",
+          repoSlug,
+        });
+        expect(links).toEqual([]);
+      }
+      // Both fills SUCCEEDED — the skip is silent, not a refusal.
+      expect(readFileSync(join(boxes, "vm-df53-fill-empty", "e.txt"), "utf8")).toBe("x\n");
+      expect(readFileSync(join(boxes, "vm-df53-fill-empty", "u.txt"), "utf8")).toBe("x\n");
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
     }
   });
 });

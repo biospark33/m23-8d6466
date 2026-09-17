@@ -160,6 +160,9 @@ export async function run(
   let auditStore: AuditStoreWriter | undefined;
   // D6 (round 3): set by the finally when the ledger handle failed to release.
   let ledgerCloseFailed = false;
+  // C10: the audit store's close obeys the SAME policy as the ledger's — one
+  // fault class must not produce two exit codes across the four CLIs.
+  let auditCloseFailed = false;
   try {
     const store = deps.store ?? new RunRecordStore({ requestId });
     if (parsed.yes) {
@@ -201,7 +204,22 @@ export async function run(
         ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
         ...(deps.now !== undefined ? { now: deps.now } : {}),
         requestId,
-        recordAuditLink: (link) => auditStore?.record(link),
+        recordAuditLink: (link) => {
+          // NOT `auditStore?.record(link)`. The story sanctions exactly ONE
+          // silent no-op link sink (the reaper's run-less revokeAndVerify,
+          // W14B-3/INV-AUDIT-4) and this is not it: a dry run reaches no emit
+          // site at all, so an emit arriving before the apply-mode open is a
+          // MIS-ORDERED emit — a programming error to be loud about, not a
+          // condition to swallow. The window is unreachable today; the throw is
+          // what keeps it unreachable when an emit site moves one line earlier.
+          const store = auditStore;
+          if (store === undefined) {
+            throw new Error(
+              `audit link ${link.hop}/${link.event} was emitted before the audit store was opened — this is a sweep ordering bug`,
+            );
+          }
+          store.record(link);
+        },
       },
       { yes: parsed.yes },
     );
@@ -222,10 +240,17 @@ export async function run(
     try {
       auditStore?.close();
     } catch (e) {
+      // C10: the same flag discipline as the ledger below — a store that did
+      // not close cleanly may not have flushed, so it feeds the exit decision
+      // instead of being a stderr-only note. The coercion is guarded: a thrown
+      // null/undefined would raise a SECOND error from inside this catch, which
+      // escapes the `finally` and masks the real outcome.
+      auditCloseFailed = true;
+      const x = (e ?? {}) as { message?: string };
       fail(
         out,
         "audit-store-close-failed",
-        `could not close the audit-link store: ${(e as Error).message}`,
+        `could not close the audit-link store: ${x.message ?? String(e)}`,
         "the handle dies with the process; re-run to confirm it still reads",
       );
     }
@@ -233,10 +258,11 @@ export async function run(
       ledger?.close();
     } catch (e) {
       ledgerCloseFailed = true;
+      const x = (e ?? {}) as { message?: string };
       fail(
         out,
         "ledger-close-failed",
-        `could not close the cost ledger: ${(e as Error).message}`,
+        `could not close the cost ledger: ${x.message ?? String(e)}`,
         "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads",
       );
     }
@@ -270,7 +296,7 @@ export async function run(
   // diagnostic-then-0 — the box-hour settles the close was releasing may not
   // be durably committed, and the cron consumer keying on the exit code must
   // not read success. (Dry run: no ledger, unchanged exit taxonomy.)
-  if (report.mode === "apply" && (report.failures.length > 0 || ledgerCloseFailed)) return 1;
+  if (report.mode === "apply" && (report.failures.length > 0 || ledgerCloseFailed || auditCloseFailed)) return 1;
   return 0;
 }
 

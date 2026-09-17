@@ -30,9 +30,11 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as YAML from "yaml";
@@ -78,7 +80,12 @@ import {
   closeThrowsLedger,
   goodLedger,
   overBudgetLedger,
+  useTempAuditStore,
 } from "./helpers.ts";
+import {
+  type AuditLinkRow,
+  openAuditStoreForWalk,
+} from "../../src/audit/link-store.ts";
 
 /**
  * UUID v4, spelled out here rather than imported from the implementation's own
@@ -157,6 +164,28 @@ const ESCAPE_REL = join("manifests", "escape.json");
 const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "df3-1-dispatch-")));
 
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+/**
+ * DF5.3 C11: `dispatch()` IS the composition root for this run's audit links —
+ * it calls `openAuditStore()` itself, which resolves `QDS_AUDIT_DB ??
+ * .sandbox/audit.db` relative to cwd. Registered at FILE scope so it covers
+ * every describe here, including the ones that do not read `auditDb.path()`.
+ */
+const auditDb = useTempAuditStore();
+
+/**
+ * The links a dispatch wrote for `runId`, oldest first — read through the
+ * PRODUCTION reader (`openAuditStoreForWalk`), so these assertions see exactly
+ * the rows `scripts/qds-audit.ts` walks, in the order it walks them.
+ */
+function auditRows(runId: string): AuditLinkRow[] {
+  const handle = openAuditStoreForWalk(auditDb.path());
+  try {
+    return handle.linksForRun(runId);
+  } finally {
+    handle.close();
+  }
+}
 
 /**
  * A clock that starts at a fixed instant and only moves when a test moves it.
@@ -2586,6 +2615,49 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(witness.budgetMs).toBeGreaterThan(TIMEOUT_MS - 1_000);
   });
 
+  test("DF5.3: the witness carries the issue correlation — the in-box engine's ONLY source for what authorized the run", async () => {
+    // The dispatched shape takes `--run-id` and so never walks DF1.8's
+    // correlation ladder (`--repo-slug`/`--issue` RESOLVE an identity, and
+    // RUN_ID_CONFLICT refuses them beside a `--run-id`). Without this pair on
+    // the witness the in-box engine falls through to its bare `startSession`
+    // and the harvested trace's `sessions` row carries NULL repo_slug/issue_id
+    // — which is what a live DF5.3 round measured, leaving the audit walker's
+    // record-vs-trace divergence check with nothing to corroborate the
+    // admission fact this dispatch wrote into the run record.
+    //
+    // The pair is asserted WHOLE, and against the run record's own copy: half
+    // a correlation REFUSES the run in-box (issue identity is the pair,
+    // INV-RUN-3), and a pair that disagrees with the record is precisely the
+    // divergence the check exists to catch, so a witness agreeing with itself
+    // proves nothing.
+    const brief = {
+      ...validBrief(),
+      repoSlug: "Owner/Repo",
+      issueId: 7,
+      issueUrl: "https://github.com/owner/repo/issues/7",
+    };
+    const result = await dispatch(brief, deps());
+
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as { repoSlug?: unknown; issueId?: unknown; issueUrl?: unknown };
+    // CANONICAL (case-folded), not the brief's spelling: `resolveRunCorrelation`
+    // folds the slug so the ledger key, the run record and this witness name
+    // ONE repository, and the engine re-validates what it reads here through
+    // that same function — a raw `Owner/Repo` on the witness would correlate
+    // the trace to a second budget identity.
+    expect(witness.repoSlug).toBe("owner/repo");
+    // `String`, matching the ledger key and the run record. The engine
+    // normalises this spelling back to an integer; a test that accepted either
+    // shape would let the two carriers drift apart silently.
+    expect(witness.issueId).toBe("7");
+    expect(witness.issueUrl).toBe("https://github.com/owner/repo/issues/7");
+
+    const record = store.get(result.runId);
+    expect(witness.repoSlug).toBe(record.extensions?.budget?.repoSlug);
+    expect(witness.issueId).toBe(record.extensions?.budget?.issueId);
+  });
+
   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
     // The create step STRADDLES the record: `provisionAdmittedRun` writes the
     // run record first (INV-1), then the box. An untyped throw escaping from
@@ -4652,6 +4724,30 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // INV-4: the hash, never the plaintext — this is a log sink.
     expect(JSON.stringify(line)).not.toContain(knownKey);
     expect(JSON.stringify(line)).not.toContain("sk-or-v1-");
+
+    // DF5.3: the abandoned mint's audit link arrives AFTER the dispatch closed
+    // the store. That is a deliberate LOGGED DROP, not a throw into a closed
+    // `Database` — which would turn this step's `abandoned-step-succeeded` into
+    // `abandoned-step-failed` and bury the one fact the operator needs (a live
+    // key exists after the refusal) under an audit-plumbing error.
+    await awaitEntry((e) => e.phase === "audit-dropped" && e.step === "mint");
+    const drops = entries.filter((e) => e.phase === "audit-dropped");
+    expect(drops).toHaveLength(1);
+    const drop = drops[0] as LogEntry;
+    expect((drop.error as { code?: string }).code).toBe("audit-link-dropped-after-close");
+    expect(drop.exitStatus).toBe("transient");
+    expect(drop.status).toBe("error");
+    // Joinable: the line names the run whose link was dropped, not `null`.
+    expect(drop.runId).toBe(readdirSync(store.dir)[0]?.replace(/\.json$/, ""));
+    // Its OWN phase, never `abandoned`: `abandonedLine` above counts those and
+    // asserts exactly one per expired step, and a drop is not a step expiry.
+    expect(drop.phase).not.toBe("abandoned");
+    expect(JSON.stringify(drop)).not.toContain(knownKey);
+    // And the link genuinely did NOT reach the store.
+    expect(existsSync(auditDb.path())).toBeTrue();
+    expect(
+      auditRows(drop.runId as string).filter((r) => r.event === "mint"),
+    ).toStrictEqual([]);
   });
 
   test("an ABANDONED setPublic names the BOX it may have published", async () => {
@@ -5539,6 +5635,220 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(createSpy).not.toHaveBeenCalled();
       expect(mintSpy).not.toHaveBeenCalled();
       expect(readdirSync(store.dir)).toHaveLength(0);
+    });
+  });
+
+  // ─── DF5.3: the hop-5 links this dispatch is the composition root for ───────
+
+  /**
+   * `dispatch()` opens the audit store ITSELF — there is no `recordAuditLink`
+   * seam on `DispatchDeps` to capture, which is why every one of these reads the
+   * real store at `auditDb.path()`. Before this block existed, deleting any of
+   * the five emits below left the whole fleet suite green and the chain would
+   * have reported `unlinked` for every real run.
+   */
+  describe("DF5.3: audit links (hop 5)", () => {
+    /** The links one successful dispatch owes, in the order it owes them. */
+    const HOP5_SEQUENCE = [
+      "run-box/create",
+      "run-credential/mint",
+      "run-credential/deliver",
+      "run-box/fill",
+      "run-box/setup-gate",
+    ];
+
+    /** A gate whose result shape is fixed, so `detail` is deterministic. */
+    const twoAssertionGate = async (
+      _d: ProviderDriver,
+      vm: string,
+    ): Promise<SetupGateResult> => ({
+      ready: true,
+      assertions: [
+        { item: "A" as const, ok: true, note: "" },
+        { item: "B" as const, ok: true, note: "" },
+      ],
+      debugCommands: [],
+      teardownCommand: `td ${vm}`,
+      vm,
+    });
+
+    test("a successful dispatch writes the FULL hop-5 set, in order, attributed to the run", async () => {
+      const result = await dispatch(validBrief(), deps({ setupGate: twoAssertionGate }));
+      const vmName = store.get(result.runId).vmName as string;
+
+      const rows = auditRows(result.runId);
+      expect(rows.map((r) => `${r.hop}/${r.event}`)).toStrictEqual(HOP5_SEQUENCE);
+      // ONE attribution for the whole set (C6) and one correlation (INV-4-bis):
+      // three emitters on three different call paths, and a chain that cannot
+      // join them is a chain that reports `unlinked`.
+      expect(new Set(rows.map((r) => r.repoSlug))).toStrictEqual(new Set(["owner/repo"]));
+      expect(new Set(rows.map((r) => r.requestId))).toStrictEqual(new Set([result.requestId]));
+      expect(new Set(rows.map((r) => r.runId))).toStrictEqual(new Set([result.runId]));
+      // The box links name the BOX; the credential links name the key HASH —
+      // a subject swap between the two hops is what makes a walk unjoinable.
+      for (const r of rows.filter((r) => r.hop === "run-box")) {
+        expect(r.subjectKind).toBe("box");
+        expect(r.subjectId).toBe(vmName);
+      }
+      for (const r of rows.filter((r) => r.hop === "run-credential")) {
+        expect(r.subjectKind).toBe("credential-key");
+        expect(r.subjectId).toBe(store.get(result.runId).keyHash as string);
+      }
+
+      // The gate link's own payload — the summary the audit row is FOR.
+      const gateRow = rows.find((r) => r.event === "setup-gate") as AuditLinkRow;
+      expect(gateRow.detail).toStrictEqual({ ready: true, assertions: 2 });
+      // INV-4: a link row is an operator-visible sink like any other.
+      expect(JSON.stringify(rows)).not.toContain(SBX_KEY_PREFIX);
+    });
+
+    test("setup-gate detail OMITS `assertions` when the gate returned a non-array — absence, never 0", async () => {
+      // `0` means "the gate ran no assertions"; absence means "the gate did not
+      // report a countable list". An audit row that cannot tell the two apart
+      // reads the safer of them.
+      const result = await dispatch(
+        validBrief(),
+        deps({
+          setupGate: async (_d: ProviderDriver, vm: string) =>
+            ({
+              ready: true,
+              assertions: undefined,
+              debugCommands: [],
+              teardownCommand: `td ${vm}`,
+              vm,
+            }) as unknown as SetupGateResult,
+        }),
+      );
+      const gateRow = auditRows(result.runId).find((r) => r.event === "setup-gate") as AuditLinkRow;
+      expect(gateRow.detail).toStrictEqual({ ready: true });
+      expect(Object.keys(gateRow.detail as object)).not.toContain("assertions");
+    });
+
+    test("an UNATTRIBUTED run emits NO hop-5 links at all — never fill/setup-gate with no create", async () => {
+      // A `fill` and a `setup-gate` with no `create` reads as "the box was
+      // filled before it was created". All three sites take the SAME slug, from
+      // the record, so they skip together (C6). Here the budget extension never
+      // reaches the record, which is the only source `auditRepoSlug` may use.
+      // No restore needed: `beforeEach` rebuilds `store` fresh.
+      const realSet = store.set.bind(store);
+      store.set = (id: string, patch: Parameters<RunRecordStore["set"]>[1]) =>
+        // The write happens; the budget attribution just is not in it.
+        realSet(id, "extensions" in patch ? {} : patch);
+
+      const result = await dispatch(validBrief(), deps({ setupGate: twoAssertionGate }));
+
+      expect(result.state).toBe("ready");
+      // The store was opened (the dispatch ran), it just has nothing to say.
+      expect(existsSync(auditDb.path())).toBeTrue();
+      expect(auditRows(result.runId)).toStrictEqual([]);
+    });
+
+    test("a dispatch refused BEFORE the open creates no store file at all", async () => {
+      // The open is fail-closed and sits after admission, right before the
+      // create — so a brief refused at the boundary must not so much as bring
+      // the store into existence. Production claims this; nothing asserted it.
+      try {
+        await dispatch(validBrief(), deps({ timeoutMs: 0 }));
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect((e as FleetError).code).toBe("timeout-invalid");
+      }
+      expect(existsSync(auditDb.path())).toBeFalse();
+      expect(existsSync(dirname(auditDb.path()))).toBeTrue(); // the parent was ours all along
+    });
+
+    test("an unopenable store refuses audit-store-unavailable at exit 1 — no box, no record, no mint", async () => {
+      // Fail-closed: a run whose box/credential links cannot be written is a run
+      // the chain can never vouch for, so it refuses instead of provisioning an
+      // unlinked box. Shipped with no test at all.
+      const sealed = realpathSync(mkdtempSync(join(tmpRoot, "sealed-")));
+      chmodSync(sealed, 0o500); // readable and traversable, NOT writable
+      process.env.QDS_AUDIT_DB = join(sealed, "nested", "audit.db");
+      const createSpy = mock(() => Promise.resolve({ name: "x", status: "running" } as ProviderVm));
+      driver.create = createSpy;
+      const originalMint = keyApi.createKey.bind(keyApi);
+      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+      keyApi.createKey = mintSpy;
+
+      try {
+        await dispatch(validBrief(), deps());
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(1);
+        expect(err.code).toBe("audit-store-unavailable");
+        // The typed code is NOT re-wrapped by the create→expose classifier, and
+        // the remediation names the knob the operator has to turn.
+        expect(err.remediation).toContain("QDS_AUDIT_DB");
+      }
+      // "so nothing was provisioned" — the refusal's own claim, asserted.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mintSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+      expect(await driver.list()).toHaveLength(0);
+      expectSingleRefusalLine("audit-store-unavailable");
+
+      chmodSync(sealed, 0o700); // so `afterAll`'s sweep of tmpRoot can remove it
+    });
+
+    test("REGRESSION: a store under a pre-existing directory this process does not own dispatches FINE", async () => {
+      // `openAuditStore` used to chmod the store's PARENT unconditionally, so
+      // `QDS_AUDIT_DB=/tmp/x.db` refused every dispatch with
+      // `audit-store-unavailable: EPERM … chmod '/tmp'` — and would have
+      // narrowed /tmp to 0700 for every other user on the host had it succeeded.
+      // The fix chmods only a directory the store itself created. This is the
+      // kind of bug that comes back, so /tmp is named literally: os.tmpdir() on
+      // darwin is a per-user directory this process DOES own, which would not
+      // reproduce it.
+      const shared = "/tmp";
+      const modeBefore = statSync(shared).mode;
+      const storePath = join(shared, `qds-df53-shared-parent-${randomUUID()}.db`);
+      process.env.QDS_AUDIT_DB = storePath;
+      try {
+        const result = await dispatch(validBrief(), deps({ setupGate: twoAssertionGate }));
+        expect(result.state).toBe("ready");
+        expect(existsSync(storePath)).toBeTrue();
+        const handle = openAuditStoreForWalk(storePath);
+        try {
+          expect(handle.linksForRun(result.runId).map((r) => `${r.hop}/${r.event}`)).toStrictEqual(
+            HOP5_SEQUENCE,
+          );
+        } finally {
+          handle.close();
+        }
+        // The other half of the bug: the shared parent is left exactly as found.
+        expect(statSync(shared).mode).toBe(modeBefore);
+      } finally {
+        rmSync(storePath, { force: true });
+      }
+    });
+
+    test("a provisioning refusal still leaves a store that later opens cleanly", async () => {
+      // The close-on-refusal fix itself (dispatch opens the store inside the
+      // admission single-flight, whose only `finally` releases the lock) has NO
+      // observable from out here: a `bun:sqlite` handle's closure is not
+      // visible to another connection, and `close()` does not release the
+      // descriptor in bun 1.4.0 either (probed), so an fd count cannot stand in
+      // for it. What IS assertable is the store's state after the refusal:
+      // opened (so this is the path under discussion), empty, and openable.
+      driver.create = () => Promise.reject(new Error("provider said no"));
+      try {
+        await dispatch(validBrief(), deps());
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect((e as FleetError).exitCode).toBe(1);
+      }
+      expect(existsSync(auditDb.path())).toBeTrue();
+      const handle = openAuditStoreForWalk(auditDb.path());
+      try {
+        expect(handle.linksForRun(readdirSync(store.dir)[0]?.replace(/\.json$/, "") ?? "")).toStrictEqual([]);
+      } finally {
+        handle.close();
+      }
     });
   });
 });

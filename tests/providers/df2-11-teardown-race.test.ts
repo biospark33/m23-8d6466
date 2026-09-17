@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
-import { VIZ_PIDFILE, createRun, type ExecResult, type ProviderDriver } from "../../src/providers/driver.ts";
+import { VIZ_PIDFILE, createRun, type ExecResult, type ProviderAuditLink, type ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { CostLedger, type RunCostRecord } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -58,8 +58,16 @@ let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 const heldLocks: RunLockHandle[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
+/**
+ * DF5.3: the IN-PROCESS racer's audit links. The child racer runs in its own
+ * process and its emits are invisible here by construction — so the exactly-one
+ * assertion below lives in the SERIALIZED test, where the loser is refused
+ * before `teardownSandbox` runs and the winner is this process.
+ */
+let auditLinks: ProviderAuditLink[] = [];
 
 beforeEach(() => {
+  auditLinks = [];
   root = mkdtempSync(join(tmpdir(), "qds-df211-race-"));
   runsDir = join(root, "runs");
   store = new RunRecordStore(runsDir);
@@ -166,6 +174,10 @@ async function seedRun(runId: string): Promise<{ baseSha: string; vmName: string
   const mint = await api.createKey(`${SBX_KEY_PREFIX}${runId}`, 50);
   store.set(runId, { keyHash: mint.hash, limitMicroUsd: 50_000_000 });
   store.set(runId, { commitSha: baseSha });
+  // DF5.3: ATTRIBUTED, so the teardown actually emits. Unattributed (or with no
+  // requestId) every emit is skipped and the exactly-once property this file
+  // exists to prove would be vacuous for the audit row.
+  store.set(runId, { requestId: "req-df211-race", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
   return { baseSha, vmName };
 }
 
@@ -179,7 +191,9 @@ function deps(driver: ProviderDriver, gitCwd: string): TeardownDeps {
     workdir: "app",
     boxRunRoot: boxRunRootDir,
     boxHome: boxHomeDir,
-    recordAuditLink: () => {},
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
   };
 }
 
@@ -373,6 +387,22 @@ describe("DF2.11 e2e teardown race", () => {
       expect(logs.filter((l) => l.operation === "teardown.destroy" && l.outcome === "ran")).toHaveLength(1);
       expect(logs.filter((l) => l.operation === "teardown.close" && l.outcome === "ran")).toHaveLength(1);
 
+      // DF5.3 — exactly one `run-box.teardown` link belongs in this list beside
+      // "one destroy, one close": a racer that emitted before losing the lock
+      // would duplicate an audit row for one box and nothing else here would
+      // notice. The loser is refused BEFORE teardownSandbox runs, so one box
+      // teardown means one row, named for the box that came down.
+      const boxLinks = auditLinks.filter((l) => `${l.hop}.${l.event}` === "run-box.teardown");
+      expect(boxLinks).toHaveLength(1);
+      expect(boxLinks[0]?.subjectId).toBe(vmName);
+      expect(boxLinks[0]?.repoSlug).toBe("qds/demo");
+      expect(boxLinks[0]?.requestId).toBe("req-df211-race");
+      // The winner's credential half landed too, once each.
+      expect(auditLinks.filter((l) => l.hop === "run-credential").map((l) => l.event)).toEqual([
+        "revoke",
+        "verify-revoked",
+      ]);
+
       console.log(
         `DF2.11 lockrace evidence: revCount=${revCount} destroyCount=${counting.destroys()} ` +
           `bundleVerifyExit=${verify.status} loserExit=${loserExit} ` +
@@ -524,6 +554,11 @@ describe("DF2.11 e2e teardown race", () => {
       // harvest.summary is the in-process sink's line: exactly one when the
       // host won, none when the child did (its line went to child stdout).
       expect(logs.filter((l) => l.operation === "harvest.summary")).toHaveLength(hostWon ? 1 : 0);
+      // DF5.3 is deliberately NOT asserted here. The winner may be the CHILD,
+      // whose `recordAuditLink` lives in another process and whose emits this
+      // one cannot see — an "exactly one link" assertion would then pass by
+      // observing zero. The exactly-once property for the box link is pinned in
+      // the SERIALIZED test above, where the in-process side always wins.
 
       console.log(
         `DF2.11 contention evidence: winner=${hostWon ? "host" : "child"} revCount=3 ` +

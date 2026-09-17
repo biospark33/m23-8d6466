@@ -752,18 +752,24 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     recordAuditLink: deps.recordAuditLink,
     ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
   };
-  // W14B-3 — THE NAMED NO-OP SINK. `revokeAndVerify` runs under a run-less
-  // step context (`runId: null`, credentials.ts) and `audit_links.run_id` is
-  // NOT NULL: a run-less revocation — the record-less leaked key — has no hop
-  // to serve, and INV-AUDIT-4 forbids manufacturing links. `revokeAndVerify`
-  // is itself deliberately not an emit site for the same reason; this literal
-  // makes that posture structural instead of pretending an emit exists.
+  // W14B-3, narrowed. The posture is unchanged: `revokeAndVerify` runs under a
+  // run-less step context (`runId: null`, credentials.ts) and
+  // `audit_links.run_id` is NOT NULL, so a run-less revocation — the
+  // record-less leaked key — has no hop to serve and INV-AUDIT-4 forbids
+  // manufacturing one. What enforces it is that `revokeAndVerify` is not an
+  // emit site BY CONSTRUCTION (`revokeHash`/`verifyHash` emit nothing;
+  // `verifyRevoked`, which does emit, takes a runId and the sweep never calls
+  // it). A `() => {}` bound HERE enforced nothing of the kind — it blinded the
+  // whole deps object, so any present or future credential call routed through
+  // it would silently drop a link INV-AUDIT-4 wanted written, which is the
+  // exact failure mode this story exists to eliminate. The seam stays live; the
+  // one non-emitting site stays non-emitting where that is actually decided.
   const credDeps: CredentialDeps = {
     keyApi: deps.keyApi,
     driver: deps.driver,
     store: deps.store,
     requestId,
-    recordAuditLink: () => {},
+    recordAuditLink: deps.recordAuditLink,
   };
   // R4-9: the lock path resolves through the SAME expression teardownSandbox's
   // head check uses (`deps.runsDir ?? deps.store.dir`) — the acquire below and
@@ -917,20 +923,73 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
             // record resolves with a DF2.8 attribution: a record-less leak has
             // no runId/repoSlug/requestId to serve the NOT NULL columns, and
             // manufacturing a link for it is exactly what INV-AUDIT-4 forbids
-            // (the credDeps no-op sink above is the same posture).
+            // (the run-less credential posture above is the same reasoning).
+            //
+            // The emit is guarded SEPARATELY from the unit's own try/catch,
+            // because by this line the destroy has already SUCCEEDED and
+            // `unit.id` is already in `executed.destroy`. A store refusal
+            // (ENOSPC, SQLITE_BUSY from a concurrent dispatch, a closed handle)
+            // falling through to the unit catch pushed
+            // `{vm, code: "destroy-failed"}` WITHOUT splicing the id back out
+            // of `executed` (the RunLockedError arm above does splice; that one
+            // did not) — so one report counted the same box as destroyed AND as
+            // failed to destroy, and sent the operator to destroy a box that no
+            // longer exists. A dropped link is a real problem, but it is not a
+            // failed destroy: log it and let the sweep finish. `SweepReport` has
+            // no non-fatal channel to carry it (`failures` feeds the apply
+            // exit code), and inventing one is not this fix's business.
             const reapRec = recordError === undefined ? claimed : undefined;
             const reapRepoSlug = auditRepoSlug(reapRec);
-            if (reapRec !== undefined && reapRepoSlug !== undefined) {
-              emitAuditLink(deps.recordAuditLink, {
+            // The RECORD's requestId, with no fallback to the sweep's own
+            // (C5/option-c, the fourth emitter). `requestId` here is
+            // `deps.requestId ?? newRequestId()` and sandbox-reap supplies a
+            // minted one, so the fallback could only ever stamp a per-invocation
+            // id — a FALSE join the walker acts on (it JOINs
+            // `sessions.request_id` / `gate_results.request_id`), on the path
+            // where the record is most likely to be incomplete.
+            if (reapRec !== undefined && reapRepoSlug !== undefined && reapRec.requestId === undefined) {
+              log({
+                requestId,
+                operation: "providers.audit-link-skipped",
+                agentId: null,
+                timestamp: new Date().toISOString(),
+                duration: 0,
+                status: "error",
                 runId: reapRec.runId,
-                repoSlug: reapRepoSlug,
-                requestId: reapRec.requestId ?? requestId,
-                hop: "run-box",
+                vm: unit.id,
                 event: "reap",
-                subjectId: unit.id,
-                subjectKind: "box",
-                detail: { vm: unit.id, class: "leaked-vm" },
+                reason: "no-request-id",
+                message: `hop run-box goes unlinked for reaped box ${unit.id}: its record carries no requestId`,
               });
+            } else if (reapRec?.requestId !== undefined && reapRepoSlug !== undefined) {
+              try {
+                emitAuditLink(deps.recordAuditLink, {
+                  runId: reapRec.runId,
+                  repoSlug: reapRepoSlug,
+                  requestId: reapRec.requestId,
+                  hop: "run-box",
+                  event: "reap",
+                  subjectId: unit.id,
+                  subjectKind: "box",
+                  detail: { vm: unit.id, class: "leaked-vm" },
+                });
+              } catch (e) {
+                const err = (e ?? {}) as { code?: string; message?: string };
+                log({
+                  requestId,
+                  operation: "providers.reap-audit-link-dropped",
+                  agentId: null,
+                  timestamp: new Date().toISOString(),
+                  duration: 0,
+                  status: "error",
+                  runId: reapRec.runId,
+                  vm: unit.id,
+                  error: {
+                    code: err.code ?? "audit-link-write-failed",
+                    message: scrub(err.message ?? String(e)),
+                  },
+                });
+              }
             }
           }
         } else if (unit.hash !== undefined) {

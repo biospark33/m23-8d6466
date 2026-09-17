@@ -1225,7 +1225,31 @@ describe("buildIdFileInputs", () => {
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
       // and `src/providers/credentials.ts` is COPY-adjacent context the walk
       // already carried.
-      "0c5509f3b05a9edc58acef2764c8437abc3aacbdc03060059912b7ccb4443aea",
+      //
+      // 122c7c0a: moved by DF5.3 (PR #258) and its review round. THIS PIN WAS
+      // ALREADY STALE ON THE BRANCH BEFORE THE REVIEW — verified by re-running
+      // this test against a clean `HEAD` (dc347863) with the whole working tree
+      // stashed: still red. DF5.3 edited walked COPY inputs and never re-pinned,
+      // which is exactly the "landed WITHOUT touching this literal, which left
+      // `dev` red" failure the run-lock.ts paragraph above records. No reviewer
+      // could catch it: this file is not in the PR's diff, so it is invisible to
+      // a diff-scoped review. It surfaced only because the review's own close
+      // gate runs the suite, which is the control the paragraph above calls
+      // "the only run whose green actually binds the commit".
+      //
+      // The walked inputs DF5.3 moved, all under directory COPYs (`src/audit/`
+      // is NEW, `src/fleet/` :279, `src/providers/` enumerated, `scripts/lib/`
+      // :278): `src/audit/{chain,link-store,index}.ts` (new module),
+      // `src/fleet/{dispatch,fanout-primitive,run-completion}.ts`,
+      // `src/providers/{credentials,driver,harvest,reaper,teardown}.ts` and
+      // `src/pr/push.ts`. The review round moved it again — same-commit re-pin,
+      // adopted AFTER the last fixer landed, per the discipline named above.
+      // `scripts/qds-audit.ts` and the test files are NOT walked COPY inputs.
+      //
+      // Still the FILE-INPUT hash, never the published image digest: no
+      // republish is owed to make this pin honest, and DEFAULT_IMAGE_REF is
+      // untouched by this PR.
+      "122c7c0ae928639c81ff314f6fa94307cba43c3e6e9c93479d77f09a73fdad66",
     );
   });
 });

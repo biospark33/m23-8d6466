@@ -64,6 +64,7 @@ import {
 } from "../../src/providers/run-record.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
+import { useTempAuditStore } from "./helpers.ts";
 
 /** The unit file DF2.10 ships and this verb starts an instance of. */
 const UNIT_FILE = join(import.meta.dir, "../../oci/exedev/systemd/qds-run@.service");
@@ -156,6 +157,15 @@ const isMarkerCat = (argv: string[]): boolean => argv[0] === "sh" && String(argv
 /** The in-box marker body the engine leaves for THIS run. */
 const markerBody = (runId: string, ok: boolean): string =>
   JSON.stringify({ runId, ok, completedAt: "2026-09-03T00:00:00.000Z" });
+
+/**
+ * DF5.3 C11: this suite drives `scripts/fleet.ts`'s `run`, whose `dispatch`
+ * verb is its own audit-store composition root (`openAuditStore()` resolves
+ * `QDS_AUDIT_DB ?? .sandbox/audit.db` relative to CWD). No case here currently
+ * reaches the open — measured — but the seam is one `dispatch` case away, and
+ * the failure mode is silent rows in the operator's live store.
+ */
+useTempAuditStore();
 
 describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => {
   let dir: string;

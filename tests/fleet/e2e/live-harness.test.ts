@@ -18,7 +18,7 @@
  *     billing box shipped a green test.
  */
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,6 +30,9 @@ import {
   fleetCleanupProblems,
   fleetLeftovers,
   keyLeakProblems,
+  liveAuditLinksFor,
+  liveAuditStorePath,
+  recordLiveAuditLink,
   revokeQuietly,
   setEffectiveImage,
   settleRun,
@@ -516,4 +519,29 @@ test("keyLeakProblems: with no runIds it does NOT claim a fallback revoke was at
   expect(problems[0]).toContain("NO record-backed fallback revoke was available");
   expect(problems[0]).not.toContain("after the harness fallback revoke");
   expect(evidence.find((p) => p.phase === "key-hash-delta-recheck")?.attemptedRevoke).toBe(false);
+});
+
+/**
+ * DF5.3 safety: the harness's audit seam is REAL under a live round and inert
+ * otherwise. Every caller already sits inside a `test.todoIf(liveTodoOff())`
+ * body; this is the second lock, and the one that keeps a future caller added
+ * outside such a body from opening a store (or dirtying the evidence tree) in
+ * the fast suite.
+ */
+test("recordLiveAuditLink is INERT unless QDS_E2E_LIVE=1 — the fast suite opens no store", () => {
+  expect(process.env.QDS_E2E_LIVE).not.toBe("1");
+  recordLiveAuditLink({
+    runId: "harness-gate",
+    repoSlug: "acme/widgets",
+    requestId: "req-gate",
+    hop: "run-credential",
+    event: "mint",
+    subjectId: "k",
+    subjectKind: "credential-key",
+    evidenceDigest: "0".repeat(64),
+    occurredAt: "2026-09-17T00:00:00.000Z",
+    recordedAt: "2026-09-17T00:00:00.000Z",
+  });
+  expect(existsSync(liveAuditStorePath())).toBeFalse();
+  expect(liveAuditLinksFor("harness-gate")).toEqual([]);
 });

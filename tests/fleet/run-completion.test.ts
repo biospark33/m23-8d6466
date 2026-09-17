@@ -36,7 +36,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { FakeDriver, FakeDriverError } from "../../src/providers/fake-driver.ts";
-import { createRun, type ExecResult } from "../../src/providers/driver.ts";
+import { createRun, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { RunRecordStore, type ExtensionEntry } from "../../src/providers/run-record.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { setLogSink } from "../../src/swarmclaw/log.ts";
@@ -286,7 +286,10 @@ function baseDeps(
     costLedger: (over.costLedger ?? quietLedger().hook) as RunCompletionDeps["costLedger"],
     maxTicks: over.maxTicks,
     windowMs: over.windowMs,
-    recordAuditLink: () => {},
+    // Overridable like every other dep here. As a bare `() => {}` no test could
+    // ever see the links this chain emits through the REAL `teardownSandbox`,
+    // so deleting the teardown emit left the suite green (DF5.3 review, H/M1).
+    recordAuditLink: over.recordAuditLink ?? (() => {}),
   };
 }
 
@@ -1362,9 +1365,21 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
       const vm = await seedGreenRun(s.store, driver, host, "run-d1", { ok: true });
       const ledger = quietLedger();
+      // DF5.3: the chain's own audit seam, CAPTURED. `chainTeardownDeps`
+      // forwards `recordAuditLink` into the real `teardownSandbox`, so this is
+      // the only place the hop-6 teardown link is observable from — and while
+      // `baseDeps` hardcoded a `() => {}` nothing in this file could see it.
+      const links: ProviderAuditLink[] = [];
       const out = await observeAndDriveChain(
         "run-d1",
-        baseDeps("run-d1", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir, costLedger: ledger.hook as never }),
+        baseDeps("run-d1", {
+          driver,
+          store: s.store,
+          runsDir: s.dir,
+          hostRoot: host.dir,
+          costLedger: ledger.hook as never,
+          recordAuditLink: (link) => links.push(link),
+        }),
       );
       expect(out).toMatchObject({ kind: "driven", markerOk: true });
       expect(typeof (out as { chainMs: number }).chainMs).toBe("number");
@@ -1374,6 +1389,34 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
       expect(fs.existsSync(path.join(s.dir, "run-d1.bundle"))).toBe(true); // harvest's bundle
       expect(driver.destroyed).toEqual([vm]); // the box is gone
       expect(ledger.ingested.length).toBeGreaterThan(0); // box-hours priced through the caller's ledger
+      // The box is gone, the bundle was fetched and verified, and the chain
+      // said so. No key was ever minted here, so no credential link is owed.
+      expect(new Set(links.map((l) => `${l.hop}/${l.event}`))).toEqual(
+        new Set(["run-bundle/bundle-verify", "run-bundle/bundle-fetch", "run-box/teardown"]),
+      );
+      // `teardown` is emitted TWICE on this path and that is BY DESIGN: the
+      // fresh close emits it (teardown.ts, inside the close step) and the
+      // approval gate's own teardown re-enters `teardownSandbox`, which
+      // short-circuits on first-close-wins and re-emits so a process that died
+      // between the close and the emit still lands the row. It is harmless only
+      // because every copy carries the SAME subject and the SAME evidence
+      // digest — which is exactly what the store's
+      // `UNIQUE (run_id, hop, event, subject_key)` + `ON CONFLICT DO NOTHING`
+      // coalesces on, so the STORE holds one row. Pin that, not the count: a
+      // second emit whose digest drifted would record as `divergent` instead.
+      const teardowns = links.filter((l) => l.event === "teardown");
+      expect(teardowns.length).toBeGreaterThanOrEqual(1);
+      expect(new Set(teardowns.map((l) => l.evidenceDigest)).size).toBe(1);
+      for (const l of teardowns) {
+        expect(l).toMatchObject({
+          runId: "run-d1",
+          repoSlug: "acme/widget", // the record's own attribution (INV-AUDIT-4)
+          requestId: "req-df37",
+          hop: "run-box",
+          subjectKind: "box",
+          subjectId: vm,
+        });
+      }
       // O16: guardedTeardown clears the destructive mark ON success — the
       // driven posture leaves an unmarked lock, same as the teardown verb.
       expect(isRunLockDestructive(lockHandle(s.dir, "run-d1"))).toBe(false);

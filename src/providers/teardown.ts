@@ -729,6 +729,71 @@ function reportSpendDivergence(
   }
 }
 
+/**
+ * DF5.3: the `teardown` link (hop 5, run-box) — the run's box came down and the
+ * record closed. Shared by the fresh-close path (INSIDE the close step) and the
+ * first-close-wins healing arm, for exactly the reason DF2.8's box-hours ingest
+ * is shared: `store.close` is irreversible and the re-run short-circuits above
+ * it, so an emit that sits AFTER the close with no healing partner is
+ * permanently unemittable once a process dies in that window — hop 5 would
+ * report `unlinked` forever for a teardown that was perfect. Re-emitting is free:
+ * the store's UNIQUE (run_id, hop, event, subject_key) + `ON CONFLICT DO
+ * NOTHING` collapses it, and the subject below is stable across re-runs.
+ *
+ * Neither identity is manufactured (INV-AUDIT-4): no DF2.8 budget attribution
+ * and no correlation id each mean SKIP — the columns are NOT NULL, and hop 5
+ * reporting `unlinked` is honest and fail-closed where a stamped random id is
+ * evidence invented at the emit.
+ *
+ * W2-C5 option (c): the RECORD is the only `requestId` source. `deps.requestId`
+ * was dropped as a fallback because it never supplies a real id the record
+ * lacks — `dispatch.ts` stamps it as its first write after provisioning, long
+ * before any teardown — while the three teardown/reap composition roots
+ * (`fleet.ts`, `sandbox-teardown.ts`, `reaper.ts`) MINT theirs, making the
+ * fallback purely a laundering channel. `deps.requestId` still serves the step
+ * log via `ctx`, which is the job it was added for.
+ */
+function emitTeardownLink(deps: TeardownDeps, ctx: StepCtx, rec: RunRecord, runId: string, closedAt: string | undefined): void {
+  const repoSlug = auditRepoSlug(rec);
+  if (repoSlug === undefined) return;
+  const requestId = rec.requestId;
+  if (requestId === undefined) {
+    log({
+      // stepBase supplies the LOG's own correlation (ctx's id, generated when
+      // the dispatch propagated none) — never the link's. That is the fix.
+      ...stepBase(ctx, "teardown", "close"),
+      // Shared verbatim with credentials.ts and driver.ts: one
+      // `operation`/`event`/`reason` triple for every C5 skip, so an operator
+      // greps the run once instead of once per emitter.
+      operation: "providers.audit-link-skipped",
+      duration: 0,
+      durationMs: 0,
+      status: "error",
+      event: "teardown",
+      reason: "no-request-id",
+      message: `run ${runId} carries no requestId and none was propagated — refusing to invent the chain's join key (INV-AUDIT-4); hop 5 reports this run unlinked`,
+    });
+    return;
+  }
+  emitAuditLink(deps.recordAuditLink, {
+    runId,
+    repoSlug,
+    requestId,
+    hop: "run-box",
+    event: "teardown",
+    // The SAME expression the destroy step targeted (F6's `rec.vmName ?? runId`).
+    subjectId: rec.vmName ?? runId,
+    subjectKind: "box",
+    // `boxSource` keeps the link honest about WHAT came down. A record with no
+    // `vmName` still reaches destroy — F6 falls back to the run id because a
+    // missing handle is not proof no box exists — and `destroy` is contractually
+    // idempotent, so that call may well have been a no-op over a box that never
+    // existed. Without this field the row vouches, indistinguishably, for a box
+    // teardown that did not demonstrably happen.
+    detail: { closedAt, boxSource: rec.vmName === undefined ? "run-id-fallback" : "record" },
+  });
+}
+
 async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOptions, ctx: StepCtx): Promise<void> {
   // Preflight — all before ANY mutation; the box stays untouched throughout.
   // Shared classifier (harvest.ts getRecord): genuine absence → no-record,
@@ -766,6 +831,15 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       // retry, or a token-ledger gap for that run goes unreported forever.
       reportSpendDivergence(ctx, deps.costLedger, rec, runId);
     }
+    // DF5.3, the same crash window the box-hours ingest above heals: if
+    // store.close succeeded but the process died before the emit ran, this
+    // re-run skips every step and the `teardown` row would never land — and
+    // could never land, because the short-circuit is above the emit site.
+    // Emit here too; `ON CONFLICT DO NOTHING` makes the ordinary (uncrashed)
+    // re-run a no-op. The record IS closed on this path, so `rec.closedAt` is
+    // the same value the fresh close writes — no second `get` (the close →
+    // reverify → gate read order below is load-bearing).
+    emitTeardownLink(deps, ctx, rec, runId, rec.closedAt);
     return;
   }
 
@@ -806,7 +880,20 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
           keyApi: deps.keyApi,
           driver: deps.driver,
           store: deps.store,
-          requestId: ctx.requestId,
+          // C5: `deps.requestId`, NOT `ctx.requestId`. `ctx.requestId` is
+          // `deps.requestId ?? newRequestId()`, and forwarding that generated
+          // id here would launder it straight into `emitCredentialLink`'s
+          // `deps.requestId` fallback — stamping hop 4 with a random join key
+          // through the back door, the exact thing this file's own teardown
+          // emit refuses to do. The chain JOINS on this value (chain.ts reads
+          // `record.requestId` against `sessions`/`gate_results.request_id`),
+          // so a per-invocation id is not a weak correlation, it is a false one.
+          // Disclosed cost: with nothing propagated, the credential steps' LOG
+          // lines fall back to their own per-call ids instead of sharing this
+          // teardown's. There was never anything real to correlate with — that
+          // shared id was this invocation's own invention — and `runId` is on
+          // every line either way.
+          requestId: deps.requestId,
           // DF5.3: the spend→revoke→verify steps below are THIS sequence's
           // credential emits — the seam forwards so revoke/verify-revoked
           // land while the run still owns its box.
@@ -907,19 +994,21 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // tokenIngestRefusalLog and the step continues (PR #253 review — a
   // deterministic refusal would resurface on every healing re-run and keep
   // the box-hours row from ever landing behind it).
-  // DF5.3: the close-step read (below) is shared — the teardown emit reuses
-  // it and NEVER issues a second post-close `get`. A read added here would
-  // silently shift every later reader's record state (the close→reverify→gate
-  // read order is load-bearing; see OverlayStore in run-completion.test.ts).
-  let closedRec: RunRecord | undefined;
+  // DF5.3: EXACTLY ONE post-close `get`, taken here and shared by the cost
+  // ledger and the teardown emit. It is unconditional so the two paths cannot
+  // diverge in read COUNT — the close→reverify→gate read order is load-bearing
+  // and pinned by position (see OverlayStore in run-completion.test.ts, whose
+  // `skip` counts this read as post-close get #1). Nothing else reads the store
+  // between here and the end of the sequence, so taking it inside the step
+  // rather than after it moves no other reader.
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
+    const closedRec = deps.store.get(runId);
     // DF2.8: price box hours into the cost ledger, now that the record's
     // lifetime is final. The no-attribution omission logs under its own
     // operation — a second "close" step line marked skipped would contradict
     // the close that just succeeded above.
     if (deps.costLedger) {
-      closedRec = deps.store.get(runId);
       // DF2.12: the harvested engine log's cost_attribution lines become token
       // rows HERE — immediately before the box-hours ingest, at the same point
       // DF2.8 established, so a teardown that aborts before close writes
@@ -947,27 +1036,16 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       // the record's figure is token spend, so the comparison must be too.
       reportSpendDivergence(ctx, deps.costLedger, closedRec, runId);
     }
+    // DF5.3: the `teardown` link — INSIDE this step, after destroy (step 6) and
+    // this step's own close both landed, and while the sequence is still
+    // coherent. It used to sit after `runStep`, outside every step and every
+    // try: `emitAuditLink` PROPAGATES a store refusal (driver.ts), so a typed
+    // AuditStoreError turned a fully successful teardown — box destroyed, key
+    // revoked and verified, record CLOSED — into a failure attributed to no
+    // step at all, and one the operator's natural re-run could never clear
+    // (first-close-wins short-circuits above it; that arm now heals it).
+    // Inside the step the refusal is attributable and retryable, which was the
+    // whole objection — so it still propagates.
+    emitTeardownLink(deps, ctx, rec, runId, closedRec.closedAt);
   });
-
-  // DF5.3: the `teardown` link (hop 5, run-box) — after destroy AND close both
-  // landed. Only the fresh-close path reaches here: the first-close-wins
-  // re-run above performed no teardown, so there is no event to link
-  // (INV-AUDIT-4). A record with no DF2.8 budget attribution emits nothing
-  // (NOT NULL columns; an invented attribution is what INV-AUDIT-4 forbids).
-  const teardownRepoSlug = auditRepoSlug(rec);
-  if (teardownRepoSlug !== undefined) {
-    // The unwired-ledger path never read the record post-close; read it once
-    // HERE, for the emit only. (Wired: closedRec is the close-step's own read.)
-    if (closedRec === undefined) closedRec = deps.store.get(runId);
-    emitAuditLink(deps.recordAuditLink, {
-      runId,
-      repoSlug: teardownRepoSlug,
-      requestId: rec.requestId ?? ctx.requestId,
-      hop: "run-box",
-      event: "teardown",
-      subjectId: destroyTarget,
-      subjectKind: "box",
-      detail: { closedAt: closedRec.closedAt },
-    });
-  }
 }

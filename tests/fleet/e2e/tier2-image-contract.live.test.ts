@@ -78,6 +78,7 @@ import {
   liveGate,
   liveTodoOff,
   preflight,
+  recordLiveAuditLink,
   revokeQuietly,
   runIdFor,
   settleRun,
@@ -440,7 +441,7 @@ test.todoIf(liveTodoOff())(
       await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha, workdir: "src" });
       evidence.push({ phase: "fill", ok: true, commitSha: ctx.sha, workdir: "src" });
 
-      const creds = { keyApi: openRouterKeyApi(), driver: ctx.driver, store, capMicroUsd: CAP_MICRO_USD, recordAuditLink: () => {} };
+      const creds = { keyApi: openRouterKeyApi(), driver: ctx.driver, store, capMicroUsd: CAP_MICRO_USD, recordAuditLink: recordLiveAuditLink };
       const minted = await mintRunKey(creds, runId);
       mintedHash = minted.hash; // the HASH is an identifier; the plaintext never leaves this scope
       evidence.push({ phase: "mint", keyHash: minted.hash, capMicroUsd: CAP_MICRO_USD });

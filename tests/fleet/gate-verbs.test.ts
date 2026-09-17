@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
+import { useTempAuditStore } from "./helpers.ts";
 import { listVerbs } from "../../src/fleet/verbs.ts";
 import { scryptToken, SCRYPT_PARAMS, authenticateApprover } from "../../src/fleet/approvers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
@@ -166,6 +167,15 @@ async function paused(reportId = "rv-1"): Promise<void> {
 function stageBundle(): void {
   fs.writeFileSync(path.join(dir, `${RUN}.bundle`), "bundle-bytes");
 }
+
+/**
+ * DF5.3 C11: this suite drives `scripts/fleet.ts`'s `run`, whose `dispatch`
+ * verb is its own audit-store composition root (`openAuditStore()` resolves
+ * `QDS_AUDIT_DB ?? .sandbox/audit.db` relative to CWD). No case here currently
+ * reaches the open — measured — but the seam is one `dispatch` case away, and
+ * the failure mode is silent rows in the operator's live store.
+ */
+useTempAuditStore();
 
 describe("fleet approve / reject — grammar and the driver exemption", () => {
   test("approve takes NO --driver: it never reaches a box", async () => {

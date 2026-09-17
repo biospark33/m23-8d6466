@@ -31,6 +31,7 @@ import {
   liveGate,
   liveTodoOff,
   preflight,
+  recordLiveAuditLink,
   runFleet,
   runIdFor,
   settleRun,
@@ -74,7 +75,7 @@ test.todoIf(liveTodoOff())(
       approvalStore = store;
 
       // ── createRun: headroom (real driver.list) + record → real box ────────
-      const record = await createRun(ctx.driver, store, { runId, recordAuditLink: () => {} });
+      const record = await createRun(ctx.driver, store, { runId, recordAuditLink: recordLiveAuditLink });
       evidence.push({ phase: "createRun", ok: true, runId, vmName: record.vmName });
       expect(record.vmName).toBe(runId);
 

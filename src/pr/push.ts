@@ -333,10 +333,28 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   // this used to admit.
   const decided = Date.parse(decidedAt);
   const completed = Date.parse(report.completedAt);
-  if (!Number.isFinite(decided) || !Number.isFinite(completed) || decided <= completed) {
+  // An UNPARSEABLE stamp is its own fault, with its own refusal: reported as an
+  // ordering violation it sent an operator hunting for a clock skew between two
+  // timestamps, one of which is not a timestamp at all.
+  if (!Number.isFinite(decided) || !Number.isFinite(completed)) {
     throw new PrRefusalError(
+      "approval-timestamp-unparseable",
+      `approval for ${runId} cannot be ordered against report ${report.reverifyId}: ${
+        !Number.isFinite(decided)
+          ? `the approval's decidedAt ${JSON.stringify(decidedAt)}`
+          : `the report's completedAt ${JSON.stringify(report.completedAt)}`
+      } is not a parseable timestamp`,
+      { reportPath: rp },
+    );
+  }
+  if (decided <= completed) {
+    throw new PrRefusalError(
+      // The CODE is unchanged — an operator's greps and anything keying on it
+      // predate this PR. Only the MESSAGE moves, because `<=` admits the
+      // EQUALITY case, for which "before" is factually false and two identical
+      // timestamps under that word read as a clock bug that does not exist.
       "approval-precedes-report",
-      `approval for ${runId} was decided at ${decidedAt}, before report ${report.reverifyId} completed at ${report.completedAt}`,
+      `approval for ${runId} was decided at ${decidedAt}, which does not strictly follow report ${report.reverifyId} completed at ${report.completedAt}`,
       { reportPath: rp },
     );
   }

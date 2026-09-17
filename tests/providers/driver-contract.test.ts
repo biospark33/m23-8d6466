@@ -25,8 +25,7 @@ import {
   SBX_OWNERSHIP_TAG,
   setupRun,
   teardownRun,
-  type ProviderDriver, emitAuditLink, type ProviderAuditLink } from "../../src/providers/driver.ts";
-import { canonicalJson, sha256Hex } from "../../src/audit/link-store.ts";
+  type ProviderDriver } from "../../src/providers/driver.ts";
 import { RunRecordStore, newId } from "../../src/providers/run-record.ts";
 
 /**
@@ -148,7 +147,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
     test("copyFile is box → host", async () => {
       const name = track(nextId());
       await driver.create(name);
-      await fillRun(driver, name, [{ path: "out/report.txt", content: "harvested\n" }], { recordAuditLink: () => {}, runId: name, requestId: "test" });
+      await fillRun(driver, name, [{ path: "out/report.txt", content: "harvested\n" }], { recordAuditLink: () => {}, runId: name, requestId: "test", repoSlug: undefined });
       const local = join(hostDir, `${name}.txt`);
       await driver.copyFile(name, "out/report.txt", local);
       expect(readFileSync(local, "utf8")).toBe("harvested\n");
@@ -229,7 +228,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await fillRun(driver, id, [
         { path: "work/input.txt", content: "payload\n" },
         { path: "work/nested/deep.txt", content: "deep\n" },
-      ], { recordAuditLink: () => {}, runId: id, requestId: "test" });
+      ], { recordAuditLink: () => {}, runId: id, requestId: "test", repoSlug: undefined });
 
       // 3. setup — provisioning steps, failing loudly on the first bad one.
       await setupRun(driver, id, [["sh", "-c", "mkdir -p out"]]);
@@ -352,37 +351,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
 // and the OCI driver story import `runDriverContract` into their own test file,
 // so importing this module must not spawn boxes, mutate env, or register tests
 // of its own. The `fake` driver's own run of the suite lives in
-// tests/providers/fake-driver.test.ts.
-
-describe("DF5.3 — the emit digest is link-store's canonicalisation, byte for byte", () => {
-  // driver.ts copies canonicalJson/sha256Hex because src/providers must not
-  // import src/audit (DF4.2 direction). The walker recomputes hops 4/5/6
-  // digests with link-store's canonicaliser, so a drift here would report
-  // evidence-mismatch on every healthy link. THIS test is the drift alarm.
-  test("emitAuditLink's evidenceDigest === sha256Hex(canonicalJson(detail)) from the store module", () => {
-    const detail = {
-      limitMicroUsd: 50_000,
-      z: { y: 1, a: undefined }, // undefined member drops; key order must not matter
-      b: "second",
-      arr: [3, 1, 2],
-      nul: null,
-    };
-    let link: ProviderAuditLink | undefined;
-    emitAuditLink(
-      (l) => {
-        link = l;
-      },
-      { runId: "r", repoSlug: "qds/demo", requestId: "req", hop: "run-box", event: "create", detail },
-    );
-    expect(link).toBeDefined();
-    expect(link!.evidenceDigest).toBe(sha256Hex(canonicalJson(detail)));
-    // One clock read: the event's own timestamp, both columns.
-    expect(link!.occurredAt).toBe(link!.recordedAt);
-    // Digest-only detail: `detail ?? null` — an absent detail digests "null".
-    let empty: ProviderAuditLink | undefined;
-    emitAuditLink((l) => {
-      empty = l;
-    }, { runId: "r", repoSlug: "qds/demo", requestId: "req", hop: "run-box", event: "fill" });
-    expect(empty!.evidenceDigest).toBe(sha256Hex(canonicalJson(null)));
-  });
-});
+// tests/providers/fake-driver.test.ts. The DF5.3 emit-canonicalisation drift
+// alarm used to be registered here and so ran — and reported its failure — once
+// per importing suite; it is a driverless unit test and now lives alone in
+// tests/providers/audit-emit.test.ts.

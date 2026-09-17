@@ -86,9 +86,18 @@ let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 /** mkdtemp roots created inside a test (origins, host clones); swept in afterEach. */
 const tmpRoots: string[] = [];
+/** Links captured by every deps factory below; cleared per test in beforeEach. */
+let auditLinks: ProviderAuditLink[] = [];
 
 beforeEach(() => {
   logs = [];
+  // Reset HERE, not inside the DF5.3 tests: every deps factory in this file
+  // pushes into `auditLinks`, so a module-level array that only the two audit
+  // tests happened to clear accumulated links from every other test in the
+  // file. Correctness then depended on those two tests self-resetting last —
+  // which a test inserted between them, or any `--test-name-pattern` run that
+  // changes ordering, silently breaks.
+  auditLinks = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
   dir = mkdtempSync(join(tmpdir(), "qds-hvst-"));
   store = new RunRecordStore(join(dir, "runs"));
@@ -107,8 +116,6 @@ afterEach(() => {
 });
 
 /** Harvest deps over the shared fixtures. */
-let auditLinks: ProviderAuditLink[] = [];
-
 function hd(gitCwd: string, overrides: Partial<HarvestDeps> = {}): HarvestDeps {
   return {
     driver,
@@ -2408,12 +2415,17 @@ describe("DF1.10 INV-IBOX-8 — the harvested tar carries no sk-or- material", (
 });
 
 describe("DF5.3 — the bundle links are emitted at their own steps", () => {
-  test("bundle-verify then bundle-fetch, hop run-bundle, subject = the bundle path", async () => {
+  /** The two things an attributed hop-6 emit needs on the record. */
+  function attribute(runId: string, requestId = "req-df53"): void {
+    store.set(runId, { requestId, extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+  }
+
+  test("bundle-verify then bundle-fetch, hop run-bundle, subject = the bundle path + generation", async () => {
     const runId = "hvst-df53-links";
     const s = await boxSetup(runId, 1);
-    // The record's DF2.8 attribution is the only repoSlug an emitter may use.
-    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
-    auditLinks = [];
+    // The record's DF2.8 attribution is the only repoSlug an emitter may use,
+    // and its `requestId` is the only join key (C5 — never a minted one).
+    attribute(runId);
     const res = mustHarvest(await harvestRun(hd(s.hostDir), runId));
     expect(res.count).toBe(1);
 
@@ -2422,9 +2434,20 @@ describe("DF5.3 — the bundle links are emitted at their own steps", () => {
     const fetch = auditLinks[1]!;
     expect(verify.hop).toBe("run-bundle");
     expect(fetch.hop).toBe("run-bundle");
+    for (const l of auditLinks) {
+      expect(l.subjectKind).toBe("bundle");
+      expect(l.repoSlug).toBe("qds/demo");
+      expect(l.requestId).toBe("req-df53");
+    }
+    // C3: the subject is the bundle path PLUS the generation the witness saw.
+    // The bare path was CONSTANT across harvests, so a lawful re-harvest
+    // collided on `UNIQUE (run_id, hop, event, subject_key)`, was dropped by
+    // `ON CONFLICT DO NOTHING`, and froze the FIRST bundle's digest against a
+    // file that had been overwritten — reporting `evidence-mismatch`
+    // ("tampered") on an ordinary second harvest, forever.
     const bundlePath = join(store.dir, `${runId}.bundle`);
-    expect(verify.subjectId).toBe(bundlePath);
-    expect(fetch.subjectId).toBe(bundlePath);
+    expect(verify.subjectId).toBe(`${bundlePath}#${(verify.detail as { sha256: string }).sha256}`);
+    expect(fetch.subjectId).toBe(`${bundlePath}#${(fetch.detail as { tip: string }).tip}`);
 
     // hops 4/5/6 digest = the emitted link's OWN detail_json — byte-agreement
     // with the store's canonicalisation is what keeps the walker's
@@ -2438,15 +2461,102 @@ describe("DF5.3 — the bundle links are emitted at their own steps", () => {
     // the walker recomputes and compares against the row (chain.ts key).
     const fileDigest = new Bun.CryptoHasher("sha256").update(readFileSync(bundlePath)).digest("hex");
     expect((verify.detail as { sha256: string }).sha256).toBe(fileDigest);
+    // And the fetch row's detail.tip is the BOX TIP the quarantine ref now
+    // points at — asserted against the ref, not just fed back through the
+    // self-consistent digest check above, which passes for ANY value
+    // (`undefined` included).
+    const tip = await boxTip(runId);
+    expect((fetch.detail as { tip: string }).tip).toBe(tip);
+    expect(res.tip).toBe(tip);
+    expect(await hostGit(s.hostDir, ["rev-parse", `refs/sandbox/${runId}`])).toBe(tip);
     // AC7 ordering: verify ≤ fetch (non-decreasing; shared ms allowed).
-    expect(Date.parse(fetch.occurredAt) >= Date.parse(verify.occurredAt)).toBeTrue();
+    // Not flattened to a boolean — `expect(false).toBeTrue()` prints neither
+    // timestamp, so the failure says nothing about which clock moved.
+    expect(Date.parse(fetch.occurredAt)).toBeGreaterThanOrEqual(Date.parse(verify.occurredAt));
   }, 30_000);
+
+  test("C3: a re-harvest APPENDS its own generation instead of colliding with the first", async () => {
+    const runId = "hvst-df53-reharvest";
+    const s = await boxSetup(runId, 1);
+    attribute(runId);
+    const first = mustHarvest(await harvestRun(hd(s.hostDir), runId));
+
+    // A second run of the same box's work: one more in-box commit, so the
+    // bundle carries different bytes and the branch a different tip. This is
+    // the lawful re-harvest Step D's `--force` exists to support (AC5).
+    await boxCommit(runId, "second round");
+    const second = mustHarvest(await harvestRun(hd(s.hostDir), runId));
+    expect(second.tip).not.toBe(first.tip);
+
+    expect(auditLinks.map((l) => l.event)).toEqual([
+      "bundle-verify",
+      "bundle-fetch",
+      "bundle-verify",
+      "bundle-fetch",
+    ]);
+    const subjectsOf = (event: string) => auditLinks.filter((l) => l.event === event).map((l) => l.subjectId);
+    // THE property: two DISTINCT subjects per event. One apiece would mean the
+    // second harvest's row is destined for `ON CONFLICT DO NOTHING` and the
+    // first bundle's digest is frozen against a file that no longer has it.
+    expect(new Set(subjectsOf("bundle-verify")).size).toBe(2);
+    expect(new Set(subjectsOf("bundle-fetch")).size).toBe(2);
+    // …and the newest verify row matches the bundle file as it stands now,
+    // which is what the walker digest-checks.
+    const bundlePath = join(store.dir, `${runId}.bundle`);
+    const fileDigest = new Bun.CryptoHasher("sha256").update(readFileSync(bundlePath)).digest("hex");
+    expect(subjectsOf("bundle-verify")[1]).toBe(`${bundlePath}#${fileDigest}`);
+    expect(subjectsOf("bundle-fetch")[1]).toBe(`${bundlePath}#${second.tip}`);
+  }, 60_000);
 
   test("an unattributed record emits nothing (INV-AUDIT-4 — no invented repoSlug)", async () => {
     const runId = "hvst-df53-nolinks";
     const s = await boxSetup(runId, 1);
-    auditLinks = [];
     mustHarvest(await harvestRun(hd(s.hostDir), runId));
     expect(auditLinks).toHaveLength(0);
+    expect(logs.filter((l) => l.operation === "providers.audit-link-skipped")).toHaveLength(0);
+  }, 30_000);
+
+  test("C5: an attributed record with NO requestId emits nothing and says so once per step", async () => {
+    const runId = "hvst-df53-noreq";
+    const s = await boxSetup(runId, 1);
+    // Attributed, but never stamped with a requestId — and no `deps.requestId`
+    // either. `ctx.requestId` falls back to a freshly MINTED id, and stamping
+    // hop 6 with that would be a FALSE correlation: the walker JOINs
+    // `sessions.request_id` on this value. No real id ⇒ no link.
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    mustHarvest(await harvestRun(hd(s.hostDir), runId));
+    expect(auditLinks).toHaveLength(0);
+    const skipped = logs.filter((l) => l.operation === "providers.audit-link-skipped");
+    expect(skipped.map((l) => (l as unknown as { event: string }).event)).toEqual([
+      "bundle-verify",
+      "bundle-fetch",
+    ]);
+    for (const l of skipped) {
+      expect((l as unknown as { reason: string }).reason).toBe("no-request-id");
+      expect(l.runId).toBe(runId);
+    }
+    // The step lines must not claim a link either — `audit: "emitted"` was a
+    // constant before this round and asserted one on every skipping run.
+    const stepAudits = logs
+      .filter((l) => l.operation === "harvest.verify" || l.operation === "harvest.fetch")
+      .map((l) => (l as unknown as { audit: string }).audit);
+    expect(stepAudits).toEqual(["skipped-no-request-id", "skipped-no-request-id"]);
+  }, 30_000);
+
+  test("deps.requestId is NEVER a join key — a record without one still emits nothing", async () => {
+    // The fallback `rec.requestId ?? deps.requestId` was deleted this round
+    // (C5 option (c)). It could never supply a real id the record lacked:
+    // dispatch stamps the record at its create step, BEFORE fill and before
+    // any harvest or teardown, so wherever `deps.requestId` is real the record
+    // already carries it. The only callers where the two differ are the
+    // CLI/reaper roots, which MINT per invocation — so the fallback was purely
+    // a laundering channel for a fabricated join key.
+    const runId = "hvst-df53-depsreq";
+    const s = await boxSetup(runId, 1);
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    mustHarvest(await harvestRun(hd(s.hostDir, { requestId: "req-from-deps" }), runId));
+    expect(auditLinks).toEqual([]);
+    // …and the deps id never reaches a link even as a fallback value.
+    expect(auditLinks.map((l) => l.requestId)).not.toContain("req-from-deps");
   }, 30_000);
 });

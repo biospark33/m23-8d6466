@@ -50,7 +50,7 @@ import { listVerbs, type VerbEntry } from "../../src/fleet/verbs.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { goodLedger } from "./helpers.ts";
+import { goodLedger, useTempAuditStore } from "./helpers.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SKILLS_ROOT = join(REPO_ROOT, ".claude", "skills", "factory");
@@ -484,6 +484,16 @@ const CLAUSE2_RE = new RegExp(
 );
 
 // ═══ the suites ═══════════════════════════════════════════════════════════════
+
+/**
+ * DF5.3 C11: this suite drives a real `dispatch()` (through `scripts/fleet.ts`
+ * or `fanout()`), and `dispatch` is its own audit-store composition root — it
+ * calls `openAuditStore()`, which resolves `QDS_AUDIT_DB ?? .sandbox/audit.db`
+ * RELATIVE TO CWD. Without this the suite appends real rows to the operator's
+ * live store. Registered at file scope so it also covers the `bun
+ * scripts/fleet.ts` subprocesses, which inherit `process.env`.
+ */
+useTempAuditStore();
 
 describe("DF3.5 skill discovery + frontmatter", () => {
   test("exactly the four factory skills exist under .claude/skills/factory/", () => {

@@ -127,7 +127,13 @@ export interface ProviderAuditLink {
 /**
  * The emit-time digest half. These two behave byte-identically to
  * `src/audit/link-store.ts`'s `canonicalJson`/`sha256Hex` — the store's own
- * exports — and MUST stay that way: hops 4/5/6's `evidence_digest` is the
+ * exports — INCLUDING the `undefined` rules: a top-level or array-element
+ * `undefined` canonicalises to `null`, and an `undefined` OBJECT MEMBER IS
+ * DROPPED, both exactly as `JSON.stringify` treats them. That is not cosmetic:
+ * `detail_json` is persisted from the store's canonicaliser and the walker
+ * re-digests what it reads back, so emitting `"k":null` for a key the store
+ * drops is a permanent, uncorrectable false `evidence-mismatch` on an
+ * append-only store. MUST stay that way: hops 4/5/6's `evidence_digest` is the
  * digest of the emitted link's own `detail_json` (story Technical Notes), and
  * the walker re-canonicalises the stored `detail_json` with link-store's
  * canonicaliser before comparing. A drift here would report `evidence-mismatch`
@@ -138,10 +144,22 @@ export interface ProviderAuditLink {
  */
 function auditCanonicalJson(value: unknown): string {
   if (value === undefined || value === null) return "null";
-  if (typeof value !== "object") return JSON.stringify(value) as string;
+  if (typeof value !== "object") {
+    // JSON.stringify returns undefined for a function/symbol — never cast.
+    const scalar = JSON.stringify(value);
+    return scalar === undefined ? "null" : scalar;
+  }
+  // `toJSON` FIRST, as JSON.stringify does: a Date is `typeof "object"` and
+  // not an array, so `Object.entries` saw no own enumerable keys and the
+  // timestamp serialised as `{}` — silent evidence LOSS on an append-only
+  // store, not an evidence-mismatch (the digest faithfully attests to the
+  // empty object). Same for URL and anything else carrying a toJSON.
+  if (typeof (value as { toJSON?: unknown }).toJSON === "function") return auditCanonicalJson((value as { toJSON(): unknown }).toJSON());
   if (Array.isArray(value)) return `[${value.map(auditCanonicalJson).join(",")}]`;
-  const entries = Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${v === undefined ? "null" : auditCanonicalJson(v)}`).join(",")}}`;
+  const entries = Object.entries(value)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${auditCanonicalJson(v)}`).join(",")}}`;
 }
 
 function auditSha256Hex(text: string): string {
@@ -367,9 +385,19 @@ export interface CreateRunOptions {
     requestId?: string;
   };
   /**
-   * DF5.3: the audit emit seam, required so an unwired construction fails at
-   * compile time. `createRun` emits nothing itself — the create link lives at
-   * `provisionAdmittedRun` — and threads this verbatim to it.
+   * DF5.3: the audit emit seam. `createRun` emits nothing itself — the create
+   * link lives at `provisionAdmittedRun` — and threads this verbatim to it.
+   *
+   * A NAMED DEAD SINK on this path, like `reaper.ts`'s W14B-3 literal, and for
+   * the same kind of structural reason: `assertAdmissionNotDelegated` refuses
+   * every call carrying `issue`, so `createRun` never passes a `budget` to
+   * `provisionAdmittedRun`, so the record it provisions can carry no
+   * `extensions.budget` — `auditRepoSlug(record)` is ALWAYS `undefined` there
+   * and no `create` link can ever be emitted through this seam. Kept because
+   * the field is part of the shared options shape (dropping it would churn
+   * every call site for nothing); documented so the next reader does not go
+   * hunting for a missing `create` link. The ONE production admission site is
+   * `src/fleet/dispatch.ts`, which calls `provisionAdmittedRun` directly.
    */
   recordAuditLink: (link: ProviderAuditLink) => void;
 }
@@ -417,8 +445,10 @@ export interface ProvisionAdmittedRunOptions {
    * DF5.3: the correlation the `create` link carries. The record's own
    * `requestId` stamp happens only after provisioning returns
    * (`store.set(runId, { requestId })` at the dispatch create step), so at
-   * emit time this is the only place it can come from; absent, the link falls
-   * back to its own emit-context id.
+   * emit time this is the only place it can come from. Absent — and with none
+   * on the record either — the emit is SKIPPED (one `audit-link-skipped` line,
+   * hop 5 reports `unlinked`): a minted id would be a fabricated join key, the
+   * invented evidence INV-AUDIT-4 forbids (C5).
    */
   requestId?: string;
   /**
@@ -444,8 +474,15 @@ export interface FillRunAuditOptions {
    * The record's DF2.8 budget attribution — the only repoSlug an emitter may
    * use, never a placeholder. Absent ⇒ the run is unattributed and `fillRun`
    * emits nothing (`audit_links`' columns are NOT NULL; INV-AUDIT-4).
+   *
+   * EXPLICIT, not optional (`| undefined`, no `?`): every other emitter derives
+   * this from the record it already holds and so cannot forget it; `fillRun`
+   * alone takes it from the caller and silently skips without it, so the caller
+   * is made to state the attribution or state its absence. Dispatch derives the
+   * ONE slug for the run — `auditRepoSlug(record)` — and passes that same value
+   * here and to the `setup-gate` emit (C6).
    */
-  repoSlug?: string;
+  repoSlug: string | undefined;
 }
 
 /**
@@ -921,17 +958,54 @@ export async function provisionAdmittedRun(
   // unadmitted run is what INV-AUDIT-4 forbids (AC5 already refuses to vouch
   // for such a run one hop later).
   const createRepoSlug = auditRepoSlug(record);
-  if (createRepoSlug !== undefined) {
-    emitAuditLink(opts.recordAuditLink, {
+  const createRequestId = opts.requestId ?? record.requestId;
+  if (createRepoSlug !== undefined && createRequestId === undefined) {
+    // W2-C5: a MINTED requestId here is a fabricated join key — the same
+    // invented evidence `auditRepoSlug` already refuses to produce for
+    // repoSlug (INV-AUDIT-4). Skipping leaves hop 5 `unlinked`, which is
+    // honest and fail-closed; this line is the only local signal that it did.
+    log({
+      // A log-line correlation id, NOT the link's: the whole reason this arm
+      // runs is that no real requestId exists, and the one thing that must not
+      // happen is a minted id reaching `audit_links` (the rollback log above
+      // mints one the same way).
+      requestId: newRequestId(),
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
       runId: opts.runId,
-      repoSlug: createRepoSlug,
-      requestId: opts.requestId ?? record.requestId ?? newRequestId(),
-      hop: "run-box",
+      driver: driver.name,
       event: "create",
-      subjectId: vm.name,
-      subjectKind: "box",
-      detail: { vmName: vm.name, provider: driver.name },
+      reason: "no-request-id",
     });
+  } else if (createRepoSlug !== undefined && createRequestId !== undefined) {
+    // Classified like the two record writes above, and for the same reason: a
+    // raw store error (ENOSPC, SQLITE_BUSY from a concurrent dispatch, a closed
+    // handle) escaping here reaches dispatch's classifier past a LIVE, BILLING
+    // box. `AuditStoreError` does carry code+remediation, but its remediation
+    // points at the audit store — while the only correct next action with a box
+    // already up is to tear the run down.
+    try {
+      emitAuditLink(opts.recordAuditLink, {
+        runId: opts.runId,
+        repoSlug: createRepoSlug,
+        requestId: createRequestId,
+        hop: "run-box",
+        event: "create",
+        subjectId: vm.name,
+        subjectKind: "box",
+        detail: { vmName: vm.name, provider: driver.name },
+      });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      throw new ProvisionRefusedError(
+        "audit-link-write-failed",
+        `the create audit link for run ${opts.runId} could not be recorded (${detail}) — box ${vm.name} is live and billing and the record is left OPEN`,
+        `tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
+      );
+    }
   }
   // Only NOW is the create-time URL validated. `address` still rejects a null
   // (any non-string, non-undefined) httpsUrl — that seam lie is what it exists
@@ -1116,8 +1190,12 @@ export async function fillRun(
     }
   }
   // DF5.3: the `fill` link (hop 5, run-box), after every file landed. An
-  // unattributed run (`repoSlug` absent) emits nothing — INV-AUDIT-4.
-  if (audit.repoSlug !== undefined) {
+  // unattributed run (`repoSlug` absent) emits nothing — INV-AUDIT-4. The
+  // predicate is `auditRepoSlug`'s own, not `!== undefined`: an EMPTY string
+  // passed that weaker guard, reached the store's non-empty check and threw
+  // `audit-link-invalid` AFTER every file had already landed in the box —
+  // converting a successful fill into a dispatch failure.
+  if (typeof audit.repoSlug === "string" && audit.repoSlug.length > 0) {
     emitAuditLink(audit.recordAuditLink, {
       runId: audit.runId,
       repoSlug: audit.repoSlug,
