@@ -990,24 +990,29 @@ test.todoIf(liveTodoOff())(
       // The file's own header calls it "the only non-fake proof of AC1", and
       // AC6's replay guard was proven by fakes alone: the negative half of the
       // `run` verb existed only in the comments at step 5. It costs no box and
-      // no spend — the run is settled, the box is up, and the engine refuses
-      // before `new FileJournal` can touch anything.
+      // no spend — the run is settled, the box is up, and the verb refuses
+      // before any start job exists to fork a second engine.
       //
-      // The SHAPE, worked out from source rather than guessed:
-      //  - `startRun` finds no approval state, no `closedAt`, no failed gate and
-      //    a `vmName`, so it issues a second `systemctl start`. The unit is
-      //    `inactive`/`success` after the first run, so systemd re-execs it and
-      //    the post-start `is-active` probe sees nothing `failed` — `fleet run`
-      //    exits 0 and prints `started:` again. That is CORRECT and is the point
-      //    of the next assertion: idempotence lives in the ENGINE, not the verb.
-      //  - the second engine reaches `markerReplayRefusal` before the correlation
-      //    ladder and before any journal is constructed. This run's marker is
-      //    present and names this run with `ok: true`, so it MIRRORS it:
-      //    `ENGINE_MARKER_PRESENT`, exit 0, one `engine_refused_replay` event.
-      //    `ENGINE_MARKER_FOREIGN` is the sibling arm and is not what fires here
-      //    — the marker is ours, which step 6 just proved by runId.
-      //  - the engine log is opened `O_APPEND`, so the refusal is APPENDED to
-      //    the first run's log and rides the harvest tar below.
+      // The SHAPE, worked out from `startRun`'s pre-start guards (src/fleet/
+      // run.ts, the SECOND carve-out, df1.10 review round 5 — eba2cff7):
+      //  - `startRun` probes `is-active` FIRST. A settled run's unit reads
+      //    `inactive` (Type=simple, engine exited 0), which is also a first
+      //    start's reading, so the unit alone cannot refuse — the guard then
+      //    reads the completion marker with the SAME classified read
+      //    `fleet status` acts on, and `settled` + this runId refuses as
+      //    `run-already-complete`: exit 5 ("refused, nothing started"),
+      //    `systemctl start` never runs, and NO second engine is forked —
+      //    strictly safer than the old shape this leg used to assert (start
+      //    the unit anyway and let the ENGINE mirror `ENGINE_MARKER_PRESENT`
+      //    from inside engine #2). The engine-side mirror remains as the
+      //    in-box backstop and is covered by the offline replay arms.
+      //  - the CLI folds `run-already-complete` through the same
+      //    `engine-start-refused` print as `unit-refused` (only the
+      //    logStart error JSON's `reason` field separates them), so the
+      //    assertion below keys on the reason, not on the remediation prose.
+      //  - because no second engine ran, the engine log is NOT appended to
+      //    and no `engine_refused_replay` event exists — asserted as
+      //    byte-identical logs, the strongest form of "nothing re-walked".
       //
       // The journal is re-read afterwards to pin the property that matters:
       // nothing was re-walked and no phase row was overwritten (INV-IBOX-6).
@@ -1017,6 +1022,12 @@ test.todoIf(liveTodoOff())(
         30_000,
       );
       expect(journalBeforeReplay.exitCode).toBe(0);
+      const engineLogBeforeReplay = await ctx.driver.execTimed(
+        vmName,
+        ["sh", "-c", `cat ${shellQuote(engineLogBoxPath)} 2>&1`],
+        30_000,
+      );
+      expect(engineLogBeforeReplay.exitCode).toBe(0);
       const replay = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
         cwd: REPO_ROOT,
         timeoutMs: 180_000,
@@ -1027,52 +1038,29 @@ test.todoIf(liveTodoOff())(
         stdout: redactSecrets(replay.stdout.trim().slice(0, 300)),
         stderrTail: redactSecrets(replay.stderr.trim().slice(-400)),
       });
-      expect(replay.exitCode).toBe(0);
-      expect(replay.stdout).toContain(`started: ${runId}`);
-      // The refusal is the ENGINE's, so it is read where the engine writes it.
-      // Polled, briefly: `fleet run` returns at the fork, so the refusal line
-      // may not be flushed the instant the verb exits.
-      let replayLine = "";
-      for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && replayLine === ""; attempt += 1) {
-        const logTail = await ctx.driver.execTimed(
-          vmName,
-          ["sh", "-c", `tail -c 4000 ${shellQuote(engineLogBoxPath)} 2>&1`],
-          30_000,
-        );
-        replayLine =
-          logTail.stdout
-            .split("\n")
-            .filter((l) => l.includes('"engine_refused_replay"'))
-            .at(-1) ?? "";
-        if (replayLine === "" && attempt < REPLAY_LOG_ATTEMPTS) await new Promise((r) => setTimeout(r, 5_000));
-      }
-      // Guarded parse: `tail -c` cuts from the START, so the LAST match is
-      // whole — but a log whose only match happens to sit at the cut would
-      // otherwise throw a SyntaxError here and hide the real assertion.
-      let replayEvent: { event?: string; runId?: string; exitCode?: number; error?: { code?: string } } = {};
-      try {
-        if (replayLine !== "") replayEvent = JSON.parse(replayLine) as typeof replayEvent;
-      } catch (parseError) {
-        evidence.push({
-          phase: "replay-refusal-unparseable",
-          line: replayLine.slice(-300),
-          error: parseError instanceof Error ? parseError.message : String(parseError),
-        });
-      }
+      // 5 = "refused, nothing started" — the terminal, non-retryable class.
+      expect(replay.exitCode).toBe(5);
+      expect(replay.stdout).not.toContain("started:");
+      // The reason rides the logStart error JSON line, the one field that
+      // separates this refusal from a genuine `unit-refused`.
+      expect(replay.stderr).toContain("run-already-complete");
+      // No second engine was forked, so the engine log carries no
+      // `engine_refused_replay` event and not one byte moved. Byte-identity is
+      // the strongest form of that claim and needs no polling: the verb
+      // refused before any start job existed.
+      const engineLogAfterReplay = await ctx.driver.execTimed(
+        vmName,
+        ["sh", "-c", `cat ${shellQuote(engineLogBoxPath)} 2>&1`],
+        30_000,
+      );
+      expect(engineLogAfterReplay.exitCode).toBe(0);
+      expect(engineLogAfterReplay.stdout).toBe(engineLogBeforeReplay.stdout);
+      expect(engineLogAfterReplay.stdout).not.toContain("engine_refused_replay");
       evidence.push({
-        phase: "replay-refusal",
-        found: replayLine !== "",
-        event: replayEvent.event,
-        code: replayEvent.error?.code,
-        exitCode: replayEvent.exitCode,
+        phase: "replay-engine-log-untouched",
+        ok: true,
+        bytes: engineLogAfterReplay.stdout.length,
       });
-      expect(replayEvent.event).toBe("engine_refused_replay");
-      expect(replayEvent.runId).toBe(runId);
-      // `ENGINE_MARKER_PRESENT` mirroring an `ok:true` marker — exit 0, because
-      // "the work you asked for is already done, and it succeeded" is not a
-      // failure and exit 2 has to keep meaning "genuinely could not settle".
-      expect(replayEvent.error?.code).toBe("ENGINE_MARKER_PRESENT");
-      expect(replayEvent.exitCode).toBe(0);
       // INV-IBOX-6: the refusal precedes `new FileJournal`, so not one byte of
       // the first run's phase rows moved.
       const journalAfterReplay = await ctx.driver.execTimed(
