@@ -1196,16 +1196,40 @@ export async function fillRun(
   // `audit-link-invalid` AFTER every file had already landed in the box —
   // converting a successful fill into a dispatch failure.
   if (typeof audit.repoSlug === "string" && audit.repoSlug.length > 0) {
-    emitAuditLink(audit.recordAuditLink, {
-      runId: audit.runId,
-      repoSlug: audit.repoSlug,
-      requestId: audit.requestId,
-      hop: "run-box",
-      event: "fill",
-      subjectId: vm,
-      subjectKind: "box",
-      detail: { fileCount: files.length },
-    });
+    // CLASSIFIED, exactly like the `create` emit in `provisionAdmittedRun` and
+    // for the same reason spelled out there: a raw store fault (ENOSPC,
+    // SQLITE_BUSY from a concurrent dispatch, a handle closed out from under
+    // us) escaping here is an untyped `Error` reaching dispatch's classifier
+    // past a LIVE, BILLING box whose files have ALREADY landed. `AuditStoreError`
+    // does carry code+remediation, but its remediation points at the audit
+    // store, while the only correct next action with a filled box up is to tear
+    // the run down. The create site wrapped this; this one did not, so the two
+    // halves of hop 5 failed with different shapes.
+    //
+    // It stays a THROW, not a logged warning: DF5.3's posture is that a run
+    // whose box-lifecycle links cannot be written is a run the chain can never
+    // vouch for (the same posture dispatch's fail-closed `openAuditStore`
+    // refusal takes before provisioning). Downgrading here would let a box
+    // billing real money proceed to the gate with hop 5 permanently incomplete.
+    try {
+      emitAuditLink(audit.recordAuditLink, {
+        runId: audit.runId,
+        repoSlug: audit.repoSlug,
+        requestId: audit.requestId,
+        hop: "run-box",
+        event: "fill",
+        subjectId: vm,
+        subjectKind: "box",
+        detail: { fileCount: files.length },
+      });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      throw new FillError(
+        "audit-link-write-failed",
+        `the fill audit link for run ${audit.runId} could not be recorded (${detail}) — every file DID land in box ${vm}, which is live and billing, and the record is left OPEN`,
+        `tear the run down: bun scripts/fleet.ts teardown ${audit.runId}`,
+      );
+    }
   }
 }
 

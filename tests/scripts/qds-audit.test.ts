@@ -28,6 +28,7 @@ import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { CostLedger } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { describeHop, run } from "../../scripts/qds-audit.ts";
+import { log, setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/qds-audit.ts");
 
@@ -760,6 +761,44 @@ describe("INV-AUDIT-2 redaction", () => {
       expect(everything).not.toContain(PROVISIONING_KEY);
       // only the hash and its 8-char prefix ever appear
       expect(everything).toContain(KEY_HASH);
+    }
+  });
+});
+
+describe("run() is exported for a harness — so its log-sink swap must be re-entrant", () => {
+  test("overlapping run() calls leave the CALLER's sink installed, not one of their own", async () => {
+    // `setLogSink` is a module GLOBAL with a save/restore discipline. Two
+    // overlapping `run()` calls used to interleave as
+    //   save(caller) · save(A) · restore(caller) · restore(A)
+    // — the first finisher restores the sink the SECOND one displaced, so when
+    // both had returned the installed sink was A's stderr writer and the
+    // caller's was gone for good. `run` is exported precisely so a harness can
+    // drive the exit matrix, and a harness driving it twice at once is the
+    // intended use, so the window was reachable from the public API.
+    //
+    // `--help` is the shortest path through `walkAndRender`: it reads no store,
+    // no record and no ledger, and returns 0 — the interleaving is a property of
+    // `run`'s own prologue, not of any walk.
+    const caller: LogEntry[] = [];
+    const restore = setLogSink((entry) => caller.push(entry));
+    try {
+      const codes = await Promise.all([run(["--help"]), run(["--help"])]);
+      expect(codes).toEqual([0, 0]);
+
+      // The observable: a line logged AFTER both returned must reach the sink
+      // this test installed.
+      log({
+        requestId: "sink-probe",
+        operation: "test.sink-probe",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        message: "the caller's sink is still the installed one",
+      });
+      expect(caller.map((l) => l.operation)).toEqual(["test.sink-probe"]);
+    } finally {
+      restore();
     }
   });
 });

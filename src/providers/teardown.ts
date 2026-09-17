@@ -771,7 +771,15 @@ function emitTeardownLink(deps: TeardownDeps, ctx: StepCtx, rec: RunRecord, runI
       status: "error",
       event: "teardown",
       reason: "no-request-id",
-      message: `run ${runId} carries no requestId and none was propagated — refusing to invent the chain's join key (INV-AUDIT-4); hop 5 reports this run unlinked`,
+      // NOT "and none was propagated": an invocation MAY well have propagated
+      // `deps.requestId` (fleet.ts / sandbox-teardown.ts / reaper.ts each mint
+      // one per invocation, and `ctx` is carrying it into this very line). That
+      // id is not a substitute — it is this process's log correlation, not the
+      // RECORD's audit-chain join key, and the walker joins `sessions` /
+      // `gate_results` on the latter. Saying "none was propagated" sent an
+      // operator hunting for a missing `--request-id` that would not have
+      // helped. See W2-C5 option (c) above.
+      message: `run ${runId} carries no requestId on its record — this invocation's own requestId is a log correlation, not the record's audit-chain join key, and cannot stand in for it; refusing to invent the join key (INV-AUDIT-4), so hop 5 reports this run unlinked`,
     });
     return;
   }

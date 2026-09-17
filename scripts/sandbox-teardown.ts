@@ -187,7 +187,31 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   // DF5.3: this CLI is the composition root for the links the teardown/harvest
   // emits — the store opens ONCE here (default path; QDS_AUDIT_DB resolves
   // inside the store) and closes in the finally below, beside the ledger.
-  const audit: AuditStoreWriter = openAuditStore();
+  //
+  // CLASSIFIED, like every other refusal this CLI reports. The open throws on
+  // an unwritable path (`QDS_AUDIT_DB` under a sealed directory, ENOSPC, a
+  // corrupt file) and sat OUTSIDE the try below, so the throw escaped `run()`
+  // entirely: `import.meta.main`'s residual handler printed a bare
+  // `EACCES: permission denied` with no code and no remediation, and the
+  // operator was told nothing about the knob that caused it. The remediation is
+  // the store's own, verbatim from `AuditStoreError` when it carries one.
+  //
+  // Nothing is leaked by returning here: the store is closed in the `finally`
+  // below only once it has been successfully OPENED, and this line precedes
+  // both the lock and the ledger, so no handle and no lock file exists yet.
+  let audit: AuditStoreWriter;
+  try {
+    audit = openAuditStore();
+  } catch (e) {
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    reportFailure(
+      out,
+      err.code ?? "audit-store-unavailable",
+      `the audit-link store could not be opened: ${err.message ?? String(e)} — the teardown's box/bundle links could not be written, so nothing was torn down`,
+      err.remediation ?? "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the teardown",
+    );
+    return 1;
+  }
   const deps: TeardownDeps = {
     driver,
     store,

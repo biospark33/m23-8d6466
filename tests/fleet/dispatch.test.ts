@@ -5764,34 +5764,40 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // unlinked box. Shipped with no test at all.
       const sealed = realpathSync(mkdtempSync(join(tmpRoot, "sealed-")));
       chmodSync(sealed, 0o500); // readable and traversable, NOT writable
-      process.env.QDS_AUDIT_DB = join(sealed, "nested", "audit.db");
-      const createSpy = mock(() => Promise.resolve({ name: "x", status: "running" } as ProviderVm));
-      driver.create = createSpy;
-      const originalMint = keyApi.createKey.bind(keyApi);
-      const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
-      keyApi.createKey = mintSpy;
-
+      // EVERYTHING from the seal onward is in the try: the 0o700 restore is the
+      // only thing that lets `afterAll` rm -rf `tmpRoot`, so a failing assertion
+      // below used to leave a 0o500 directory behind and turn ONE red test into
+      // a red test PLUS a teardown EACCES that buries it.
       try {
-        await dispatch(validBrief(), deps());
-        failUnreachable();
-      } catch (e) {
-        if (e instanceof UnexpectedSuccessError) throw e;
-        expect(e).toBeInstanceOf(FleetError);
-        const err = e as FleetError;
-        expect(err.exitCode).toBe(1);
-        expect(err.code).toBe("audit-store-unavailable");
-        // The typed code is NOT re-wrapped by the create→expose classifier, and
-        // the remediation names the knob the operator has to turn.
-        expect(err.remediation).toContain("QDS_AUDIT_DB");
-      }
-      // "so nothing was provisioned" — the refusal's own claim, asserted.
-      expect(createSpy).not.toHaveBeenCalled();
-      expect(mintSpy).not.toHaveBeenCalled();
-      expect(readdirSync(store.dir)).toHaveLength(0);
-      expect(await driver.list()).toHaveLength(0);
-      expectSingleRefusalLine("audit-store-unavailable");
+        process.env.QDS_AUDIT_DB = join(sealed, "nested", "audit.db");
+        const createSpy = mock(() => Promise.resolve({ name: "x", status: "running" } as ProviderVm));
+        driver.create = createSpy;
+        const originalMint = keyApi.createKey.bind(keyApi);
+        const mintSpy = mock((name: string, limit: number) => originalMint(name, limit));
+        keyApi.createKey = mintSpy;
 
-      chmodSync(sealed, 0o700); // so `afterAll`'s sweep of tmpRoot can remove it
+        try {
+          await dispatch(validBrief(), deps());
+          failUnreachable();
+        } catch (e) {
+          if (e instanceof UnexpectedSuccessError) throw e;
+          expect(e).toBeInstanceOf(FleetError);
+          const err = e as FleetError;
+          expect(err.exitCode).toBe(1);
+          expect(err.code).toBe("audit-store-unavailable");
+          // The typed code is NOT re-wrapped by the create→expose classifier, and
+          // the remediation names the knob the operator has to turn.
+          expect(err.remediation).toContain("QDS_AUDIT_DB");
+        }
+        // "so nothing was provisioned" — the refusal's own claim, asserted.
+        expect(createSpy).not.toHaveBeenCalled();
+        expect(mintSpy).not.toHaveBeenCalled();
+        expect(readdirSync(store.dir)).toHaveLength(0);
+        expect(await driver.list()).toHaveLength(0);
+        expectSingleRefusalLine("audit-store-unavailable");
+      } finally {
+        chmodSync(sealed, 0o700); // so `afterAll`'s sweep of tmpRoot can remove it
+      }
     });
 
     test("REGRESSION: a store under a pre-existing directory this process does not own dispatches FINE", async () => {

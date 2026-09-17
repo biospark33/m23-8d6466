@@ -813,3 +813,74 @@ describe("linksForRun ordering", () => {
     expect(rowCount(p)).toBe(2);
   });
 });
+
+describe("structured lines for the REFUSED paths", () => {
+  test("a validation refusal emits an audit-link.record error line naming the code, then rethrows", () => {
+    // Every other outcome of `record()` emits an `audit-link.record` line —
+    // inserted, duplicate, divergent. A refusal emitted NOTHING, so an operator
+    // grepping that operation for a run saw only the emits that landed: a
+    // validator throwing out every link of a run was indistinguishable from an
+    // emitter that never fired at all.
+    const p = join(dir, "audit.db");
+    const store = openAuditStore(p);
+    let thrown: unknown;
+    const lines = capturedLines(() => {
+      try {
+        store.record(validLink({ occurredAt: "2026-09-16 01:00:00+00:00" })); // non-canonical
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    store.close();
+
+    // The throw is unchanged — the line is purely additive.
+    expect(thrown).toBeInstanceOf(AuditStoreError);
+    expect((thrown as AuditStoreError).code).toBe("audit-link-invalid");
+    // ...and nothing was written.
+    expect(rowCount(p)).toBe(0);
+
+    const line = lines.find((l) => l.operation === "audit-link.record");
+    expect(line).toBeDefined();
+    expect(line?.status).toBe("error");
+    expect(line?.outcome).toBe("audit-link-invalid");
+    // The join columns ride along so the line is greppable by run like the rest.
+    expect(line?.runId).toBe(validLink().runId);
+    expect(line?.hop).toBe(validLink().hop);
+    expect(String(line?.message)).toContain("audit link refused");
+  });
+
+  test("a refusal whose requestId is ITSELF invalid still emits a line (with a minted log id)", () => {
+    // `emitLine` needs a requestId, and an empty one is exactly the failure this
+    // arm reports — so the line falls back to a minted id. That id is the LOG's
+    // correlation only; nothing is written to audit_links, so no fabricated join
+    // key can reach the store (INV-AUDIT-4).
+    const p = join(dir, "audit.db");
+    const store = openAuditStore(p);
+    const lines = capturedLines(() => {
+      expect(() => store.record(validLink({ requestId: "" }))).toThrow();
+    });
+    store.close();
+    const line = lines.find((l) => l.operation === "audit-link.record");
+    expect(line?.status).toBe("error");
+    expect(typeof line?.requestId).toBe("string");
+    expect(String(line?.requestId).length).toBeGreaterThan(0);
+    expect(rowCount(p)).toBe(0);
+  });
+
+  test("openAuditStoreForWalk emits an audit-store.open error line when the PROBE fails", () => {
+    // `audit-store-absent` is the commonest refusal this opener has, and it was
+    // the ONE that emitted no open line: the walk's structured log jumped
+    // straight from "walk started" to hops 4/5/6 broken, with no record that the
+    // store had been reached for at all.
+    const missing = join(dir, "nope", "audit.db");
+    const lines = capturedLines(() => {
+      const e = refusalOf(() => openAuditStoreForWalk(missing));
+      expect(e.code).toBe("audit-store-absent");
+    });
+    const line = lines.find((l) => l.operation === "audit-store.open");
+    expect(line).toBeDefined();
+    expect(line?.status).toBe("error");
+    expect(line?.outcome).toBe("audit-store-absent");
+    expect(line?.auditPath).toBe(missing);
+  });
+});

@@ -17,8 +17,13 @@
  * $OPENROUTER_PROVISIONING_KEY fails the same way — the sweep cannot list
  * keys without it. Exit codes: 0 dry-run / clean apply / empty fleet; 1 hard
  * SweepError (malformed record, unenumerable list, config error), any
- * apply-mode action failure, or an apply-mode success-path ledger close
- * failure; 2 usage. Errors print `!! <code>: <message>` plus
+ * apply-mode action failure, or an apply-mode success-path close failure of
+ * EITHER handle — the cost ledger or the audit-link store. A store that did not
+ * close cleanly may not have flushed, so an audit-store close failure is exit 1
+ * even when every link the sweep emitted was already committed and every unit
+ * succeeded: the cron/CI consumer keying on the exit code must not read a
+ * possibly-unflushed evidence write as success. Exit 2 is usage. Errors print
+ * `!! <code>: <message>` plus
  * `next: <remediation>`; key material is never printed.
  */
 

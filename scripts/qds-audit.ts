@@ -242,23 +242,44 @@ function fail(prefix: string, lines: readonly string[]): 2 {
 }
 
 /**
+ * Serializes the sink swap below. `setLogSink` is a MODULE-GLOBAL with a
+ * save/restore discipline, so two overlapping `run()` calls interleave as
+ * save(orig) · save(A) · restore(orig) · restore(A) — the first finisher
+ * restores the sink the SECOND one displaced, and the caller's own sink is
+ * gone for good while A's stderr writer stays installed after both returned.
+ * `run` is exported precisely so a harness can drive it (and a harness driving
+ * the exit matrix is exactly what runs two walks at once), so the window is
+ * reachable from the API's intended use.
+ *
+ * ponytail: one global gate, not a per-argv one — the resource being guarded
+ * IS global, and a walk is an operator-scale operation, not a hot path.
+ */
+let sinkGate: Promise<unknown> = Promise.resolve();
+
+/**
  * Walk and render. RETURNS the exit code (see the matrix in the file header) —
  * it never terminates the process, so a harness can drive the matrix directly.
  */
 export async function run(argv: readonly string[]): Promise<number> {
-  // Structured logs to stderr so stdout carries only the command's output.
-  // Installed here rather than under `import.meta.main`: `run` is exported
-  // precisely so a harness can drive it, and the --json stdout guarantee must
-  // hold for that caller too. writeSync, not process.stderr.write: the latter
-  // is async for pipes/files and our caller may exit before it drains.
-  const restoreSink = setLogSink((entry) => {
-    writeSync(2, `${JSON.stringify(entry)}\n`);
+  const mine = sinkGate.then(async () => {
+    // Structured logs to stderr so stdout carries only the command's output.
+    // Installed here rather than under `import.meta.main`: `run` is exported
+    // precisely so a harness can drive it, and the --json stdout guarantee must
+    // hold for that caller too. writeSync, not process.stderr.write: the latter
+    // is async for pipes/files and our caller may exit before it drains.
+    const restoreSink = setLogSink((entry) => {
+      writeSync(2, `${JSON.stringify(entry)}\n`);
+    });
+    try {
+      return await walkAndRender(argv);
+    } finally {
+      restoreSink();
+    }
   });
-  try {
-    return await walkAndRender(argv);
-  } finally {
-    restoreSink();
-  }
+  // The GATE swallows the rejection (a failed walk must not wedge every later
+  // one); the CALLER still gets `mine` verbatim, rejection and all.
+  sinkGate = mine.catch(() => undefined);
+  return mine;
 }
 
 async function walkAndRender(argv: readonly string[]): Promise<number> {

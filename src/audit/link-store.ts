@@ -359,7 +359,35 @@ function emitLine(entry: { operation: string; requestId: string; durationMs: num
  */
 function recordLink(stmts: { insert: Statement; storedDigest: Statement }, link: AuditLinkInput): void {
   const started = Date.now();
-  const { detailJson } = validateAndBind(link);
+  let detailJson: string | null;
+  try {
+    ({ detailJson } = validateAndBind(link));
+  } catch (e) {
+    // Every OTHER outcome of this function emits an `audit-link.record` line —
+    // inserted, duplicate, divergent — so a REFUSED emit was the one outcome
+    // with no structured trace at all. An operator grepping `audit-link.record`
+    // for a run saw the emits that landed and nothing whatsoever for the ones
+    // the validator threw out, which reads as "the emitter never fired".
+    // The throw still propagates untouched; this only adds the line.
+    const code = (e as { code?: unknown } | null)?.code;
+    emitLine({
+      operation: "audit-link.record",
+      // The link's own correlation when it HAS one — but an empty/non-string
+      // `requestId` is itself a validation failure this arm reports, and
+      // `emitLine` must not be handed it.
+      requestId: typeof link.requestId === "string" && link.requestId.length > 0 ? link.requestId : newRequestId(),
+      durationMs: Date.now() - started,
+      status: "error",
+      runId: link.runId,
+      repoSlug: link.repoSlug,
+      hop: link.hop,
+      event: link.event,
+      subjectKind: link.subjectKind ?? null,
+      outcome: typeof code === "string" ? code : "audit-link-invalid",
+      message: `audit link refused: ${(e as { message?: unknown } | null)?.message ?? String(e)}`,
+    });
+    throw e;
+  }
   const subjectKey = link.subjectId ?? SUBJECT_NONE_KEY;
   const { changes } = stmts.insert.run(
     link.runId,
@@ -608,7 +636,19 @@ export function openAuditStoreForWalk(path: string): AuditStoreWalkHandle {
   const started = Date.now();
   const openLine = (status: "ok" | "error", outcome: string, message: string): void =>
     emitLine({ operation: "audit-store.open", requestId: newRequestId(), durationMs: Date.now() - started, status, auditPath: path, outcome, message });
-  const probe = probeAuditStore(path);
+  // The PROBE's own failure gets the same `audit-store.open` error line as
+  // every failure past it. `audit-store-absent` is the single most common way
+  // this opener refuses (no store, wrong `QDS_AUDIT_DB`, unreadable file) and
+  // it was the ONE refusal that emitted no open line — so the walk's structured
+  // log jumped straight from "walk started" to hops 4/5/6 reporting broken with
+  // no record of the store ever having been reached for.
+  let probe: { ino: number; close(): void };
+  try {
+    probe = probeAuditStore(path);
+  } catch (e) {
+    if (e instanceof AuditStoreError) openLine("error", e.code, e.message);
+    throw e;
+  }
   let db: Database;
   try {
     db = probeAndBind(path, probe);
