@@ -40,6 +40,7 @@ import { dirname } from "node:path";
 
 import { Database, type Statement } from "bun:sqlite";
 
+import { sanitizeLabel } from "../fleet/brief-schema.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 
 /**
@@ -373,6 +374,33 @@ function emitLine(entry: { operation: string; requestId: string; durationMs: num
 }
 
 /**
+ * Longest a join column may be on a REFUSAL line. Every real one is far under
+ * it (a run id, a `owner/repo`, a hop name, an event name), so the cap only
+ * ever bites a value that was already invalid — which is the case this exists
+ * for.
+ */
+const REFUSAL_FIELD_MAX = 120;
+
+/**
+ * One unvalidated join column, made safe to put in the engine log.
+ *
+ * The refusal arm of `recordLink` runs AFTER the validator threw, so its inputs
+ * have been proven nothing: `runId` may be an object, `hop` a 4 MiB string, any
+ * of them may carry control characters that reflow an operator's terminal. The
+ * line still needs them — a refusal nobody can grep by run is the gap the line
+ * closes — so they are bounded rather than dropped.
+ *
+ * `sanitizeLabel` is the same treatment `status.ts` gives substrate-supplied
+ * box names, and for the same reason: strip, cap, and never let a name surprise
+ * a consumer. A non-string is reported as its SHAPE — serialising it is exactly
+ * the unbounded echo this guards against.
+ */
+function refusalField(value: unknown): string {
+  if (typeof value === "string") return sanitizeLabel(value, REFUSAL_FIELD_MAX);
+  return `<non-string: ${value === null ? "null" : Array.isArray(value) ? "array" : typeof value}>`;
+}
+
+/**
  * The one insert path, shared by the writer and the walk handle. `changes === 0`
  * means ON CONFLICT fired on the UNIQUE key — but that alone cannot tell an
  * identical redelivery from a CONTRADICTORY one, and the store is append-only,
@@ -393,6 +421,15 @@ function recordLink(stmts: { insert: Statement; storedDigest: Statement }, link:
     // for a run saw the emits that landed and nothing whatsoever for the ones
     // the validator threw out, which reads as "the emitter never fired".
     // The throw still propagates untouched; this only adds the line.
+    //
+    // FIXED message, never the validator's. `invalidLink` messages quote the
+    // REJECTED INPUT back unbounded (`got ${JSON.stringify(value)}`, and the
+    // `detail is not JSON-serialisable (${e.message})` arm relays whatever a
+    // caller's throwing `toJSON` chose to say) — and this line rides the engine
+    // log into the harvest tar, where `detail` is a payload field that carries
+    // prompt content BY DESIGN. The refusal's machine-readable half is the
+    // `outcome` code; its human half belongs on the throw, which goes to the
+    // caller and not into the tar (INV-AUDIT-2).
     const code = (e as { code?: unknown } | null)?.code;
     emitLine({
       operation: "audit-link.record",
@@ -402,13 +439,20 @@ function recordLink(stmts: { insert: Statement; storedDigest: Statement }, link:
       requestId: typeof link.requestId === "string" && link.requestId.length > 0 ? link.requestId : newRequestId(),
       durationMs: Date.now() - started,
       status: "error",
-      runId: link.runId,
-      repoSlug: link.repoSlug,
-      hop: link.hop,
-      event: link.event,
-      subjectKind: link.subjectKind ?? null,
+      // The JOIN COLUMNS stay: INV-AUDIT-2 admits "ids, digests, hops, paths
+      // and codes", and a refusal line nobody can grep by run is the very gap
+      // this arm exists to close. But they are UNVALIDATED here by definition —
+      // the validator threw, so any of them may be a non-string, or a string of
+      // any length — so each is bounded the way `status.ts` bounds
+      // substrate-supplied names: control characters stripped, length capped.
+      // A non-string is reported as its shape, never serialised.
+      runId: refusalField(link.runId),
+      repoSlug: refusalField(link.repoSlug),
+      hop: refusalField(link.hop),
+      event: refusalField(link.event),
+      subjectKind: link.subjectKind === undefined ? null : refusalField(link.subjectKind),
       outcome: typeof code === "string" ? code : "audit-link-invalid",
-      message: `audit link refused: ${(e as { message?: unknown } | null)?.message ?? String(e)}`,
+      message: "audit link refused",
     });
     throw e;
   }

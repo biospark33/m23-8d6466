@@ -966,6 +966,72 @@ describe("structured lines for the REFUSED paths", () => {
     expect(String(line?.message)).toContain("audit link refused");
   });
 
+  test("the refusal line carries NEITHER the validator's message nor an unbounded join column", () => {
+    // The two halves of INV-AUDIT-2 on this line, pinned together because they
+    // are the same leak:
+    //
+    //  1. `invalidLink` messages quote the REJECTED INPUT back (`got
+    //     ${JSON.stringify(value)}`), and `detail` is a payload field that
+    //     carries prompt content by design. Interpolating that message into the
+    //     line put caller bytes into the engine log, which rides the harvest
+    //     tar. The `outcome` code is the machine-readable half and stays; the
+    //     human half lives on the THROW, which goes to the caller only.
+    //  2. The join columns are unvalidated HERE by definition — the validator
+    //     already threw — so a 4 MiB `hop`, or one full of control characters,
+    //     reached the log verbatim.
+    const p = join(dir, "audit.db");
+    const store = openAuditStore(p);
+    const secret = "sk-live-SHOULD-NEVER-REACH-THE-LOG";
+    const lines = capturedLines(() => {
+      expect(() =>
+        // Refused on the digest; the junk `runId` and the secret-bearing
+        // `subjectId` ride along as the fields the line must NOT echo.
+        store.record(
+          validLink({
+            evidenceDigest: "not-a-digest",
+            runId: `run\u001b[2J${"x".repeat(500)}`,
+            subjectId: secret,
+          }),
+        ),
+      ).toThrow(AuditStoreError);
+    });
+    store.close();
+
+    const line = lines.find((l) => l.operation === "audit-link.record");
+    expect(line?.status).toBe("error");
+    expect(line?.outcome).toBe("audit-link-invalid");
+    // The message is FIXED — not the validator's, which quotes "not-a-digest".
+    expect(line?.message).toBe("audit link refused");
+    // Nothing anywhere on the line quotes the rejected input or the secret.
+    const whole = JSON.stringify(line);
+    expect(whole).not.toContain(secret);
+    expect(whole).not.toContain("not-a-digest");
+    // The join column is still THERE (the line must stay greppable by run) but
+    // bounded and stripped.
+    expect(String(line?.runId).length).toBeLessThanOrEqual(120);
+    expect(String(line?.runId)).toStartWith("run");
+    expect(String(line?.runId)).not.toContain("\u001b");
+    expect(rowCount(p)).toBe(0);
+  });
+
+  test("a refusal whose join column is a NON-STRING is reported as a shape, never serialised", () => {
+    // `runId` is typed `string`, but this is the provider trust boundary and
+    // the validator has already thrown by the time the line is built — so a
+    // caller that passed an object got it `JSON.stringify`d into the log whole.
+    const p = join(dir, "audit.db");
+    const store = openAuditStore(p);
+    const lines = capturedLines(() => {
+      expect(() =>
+        store.record(validLink({ runId: { token: "sk-live-nested" } as unknown as string })),
+      ).toThrow(AuditStoreError);
+    });
+    store.close();
+    const line = lines.find((l) => l.operation === "audit-link.record");
+    expect(line?.runId).toBe("<non-string: object>");
+    expect(JSON.stringify(line)).not.toContain("sk-live-nested");
+    expect(rowCount(p)).toBe(0);
+  });
+
   test("a refusal whose requestId is ITSELF invalid still emits a line (with a minted log id)", () => {
     // `emitLine` needs a requestId, and an empty one is exactly the failure this
     // arm reports — so the line falls back to a minted id. That id is the LOG's
