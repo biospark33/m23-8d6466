@@ -85,6 +85,7 @@ import { boxMarkerPath, classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from 
 // The systemd instance name, from the ONE place that builds it — so the
 // remediation this test prints names the unit `fleet run` actually started.
 import { runUnitName } from "../../../src/fleet/run.ts";
+import { runMarkerRoot } from "../../../src/phase-engine/journal.ts";
 // The in-box layout, imported rather than re-spelled. `QDS_IN_BOX_DIR` and
 // `DEFAULT_FILL_WORKDIR` are the two constants `dispatch.ts:2839` builds the
 // delivered manifest pair's path from; `BOX_RUN_ROOT` is the in-box tmpfs root
@@ -442,7 +443,13 @@ test.todoIf(liveTodoOff())(
         }
         return read;
       };
-      const traceBoxPath = `${BOX_RUN_ROOT}/trace/trace.db`;
+      // live-mirror: engine trace store — pipeline-run.ts claims
+      // `<markerRoot>/trace` where markerRoot = runMarkerRoot(runId), so the
+      // per-run re-rooting (#217 F-D1) moved the db from the DF1.4 flat
+      // `/run/trace` to `/run/qds-run/<runId>/trace`. Derived from the same
+      // exported runMarkerRoot the engine derives its root from — a hand
+      // literal here is how the stale `/run/trace` slipped past review.
+      const traceBoxPath = posix.join(runMarkerRoot(runId), "trace", "trace.db");
       const pair = await ctx.driver.exec(vmName, [
         "sh",
         "-c",
