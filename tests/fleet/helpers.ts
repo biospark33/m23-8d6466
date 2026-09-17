@@ -204,8 +204,11 @@ import { join } from "node:path";
  *
  * MANDATORY in any suite that reaches a composition root which opens the audit
  * store with no argument — `dispatch()` (src/fleet/dispatch.ts), `fleet
- * dispatch` (scripts/fleet.ts), `sandbox-teardown` (scripts/sandbox-teardown.ts),
- * `cap-hit-demo` (scripts/cap-hit-demo.ts — a root as of DF5.3).
+ * dispatch` and `fleet observe`/the destructive verbs (scripts/fleet.ts),
+ * `sandbox-teardown` (scripts/sandbox-teardown.ts), `sandbox-reap --yes`
+ * (scripts/sandbox-reap.ts) and `cap-hit-demo` (scripts/cap-hit-demo.ts).
+ * The last two became roots in DF5.3; this list is the thing that tells the
+ * next author the helper is required, so it has to name every one of them.
  * `openAuditStore()` resolves `process.env.QDS_AUDIT_DB ?? ".sandbox/audit.db"`
  * RELATIVE TO CWD, and these suites run with cwd = repo root: without this the
  * fleet suite appends real rows to the operator's live `.sandbox/audit.db`,

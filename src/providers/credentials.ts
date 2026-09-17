@@ -1106,6 +1106,26 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
       // that did land — the alternative loses the real cause).
       emitCredentialLink(deps, rec, runId, "revoke", {}, minted.hash);
       emitCredentialLink(deps, rec, runId, "verify-revoked", {}, minted.hash);
+      // The SUCCESS line, added in review round 3. Stripping `compensation:`
+      // from `detail` above fixed the `divergent` collision but took the only
+      // signal with it: a compensation that LANDED then wrote two
+      // `{keyHash}`-only rows indistinguishable from an ordinary teardown's,
+      // and this operation was logged on the failure arm alone. Two rows plus
+      // silence is not observability. The marker belongs here, where it costs
+      // the store nothing, and this is the line the comment above promises.
+      log({
+        requestId: deps.requestId ?? newRequestId(),
+        operation: "credential.delivery_compensation",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        runId,
+        step: "delivery_compensation",
+        keyHashPrefix: keyHashPrefix(minted.hash),
+        outcome: "revoked",
+        delivery_compensation_ms: 0,
+      });
     } catch (compErr) {
       // Log the failed compensation so it's observable; the record still
       // carries keyHash, so DF2.6's orphan sweep or a manual re-run reaches it.

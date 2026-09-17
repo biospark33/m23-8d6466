@@ -328,10 +328,28 @@ describe("DF2.3 credential lifecycle", () => {
     // `credential.delivery_compensation` step line, which carries no digest.
     expect(auditLinks[1]?.detail).toEqual({ keyHash: hash });
     expect(auditLinks[2]?.detail).toEqual({ keyHash: hash });
-    // `credential.delivery_compensation` is logged only by the compensation's
-    // FAILURE arm (see the store-refusal test below), so a clean compensation
-    // is silent here — its evidence is the two links plus the absent key.
-    expect(logs.filter((l) => l.operation === "credential.delivery_compensation")).toEqual([]);
+    // …and the step line the comment above points at actually exists on the
+    // SUCCESS arm. It did not, until round 3's follow-up: stripping the
+    // `compensation:` marker from `detail` fixed the `divergent` collision but
+    // left a compensation that LANDED writing two `{keyHash}`-only rows
+    // indistinguishable from an ordinary teardown's, with this operation logged
+    // on the failure arm alone. Two rows plus silence is not observability, and
+    // the comment four lines up would have been describing a line nothing wrote.
+    const comp = logs.filter((l) => l.operation === "credential.delivery_compensation");
+    expect(comp).toHaveLength(1);
+    expect(comp[0]?.status).toBe("ok");
+    expect(comp[0]?.outcome).toBe("revoked");
+    expect(comp[0]?.runId).toBe(runId);
+    expect(comp[0]?.step).toBe("delivery_compensation");
+    // The prefix, never the hash: INV-AUDIT-2 applies to the step log too.
+    // Asserted as a PROPERTY (a strict prefix, materially shorter) rather than
+    // by restating the production slice — round 3 flagged that shape elsewhere,
+    // since an expectation computed the same way the code computes it pins
+    // nothing about the guarantee.
+    const prefix = comp[0]?.keyHashPrefix as string;
+    expect(hash.startsWith(prefix)).toBeTrue();
+    expect(prefix.length).toBeLessThan(hash.length / 2);
+    expect(JSON.stringify(comp[0])).not.toContain(hash);
     // …and the compensation really happened: the key is gone from the list.
     expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
   });
