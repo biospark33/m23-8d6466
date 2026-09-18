@@ -1,0 +1,71 @@
+{
+  "story": "df3-8-host-completion-watcher",
+  "publishedBy": "post-round driver extraction (handoff item 3; the live test writes no df3-8 evidence of its own)",
+  "round": {
+    "date": "2026-09-18",
+    "outcome": "pass (1 pass / 0 fail, 39 expect() calls, 174.91 s)",
+    "runId": "qds-20260918-cd7fb6",
+    "image": {
+      "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8f5941e04d714f0fa3abd5508cc74ab2915ff924517ee113c6284bc14cf13cf9",
+      "buildId": "438fe0b7d10a3923",
+      "overriddenBy": [],
+      "isRepoPin": true
+    },
+    "evidence": "_bmad-output/evidence/df3-e2e/2026-09-18-233121-df3-8-observe-detached-v1nygd.json",
+    "log": "/tmp/df38-live-round2.log",
+    "priorRedRound": "2026-09-18-225738-df3-8-observe-detached-qm2938.json (stale eleventh pin; cleared by the twelfth-pin adoption 3cb72485)"
+  },
+  "sweepComplete": {
+    "agentId": null,
+    "timestamp": "2026-09-18T23:31:14.384Z",
+    "duration": 44546,
+    "status": "ok",
+    "requestId": "9e4a9f40-357a-4085-9f80-ea0b2c334b5d",
+    "operation": "fleet.observe",
+    "event": "sweep-complete",
+    "candidates_enumerated": 1,
+    "runs_observed": 1,
+    "runs_unsettled": 0,
+    "runs_engine_dead": 0,
+    "runs_box_unreachable": 0,
+    "runs_lost_to_reboot": 0,
+    "lock_refused": 0,
+    "completion_unwitnessed": 0,
+    "runs_vetoed": 0,
+    "runs_approval_failed": 0,
+    "runs_chain_failed": 0,
+    "runs_handed_off": 0,
+    "candidates_skipped": 0,
+    "box_reboot_after_dispatch": 0,
+    "uptime_unknown": 1,
+    "sweep_ms": 44546
+  },
+  "invIBOX19Counters": {
+    "box_reboot_after_dispatch": 0,
+    "uptime_unknown": 1
+  },
+  "perRunUptimeEvidence": [
+    {
+      "runId": "qds-20260918-cd7fb6",
+      "hostNow": null,
+      "createdAt": "2026-09-18T23:28:29.605000Z",
+      "uptimeSeconds": null,
+      "provisionLagMs": null,
+      "derivation": {
+        "createdAt": "dispatch-start = phase-complete timestamp minus durationMs (evidence dispatch-verb line: 2026-09-18T23:30:15.869Z minus 106264 ms)",
+        "provisionLagMsEstimate": 50172,
+        "provisionLagMsBasis": "dispatch timings.create_ms \u2014 the measured store.create\u2192driver.create(boot) span, i.e. the exact create\u2192boot lag PROVISION_LAG_MARGIN_MS absorbs (createdAt is stamped inside that span, src/fleet/dispatch.ts)",
+        "whyRawIsNull": "the sweep is stateless (INV-IBOX-18) and returns uptime_evidence only in its in-memory summary; scripts/fleet.ts:2155 strips it from every emitted line, so uptimeSeconds/provisionLagMs raw values had no capturable channel this round \u2014 the box classified uptime_unknown:1 (inside margin, uptime read parsed) per AC4a. Filed as an observability gap issue."
+      }
+    }
+  ],
+  "spend": {
+    "modelMicroUsd": 0,
+    "modelCapMicroUsd": 50000,
+    "boxMicroUsd": 8922,
+    "boxCeilingMicroUsd": 543056,
+    "boxRateMicroUsdPerHour": 230000,
+    "leakedBoxes": 0,
+    "leakedKeys": 0
+  }
+}

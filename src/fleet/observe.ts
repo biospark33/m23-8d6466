@@ -60,12 +60,21 @@ import { observeAndDriveChain, type ChainOutcome } from "./run-completion.ts";
  * ceiling, so the sweep never mistakes a merely-provisioning box for a
  * rebooted one on any interval derived from it.
  *
- * OPEN MEASUREMENT (story Technical Notes): the 2026-08-31 probe contains no
- * provisioning-to-first-boot duration, so this first value is PROVISIONAL —
- * set at ~4× the whole dispatch leg the T2.8 live round measured (79 s to
- * ack, evidence 2026-09-15-184348-…-5wmt0b.json). Reprice it from the first
- * live e2e's own `uptime_evidence` (`provisionLagMs = (hostNow − createdAt) −
- * uptimeMs`, milliseconds on both sides), never re-argue it.
+ * RE-DERIVED (story Technical Notes' open measurement, closed 2026-09-18):
+ * the first live e2e round that could measure this (DF3.8 round 2, evidence
+ * 2026-09-18-233121-…-v1nygd.json) recorded the create→boot span directly —
+ * dispatch `timings.create_ms` = 50 172 ms, the exact lag this margin
+ * absorbs (createdAt is stamped inside that span, src/fleet/dispatch.ts).
+ * 6× that measurement is ≈301 s; the value keeps the round 300 000 (within
+ * 0.4% of the derived figure), so the CONSTANT IS UNCHANGED and only its
+ * basis swaps — provisional 4×-dispatch-leg estimate → measured span × 6.
+ * Caveat, filed as #266: that round could not capture per-box raw
+ * `uptime_evidence` (`provisionLagMs = (hostNow − createdAt) − uptimeMs`,
+ * milliseconds on both sides) — the sweep is stateless (INV-IBOX-18) and
+ * scripts/fleet.ts strips the summary's uptime_evidence before any line is
+ * emitted — so the derivation stands on the recorded dispatch timing span:
+ * the same lag, measured one level up. When #266 lands and a later round
+ * captures the raw per-box values, reprice against THAT sample.
  */
 export const PROVISION_LAG_MARGIN_MS = 300_000;
 
