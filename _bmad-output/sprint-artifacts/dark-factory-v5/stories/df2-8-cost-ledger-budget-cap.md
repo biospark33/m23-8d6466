@@ -529,5 +529,27 @@ Deferred (1): internal retry/backoff for `ledger-busy` under >10 concurrent disp
 
 Dismissed (4): box-hour rate late-fail at teardown — spec-mandated surfacing, not silent default (blind); positive-USD→negative-µ$ — mathematically impossible in safe range (edge); open-run reservation persistence — verify-only, expiry path exists from prior round (edge, pending verifier verdict); INFO confirmations ×2 (append-only triggers, serialized admission).
 
+### Follow-ups owned here (recorded by DF3.6a + its review round 1, 2026-09-18 — this story's file owns `cost-ledger.ts`; landed post-DF2.8, tracked so they surface when this ledger is next opened)
+
+- [ ] **Admission-reservation release API.** DF3.6a's dispatch added a `resident-ceiling-unfundable`
+  **pre-provision** refusal (and its review round added `resident-cap-above-backstop`) — both refuse
+  AFTER `admitIssue` reserved `min(keyCap, remaining)` but BEFORE any run record exists, so the
+  reservation strands the issue's ENTIRE remaining headroom until orphan aging
+  (`ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS`), and a bare retry against the same issue
+  misreads as `budget-exceeded`. Interim: the refusal's remediation text warns the operator (wait
+  out the window or pick another issue). The fix is an API this file owns: a compensating release
+  (`admitIssue` gains a release path, or the `cancelAdmission`-shaped retirement policy this
+  story's own 2026-08-20 review already deferred for the store.set-orphan case — **same family,
+  one API can serve both**; that deferred item is the kinship citation, not a new requirement).
+  Full context: `sprint-artifacts/deferred-work.md` (2026-09-18 section), DF3.6a story Review
+  Findings.
+- [ ] **Global-default resident spend ceiling config key.** The DF3.6a operator ruling (2026-09-13)
+  made the resident ceiling user policy with a *global default* rung — but `CONFIG_KEYS` is exactly
+  `[defaultCapMicroUsd, perIssueOverrides, boxHourRateMicroUsd]` and none is a ceiling carrier, so
+  the rung has no config surface; the shipped 8,000 µ$ fallback constant IS the effective global
+  default. A `residentSpendCeilingMicros` key is this file's schema addition (recorded as a named
+  follow-up in DF3.6a's Technical Notes at implementation; restated here so it lives on the owning
+  story, not only in the citing one).
+
 
 **Status:** done — PR #121 merged 2026-08-21 (`31c4a0d`), after four review rounds (final pass: 19/19 actionable patches applied, 119/119 focal green). This line read "review — awaiting PR #121 merge" for five days after the merge; corrected in the 2026-08-26 artifact audit.
