@@ -180,6 +180,25 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     // site that must be argued, not smuggled in.
     const steering = codeOnly(steeringPath);
     expect((steering.match(/\/\s*1_000_000/g) ?? []).length).toBe(2);
+    // AMENDED DF3.6A: resident-bounds.ts is the second sanctioned ENGINE-SIDE
+    // tokens→µ$ projection site — the worst-case projection the pre-call spend
+    // refusal stands on. Same class as the meter (per-term `/ 1_000_000`, per-term
+    // Math.round, integer µ$ per DD-9); the story's Technical Notes rule the
+    // unit contract ("the /1e6 is what converts DF1.5's µ$-per-million-tokens
+    // unit into µ$ for this call, and it is applied once, at the projection,
+    // by the consumer"). Same compensating-pin discipline as steering.ts: the
+    // exemption buys a COUNT pin plus numerator pins, so a new division or a
+    // rewired numerator fails here rather than passing unexamined.
+    const boundsPath = path.join(engineRoot, "resident-bounds.ts");
+    const bounds = codeOnly(boundsPath);
+    expect((bounds.match(/\/\s*1_000_000/g) ?? []).length).toBe(2);
+    // Numerators are the projection's own two terms: the chars→tokens heuristic
+    // ceiling × the clamped input rate, and the output-token ceiling × the
+    // clamped output rate — never a raw spend figure (µ$ in, nothing).
+    expect(bounds).toMatch(
+      /\(\(PROMPT_CHAR_CEILING \/ 4\) \* clampTerm\(rate\.inputPerMTok\)\) \/ 1_000_000/,
+    );
+    expect(bounds).toMatch(/\(MAX_OUTPUT_TOKENS \* clampTerm\(rate\.outputPerMTok\)\) \/ 1_000_000/);
     // The count alone is position-blind: removing one meter term (say, output
     // tokens) while adding an unrelated `/ 1_000_000` elsewhere keeps it at 2
     // and passes unexamined — exactly the smuggled conversion the pin exists
@@ -202,7 +221,8 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
         else if (
           entry.name.endsWith(".ts") &&
           path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts") &&
-          path.resolve(dir, entry.name) !== steeringPath
+          path.resolve(dir, entry.name) !== steeringPath &&
+          path.resolve(dir, entry.name) !== boundsPath
         ) {
           if (/\/\s*1_000_000/.test(codeOnly(full))) others.push(full);
         }

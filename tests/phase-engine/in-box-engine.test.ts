@@ -129,6 +129,15 @@ function writeManifest(ws: Workspace, phases: unknown[], over: Record<string, un
       version: "1.0.0",
       pipelineId: "in-box-demo",
       runBudgetMs: 200_000,
+      // DF3.6a: the four resident bound operands — this suite's witnesses arm
+      // residents, and the arm-scoped loadResidentBounds refuses an operand-less
+      // manifest before startResident (AC2a fail-closed). At the default test
+      // rates the 8,000 µ$ ceiling is structurally unreachable, so no bound ever
+      // fires here and every leg's pre-bounds semantics is unchanged.
+      residentSpendCeilingMicros: 8_000,
+      capMicroUsd: 50_000_000,
+      defaultKeyCapMicroUsd: 50_000_000,
+      residentRssBytes: 536_870_912,
       phases,
       ...over,
     }),

@@ -1957,6 +1957,38 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(await driver.list()).toHaveLength(0);
   });
 
+  test("DF3.6a: an admitted ceiling below the resolved resident ceiling refuses BEFORE provisioning", async () => {
+    // The fill stamp would deliver capMicroUsd = admittedCeilingMicroUsd, so
+    // a manifest whose resident ceiling (here the 8,000 µ$ fallback — the
+    // default brief declares none) exceeds what admission granted is a run
+    // the IN-BOX ENGINE refuses bound-config-invalid at arm — after the box
+    // billed and the key minted. The host-side guard refuses the same verdict
+    // at zero spend (the roster pre-check's doctrine), with an actionable
+    // remediation.
+    const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+    driver.create = createSpy;
+    const ledger = goodLedger(5_000); // admitted 5,000 µ$ < the 8,000 µ$ fallback ceiling
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("resident-ceiling-unfundable");
+      expect(err.payload?.admittedCeilingMicroUsd).toBe(5_000);
+      expect(err.payload?.residentSpendCeilingMicros).toBe(8_000);
+      expect(err.message).toContain("resident spend ceiling");
+      // Zero provisioning — admission ran (the ledger was consulted), but no
+      // box, no record, no key.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    }
+    expectSingleRefusalLine("resident-ceiling-unfundable");
+    expect(ledger.closeCalls).toBe(1);
+  });
+
   test("AC7: {admitted:true} still checks budget (only headroom suppressed)", async () => {
     // "ONLY headroom" is half the claim, and nothing here used to test it: with
     // an ordinary quota the headroom gate ALLOWS, so deleting the `opts.admitted`

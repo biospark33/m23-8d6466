@@ -1,0 +1,32 @@
+story: df3-6a
+title: Resident Spend Ceiling + Per-Phase Iteration Bound, Enforced by the Engine
+phase: 4-dev-story
+branch: feature/df3-6a-resident-bounds
+base: dev
+target: dev
+started: 2026-09-18T07:00:00-04:00
+research:
+  status: complete
+  confidence: 0.95
+  method: driver firsthand verification (steering.ts, manifest.ts, journal.ts, pipeline-run.ts
+    arm+retry+finally regions, dispatch.ts fill/mint chain, resident.ts, budget-gate.ts, ADR
+    Appendix A/B, DF3.6b cross-story shapes, fixtures, zod v3, green baselines steering 91 /
+    resident-e2e+pipeline-run 94). Six Explore agents dispatched; reports undelivered —
+    firsthand source reads superseded. Reference repos scanned: nothing liftable for engine
+    µ$ bounds (conceptual/observability patterns only).
+unlazy:
+  scope: df3-6a
+  plan: .unlazy/df3-6a/PLAN.md
+  waves:
+    - wave-1: leaf-1 (engine core) IN-FLIGHT
+    - wave-2: leaf-2 steering, leaf-3 dispatch, leaf-5 fixtures (WAITING on leaf-1)
+    - wave-3: leaf-4 pipeline-run (WAITING on 1+2)
+    - wave-4: leaf-6 acceptance tests
+    - wave-5: node-1 branch integration (driver)
+guardrails:
+  branch: ok
+  scope: story Files-to-Modify closed list enforced via leaf OWNS
+  tdd: leaf-1 test-first; leaves 2-5 wiring against locked interfaces; leaf-6 acceptance
+notes: >
+  Driver runs full suite ONCE at branch gate (node-1 G3) + targeted suites during
+  integration (operator directive). Subagents run only own-suite + tsc + own ledger.

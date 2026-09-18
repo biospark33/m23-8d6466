@@ -38,6 +38,10 @@ import {
   stampManifestLimit,
   stripAuthoredLimit,
 } from "../phase-engine/manifest.ts";
+// DF3.6a: direct module import, beside the manifest.ts one above — the engine
+// barrel is not widened for a single stamp function (same precedent as the
+// direct `issue-correlation.ts` imports).
+import { DEFAULT_RESIDENT_SPEND_CEILING_MICROS, stampResidentBounds } from "../phase-engine/resident-bounds.ts";
 // `auditNonEmpty` is `audit_links`' NOT NULL + non-empty identity rule as a
 // predicate (C-3): an empty string passes a `!== undefined` guard, reaches the
 // store's own check and throws `audit-link-invalid` AFTER the attested action
@@ -2609,6 +2613,15 @@ export async function dispatch(
   }
 
   // ── 5–6 single-flight: the admission critical section (DF3.2, finding DF13) ─
+  // DF3.6a: the manifest's resolved resident ceiling, captured BEFORE the
+  // critical section (loaded is this scope's; the section below returns the
+  // admission's own ceiling and cannot see the manifest). The two meet in the
+  // unfundable-ceiling refusal inside — the fill stamp would otherwise deliver
+  // a manifest whose ordering the in-box engine refuses only AFTER the box
+  // billed and the key minted.
+  const residentCeilingMicros =
+    (loaded.manifest as { residentSpendCeilingMicros?: number }).residentSpendCeilingMicros ??
+    DEFAULT_RESIDENT_SPEND_CEILING_MICROS;
   // Wrapped as one unit — headroom read, budget decision, box create — so that
   // concurrent in-process dispatches (fan-out arms especially) cannot both
   // pass a ceiling they sampled before either box existed. See
@@ -2888,6 +2901,31 @@ export async function dispatch(
         `raise the cap via .sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}, or pick another issue`,
         {
           admittedCeilingMicroUsd: effectiveCeilingMicros,
+          capMicroUsd: decision.capMicroUsd,
+          spentMicroUsd: decision.spentMicroUsd,
+          reservedMicroUsd: decision.reservedMicroUsd,
+        },
+      );
+    }
+    // DF3.6a: an admitted ceiling below the manifest's resolved resident
+    // ceiling is a run the IN-BOX ENGINE would refuse `bound-config-invalid`
+    // at arm (AC2a's ≤ chain: capMicroUsd is stamped with this very
+    // admittedCeilingMicroUsd, so ceiling > cap refuses) — but only after
+    // `provisionAdmittedRun` wrote the record, billed the box and minted the
+    // key. Refusing HERE is the same verdict at zero spend, the roster
+    // pre-check's doctrine ("refuses before a box exists rather than as a
+    // failed assertion on a live box"). The reservation this strands ages out
+    // exactly like the no-ceiling arm above (store.create never runs); the
+    // SAME ponytail caveat applies if this ever needs a compensating release.
+    if (effectiveCeilingMicros < residentCeilingMicros) {
+      throw refuse(
+        5,
+        "resident-ceiling-unfundable",
+        `admitted ceiling ${effectiveCeilingMicros} µ$ is below the manifest's resident spend ceiling ${residentCeilingMicros} µ$ — the in-box engine would refuse bound-config-invalid after the box billed`,
+        `top up the issue budget (.sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}), lower residentSpendCeilingMicros on the task manifest, or pick another issue`,
+        {
+          admittedCeilingMicroUsd: effectiveCeilingMicros,
+          residentSpendCeilingMicros: residentCeilingMicros,
           capMicroUsd: decision.capMicroUsd,
           spentMicroUsd: decision.spentMicroUsd,
           reservedMicroUsd: decision.reservedMicroUsd,
@@ -3233,6 +3271,19 @@ export async function dispatch(
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
     const tFill = now();
     const stamped = stampManifestLimit(loaded, mintedCeilingMicros);
+    // DF3.6a: the four bound operands get their production provisioner beside
+    // DF3.1's limit stamp. capMicroUsd is the MINT-TIME per-run cap (the
+    // admittedCeilingMicroUsd = min(keyCap, remaining) DF2.8/DF2.13 derived —
+    // the middle term of the ordering chain the in-box engine asserts at load);
+    // defaultKeyCapMicroUsd is the provider backstop constant. The ceiling and
+    // rssBytes resolve through their ladders (declared → shipped fallback /
+    // PROVISIONAL constant) inside the stamp. Authored capMicroUsd /
+    // defaultKeyCapMicroUsd are overwritten — the author does not name the
+    // chain's own operands. limitMicroUsd stays DF3.1's stamp's field alone (CC-1).
+    const stampedBounds = stampResidentBounds(stamped, {
+      capMicroUsd: effectiveCeilingMicros,
+      defaultKeyCapMicroUsd,
+    });
     // AC9: the manifest is the cap's only in-box source (9a); the run context
     // carries the same computed-once ceiling for DF1.6's spawn seam (9b), plus
     // the issue deep link the brief supplied — the box's own back-reference to
@@ -3254,7 +3305,7 @@ export async function dispatch(
     // (QDS_IN_BOX_DIR, src/providers/exedev/fill.ts — pinned to these two
     // literals by tests/fleet/dispatch.test.ts).
     const files = [
-      { path: `${IN_BOX_QDS_DIR}/pipeline.yaml`, content: serializeManifest(stamped) },
+      { path: `${IN_BOX_QDS_DIR}/pipeline.yaml`, content: serializeManifest(stampedBounds) },
       {
         path: `${IN_BOX_QDS_DIR}/run-context.json`,
         content: JSON.stringify({

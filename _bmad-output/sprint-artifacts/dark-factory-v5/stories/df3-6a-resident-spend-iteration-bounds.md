@@ -762,25 +762,99 @@ nothing), DF3.3.
 
 ## Definition of Done
 
-- [ ] **Impl:** `loadResidentBounds` + `checkBounds` in `src/phase-engine/resident-bounds.ts`; every DF3.3 solicitation is gated by `checkBounds` with no unguarded call site in the diff.
-- [ ] **Impl:** worst-case pre-flight projection from `deps.rate` (`inputPerMTok`/`outputPerMTok` divided by `1e6`) — **no models.json reader in this story**; engine refuses to solicit when `spent + projected > effectiveCeiling` (AC1, INV-BND-3).
-- [ ] **Contract:** all three bounds carried in DF1.1's frozen manifest (`residentRssBytes` validated here, applied by DF3.6b); strict ordering assertion over the **three stamped configured defaults**; schema exposes no ratio/percentage field and is `.strict()` (INV-BND-2, INV-BND-4). DF2.8's per-issue cap is the shipped `defaultCapMicroUsd` (`src/providers/cost-ledger.ts`) — cited by its real name and stamped, never read from `.sandbox/cost-config.json` in-box.
-- [ ] **Integration:** a spend breach emits a DF3.3 `residentTripwire` row with `cause:"spend_ceiling_breach"` and a `detail` carrying the projected and cumulative figures; the `cause` union widening (both new members) and the `meter` zero-usage reversal are recorded in DF3.3's deviation ledger (Files to Modify).
-- [ ] **Security:** no bound is readable or writable from any path the resident controls; no public setter for `telemetry.status` is added — the controller keeps its snapshot-only getter (cited by symbol in `src/phase-engine/steering.ts`); the engine imports **no fleet module** (`steering.ts:11-13`, the shipped boundary) and imports **neither `src/providers/credentials.ts` nor `src/providers/cost-ledger.ts`** and reads **neither `.sandbox/runs/` nor `.sandbox/cost-config.json`** — the gate greps the four **import-specifier/path forms** `providers/credentials`, `providers/cost-ledger`, `.sandbox/runs/`, `.sandbox/cost-config.json` over `src/phase-engine/` and requires zero hits; the bare tokens are NOT the gate (`credentials` and `cost-ledger` appear in shipped comment prose). Positive control: `bounded-exec` hits exactly the three shipped importer files. *(A blanket "no provider import" grep is NOT the gate and would fail on shipped code: `gates/command-gate.ts:17`, `roster/validate.ts:34` and `phases/test-results.ts:37` already import `../../providers/bounded-exec.ts`, and `roster/validate.ts` is this story's own `resolveRate` source.)*
-- [ ] **Test (pre-flight ceiling, AC1):** spend at `ceiling − ε` → next call never issued; recorded spend stays under ceiling; post-hoc-metering implementation MUST fail.
-- [ ] **Test (config refusal, AC2a):** `ceiling > capMicroUsd` refuses (`ceiling == capMicroUsd` is **admitted** — the chain is `≤`); `capMicroUsd > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse; a missing or non-positive `residentRssBytes` refuses; **a manifest missing any of the three stamped operands refuses** — no operand ever defaults to a documented constant. Each at manifest load, writing the terminal marker `ok:false` (the writer's shipped shape; the `code` travels on the fd-2 diagnostic line) — the code is payload, never a process exit code.
-- [ ] **Test (per-run clamp, AC2b):** run whose manifest declares ceiling 2,000,000 with minted `limitMicroUsd` 1,500,000 runs with effective ceiling 1,500,000 and a `{bound:"spend", action:"clamped"}` **trace/log** row — not a journal `resident` key, whose set DF3.3 closed.
-- [ ] **Test (no host-side cap read, INV-BND-2):** grep of `src/phase-engine/` finds **no** read of `.sandbox/runs/` and no read of `.sandbox/cost-config.json`. A manifest reaching `loadResidentBounds` with no `limitMicroUsd` runs **unclamped** — no clamp row, no refusal: the field bounds the provider key, not the resident bound, and an implementation that refuses on its absence (or bare-throws, producing an unclassified crash and a marker-absent box) MUST fail.
-- [ ] **Test (per-phase iteration bound fires, AC3):** a phase declaring `retries: 5` whose gate **fails on attempts 1–4 and passes on attempt 5** stops soliciting at the **fourth** `post_gate_failure` point, attempt 5 runs and passes on the deterministic path, the phase completes, and the next phase solicits normally. A gate failing **every** attempt exhausts `retries` and rethrows `GateFailureError` (the retry loop's exit in `scripts/pipeline-run.ts`), failing the phase — there is no next phase to solicit, and a test whose Given promises one is unreachable from its own words (W12C-6a-2; the same defect AC3's prose already names). Counter is this story's own, not `telemetry.steeringIterations`: a resident replying `proceed` on every solicitation is still bounded, and an implementation bounding `steeringIterations` MUST fail.
-- [ ] **Test (zero-usage charging, AC4/INV-BND-3):** a reply with no usage object is charged the projected worst case in the ceiling accumulator, and the DF2.12 attribution row stays **unpriced** (`unpricedTurns = 1`, the shipped emit's disposition — the ledger never carries the projection); an implementation leaving `meter`'s ceiling-side zero-usage arm untouched, or writing the projected charge into the ledger row, MUST fail.
-- [ ] **Test (degraded precedence, AC5):** a resident that degrades at solicitation 2 and would have breached at solicitation 4 ends the run `"degraded"`, not `"stopped"`, and no bounds evaluation fires after the latch (the status gate precedes the check — there is no post-latch bound line to read). An implementation evaluating a bound for a degraded resident, or overwriting `"degraded"` with `"stopped"`, MUST fail.
-- [ ] **Test (ceiling reachability, AC6):** at the shipped fixture rate the reachability row reports `binding` for the default 8,000 µ$ ceiling on a five-phase `retries: 3` manifest and `unreachable` for 50,000 µ$ on the same manifest; at a frontier-priced fixture slug it reports `below_one_call` and the resident is stopped with `code:"bound-config-invalid"`. An implementation reporting `spend_ceiling_breach` at `run_start` for a ceiling below one call's projection MUST fail.
-- [ ] **Test (`loadResidentBounds` is actually called, AC2a):** a pipeline run with an ordering-invalid manifest refuses **through `scripts/pipeline-run.ts`**, not only through a direct unit call — the marker is written and no resident is armed. An implementation that exports `loadResidentBounds` without wiring it passes every direct unit test and MUST fail this one.
-- [ ] **Test (e2e demo — MANDATORY):** `pipeline.bounds.json` + `pi-catalog-bounds/openrouter.json` run writes `out.json` with `resident.status:"stopped"`, `resident.spendMicros` strictly below the ceiling at every point, a full-shape `{runId, cause:"spend_ceiling_breach", phase:"build", detail}` tripwire row, and all remaining phases/gates executed deterministically. The refusal must be **projection-driven**: an implementation comparing metered spend after the call reproduces the outcome and MUST fail AC1's control.
+- [x] **Impl:** `loadResidentBounds` + `checkBounds` in `src/phase-engine/resident-bounds.ts`; every DF3.3 solicitation is gated by `checkBounds` with no unguarded call site in the diff.
+- [x] **Impl:** worst-case pre-flight projection from `deps.rate` (`inputPerMTok`/`outputPerMTok` divided by `1e6`) — **no models.json reader in this story**; engine refuses to solicit when `spent + projected > effectiveCeiling` (AC1, INV-BND-3).
+- [x] **Contract:** all three bounds carried in DF1.1's frozen manifest (`residentRssBytes` validated here, applied by DF3.6b); strict ordering assertion over the **three stamped configured defaults**; schema exposes no ratio/percentage field and is `.strict()` (INV-BND-2, INV-BND-4). DF2.8's per-issue cap is the shipped `defaultCapMicroUsd` (`src/providers/cost-ledger.ts`) — cited by its real name and stamped, never read from `.sandbox/cost-config.json` in-box.
+- [x] **Integration:** a spend breach emits a DF3.3 `residentTripwire` row with `cause:"spend_ceiling_breach"` and a `detail` carrying the projected and cumulative figures; the `cause` union widening (both new members) and the `meter` zero-usage reversal are recorded in DF3.3's deviation ledger (Files to Modify).
+- [x] **Security:** no bound is readable or writable from any path the resident controls; no public setter for `telemetry.status` is added — the controller keeps its snapshot-only getter (cited by symbol in `src/phase-engine/steering.ts`); the engine imports **no fleet module** (`steering.ts:11-13`, the shipped boundary) and imports **neither `src/providers/credentials.ts` nor `src/providers/cost-ledger.ts`** and reads **neither `.sandbox/runs/` nor `.sandbox/cost-config.json`** — the gate greps the four **import-specifier/path forms** `providers/credentials`, `providers/cost-ledger`, `.sandbox/runs/`, `.sandbox/cost-config.json` over `src/phase-engine/` and requires zero hits; the bare tokens are NOT the gate (`credentials` and `cost-ledger` appear in shipped comment prose). Positive control: `bounded-exec` hits exactly the three shipped importer files. *(A blanket "no provider import" grep is NOT the gate and would fail on shipped code: `gates/command-gate.ts:17`, `roster/validate.ts:34` and `phases/test-results.ts:37` already import `../../providers/bounded-exec.ts`, and `roster/validate.ts` is this story's own `resolveRate` source.)*
+- [x] **Test (pre-flight ceiling, AC1):** spend at `ceiling − ε` → next call never issued; recorded spend stays under ceiling; post-hoc-metering implementation MUST fail.
+- [x] **Test (config refusal, AC2a):** `ceiling > capMicroUsd` refuses (`ceiling == capMicroUsd` is **admitted** — the chain is `≤`); `capMicroUsd > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse; a missing or non-positive `residentRssBytes` refuses; **a manifest missing any of the three stamped operands refuses** — no operand ever defaults to a documented constant. Each at manifest load, writing the terminal marker `ok:false` (the writer's shipped shape; the `code` travels on the fd-2 diagnostic line) — the code is payload, never a process exit code.
+- [x] **Test (per-run clamp, AC2b):** run whose manifest declares ceiling 2,000,000 with minted `limitMicroUsd` 1,500,000 runs with effective ceiling 1,500,000 and a `{bound:"spend", action:"clamped"}` **trace/log** row — not a journal `resident` key, whose set DF3.3 closed.
+- [x] **Test (no host-side cap read, INV-BND-2):** grep of `src/phase-engine/` finds **no** read of `.sandbox/runs/` and no read of `.sandbox/cost-config.json`. A manifest reaching `loadResidentBounds` with no `limitMicroUsd` runs **unclamped** — no clamp row, no refusal: the field bounds the provider key, not the resident bound, and an implementation that refuses on its absence (or bare-throws, producing an unclassified crash and a marker-absent box) MUST fail.
+- [x] **Test (per-phase iteration bound fires, AC3):** a phase declaring `retries: 5` whose gate **fails on attempts 1–4 and passes on attempt 5** stops soliciting at the **fourth** `post_gate_failure` point, attempt 5 runs and passes on the deterministic path, the phase completes, and the next phase solicits normally. A gate failing **every** attempt exhausts `retries` and rethrows `GateFailureError` (the retry loop's exit in `scripts/pipeline-run.ts`), failing the phase — there is no next phase to solicit, and a test whose Given promises one is unreachable from its own words (W12C-6a-2; the same defect AC3's prose already names). Counter is this story's own, not `telemetry.steeringIterations`: a resident replying `proceed` on every solicitation is still bounded, and an implementation bounding `steeringIterations` MUST fail.
+- [x] **Test (zero-usage charging, AC4/INV-BND-3):** a reply with no usage object is charged the projected worst case in the ceiling accumulator, and the DF2.12 attribution row stays **unpriced** (`unpricedTurns = 1`, the shipped emit's disposition — the ledger never carries the projection); an implementation leaving `meter`'s ceiling-side zero-usage arm untouched, or writing the projected charge into the ledger row, MUST fail.
+- [x] **Test (degraded precedence, AC5):** a resident that degrades at solicitation 2 and would have breached at solicitation 4 ends the run `"degraded"`, not `"stopped"`, and no bounds evaluation fires after the latch (the status gate precedes the check — there is no post-latch bound line to read). An implementation evaluating a bound for a degraded resident, or overwriting `"degraded"` with `"stopped"`, MUST fail.
+- [x] **Test (ceiling reachability, AC6):** at the shipped fixture rate the reachability row reports `binding` for the default 8,000 µ$ ceiling on a five-phase `retries: 3` manifest and `unreachable` for 50,000 µ$ on the same manifest; at a frontier-priced fixture slug it reports `below_one_call` and the resident is stopped with `code:"bound-config-invalid"`. An implementation reporting `spend_ceiling_breach` at `run_start` for a ceiling below one call's projection MUST fail.
+- [x] **Test (`loadResidentBounds` is actually called, AC2a):** a pipeline run with an ordering-invalid manifest refuses **through `scripts/pipeline-run.ts`**, not only through a direct unit call — the marker is written and no resident is armed. An implementation that exports `loadResidentBounds` without wiring it passes every direct unit test and MUST fail this one.
+- [x] **Test (e2e demo — MANDATORY):** `pipeline.bounds.json` + `pi-catalog-bounds/openrouter.json` run writes `out.json` with `resident.status:"stopped"`, `resident.spendMicros` strictly below the ceiling at every point, a full-shape `{runId, cause:"spend_ceiling_breach", phase:"build", detail}` tripwire row, and all remaining phases/gates executed deterministically. The refusal must be **projection-driven**: an implementation comparing metered spend after the call reproduces the outcome and MUST fail AC1's control.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Implemented 2026-09-18** (branch `feature/df3-6a-resident-bounds`, qds-dev + unlazy
+orchestrated, six leaves + driver integration).
+
+**Files:** `src/phase-engine/resident-bounds.ts` (NEW, ~460 lines: constants, `BoundConfigError`,
+`loadResidentBounds`, `projectWorstCaseMicros`, `createBoundsGuard`, `stampResidentBounds`);
+`src/phase-engine/manifest.ts` (five optional schema fields + DF3.6a comment block); `src/phase-engine/steering.ts`
+(the closed six-item edit list: SEAM check after the status gate, cause union → three members,
+internal stopped-writers, meter zero-usage arm, bounds/onBoundBreach/lastMemory deps,
+PlacementRefusedError + instanceof arm); `src/fleet/dispatch.ts` (fill-side bound stamp beside
+`stampManifestLimit` + the `resident-ceiling-unfundable` pre-provision refusal);
+`scripts/pipeline-run.ts` (edit (i): arm-scoped `loadResidentBounds` with the marker-writing
+refusal + clamp row; edit (ii): `createBoundsGuard` + `bounds`/`onBoundBreach` at the sole
+`createSteering` site); fixtures `pipeline.bounds.json` + `pi-catalog-bounds/openrouter.json` +
+the four operands on `pipeline.resident.json`; tests `resident-bounds.test.ts` (46) + operand
+stamps in `pipeline-run.test.ts`/`in-box-engine.test.ts` (W14C-6a-1 blast radius).
+
+**Deviations from the story text (all evidence-backed):**
+1. **The AC3 counter mechanism** — the story's `$$` form (`$TMPDIR/qds-bounds-count-$$`) is
+   mechanically broken in the real runner: `$$` is the per-ATTEMPT `sh -c` PID (a fresh
+   `Bun.spawn` per gate attempt), so the counter file never accumulates — live-probed: six
+   counter files, every attempt "test attempt 1", retries exhausted, exit 1. Adopted the story's
+   own stated alternative: a FIXED name (`qds-bounds-count`) whose per-run isolation comes from
+   the harness's per-leg TMPDIR — the same discipline as the shipped `qds-resident-fixture-count`.
+2. **AC5's producible trigger** — "degrade at solicitation 2" via the malformed limit latches
+   with spend past the ceiling ONLY through the second malformed call's metered overshoot (the
+   re-gate below refuses a correction whose projection crosses); the test constructs exactly
+   that. A call-failure degrade meters nothing and cannot reach the would-breach state.
+3. **DF3.3 ledger entries 10-11** recorded per DoD (meter zero-usage ceiling-side reversal;
+   cause-union widening).
+
+**Pre-PR adversarial self-review (round 1, 3 fixes applied in-PR):**
+- **Pre-correction re-gate** (AC1's margin): one solicitation bills up to two calls (reply +
+  malformed correction) but the SEAM gated only the first — an adversarial resident at
+  ceiling−ε could reply malformed once then validly, metering two calls past one check. The
+  correction call is now re-gated against the same projection predicate (inline, never
+  `guard.check` — no double count, no duplicate line); regression test pins the refused
+  correction.
+- **AC6's `code` observable**: the below_one_call reachability row now carries
+  `code:"bound-config-invalid"` (misconfiguration ≠ runaway, machine-readable); asserted.
+- **`resident-ceiling-unfundable`** (dispatch): an admitted ceiling below the manifest's
+  resolved resident ceiling previously delivered a manifest the in-box engine refused only
+  AFTER the box billed and the key minted; now refused pre-provision (exit 5, zero
+  provisioning) with an actionable remediation + test.
+- **AC4 narrowing**: a POSITIVE-token reply whose per-term rounding lands at 0 µ$ (3 tokens at
+  0.08/MTok) is genuinely priced sub-micro-dollar and no longer charged the projection; the
+  no-positive-usage shapes (absent / {0,0} / garbage) keep the fail-safe charge.
+- **Pushed back with evidence (no fix)**: empty-brief reaching `loadResidentBounds` is
+  unreachable TWICE over (the arming predicate requires an identity field,
+  `pipeline-run.ts` arming check; and the cap reader refuses a witness without
+  `effectiveCeilingMicros`); dup phase names share one iteration counter (conservative
+  direction only; the S3-7 precedent treats dup names as config-level).
+
+**Known limitations recorded:** (a) the iteration counter keys on phase NAME — duplicate
+phase names share a budget (under-solicit only); (b) `fireOnBoundBreach` is awaited+swallowed
+but not deadline-bound — 6a's handler is bounded, DF3.6b may mirror `onInboxError`'s
+`withDeadline`; (c) `PlacementRefusedError` is not on the engine barrel — DF3.6b's fleet caller
+imports the module path directly (the dispatch/manifest.ts precedent); (d) the global-default
+ceiling config key (operator ruling rung 3) remains a DF2.8-owned schema follow-up, as the
+story records.
+
+**Gates:** resident-bounds 46/0 (12 unit-refusal/clamp/verdict/stamp describes + 7 integration
++ 5 e2e incl. the mandatory demo: journal `resident.status:"stopped"`, spendMicros 1,521,920 <
+2,000,000, tripwire `{cause:"spend_ceiling_breach", phase:"build"}` with the exact figures,
+run ok:true with both phases deterministic); steering 91/0 (pre-DF3.6a behavior byte-identical
+bounds-absent); resident-e2e 12/0; pipeline-run 82/0; in-box-engine 51/0; dispatch 158/0;
+usage 12/0 (DD-9 pin AMENDED DF3.6A with compensating numerator pins — the file's own
+AMENDED DF3.3 precedent); build-exedev-image 234/0 (file-input digest re-pinned same-commit:
+48d3b237 → e42f4352, walked COPY inputs moved by the engine edits + the new module);
+tests/phase-engine/ whole 960/0; tsc clean; biome clean (scoped); DoD security grep
+hits=0 with the three-file bounded-exec positive control; `check-defensive-programming.sh`
+clean; zero open-PR conflicts vs base dev; detect_changes: 29 symbols / 7 processes /
+risk HIGH (hub files main/dispatch/steering in the diff — additive deps, all suites green).
+Full suite once at the branch gate: green except one PROVEN pre-existing environmental
+failure (`tests/swarmclaw/mcp-stdio-transport.test.ts` "real binary exposes an HTTP API" —
+reproduced identical on a clean dev worktree, outside this diff's reach).
 
 ---
 

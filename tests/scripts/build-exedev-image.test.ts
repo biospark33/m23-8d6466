@@ -1311,7 +1311,19 @@ describe("buildIdFileInputs", () => {
       // Dockerfile comment documents; measured, not inferred, via
       // `buildIdFileInputs(realDockerfile())` on the tree this literal lands
       // with, same-commit re-pin per the discipline above.
-      "48d3b237c7eb27c5fae957ecda76064421d989e71d0ee522e93e449cc14e5804",
+      //
+      // e42f4352: moved from 48d3b237 by DF3.6a — the resident spend/iteration
+      // bounds. This story's engine-tree edits are all under directory COPYs
+      // (`src/phase-engine/steering.ts` — the SEAM check, cause-union widening,
+      // meter zero-usage arm, three additive deps, PlacementRefusedError, the
+      // pre-correction re-gate; `src/phase-engine/manifest.ts` — the five
+      // optional bound fields; NEW `src/phase-engine/resident-bounds.ts` —
+      // enters the walk under the engine directory COPY) plus the walked
+      // `src/fleet/dispatch.ts` (fill-side bound stamp + the
+      // resident-ceiling-unfundable pre-provision refusal). Measured on the
+      // FINAL tree (post self-review fixes) via the same failing-run receive
+      // this file's discipline prescribes — same-commit re-pin.
+      "e42f4352be6b9c75397a3d7b27ab9731ce7e7d8dca93a9285e7232078b9c2508",
     );
   });
 });

@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "resident-bounds",
+  "runBudgetMs": 120000,
+  "residentSpendCeilingMicros": 2000000,
+  "maxSteeringIterations": 3,
+  "capMicroUsd": 50000000,
+  "defaultKeyCapMicroUsd": 50000000,
+  "residentRssBytes": 536870912,
+  "phases": [
+    {
+      "name": "build",
+      "kind": "code",
+      "description": "Apply the planned change and prove it with the gated test command",
+      "maxDurationMs": 5000,
+      "retries": 5,
+      "command": ["echo", "build ran"],
+      "testCommand": [
+        "sh",
+        "-c",
+        "f=\"$TMPDIR/qds-bounds-count\"; n=$(cat \"$f\" 2>/dev/null || echo 0); n=$((n+1)); printf '%s' \"$n\" > \"$f\"; echo \"test attempt $n\"; test \"$n\" -ge 5"
+      ]
+    },
+    {
+      "name": "verify",
+      "kind": "code",
+      "description": "Confirm the build landed on the deterministic path",
+      "maxDurationMs": 2000,
+      "retries": 0,
+      "command": ["echo", "verify complete"]
+    }
+  ]
+}

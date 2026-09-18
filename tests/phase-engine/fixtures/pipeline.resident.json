@@ -2,6 +2,10 @@
   "version": "1.0.0",
   "pipelineId": "resident-e2e",
   "runBudgetMs": 50000,
+  "residentSpendCeilingMicros": 8000,
+  "capMicroUsd": 50000000,
+  "defaultKeyCapMicroUsd": 50000000,
+  "residentRssBytes": 536870912,
   "phases": [
     {
       "name": "plan",

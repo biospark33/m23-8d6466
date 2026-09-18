@@ -114,7 +114,14 @@ import {
 // already imports it this way. Reconstructing the join here instead would give
 // the engine a second, drifting copy of the one path DF3.2's poller and DF2.5's
 // harvest both key on.
-import { runMarkerPath, unidentifiedRunRoot } from "../src/phase-engine/journal.ts";
+// `writeTerminalMarker` rides the same straight import: it too lives in
+// `journal.ts` and not on the barrel, and edit (i)'s arming refusal must
+// settle through the SAME writer Run.finish uses — never a second copy.
+import {
+  runMarkerPath,
+  unidentifiedRunRoot,
+  writeTerminalMarker,
+} from "../src/phase-engine/journal.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -130,6 +137,16 @@ import {
   type SteeringDirective,
   type SteeringPoint,
 } from "../src/phase-engine/steering.ts";
+// DF3.6a: the resident bound operands' engine-side load and guard. Straight
+// from the module, not the barrel — steering.ts imports its type the same
+// way, and this runner is the composition root where the frozen manifest, the
+// resolved rate and the spawn handle are the only three things that ever meet.
+import {
+  BoundConfigError,
+  createBoundsGuard,
+  loadResidentBounds,
+  type ResidentBoundsConfig,
+} from "../src/phase-engine/resident-bounds.ts";
 import { loadRoster } from "../src/phase-engine/roster/schema.ts";
 import { ACKS_READ_CAP_BYTES, acksPath, localSteeringInbox } from "../src/fleet/attach.ts";
 import { DEFAULT_RESIDENT_SLUG, startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
@@ -3864,7 +3881,91 @@ async function main(argv: readonly string[]): Promise<number> {
     );
   }
   let steering: SteeringController | undefined;
+  // DF3.6a edit (i): the bound set loads at the ARM site — a --no-resident
+  // invocation and an empty-brief invocation never enter this block, so a
+  // resident bound can never fail a run that arms no resident (INV-BND-5's
+  // own first clause).
+  let loadedBounds: ResidentBoundsConfig | undefined;
   if (residentArmed && residentBrief !== undefined) {
+    // BEFORE startResident and before the first solicitation: AC2a's refusal
+    // refuses the whole run while no resident exists. The typed
+    // {code, message, remediation} triple rides the engine's fd-2 diagnostic
+    // line, never the marker — the marker keeps its shipped {runId, ok,
+    // completedAt} shape (writeTerminalMarker's payload vocabulary is closed,
+    // and a full remediation risks MARKER_MAX_BYTES' oversized arm, which a
+    // poller reads as "no verdict" = unknown, not not-ok).
+    try {
+      loadedBounds = loadResidentBounds(manifest);
+    } catch (err) {
+      writeAll(
+        2,
+        `${JSON.stringify({
+          level: "error",
+          event: "resident_bounds_invalid",
+          runId,
+          requestId,
+          code: err instanceof BoundConfigError ? err.code : "bound-config-invalid",
+          message: err instanceof Error ? err.message : String(err),
+          remediation:
+            err instanceof BoundConfigError
+              ? err.remediation
+              : "inspect the manifest's resident bound operands",
+        })}\n`,
+      );
+      // DF3.3's settled-journal guarantee: a settled run always carries a
+      // resident block — seed the explicit disabled shape before the marker
+      // can exist. This is residentTelemetryOf()'s disabled arm, inlined
+      // because that const is declared below the arm block (calling it here
+      // would hit its temporal dead zone) and steering is undefined here by
+      // construction: the refusal precedes startResident, so nothing armed.
+      try {
+        innerJournal.writeResident({
+          status: "disabled",
+          directives: 0,
+          directivesRejected: 0,
+          steeringIterations: {},
+          spendMicros: 0,
+          exitStatus: null,
+          tripwires: [],
+        });
+      } catch {
+        /* the marker is the commitment */
+      }
+      try {
+        tracer.close();
+      } catch {
+        /* the refusal outranks a close failure */
+      }
+      // The SAME identity-keyed path Run.finish settles through (ctx.markerRunKey
+      // comes from this run's own rootIdentityKey derivation; `markerPath` above
+      // is its #217 F-D1 resolved form, named and unnamed alike) — the poller
+      // watches that path and no other.
+      writeTerminalMarker(runId, { ok: false, completedAt: new Date().toISOString() }, markerPath);
+      // 1, not 2: the marker is on disk, so "settled not-ok" — Run.finish's own
+      // exitCode mapping. This return sits OUTSIDE the walk's try/finally (that
+      // try opens at the resident-block seed, below), so the finally's claim
+      // release does not run on this path — the process-`exit` hook registered
+      // at claim acquisition does (the "refusals" arm of the claim's coverage
+      // comment), no resident exists to stop, and the resident block above is
+      // already seeded.
+      return 1;
+    }
+    // AC2b's clamp row — the engine's trace/log stream (fd-2), never the
+    // journal's resident block (its key set is DF3.3-closed). Emitted exactly
+    // once, here at load: the only place configured and effective ceilings
+    // differ.
+    if (loadedBounds.clampRow !== undefined) {
+      writeAll(
+        2,
+        `${JSON.stringify({
+          level: "info",
+          event: "resident_bounds_clamped",
+          runId,
+          requestId,
+          ...loadedBounds.clampRow,
+        })}\n`,
+      );
+    }
     let spawned: ReturnType<typeof startResident> | undefined;
     try {
       spawned = startResident({
@@ -3906,6 +4007,17 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (spawned !== undefined && !("disabled" in spawned)) {
       residentSpawn = spawned;
+      // DF3.6a edit (ii): arm the guard now that the rate exists (resolveRate
+      // ran inside startResident — this is the one place ceiling and rate
+      // meet, AC6). Construction emits the reachability row exactly once;
+      // every later bounds line rides writeAll's fd-2 tee — trace/log stream,
+      // never the journal's resident block.
+      const boundsGuard =
+        loadedBounds === undefined
+          ? undefined
+          : createBoundsGuard(loadedBounds, spawned.rate, manifest.phases.length, (line) => {
+              writeAll(2, `${JSON.stringify({ level: "info", event: "resident_bounds", runId, requestId, ...line })}\n`);
+            });
       steering = createSteering({
         caller: spawned.caller,
         rate: spawned.rate,
@@ -3913,6 +4025,42 @@ async function main(argv: readonly string[]): Promise<number> {
         // process.stderr.write bypasses writeAll's engine-log tee and the line
         // would reach journald only (see moneyLineTee).
         emitAttribution: moneyLineTee(),
+        // DF3.6a: the resident bounds guard (edit (ii)'s other half). Absent
+        // only when the load refused-and-returned above — which never reaches
+        // this line — so on every path that constructs steering, bounds exist.
+        bounds: boundsGuard,
+        // DF3.6a: fired when the engine's bounds enforcement stops the resident
+        // (the spend breach; DF3.6b adds the rss arms). The engine has already
+        // latched telemetry.status="stopped"; the runner — which holds the
+        // spawn handle — performs the stop, records the cause on the trace
+        // sidecar, and the deterministic walk continues (INV-BND-5).
+        onBoundBreach: (e) => {
+          // `...e` FIRST: steering always constructs the event with
+          // requestId/phase keys present (undefined when absent from the
+          // solicit ctx), so a trailing spread would clobber the join keys
+          // with undefined and JSON.stringify would DROP them from the line.
+          writeAll(2, `${JSON.stringify({ level: "warn", event: "resident_bound_breach", ...e, runId, requestId })}\n`);
+          try {
+            tracer.trace({
+              type: "log",
+              name: "residentBoundBreach",
+              requestId,
+              payloadJson: JSON.stringify(e),
+            });
+          } catch {
+            /* the trace store is a sidecar; the warn line is the record */
+          }
+          // `spawned` is a `let` this closure cannot keep narrowed, so read the
+          // spawn through `residentSpawn` — assigned to exactly this spawn two
+          // statements above, and the only binding typed `ResidentSpawn` here.
+          // Best-effort — the walk continues regardless (INV-BND-5); the
+          // run-down finally's idempotent re-stop is already this file's own
+          // pattern.
+          const spawn = residentSpawn;
+          if (spawn !== undefined) {
+            return spawn.stop().then(undefined, () => undefined);
+          }
+        },
         // DF3.4 AC6: `fleet attach`'s queued messages are folded into the next
         // of DF3.3's three solicitation points. The engine addresses the in-box
         // steering paths as local paths, exactly as journal.ts addresses

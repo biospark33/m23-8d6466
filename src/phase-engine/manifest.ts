@@ -312,6 +312,27 @@ export const PipelineManifestSchema = z
     // apart and a consumer that skips the reconciliation lets a hand-authored
     // `pipeline.yaml` name its own ceiling.
     limitMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    // DF3.6a: resident bound operands — all five optional BY DESIGN. Hand-
+    // authored non-resident manifests omit them; the arm-scoped loader
+    // (`loadResidentBounds` in resident-bounds.ts) is the fail-closed
+    // required-set check for runs that arm a resident, so a schema default
+    // here would make the missing-value refusal unobservable (W14C-PAIR-1): a
+    // defaulted operand turns the ordering assertion into a comparison of two
+    // constants that can never disagree. The producer side is closed instead —
+    // `stampResidentBounds` supplies all four at dispatch fill. No ratio or
+    // percentage field exists or may be added (INV-BND-4, R5 §6 fact 12): the
+    // ceiling is an absolute integer µ$ value, and `.strict()` below makes an
+    // unknown ratio-shaped key a parse rejection, not a tolerated extra.
+    // `.max` for the same reason as limitMicroUsd above: `z.number().int()`
+    // accepts 1e300, which the engine can neither compare nor round-trip.
+    residentSpendCeilingMicros: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    capMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    defaultKeyCapMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    residentRssBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    // 0 is a legal bound (never solicit post_gate_failure); MAX_RETRIES is the
+    // structural ceiling the schema already clamps `retries` to, so an
+    // iteration bound above it can never fire on a schema-valid manifest.
+    maxSteeringIterations: z.number().int().min(0).max(MAX_RETRIES).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
   .strict();
