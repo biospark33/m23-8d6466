@@ -1248,6 +1248,9 @@ const E2E_FIXTURES = path.join(import.meta.dir, "fixtures");
 const BOUNDS_FIXTURE = path.join(E2E_FIXTURES, "pipeline.bounds.json");
 const BOUNDS_CATALOG = path.join(E2E_FIXTURES, "pi-catalog-bounds");
 const DEFAULT_CATALOG = path.join(E2E_FIXTURES, "pi-catalog");
+/** input term 0.0 — legal to resolveRate (validate.ts rejects only < 0), so
+ * startResident arms and createBoundsGuard is the one that must refuse. */
+const ZERO_RATE_CATALOG = path.join(E2E_FIXTURES, "pi-catalog-zero-rate");
 const FAKE_PI = path.join(E2E_FIXTURES, "fake-resident.ts");
 /** The bounds fixture's testCommand counts attempts in $TMPDIR under this name. */
 const BOUNDS_COUNT_NAME = "qds-bounds-count";
@@ -1638,6 +1641,58 @@ describe("e2e (leaf-6) — AC2a: loadResidentBounds is actually called by the ru
 
     // No resident was spawned and nothing was solicited; the journal carries
     // the explicit disabled shape (the settled-journal guarantee).
+    expect(jsonLines(leg.stderr).some((l) => l.event === "resident_solicit")).toBe(false);
+    expect(j.resident).toEqual({
+      status: "disabled",
+      directives: 0,
+      directivesRejected: 0,
+      steeringIterations: {},
+      spendMicros: 0,
+      exitStatus: null,
+      tripwires: [],
+    });
+  }, 60_000);
+});
+
+describe("e2e (leaf-6) — guard-construction refusal: a ZERO bundled rate settles not-ok", () => {
+  test("input term 0.0 resolves at startResident, createBoundsGuard refuses, the run still gets its marker", async () => {
+    // PR #263 review: resolveRate accepts 0 (validate.ts rejects only < 0 and
+    // gates its plausibility band on value > 0), startResident copies the
+    // terms unchanged, so the FIRST refusal point is createBoundsGuard's
+    // INV-BND-3 rate check — which used to escape to the module-level handler
+    // as exit 2 with NO terminal marker. Pinned here: settled not-ok instead,
+    // the same contract the AC2a leg above pins for the load refusal.
+    const leg = await boundsLeg("zero-rate", {
+      runId: "bounds-zero-rate-run",
+      manifest: boundsManifestBody(),
+      catalogDir: ZERO_RATE_CATALOG,
+    });
+    expect(leg.exitCode).toBe(1); // settled not-ok — the marker is on disk, not exit 2
+    const j = leg.journal;
+    expect(j.ok).toBe(false);
+    expect(j.phases).toEqual([]); // refused before the walk
+
+    // The typed triple names the zero TERM — the operator's fact to fix.
+    const invalid = jsonLines(leg.stderr).find((l) => l.event === "resident_bounds_invalid");
+    expect(invalid).toMatchObject({ code: "bound-config-invalid" });
+    expect(String(invalid?.message)).toContain("rate.inputPerMTok");
+    expect(typeof invalid?.remediation === "string" && (invalid?.remediation as string).length > 0).toBe(true);
+
+    // The terminal marker at the identity path — the review's whole point:
+    // a config fault must not leave the poller reading "unknown" forever.
+    const marker = JSON.parse(
+      fs.readFileSync(
+        path.join(e2eRoot, "zero-rate", "marker", "qds-run", "bounds-zero-rate-run", "journal", "final.json"),
+        "utf8",
+      ),
+    ) as { runId?: string; ok?: boolean; completedAt?: string };
+    expect(marker.runId).toBe("bounds-zero-rate-run");
+    expect(marker.ok).toBe(false);
+    expect(typeof marker.completedAt).toBe("string");
+
+    // The resident WAS spawned on this path (unlike AC2a) — nothing was ever
+    // solicited through it, and the journal still carries the explicit
+    // disabled shape (steering was never constructed).
     expect(jsonLines(leg.stderr).some((l) => l.event === "resident_solicit")).toBe(false);
     expect(j.resident).toEqual({
       status: "disabled",

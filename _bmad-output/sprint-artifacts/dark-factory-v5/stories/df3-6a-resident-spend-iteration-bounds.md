@@ -848,12 +848,14 @@ stamps in `pipeline-run.test.ts`/`in-box-engine.test.ts` (W14C-6a-1 blast radius
   direction only; the S3-7 precedent treats dup names as config-level).
 
 **Known limitations recorded:** (a) the iteration counter keys on phase NAME — duplicate
-phase names share a budget (under-solicit only); (b) `fireOnBoundBreach` is awaited+swallowed
-but not deadline-bound — 6a's handler is bounded, DF3.6b may mirror `onInboxError`'s
-`withDeadline`; (c) `PlacementRefusedError` is not on the engine barrel — DF3.6b's fleet caller
-imports the module path directly (the dispatch/manifest.ts precedent); (d) the global-default
-ceiling config key (operator ruling rung 3) remains a DF2.8-owned schema follow-up, as the
-story records.
+phase names share a budget (under-solicit only); (b) `PlacementRefusedError` is not on the
+engine barrel — DF3.6b's fleet caller imports the module path directly (the
+dispatch/manifest.ts precedent); (c) the global-default ceiling config key (operator ruling
+rung 3) remains a DF2.8-owned schema follow-up, as the story records. (The originally recorded
+limitation "`fireOnBoundBreach` is awaited+swallowed but not deadline-bound" was retired by
+this branch's own review round: the engine's await of the breach observer is now
+deadline-bounded via `ON_BOUND_BREACH_TIMEOUT_MS`/`withDeadline` — see the Medium-patches
+list below — so DF3.6b must not plan that work.)
 
 **Gates:** resident-bounds 46/0 (12 unit-refusal/clamp/verdict/stamp describes + 7 integration
 + 5 e2e incl. the mandatory demo: journal `resident.status:"stopped"`, spendMicros 1,521,920 <

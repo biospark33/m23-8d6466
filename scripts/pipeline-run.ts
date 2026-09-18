@@ -4042,27 +4042,126 @@ async function main(argv: readonly string[]): Promise<number> {
       // returns 1 before reaching here. Fail loud anyway: if a future refactor
       // makes this reachable, steering would construct with bounds:undefined
       // and an ARMED resident would run unguarded, silently (INV-BND-5). The
-      // typed BoundConfigError rides the module-level handler → exit 2;
-      // residentSpawn is already assigned above, so the process-exit hooks
-      // stop the resident on the way out.
+      // typed BoundConfigError rides the module-level handler → exit 2. No
+      // hook stops the resident on that throw path (the exit hook releases
+      // only the claim; the resident-stopping signal handlers need a signal)
+      // — the spawn's own native timeout + SIGKILL bounds the orphan, and a
+      // loud exit-2 beats an armed resident spending unguarded.
       if (loadedBounds === undefined) {
         throw new BoundConfigError(
           "resident armed without bounds — invariant violated (DF3.6a)",
           "this is a runner bug, not a manifest fault — report it",
         );
       }
-      const boundsGuard = createBoundsGuard(
-        loadedBounds,
-        spawned.rate,
-        manifest.phases.length,
-        (line) => {
-          // P11: the row spreads FIRST — a trailing spread would re-set the
-          // join keys (an undefined runId inside the row gets dropped by
-          // JSON.stringify and the line loses correlation).
-          writeAll(2, `${JSON.stringify({ ...line, level: "info", event: "resident_bounds", runId, requestId })}\n`);
-        },
-        runId,
-      );
+      let boundsGuard: ReturnType<typeof createBoundsGuard>;
+      try {
+        boundsGuard = createBoundsGuard(
+          loadedBounds,
+          spawned.rate,
+          manifest.phases.length,
+          (line) => {
+            // P11: the row spreads FIRST — a trailing spread would re-set the
+            // join keys (an undefined runId inside the row gets dropped by
+            // JSON.stringify and the line loses correlation).
+            writeAll(2, `${JSON.stringify({ ...line, level: "info", event: "resident_bounds", runId, requestId })}\n`);
+          },
+          runId,
+        );
+      } catch (err) {
+        // PR #263 review: construction can itself refuse — resolveRate
+        // accepts a ZERO bundled rate term (validate.ts rejects only < 0;
+        // value > 0 gates the plausibility band, so 0 slips under it),
+        // startResident copies the terms unchanged, and createBoundsGuard
+        // fail-closes on any term that is not finite > 0 (INV-BND-3, P2).
+        // That throw used to escape to the module-level handler → exit 2
+        // with NO terminal marker — a config fault left the poller reading
+        // "unknown" forever. Settle not-ok instead, the SAME path the
+        // loadResidentBounds refusal above takes (its catch is the
+        // reference; this inline copy must track it, the P23 idiom).
+        if (!(err instanceof BoundConfigError)) {
+          // An unforeseen non-config throw keeps its fail-loud module-level
+          // path — the RateError arm above draws exactly this line.
+          throw err;
+        }
+        writeAll(
+          2,
+          `${JSON.stringify({
+            level: "error",
+            event: "resident_bounds_invalid",
+            runId,
+            requestId,
+            code: err.code,
+            message: err.message,
+            remediation: err.remediation,
+          })}\n`,
+        );
+        // The resident EXISTS here (unlike the load refusal, which precedes
+        // startResident) and the signal handlers are the only automatic stop
+        // — a normal `return 1` fires none of them. Stop it explicitly,
+        // best-effort, with the resident_stop_failed record (P7's shape).
+        try {
+          await spawned.stop();
+        } catch (stopErr) {
+          writeAll(
+            2,
+            `${JSON.stringify({
+              level: "warn",
+              event: "resident_stop_failed",
+              runId,
+              requestId,
+              message: stopErr instanceof Error ? stopErr.message : String(stopErr),
+            })}\n`,
+          );
+        }
+        // DF3.3's settled-journal guarantee — seed the resident block before
+        // the marker can exist. The DISABLED arm is canonical for
+        // steering === undefined (steering was never constructed; no
+        // solicitation ever issued, so spend/directives are honestly 0);
+        // residentTelemetryOf (below) is canonical — this inline copy must
+        // track its disabled arm (P23).
+        try {
+          innerJournal.writeResident({
+            status: "disabled",
+            directives: 0,
+            directivesRejected: 0,
+            steeringIterations: {},
+            spendMicros: 0,
+            exitStatus: null,
+            tripwires: [],
+          });
+        } catch {
+          /* the marker is the commitment */
+        }
+        try {
+          tracer.close();
+        } catch {
+          /* the refusal outranks a close failure */
+        }
+        // Same identity-keyed marker path Run.finish settles through; guarded
+        // like every sibling step (P6): a throw here would escape past
+        // `return 1` to the module-level handler → exit 2 with NO marker. On
+        // failure the fd-2 diagnostic + the seeded resident block above ARE
+        // the record; the run still settles not-ok via exit 1.
+        try {
+          writeTerminalMarker(runId, { ok: false, completedAt: new Date().toISOString() }, markerPath);
+        } catch (markerErr) {
+          writeAll(
+            2,
+            `${JSON.stringify({
+              level: "error",
+              event: "marker_write_failed",
+              runId,
+              requestId,
+              message: markerErr instanceof Error ? markerErr.message : String(markerErr),
+            })}\n`,
+          );
+        }
+        // 1, not 2: the marker is on disk, so "settled not-ok". Like the
+        // load-refusal return, this sits OUTSIDE the walk's try/finally —
+        // the claim-release process-exit hook owns the claim, no phase ever
+        // opened, and the resident block above is already seeded.
+        return 1;
+      }
       steering = createSteering({
         caller: spawned.caller,
         rate: spawned.rate,

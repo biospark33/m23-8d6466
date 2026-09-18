@@ -2754,11 +2754,15 @@ export class CostLedger {
    * RELEASE the reservation one admission holds — the compensating write for a
    * dispatch that admitted and then refused BEFORE any run record existed
    * (DF3.6a's `resident-ceiling-unfundable` and `resident-cap-above-backstop`
-   * in src/fleet/dispatch.ts). Those refusals used to strand the issue's
-   * entire remaining admission headroom until the orphan window aged the
-   * reservation out, and the operator's reflexive retry read
-   * `spend-cap-exceeded`. DF2.8-owned API, added 2026-09-18 under the operator
-   * sanction recorded in DF3.6a's review round.
+   * in src/fleet/dispatch.ts). Those refusals used to strand the ADMITTED
+   * CEILING — `min(keyCapMicroUsd, remainingMicroUsd)`, the amount admitIssue
+   * actually reserves — until the orphan window aged the reservation out. That
+   * equals the issue's ENTIRE remaining headroom only when
+   * remaining <= keyCapMicroUsd (the two are then the same number), and only
+   * in that full-headroom case did the operator's reflexive retry read
+   * `spend-cap-exceeded` — with headroom above the keyCap, a retry admitted
+   * again at a fresh min(keyCap, remaining). DF2.8-owned API, added 2026-09-18
+   * under the operator sanction recorded in DF3.6a's review round.
    *
    * Append-only mechanics (INV-COST-1): `gate_admissions` carries BEFORE
    * UPDATE/DELETE triggers, so a release CANNOT mark the admission row. It is
