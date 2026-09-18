@@ -348,6 +348,22 @@ host models.json).
    no roster in `config/rosters/` defines a `resident` role and nothing reads one.
    wave0-spec.md re-specified the constant; roster-role sourcing is deferred to the story
    that owns the roster schema.
+10. **DF3.6a reversal of the zero-usage metering disposition (entry 8's neighborhood, INV-BND-3 /
+    AC4 of df3-6a):** DF3.3 shipped "a reply carrying no usage object meters as zero rather than
+    throwing" — for the LEDGER that stands unchanged. DF3.6a reverses it CEILING-SIDE only: when
+    a bounds guard is armed (`deps.bounds` present), a reply that prices zero (absent usage
+    object, literal `{0,0}`, or unusable token values) is charged the projected worst case on
+    the ceiling accumulator (`telemetry.spendMicros`), never zero — a silent resident cannot
+    spend unbounded. The DF2.12 attribution row keeps its shipped disposition verbatim (absent
+    usage → `unpricedTurns: 1`; `{0,0}` → priced-zero): one spend truth per basis, the
+    projection never masquerades as metered in the ledger. No guard ⇒ byte-for-byte DF3.3
+    behavior (steering.test.ts's 91 original tests pass unchanged).
+11. **DF3.6a widening of `ResidentTripwire["cause"]` (the transfer this story recorded at its
+    own :632, exercised here):** the union DF3.3 closed to `"gate_bypass_attempt"` is widened
+    to `"gate_bypass_attempt" | "spend_ceiling_breach" | "watchdog_kill"`. DF3.6a raises only
+    `spend_ceiling_breach`; `watchdog_kill` is DF3.6b's future member, landed in the same edit
+    because the union is one closed type on one line and splitting it would put two PRs on the
+    same literal.
 
 **Gates:** steering 25/25, resident 18/18, resident-e2e 6/6, pipeline-run regression 36/36,
 phase-lifecycle 32/32; tsc --noEmit 0 project-wide; biome clean on all touched files; GitNexus

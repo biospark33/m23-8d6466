@@ -21,6 +21,8 @@ export interface AdmitCall {
  */
 export interface RecordingLedger extends LedgerLike {
   readonly admitCalls: AdmitCall[];
+  /** One `releaseAdmission` call, exactly as a refusal guard handed it over. */
+  readonly releaseCalls: AdmissionInput[];
   closeCalls: number;
 }
 
@@ -41,6 +43,7 @@ export interface BudgetSnapshot {
  */
 function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDecision): RecordingLedger {
   const admitCalls: AdmitCall[] = [];
+  const releaseCalls: AdmissionInput[] = [];
   const ledger: RecordingLedger = {
     config: { defaultCapMicroUsd, perIssueOverrides: {} },
     issueBudgetSnapshot: () => ({
@@ -60,10 +63,17 @@ function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDeci
       admitCalls.push({ input: structuredClone(input), capMicroUsd, keyCapMicroUsd });
       return decide();
     },
+    releaseAdmission(input) {
+      // Same clone discipline as admitIssue — the refusal guard's release is
+      // part of the money path it records.
+      releaseCalls.push(structuredClone(input));
+      return { released: true };
+    },
     close() {
       ledger.closeCalls += 1;
     },
     admitCalls,
+    releaseCalls,
     closeCalls: 0,
   };
   return ledger;

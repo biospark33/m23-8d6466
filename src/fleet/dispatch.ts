@@ -38,6 +38,10 @@ import {
   stampManifestLimit,
   stripAuthoredLimit,
 } from "../phase-engine/manifest.ts";
+// DF3.6a: direct module import, beside the manifest.ts one above — the engine
+// barrel is not widened for a single stamp function (same precedent as the
+// direct `issue-correlation.ts` imports).
+import { DEFAULT_RESIDENT_SPEND_CEILING_MICROS, stampResidentBounds } from "../phase-engine/resident-bounds.ts";
 // `auditNonEmpty` is `audit_links`' NOT NULL + non-empty identity rule as a
 // predicate (C-3): an empty string passes a `!== undefined` guard, reaches the
 // store's own check and throws `audit-link-invalid` AFTER the attested action
@@ -438,7 +442,10 @@ function storeRunIdRefusal(e: unknown, value: unknown): string {
  * and derived from `CostLedger` itself so a fake cannot drift from the real
  * signatures the gate is compiled against (`as never` erased exactly that).
  */
-export type LedgerLike = Pick<CostLedger, "config" | "issueBudgetSnapshot" | "admitIssue" | "close">;
+export type LedgerLike = Pick<
+  CostLedger,
+  "config" | "issueBudgetSnapshot" | "admitIssue" | "releaseAdmission" | "close"
+>;
 
 export interface DispatchDeps {
   driver: ProviderDriver;
@@ -2609,6 +2616,15 @@ export async function dispatch(
   }
 
   // ── 5–6 single-flight: the admission critical section (DF3.2, finding DF13) ─
+  // DF3.6a: the manifest's resolved resident ceiling, captured BEFORE the
+  // critical section (loaded is this scope's; the section below returns the
+  // admission's own ceiling and cannot see the manifest). The two meet in the
+  // unfundable-ceiling refusal inside — the fill stamp would otherwise deliver
+  // a manifest whose ordering the in-box engine refuses only AFTER the box
+  // billed and the key minted.
+  const residentCeilingMicros =
+    (loaded.manifest as { residentSpendCeilingMicros?: number }).residentSpendCeilingMicros ??
+    DEFAULT_RESIDENT_SPEND_CEILING_MICROS;
   // Wrapped as one unit — headroom read, budget decision, box create — so that
   // concurrent in-process dispatches (fan-out arms especially) cannot both
   // pass a ceiling they sampled before either box existed. See
@@ -2706,6 +2722,42 @@ export async function dispatch(
     }
     let ledger: LedgerLike | undefined;
     let decision: Extract<AdmissionDecision, { admitted: true }>;
+    let effectiveCeilingMicros: number;
+    // DF3.6a (2026-09-18, operator-sanctioned in this PR's review round): the
+    // best-effort compensating release of THIS dispatch's admission
+    // reservation, called by the two live pre-provision refusal guards below —
+    // `ledger.releaseAdmission`, a DF2.8-owned ledger API. THE REFUSAL IS THE
+    // COMMITMENT; this release is compensation only: a throwing release
+    // (SQLITE_BUSY, a failing fake, anything) must never turn the refusal into
+    // a crash or dilute its exit code, so a failure is named on one structured
+    // line — mirroring the ledger-close-failed handler's shape in the `finally`
+    // below — and the ledger's orphan window (ADMISSION_GRACE_MS +
+    // ADMISSION_SKEW_MARGIN_MS, cost-ledger.ts) stays the fallback that retires
+    // whatever the release could not.
+    const releaseReservation = (code: string): void => {
+      try {
+        ledger?.releaseAdmission({ repoSlug, issueId, runId, requestId });
+      } catch (e) {
+        try {
+          log({
+            requestId,
+            operation: "fleet.dispatch",
+            agentId: null,
+            timestamp: new Date().toISOString(),
+            duration: now() - wallStart,
+            durationMs: now() - wallStart,
+            status: "error",
+            error: { code: "reservation-release-failed", message: redact(`${code}: ${errorMessage(e)}`) },
+            runId,
+            verb: "dispatch",
+            phase: "admitted",
+            exitStatus: "transient" as ExitStatus,
+          });
+        } catch {
+          // a throwing sink must not become the failure this handler reports
+        }
+      }
+    };
     try {
       ledger = deps.ledgerFactory();
       // No cast. `assertWithinBudget` takes `BudgetLedger`, a structural slice
@@ -2721,7 +2773,180 @@ export async function dispatch(
         { repoSlug, issueId, runId, requestId },
         deps.capMicroUsd,
       );
+      // AC9b: the ONE ceiling — DF2.8 computed min(keyCap, remaining); propagate.
+      effectiveCeilingMicros = decision.admittedCeilingMicroUsd;
+      // A zero ceiling is an admission that buys nothing: the mint refuses a
+      // non-positive cap and the manifest stamp rejects 0, so the run would exist,
+      // bill box-hours and be unable to spend a micro-dollar. That is a refusal
+      // (exit 5), not a provisioning step.
+      //
+      // `isSafeInteger`, not `isInteger`: `Number.isInteger(1e300)` is true, so an
+      // unsafe ceiling passed this guard, provisioned a box and a key, and only
+      // then died in `stampManifestLimit` (which does bound it) — INV-2 in reverse.
+      // The same bound is on the manifest schema, so the three agree.
+      //
+      // ponytail: this refusal fires AFTER `assertWithinBudget` committed the
+      // admission, and cannot be moved before it — the ceiling under test IS the
+      // decision's own output.
+      //
+      // It is also, today, UNREACHABLE from this call site, which is why the
+      // reservation it would strand is not worth a compensating release:
+      // `admitIssue` refuses a non-positive `capMicroUsd` before it writes anything,
+      // returns `admitted: false` unless `remainingMicroUsd > 0`, and then computes
+      // `min(keyCapMicroUsd, remaining)` — a min of two positive safe integers.
+      //
+      // CORRECTED 2026-09-08 (Wave-6 review). This used to close with "and dispatch
+      // never passes `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive
+      // literal." That is FALSE, and has been since DF3.2: the `assertWithinBudget`
+      // call above passes `deps.capMicroUsd` as its THIRD parameter, and that
+      // parameter IS `keyCapMicroUsd` (see `assertWithinBudget`'s signature in
+      // `src/providers/budget-gate.ts`). Upgrade trigger 1 below had already fired
+      // while the comment asserting it had not sat directly above it.
+      //
+      // The CONCLUSION survives on a different guard: the B1 defence-in-depth block
+      // near the top of this function refuses any `deps.capMicroUsd` that is not a
+      // positive integer <= MAX_SAFE_INTEGER before the call is made, and
+      // `admitIssue` re-validates it. So the clamp's first operand is a positive
+      // safe integer whether the caller supplied it or the default did. Verified by
+      // enumeration: `assertWithinBudget` has exactly ONE production call site — the
+      // one above. No compensating release is owed.
+      //
+      // The guard stays because it is the one thing standing between a future change to
+      // any of those three and a run that bills box-hours it can never spend.
+      // The reservation is retired by the ledger's orphan
+      // guard: `store.create` never runs on this path, so no record ever resolves
+      // for this id and the admission stops counting once it ages past the ledger's
+      // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`, the margin
+      // added in review round 4 so a reader whose clock runs ahead of the writer's
+      // cannot expire a live reservation and grant its headroom twice). The
+      // ledger-side release this once lacked — `releaseAdmission` (2026-09-18)
+      // — is deliberately NOT taken here: this arm is unreachable (the argument
+      // directly above), and an unreachable refusal owes no compensation. The
+      // ponytail caveat below is the trigger that would change that.
+      //
+      // ponytail: the arm is kept UNRELEASED because it is unreachable, and that
+      // is a claim about three things outside this file. UPGRADE TRIGGER — the
+      // first of these makes it reachable, and a reachable arm strands a real
+      // reservation for the whole orphan window and needs the compensating
+      // release above instead of this comment:
+      //   1. FIRED (DF3.2), and COMPENSATED, not breached — dispatch passes
+      //      `deps.capMicroUsd` as `assertWithinBudget`'s `keyCapMicroUsd`, but B1
+      //      above bounds it to a positive safe integer before the call. This
+      //      trigger is retired; the live condition it becomes is "B1's validation
+      //      is weakened, bypassed, or a second call site appears";
+      //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
+      //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
+      //      refusing a non-positive `capMicroUsd`.
+      // DF2.13's mint-time `cap-invalid` refusal downstream of here used to be
+      // reachable from this call path, and EXPENSIVELY so. The effective ceiling
+      // is `min(keyCap, remaining)`, so it fired only when BOTH halves cleared
+      // the backstop — the issue's remaining budget (config `defaultCapMicroUsd`
+      // / `perIssueOverrides` minus committed spend) AND the passed
+      // `--cap-micro-usd`. By then `provisionAdmittedRun` had written an OPEN run
+      // record and created a LIVE BILLABLE box, which `classifyReservation`
+      // counts (`closedAt === undefined`) until teardown closes the record: the
+      // headroom did not age out the way this arm's absent record does, and the
+      // box billed until an operator tore the run down.
+      //
+      // DF2.14 RETIRES that class: B1 now bounds `deps.capMicroUsd` at
+      // `defaultKeyCapMicroUsd` pre-admission, so the knob that reached the mint
+      // guard cannot clear the backstop from dispatch at all. The `min` keeps its
+      // meaning — issue caps are deliberately unbounded and absorbed by it — and
+      // the observable for a would-be over-ceiling run is a clean exit-2
+      // `invalid-cap` refusal with zero boxes, zero run records and zero
+      // admissions, not a `providerCode: "cap-invalid"` line (exit 1, generic
+      // text) arriving the expensive way. The mint guard itself is UNCHANGED and
+      // stays the caller-agnostic last line for non-dispatch callers (the demo,
+      // `runCredentialLifecycle`, direct programmatic mint calls).
+      if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
+        throw refuse(
+          5,
+          "no-ceiling",
+          `admitted ceiling is ${effectiveCeilingMicros} µ$ — the run could not spend anything`,
+          `raise the cap via .sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}, or pick another issue`,
+          {
+            admittedCeilingMicroUsd: effectiveCeilingMicros,
+            capMicroUsd: decision.capMicroUsd,
+            spentMicroUsd: decision.spentMicroUsd,
+            reservedMicroUsd: decision.reservedMicroUsd,
+          },
+        );
+      }
+      // DF3.6a: an admitted ceiling below the manifest's resolved resident
+      // ceiling is a run the IN-BOX ENGINE would refuse `bound-config-invalid`
+      // at arm (AC2a's ≤ chain: capMicroUsd is stamped with this very
+      // admittedCeilingMicroUsd, so ceiling > cap refuses) — but only after
+      // `provisionAdmittedRun` wrote the record, billed the box and minted the
+      // key. Refusing HERE is the same verdict at zero spend, the roster
+      // pre-check's doctrine ("refuses before a box exists rather than as a
+      // failed assertion on a live box").
+      //
+      // RESERVATION RELEASE (2026-09-18, closing this arm's own documented
+      // stranding loop): this refusal fires AFTER `assertWithinBudget`
+      // committed the issue's ENTIRE remaining admission headroom and BEFORE
+      // any run record exists, so `store.create` never resolves the id and —
+      // before the release — the stranded reservation held until the orphan
+      // window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`) aged it out,
+      // making the operator's reflexive retry read `budget-exceeded`. The
+      // DF2.8-owned `releaseAdmission` (a compensating insert; gate_admissions
+      // is append-only, INV-COST-1) returns the headroom NOW, on this
+      // still-open handle, BEFORE the `finally` below closes it. Best-effort
+      // (`releaseReservation` above): a failed release warns and the orphan
+      // window remains the fallback — aging still covers a dispatch that
+      // crashes between the admission and the throw.
+      if (effectiveCeilingMicros < residentCeilingMicros) {
+        releaseReservation("resident-ceiling-unfundable");
+        throw refuse(
+          5,
+          "resident-ceiling-unfundable",
+          `admitted ceiling ${effectiveCeilingMicros} µ$ is below the manifest's resident spend ceiling ${residentCeilingMicros} µ$ — the in-box engine would refuse bound-config-invalid after the box billed`,
+          `top up the issue budget (.sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}) or lower residentSpendCeilingMicros on the task manifest, then retry — this refusal RELEASES the admission reservation it stranded (ledger releaseAdmission), so the retry sees the issue's headroom back; a "reservation-release-failed" log line means the release did not land and the orphan window (ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS in src/providers/cost-ledger.ts) is the fallback — wait it out or pick another issue meanwhile`,
+          {
+            admittedCeilingMicroUsd: effectiveCeilingMicros,
+            residentSpendCeilingMicros: residentCeilingMicros,
+            capMicroUsd: decision.capMicroUsd,
+            spentMicroUsd: decision.spentMicroUsd,
+            reservedMicroUsd: decision.reservedMicroUsd,
+          },
+        );
+      }
+      // DF3.6a, INV-BND-2 link 2: the in-box chain is residentSpendCeilingMicros
+      // ≤ capMicroUsd ≤ defaultKeyCapMicroUsd, asserted at arm by
+      // `loadResidentBounds` (src/phase-engine/resident-bounds.ts). The guard
+      // above mirrors link 1 (ceiling ≤ cap); this mirrors link 2 (cap ≤ the
+      // provider backstop). The pre-admission guard earlier in this function
+      // bounds only the OPERATOR knob (`deps.capMicroUsd`); the admitted ceiling
+      // is min(keyCap, remaining), and an unbounded issue override, a ledger
+      // returning admitted past the backstop, or a gate-default change can still
+      // push it over — re-opening the post-bill refusal class this PR closes
+      // (box billed + key minted, then in-box bound-config-invalid). The mirror
+      // lives BESIDE link 1's guard — same moment, same zero-spend verdict — so
+      // upstream drift trips here instead of on a live box. Same reservation
+      // stranding as the arm above; same `releaseReservation` before the throw,
+      // same orphan-window fallback if the release cannot land.
+      if (effectiveCeilingMicros > defaultKeyCapMicroUsd) {
+        releaseReservation("resident-cap-above-backstop");
+        throw refuse(
+          5,
+          "resident-cap-above-backstop",
+          `admitted ceiling ${effectiveCeilingMicros} µ$ exceeds the provider backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — the in-box engine would refuse bound-config-invalid after the box billed and the key minted (INV-BND-2 link 2: capMicroUsd ≤ defaultKeyCapMicroUsd)`,
+          `lower the issue budget (.sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}) to the backstop or below, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it; this refusal RELEASES the admission reservation it stranded (ledger releaseAdmission), so an immediate retry against THIS issue sees its headroom back — unless a "reservation-release-failed" log line says the release missed, in which case the orphan window (ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS in src/providers/cost-ledger.ts) is the fallback`,
+          {
+            admittedCeilingMicroUsd: effectiveCeilingMicros,
+            backstopMicroUsd: defaultKeyCapMicroUsd,
+            capMicroUsd: decision.capMicroUsd,
+            spentMicroUsd: decision.spentMicroUsd,
+            reservedMicroUsd: decision.reservedMicroUsd,
+          },
+        );
+      }
     } catch (e) {
+      // The three pre-provision ceiling guards above refuse THROUGH this
+      // try — their FleetError already carries its dispatch-log entry and
+      // structured line, and the typed arms below would re-classify it
+      // (checked against the marker, not the class: the same rule the
+      // create-path catch states).
+      if (alreadyRefused(e)) throw e;
       if (e instanceof OverBudgetError) {
         throw refuse(5, "budget-exceeded", e.message, e.remediation, {
           code: e.code,
@@ -2797,104 +3022,6 @@ export async function dispatch(
         }
       }
     }
-    // AC9b: the ONE ceiling — DF2.8 computed min(keyCap, remaining); propagate.
-    const effectiveCeilingMicros = decision.admittedCeilingMicroUsd;
-    // A zero ceiling is an admission that buys nothing: the mint refuses a
-    // non-positive cap and the manifest stamp rejects 0, so the run would exist,
-    // bill box-hours and be unable to spend a micro-dollar. That is a refusal
-    // (exit 5), not a provisioning step.
-    //
-    // `isSafeInteger`, not `isInteger`: `Number.isInteger(1e300)` is true, so an
-    // unsafe ceiling passed this guard, provisioned a box and a key, and only
-    // then died in `stampManifestLimit` (which does bound it) — INV-2 in reverse.
-    // The same bound is on the manifest schema, so the three agree.
-    //
-    // ponytail: this refusal fires AFTER `assertWithinBudget` committed the
-    // admission, and cannot be moved before it — the ceiling under test IS the
-    // decision's own output.
-    //
-    // It is also, today, UNREACHABLE from this call site, which is why the
-    // reservation it would strand is not worth a compensating release:
-    // `admitIssue` refuses a non-positive `capMicroUsd` before it writes anything,
-    // returns `admitted: false` unless `remainingMicroUsd > 0`, and then computes
-    // `min(keyCapMicroUsd, remaining)` — a min of two positive safe integers.
-    //
-    // CORRECTED 2026-09-08 (Wave-6 review). This used to close with "and dispatch
-    // never passes `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive
-    // literal." That is FALSE, and has been since DF3.2: the `assertWithinBudget`
-    // call above passes `deps.capMicroUsd` as its THIRD parameter, and that
-    // parameter IS `keyCapMicroUsd` (see `assertWithinBudget`'s signature in
-    // `src/providers/budget-gate.ts`). Upgrade trigger 1 below had already fired
-    // while the comment asserting it had not sat directly above it.
-    //
-    // The CONCLUSION survives on a different guard: the B1 defence-in-depth block
-    // near the top of this function refuses any `deps.capMicroUsd` that is not a
-    // positive integer <= MAX_SAFE_INTEGER before the call is made, and
-    // `admitIssue` re-validates it. So the clamp's first operand is a positive
-    // safe integer whether the caller supplied it or the default did. Verified by
-    // enumeration: `assertWithinBudget` has exactly ONE production call site — the
-    // one above. No compensating release is owed.
-    //
-    // The guard stays because it is the one thing standing between a future change to
-    // any of those three and a run that bills box-hours it can never spend.
-    // The reservation is retired by the ledger's orphan
-    // guard: `store.create` never runs on this path, so no record ever resolves
-    // for this id and the admission stops counting once it ages past the ledger's
-    // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`, the margin
-    // added in review round 4 so a reader whose clock runs ahead of the writer's
-    // cannot expire a live reservation and grant its headroom twice).
-    // Retiring it sooner needs a ledger-side release, which `admitIssue`'s
-    // contract deliberately does not offer and this layer holds no handle for.
-    //
-    // ponytail: the arm is kept UNRELEASED because it is unreachable, and that
-    // is a claim about three things outside this file. UPGRADE TRIGGER — the
-    // first of these makes it reachable, and a reachable arm strands a real
-    // reservation for the whole orphan window and needs the compensating
-    // release above instead of this comment:
-    //   1. FIRED (DF3.2), and COMPENSATED, not breached — dispatch passes
-    //      `deps.capMicroUsd` as `assertWithinBudget`'s `keyCapMicroUsd`, but B1
-    //      above bounds it to a positive safe integer before the call. This
-    //      trigger is retired; the live condition it becomes is "B1's validation
-    //      is weakened, bypassed, or a second call site appears";
-    //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
-    //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
-    //      refusing a non-positive `capMicroUsd`.
-    // DF2.13's mint-time `cap-invalid` refusal downstream of here used to be
-    // reachable from this call path, and EXPENSIVELY so. The effective ceiling
-    // is `min(keyCap, remaining)`, so it fired only when BOTH halves cleared
-    // the backstop — the issue's remaining budget (config `defaultCapMicroUsd`
-    // / `perIssueOverrides` minus committed spend) AND the passed
-    // `--cap-micro-usd`. By then `provisionAdmittedRun` had written an OPEN run
-    // record and created a LIVE BILLABLE box, which `classifyReservation`
-    // counts (`closedAt === undefined`) until teardown closes the record: the
-    // headroom did not age out the way this arm's absent record does, and the
-    // box billed until an operator tore the run down.
-    //
-    // DF2.14 RETIRES that class: B1 now bounds `deps.capMicroUsd` at
-    // `defaultKeyCapMicroUsd` pre-admission, so the knob that reached the mint
-    // guard cannot clear the backstop from dispatch at all. The `min` keeps its
-    // meaning — issue caps are deliberately unbounded and absorbed by it — and
-    // the observable for a would-be over-ceiling run is a clean exit-2
-    // `invalid-cap` refusal with zero boxes, zero run records and zero
-    // admissions, not a `providerCode: "cap-invalid"` line (exit 1, generic
-    // text) arriving the expensive way. The mint guard itself is UNCHANGED and
-    // stays the caller-agnostic last line for non-dispatch callers (the demo,
-    // `runCredentialLifecycle`, direct programmatic mint calls).
-    if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
-      throw refuse(
-        5,
-        "no-ceiling",
-        `admitted ceiling is ${effectiveCeilingMicros} µ$ — the run could not spend anything`,
-        `raise the cap via .sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}, or pick another issue`,
-        {
-          admittedCeilingMicroUsd: effectiveCeilingMicros,
-          capMicroUsd: decision.capMicroUsd,
-          spentMicroUsd: decision.spentMicroUsd,
-          reservedMicroUsd: decision.reservedMicroUsd,
-        },
-      );
-    }
-
     // ── 6. record → box (INV-3: record → box → key, enforced by construction).
     // The sequence is provisionAdmittedRun — the same body createRun composes —
     // so the record-before-VM invariant cannot drift between the two callers.
@@ -3081,9 +3208,11 @@ export async function dispatch(
       // The loser's reservation stays outstanding, and this layer cannot retire
       // it: the ledger's orphan guard expires an admission only when NO record
       // resolves for the id, and the winner's record resolves under exactly this
-      // id. `admitIssue`'s contract states no caller may release a reservation,
-      // and the ledger handle is closed by the `finally` above. Retiring it needs
-      // a ledger-side rule for a losing admission — cross-cluster, not here.
+      // id. `releaseAdmission` (2026-09-18) cannot help either — it releases one
+      // (requestId, runId) admission, while the reservation sums count ONE
+      // ceiling per run_id, and the winner's own admission row for this same
+      // run keeps that ceiling counted. Retiring it needs a ledger-side rule
+      // for a losing admission — cross-cluster, not here.
       //
       // Scoped to the RECORD half. `within("create", …)` wraps the whole of
       // `provisionAdmittedRun` — `store.create`, the budget `store.set` AND
@@ -3233,6 +3362,19 @@ export async function dispatch(
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
     const tFill = now();
     const stamped = stampManifestLimit(loaded, mintedCeilingMicros);
+    // DF3.6a: the four bound operands get their production provisioner beside
+    // DF3.1's limit stamp. capMicroUsd is the MINT-TIME per-run cap (the
+    // admittedCeilingMicroUsd = min(keyCap, remaining) DF2.8/DF2.13 derived —
+    // the middle term of the ordering chain the in-box engine asserts at load);
+    // defaultKeyCapMicroUsd is the provider backstop constant. The ceiling and
+    // rssBytes resolve through their ladders (declared → shipped fallback /
+    // PROVISIONAL constant) inside the stamp. Authored capMicroUsd /
+    // defaultKeyCapMicroUsd are overwritten — the author does not name the
+    // chain's own operands. limitMicroUsd stays DF3.1's stamp's field alone (CC-1).
+    const stampedBounds = stampResidentBounds(stamped, {
+      capMicroUsd: effectiveCeilingMicros,
+      defaultKeyCapMicroUsd,
+    });
     // AC9: the manifest is the cap's only in-box source (9a); the run context
     // carries the same computed-once ceiling for DF1.6's spawn seam (9b), plus
     // the issue deep link the brief supplied — the box's own back-reference to
@@ -3254,7 +3396,7 @@ export async function dispatch(
     // (QDS_IN_BOX_DIR, src/providers/exedev/fill.ts — pinned to these two
     // literals by tests/fleet/dispatch.test.ts).
     const files = [
-      { path: `${IN_BOX_QDS_DIR}/pipeline.yaml`, content: serializeManifest(stamped) },
+      { path: `${IN_BOX_QDS_DIR}/pipeline.yaml`, content: serializeManifest(stampedBounds) },
       {
         path: `${IN_BOX_QDS_DIR}/run-context.json`,
         content: JSON.stringify({

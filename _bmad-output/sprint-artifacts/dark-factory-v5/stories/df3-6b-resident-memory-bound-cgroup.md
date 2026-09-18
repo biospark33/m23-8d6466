@@ -373,6 +373,15 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 - The bounds-check line for this bound logs `{ requestId, runId, phase, bound: "rss", rssPeakBytes, residentRssBytes, allowed }`
 - `requestId` propagates unchanged from DF3.3's solicitation record; a kill additionally emits
   `{ code, bound, cause, phase }` on the tripwire row
+  **(DF3.6a review handoff, 2026-09-18 — this sentence carries the SAME spec-internal contradiction
+  DF3.6a's review caught in its own contract: `ResidentTripwire` is DF3.3's closed type and carries
+  neither `code` nor `bound`; DF3.6a followed the closed type and left its contract sentence
+  unamended. This story emits `watchdog_kill` tripwires and therefore OWNS the resolution: either
+  widen `ResidentTripwire` (an explicit cross-story amendment to DF3.3's closed type, recorded in
+  its deviation ledger) or amend this sentence to the shape actually emitted — `{runId, requestId,
+  cause, phase, detail}` with `bound`/`code` riding the fd-2 `resident_bound_breach` warn line, as
+  DF3.6a shipped. Decide it here, record it either way; do not ship a second contract sentence the
+  type contradicts.)**
 - Sub-timings: `cgroup_setup_ms`, `cgroup_teardown_ms`. A bound never evaluated reports `0`.
   `rssPeakBytes` is read from the solicitation cgroup's `memory.peak` — a kernel high-water mark,
   **not** a sampled value, so there is no sample interval to report.
@@ -401,7 +410,10 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   writing the `"degraded"` latch. DF3.6a's enumerated list is amended accordingly (item 6, this
   story's — the same cross-story amendment shape that put `lastMemory` in item 5). The `lastMemory` dep
   lands in **DF3.6a's** diff (its Files list item 5), because the deps object is one literal and two
-  stories must not edit it. The controller keeps its snapshot-only getter;
+  stories must not edit it. **(DF3.6a review handoff, 2026-09-18: the dep is landed and UNUSED —
+  `createSteering` accepts it, nothing reads it yet. Your edit (iv) below is its first consumer, so
+  during development a grep for `lastMemory` in `src/phase-engine/steering.ts` showing a single
+  reference is CORRECT pre-(iv), not drift to "clean up".)** The controller keeps its snapshot-only getter;
   **no public setter is added**, because a public setter is a path the resident's own tier could
   reach and INV-MEM-1 forbids it. **The engine does not call `stop()` and cannot:** `stop()` is on
   `ResidentSpawn`, which the engine never receives — the same reason `lastMemory` had to become a
@@ -414,6 +426,14 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   default would make DF3.6a AC2a's missing-value refusal unobservable; the W6-C-H4 file assignment
   predates that design). No other field, no schema change — the three bound fields and their
   validation are DF3.6a's.
+  **(DF3.6a review handoff, 2026-09-18 — optional widening while you are in this seam:** DF3.6a's
+  per-phase iteration counter keys on phase NAME, so a schema-valid manifest with duplicate phase
+  names pools two phases' solicitation budgets (under-refusal only, fail-closed direction; DF3.6a
+  recorded it as known-limitation (a) on the S3-7 config-level precedent). The clean fix — a phase
+  ordinal beside the name in the guard ctx, or a dup-name check at guard construction — widens the
+  steering↔guard interface beyond DF3.6a's closed edit list, but THIS story already widens that
+  interface (`lastMemory`, the rss writer). Fold it in, or record the S3-7 deferral as deliberate
+  in your Dev Agent Record — either way the item closes here.)
 - `scripts/pipeline-run.ts` — **the pair takes seven edits on this file; the count is stated once, in
   DF3.6a's Files to Modify, and mirrored here so neither half's "no other change" can reject the
   other's** (W6-C-M2): DF3.6a lands (i)–(ii); **this story adds (iii)** `residentRssBytes` on the
@@ -544,10 +564,51 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 - [ ] **Test (host-side seam, INV-MEM-2 Scope):** omitting `residentRssBytes` arms a resident with **no** cgroup calls (this is what keeps `tests/fleet/resident.test.ts`'s 42 arming sites and DF3.3's INV-RES-3 exhibit green on darwin); supplying it on a host without cgroup v2 refuses to start. Both asserted.
 - [ ] **Test (reclaimable pressure is not a silent miss, M1):** a solicitation driven to `memory.max` by **file-backed** (reclaimable) growth thrashes rather than OOMs, and the run records a **timeout** (`SOLICIT_TIMEOUT_MS = 60_000`, `src/phase-engine/steering.ts:26`) — not a `watchdog_kill`, and not a silent pass. Asserts the classification, so a missing `oom_kill` count on that path reads as "the other backstop fired", never as "the bound is absent". Host-side where cgroups exist; skipped, not faked, where they do not.
 - [ ] **Test (leaf lifecycle, host-side):** the subtree split is idempotent across engine restarts; a leaf is removed after every call including the OOM path; a second solicitation gets a fresh leaf and a fresh `memory.peak`. An implementation writing `memory.max` **without `memory.oom.group=1`** leaves a surviving sibling on a multi-process pi tree and MUST fail leaf removal (`EBUSY`).
+- [ ] **Test (the rss bound's numeric contract — DF3.6a review handoff, 2026-09-18):** DF3.6a
+      shipped `residentRssBytes` validate-and-carry with **zero behavioral coverage** — its suite
+      pins the schema/loader refusal shape only, so the bound's arithmetic and breach shape are
+      untested anywhere until this story. These DoD test items are therefore the field's FIRST
+      behavioral coverage: at least one must assert the numeric contract itself (bound compared
+      against the measured `rssPeakBytes` figure, breach classified `watchdog_kill` and nothing
+      else) — not only the cgroup mechanics around it. An implementation whose assertions pass with
+      any bound value (fixture-bound-agnostic) leaves the numeric contract still untested and MUST
+      fail this item.
 
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+### Handed off from DF3.6a's review round 1 (2026-09-18, PR #263) — read before scoping
+
+Four items from DF3.6a's adversarial review round land here by ownership, recorded so
+they are not lost (full detail: `sprint-artifacts/deferred-work.md`, section dated
+2026-09-18; ledger: DF3.6a story's Review Findings):
+
+1. **`lastMemory` dep (this story's edit-list item 5) is landed and UNUSED** —
+   `createSteering` accepts it, nothing reads it yet. Your `exitStatus:"overflow"`
+   writer is its consumer; until you land edit (iv), a grep for `lastMemory` in
+   `src/phase-engine/steering.ts` showing one reference is CORRECT, not drift.
+2. **`residentRssBytes` is validated + carried but has ZERO behavioral tests** — DF3.6a
+   pinned its schema/loader refusal shape only. Your cgroup enforcement is the first
+   consumer; its breach shape, arithmetic, and `watchdog_kill` path are untested
+   anywhere. Budget test coverage for the bound itself, not just the cgroup mechanics.
+3. **Dup phase names share one iteration budget** (`createBoundsGuard` counters keyed by
+   phase NAME, `src/phase-engine/resident-bounds.ts`). DF3.6a deferred the fix because it
+   needs a phase ordinal (or name-set check) through the steering↔guard interface —
+   wider than 6a's closed edit list, but YOU already widen that seam (`lastMemory`,
+   cgroup deps). Fold the ordinal in while you are in there, or record the S3-7
+   config-level precedent decision as deliberate.
+4. **Tripwire `code`/`bound` keys spec contradiction** — DF3.6a's Observability Contract
+   names `{code, bound, cause, phase}` on breach tripwires; `ResidentTripwire` (DF3.3's
+   closed type) has neither. 6a followed the closed type. You emit `watchdog_kill`
+   tripwires — resolve the contradiction in whichever direction you rule (widen the
+   type with 6a's record, or amend 6a's contract sentence) and record it either way.
+
+Also observed, NOT yours: DF2.8-owned follow-up — admission-reservation release API
+(`resident-ceiling-unfundable` strands headroom until orphan aging; remediation text
+warns, the API is the fix) — and pre-existing `yaml.safe_load` failures in
+`workflow-state/qds-dev/{df2-2,df3-1}/state.yaml` (same plain-scalar colon defect
+CodeRabbit caught in df3-6a's file, fixed there).
 
 ---
 

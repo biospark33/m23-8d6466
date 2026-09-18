@@ -529,5 +529,33 @@ Deferred (1): internal retry/backoff for `ledger-busy` under >10 concurrent disp
 
 Dismissed (4): box-hour rate late-fail at teardown — spec-mandated surfacing, not silent default (blind); positive-USD→negative-µ$ — mathematically impossible in safe range (edge); open-run reservation persistence — verify-only, expiry path exists from prior round (edge, pending verifier verdict); INFO confirmations ×2 (append-only triggers, serialized admission).
 
+### Follow-ups owned here (recorded by DF3.6a + its review round 1, 2026-09-18 — this story's file owns `cost-ledger.ts`; landed post-DF2.8, tracked so they surface when this ledger is next opened)
+
+- [x] **Admission-reservation release API — SHIPPED in PR #263 (DF3.6a review round, operator
+  sanction 2026-09-18):** `CostLedger.releaseAdmission(input)` + the append-only
+  `gate_admission_releases` companion table (PK `(request_id, run_id)`, own INV-COST-1
+  no-update/no-delete triggers; both reservation sums — `admitIssue`'s and
+  `issueBudgetSnapshot`'s — exclude released admissions via `NOT EXISTS`; keyed to the pair so a
+  run's second unreleased admission stays counted). Typed errors
+  `admission-release-unknown` / `admission-release-mismatch`; idempotent re-release; read-only
+  refusal; new replay guard `ledger-admission-released` (a released admission's exact replay
+  cannot re-mint its ceiling). Called best-effort from both DF3.6a pre-provision refusals —
+  the refusal is the commitment, the release is compensation, aging stays the fallback for
+  crashed refusals (pinned by test). Remediation texts updated (retry now admits after a
+  config fix). Tests: reservation suite 21→28, dispatch +1 release-failure leg, INV-COST-2
+  census + DF2.11 write-completeness extended.
+  **Residual (still a follow-up, per-cause semantics this API deliberately does not force):**
+  the driver-layer store.set-orphan retirement this story's 2026-08-20 review deferred — the
+  ordinary-write-failure arm wants a release but the driver holds no ledger handle;
+  `budget-write-lock-timeout` must NOT release (another writer may recreate the record). Needs
+  a per-cause policy + handle plumbing, not this API.
+- [ ] **Global-default resident spend ceiling config key.** The DF3.6a operator ruling (2026-09-13)
+  made the resident ceiling user policy with a *global default* rung — but `CONFIG_KEYS` is exactly
+  `[defaultCapMicroUsd, perIssueOverrides, boxHourRateMicroUsd]` and none is a ceiling carrier, so
+  the rung has no config surface; the shipped 8,000 µ$ fallback constant IS the effective global
+  default. A `residentSpendCeilingMicros` key is this file's schema addition (recorded as a named
+  follow-up in DF3.6a's Technical Notes at implementation; restated here so it lives on the owning
+  story, not only in the citing one).
+
 
 **Status:** done — PR #121 merged 2026-08-21 (`31c4a0d`), after four review rounds (final pass: 19/19 actionable patches applied, 119/119 focal green). This line read "review — awaiting PR #121 merge" for five days after the merge; corrected in the 2026-08-26 artifact audit.

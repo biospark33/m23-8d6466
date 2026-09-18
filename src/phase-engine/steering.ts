@@ -15,6 +15,10 @@
 import { z, type ZodError } from "zod";
 
 import { extractJsonCandidate } from "./agents/envelope-parse.ts";
+// TYPE-ONLY, and it must stay that way: resident-bounds.ts imports
+// PROMPT_CHAR_CEILING/MAX_OUTPUT_TOKENS from THIS file (values), so a value
+// import here would be a runtime cycle. Erased at compile, no edge at run.
+import type { ResidentBoundsGuard } from "./resident-bounds.ts";
 import { formatZodIssue, sanitizeForMessage, type ExitStatus } from "./types.ts";
 
 /** Solicitation prompt ceiling INCLUDING its truncation suffix (per call). */
@@ -82,6 +86,17 @@ export const INBOX_CALL_TIMEOUT_MS = 5_000;
  *  remainders, counted separately); both are retried by the NEXT
  *  solicitation's drain, which re-reads the queue in full. */
 export const DRAIN_PASS_TIMEOUT_MS = SOLICIT_TIMEOUT_MS;
+/** Deadline on the `onBoundBreach` observer's push. The pipeline-run
+ *  implementation stops the spawn, and a stop that HANGS — a wedged child
+ *  process, an unkillable cgroup — would hold that await open forever;
+ *  `solicit` serializes every solicitation through one chain, so one hung
+ *  stop wedges every LATER solicitation with no diagnostic, exactly the
+ *  failure mode INBOX_CALL_TIMEOUT_MS's header exists to prevent, one door
+ *  over. Derived from that constant, not new tuning: this is the same
+ *  budget class — a sidecar push, not work. Expiry behaves like observer
+ *  failure: swallowed, the status/tripwire writes that already happened
+ *  stand, and the solicitation proceeds. */
+export const ON_BOUND_BREACH_TIMEOUT_MS = INBOX_CALL_TIMEOUT_MS;
 
 /** The three engine-owned solicitation points — there is no fourth. */
 export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
@@ -142,8 +157,27 @@ const POINT_ALLOWLIST: Record<SteeringPoint, readonly SteeringDirective["action"
 /** Fleet-supplied agent caller. Engine never imports fleet (INV-RES-1). */
 export interface ResidentCaller {
   /** One synchronous solicitation. Returns raw reply text + token usage.
-   *  Throws on timeout / unreachable / process death. */
+   *  Throws on timeout / unreachable / process death. Fleet's implementation
+   *  (DF3.6b) additionally rejects with the typed `PlacementRefusedError`
+   *  (exit 97) when the per-solicitation cgroup placement wrapper fails —
+   *  classified by the engine's `instanceof` arm, never the opaque degrade
+   *  latch. */
   call(prompt: string): Promise<{ raw: string; usage: { inputTokens: number; outputTokens: number } }>;
+}
+
+/** DF3.6b (landed with DF3.6a — the deps/seams this needs are this story's
+ *  diff): fleet's caller throws this when the per-solicitation cgroup
+ *  placement wrapper fails (`|| exit 97`) — the engine classifies it by
+ *  type instead of the opaque degrade latch. Engine-owned (fleet→engine is
+ *  the allowed import direction); the engine learns the placement failed,
+ *  never how to place. */
+export class PlacementRefusedError extends Error {
+  readonly exitCode: number;
+  constructor(exitCode = 97, message = "resident cgroup placement refused") {
+    super(message);
+    this.name = "PlacementRefusedError";
+    this.exitCode = exitCode;
+  }
 }
 
 /**
@@ -191,12 +225,16 @@ export interface SolicitCtx {
 
 export type ResidentStatus = "active" | "degraded" | "disabled" | "stopped";
 
-/** D4 tripwire row. `spend_ceiling_breach` + `watchdog_kill` are DF3.6's to
- *  raise — the cause union stays closed to "gate_bypass_attempt" in DF3.3. */
+/** D4 tripwire row. The cause union is closed at three members: DF3.3's
+ *  `gate_bypass_attempt` (still its only raiser), DF3.6a's
+ *  `spend_ceiling_breach` (raised at the SEAM DF3.6 spend refusal in
+ *  `solicitSerialized`), and DF3.6b's `watchdog_kill` — landed here with
+ *  DF3.6a because the union is one closed type on one line and splitting the
+ *  edit across two stories would put two PRs on the same literal. */
 export interface ResidentTripwire {
   runId: string;
   requestId?: string;
-  cause: "gate_bypass_attempt";
+  cause: "gate_bypass_attempt" | "spend_ceiling_breach" | "watchdog_kill";
   phase?: string;
   detail: string;
 }
@@ -406,7 +444,8 @@ export function createSteering(deps: {
   rate: { inputPerMTok: number; outputPerMTok: number };
   onTripwire?: (t: ResidentTripwire) => void;
   /** DF3.4 `fleet attach` transport. Absent ⇒ no drain, exactly the pre-DF3.4
-   *  behavior. Additive, so DF3.6 can add its bounds deps to the same object. */
+   *  behavior. Additive — DF3.6a's bounds deps below landed on the same
+   *  object by the same rule. */
   inbox?: SteeringInbox;
   /**
    * DF3.4: an inbox fault that is NOT "nothing queued" — an unreadable
@@ -439,6 +478,27 @@ export function createSteering(deps: {
    * code (module boundary, file header), and the writer is one line.
    */
   emitAttribution?: (line: Record<string, unknown>) => void;
+  /** DF3.6a: the resident bounds guard (spend ceiling + per-phase iteration
+   *  counter), armed by the runner after startResident resolves the rate.
+   *  Absent ⇒ no bounds path at all — byte-for-byte pre-DF3.6a behavior. */
+  bounds?: ResidentBoundsGuard;
+  /** DF3.6a: fired when this story's enforcement stops the resident (spend
+   *  breach) or when DF3.6b's typed placement failure arrives. Sidecar: a
+   *  throwing observer never fails a solicitation. Awaited at the call site. */
+  onBoundBreach?: (e: {
+    bound: "spend" | "rss";
+    allowed: false;
+    cause: string;
+    exitCode?: number;
+    runId: string;
+    requestId?: string;
+    phase?: string;
+  }) => void | Promise<void>;
+  /** DF3.6b: last solicitation's cgroup accounting. Landed here (DF3.6a's
+   *  diff) because the deps object is one literal and two stories must not
+   *  edit it; DF3.6b wires `lastMemory: spawned.lastMemory`. A structural
+   *  callback, NOT a fleet import. Unused by DF3.6a. */
+  lastMemory?: () => { peakBytes: number; oomKilled: boolean } | null;
 }): SteeringController {
   const telemetry: ResidentTelemetry = {
     status: "active",
@@ -449,6 +509,22 @@ export function createSteering(deps: {
     exitStatus: null,
     tripwires: [],
   };
+  // DF3.6a AC6: a ceiling that cannot buy one projected call is a POLICY
+  // outcome, never a runaway — "bound-config-invalid" rides the guard's own
+  // reachability row (emitted once, at the guard's construction), so this
+  // arm writes NO tripwire: a `spend_ceiling_breach` row here would make a
+  // misconfiguration indistinguishable from a loop. The run proceeds
+  // deterministic; every later solicitation is refused by the status gate
+  // below, and the guard's check() is never reached. The internal writers
+  // of "stopped" are exactly three arms: this construction arm (with its
+  // SEAM twin in the spend-refusal block below, for a guard armed after
+  // construction), `stopForSpend` (the SEAM spend refusal and the
+  // pre-correction re-gate), and DF3.6b's PlacementRefusedError arm — no
+  // public setter, because a setter is a path the resident's own tier could
+  // reach (INV-BND-1).
+  if (deps.bounds !== undefined && deps.bounds.reachability === "below_one_call") {
+    telemetry.status = "stopped";
+  }
   let lastDegradationReason: string | null = null;
   let lastInboxErrorReason: string | null = null;
   /** DF2.12: the attribution SINK's health, latched at the first failure —
@@ -600,6 +676,42 @@ export function createSteering(deps: {
     return PROCEED;
   };
 
+  /** DF3.6a: push a bound breach to the `onBoundBreach` observer. AWAITED —
+   *  the dep is typed `void | Promise<void>`, and an async observer's
+   *  rejection is otherwise an unhandled rejection a synchronous try/catch
+   *  never sees (the `onInboxError` lesson, stated in its docstring).
+   *  Swallowed on throw for the same rule as onTripwire's observer: a broken
+   *  observer is a sidecar fault and must never fail — or wedge the refusal
+   *  outcome of — a solicitation whose enforcement already happened. The
+   *  telemetry/tripwire writes happen BEFORE this fires, so a lost push loses
+   *  only the push. DEADLINE-BOUND (PR #263 review) with
+   *  ON_BOUND_BREACH_TIMEOUT_MS: the pipeline-run observer stops the spawn,
+   *  and a hung stop wedged the serialized chain forever — see the
+   *  constant's header. Timeout joins throw in this catch: expiry loses only
+   *  the push, the enforcement writes stand, the solicitation proceeds.
+   *  `withDeadline` is declared further down this closure; this arrow runs
+   *  only from inside `solicitSerialized`, post-construction, so the binding
+   *  is always initialized when reached — no TDZ. */
+  const fireOnBoundBreach = async (e: {
+    bound: "spend" | "rss";
+    allowed: false;
+    cause: string;
+    exitCode?: number;
+    runId: string;
+    requestId?: string;
+    phase?: string;
+  }): Promise<void> => {
+    try {
+      await withDeadline(
+        Promise.resolve(deps.onBoundBreach?.(e)),
+        "onBoundBreach observer",
+        ON_BOUND_BREACH_TIMEOUT_MS,
+      );
+    } catch {
+      /* sidecar — the status/tripwire writes are the record */
+    }
+  };
+
   /** Delivered `messageId`s, run-lifetime: a re-issued line folds ONCE (AC6).
    *  Mapped to the FOLD-TIME point so an ack retry records the solicitation
    *  whose prompt context the message actually reached — the ack means
@@ -663,15 +775,18 @@ export function createSteering(deps: {
    * than eight lines. The losing promise gets a no-op catch BEFORE the race so
    * its late rejection can never surface as an unhandled rejection after the
    * deadline has already refused the caller — the same discipline as that file.
+   * `ms` defaults to INBOX_CALL_TIMEOUT_MS; a caller with its own budget (the
+   * onBoundBreach stop push) names it, so the timeout message cannot quote a
+   * budget the caller did not pass.
    */
-  const withDeadline = async <T>(p: Promise<T>, what: string): Promise<T> => {
+  const withDeadline = async <T>(p: Promise<T>, what: string, ms: number = INBOX_CALL_TIMEOUT_MS): Promise<T> => {
     void p.catch(() => {});
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         p,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${what} timed out after ${INBOX_CALL_TIMEOUT_MS}ms`)), INBOX_CALL_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
         }),
       ]);
     } finally {
@@ -978,8 +1093,84 @@ export function createSteering(deps: {
       acksBeforeCall += ackedThisPass;
       return PROCEED;
     }
-    // SEAM DF3.6: checkBounds(point) wraps here — spend/iteration/RSS bounds
-    // gate before any prompt is rendered.
+    // SEAM DF3.6: the resident bounds guard gates here — AFTER the status
+    // gate (AC5(a): a non-active resident is never bound-checked; a resident
+    // that cannot call cannot spend, and a degraded one keeps its
+    // already-latched status — "stopped" wins only when this story's
+    // enforcement is the proximate cause) and BEFORE any prompt is rendered,
+    // so a refused solicitation never reaches the resident. The guard emits
+    // its own bounds-check log line on every call, allowed and refused alike.
+    // `stopForSpend` is the one stop path, shared by the SEAM refusal and the
+    // pre-correction re-gate below: internal `telemetry.status = "stopped"`
+    // write (no public setter — INV-BND-1), the tripwire row carrying the
+    // projected + cumulative figures, and the onBoundBreach fire — all
+    // sidecar-guarded, never a throw on the solicitation path.
+    const stopForSpend = async (detail: string | undefined): Promise<void> => {
+      telemetry.status = "stopped";
+      const row: ResidentTripwire = {
+        runId: ctx.runId,
+        requestId: ctx.requestId,
+        cause: "spend_ceiling_breach",
+        phase: ctx.phase,
+        // The projected + cumulative figures that crossed the ceiling
+        // (Observability Contract); the fallback is belt-and-braces for a
+        // guard that refused without a detail.
+        detail: detail ?? "resident spend ceiling breach",
+      };
+      telemetry.tripwires.push(row);
+      // Same sidecar rule as reject's observer: a throwing onTripwire must
+      // never convert the refusal into a throw on the solicitation path —
+      // the journal row above is the record.
+      try {
+        deps.onTripwire?.(row);
+      } catch {
+        /* observability is a sidecar; the journal row above is the record */
+      }
+      await fireOnBoundBreach({
+        bound: "spend",
+        allowed: false,
+        cause: "spend_ceiling_breach",
+        runId: ctx.runId,
+        requestId: ctx.requestId,
+        phase: ctx.phase,
+      });
+    };
+    if (deps.bounds !== undefined) {
+      const verdict = deps.bounds.check(point, {
+        runId: ctx.runId,
+        requestId: ctx.requestId,
+        phase: ctx.phase,
+        spent: telemetry.spendMicros,
+      });
+      if (!verdict.allowed) {
+        if (verdict.bound === "spend") {
+          // AC6 (PR #263 review): a guard armed AFTER construction (deps is
+          // one object; the runner arms `bounds` once the rate resolves — the
+          // documented model) missed the construction arm above, so its
+          // below_one_call refusal lands HERE and must stop the resident
+          // exactly as that arm does: status "stopped", NO
+          // `spend_ceiling_breach` tripwire, no onBoundBreach fire — or a
+          // misconfiguration is re-labeled a runaway, the exact confusion
+          // AC6 forbids. The guard's own reachability row already carries
+          // code:"bound-config-invalid". Nothing else is reachable for this
+          // reachability: an effective ceiling below one projection means
+          // the check above can never allow, so the resident call, its
+          // projection charge, and the pre-correction re-gate are all out
+          // of reach.
+          if (deps.bounds.reachability === "below_one_call") {
+            telemetry.status = "stopped";
+          } else {
+            await stopForSpend(verdict.detail);
+          }
+        }
+        // An iterations refusal refuses THIS solicitation only — no stop, no
+        // tripwire (AC3/INV-BND-5): the one bound that never stops the
+        // resident. The deterministic phase walk continues, and later phases
+        // solicit normally; the guard's log line is the record.
+        acksBeforeCall += ackedThisPass;
+        return PROCEED;
+      }
+    }
     let prompt: string;
     try {
       prompt = renderPrompt(point, ctx);
@@ -1005,6 +1196,26 @@ export function createSteering(deps: {
         // call failure, malformed-limit) reverse that for this pass.
         ackedThisPass = 0;
       } catch (err) {
+        if (err instanceof PlacementRefusedError) {
+          // DF3.6b AC4: stopped FIRST (proximate cause is this pair's
+          // enforcement, not a call failure), then onBoundBreach — so the
+          // next solicitation is refused by the status gate above and this
+          // classification can never fall through to the degrade write
+          // below, where a stopped-and-unenforceable resident would be
+          // re-labeled "degraded".
+          telemetry.status = "stopped";
+          await fireOnBoundBreach({
+            bound: "rss",
+            allowed: false,
+            cause: "unenforceable",
+            exitCode: err.exitCode,
+            runId: ctx.runId,
+            requestId: ctx.requestId,
+            phase: ctx.phase,
+          });
+          acksBeforeCall += ackedThisPass;
+          return PROCEED;
+        }
         // Timeout / unreachable / process death: no retry of the call, no
         // retry of the underlying phase, no gate skipped (AC3). The cause is
         // kept in memory for diagnostics — the journal's resident block is a
@@ -1015,6 +1226,38 @@ export function createSteering(deps: {
         return PROCEED;
       }
       const metered = meter(reply.usage);
+      // DF3.6a INV-BND-3 (AC4): a reply the METER refused to price — the
+      // usage object ABSENT, a literal {0,0}, or unusable counts — is
+      // charged the projected worst case on the CEILING accumulator, never
+      // zero: without this arm a silent resident zeroes its own meter by
+      // replying with no usage and spends unbounded. The gate is keyed on
+      // the METER'S OWN VERDICT (`unpriced`), not on a positive-token scan
+      // of the raw usage (PR #263 review): `posTokens(in) || posTokens(out)`
+      // is an OR, so a MIXED shape — one positive count beside one poisoned
+      // count ({inputTokens:-5, outputTokens:1000000}), or a positive count
+      // whose term trips the meter's safe-integer guard — meters
+      // {costMicroUsd: 0, unpriced: true} yet SKIPPED the charge, reopening
+      // the exact bypass this arm exists to close. A POSITIVE-token reply
+      // whose per-term rounding lands at 0 µ$ (ten tokens at 0.08/MTok) is
+      // genuinely PRICED sub-micro-dollar (unpriced:false) and is NOT
+      // charged — its metered figure is real, and charging it the projection
+      // would stop a cheap-call resident far below the ceiling. The DF2.12
+      // attribution row below keeps its shipped METERED disposition (absent
+      // → unpriced, {0,0} → priced-zero, unpriced garbage → unpriced) — the
+      // projection is ceiling-side protection and never enters the ledger
+      // (one spend truth per basis). Runs per REPLY: the
+      // malformed-correction attempt is also a billed call. Safe-integer
+      // guard matches the meter's own: an unsafe sum leaves the last exact
+      // spendMicros intact instead of corrupting it.
+      const posTokens = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v) && v > 0;
+      if (
+        deps.bounds !== undefined &&
+        (metered.unpriced ||
+          (metered.costMicroUsd === 0 && !(posTokens(reply.usage?.inputTokens) || posTokens(reply.usage?.outputTokens))))
+      ) {
+        const charged = telemetry.spendMicros + deps.bounds.projectedPerCallMicros;
+        if (Number.isSafeInteger(charged)) telemetry.spendMicros = charged;
+      }
       emitResidentAttribution(ctx, metered, reply.usage);
       let parsed: ReplyParse;
       try {
@@ -1029,6 +1272,27 @@ export function createSteering(deps: {
         if (attempt >= MAX_MALFORMED_ATTEMPTS) {
           telemetry.status = "degraded";
           lastDegradationReason = sanitizeForMessage(`malformed reply: ${parsed.reason}`);
+          return PROCEED;
+        }
+        // DF3.6a re-gate (AC1's margin): the correction attempt is a SECOND
+        // billed call inside ONE solicitation, and the SEAM check above gated
+        // only the first. Without this, a resident at ceiling−ε that replies
+        // malformed once and then validly meters TWO calls past a single
+        // check — the exact "spend above ceiling + one call's metered cost"
+        // shape AC1's negative control exists to fail. The comparison is
+        // inline against the guard's public figures, NOT a second
+        // guard.check(): check() emits the bounds line and (on allow)
+        // increments the per-phase counter, and a correction is not a new
+        // solicitation. Refused ⇒ stopped via the same stopForSpend path.
+        if (
+          deps.bounds !== undefined &&
+          telemetry.spendMicros + deps.bounds.projectedPerCallMicros > deps.bounds.effectiveCeilingMicros
+        ) {
+          await stopForSpend(
+            `projected ${deps.bounds.projectedPerCallMicros} µ$ + spent ${telemetry.spendMicros} µ$ = ${
+              telemetry.spendMicros + deps.bounds.projectedPerCallMicros
+            } µ$ exceeds effective ceiling ${deps.bounds.effectiveCeilingMicros} µ$ (pre-correction re-gate)`,
+          );
           return PROCEED;
         }
         prompt = malformedCorrectionPrompt(parsed.reason, point, ctx);

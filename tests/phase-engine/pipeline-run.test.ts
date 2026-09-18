@@ -567,7 +567,20 @@ function jsonLines(stderr: string): Record<string, unknown>[] {
   return parsed;
 }
 
-/** A green two-code-phase manifest — the minimal walk for a correlated run. */
+/**
+ * A green two-code-phase manifest — the minimal walk for a correlated run.
+ *
+ * DF3.6a (leaf-6 blast radius): the four bound operands ride every copy of this
+ * manifest because most of its legs ARM a resident through a `run-context.json`
+ * witness, and leaf-4's `loadResidentBounds` refuses an arming manifest that
+ * carries fewer than all four (INV-BND-2, fail-closed) BEFORE `startResident`.
+ * The values are the shipped fallback ladder's own (8,000 µ$ ceiling, 512 MiB
+ * rss) with the dispatch cap operands at their provider constants; at the
+ * default fixture-catalog rate (~504 µ$/call projected × 8 structural
+ * solicitations = 4,032) the ceiling is `unreachable`, so no bound ever fires
+ * on these legs and their assertions keep their pre-bounds meaning. Legs that
+ * never arm read no bound at all — the operands are inert bytes to them.
+ */
 function writeCodeManifest(dir: string): string {
   const manifest = path.join(dir, `pipeline-${seq++}.json`);
   fs.writeFileSync(
@@ -576,6 +589,10 @@ function writeCodeManifest(dir: string): string {
       version: "1.0.0",
       pipelineId: "correlated-demo",
       runBudgetMs: 100_000,
+      residentSpendCeilingMicros: 8_000,
+      capMicroUsd: 50_000_000,
+      defaultKeyCapMicroUsd: 50_000_000,
+      residentRssBytes: 536_870_912,
       phases: [
         {
           name: "plan",
@@ -1767,6 +1784,12 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
         version: "1.0.0",
         pipelineId: "roster-accept",
         runBudgetMs: 100_000,
+        // DF3.6a leaf-6: the witness below ARMS a resident, so the manifest
+        // carries all four bound operands or loadResidentBounds refuses first.
+        residentSpendCeilingMicros: 8_000,
+        capMicroUsd: 50_000_000,
+        defaultKeyCapMicroUsd: 50_000_000,
+        residentRssBytes: 536_870_912,
         phases: [
           {
             name: "plan",
@@ -1900,6 +1923,12 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
         version: "1.0.0",
         pipelineId: "roster-dup-name",
         runBudgetMs: 150_000,
+        // DF3.6a leaf-6: the witness below ARMS a resident, so the manifest
+        // carries all four bound operands or loadResidentBounds refuses first.
+        residentSpendCeilingMicros: 8_000,
+        capMicroUsd: 50_000_000,
+        defaultKeyCapMicroUsd: 50_000_000,
+        residentRssBytes: 536_870_912,
         phases: [
           {
             name: "plan",

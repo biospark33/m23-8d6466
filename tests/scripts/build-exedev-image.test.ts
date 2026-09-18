@@ -1311,7 +1311,29 @@ describe("buildIdFileInputs", () => {
       // Dockerfile comment documents; measured, not inferred, via
       // `buildIdFileInputs(realDockerfile())` on the tree this literal lands
       // with, same-commit re-pin per the discipline above.
-      "48d3b237c7eb27c5fae957ecda76064421d989e71d0ee522e93e449cc14e5804",
+      //
+      // e42f4352: moved from 48d3b237 by DF3.6a — the resident spend/iteration
+      // bounds. This story's engine-tree edits are all under directory COPYs
+      // (`src/phase-engine/steering.ts` — the SEAM check, cause-union widening,
+      // meter zero-usage arm, three additive deps, PlacementRefusedError, the
+      // pre-correction re-gate; `src/phase-engine/manifest.ts` — the five
+      // optional bound fields; NEW `src/phase-engine/resident-bounds.ts` —
+      // enters the walk under the engine directory COPY) plus the walked
+      // `src/fleet/dispatch.ts` (fill-side bound stamp + the
+      // resident-ceiling-unfundable pre-provision refusal). Measured on the
+      // FINAL tree (post self-review fixes) via the same failing-run receive
+      // this file's discipline prescribes — same-commit re-pin.
+      //
+      // 5d5b84b6: moved from e42f4352 by DF3.6a's review round — the walked
+      // inputs this round edited: `src/phase-engine/steering.ts` (INV-BND-3
+      // mixed-shape charge keyed on metered.unpriced, withDeadline-bounded
+      // onBoundBreach, below_one_call SEAM twin), `src/phase-engine/
+      // resident-bounds.ts` (rate fail-closed validation, fifth-operand
+      // validation, spend-wins precedence, projection_ms, runId row,
+      // iterations() copy), `src/fleet/dispatch.ts` (link-2
+      // resident-cap-above-backstop mirror + unfundable remediation text).
+      // Same failing-run receive on the post-fix tree — same-commit re-pin.
+      "5d5b84b65546db511f4b5628a7574680aae401dc394cd0c4ef9ef4e3c69c8069",
     );
   });
 });
