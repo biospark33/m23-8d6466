@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "qds-audit-demo-chain",
+  "runBudgetMs": 570000,
+  "phases": [
+    {
+      "name": "audit-demo-team",
+      "kind": "dispatch_task",
+      "description": "DF5.3 audit-chain demo: one dispatch_task team on the proven T2 pair. The task is pure arithmetic Q&A so every micro of spend is token spend attributable by roster role, which is what the DF2.12 bridge turns into the run-cost hop's perRole rows.",
+      "roster": "config/roster.yaml",
+      "task": "You lead a one-worker team. Immediately spawn the worker named fixer. Ask fixer exactly: Reply with only the number: 19*21. When the reply arrives, finish with a JSON object of shape {\"changedFiles\": [], \"result\": {\"summary\": \"fixer=<the answer>\"}}. Do not modify any files.",
+      "maxDurationMs": 170000,
+      "retries": 0
+    },
+    {
+      "name": "audit-demo-commit",
+      "kind": "code",
+      "description": "Writes the demo artifact and commits it on the sandbox branch, so the run produces the commits harvest bundles into refs/sandbox/<run-id> \u2014 a run with no commits harvests NOCOMMITS and the run-bundle hop has no subject.",
+      "command": [
+        "bash",
+        "-lc",
+        "set -eu; printf 'QDS-Factory audit-chain demo\\n\\nProduced in-box by the phase engine at base %s.\\nWalk this PR with: bun scripts/qds-audit.ts <pr-url>\\n' \"$(git rev-parse HEAD)\" > DEMO.md; git add DEMO.md; git -c user.email=factory@qds.local -c user.name='QDS Factory' commit -q -m 'demo: audit-chain walk artifact'; git log --oneline -1"
+      ],
+      "testCommand": [
+        "bash",
+        "-lc",
+        "test -f DEMO.md && git log --oneline -1 >/dev/null"
+      ],
+      "maxDurationMs": 15000,
+      "retries": 0
+    }
+  ]
+}
