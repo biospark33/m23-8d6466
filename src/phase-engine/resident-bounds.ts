@@ -21,7 +21,7 @@
  */
 import { PipelineManifestSchema, type LoadedManifest } from "./manifest.ts";
 import { MAX_OUTPUT_TOKENS, PROMPT_CHAR_CEILING } from "./steering.ts";
-import type { PipelineManifest } from "./types.ts";
+import { MAX_RETRIES, type PipelineManifest } from "./types.ts";
 
 /**
  * Provisional resident RSS bound, 512 MiB (W6-C-H4). DF3.6b's live round
@@ -36,9 +36,10 @@ export const PROVISIONAL_RESIDENT_RSS_BYTES = 536_870_912;
  * Shipped FALLBACK spend ceiling, 8,000 µ$ ($0.008) per run — user policy, not
  * a derivation (operator ruling, 2026-09-13). Rung 2 of a two-rung ladder:
  * per-task manifest declaration → this fallback. At the default
- * fixture-catalog rates (~504 µ$/call projected) it buys roughly sixteen
- * projected calls; at frontier rates it cannot buy one and AC6's
- * `below_one_call` refuses — the ladder working as designed.
+ * fixture-catalog rates (~504 µ$/call projected) it buys fifteen full
+ * projected calls (15 × 504 = 7,560; the strict `>` gate refuses the
+ * sixteenth — 7,560 + 504 = 8,064 > 8,000); at frontier rates it cannot buy
+ * one and AC6's `below_one_call` refuses — the ladder working as designed.
  */
 export const DEFAULT_RESIDENT_SPEND_CEILING_MICROS = 8_000;
 
@@ -184,12 +185,29 @@ export function loadResidentBounds(manifest: PipelineManifest): ResidentBoundsCo
     }
   }
 
+  // The fifth operand rides outside the ordering chain, and `??` alone would
+  // let NaN/Infinity/float/negative ride with it: NaN makes
+  // `(counters[phase] ?? 0) >= NaN` always false — the iteration bound
+  // silently disarmed — and NaN-poisons maxSolicitations/worstRunMicros
+  // besides. Refuse, don't default: this loader is the backstop for
+  // manifests that already bypassed BOTH the schema and the fill stamp, so
+  // an unusable value is a corrupted delivery, not a missing preference
+  // (INV-BND-2 fail-closed — same posture as the operand() checks above).
+  // 0 stays legal: the schema's `.min(0)` blesses never-solicit.
+  const maxSteeringIterations = m.maxSteeringIterations ?? DEFAULT_MAX_STEERING_ITERATIONS;
+  if (!Number.isSafeInteger(maxSteeringIterations) || maxSteeringIterations < 0 || maxSteeringIterations > MAX_RETRIES) {
+    throw new BoundConfigError(
+      `maxSteeringIterations must be an integer between 0 and MAX_RETRIES (${MAX_RETRIES}) on a resident-arming manifest (INV-BND-2); got ${m.maxSteeringIterations}`,
+      "declare an integer 0..5 bound on the task manifest or omit it for the default (3); a NaN, fractional, or oversized value means the manifest delivery was corrupted",
+    );
+  }
+
   return {
     residentSpendCeilingMicros,
     capMicroUsd,
     defaultKeyCapMicroUsd,
     residentRssBytes,
-    maxSteeringIterations: m.maxSteeringIterations ?? DEFAULT_MAX_STEERING_ITERATIONS,
+    maxSteeringIterations,
     effectiveCeilingMicros,
     clampRow,
   };
@@ -209,9 +227,17 @@ export function loadResidentBounds(manifest: PipelineManifest): ResidentBoundsCo
  *
  * A non-finite or non-positive rate term clamps to 0, exactly like the meter's
  * `clampTerm`: one poisoned rate must not turn the projection into NaN, which
- * would make every comparison false and the bound vacuous. The rate comes from
- * `deps.rate` — resolved once per run by `resolveRate` and handed to the
- * engine; this module loads nothing and is never a second rate path.
+ * would make every comparison false and the bound vacuous. On the ENFORCEMENT
+ * path this is defense-in-depth only — `createBoundsGuard` refuses a
+ * zero/unusable rate at construction before calling this (a 0-rate projection
+ * would make `spent + 0 > ceiling` unsatisfiable and report "unreachable":
+ * fail-open, exactly what INV-BND-3's fail-safe posture forbids). The clamp
+ * that must SURVIVE that refusal is the huge-but-FINITE case: a rate of 1e300
+ * is finite and > 0, passes the guard, and its projection overflows to
+ * Infinity, which flows to the `below_one_call` verdict — also a refusal, so
+ * the ladder fails closed at every rung. The rate comes from `deps.rate` —
+ * resolved once per run by `resolveRate` and handed to the engine; this module
+ * loads nothing and is never a second rate path.
  */
 export function projectWorstCaseMicros(rate: { inputPerMTok: number; outputPerMTok: number }): number {
   const clampTerm = (n: number): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
@@ -247,10 +273,15 @@ export interface ResidentBoundsGuard {
   /**
    * Pre-flight gate for one solicitation. Emits the bounds-check line
    * `{requestId, runId, phase, bound, spendMicros, projectedMicros, iterations,
-   * allowed}` on EVERY call — allowed and refused alike — then returns the
-   * verdict. Spend refusal carries the projected + cumulative figures in
-   * `detail`; iteration refusal carries NO cause: it is not a tripwire, and
-   * the log line is the record.
+   * projection_ms, allowed}` on every call the SEAM gates — allowed and
+   * refused alike — then returns the verdict. One deliberate exception: the
+   * malformed-correction re-gate in steering.ts does NOT call check() (a
+   * correction is a second billed call inside ONE solicitation, not a new
+   * one — it must neither emit a second bounds line nor bump the phase
+   * counter) and compares inline against the guard's public figures instead.
+   * Spend refusal carries the projected + cumulative figures in `detail`;
+   * iteration refusal carries NO cause: it is not a tripwire, and the log
+   * line is the record.
    */
   check(
     point: BoundsCheckPoint,
@@ -273,7 +304,30 @@ export function createBoundsGuard(
   rate: { inputPerMTok: number; outputPerMTok: number },
   phaseCount: number,
   emit: (line: Record<string, unknown>) => void,
+  runId?: string,
 ): ResidentBoundsGuard {
+  // INV-BND-3's fail-safe posture, applied to the rate: a zero/poisoned rate
+  // term REFUSES construction instead of projecting to 0 µ$/call — a 0-rate
+  // projection makes `spent + 0 > ceiling` unsatisfiable AND reachability
+  // reports "unreachable", the bound silently disarmed exactly when the
+  // billing data is least trustworthy (fail-closed, same family as the
+  // loader's operand() refusals). A huge-but-FINITE rate (1e300) is legal
+  // here: it passes this check, projects to Infinity, and flows to the
+  // `below_one_call` verdict below — also a refusal, so every rung of the
+  // ladder fails closed.
+  for (const term of ["inputPerMTok", "outputPerMTok"] as const) {
+    const v = rate[term];
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+      throw new BoundConfigError(
+        `rate.${term} ${v} is not a finite number > 0; a zero or unusable rate would project every call at 0 µ$ and silently disarm the spend bound (INV-BND-3)`,
+        "re-dispatch the run: the rate is resolved once per run from the roster (resolveRate at startResident); an unusable term means the roster entry or its delivery is corrupted",
+      );
+    }
+  }
+  // `projection_ms` (Observability Contract: "Sub-timings: projection_ms")
+  // covers the construction-time projection + reachability comparison; the
+  // per-solicitation evaluations carry their own timing on each check row.
+  const projectionStart = performance.now();
   const projectedPerCallMicros = projectWorstCaseMicros(rate);
   const effectiveCeilingMicros = cfg.effectiveCeilingMicros;
   const maxSolicitations = 2 + cfg.maxSteeringIterations * phaseCount;
@@ -284,6 +338,13 @@ export function createBoundsGuard(
       : effectiveCeilingMicros < projectedPerCallMicros
         ? "below_one_call"
         : "binding";
+  const projectionMs = performance.now() - projectionStart;
+  // "unreachable" is a structural-worst-case ESTIMATE over SOFT ceilings —
+  // the chars/4 heuristic and the prompt-enforced MAX_OUTPUT_TOKENS — that
+  // also ignores correction calls (each a second billed call inside one
+  // solicitation) and any metered actual above its projection. A run labeled
+  // unreachable can therefore still trip the spend refusal in check(); the
+  // check, not this verdict, is the enforcement.
 
   /** Emit is an observability sidecar: a broken sink must never convert a
    *  verdict into a throw on the solicitation path (same rule as steering's
@@ -306,12 +367,17 @@ export function createBoundsGuard(
   // verdict already lives on (no second emission, no tripwire: the cause union
   // has no member for a misconfiguration, by design).
   emitSafe({
+    // `runId` when the caller can name it: this row carries the
+    // below_one_call/bound-config-invalid verdict — the policy-stop record —
+    // and must correlate to its run.
+    ...(runId !== undefined ? { runId } : {}),
     bound: "spend",
     check: "reachability",
     projectedMicros: projectedPerCallMicros,
     effectiveMicros: effectiveCeilingMicros,
     maxSolicitations,
     verdict: reachability,
+    projection_ms: projectionMs,
     ...(reachability === "below_one_call" ? { code: "bound-config-invalid" } : {}),
   });
 
@@ -322,20 +388,29 @@ export function createBoundsGuard(
     effectiveCeilingMicros,
     reachability,
     maxSolicitations,
-    iterations: () => counters,
+    // Copy, not the live map: the Readonly<> return type is a lie the
+    // compiler cannot enforce on a direct reference — callers must not be
+    // handed a mutable handle into the guard's counters.
+    iterations: () => ({ ...counters }),
     check(point, ctx) {
       const phase = ctx.phase;
-      let verdict: BoundsVerdict;
-      if (
+      // Spend-breach evaluated FIRST, deliberately: when a post_gate_failure
+      // point is BOTH at the iteration max AND over the spend line, the spend
+      // refusal wins — metered spend has crossed/overshot the ceiling and
+      // that is a stop-with-tripwire the record must carry; letting the
+      // iterations branch (refuse-only, no tripwire) shadow it would erase
+      // the breach. Iterations refuse on their own only when spend is fine.
+      // `projection_ms` times exactly this projection + comparison work.
+      const evalStart = performance.now();
+      const spendBreached = ctx.spent + projectedPerCallMicros > effectiveCeilingMicros;
+      const iterationMaxed =
+        !spendBreached &&
         point === "post_gate_failure" &&
         phase !== undefined &&
-        (counters[phase] ?? 0) >= cfg.maxSteeringIterations
-      ) {
-        // The phase's solicitation budget is spent: refuse the call, let the
-        // deterministic walk continue (AC3 — the one bound that never stops
-        // the resident). No cause: not a tripwire.
-        verdict = { allowed: false, bound: "iterations" };
-      } else if (ctx.spent + projectedPerCallMicros > effectiveCeilingMicros) {
+        (counters[phase] ?? 0) >= cfg.maxSteeringIterations;
+      const projectionMs = performance.now() - evalStart;
+      let verdict: BoundsVerdict;
+      if (spendBreached) {
         verdict = {
           allowed: false,
           bound: "spend",
@@ -344,11 +419,17 @@ export function createBoundsGuard(
             projectedPerCallMicros + ctx.spent
           } µ$ exceeds effective ceiling ${effectiveCeilingMicros} µ$`,
         };
+      } else if (iterationMaxed) {
+        // The phase's solicitation budget is spent: refuse the call, let the
+        // deterministic walk continue (AC3 — the one bound that never stops
+        // the resident). No cause: not a tripwire.
+        verdict = { allowed: false, bound: "iterations" };
       } else {
         verdict = { allowed: true };
         // Count only what the bound counts: solicitations ISSUED (allowed) at
-        // the in-phase point. run_start/run_end are single-shot by
-        // construction and are never counted against any phase.
+        // the in-phase point — never on a refused check, either bound.
+        // run_start/run_end are single-shot by construction and are never
+        // counted against any phase.
         if (point === "post_gate_failure" && phase !== undefined) {
           counters[phase] = (counters[phase] ?? 0) + 1;
         }
@@ -361,6 +442,7 @@ export function createBoundsGuard(
         spendMicros: ctx.spent,
         projectedMicros: projectedPerCallMicros,
         iterations: phase !== undefined ? (counters[phase] ?? 0) : 0,
+        projection_ms: projectionMs,
         allowed: verdict.allowed,
       });
       return verdict;
@@ -369,14 +451,21 @@ export function createBoundsGuard(
 }
 
 /**
- * `deepFreeze` is module-private in `manifest.ts`; the same 5-line walker,
+ * `deepFreeze` is module-private in `manifest.ts`; the same walker,
  * re-implemented locally rather than exported from a file this story does not
  * widen. Frozen at stamp for the same reason `loadManifest` freezes: the run
  * carries the value, and a mid-run mutation has no effect (INV-BND-1).
  */
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object") {
-    for (const v of Object.values(value)) deepFreeze(v);
+    // Object.values yields NOTHING for Map/Set — without these arms their
+    // contents stay mutable behind a frozen wrapper. Ceiling: Object.freeze
+    // on a Map/Set blocks neither .set()/.add() nor entry deletion (they
+    // carry no frozen flag), so this is contents-only; today's manifest is
+    // plain JSON and never hits either arm.
+    if (value instanceof Map) for (const v of value.values()) deepFreeze(v);
+    else if (value instanceof Set) for (const v of value) deepFreeze(v);
+    else for (const v of Object.values(value)) deepFreeze(v);
     Object.freeze(value);
   }
   return value;

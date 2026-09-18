@@ -43,8 +43,8 @@ import {
 } from "../../src/phase-engine/resident-bounds.ts";
 import { PipelineManifestSchema, type LoadedManifest } from "../../src/phase-engine/manifest.ts";
 import {
-  MAX_OUTPUT_TOKENS,
-  PROMPT_CHAR_CEILING,
+  INBOX_CALL_TIMEOUT_MS,
+  ON_BOUND_BREACH_TIMEOUT_MS,
   PlacementRefusedError,
   createSteering,
   type ResidentCaller,
@@ -151,6 +151,18 @@ describe("loadResidentBounds — AC2a refusals (fail-closed, INV-BND-2)", () => 
     expect(cfg.clampRow).toBeUndefined();
   });
 
+  test("operand matrix, remaining cells direct-to-loader: a ZERO operand and a NaN ceiling each refuse (raw literals, past the schema)", () => {
+    // P35: boundsManifest hands the loader a raw object, so these cells reach
+    // operand() itself rather than dying at schema parse — the loader is the
+    // backstop for deliveries that bypassed both the schema and the stamp.
+    expect(() => loadResidentBounds(boundsManifest({ residentSpendCeilingMicros: 0 }))).toThrow(BoundConfigError);
+    expect(() => loadResidentBounds(boundsManifest({ capMicroUsd: 0 }))).toThrow(BoundConfigError);
+    expect(() => loadResidentBounds(boundsManifest({ defaultKeyCapMicroUsd: 0 }))).toThrow(BoundConfigError);
+    expect(() => loadResidentBounds(boundsManifest({ residentSpendCeilingMicros: Number.NaN }))).toThrow(
+      BoundConfigError,
+    );
+  });
+
   test("the refusal carries the typed triple: code bound-config-invalid + non-empty remediation", () => {
     let err: BoundConfigError | undefined;
     try {
@@ -166,10 +178,29 @@ describe("loadResidentBounds — AC2a refusals (fail-closed, INV-BND-2)", () => 
   });
 
   test("maxSteeringIterations defaults to 3 (below MAX_RETRIES — a bound at 5 can never fire)", () => {
+    expect(DEFAULT_MAX_STEERING_ITERATIONS).toBeLessThan(MAX_RETRIES); // P37: the default is a fireable bound
     expect(loadResidentBounds(boundsManifest()).maxSteeringIterations).toBe(
       DEFAULT_MAX_STEERING_ITERATIONS,
     );
     expect(loadResidentBounds(boundsManifest({ maxSteeringIterations: 1 })).maxSteeringIterations).toBe(1);
+  });
+
+  test("maxSteeringIterations operand cells direct-to-loader: NaN/Infinity/1.5/-1/6 refuse; 0 and MAX_RETRIES admit (P3, INV-BND-2 fail-closed)", () => {
+    // Raw literals, so NaN/Infinity reach the loader's own guard rather than a
+    // schema parse failure — `??` alone would have let every one of these ride.
+    for (const maxSteeringIterations of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1.5,
+      -1,
+      MAX_RETRIES + 1,
+    ]) {
+      expect(() => loadResidentBounds(boundsManifest({ maxSteeringIterations }))).toThrow(BoundConfigError);
+    }
+    expect(loadResidentBounds(boundsManifest({ maxSteeringIterations: 0 })).maxSteeringIterations).toBe(0);
+    expect(loadResidentBounds(boundsManifest({ maxSteeringIterations: MAX_RETRIES })).maxSteeringIterations).toBe(
+      MAX_RETRIES,
+    );
   });
 });
 
@@ -207,20 +238,35 @@ describe("loadResidentBounds — AC2b clamp against the minted limitMicroUsd", (
     expect(cfg.effectiveCeilingMicros).toBe(100);
     expect(cfg.clampRow?.effectiveMicros).toBe(100);
   });
+
+  test("a PRESENT-but-poisoned limitMicroUsd refuses — 0, -1, 1.5, NaN never launder into an effective ceiling (P28)", () => {
+    // Raw literals reach the loader's clamp-input guard directly; a poisoned
+    // limit must refuse rather than narrow to garbage or pass ignored.
+    for (const limitMicroUsd of [0, -1, 1.5, Number.NaN]) {
+      expect(() => loadResidentBounds(boundsManifest({ limitMicroUsd }))).toThrow(BoundConfigError);
+    }
+  });
 });
 
 describe("projectWorstCaseMicros — per-term rounding identical to the meter (DD-9)", () => {
   test("760,960 µ$ at the pi-catalog-bounds rate (the e2e demo's per-call figure)", () => {
     // (16000/4 × 180_000_000 + 1024 × 40_000_000) / 1e6, rounded per term:
-    // 720,000 + 40,960 — the E2E Slice's pinned arithmetic.
-    expect(PROMPT_CHAR_CEILING).toBe(16_000);
-    expect(MAX_OUTPUT_TOKENS).toBe(1_024);
+    // 720,000 + 40,960 — the E2E Slice's pinned arithmetic. The constants
+    // are exercised in steering.test.ts (their home); asserting them against
+    // their own literals here was tautological (P36).
     expect(projectWorstCaseMicros(FRONTIER_RATE)).toBe(760_960);
   });
 
   test("504 µ$ at the default fixture-catalog rate (0.08 / 0.18 USD-per-MTok)", () => {
     // round(4000 × 80_000 / 1e6) = 320; round(1024 × 180_000 / 1e6) = 184.
     expect(projectWorstCaseMicros(CHEAP_RATE)).toBe(504);
+  });
+
+  test("a term landing exactly on .5 rounds UP — Math.round in the PROJECTION, not floor (P31, DD-9's twin)", () => {
+    // 4,000 prompt-tokens × 125 µ$/MTok / 1e6 = 0.5 µ$ exactly: Math.round
+    // gives 1, Math.floor would give 0 (and to-even would also give 0) — the
+    // projection rounds half-away-from-zero like the meter, per term.
+    expect(projectWorstCaseMicros({ inputPerMTok: 125, outputPerMTok: 0 })).toBe(1);
   });
 
   test("a poisoned rate clamps per term — never NaN, never a throw (clampTerm discipline)", () => {
@@ -245,7 +291,8 @@ describe("createBoundsGuard — AC6 reachability, computed where the rate exists
     expect(guard.projectedPerCallMicros).toBe(504);
     expect(guard.maxSolicitations).toBe(2 + 3 * 2);
     expect(guard.reachability).toBe("unreachable"); // 8,000 ≥ 504 × 8 = 4,032
-    // The reachability row: exact field set, emitted ONCE at construction.
+    // The reachability row: exact field set (P17: `projection_ms` rides every
+    // row now — float ms, any finite number), emitted ONCE at construction.
     expect(rows.filter((r) => r.check === "reachability")).toEqual([
       {
         bound: "spend",
@@ -254,6 +301,7 @@ describe("createBoundsGuard — AC6 reachability, computed where the rate exists
         effectiveMicros: 8_000,
         maxSolicitations: 8,
         verdict: "unreachable",
+        projection_ms: expect.any(Number),
       },
     ]);
     // Later checks must not re-emit it.
@@ -292,6 +340,52 @@ describe("createBoundsGuard — AC6 reachability, computed where the rate exists
     // carry NO code.
     expect(rows[0]).toMatchObject({ code: "bound-config-invalid" });
   });
+
+  test("reachability boundaries are >= / <, not strict: ceiling === worstRun is unreachable; ceiling === projection is binding (P25)", () => {
+    // effectiveCeilingMicros === worstRunMicros (504 × 8 = 4,032) hits the
+    // `>=` arm — the whole structural worst case fits, so unreachable.
+    const edge = loadResidentBounds(boundsManifest({ residentSpendCeilingMicros: 4_032 }));
+    expect(createBoundsGuard(edge, CHEAP_RATE, 2, sink().emit).reachability).toBe("unreachable");
+    // effectiveCeilingMicros === projectedPerCallMicros (504) fails the `<`
+    // arm by equality — the ceiling buys exactly one call, so binding, NOT
+    // below_one_call.
+    const one = loadResidentBounds(boundsManifest({ residentSpendCeilingMicros: 504 }));
+    expect(createBoundsGuard(one, CHEAP_RATE, 2, sink().emit).reachability).toBe("binding");
+  });
+
+  test("a huge-but-FINITE rate (1e300) still yields below_one_call — the fail-closed path past the rate refusal (P32)", () => {
+    // 1e300 is finite and > 0, so it passes construction and projects past
+    // every safe ceiling — a refusal, not a NaN comparison that never fires.
+    const cfg = loadResidentBounds(boundsManifest());
+    const guard = createBoundsGuard(cfg, { inputPerMTok: 1e300, outputPerMTok: 1e300 }, 2, sink().emit);
+    expect(Number.isFinite(guard.projectedPerCallMicros)).toBe(true);
+    expect(guard.projectedPerCallMicros).toBeGreaterThan(cfg.effectiveCeilingMicros);
+    expect(guard.reachability).toBe("below_one_call");
+  });
+
+  test("a zero / negative / non-finite rate term REFUSES construction, naming the term (P2, INV-BND-3 — was a silent 0-projection)", () => {
+    const cfg = loadResidentBounds(boundsManifest());
+    for (const [rate, term] of [
+      [{ inputPerMTok: 0, outputPerMTok: 100 }, "rate.inputPerMTok"],
+      [{ inputPerMTok: -1, outputPerMTok: 100 }, "rate.inputPerMTok"],
+      [{ inputPerMTok: 100, outputPerMTok: Number.NaN }, "rate.outputPerMTok"],
+      [{ inputPerMTok: Number.POSITIVE_INFINITY, outputPerMTok: 100 }, "rate.inputPerMTok"],
+    ] as const) {
+      expect(() => createBoundsGuard(cfg, rate, 2, sink().emit)).toThrow(BoundConfigError);
+      expect(() => createBoundsGuard(cfg, rate, 2, sink().emit)).toThrow(term);
+    }
+  });
+
+  test("runId (the 5th param) rides the reachability row only when the caller names it (P10)", () => {
+    const named = sink();
+    createBoundsGuard(loadResidentBounds(boundsManifest()), CHEAP_RATE, 2, named.emit, "run-42");
+    expect(Object.hasOwn(named.rows[0] as object, "runId")).toBe(true);
+    expect(named.rows[0]?.runId).toBe("run-42");
+    const anonymous = sink();
+    createBoundsGuard(loadResidentBounds(boundsManifest()), CHEAP_RATE, 2, anonymous.emit);
+    // Absent key, not a present undefined — toEqual would not tell them apart.
+    expect(Object.hasOwn(anonymous.rows[0] as object, "runId")).toBe(false);
+  });
 });
 
 describe("createBoundsGuard.check — AC1 pre-flight spend refusal + AC3 iteration bound", () => {
@@ -321,6 +415,7 @@ describe("createBoundsGuard.check — AC1 pre-flight spend refusal + AC3 iterati
       spendMicros: 0,
       projectedMicros: 760_960,
       iterations: 0,
+      projection_ms: expect.any(Number), // P17: per-solicitation sub-timing
       allowed: true,
     });
   });
@@ -375,6 +470,83 @@ describe("createBoundsGuard.check — AC1 pre-flight spend refusal + AC3 iterati
     expect(guard.check("post_gate_failure", { runId: "r1", phase: "a", spent: 0 }).allowed).toBe(false);
     expect(guard.check("post_gate_failure", { runId: "r1", phase: "b", spent: 0 }).allowed).toBe(true);
     expect(guard.iterations()).toEqual({ a: 3, b: 1 });
+  });
+
+  test("equality boundary: spent + projected === effectiveCeiling exactly is ALLOWED — the `>` is strict (P24)", () => {
+    const { guard } = guardWith(1_521_920);
+    // 760,960 + 760,960 === 1,521,920: equality is allowed; one µ$ more (760,961)
+    // crosses. A `>=` comparison stops a resident whose accumulator would land
+    // exactly ON the ceiling — the ceiling is a bound, not a shrink.
+    expect(guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 760_960 })).toEqual({
+      allowed: true,
+    });
+    expect(guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 760_961 })).toMatchObject({
+      allowed: false,
+      bound: "spend",
+      cause: "spend_ceiling_breach",
+    });
+  });
+
+  test("a DECLARED maxSteeringIterations reaches the guard: bound 1 allows the first post_gate_failure, refuses the second (P26)", () => {
+    // The manifest-declared fifth operand — not the default — is what the
+    // guard's comparison reads; spend stays fine (1,521,920 <= 2,000,000) so
+    // the second refusal is the iteration bound alone.
+    const cfg = loadResidentBounds(boundsManifest({ maxSteeringIterations: 1 }));
+    const guard = createBoundsGuard(cfg, FRONTIER_RATE, 2, sink().emit);
+    expect(guard.maxSolicitations).toBe(2 + 1 * 2);
+    expect(guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 0 })).toEqual({ allowed: true });
+    expect(guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 760_960 })).toEqual({
+      allowed: false,
+      bound: "iterations",
+    });
+    expect(guard.iterations()).toEqual({ build: 1 }); // refused ⇒ not counted
+  });
+
+  test("maxSteeringIterations: 0 (never-solicit) refuses the FIRST post_gate_failure (P27)", () => {
+    const cfg = loadResidentBounds(boundsManifest({ maxSteeringIterations: 0 }));
+    const guard = createBoundsGuard(cfg, FRONTIER_RATE, 2, sink().emit);
+    expect(guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 0 })).toEqual({
+      allowed: false,
+      bound: "iterations",
+    });
+    expect(guard.iterations()).toEqual({});
+  });
+
+  test("a point BOTH over the spend line AND at the iteration max returns the SPEND verdict (P4 stop semantics)", () => {
+    const { guard } = guardWith(8_000_000);
+    const ctx = { runId: "r1", phase: "build", spent: 0 };
+    for (let i = 0; i < 3; i++) expect(guard.check("post_gate_failure", ctx).allowed).toBe(true);
+    // Counter at 3/3 AND 8,000,000 + 760,960 > 8,000,000: the spend refusal
+    // must win — letting the iterations branch (refuse-only, no tripwire)
+    // shadow it would erase a crossed ceiling from the record.
+    expect(guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 8_000_000 })).toEqual({
+      allowed: false,
+      bound: "spend",
+      cause: "spend_ceiling_breach",
+      detail:
+        "projected 760960 µ$ + spent 8000000 µ$ = 8760960 µ$ exceeds effective ceiling 8000000 µ$",
+    });
+    expect(guard.iterations()).toEqual({ build: 3 }); // refused ⇒ not counted
+  });
+
+  test("iterations() returns a COPY — mutating the returned record cannot arm or disarm the guard (P16)", () => {
+    const { guard } = guardWith(8_000_000);
+    guard.check("post_gate_failure", { runId: "r1", phase: "build", spent: 0 });
+    const snap = guard.iterations();
+    expect(snap).toEqual({ build: 1 });
+    // The cast bypasses the Readonly<> return type on purpose: the copy is the
+    // runtime guarantee, and this mutation must not reach the guard's counters.
+    (snap as Record<string, number>).build = 99;
+    expect(guard.iterations()).toEqual({ build: 1 }); // the guard's counters are untouched
+  });
+
+  test("a THROWING emit never converts a verdict into a throw — the returned verdict is the record (P29)", () => {
+    const cfg = loadResidentBounds(boundsManifest());
+    const guard = createBoundsGuard(cfg, FRONTIER_RATE, 2, () => {
+      throw new Error("log sink is down");
+    });
+    // Construction survived its reachability emit; the check verdict comes back.
+    expect(guard.check("run_start", { runId: "r1", spent: 0 })).toEqual({ allowed: true });
   });
 });
 
@@ -644,6 +816,28 @@ describe("integration (leaf-6) — AC1: the pre-flight refusal through createSte
     expect(steering.telemetry.tripwires).toHaveLength(1);
   });
 
+  test("equality boundary through the SEAM: a ceiling of exactly two projections lands the accumulator ON it, never above (P24)", async () => {
+    // Ceiling 1,521,920 buys exactly two 760,960 calls: the second check sees
+    // 760,960 + 760,960 === 1,521,920 — not `>` — so it allows and the meter
+    // lands ON the ceiling. The third (1,521,920 + 760,960) refuses. A `>=`
+    // gate stops one call early and this test fails on s.calls().
+    const s = stepCaller([
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+    ]);
+    const { steering } = steeringWith({ ceiling: 1_521_920, rate: FRONTIER_RATE, caller: s.caller });
+    const pgf = () => ictx({ phase: "build" });
+    expect((await steering.solicit("post_gate_failure", pgf())).action).toBe("proceed");
+    expect((await steering.solicit("post_gate_failure", pgf())).action).toBe("proceed");
+    expect(steering.telemetry.spendMicros).toBe(1_521_920); // exactly AT the ceiling
+    expect((await steering.solicit("post_gate_failure", pgf())).action).toBe("proceed");
+    const t = steering.telemetry;
+    expect(t.status).toBe("stopped");
+    expect(t.spendMicros).toBe(1_521_920); // never above
+    expect(s.calls()).toBe(2);
+  });
+
   test("pre-correction re-gate: a malformed reply that meters past the headroom never gets its correction call", async () => {
     // Self-review fix (AC1's margin): ONE solicitation bills up to two calls
     // (reply + malformed correction), and the SEAM check gated only the
@@ -731,8 +925,43 @@ describe("integration (leaf-6) — AC4: zero-usage replies charge the projection
     });
     expect((await steering.solicit("run_start", ictx())).action).toBe("proceed");
     expect(steering.telemetry.spendMicros).toBe(0); // metered 0 — NOT the 504 projection
+    expect(attributionRows).toHaveLength(1);
     expect(attributionRows[0]).toMatchObject({ role: "resident", unpricedTurns: 0 });
     expect(attributionRows[0]?.costMicroUsd).toBe(0);
+  });
+
+  test("MIXED positive+poisoned usage shapes charge the projection — the gate is the meter's unpriced verdict, not a token scan (P39)", async () => {
+    // {in:-5, out:1e6}: rawTokens(-5) is null, so the METER prices nothing
+    // (unpriced) even though one count is positive — the charge must fire on
+    // that verdict, or the OR-scan bypass this arm exists to close reopens.
+    {
+      const s = stepCaller([{ usage: { inputTokens: -5, outputTokens: 1_000_000 } }]);
+      const { steering, attributionRows } = steeringWith({
+        ceiling: 2_000_000,
+        rate: FRONTIER_RATE,
+        caller: s.caller,
+      });
+      expect((await steering.solicit("run_start", ictx())).action).toBe("proceed");
+      expect(steering.telemetry.spendMicros).toBe(760_960); // the projection, not 0
+      expect(attributionRows).toHaveLength(1);
+      expect(attributionRows[0]).toMatchObject({ role: "resident", unpricedTurns: 1 });
+      expect(attributionRows[0]?.costMicroUsd).toBe(0); // the ledger row stays unpriced
+    }
+    // {in:1e18, out:0}: the input term overflows past MAX_SAFE_INTEGER — the
+    // meter's safe-integer guard prices nothing, the projection is charged.
+    {
+      const s = stepCaller([{ usage: { inputTokens: 1e18, outputTokens: 0 } }]);
+      const { steering, attributionRows } = steeringWith({
+        ceiling: 2_000_000,
+        rate: FRONTIER_RATE,
+        caller: s.caller,
+      });
+      expect((await steering.solicit("run_start", ictx())).action).toBe("proceed");
+      expect(steering.telemetry.spendMicros).toBe(760_960);
+      expect(attributionRows).toHaveLength(1);
+      expect(attributionRows[0]).toMatchObject({ role: "resident", unpricedTurns: 1 });
+      expect(attributionRows[0]?.costMicroUsd).toBe(0);
+    }
   });
 });
 
@@ -820,6 +1049,42 @@ describe("integration (leaf-6) — AC6: below_one_call stops at construction, ne
       verdict: "below_one_call",
     });
   });
+
+  test("a below_one_call guard attached AFTER construction stops with NO tripwire and NO onBoundBreach (P14, the SEAM twin of the construction arm)", async () => {
+    // The runner's documented model: createSteering first, arm `bounds` once
+    // the rate resolves — steering reads deps.bounds LIVE, so mutating the
+    // deps object post-construction is the seam. The construction arm never
+    // saw a bounds, so this below_one_call refusal must land in the SEAM arm
+    // and stop EXACTLY as the construction arm would: status "stopped", no
+    // spend_ceiling_breach tripwire (a misconfiguration is never a runaway),
+    // no observer fire.
+    const breaches: BoundBreachEvent[] = [];
+    const s = stepCaller([{ usage: { inputTokens: 4_000, outputTokens: 1_024 } }]);
+    const deps: Parameters<typeof createSteering>[0] = {
+      caller: s.caller,
+      rate: OUTRAGEOUS_RATE,
+      emitAttribution: () => {},
+      onBoundBreach: (e) => {
+        breaches.push(e);
+      },
+    };
+    const steering = createSteering(deps);
+    expect(steering.telemetry.status).toBe("active"); // the construction arm saw no bounds
+    deps.bounds = createBoundsGuard(
+      loadResidentBounds(
+        boundsManifest({ residentSpendCeilingMicros: DEFAULT_RESIDENT_SPEND_CEILING_MICROS }),
+      ),
+      OUTRAGEOUS_RATE,
+      2,
+      () => {},
+    );
+    expect(deps.bounds.reachability).toBe("below_one_call");
+    expect((await steering.solicit("run_start", ictx())).action).toBe("proceed");
+    expect(steering.telemetry.status).toBe("stopped");
+    expect(steering.telemetry.tripwires).toEqual([]); // ZERO tripwires
+    expect(breaches).toEqual([]); // ZERO onBoundBreach calls
+    expect(s.calls()).toBe(0); // the refusal precedes the call
+  });
 });
 
 describe("integration (leaf-6) — onBoundBreach: the sidecar the runner stops the spawn on", () => {
@@ -879,8 +1144,58 @@ describe("integration (leaf-6) — onBoundBreach: the sidecar the runner stops t
       expect((await steering.solicit("post_gate_failure", pgf())).action).toBe("proceed");
       expect(steering.telemetry.status).toBe("stopped");
       expect(steering.telemetry.tripwires).toHaveLength(1);
+      // P33: the refused point issued NO call — a throwing observer must not
+      // change even the call count, only lose its own push.
+      expect(s.calls()).toBe(2);
     }
   });
+
+  test("an ASYNC-rejecting observer (rejected promise, not a sync throw) loses only the push — stop, tripwire, proceed all stand (P38)", async () => {
+    const s = stepCaller([
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+    ]);
+    const { steering } = steeringWith({
+      ceiling: 2_000_000,
+      rate: FRONTIER_RATE,
+      caller: s.caller,
+      onBoundBreach: () => Promise.reject(new Error("async observer sink down")),
+    });
+    const pgf = () => ictx({ phase: "build" });
+    await steering.solicit("post_gate_failure", pgf());
+    await steering.solicit("post_gate_failure", pgf());
+    expect((await steering.solicit("post_gate_failure", pgf())).action).toBe("proceed");
+    expect(steering.telemetry.status).toBe("stopped");
+    expect(steering.telemetry.tripwires).toHaveLength(1);
+    expect(s.calls()).toBe(2);
+  });
+
+  test("a NEVER-resolving observer cannot wedge the refusal — the push is deadline-bound at ON_BOUND_BREACH_TIMEOUT_MS (P5)", async () => {
+    // Real timers, one bounded wait: withDeadline races the observer against a
+    // 5,000 ms setTimeout, so this completes in ~ON_BOUND_BREACH_TIMEOUT_MS
+    // when correct and hits the 10,000 ms test timeout when the deadline
+    // regresses into a plain await (the wedge PR #263 closed). Fake-timer
+    // control of the module-internal withDeadline is not available in
+    // bun:test, so the derivation assert below is the cheap half of the pin.
+    expect(ON_BOUND_BREACH_TIMEOUT_MS).toBe(INBOX_CALL_TIMEOUT_MS); // one budget, stated once
+    const s = stepCaller([
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+      { usage: { inputTokens: 4_000, outputTokens: 1_024 } },
+    ]);
+    const { steering } = steeringWith({
+      ceiling: 2_000_000,
+      rate: FRONTIER_RATE,
+      caller: s.caller,
+      onBoundBreach: () => new Promise<void>(() => {}),
+    });
+    const pgf = () => ictx({ phase: "build" });
+    await steering.solicit("post_gate_failure", pgf());
+    await steering.solicit("post_gate_failure", pgf());
+    expect((await steering.solicit("post_gate_failure", pgf())).action).toBe("proceed");
+    expect(steering.telemetry.status).toBe("stopped");
+    expect(steering.telemetry.tripwires).toHaveLength(1);
+    expect(s.calls()).toBe(2);
+  }, 10_000);
 
   test("PlacementRefusedError: stopped (never degraded), onBoundBreach carries the exit-97 unenforceable arm", async () => {
     const breaches: BoundBreachEvent[] = [];

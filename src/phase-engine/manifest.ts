@@ -330,8 +330,10 @@ export const PipelineManifestSchema = z
     defaultKeyCapMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     residentRssBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     // 0 is a legal bound (never solicit post_gate_failure); MAX_RETRIES is the
-    // structural ceiling the schema already clamps `retries` to, so an
-    // iteration bound above it can never fire on a schema-valid manifest.
+    // structural ceiling the schema already enforces on `retries` — `.max()`
+    // REJECTS above it, it does not clamp — so a manifest declaring an
+    // iteration bound above MAX_RETRIES cannot parse, and a bound above it
+    // can never fire on a schema-valid manifest.
     maxSteeringIterations: z.number().int().min(0).max(MAX_RETRIES).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })

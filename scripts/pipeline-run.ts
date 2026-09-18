@@ -3918,6 +3918,8 @@ async function main(argv: readonly string[]): Promise<number> {
       // because that const is declared below the arm block (calling it here
       // would hit its temporal dead zone) and steering is undefined here by
       // construction: the refusal precedes startResident, so nothing armed.
+      // residentTelemetryOf (below) is CANONICAL — this inline copy must
+      // track any change to its disabled arm (P23).
       try {
         innerJournal.writeResident({
           status: "disabled",
@@ -3940,7 +3942,27 @@ async function main(argv: readonly string[]): Promise<number> {
       // comes from this run's own rootIdentityKey derivation; `markerPath` above
       // is its #217 F-D1 resolved form, named and unnamed alike) — the poller
       // watches that path and no other.
-      writeTerminalMarker(runId, { ok: false, completedAt: new Date().toISOString() }, markerPath);
+      // P6: the marker write is guarded like every sibling step in this catch
+      // (writeResident, tracer.close). If IT throws (ENOSPC/EACCES/EROFS —
+      // likely on the degraded box this refusal path implies), the throw would
+      // escape past `return 1` to the module-level handler → exit 2 with NO
+      // marker → the poller reads "unknown" forever instead of settled
+      // not-ok. On failure, the fd-2 diagnostic + the seeded resident block
+      // above ARE the record; the run still settles not-ok via exit 1.
+      try {
+        writeTerminalMarker(runId, { ok: false, completedAt: new Date().toISOString() }, markerPath);
+      } catch (markerErr) {
+        writeAll(
+          2,
+          `${JSON.stringify({
+            level: "error",
+            event: "marker_write_failed",
+            runId,
+            requestId,
+            message: markerErr instanceof Error ? markerErr.message : String(markerErr),
+          })}\n`,
+        );
+      }
       // 1, not 2: the marker is on disk, so "settled not-ok" — Run.finish's own
       // exitCode mapping. This return sits OUTSIDE the walk's try/finally (that
       // try opens at the resident-block seed, below), so the finally's claim
@@ -3958,11 +3980,14 @@ async function main(argv: readonly string[]): Promise<number> {
       writeAll(
         2,
         `${JSON.stringify({
+          // P11: the row spreads FIRST — a trailing spread would re-set the
+          // join keys (an undefined runId inside the row gets dropped by
+          // JSON.stringify and the line loses correlation).
+          ...loadedBounds.clampRow,
           level: "info",
           event: "resident_bounds_clamped",
           runId,
           requestId,
-          ...loadedBounds.clampRow,
         })}\n`,
       );
     }
@@ -4012,12 +4037,32 @@ async function main(argv: readonly string[]): Promise<number> {
       // meet, AC6). Construction emits the reachability row exactly once;
       // every later bounds line rides writeAll's fd-2 tee — trace/log stream,
       // never the journal's resident block.
-      const boundsGuard =
-        loadedBounds === undefined
-          ? undefined
-          : createBoundsGuard(loadedBounds, spawned.rate, manifest.phases.length, (line) => {
-              writeAll(2, `${JSON.stringify({ level: "info", event: "resident_bounds", runId, requestId, ...line })}\n`);
-            });
+      // P13: the undefined arm was structurally dead — the AC2a catch above is
+      // the only way loadedBounds stays undefined on an armed path, and it
+      // returns 1 before reaching here. Fail loud anyway: if a future refactor
+      // makes this reachable, steering would construct with bounds:undefined
+      // and an ARMED resident would run unguarded, silently (INV-BND-5). The
+      // typed BoundConfigError rides the module-level handler → exit 2;
+      // residentSpawn is already assigned above, so the process-exit hooks
+      // stop the resident on the way out.
+      if (loadedBounds === undefined) {
+        throw new BoundConfigError(
+          "resident armed without bounds — invariant violated (DF3.6a)",
+          "this is a runner bug, not a manifest fault — report it",
+        );
+      }
+      const boundsGuard = createBoundsGuard(
+        loadedBounds,
+        spawned.rate,
+        manifest.phases.length,
+        (line) => {
+          // P11: the row spreads FIRST — a trailing spread would re-set the
+          // join keys (an undefined runId inside the row gets dropped by
+          // JSON.stringify and the line loses correlation).
+          writeAll(2, `${JSON.stringify({ ...line, level: "info", event: "resident_bounds", runId, requestId })}\n`);
+        },
+        runId,
+      );
       steering = createSteering({
         caller: spawned.caller,
         rate: spawned.rate,
@@ -4039,7 +4084,12 @@ async function main(argv: readonly string[]): Promise<number> {
           // requestId/phase keys present (undefined when absent from the
           // solicit ctx), so a trailing spread would clobber the join keys
           // with undefined and JSON.stringify would DROP them from the line.
-          writeAll(2, `${JSON.stringify({ level: "warn", event: "resident_bound_breach", ...e, runId, requestId })}\n`);
+          // P12: ALL FOUR fixed keys sit after the spread — `...e` is the
+          // engine's own breach event and could equally clobber level/event.
+          writeAll(
+            2,
+            `${JSON.stringify({ ...e, level: "warn", event: "resident_bound_breach", runId, requestId })}\n`,
+          );
           try {
             tracer.trace({
               type: "log",
@@ -4055,10 +4105,26 @@ async function main(argv: readonly string[]): Promise<number> {
           // statements above, and the only binding typed `ResidentSpawn` here.
           // Best-effort — the walk continues regardless (INV-BND-5); the
           // run-down finally's idempotent re-stop is already this file's own
-          // pattern.
+          // pattern. P7: the stop is still swallowed (control flow unchanged)
+          // but a rejection now leaves a record — else telemetry latches
+          // "stopped" while the process may still spend, and nothing
+          // distinguishes stop-failed from stopped. No local deadline: this
+          // file has no timeout helper, and the engine's withDeadline over
+          // its await of this observer bounds the wedge.
           const spawn = residentSpawn;
           if (spawn !== undefined) {
-            return spawn.stop().then(undefined, () => undefined);
+            return spawn.stop().then(undefined, (stopErr: unknown) => {
+              writeAll(
+                2,
+                `${JSON.stringify({
+                  level: "warn",
+                  event: "resident_stop_failed",
+                  runId,
+                  requestId,
+                  message: stopErr instanceof Error ? stopErr.message : String(stopErr),
+                })}\n`,
+              );
+            });
           }
         },
         // DF3.4 AC6: `fleet attach`'s queued messages are folded into the next

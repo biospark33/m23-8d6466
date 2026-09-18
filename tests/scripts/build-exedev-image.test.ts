@@ -1323,7 +1323,17 @@ describe("buildIdFileInputs", () => {
       // resident-ceiling-unfundable pre-provision refusal). Measured on the
       // FINAL tree (post self-review fixes) via the same failing-run receive
       // this file's discipline prescribes — same-commit re-pin.
-      "e42f4352be6b9c75397a3d7b27ab9731ce7e7d8dca93a9285e7232078b9c2508",
+      //
+      // 5d5b84b6: moved from e42f4352 by DF3.6a's review round — the walked
+      // inputs this round edited: `src/phase-engine/steering.ts` (INV-BND-3
+      // mixed-shape charge keyed on metered.unpriced, withDeadline-bounded
+      // onBoundBreach, below_one_call SEAM twin), `src/phase-engine/
+      // resident-bounds.ts` (rate fail-closed validation, fifth-operand
+      // validation, spend-wins precedence, projection_ms, runId row,
+      // iterations() copy), `src/fleet/dispatch.ts` (link-2
+      // resident-cap-above-backstop mirror + unfundable remediation text).
+      // Same failing-run receive on the post-fix tree — same-commit re-pin.
+      "5d5b84b65546db511f4b5628a7574680aae401dc394cd0c4ef9ef4e3c69c8069",
     );
   });
 });

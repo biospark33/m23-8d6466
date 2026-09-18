@@ -618,6 +618,13 @@ nothing), DF3.3.
   fixture suites stay green — the `ingestCostEvent` dead-writer shape.** DF3.1 is done and its
   shipped stamp writes `limitMicroUsd` only; the stamp edit is new work in the done story's file,
   owned here on the DF5.3 setup-gate-emit precedent.
+  (AMENDED 2026-09-18, review round 1: dispatch additionally carries **two admission-time
+  pre-provision refusals** beside the stamp — `resident-ceiling-unfundable` (an admitted
+  ceiling below the resolved resident ceiling, so the box is never billed for a run the
+  in-box engine would refuse at arm) and, from the review round itself,
+  `resident-cap-above-backstop` (INV-BND-2 link 2's host-side mirror: an admitted ceiling
+  above `defaultKeyCapMicroUsd` refuses pre-provision). Both verified zero-provisioning in
+  `tests/fleet/dispatch.test.ts`; both recorded in the Dev Agent Record's review round.)
 - `src/phase-engine/steering.ts` (shared, three-way — **DF3.3 authors** the port and
   its three solicitation points, **DF3.4** adds the `attach` inbox drain + ack append at those same
   points, and **DF3.6 rebases last**. The edits are **enumerated and closed** — no fourth
@@ -659,6 +666,14 @@ nothing), DF3.3.
      implementation (fleet→engine is the allowed import direction) — and the call-failure catch
      gains its `instanceof` arm beside the degrade arm. Same cross-story amendment shape as
      item 5's `lastMemory`.
+  7. **The pre-correction re-gate** (AMENDED 2026-09-18, review round 1 — recorded
+     post-hoc; the edit landed with the self-review that required it): inside the
+     malformed-correction loop, an inline second spend gate comparing
+     `telemetry.spendMicros + projectedPerCallMicros > effectiveCeilingMicros` (never
+     `guard.check` — no double count, no duplicate bounds line) that stops the resident
+     before the correction call issues, closing AC1's margin against an adversarial
+     resident that replies malformed once then validly (one solicitation bills up to two
+     calls; the SEAM gated only the first).
 
   Mirrored in df3-3's Technical Notes and df3-4's Files list.)
 - `src/phase-engine/manifest.ts` — all three bound fields (including `residentRssBytes`, which
@@ -855,6 +870,103 @@ risk HIGH (hub files main/dispatch/steering in the diff — additive deps, all s
 Full suite once at the branch gate: green except one PROVEN pre-existing environmental
 failure (`tests/swarmclaw/mcp-stdio-transport.test.ts` "real binary exposes an HTTP API" —
 reproduced identical on a clean dev worktree, outside this diff's reach).
+
+### Review Findings — round 1 (2026-09-18, bmad-code-review, 7 reviewers)
+
+40 findings patched (23 source, 17 test), 5 deferred, 10 dismissed-as-noise (each
+dismissal verified against source; ledger in the review workspace). Gates after the round:
+tests/phase-engine/ whole + dispatch + build-exedev-image = 1609/0 (1375 + 234 after the
+digest re-pin below), steering 91/0 standalone, tsc clean, biome clean on all nine touched
+files, detect_changes HIGH = the same hub symbols the PR already discloses.
+
+**High-severity patches (both were real, both now pinned by tests):**
+- [x] [Review][Patch] INV-BND-3 mixed-shape bypass — a reply with ONE positive and ONE
+  poisoned/unusable token count (or a positive count tripping the meter's safe-integer
+  guard) metered 0 µ$ AND skipped the fail-safe projection charge; the charge now keys on
+  `metered.unpriced` [src/phase-engine/steering.ts]
+- [x] [Review][Patch] zero/poisoned rate silently disarmed the spend bound and reported it
+  "unreachable" (fail-open); `createBoundsGuard` now refuses construction on any rate term
+  that is not finite > 0 [src/phase-engine/resident-bounds.ts]
+
+**Medium patches:** pre-correction re-gate now also re-gated for spend (kept); `onBoundBreach`
+await deadline-bounded (`ON_BOUND_BREACH_TIMEOUT_MS`, the `withDeadline` pattern) so a hung
+`spawn.stop()` can no longer wedge the serialized solicit chain; AC2a refusal's
+`writeTerminalMarker` wrapped (fs failure → fd-2 `marker_write_failed` + still exit 1,
+never exit-2 marker-absent); `spawn.stop()` rejection now records an fd-2
+`resident_stop_failed` line; fifth operand `maxSteeringIterations` validated in the loader
+(safe integer, 0..MAX_RETRIES — 0 stays legal); spend-breach verdict now wins over an
+iterations refusal at a point where both hold (stop + tripwire, not silent suppression);
+unfundable refusal remediation now warns the reservation holds until the orphan window
+(stranding documented; DF2.8-owned release API named as follow-up); NEW
+`resident-cap-above-backstop` pre-provision mirror for chain link 2; `projection_ms`
+implemented on both row shapes (Observability Contract).
+
+**Low patches:** reachability row carries `runId` (optional guard param); `iterations()`
+returns a copy; below_one_call classification no longer construction-order-dependent
+(the SEAM refusal honors the reachability verdict — no `spend_ceiling_breach` tripwire for
+a config stop); spread-order fixed on three fd-2 line shapes (join keys and `level`/`event`
+can no longer be clobbered); the structurally-dead `loadedBounds === undefined` arm now
+fails loudly instead of pre-wiring silent unguarded steering; deepFreeze covers Map/Set
+contents; stale/overclaiming comments corrected (three stopped-writers, "fifteen not
+sixteen", "Zod rejects not clamps", the guard doc's correction-call exception, the
+"unreachable"-is-an-estimate caveat).
+
+**Test hardening (17):** mixed-shape + safe-integer-overflow charge pins; equality
+boundaries pinned on both the spend gate (`===` ceiling is ALLOWED) and both reachability
+verdicts; a DECLARED `maxSteeringIterations` now provably reaches the guard (1 and 0
+shapes); poisoned `limitMicroUsd` loader arm covered; throwing-`emit` (emitSafe) covered;
+async-rejecting + never-resolving `onBoundBreach` observers covered; per-term Math.round
+pinned in the PROJECTION (0.5 case — DD-9); operand matrix crossed (0/NaN/Infinity cells);
+dispatch equality arm, declared-rung arm, and the above-backstop refusal covered; tautological
+pins removed; `DEFAULT_MAX_STEERING_ITERATIONS < MAX_RETRIES` actually asserted.
+
+**Image digest re-pinned again same-commit** by this round's walked-input edits:
+`e42f4352 → 5d5b84b6` (provenance comment in `tests/scripts/build-exedev-image.test.ts`).
+
+**Deviations recorded this round (story-text amendments):**
+- [x] Files to Modify / steering.ts edit list widened to a SEVENTH item (the
+  pre-correction re-gate, landed with the self-review) — the round's auditor flagged the
+  closed six-item list as contradicted by the shipped seventh edit.
+- [x] Edit-list item 4's named site substituted: the ceiling-side charge lives at the
+  `solicitSerialized` call site, NOT inside `meter`'s `clampTerm` arms — the substituted
+  placement is the correct one (charging inside `meter` would leak the projection into the
+  DF2.12 ledger row and violate the one-spend-truth rule the same item mandates).
+- [x] dispatch Files entry amended: the two admission-time pre-provision refusals are now
+  recorded beside the fill-side stamp (see the AMENDED note above).
+
+**Deferred (checked, tracked in sprint-artifacts/deferred-work.md):**
+- [x] [Review][Defer] duplicate phase names share one iteration counter — under-refusal
+  only (fail-closed), S3-7 config-level precedent; clean fix needs a phase-ordinal through
+  the steering↔guard interface, wider than the sanctioned edit list
+  [src/phase-engine/resident-bounds.ts:318] — deferred, story-recorded limitation (a)
+- [x] [Review][Defer] `lastMemory` dep lands unused — DF3.6b-sanctioned (edit-list item 5)
+  [src/phase-engine/steering.ts] — deferred to DF3.6b
+- [x] [Review][Defer] `residentRssBytes` has no behavioral coverage — provisional;
+  DF3.6b owns enforcement [tests/phase-engine/resident-bounds.test.ts] — deferred to DF3.6b
+- [x] [Review][Defer] tripwire row omits `code`/`bound` keys the Observability Contract
+  names — `ResidentTripwire` is DF3.3's closed type; the contract sentence is a
+  spec-internal contradiction, noted here rather than widened cross-story
+  [src/phase-engine/steering.ts] — deferred, spec note
+- [x] [Review][Defer] admission-reservation release API for the unfundable refusal —
+  `cost-ledger.ts` is DF2.8-owned; remediation text now warns the operator, the API is the
+  follow-up [src/fleet/dispatch.ts] — deferred to DF2.8
+
+**False positives dismissed (verified, 10 — highlights):** the "dispatch reads a different
+ceiling source" HIGH (both ladders are the identical `declared ?? DEFAULT` expression);
+"NaN ceiling disables the refusal" (schema `int().positive().max` + JSON cannot carry NaN);
+"phases.length lacks a zero-guard" (`z.array(...).min(MIN_PHASES)`); "stampResidentBounds
+drops fields" (`resolvedPath` absent-by-design for derived-in-memory content, the
+`stampManifestLimit` precedent); "two ceiling variables never asserted equal" (they are
+different operands by design — `limitMicroUsd` is the AC2b clamp input, `capMicroUsd` the
+chain operand). Full dismissal ledger in the review workspace triage.
+
+**CodeRabbit comment (2026-09-18) — verified correct, fixed:**
+`_bmad-output/workflow-state/qds-dev/df3-6a/state.yaml` line 15 carried `scanned: nothing`
+— a colon+space inside a plain multiline YAML scalar; `yaml.safe_load` was failing on
+exactly that byte. Now an em dash, and the `phase:` scalar is quoted (its ` #263)` was
+being silently truncated into a YAML comment). Sibling files `df2-2/state.yaml` and
+`df3-1/state.yaml` fail `yaml.safe_load` the same way — PRE-EXISTING, outside this PR's
+diff, disclosed for a separate chore.
 
 ---
 

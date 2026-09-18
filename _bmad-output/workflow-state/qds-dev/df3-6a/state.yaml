@@ -1,6 +1,6 @@
 story: df3-6a
 title: Resident Spend Ceiling + Per-Phase Iteration Bound, Enforced by the Engine
-phase: 5-complete (PR #263)
+phase: "5-complete (PR #263)"
 branch: feature/df3-6a-resident-bounds
 base: dev
 target: dev
@@ -12,7 +12,7 @@ research:
     arm+retry+finally regions, dispatch.ts fill/mint chain, resident.ts, budget-gate.ts, ADR
     Appendix A/B, DF3.6b cross-story shapes, fixtures, zod v3, green baselines steering 91 /
     resident-e2e+pipeline-run 94). Six Explore agents dispatched; reports undelivered —
-    firsthand source reads superseded. Reference repos scanned: nothing liftable for engine
+    firsthand source reads superseded. Reference repos scanned — nothing liftable for engine
     µ$ bounds (conceptual/observability patterns only).
 unlazy:
   scope: df3-6a

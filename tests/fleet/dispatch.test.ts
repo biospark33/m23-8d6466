@@ -264,7 +264,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
   // ─── helpers ─────────────────────────────────────────────────────────────────
 
-  function validBrief(overrides: Partial<{ requestId: string; manifestPath: string }> = {}) {
+  function validBrief(
+    overrides: Partial<{ requestId: string; manifestPath: string }> = {},
+    // Extra top-level manifest fields (e.g. a declared residentSpendCeilingMicros)
+    // spread LAST so a test can exercise rung 1 of a two-rung ladder without
+    // re-declaring the whole fixture manifest.
+    manifestFields: Record<string, unknown> = {},
+  ) {
     const manifestPath = join(dir, MANIFEST_REL);
     mkdirSync(dirname(manifestPath), { recursive: true });
     const manifest = {
@@ -275,6 +281,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         { name: "plan", kind: "code", description: "Draft the approach for the change", command: ["true"], maxDurationMs: 10_000, retries: 0 },
         { name: "build", kind: "code", description: "Run the repository test suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
       ],
+      ...manifestFields,
     };
     writeFileSync(manifestPath, JSON.stringify(manifest));
 
@@ -1986,6 +1993,69 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(readdirSync(store.dir)).toHaveLength(0);
     }
     expectSingleRefusalLine("resident-ceiling-unfundable");
+    expect(ledger.closeCalls).toBe(1);
+  });
+
+  test("DF3.6a: an admitted ceiling EXACTLY EQUAL to the resident ceiling proceeds (the ≤ chain admits equality)", async () => {
+    // AC2a's ordering is `residentSpendCeilingMicros ≤ capMicroUsd` — equality
+    // is fundable by the operator ruling, mirrored host-side by the unfundable
+    // guard's strict `<`. A rewrite to `<=` there refuses a run the engine arms
+    // today, and the strictly-below sibling above cannot notice — only this
+    // boundary pin can.
+    const result = await dispatch(validBrief(), deps({ ledgerFactory: () => goodLedger(8_000) }));
+
+    const record = store.get(result.runId);
+    expect(record.extensions?.budget?.admittedCeilingMicroUsd).toBe(8_000);
+    expect(refusalLines()).toHaveLength(0);
+  });
+
+  test("DF3.6a: a DECLARED residentSpendCeilingMicros rung is what the guard reads — not the 8,000 µ$ fallback", async () => {
+    // Rung 1 of the two-rung ladder (declared → shipped fallback). Admission
+    // of 5,000 µ$ is below the 8,000 µ$ fallback, so a dispatch that compared
+    // against DEFAULT_RESIDENT_SPEND_CEILING_MICROS (or hardcoded 8_000 where
+    // the manifest read belongs) refuses unfundable here; against the DECLARED
+    // 4,000 µ$ the run is comfortably fundable and proceeds.
+    const brief = validBrief({}, { residentSpendCeilingMicros: 4_000 });
+
+    const result = await dispatch(brief, deps({ ledgerFactory: () => goodLedger(5_000) }));
+
+    const record = store.get(result.runId);
+    expect(record.extensions?.budget?.admittedCeilingMicroUsd).toBe(5_000);
+    expect(refusalLines()).toHaveLength(0);
+  });
+
+  test("DF3.6a: an admitted ceiling ABOVE the provider backstop refuses BEFORE provisioning (INV-BND-2 link 2)", async () => {
+    // The B1 defence-in-depth guard bounds only the OPERATOR knob
+    // (`deps.capMicroUsd`); the admitted ceiling is the decision's own output,
+    // and a ledger admitting past defaultKeyCapMicroUsd (unbounded issue
+    // override, ledger drift, a gate-default change) would otherwise provision
+    // a box and key the in-box engine refuses bound-config-invalid on — the
+    // post-bill refusal class this PR closes. Link 2's mirror refuses the same
+    // verdict at zero spend, beside link 1's guard above.
+    const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+    driver.create = createSpy;
+    const ledger = goodLedger(60_000_000); // admitted past the 50,000,000 µ$ backstop
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("resident-cap-above-backstop");
+      expect(err.payload?.admittedCeilingMicroUsd).toBe(60_000_000);
+      expect(err.payload?.backstopMicroUsd).toBe(defaultKeyCapMicroUsd);
+      expect(err.message).toContain("provider backstop");
+      // The stranded-reservation loop is what the operator needs BEFORE the
+      // reflexive retry: the remediation names the orphan window that ages
+      // the refusal's own admission out.
+      expect(err.remediation).toContain("orphan window");
+      // Zero provisioning — the same shape link 1's refusal asserts above.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    }
+    expectSingleRefusalLine("resident-cap-above-backstop");
     expect(ledger.closeCalls).toBe(1);
   });
 

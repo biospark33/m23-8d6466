@@ -86,6 +86,17 @@ export const INBOX_CALL_TIMEOUT_MS = 5_000;
  *  remainders, counted separately); both are retried by the NEXT
  *  solicitation's drain, which re-reads the queue in full. */
 export const DRAIN_PASS_TIMEOUT_MS = SOLICIT_TIMEOUT_MS;
+/** Deadline on the `onBoundBreach` observer's push. The pipeline-run
+ *  implementation stops the spawn, and a stop that HANGS — a wedged child
+ *  process, an unkillable cgroup — would hold that await open forever;
+ *  `solicit` serializes every solicitation through one chain, so one hung
+ *  stop wedges every LATER solicitation with no diagnostic, exactly the
+ *  failure mode INBOX_CALL_TIMEOUT_MS's header exists to prevent, one door
+ *  over. Derived from that constant, not new tuning: this is the same
+ *  budget class — a sidecar push, not work. Expiry behaves like observer
+ *  failure: swallowed, the status/tripwire writes that already happened
+ *  stand, and the solicitation proceeds. */
+export const ON_BOUND_BREACH_TIMEOUT_MS = INBOX_CALL_TIMEOUT_MS;
 
 /** The three engine-owned solicitation points — there is no fourth. */
 export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
@@ -504,10 +515,13 @@ export function createSteering(deps: {
   // arm writes NO tripwire: a `spend_ceiling_breach` row here would make a
   // misconfiguration indistinguishable from a loop. The run proceeds
   // deterministic; every later solicitation is refused by the status gate
-  // below, and the guard's check() is never reached. This and the spend
-  // refusal are the ONLY internal writers of "stopped" — no public setter,
-  // because a setter is a path the resident's own tier could reach
-  // (INV-BND-1).
+  // below, and the guard's check() is never reached. The internal writers
+  // of "stopped" are exactly three arms: this construction arm (with its
+  // SEAM twin in the spend-refusal block below, for a guard armed after
+  // construction), `stopForSpend` (the SEAM spend refusal and the
+  // pre-correction re-gate), and DF3.6b's PlacementRefusedError arm — no
+  // public setter, because a setter is a path the resident's own tier could
+  // reach (INV-BND-1).
   if (deps.bounds !== undefined && deps.bounds.reachability === "below_one_call") {
     telemetry.status = "stopped";
   }
@@ -670,7 +684,14 @@ export function createSteering(deps: {
    *  observer is a sidecar fault and must never fail — or wedge the refusal
    *  outcome of — a solicitation whose enforcement already happened. The
    *  telemetry/tripwire writes happen BEFORE this fires, so a lost push loses
-   *  only the push. */
+   *  only the push. DEADLINE-BOUND (PR #263 review) with
+   *  ON_BOUND_BREACH_TIMEOUT_MS: the pipeline-run observer stops the spawn,
+   *  and a hung stop wedged the serialized chain forever — see the
+   *  constant's header. Timeout joins throw in this catch: expiry loses only
+   *  the push, the enforcement writes stand, the solicitation proceeds.
+   *  `withDeadline` is declared further down this closure; this arrow runs
+   *  only from inside `solicitSerialized`, post-construction, so the binding
+   *  is always initialized when reached — no TDZ. */
   const fireOnBoundBreach = async (e: {
     bound: "spend" | "rss";
     allowed: false;
@@ -681,7 +702,11 @@ export function createSteering(deps: {
     phase?: string;
   }): Promise<void> => {
     try {
-      await deps.onBoundBreach?.(e);
+      await withDeadline(
+        Promise.resolve(deps.onBoundBreach?.(e)),
+        "onBoundBreach observer",
+        ON_BOUND_BREACH_TIMEOUT_MS,
+      );
     } catch {
       /* sidecar — the status/tripwire writes are the record */
     }
@@ -750,15 +775,18 @@ export function createSteering(deps: {
    * than eight lines. The losing promise gets a no-op catch BEFORE the race so
    * its late rejection can never surface as an unhandled rejection after the
    * deadline has already refused the caller — the same discipline as that file.
+   * `ms` defaults to INBOX_CALL_TIMEOUT_MS; a caller with its own budget (the
+   * onBoundBreach stop push) names it, so the timeout message cannot quote a
+   * budget the caller did not pass.
    */
-  const withDeadline = async <T>(p: Promise<T>, what: string): Promise<T> => {
+  const withDeadline = async <T>(p: Promise<T>, what: string, ms: number = INBOX_CALL_TIMEOUT_MS): Promise<T> => {
     void p.catch(() => {});
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         p,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${what} timed out after ${INBOX_CALL_TIMEOUT_MS}ms`)), INBOX_CALL_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
         }),
       ]);
     } finally {
@@ -1116,7 +1144,24 @@ export function createSteering(deps: {
       });
       if (!verdict.allowed) {
         if (verdict.bound === "spend") {
-          await stopForSpend(verdict.detail);
+          // AC6 (PR #263 review): a guard armed AFTER construction (deps is
+          // one object; the runner arms `bounds` once the rate resolves — the
+          // documented model) missed the construction arm above, so its
+          // below_one_call refusal lands HERE and must stop the resident
+          // exactly as that arm does: status "stopped", NO
+          // `spend_ceiling_breach` tripwire, no onBoundBreach fire — or a
+          // misconfiguration is re-labeled a runaway, the exact confusion
+          // AC6 forbids. The guard's own reachability row already carries
+          // code:"bound-config-invalid". Nothing else is reachable for this
+          // reachability: an effective ceiling below one projection means
+          // the check above can never allow, so the resident call, its
+          // projection charge, and the pre-correction re-gate are all out
+          // of reach.
+          if (deps.bounds.reachability === "below_one_call") {
+            telemetry.status = "stopped";
+          } else {
+            await stopForSpend(verdict.detail);
+          }
         }
         // An iterations refusal refuses THIS solicitation only — no stop, no
         // tripwire (AC3/INV-BND-5): the one bound that never stops the
@@ -1181,27 +1226,34 @@ export function createSteering(deps: {
         return PROCEED;
       }
       const metered = meter(reply.usage);
-      // DF3.6a INV-BND-3 (AC4): a reply yielding no positive usage — the
-      // usage object ABSENT, a literal {0,0}, or unpriced garbage (any shape
-      // whose token counts are not positive numbers) — is charged the
-      // projected worst case on the CEILING accumulator, never zero: without
-      // this arm a silent resident zeroes its own meter by replying with no
-      // usage and spends unbounded. A POSITIVE-token reply whose per-term
-      // rounding lands at 0 µ$ (ten tokens at 0.08/MTok) is genuinely PRICED
-      // sub-micro-dollar and is NOT charged — its metered figure is real,
-      // and charging it the projection would stop a cheap-call resident far
-      // below the ceiling. The DF2.12 attribution row below keeps its
-      // shipped METERED disposition (absent → unpriced, {0,0} → priced-zero,
-      // unpriced garbage → unpriced) — the projection is ceiling-side
-      // protection and never enters the ledger (one spend truth per basis).
-      // Runs per REPLY: the malformed-correction attempt is also a billed
-      // call. Safe-integer guard matches the meter's own: an unsafe sum
-      // leaves the last exact spendMicros intact instead of corrupting it.
+      // DF3.6a INV-BND-3 (AC4): a reply the METER refused to price — the
+      // usage object ABSENT, a literal {0,0}, or unusable counts — is
+      // charged the projected worst case on the CEILING accumulator, never
+      // zero: without this arm a silent resident zeroes its own meter by
+      // replying with no usage and spends unbounded. The gate is keyed on
+      // the METER'S OWN VERDICT (`unpriced`), not on a positive-token scan
+      // of the raw usage (PR #263 review): `posTokens(in) || posTokens(out)`
+      // is an OR, so a MIXED shape — one positive count beside one poisoned
+      // count ({inputTokens:-5, outputTokens:1000000}), or a positive count
+      // whose term trips the meter's safe-integer guard — meters
+      // {costMicroUsd: 0, unpriced: true} yet SKIPPED the charge, reopening
+      // the exact bypass this arm exists to close. A POSITIVE-token reply
+      // whose per-term rounding lands at 0 µ$ (ten tokens at 0.08/MTok) is
+      // genuinely PRICED sub-micro-dollar (unpriced:false) and is NOT
+      // charged — its metered figure is real, and charging it the projection
+      // would stop a cheap-call resident far below the ceiling. The DF2.12
+      // attribution row below keeps its shipped METERED disposition (absent
+      // → unpriced, {0,0} → priced-zero, unpriced garbage → unpriced) — the
+      // projection is ceiling-side protection and never enters the ledger
+      // (one spend truth per basis). Runs per REPLY: the
+      // malformed-correction attempt is also a billed call. Safe-integer
+      // guard matches the meter's own: an unsafe sum leaves the last exact
+      // spendMicros intact instead of corrupting it.
       const posTokens = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v) && v > 0;
       if (
         deps.bounds !== undefined &&
-        metered.costMicroUsd === 0 &&
-        !(posTokens(reply.usage?.inputTokens) || posTokens(reply.usage?.outputTokens))
+        (metered.unpriced ||
+          (metered.costMicroUsd === 0 && !(posTokens(reply.usage?.inputTokens) || posTokens(reply.usage?.outputTokens))))
       ) {
         const charged = telemetry.spendMicros + deps.bounds.projectedPerCallMicros;
         if (Number.isSafeInteger(charged)) telemetry.spendMicros = charged;

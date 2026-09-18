@@ -2917,15 +2917,60 @@ export async function dispatch(
     // failed assertion on a live box"). The reservation this strands ages out
     // exactly like the no-ceiling arm above (store.create never runs); the
     // SAME ponytail caveat applies if this ever needs a compensating release.
+    //
+    // FEEDBACK LOOP (unlike the unreachable no-ceiling arm, this one FIRES):
+    // the stranded reservation is the issue's ENTIRE remaining admission
+    // headroom — `assertWithinBudget` committed it above, `cost-ledger.ts`
+    // exposes no release API (deliberately; it is DF2.8-owned), and
+    // `store.create` never runs so nothing ever resolves the id. Until the
+    // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`) ages
+    // the reservation out, every dispatch for THIS issue — the operator's
+    // reflexive retry included — reads `remaining: 0` and refuses
+    // `budget-exceeded`, which reads like the top-up failed when it is the
+    // refusal itself holding the headroom. The remediation below therefore
+    // tells the operator to wait out the window or switch issues, not merely
+    // to retry. The durable fix is a ledger-side release API — a DF2.8-owned
+    // follow-up: `admitIssue` gains a compensating release this layer calls
+    // on every pre-provision refusal; until it lands, the window IS the
+    // release.
     if (effectiveCeilingMicros < residentCeilingMicros) {
       throw refuse(
         5,
         "resident-ceiling-unfundable",
         `admitted ceiling ${effectiveCeilingMicros} µ$ is below the manifest's resident spend ceiling ${residentCeilingMicros} µ$ — the in-box engine would refuse bound-config-invalid after the box billed`,
-        `top up the issue budget (.sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}), lower residentSpendCeilingMicros on the task manifest, or pick another issue`,
+        `top up the issue budget (.sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}) or lower residentSpendCeilingMicros on the task manifest, then WAIT — this refusal already committed the issue's admission reservation and the ledger has no release API, so it holds until the orphan window (ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS in src/providers/cost-ledger.ts) ages it out and an immediate retry against THIS issue reads budget-exceeded; wait out the window after the config change, or pick another issue meanwhile`,
         {
           admittedCeilingMicroUsd: effectiveCeilingMicros,
           residentSpendCeilingMicros: residentCeilingMicros,
+          capMicroUsd: decision.capMicroUsd,
+          spentMicroUsd: decision.spentMicroUsd,
+          reservedMicroUsd: decision.reservedMicroUsd,
+        },
+      );
+    }
+    // DF3.6a, INV-BND-2 link 2: the in-box chain is residentSpendCeilingMicros
+    // ≤ capMicroUsd ≤ defaultKeyCapMicroUsd, asserted at arm by
+    // `loadResidentBounds` (src/phase-engine/resident-bounds.ts). The guard
+    // above mirrors link 1 (ceiling ≤ cap); this mirrors link 2 (cap ≤ the
+    // provider backstop). The pre-admission guard earlier in this function
+    // bounds only the OPERATOR knob (`deps.capMicroUsd`); the admitted ceiling
+    // is min(keyCap, remaining), and an unbounded issue override, a ledger
+    // returning admitted past the backstop, or a gate-default change can still
+    // push it over — re-opening the post-bill refusal class this PR closes
+    // (box billed + key minted, then in-box bound-config-invalid). The mirror
+    // lives BESIDE link 1's guard — same moment, same zero-spend verdict — so
+    // upstream drift trips here instead of on a live box. Same reservation
+    // stranding as the arm above; same orphan-window release, same feedback
+    // loop on the retry.
+    if (effectiveCeilingMicros > defaultKeyCapMicroUsd) {
+      throw refuse(
+        5,
+        "resident-cap-above-backstop",
+        `admitted ceiling ${effectiveCeilingMicros} µ$ exceeds the provider backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — the in-box engine would refuse bound-config-invalid after the box billed and the key minted (INV-BND-2 link 2: capMicroUsd ≤ defaultKeyCapMicroUsd)`,
+        `lower the issue budget (.sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}) to the backstop or below, or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it; this refusal strands the issue's reservation until the orphan window ages it out, so an immediate retry against THIS issue reads budget-exceeded`,
+        {
+          admittedCeilingMicroUsd: effectiveCeilingMicros,
+          backstopMicroUsd: defaultKeyCapMicroUsd,
           capMicroUsd: decision.capMicroUsd,
           spentMicroUsd: decision.spentMicroUsd,
           reservedMicroUsd: decision.reservedMicroUsd,
