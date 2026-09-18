@@ -1032,15 +1032,30 @@ export async function walkAuditChain(ref: string, opts: WalkOptions = {}): Promi
               sessionRow === undefined
                 ? null
                 : {
-                    // INV-AUDIT-2: these two columns are written INSIDE the box
-                    // and land verbatim in hop 2's `detail.traceCorrelation`
-                    // AND on every structured log line via `repoSlugFor()`.
-                    // They got neither cap nor redaction.
-                    repoSlug: typeof sessionRow.repo_slug === "string" ? cap(sessionRow.repo_slug) : null,
+                    // RAW, never `cap()`: these two columns feed hop 2's
+                    // EQUALITY JOIN against the record's canonicalised pair,
+                    // and `cap` is the diagnostic chokepoint (redactSecrets
+                    // then cap) — running the join data through it let the
+                    // redactor's ≥40-char token heuristic rewrite a lawful
+                    // `owner/repo` slug (e.g. quantum-digital-solutions/
+                    // qds-audit-demo, exactly 40 units of the token charset)
+                    // to «redacted», and the hop then reported the run's OWN
+                    // slug as a tamper disagreement (INV-AUDIT-1 false
+                    // positive, live 2026-09-18). The columns are bounded at
+                    // the WRITER — `resolveRunCorrelation`'s charset and
+                    // length validation gates every initiateSession — and
+                    // identifiers are INV-AUDIT-2's admitted class ("ids,
+                    // digests, hops, paths and codes"). The `typeof` guard
+                    // stays: the store is a box-written file, and a non-string
+                    // must read as null (corroborates nothing) rather than
+                    // throw the walk.
+                    repoSlug: typeof sessionRow.repo_slug === "string" ? sessionRow.repo_slug : null,
                     // The column is INTEGER; the record side is a string. Both
                     // sides are String()-ed so an uncoerced 42 === "42" cannot
-                    // report tamper on a healthy run.
-                    issueId: sessionRow.issue_id === null || sessionRow.issue_id === undefined ? null : cap(String(sessionRow.issue_id)),
+                    // report tamper on a healthy run. Same no-cap rule: an
+                    // issue number is the admitted class, and the heuristic
+                    // has nothing to say about digits anyway.
+                    issueId: sessionRow.issue_id === null || sessionRow.issue_id === undefined ? null : String(sessionRow.issue_id),
                   };
           } catch (e) {
             sessionError = cap((e as Error).message);
