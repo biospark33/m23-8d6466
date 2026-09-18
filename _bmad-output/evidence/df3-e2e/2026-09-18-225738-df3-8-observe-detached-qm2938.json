@@ -1,0 +1,92 @@
+{
+  "test": "T3.8",
+  "outcome": "fail",
+  "runId": "qds-20260918-f4f34f",
+  "capMicroUsd": 50000,
+  "engineWindowMs": 2700000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "orphan-recovery-file",
+      "path": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t38-MrQI4b/orphan-recovery.json",
+      "note": "{runId, vmName, keyHash} for an out-of-band reaper if this process dies owning a box or key — kept on failure, removed only on full green success"
+    },
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t3.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260918-f4f34f\",\"requestId\":\"d942464c-260c-41ef-9ca3-b4627371dac0\",\"state\":\"ready\",\"vmName\":\"qds-20260918-f4f34f\",\"httpsUrl\":\"https://qds-20260918-f4f34f.exe.xyz\"}",
+      "stderrTail": "9-18T22:57:13.023Z\",\"duration\":60545,\"durationMs\":60545,\"status\":\"ok\",\"runId\":\"qds-20260918-f4f34f\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3811,\"mint_ms\":1479,\"fill_ms\":37911,\"setup_gate_ms\":16043}}\n{\"requestId\":\"d942464c-260c-41ef-9ca3-b4627371dac0\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-18T22:57:13.025Z\",\"duration\":60552,\"durationMs\":60552,\"status\":\"ok\",\"runId\":\"qds-20260918-f4f34f\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260918-f4f34f",
+      "vmName": "qds-20260918-f4f34f"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "a6bc01d8ae6822af45f7c58066d51bba65d81123f52591c950a8b6360224adb8",
+      "limitMicroUsd": 50000,
+      "requestId": "d942464c-260c-41ef-9ca3-b4627371dac0",
+      "recordSlug": "quantum-digital-solutions/qds-factory"
+    },
+    {
+      "phase": "host-plan",
+      "ok": true,
+      "hostRepo": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t38-MrQI4b/host-clone",
+      "keyedBy": "quantum-digital-solutions/qds-factory"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 5,
+      "runVerbMs": 6296,
+      "note": "runFleet resolves on proc.exited — the dispatching host process is GONE from here on; the engine walks under systemd with no host process attached",
+      "stdout": "",
+      "stderrTail": "s qds-run@qds-20260918-f4f34f.service`: the unit is Restart=no, so this failure is terminal and identical on every retry\"}\n{\"requestId\":\"3b0a4b3e-5cf3-47ad-acaf-1a73a03f6295\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-18T22:57:24.525Z\",\"duration\":6133,\"durationMs\":6133,\"status\":\"error\",\"runId\":\"qds-20260918-f4f34f\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 5\n"
+    },
+    {
+      "at": "t3.8-cleanup",
+      "runId": "qds-20260918-f4f34f",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":13}\n{\"requestId\":\"970f6262-a965-4632-a8b3-ff6219820cdb\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-18T22:57:33.138Z\",\"duration\":8521,\"durationMs\":8521,\"status\":\"ok\",\"runId\":\"qds-20260918-f4f34f\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260918-f4f34f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-18T22:57:38.705Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:de9d165e49ec9932e06c2e2c841e654a70ff20017f1cae9b0135dd435521ac5e",
+    "buildId": "289c1f234f14102b",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
