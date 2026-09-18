@@ -268,7 +268,7 @@ function parseUptimeSeconds(content: string): number | null {
  * returns `{kind:"refused"}`. Persists nothing: no record, no cursor, no
  * second marker (INV-IBOX-18).
  */
-export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome> {
+export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome> { // dp:ok the pass-level awaits (driverListing, listWithAnomalies) propagate by design: a failure to complete the pass is the CLI's non-zero via reportCode, never a per-candidate concern
   const passStart = Date.now();
   const summary = emptySummary();
   const el = (): number => Date.now() - passStart;
@@ -314,7 +314,7 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
     sweepLine(deps.requestId, {
       event: "sweep-record-anomaly",
       file: logText(recordListing.skipped[i]),
-      reason: logText(recordListing.skippedReasons[i] ?? ""),
+      reason: logText(recordListing.skippedReasons[i] ?? ""), // dp:ok skippedReasons is same-length-as-skipped by contract; the fallback only shapes an optional reason field on a diagnostics line no consumer branches on
       sweep_ms: el(),
     });
   }
@@ -503,11 +503,12 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
           hostRoot: deps.hostRoot,
           runLock: handle,
           keyApi: chainCtx.keyApi,
-          // The RECORD's dispatch stamp is the join key; `?? ""` — NOT the
-          // sweep's own id — when the record carries none, so the sweep mints
-          // no correlation the run never had (the fleet.ts single-run comment
-          // and the Observability Contract's empty-string rule).
-          requestId: nowRec.requestId ?? "",
+          // The RECORD's dispatch stamp is the join key; the empty-string
+          // fallback — never the sweep's own id — when the record carries
+          // none, so the sweep mints no correlation the run never had (the
+          // fleet.ts single-run comment and the Observability Contract's
+          // empty-string rule).
+          requestId: nowRec.requestId ?? "", // dp:ok "" is the honest value: an unstamped record carries no dispatch correlation and the sweep must not invent one (fleet.ts:1837-1843)
           costLedger: chainCtx.costLedger,
           recordAuditLink: chainCtx.recordAuditLink,
           maxTicks: 1, // a sweep is not a wait — one read, then the next candidate

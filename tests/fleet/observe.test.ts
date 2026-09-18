@@ -127,7 +127,7 @@ class SweepDriver extends FakeDriver {
     return this.intercept(vm, argv, stdin);
   }
 
-  override async destroy(vm: string): Promise<void> {
+  override async destroy(vm: string): Promise<void> { // dp:ok fixture seam — a rejection here fails the test driving it, which is the assertion
     this.destroyed.push(vm);
     if (this.destroyThrows) {
       const { FakeDriverError } = await import("../../src/providers/fake-driver.ts");
@@ -187,14 +187,14 @@ class SweepDriver extends FakeDriver {
 
 /** A driver whose listing cannot be proven complete — the typed start-up refusal. */
 class UnverifiedDriver extends SweepDriver {
-  override async listWithAnomalies(name?: string): Promise<ProviderVmListing> {
+  override async listWithAnomalies(name?: string): Promise<ProviderVmListing> { // dp:ok fixture plumbing — a rejection fails the arranging test, which is the assertion
     const base = await super.listWithAnomalies(name);
     return { ...base, skipped: ["entry-0 (row had no name)"] };
   }
 }
 
 /** Seed an open candidate: record + live fake box, dispatch-stamped. */
-async function seedCandidate(s: RunRecordStore, driver: SweepDriver, runId: string, patch: Record<string, unknown> = {}): Promise<string> {
+async function seedCandidate(s: RunRecordStore, driver: SweepDriver, runId: string, patch: Record<string, unknown> = {}): Promise<string> { // dp:ok fixture seeding — createRun/set rejections fail the arranging test, which is the assertion
   const rec = await createRun(driver, s, { runId, recordAuditLink: () => {} });
   s.set(runId, { requestId: "req-dispatch-stamp", ...patch } as never);
   return rec.vmName!;
@@ -203,7 +203,7 @@ async function seedCandidate(s: RunRecordStore, driver: SweepDriver, runId: stri
 /** Hand-rewrite `createdAt` (immutable via set()) — the run-completion.test.ts hand-edit idiom. */
 function ageRecord(s: RunRecordStore, runId: string, ageMs: number): void {
   const p = s.path(runId);
-  const rec = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+  const rec = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>; // dp:ok parses the record this helper's caller just wrote through the store — a parse failure IS the test failure
   rec.createdAt = new Date(Date.now() - ageMs).toISOString();
   fs.writeFileSync(p, JSON.stringify(rec));
 }
@@ -350,7 +350,7 @@ function fenceViolations(src: string): string[] {
 }
 
 function runRecordImportNames(src: string): string[] {
-  const rrLine = src.match(/(?:^|\n)(\s*import[^;\n]*from\s*["']\.\.\/providers\/run-record\.ts["'];?)/)?.[1] ?? "";
+  const rrLine = src.match(/(?:^|\n)(\s*import[^;\n]*from\s*["']\.\.\/providers\/run-record\.ts["'];?)/)?.[1] ?? ""; // dp:ok "" is the no-run-record-import sentinel (DF3.7's run-completion.test.ts helper, copied verbatim; callers treat "" as absent)
   const braceStart = rrLine.indexOf("{");
   const braceEnd = rrLine.lastIndexOf("}");
   if (braceStart === -1 || braceEnd === -1) return [];
@@ -665,7 +665,7 @@ describe("AC4 the reboot measurement", () => {
       const t0 = Date.now();
       armFakeClock(t0);
       const p = s.store.path("run-edge");
-      const recFile = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+      const recFile = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>; // dp:ok parses the record this test just seeded through the store — a parse failure IS the test failure
       recFile.createdAt = new Date(t0 - 3_600_000).toISOString();
       fs.writeFileSync(p, JSON.stringify(recFile));
       driver.uptimeSeconds = (3_600_000 - PROVISION_LAG_MARGIN_MS) / 1000;
@@ -688,7 +688,7 @@ describe("AC4 the reboot measurement", () => {
       const driver = new SweepDriver(path.join(s.dir, "boxes"));
       await seedCandidate(s.store, driver, "run-badstamp");
       const p = s.store.path("run-badstamp");
-      const recFile = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+      const recFile = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>; // dp:ok parses the record this test just seeded through the store — a parse failure IS the test failure
       recFile.createdAt = "not-a-timestamp";
       fs.writeFileSync(p, JSON.stringify(recFile));
       const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
@@ -745,7 +745,7 @@ describe("AC4 the reboot measurement", () => {
       expect(fs.readFileSync(s.store.path("run-lost"))).toEqual(before);
       const line = lines.find((l) => l.event === "run-lost-to-reboot");
       expect(line).toMatchObject({ runId: "run-lost" });
-      expect(`${String(line!.message)} ${String(line!.remediation ?? "")}`).toContain("fleet teardown run-lost");
+      expect(`${String(line!.message)} ${String(line!.remediation ?? "")}`).toContain("fleet teardown run-lost"); // dp:ok remediation is an optional log field; "" only shapes the concatenation — the assertion is the teardown command, asserted on the line itself
       // The refusal does NOT retire the candidate: the next tick re-enumerates
       // and re-reports it (liveness cannot tell started-then-rebooted from
       // never-started — the unit carries no [Install] section either way).

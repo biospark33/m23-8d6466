@@ -231,7 +231,7 @@ function jsonLines(text: string): { lines: Record<string, unknown>[]; dropped: {
   for (const l of text.split("\n")) {
     if (!l.startsWith("{")) continue;
     try {
-      lines.push(JSON.parse(redactSecrets(l)) as Record<string, unknown>);
+      lines.push(JSON.parse(redactSecrets(l)) as Record<string, unknown>); // dp:ok guarded by this try/catch — dp020_guarded itself returns "guarded" here; the finding is its early-exit pipeline taking SIGPIPE under `set -o pipefail` (exit 141 read as unguarded — tier2-run-completion.live.test.ts:201, the identical shape, exits 141 the same way)
     } catch {
       droppedCount += 1;
       if (firstDropped === "") firstDropped = redactSecrets(l.trim().slice(0, 300));
@@ -251,7 +251,7 @@ test.todoIf(liveTodoOff())(
     // imported `boxMarkerPath` constant, so the variable cannot redirect the
     // probes — the refusal is the tripwire for the shell, not a load-bearing
     // guard.
-    const hostRunRoot = (process.env.QDS_RUN_ROOT ?? "").trim();
+    const hostRunRoot = (process.env.QDS_RUN_ROOT ?? "").trim(); // dp:ok optional env — blank IS "unset", and a non-empty value is REFUSED by name in the throw below; tier2-run-completion.live.test.ts:220 verbatim
     if (hostRunRoot !== "") {
       throw new Error(
         `QDS_RUN_ROOT is exported host-side as ${JSON.stringify(hostRunRoot)}. It is a HOST-side test lever the box never sets, and no live round should inherit one — unset it and re-run.`,
@@ -264,7 +264,7 @@ test.todoIf(liveTodoOff())(
     // — both silently defeating the 50,000 µ$ / 230,000 µ$/h figures this
     // round is approved for.
     for (const name of ["QDS_COST_CONFIG_FILE", "QDS_COST_LEDGER_FILE"]) {
-      const value = (process.env[name] ?? "").trim();
+      const value = (process.env[name] ?? "").trim(); // dp:ok optional env — blank IS "unset", and a non-empty value is REFUSED by name in the throw below; tier2-run-completion.live.test.ts:233 verbatim
       if (value !== "") {
         throw new Error(
           `${name} is exported host-side as ${JSON.stringify(value)}. This round must admit under the cost config it writes into its own workspace and settle box-hours into the ledger beside its records — unset it and re-run.`,
@@ -408,13 +408,13 @@ test.todoIf(liveTodoOff())(
       const rec = store.get(runId);
       expect(rec.vmName).toBe(vmName);
       expect(rec.commitSha).toBe(ctx.sha);
-      expect(rec.keyHash ?? "").not.toBe("");
+      expect(rec.keyHash ?? "").not.toBe(""); // dp:ok the coalescing IS the validation — undefined coerces to the very sentinel this assert rejects (dropping it would let undefined PASS .not.toBe("")); tier2-run-completion.live.test.ts:375 verbatim
       expect(rec.limitMicroUsd).toBe(T38_CAP_MICRO_USD);
       // requestId is the JOIN KEY for the pause event below — `""` would make
       // that comparison pass while joining on nothing, so it is refused here
       // (T5.1's rule at its :420-425).
       expect(typeof rec.requestId).toBe("string");
-      expect(rec.requestId ?? "").not.toBe("");
+      expect(rec.requestId ?? "").not.toBe(""); // dp:ok coaxes undefined into the sentinel this assert rejects — the join key must be non-empty (T5.1's rule); tier2-run-completion.live.test.ts:381 verbatim
       recordRequestId = rec.requestId as string;
       // The minted key's hash completes the reaper's triple — still before any
       // spend-heavy leg (the clone, the run, the sweep all come later).
@@ -424,7 +424,7 @@ test.todoIf(liveTodoOff())(
       // so the host plan below is keyed by the record, never by the brief.
       const slug = rec.extensions?.budget?.repoSlug;
       expect(typeof slug).toBe("string");
-      expect(slug ?? "").not.toBe("");
+      expect(slug ?? "").not.toBe(""); // dp:ok coaxes undefined into the sentinel this assert rejects — the host plan's join key must be non-empty; tier2-run-completion.live.test.ts:391 verbatim
       const recordSlug = typeof slug === "string" ? slug : "";
       evidence.push({
         phase: "record",
@@ -562,9 +562,9 @@ test.todoIf(liveTodoOff())(
           );
         }
       }
-      const activeState = /ActiveState=(\S*)/.exec(unitStdout)?.[1] ?? "";
-      const probeResult = /Result=(\S*)/.exec(unitStdout)?.[1] ?? "";
-      const mainStatus = /ExecMainStatus=(\S*)/.exec(unitStdout)?.[1] ?? "";
+      const activeState = /ActiveState=(\S*)/.exec(unitStdout)?.[1] ?? ""; // dp:ok an unmatched capture reads "" and fails the armed check below BY NAME, with this raw value in the message; tier2-run-completion.live.test.ts:520 verbatim
+      const probeResult = /Result=(\S*)/.exec(unitStdout)?.[1] ?? ""; // dp:ok an unmatched capture reads "" and fails the armed check below BY NAME, with this raw value in the message; tier2-run-completion.live.test.ts:521 verbatim
+      const mainStatus = /ExecMainStatus=(\S*)/.exec(unitStdout)?.[1] ?? ""; // dp:ok an unmatched capture reads "" and fails the armed check below BY NAME, with this raw value in the message; tier2-run-completion.live.test.ts:522 verbatim
       const armed =
         ["activating", "active", "reloading", "deactivating"].includes(activeState) ||
         (activeState === "inactive" && probeResult === "success" && mainStatus === "0");
@@ -757,14 +757,14 @@ test.todoIf(liveTodoOff())(
         approvalJson: redactSecrets(JSON.stringify(driven.extensions?.approval ?? null)),
         spendMicroUsd: driven.spendMicroUsd,
       });
-      expect(driven.closedAt ?? "").not.toBe("");
+      expect(driven.closedAt ?? "").not.toBe(""); // dp:ok coaxes undefined into the sentinel this assert rejects — the chain must have closed the record; tier2-run-completion.live.test.ts:653 verbatim
       expect(driven.extensions?.approval?.state).toBe("awaiting-approval"); // live-mirror: ApprovalState union (src/reverify/approval.ts:28, written by approval-gate.ts — DF3.8 asserts, never writes it)
       // reverify's proposal is `open a PR for run ${runId} at ${headSha}` —
       // the runId mention is what proves the GATE built it, not this test.
-      expect(String(driven.extensions?.approval?.proposal ?? "")).toContain(runId);
-      expect(String(driven.extensions?.approval?.reportId ?? "")).not.toBe("");
-      expect(String(driven.extensions?.approval?.headSha ?? "")).not.toBe("");
-      expect(String(driven.extensions?.approval?.expiresAt ?? "")).not.toBe("");
+      expect(String(driven.extensions?.approval?.proposal ?? "")).toContain(runId); // dp:ok a missing proposal reads "" and FAILS this toContain — the gate must have built it; tier2-run-completion.live.test.ts:657 verbatim
+      expect(String(driven.extensions?.approval?.reportId ?? "")).not.toBe(""); // dp:ok coaxes undefined into the sentinel this assert rejects; tier2-run-completion.live.test.ts:658 verbatim
+      expect(String(driven.extensions?.approval?.headSha ?? "")).not.toBe(""); // dp:ok coaxes undefined into the sentinel this assert rejects — headSha joins to refs/sandbox below; tier2-run-completion.live.test.ts:659 verbatim
+      expect(String(driven.extensions?.approval?.expiresAt ?? "")).not.toBe(""); // dp:ok coaxes undefined into the sentinel this assert rejects; tier2-run-completion.live.test.ts:660 verbatim
       // headSha JOINS to the harvested tip the chain's teardown fetched into
       // the host clone — the approval is bound to real bytes, not to a claim.
       const tip = Bun.spawnSync({
