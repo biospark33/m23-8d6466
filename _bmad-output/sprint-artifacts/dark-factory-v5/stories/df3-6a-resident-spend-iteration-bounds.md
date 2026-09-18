@@ -3,6 +3,14 @@
 **Story Points:** 3
 **Sprint:** v5-S3 (fleet band)
 
+**Status:** done — PR #263 merged to dev 2026-09-18 (`b85b15db`), after review round 1 (40 findings:
+23 source + 17 test patched, 5 deferred with rationale, 10 dismissed-as-noise) and round 2 (3 CodeRabbit
+findings: `createBoundsGuard` refusals — including zero bundled rates — now settle not-ok through the
+load-refusal path with a terminal marker, pinned by a new zero-rate e2e leg; the stale
+`onBoundBreach` known-limitation retired; `releaseAdmission`'s stranded-headroom claim corrected).
+Full suite green except the PROVEN pre-existing `tests/swarmclaw/mcp-stdio-transport.test.ts`
+environmental failure (reproduced identical on a clean dev worktree, outside this diff's reach).
+
 > **Split provenance.** This story is the first half of **DF3.6 "Resident-Agent Bounds —
 > Iterations, RSS, and an Absolute Spend Ceiling Enforced by the Engine"** (3 pts, last authored
 > 2026-08-20), split on **2026-09-08** by the QDS story-review campaign at the **provability seam**.

@@ -1,0 +1,57 @@
+{
+  "test": "DF2.10-AC4-registry-auth",
+  "tier": 1,
+  "outcome": "fail",
+  "privateRef": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+  "probeRef": "ghcr.io/quantum-digital-solutions/qds-e2e-authprobe@sha256:63834813f3f0f7e29f5b04e80eadc3cc8598b0e9a84c52857c4803c9a15a10e8",
+  "phases": [
+    {
+      "phase": "posture-ratified",
+      "postureFile": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t1reg-TsBwZd/exedev-posture.json",
+      "expiry": "2026-09-24T21:26:21.560Z",
+      "scope": "read:packages"
+    },
+    {
+      "phase": "negative-control",
+      "vm": "e2e-t1regneg-mu61hoc82fom",
+      "outcome": "threw",
+      "ms": 1751,
+      "code": "create-failed",
+      "error": "ssh exe.dev new --name e2e-t1regneg-mu61hoc82fom --image ghcr.io/quantum-digital-solutions/qds-e2e-authprobe@sha256:63834813f3f0f7e29f5b04e80eadc3cc8598b0e9a84c52857c4803c9a15a10e8 exited 1: "
+    },
+    {
+      "phase": "negative-control-listed",
+      "listed": false
+    },
+    {
+      "phase": "test-error",
+      "error": "ssh exe.dev new --name e2e-t1regpos-mu61hoc8bb58 --image ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67 exited 1: "
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regneg-mu61hoc82fom",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regpos-mu61hoc8bb58",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-17T21:26:32.176Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": false,
+    "note": "AC4 builds its own drivers (no preflight): the positive leg boots the private mirror, byte-identical to the repo pin by digest. The negative leg pins a separate never-pulled probe image and boots nothing."
+  }
+}

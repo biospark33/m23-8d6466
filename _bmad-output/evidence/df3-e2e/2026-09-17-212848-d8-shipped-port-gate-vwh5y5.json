@@ -1,0 +1,89 @@
+{
+  "test": "D8",
+  "outcome": "pass",
+  "runId": "e2e-d8-mu61kfr6atss",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-d8-mu61kfr6atss",
+      "requestId": "8b4e6d21-3c7a-4f09-9d52-6a1f0b3e7c48",
+      "commitSha": "17287d98b29ab1220859108787210c2d59016dc7"
+    },
+    {
+      "phase": "mint",
+      "ok": true,
+      "keyHash": "fc3e7a6801b3b0c08f61f2ed70bce628eaca94175c14805b8ea811e3e0d7e320"
+    },
+    {
+      "phase": "df2.5-teardown",
+      "exitCode": 0,
+      "stderrTail": "us\":\"ok\",\"outcome\":\"ran\",\"revoke_ms\":837}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"credential.verify\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:40.439Z\",\"duration\":441,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"step\":\"verify\",\"keyHashPrefix\":\"fc3e7a68\",\"durationMs\":441,\"outcome\":\"ok\",\"verify_ms\":441}\n{\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:40.439Z\",\"duration\":0,\"operation\":\"audit-link.record\",\"requestId\":\"8b4e6d21-3c7a-4f09-9d52-6a1f0b3e7c48\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"repoSlug\":\"e2e-private/test\",\"hop\":\"run-credential\",\"event\":\"verify-revoked\",\"subjectKind\":\"credential-key\",\"outcome\":\"inserted\",\"message\":\"audit link inserted: run e2e-d8-mu61kfr6atss hop run-credential.verify-revoked\"}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"teardown.verify\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:39.998Z\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"step\":\"verify\",\"driver\":\"exedev\",\"duration\":441,\"durationMs\":441,\"status\":\"ok\",\"outcome\":\"ran\",\"verify_ms\":441}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"provider.destroy\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.299Z\",\"duration\":2860,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"driver\":\"exedev\",\"verb\":\"destroy\",\"durationMs\":2860,\"outcome\":\"ok\",\"driver_call_ms\":2860}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"teardown.destroy\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:40.439Z\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"step\":\"destroy\",\"driver\":\"exedev\",\"duration\":2860,\"durationMs\":2860,\"status\":\"ok\",\"outcome\":\"ran\",\"destroy_ms\":2860}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"run-record.close\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.300Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"driver\":null,\"verb\":\"close\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"cost-ledger.token-ingest-summary\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.300Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"logPath\":\"/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-d8-EY1RP0/runs/e2e-d8-mu61kfr6atss-artifacts/e2e-d8-mu61kfr6atss.engine.log\",\"rowsRead\":0,\"rowsInserted\":0,\"rowsDuplicate\":0,\"rowsUnpriced\":0,\"rowsRefused\":0,\"log_read_ms\":0,\"durationMs\":0,\"outcome\":\"tokens-not-harvested\",\"reason\":\"no readable harvested engine log at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-d8-EY1RP0/runs/e2e-d8-mu61kfr6atss-artifacts/e2e-d8-mu61kfr6atss.engine.log (ENOENT) — the DF2.5 artifacts pull failed or the box died before harvest, so this run's token spend is unrecorded, not zero\"}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"cost-ledger.ingest\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.302Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"repoSlug\":\"e2e-private/test\",\"issueId\":\"1\",\"role\":null,\"kind\":\"box_hours\",\"costMicroUsd\":797,\"unpriced\":0,\"durationMs\":1,\"outcome\":\"inserted\",\"ingest_ms\":1}\n{\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.302Z\",\"duration\":0,\"operation\":\"audit-link.record\",\"requestId\":\"8b4e6d21-3c7a-4f09-9d52-6a1f0b3e7c48\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"repoSlug\":\"e2e-private/test\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"inserted\",\"message\":\"audit link inserted: run e2e-d8-mu61kfr6atss hop run-box.teardown\"}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"teardown.close\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.299Z\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":3,\"durationMs\":3,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":3}\n{\"requestId\":\"d4ed8d9d-0372-41d3-b107-a67f51100958\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:28:43.303Z\",\"duration\":7414,\"durationMs\":7414,\"status\":\"ok\",\"runId\":\"e2e-d8-mu61kfr6atss\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ledger-rows",
+      "rows": [
+        {
+          "run_id": "e2e-d8-mu61kfr6atss",
+          "kind": "box_hours",
+          "cost_micro_usd": 797,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "record-at-gate-entry",
+      "vmName": "e2e-d8-mu61kfr6atss",
+      "closedAt": "2026-09-17T21:28:43.299Z",
+      "keyHash": "fc3e7a6801b3b0c08f61f2ed70bce628eaca94175c14805b8ea811e3e0d7e320"
+    },
+    {
+      "phase": "gate",
+      "outcome": "requested"
+    },
+    {
+      "phase": "pause-event",
+      "event": {
+        "requestId": "8b4e6d21-3c7a-4f09-9d52-6a1f0b3e7c48",
+        "operation": "fleet.pause",
+        "agentId": null,
+        "timestamp": "2026-09-17T21:28:44.842Z",
+        "duration": 5,
+        "durationMs": 5,
+        "status": "ok",
+        "runId": "e2e-d8-mu61kfr6atss",
+        "event": "pause",
+        "state": "awaiting-approval",
+        "outcome": "requested",
+        "dispatchRequestId": "8b4e6d21-3c7a-4f09-9d52-6a1f0b3e7c48",
+        "record_write_ms": 3
+      }
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-d8-mu61kfr6atss",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-17T21:28:48.042Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

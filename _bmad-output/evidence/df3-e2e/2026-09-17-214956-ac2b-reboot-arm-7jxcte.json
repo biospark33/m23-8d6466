@@ -1,0 +1,104 @@
+{
+  "test": "AC2b",
+  "outcome": "pass",
+  "name": "e2e-ac2b-reboot-mu62bjvxi83k",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "name": "e2e-ac2b-reboot-mu62bjvxi83k"
+    },
+    {
+      "phase": "conf-pre",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$",
+      "stderrTail": ""
+    },
+    {
+      "phase": "dir-pre",
+      "exitCode": 0,
+      "stdout": "700 exedev exedev 1789681778",
+      "stderrTail": ""
+    },
+    {
+      "phase": "boot-id-pre",
+      "exitCode": 0,
+      "stdout": "795d791c-5845-4b87-ba97-030450999938",
+      "stderrTail": ""
+    },
+    {
+      "phase": "engine-unit-declarative",
+      "exitCode": 0,
+      "stdout": "33:After=systemd-tmpfiles-setup.service\n34:Requires=systemd-tmpfiles-setup.service\n55:AssertPathIsDirectory=/run/steering",
+      "stderrTail": ""
+    },
+    {
+      "phase": "reboot-verb",
+      "exitCode": 0,
+      "stdout": "",
+      "stderrTail": ""
+    },
+    {
+      "phase": "reboot-poll",
+      "rotated": true,
+      "waitedMs": 2152,
+      "attempts": 30
+    },
+    {
+      "phase": "dir-post",
+      "exitCode": 0,
+      "stdout": "700 exedev exedev 1789681786",
+      "stderrTail": ""
+    },
+    {
+      "phase": "conf-post",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$",
+      "stderrTail": ""
+    },
+    {
+      "phase": "tmpfiles-journal-this-boot",
+      "exitCode": 0,
+      "stdout": "Starting systemd-tmpfiles-setup.service - Create Volatile Files and Directories...\nFinished systemd-tmpfiles-setup.service - Create Volatile Files and Directories.",
+      "stderrTail": ""
+    },
+    {
+      "phase": "no-qds-units",
+      "exitCode": 0,
+      "stdout": "0",
+      "stderrTail": ""
+    },
+    {
+      "phase": "verdict",
+      "ok": true,
+      "note": "/run/steering recreated at boot by systemd-tmpfiles (dir state + this-boot journal); zero qds units ran; engine dependency verified declaratively"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": [
+        "e2e-ac2b-reboot-mu62bjvxi83k"
+      ],
+      "ownBox": "e2e-ac2b-reboot-mu62bjvxi83k"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-ac2b-reboot-mu62bjvxi83k",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-17T21:49:56.687Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

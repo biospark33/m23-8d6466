@@ -1,0 +1,22 @@
+{
+  "test": "T1.6b",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "busy",
+      "code": "run-locked",
+      "stale": false,
+      "remediation": "wait for that invocation to finish — or, only if pid 90694, held 0s is gone: rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t16b-5zP7Td/runs/e2e-t16b-busy-mu61gyr9a25r.lock"
+    },
+    {
+      "phase": "stale",
+      "code": "run-locked",
+      "stale": true,
+      "remediation": "no live process holds it (pid 90694 is not running, held 0s) — rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t16b-5zP7Td/runs/e2e-t16b-busy-mu61gyr9a25r.lock to clear the stale lock, then re-run"
+    }
+  ],
+  "writtenAt": "2026-09-17T21:25:48.460Z",
+  "image": {
+    "note": "T1.6b never creates a box — the substrate is host lock files + real process lifecycles"
+  }
+}

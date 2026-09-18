@@ -1,0 +1,104 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "qds-20260915-5e3be8",
+  "capMicroUsd": 50000,
+  "windowMs": 2700000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t3.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260915-5e3be8\",\"requestId\":\"4e92d944-d797-4bb4-bdb5-b46cd1fb1fcd\",\"state\":\"ready\",\"vmName\":\"qds-20260915-5e3be8\",\"httpsUrl\":\"https://qds-20260915-5e3be8.exe.xyz\"}",
+      "stderrTail": "18:24:45.872Z\",\"duration\":100984,\"durationMs\":100984,\"status\":\"ok\",\"runId\":\"qds-20260915-5e3be8\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":1,\"create_ms\":50559,\"mint_ms\":1570,\"fill_ms\":27651,\"setup_gate_ms\":19512}}\n{\"requestId\":\"4e92d944-d797-4bb4-bdb5-b46cd1fb1fcd\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-15T18:24:45.873Z\",\"duration\":100989,\"durationMs\":100989,\"status\":\"ok\",\"runId\":\"qds-20260915-5e3be8\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260915-5e3be8",
+      "vmName": "qds-20260915-5e3be8"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "45d5f6b37d5d03a4eb8aae6e08aaf9db04ad262fbd48d80a603e2659972ef789",
+      "limitMicroUsd": 50000,
+      "requestId": "4e92d944-d797-4bb4-bdb5-b46cd1fb1fcd",
+      "recordSlug": "quantum-digital-solutions/qds-factory"
+    },
+    {
+      "phase": "host-plan",
+      "ok": true,
+      "hostRepo": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t28-Dxdaq4/host-clone",
+      "keyedBy": "quantum-digital-solutions/qds-factory"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20260915-5e3be8",
+      "stderrTail": "5-b46cd1fb1fcd\",\"outcome\":\"started\",\"vm\":\"qds-20260915-5e3be8\",\"unit\":\"qds-run@qds-20260915-5e3be8.service\",\"printed\":true}\n{\"requestId\":\"c0db7c1a-0103-446d-b240-ef877026864d\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-15T18:24:55.103Z\",\"duration\":4282,\"durationMs\":4282,\"status\":\"ok\",\"runId\":\"qds-20260915-5e3be8\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "pre-observe-marker",
+      "markerPath": "/run/qds-run/qds-20260915-5e3be8/journal/final.json",
+      "expectedRunId": "qds-20260915-5e3be8",
+      "kind": "absent"
+    },
+    {
+      "phase": "observe-verb",
+      "exitCode": 6,
+      "observeMs": 22723,
+      "windowMs": 2700000,
+      "stdoutTail": "{\"runId\":\"qds-20260915-5e3be8\",\"kind\":\"chain-failed\",\"step\":\"teardown\"}",
+      "stderrTail": "ds-20260915-5e3be8 failed at step teardown: run qds-20260915-5e3be8 is not closed — the VM lifetime is not final and the destroy is unconfirmed\",\"remediation\":\"the teardown aborted with the record still open and the box possibly alive — inspect the run (`fleet status`) and re-run teardown before anything else\"}\n{\"requestId\":\"b2e5e6bc-e7b4-44b9-a464-2c9566ada710\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-09-15T18:25:18.862Z\",\"duration\":22546,\"durationMs\":22546,\"status\":\"error\",\"runId\":\"qds-20260915-5e3be8\",\"verb\":\"observe\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 6\n"
+    },
+    {
+      "at": "t2.8-cleanup",
+      "runId": "qds-20260915-5e3be8",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "d\",\"ingest_ms\":0}\n{\"requestId\":\"077a78c2-1dba-4123-a750-041336e455ce\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-15T18:25:18.961Z\",\"duration\":14,\"durationMs\":14,\"status\":\"ok\",\"runId\":\"qds-20260915-5e3be8\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260915-5e3be8",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "workspace-kept",
+      "workspace": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t28-Dxdaq4",
+      "reason": "RED round — forensics kept (bundle + records under runs/)"
+    }
+  ],
+  "writtenAt": "2026-09-15T18:25:22.849Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

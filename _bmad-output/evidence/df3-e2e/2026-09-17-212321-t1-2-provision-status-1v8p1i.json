@@ -1,0 +1,72 @@
+{
+  "test": "T1.2",
+  "outcome": "pass",
+  "runId": "e2e-t12-mu61dcxr6gz2",
+  "phases": [
+    {
+      "phase": "createRun",
+      "ok": true,
+      "runId": "e2e-t12-mu61dcxr6gz2",
+      "vmName": "e2e-t12-mu61dcxr6gz2"
+    },
+    {
+      "phase": "box-in-list",
+      "count": 1
+    },
+    {
+      "phase": "status-read",
+      "runId": "e2e-t12-mu61dcxr6gz2",
+      "state": "not-running",
+      "exitCode": 0,
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "not-running"
+        }
+      ]
+    },
+    {
+      "phase": "status-all",
+      "exitCode": 0,
+      "attempt": 1,
+      "stdout": "{\"runId\":\"e2e-t12-mu61dcxr6gz2\",\"vmName\":\"e2e-t12-mu61dcxr6gz2\",\"httpsUrl\":\"https://e2e-t12-mu61dcxr6gz2.exe.xyz\",\"createdAt\":\"2026-09-17T21:23:01.295Z\",\"state\":\"not-running\"}"
+    },
+    {
+      "phase": "approval-echo-unprobed",
+      "exitCode": 0,
+      "runId": "e2e-t12a-mu61dm9i4frr",
+      "vmName": "e2e-t12-mu61dcxr6gz2",
+      "state": "live"
+    },
+    {
+      "phase": "approval-echo-closed",
+      "runId": "e2e-t12a-mu61dm9i4frr",
+      "deferredTo": "finally"
+    },
+    {
+      "at": "t1.2-cleanup",
+      "runId": "e2e-t12-mu61dcxr6gz2",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "refusalCode": "cost-config-absent-using-defaults",
+      "stderrTail": "lose_ms\":3}\n{\"requestId\":\"f7827210-2d81-49a2-acb3-0634a279005a\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-17T21:23:18.933Z\",\"duration\":5309,\"durationMs\":5309,\"status\":\"error\",\"runId\":\"e2e-t12-mu61dcxr6gz2\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-17T21:23:21.179Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

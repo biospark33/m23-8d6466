@@ -533,13 +533,16 @@ authorizing-record digest coverage are why this story is 6 points, not 4.
 
 ## Status
 
-`in-progress` — code review **round 3** complete (PR #258, 2026-09-17). Rounds 1 and 2
-landed as `7bb6c221` / `c6800cfa`; round 3 ran 15 parallel reviewers over an 11-chunk
-diff and patched 93 findings across 11 fix clusters. Full suite green (5,972 pass / 0
-fail), `bunx tsc --noEmit` and `bunx biome check` clean, `detect_changes` blast radius
-confined to this story's own modules. Fifteen of the sixteen DoD boxes are now ticked;
-the MANDATORY live e2e demo remains **deferred by operator** (handoff at
-`_bmad-output/plans/df5-3-live-e2e-handoff.md`), so the story is not `done`.
+`done` — PR #258 merged to dev 2026-09-17 (`4603d1a3`), after three adversarial review
+rounds (rounds 1-2 landed as `7bb6c221` / `c6800cfa`; round 3 ran 15 parallel reviewers
+over an 11-chunk diff and patched 93 findings across 11 fix clusters). Full suite green
+(5,972 pass / 0 fail), `bunx tsc --noEmit` and `bunx biome check` clean, `detect_changes`
+blast radius confined to this story's own modules. The operator-deferred live e2e demo
+(the last open DoD box) **ran pre-merge 2026-09-17** per the handoff plan
+(`_bmad-output/plans/df5-3-live-e2e-handoff.md`), operator-confirmed complete; evidence in
+`_bmad-output/evidence/df5-3/` (walk-1, walk-2, walk-2b, walk-3 audit chains + human
+outputs + run-record). Status reconciled against git history 2026-09-18 — this section
+had still read `in-progress` past the merge.
 
 ## Review Findings
 

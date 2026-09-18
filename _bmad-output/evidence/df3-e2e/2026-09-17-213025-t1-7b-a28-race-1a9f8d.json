@@ -1,0 +1,72 @@
+{
+  "test": "T1.7b",
+  "outcome": "pass",
+  "runId": "e2e-t17b-mu61ku8decc3",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17b-mu61ku8decc3",
+      "keyHash": "7fd92d8ff36b177118da56f24e20dd6ffe9e33e262c4f8bf9b72b41a8bcdedf1",
+      "harvest": "harvested"
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      }
+    },
+    {
+      "phase": "window",
+      "expiresAt": "2026-09-17T21:30:22.960Z",
+      "waitMs": 58724
+    },
+    {
+      "phase": "race-a",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"e2e-t17b-mu61ku8decc3\",\"outcome\":\"already-decided\",\"state\":\"timed-out\",\"approverId\":\"system:timeout\",\"decidedAt\":\"2026-09-17T21:30:22.960Z\",\"reason\":\"the approval window closed with no decis",
+      "timeoutLines": 0
+    },
+    {
+      "phase": "race-b",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"e2e-t17b-mu61ku8decc3\",\"outcome\":\"already-decided\",\"state\":\"timed-out\",\"approverId\":\"system:timeout\",\"decidedAt\":\"2026-09-17T21:30:22.960Z\",\"reason\":\"the approval window closed with no decis",
+      "timeoutLines": 1
+    },
+    {
+      "phase": "race-verdict",
+      "timeoutCount": 1
+    },
+    {
+      "phase": "reinvocation",
+      "exitCode": 0,
+      "timeoutLines": 0
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t17b-mu61ku8decc3",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-17T21:30:25.958Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

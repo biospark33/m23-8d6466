@@ -1,0 +1,84 @@
+{
+  "round": "DF5.3 N6 — retest after fixing findings 1 and 2",
+  "writtenAt": "2026-09-17T11:40:00Z",
+  "verdict": "DEMO PASSES — chain COMPLETE, exit 0, on both a re-walk and a freshly produced run",
+  "fixes": [
+    {
+      "finding": 1,
+      "hop": "run-bundle",
+      "file": "src/audit/chain.ts",
+      "change": "Hash the bundle Buffer directly instead of sha256Hex(bytes.toString(\"latin1\")). Bun's CryptoHasher encodes a string argument as UTF-8, so the latin1 round-trip expanded every byte >= 0x80 and could never match harvest.ts's sha256File.",
+      "regressionTest": "tests/audit/chain.test.ts — the bundle fixture now contains bytes >= 0x80. The previous fixture was the ASCII literal `bundle-bytes-${runId}\\n`, for which the latin1 round-trip is a no-op; that is why the offline suite was green while every real (binary) bundle mismatched.",
+      "provenLive": true
+    },
+    {
+      "finding": "2A",
+      "hop": "run-issue",
+      "file": "src/audit/chain.ts",
+      "change": "Authority inverted. The hop now resolves from the host admission record (extensions.budget.repoSlug/issueId) and treats the harvested in-box trace as corroboration, reported in detail.corroboration as \"confirmed\" | \"unavailable\" with a reason. A record-vs-trace DISAGREEMENT remains broken, preserving the INV-AUDIT-1 tamper check. Restores consistency with INV-AUDIT-5 (\"the in-box gate results are a claim, never authority\").",
+      "provenLive": true
+    },
+    {
+      "finding": "2B",
+      "files": ["src/fleet/dispatch.ts", "scripts/pipeline-run.ts"],
+      "change": "ENGINE-SIDE ONLY. Dispatch has written (repoSlug, issueId, issueUrl) into the delivered run-context.json since DF3.1 — verified: `git diff src/fleet/dispatch.ts` contains zero non-comment added lines, and the committed HEAD already emits all three fields at the witness write. The defect was entirely that scripts/pipeline-run.ts read the witness three times (cap ceiling, argv derivation, resident brief) and never once for the correlation, so the dispatched shape fell through to the bare startSession. The fix adds witnessCorrelationBeside, which validates through the EXISTING resolveRunCorrelation (not a second opinion, so slug charset / issue bounds / case-folding cannot drift between the flag and witness carriers), refuses a half-correlation (INV-RUN-3), treats an absent pair as a pre-field witness and falls back to startSession, and otherwise calls tracer.initiateSession — reusing the write-once INV-RUN-2 fill. The DF1.8 flag ladder and RUN_ID_CONFLICT are untouched: the correlation travels on the WITNESS, never on the identity flags. The dispatch.ts edit is documentation of that contract, nothing more.",
+      "provenLive": false,
+      "pairingDebt": "UNPROVABLE FROM THIS BRANCH BY DESIGN, and the debt is engine-only. The in-box engine is `qds-engine run <runId>` running on the IMAGE's pinned bun — baked into ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67, not shipped from the working tree. An edit to scripts/pipeline-run.ts cannot reach a box until the image is rebuilt and re-pinned, and the publish workflow refuses a non-dry run off a feature branch by environment branch policy. Run 2's sessions row is therefore still {repo_slug: null, issue_id: null} and hop 2 reports corroboration \"unavailable\" — the correct, designed outcome for a bare run. Verified live by run 2. Because dispatch needed no change, NOTHING host-side is pending: after the post-merge publish + pin adoption ritual, one live run should flip corroboration to \"confirmed\" with no further code change. That single run is the whole remaining proof obligation.",
+      "doesNotAffectChainCompleteness": true
+    }
+  ],
+  "offlineGates": {
+    "tsc": "exit 0",
+    "biome": "exit 0, 6 files",
+    "suites": "tests/audit/ + tests/scripts/qds-audit.test.ts + tests/fleet/dispatch.test.ts + tests/phase-engine/pipeline-run.test.ts + tests/providers/harvest.test.ts",
+    "pass": 338,
+    "fail": 0
+  },
+  "walks": [
+    {
+      "label": "re-walk of the pre-fix merged PR (free, no dispatch)",
+      "ref": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/2",
+      "runId": "qds-20260916-01d5c5",
+      "complete": true,
+      "exitCode": 0,
+      "wallSeconds": 0.548,
+      "runIssueCorroboration": "unavailable",
+      "note": "Same on-disk evidence that produced BROKEN before the fixes. The only variable is the walker."
+    },
+    {
+      "label": "fresh run produced entirely after the fixes",
+      "ref": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/4",
+      "runId": "qds-20260917-3a0ce9",
+      "issueId": 3,
+      "complete": true,
+      "exitCode": 0,
+      "wallSeconds": 0.412,
+      "mergedAt": "2026-09-17T11:39:05Z",
+      "runIssueCorroboration": "unavailable",
+      "runBundleStatus": "resolved",
+      "note": "All nine walkable hops resolved, hop 10 void. run-bundle resolved against a real binary bundle — the defect-1 regression proven on fresh substrate."
+    }
+  ],
+  "negativeProofPostFix": {
+    "exitCode": 1,
+    "typedCode": "audit-store-absent",
+    "fileStillAbsent": true
+  },
+  "refusalsThatCostNothing": [
+    "run-2 first attempt refused exit 5 budget-exceeded: issue #1 had spent 238604 / 50000 µ$, dominated by box-hours at the operator-configured 3600000 µ$/h. Resolved by dispatching against a fresh issue rather than raising the cap — the gate was working.",
+    "The GitHub issue created for run 2 landed as #3, not #2: issues and pull requests share one numbering space and PR #2 took that slot. The brief was corrected before dispatch."
+  ],
+  "cleanup": {
+    "boxesRemaining": 0,
+    "keyHashesBefore": 7,
+    "keyHashesAfter": 7,
+    "keysLeaked": 0,
+    "fleetLockPresent": false
+  },
+  "openFindingsNotAddressedThisRound": [
+    "Finding 3 (HIGH): run records store the lowercased canonical repoSlug but .factory allowlists are looked up by exact match, so correctly-cased operator config fails with no-host-plan AFTER teardown. Worked around by registering both spellings; the real fix is to canonicalise the lookup key in resolveHostPlan and resolveRepoEntry.",
+    "Finding 4 (MEDIUM): cross-repository dispatch needs the target's base commit fetched into the factory checkout by hand or harvest dies missing-prerequisite, because fill's bundle-push builds in a temp scratch dir while harvest verifies in process.cwd().",
+    "Finding 5 (LOW): hostRoot must be spelled in canonical filesystem case on case-insensitive volumes.",
+    "Observed but not investigated: teardown reported spend-divergence on run 2 (recorded token spend 0 µ$ vs ledger-derived 1065 µ$). The provider-authoritative capture returned 0 while the bridge ingested real token rows."
+  ]
+}

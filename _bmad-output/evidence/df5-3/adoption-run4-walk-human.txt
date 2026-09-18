@@ -1,0 +1,66 @@
+{"agentId":null,"timestamp":"2026-09-18T02:50:08.576Z","duration":4,"operation":"audit-store.open","requestId":"17948dc9-e7f3-4a0f-8778-c1f0cd616154","durationMs":4,"status":"ok","auditPath":".sandbox/audit.db","outcome":"opened","message":"opened .sandbox/audit.db for the walk — no-create probe, inode-verified attach, schema asserted; nothing was created or migrated"}
+{"agentId":null,"timestamp":"2026-09-18T02:50:08.581Z","duration":2,"operation":"audit-link.record","requestId":"894bcb72-837e-4560-9826-4aec24875c8d","durationMs":2,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"pr-run","event":"walk-observed","subjectKind":"run-record.pr","outcome":"inserted","message":"audit link inserted: run qds-20260918-cc93a3 hop pr-run.walk-observed"}
+{"requestId":"20465541-74f3-4dcc-84d9-1b484807787b","operation":"cost-ledger.open","agentId":null,"timestamp":"2026-09-18T02:50:08.585Z","duration":1,"status":"ok","mode":"read-only","ledgerPath":".sandbox/cost-ledger.db","outcome":"opened","durationMs":1,"ledgerOpenMs":1,"message":"opened .sandbox/cost-ledger.db read-only — no mkdir, chmod, mode assert, schema or persistent pragma effect was performed; busy_timeout is connection-local (INV-COST-7)"}
+{"agentId":null,"timestamp":"2026-09-18T02:50:08.591Z","duration":1,"operation":"audit-link.record","requestId":"894bcb72-837e-4560-9826-4aec24875c8d","durationMs":1,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-reverify","event":"walk-observed","subjectKind":"reverify-report","outcome":"inserted","message":"audit link inserted: run qds-20260918-cc93a3 hop run-reverify.walk-observed"}
+{"agentId":null,"timestamp":"2026-09-18T02:50:08.591Z","duration":0,"operation":"audit-link.record","requestId":"894bcb72-837e-4560-9826-4aec24875c8d","durationMs":0,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-approval","event":"walk-observed","subjectKind":"run-record.approval","outcome":"inserted","message":"audit link inserted: run qds-20260918-cc93a3 hop run-approval.walk-observed"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":335,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"pr-run","per_hop_ms":335,"outcome":"resolved","message":"hop pr-run → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":3,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-issue","per_hop_ms":3,"outcome":"resolved","message":"hop run-issue → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":2,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-cost","per_hop_ms":2,"outcome":"resolved","message":"hop run-cost → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":1,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-credential","per_hop_ms":1,"outcome":"resolved","message":"hop run-credential → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":0,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-box","per_hop_ms":0,"outcome":"resolved","message":"hop run-box → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":1,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-bundle","per_hop_ms":1,"outcome":"resolved","message":"hop run-bundle → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":2,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-reverify","per_hop_ms":2,"outcome":"resolved","message":"hop run-reverify → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":0,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-approval","per_hop_ms":0,"outcome":"resolved","message":"hop run-approval → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":1,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"run-gate-evidence","per_hop_ms":1,"outcome":"resolved","message":"hop run-gate-evidence → resolved"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.hop","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":0,"status":"ok","runId":"qds-20260918-cc93a3","repoSlug":"quantum-digital-solutions/qds-audit-demo","hop":"memory-retain-receipt","per_hop_ms":0,"outcome":"void","message":"hop memory-retain-receipt → void"}
+{"requestId":"7fbb1b5f-38d7-4b46-96a1-d5308fd5f4a8","operation":"audit-chain.verdict","agentId":null,"timestamp":"2026-09-18T02:50:08.592Z","duration":349,"status":"ok","ref":"https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/10","refKind":"pr-url","complete":true,"brokenHops":[],"pr_fetch_ms":326,"per_hop_ms":{"pr-run":335,"run-issue":3,"run-cost":2,"run-credential":1,"run-box":0,"run-bundle":1,"run-reverify":2,"run-approval":0,"run-gate-evidence":1,"memory-retain-receipt":0}}
+run qds-20260918-cc93a3
+  pr-run [resolved]
+    status: resolved
+    subject: https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/10
+    evidence: .sandbox/runs/qds-20260918-cc93a3.json
+    digest: 266b3604bcc555163dc816d20e33c56ec9d42991b1d980293d9610c73426d517
+  run-issue [resolved]
+    status: resolved
+    subject: quantum-digital-solutions/qds-audit-demo#9
+    evidence: .sandbox/runs/qds-20260918-cc93a3.json
+  run-cost [resolved]
+    status: resolved
+    subject: qds-20260918-cc93a3
+    evidence: .sandbox/cost-ledger.db
+    totalMicroUsd: 141082
+    perRole: {"box-hours":138970,"lead":0,"resident":112,"worker":2000}
+  run-credential [resolved]
+    status: resolved
+    subject: 092e4b5f5bcee04636563c9e8c9fb18302a1c68882d95edcd79e87c46007734c
+    link: #3712
+    keyHash: 092e4b5f5bcee04636563c9e8c9fb18302a1c68882d95edcd79e87c46007734c
+    keyHashPrefix: 092e4b5f
+  run-box [resolved]
+    status: resolved
+    subject: qds-20260918-cc93a3
+    link: #3711
+  run-bundle [resolved]
+    status: resolved
+    subject: .sandbox/runs/qds-20260918-cc93a3.bundle#ce79c405a7abb14202ddf1f66cef12379532e1a45ec1ad7cba272c2c4b2aee4c
+    evidence: .sandbox/runs/qds-20260918-cc93a3.bundle
+    digest: a7beb8d457321e308efc3f658da57b97bb1443c77c19ead486f3903e35f91bac
+    link: #3716
+  run-reverify [resolved]
+    status: resolved
+    subject: rv-qds-20260918-cc93a3-2026-09-18t02-49-30-702z-gyiyex
+    evidence: .sandbox/reverify/qds-20260918-cc93a3.jsonl
+    digest: 440de2e044719234500f91042941c4ad04495f23111baabddc50019537408f7d
+  run-approval [resolved]
+    status: resolved
+    subject: df53-demo-operator@2026-09-18T02:49:51.924Z
+    evidence: .sandbox/runs/qds-20260918-cc93a3.json
+    digest: 345ffd51db13d8d25b9d133103bf7ceceef369ccdd1584bfdc37650c11890977
+  run-gate-evidence [resolved]
+    status: resolved
+    subject: 894bcb72-837e-4560-9826-4aec24875c8d
+    evidence: .sandbox/runs/qds-20260918-cc93a3-artifacts/trace/trace.db
+  memory-retain-receipt [void]
+    status: void
+    OQ-4 unresolved — Hindsight has never booted on this host (arm64 libpq/openssl@3; :8888 collides with a local Jupyter); step-6 memory wiring is outside the v5 horizon
+chain: COMPLETE (https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/10, pr-url)

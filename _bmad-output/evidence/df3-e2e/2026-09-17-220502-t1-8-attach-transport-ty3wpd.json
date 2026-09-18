@@ -1,0 +1,165 @@
+{
+  "test": "T1.8",
+  "outcome": "pass",
+  "runId": "qds-20260917-164c4c",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260917-164c4c\",\"requestId\":\"8168f5a2-16ce-4725-bb90-11b4499fdd27\",\"state\":\"ready\",\"vmName\":\"qds-20260917-164c4c\",\"httpsUrl\":\"https://qds-20260917-164c4c.exe.xyz\"}",
+      "stderrTail": "9-17T22:04:04.361Z\",\"duration\":44981,\"durationMs\":44981,\"status\":\"ok\",\"runId\":\"qds-20260917-164c4c\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3864,\"mint_ms\":1428,\"fill_ms\":23220,\"setup_gate_ms\":15129}}\n{\"requestId\":\"8168f5a2-16ce-4725-bb90-11b4499fdd27\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-17T22:04:04.363Z\",\"duration\":44987,\"durationMs\":44987,\"status\":\"ok\",\"runId\":\"qds-20260917-164c4c\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260917-164c4c",
+      "vmName": "qds-20260917-164c4c"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "9a1cfe256d4835014a67ca75e0bcb5aa4ec2b00f00959784e6f74a52c425f958",
+      "limitMicroUsd": 50000,
+      "requestId": "8168f5a2-16ce-4725-bb90-11b4499fdd27"
+    },
+    {
+      "phase": "run-writable-probe",
+      "exitCode": 0,
+      "stdout": "WRITABLE",
+      "stderrTail": ""
+    },
+    {
+      "phase": "inbox-pre-engine",
+      "confirmed": true,
+      "waitedMsPerAttempt": [
+        942,
+        2500
+      ],
+      "waitedMs": 2500
+    },
+    {
+      "phase": "round-trip",
+      "wallMs": 6658,
+      "attachExits": [
+        0,
+        0,
+        0
+      ],
+      "runExit": 0,
+      "runStdout": "started: qds-20260917-164c4c"
+    },
+    {
+      "phase": "inbox-after-acks",
+      "lineCount": 3
+    },
+    {
+      "phase": "acks-file",
+      "rows": [
+        {
+          "messageId": "b90e063d-f44e-46ed-84ae-5bca5864ee3d",
+          "ackedAt": "2026-09-17T22:04:12.972Z",
+          "point": "run_start"
+        },
+        {
+          "messageId": "f1b68245-d8ea-4472-a660-84b768bd999a",
+          "ackedAt": "2026-09-17T22:04:12.973Z",
+          "point": "run_start"
+        },
+        {
+          "messageId": "90fa4938-1c90-4140-a6de-9c475ddb5bc7",
+          "ackedAt": "2026-09-17T22:04:12.973Z",
+          "point": "run_start"
+        }
+      ]
+    },
+    {
+      "phase": "settle-poll",
+      "runId": "qds-20260917-164c4c",
+      "state": "ok",
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 2,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 3,
+          "exitCode": 0,
+          "state": "ok"
+        }
+      ]
+    },
+    {
+      "phase": "engine-settled",
+      "state": "ok"
+    },
+    {
+      "phase": "attach-over-ceiling",
+      "exitCode": 2,
+      "messageChars": 4001,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"--message is 4001 chars once escaped, over the 4000-char ceiling\",\"remediation\":\"shorten the message — steering guidance is a directive, not a document\"}\n{\"requestId\":\"9df7c2a4-d0d7-407a-8b77-656c41e96e28\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-17T22:04:46.846Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"qds-20260917-164c4c\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": [
+        "qds-20260917-164c4c"
+      ],
+      "ownBox": "qds-20260917-164c4c"
+    },
+    {
+      "at": "t1-8-cleanup",
+      "runId": "qds-20260917-164c4c",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":13}\n{\"requestId\":\"693ca739-8fed-474e-aeb5-c749a038b74a\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-17T22:04:57.978Z\",\"duration\":8618,\"durationMs\":8618,\"status\":\"ok\",\"runId\":\"qds-20260917-164c4c\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260917-164c4c",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260917-164c4c",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-17T22:05:02.464Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

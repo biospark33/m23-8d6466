@@ -1,0 +1,51 @@
+run qds-20260916-01d5c5
+  pr-run [resolved]
+    status: resolved
+    subject: https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/2
+    evidence: .sandbox/runs/qds-20260916-01d5c5.json
+    digest: 211616d8989f98fae1c3ff182c0a07f941de8a1a16f1acc1dce595c0cc4e3970
+  run-issue [broken]
+    status: broken
+    expected: issue correlation on a PR-rooted walk
+    actual: sessions.repo_slug and sessions.issue_id are NULL
+    admission required the issue ref, so NULL correlation on a PR-bearing run cannot arise — fail closed
+    evidence: .sandbox/runs/qds-20260916-01d5c5-artifacts/trace/trace.db
+  run-cost [resolved]
+    status: resolved
+    subject: qds-20260916-01d5c5
+    evidence: .sandbox/cost-ledger.db
+    totalMicroUsd: 238604
+    perRole: {"box-hours":227979,"lead":0,"resident":73,"worker":10552}
+  run-credential [resolved]
+    status: resolved
+    subject: 68179b447b3e4353468188bf08331918f0dcde54b06ad2ea1d5fa2beec10c303
+    link: #2849
+    keyHash: 68179b447b3e4353468188bf08331918f0dcde54b06ad2ea1d5fa2beec10c303
+    keyHashPrefix: 68179b44
+  run-box [resolved]
+    status: resolved
+    subject: qds-20260916-01d5c5
+    link: #2848
+  run-bundle [evidence-mismatch]
+    status: evidence-mismatch
+    expected: e7912cc51570ca64a5acf2190d6206bf503cfad3bd569e7fc6cd70fc11126d1c
+    actual: c945b39b34383bddd4fcbe730a053dca40a13652bc9d11fd43a40a3a601daa01
+    evidence: .sandbox/runs/qds-20260916-01d5c5.bundle
+  run-reverify [resolved]
+    status: resolved
+    subject: rv-qds-20260916-01d5c5-2026-09-16t21-20-54-448z-37kc3x
+    evidence: .sandbox/reverify/qds-20260916-01d5c5.jsonl
+    digest: 3a62ec09846373d291e4fa2574ebb35b99ef2eaa0d4092d6b4cf7cbc6b8acc09
+  run-approval [resolved]
+    status: resolved
+    subject: df53-demo-operator@2026-09-16T21:20:59.941Z
+    evidence: .sandbox/runs/qds-20260916-01d5c5.json
+    digest: 362ebb069ea9ce4932e24313e14d49d7092c9a34070fb88b4ba812abb1494eb8
+  run-gate-evidence [resolved]
+    status: resolved
+    subject: 1df4fc92-7ed3-4898-bbf7-e2d438f0f15d
+    evidence: .sandbox/runs/qds-20260916-01d5c5-artifacts/trace/trace.db
+  memory-retain-receipt [void]
+    status: void
+    OQ-4 unresolved — Hindsight has never booted on this host (arm64 libpq/openssl@3; :8888 collides with a local Jupyter); step-6 memory wiring is outside the v5 horizon
+chain: BROKEN (2 broken hop(s): run-issue, run-bundle)

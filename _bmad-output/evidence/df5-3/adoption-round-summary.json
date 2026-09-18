@@ -1,0 +1,20 @@
+{
+  "round": "Eleventh-pin adoption + DF5.3 N6 finding-2B corroboration closeout",
+  "writtenAt": "2026-09-18T02:55:00Z",
+  "verdict": "COMPLETE — chain walks green with corroboration 'confirmed' on the first factory-produced PR from the eleventh-pin image",
+  "sequence": [
+    "PR #258 merged → publish run 35293469648 refused at the engine stage's resolution probe: Could not resolve ../src/providers/step-log.ts — the Dockerfile's enumerated COPY set had fallen behind the engine's import graph",
+    "Convergence commit 91fd14c3: five COPYs added (src/providers/{step-log,cap-rejection,run-record,fs-atomic}.ts + src/swarmclaw/), workflow both lists updated, walk digest re-pinned f145ef42 → 48d3b237, Dockerfile content pin → 23edf4b9",
+    "Publish 35296406698 reached gate B and printed the pair; adoption commit 1c0bbeb7 (digest sha256:de9d165e…, buildId 289c1f234f14102b) at all three sites; healing run 35297079260 completed success",
+    "Private mirror re-pushed: qds-exedev-private:build-289c1f234f14102b; digest-addressed private@sha256:de9d165e resolves an OCI manifest",
+    "Run 3 (issue #6, runId qds-20260918-cb2148, PR #7): first dispatch on the new image. Walker bug found and fixed (5936845): hop 2 ran the correlation join through cap() = redactSecrets+cap, and LONG_TOKEN_RE /[A-Za-z0-9+/=_.:-]{40,}/ ate the exactly-40-char slug quantum-digital-solutions/qds-audit-demo → INV-AUDIT-1 false positive. After the fix, hop 2 = resolved with corroboration 'confirmed'. Chain stayed BROKEN on hops 7/8 only because the operator ran reverify twice (two report lines sharing one reverifyId — hop 7's by-design ambiguity refusal).",
+    "Run 4 (issue #9, runId qds-20260918-cc93a3, PR #10, single fleet-observe pass): chain COMPLETE, exit 0, twice, wall 0.53 s, corroboration 'confirmed', hop 10 void with OQ-4 reason.",
+    "Negative: --audit-db at an absent path → typed audit-store-absent (exit 2), file still absent"
+  ],
+  "knownIssuesHit": [
+    "Setup gate B first-boot pi race: 2 of 4 dispatches refused at item B (pi --list-models: No models available — registry initializing); both boxes torn down cleanly, budget caps consumed the affected issues exactly as the gate intends. Filed for its own fix.",
+    "redactSecrets LONG_TOKEN_RE false-positives on org/repo slugs >= 40 chars (latent everywhere the redactor runs; not weakened under pressure — filed separately)"
+  ],
+  "cleanup": { "boxesRemaining": 0, "keyHashesBefore": 7, "keyHashesAfter": 7, "leaked": 0, "fleetLock": false },
+  "spend": { "run3SpendMicroUsd": "see .sandbox/runs/qds-20260918-cb2148.json", "run4SpendMicroUsd": 2184, "capMicroUsdPerKey": 50000, "withinCap": true }
+}

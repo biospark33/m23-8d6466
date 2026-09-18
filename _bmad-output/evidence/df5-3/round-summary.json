@@ -1,0 +1,177 @@
+{
+  "round": "DF5.3 N6 — produce and walk a real merged factory PR",
+  "writtenAt": "2026-09-17T11:00:00Z",
+  "verdict": "DEMO BROKEN — 8/10 hops resolve; 2 product defects block a COMPLETE chain",
+  "tree": {
+    "repo": "QDS-Factory",
+    "branch": "feature/df5-3-audit-chain-extended",
+    "headSha": "dc34786312d296fda89ca000802709637a8ed31f",
+    "note": "PR #258 was OPEN, not merged, contrary to the handoff. The audit-chain code exists only on this branch, so the round ran from it."
+  },
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67",
+    "buildId": "a095d2629d5bcc09",
+    "overriddenBy": null,
+    "isRepoPin": true
+  },
+  "target": {
+    "repoSlug": "Quantum-Digital-Solutions/qds-audit-demo",
+    "visibility": "private",
+    "seedSha": "97c27f9f8018d16293a9e8117f80eab1e50e14a3",
+    "issue": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/issues/1"
+  },
+  "run": {
+    "runId": "qds-20260916-01d5c5",
+    "requestId": "1df4fc92-7ed3-4898-bbf7-e2d438f0f15d",
+    "vmName": "qds-20260916-01d5c5",
+    "keyHashPrefix": "68179b44",
+    "inBoxHeadSha": "0241bf914de28fa256abd46d16b6b9f234ca989f",
+    "closedAt": "2026-09-16T21:20:42.098Z"
+  },
+  "pr": {
+    "url": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/2",
+    "number": 2,
+    "headRef": "qds/qds-20260916-01d5c5",
+    "createdAt": "2026-09-16T21:21:05.608Z",
+    "mergedAt": "2026-09-17T10:58:59Z",
+    "state": "MERGED"
+  },
+  "authorizationOrdering": {
+    "reportCompletedAt": "2026-09-16T21:20:55.152Z",
+    "decidedAt": "2026-09-16T21:20:59.941Z",
+    "prCreatedAt": "2026-09-16T21:21:05.608Z",
+    "strictlyIncreasing": true,
+    "note": "AC7 strict preflight satisfied: completedAt < decidedAt < prCreatedAt."
+  },
+  "spend": {
+    "totalMicroUsd": 238604,
+    "perRole": { "box-hours": 227979, "lead": 0, "resident": 73, "worker": 10552 },
+    "tokenMicroUsd": 10625,
+    "hasTokenRows": true,
+    "providerRecordedMicroUsd": 9834,
+    "capMicroUsd": 50000,
+    "withinCap": true,
+    "note": "box-hours priced from the operator-authored .sandbox/cost-config.json boxHourRateMicroUsd (3600000 µ$/h); it is a local rate, not a vendor invoice."
+  },
+  "walk": {
+    "command": "bun scripts/qds-audit.ts https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/2",
+    "wallSeconds": 0.496,
+    "under30s": true,
+    "exitCode": 1,
+    "hopCount": 10,
+    "nullHops": 0,
+    "jsonParsesAsChainReport": true,
+    "hop10": {
+      "status": "void",
+      "reasonMatchesOQ4Verbatim": true
+    },
+    "hops": {
+      "pr-run": "resolved",
+      "run-issue": "broken",
+      "run-cost": "resolved",
+      "run-credential": "resolved",
+      "run-box": "resolved",
+      "run-bundle": "evidence-mismatch",
+      "run-reverify": "resolved",
+      "run-approval": "resolved",
+      "run-gate-evidence": "resolved",
+      "memory-retain-receipt": "void"
+    }
+  },
+  "secondWalk": {
+    "statusDrift": 0,
+    "digestsIdentical": true,
+    "note": "First-observation digest rows for pr-run / run-reverify / run-approval are stable across walks; no spurious evidence-mismatch."
+  },
+  "negativeProof": {
+    "command": "bun scripts/qds-audit.ts <pr-url> --audit-db /tmp/qds-df53-nonexistent-audit.db",
+    "exitCode": 1,
+    "typedCode": "audit-store-absent",
+    "fileStillAbsent": true
+  },
+  "cleanup": {
+    "boxesRemaining": 0,
+    "keyHashesBefore": 7,
+    "keyHashesAfter": 7,
+    "keysLeaked": 0,
+    "roundKeyStillListed": false,
+    "fleetLockPresent": false
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "BLOCKER",
+      "hop": "run-bundle",
+      "title": "The walker's bundle digest is computed through a latin1->utf8 round-trip, so it can never match the emitted file hash for a binary bundle",
+      "site": "src/audit/chain.ts — hop6bundle: sha256Hex(bytes.toString(\"latin1\"))",
+      "evidence": {
+        "bundleFileSha256": "e7912cc51570ca64a5acf2190d6206bf503cfad3bd569e7fc6cd70fc11126d1c",
+        "emittedAtBundleVerify": "e7912cc51570ca64a5acf2190d6206bf503cfad3bd569e7fc6cd70fc11126d1c",
+        "walkerComputed": "c945b39b34383bddd4fcbe730a053dca40a13652bc9d11fd43a40a3a601daa01",
+        "hashOfBuffer": "e7912cc51570ca64a5acf2190d6206bf503cfad3bd569e7fc6cd70fc11126d1c",
+        "hashOfLatin1String": "c945b39b34383bddd4fcbe730a053dca40a13652bc9d11fd43a40a3a601daa01",
+        "bundleContainsHighBytes": true
+      },
+      "analysis": "harvest.ts emits detail.sha256 = sha256File(hostBundle), the true file hash. The walker re-derives it as sha256Hex(bytes.toString(\"latin1\")); Bun's CryptoHasher.update(string) encodes as UTF-8, so every byte >= 0x80 expands to two bytes. A git bundle is binary, so the two values disagree for every real bundle and the hop reports evidence-mismatch unconditionally.",
+      "fix": "Hash the Buffer directly rather than a latin1 string round-trip.",
+      "reproducedOffline": true
+    },
+    {
+      "id": 2,
+      "severity": "BLOCKER",
+      "hop": "run-issue",
+      "title": "The dispatch->run engine invocation is structurally bare, so sessions.repo_slug/issue_id are NULL on every dispatched run, which hop 2 fails closed on for PR-rooted walks",
+      "site": "scripts/pipeline-run.ts deriveInBoxArgv (\"Correlation flags are deliberately absent: the in-box invocation is bare.\") vs src/audit/chain.ts hop run-issue",
+      "evidence": {
+        "harvestedSessionsRow": { "request_id": "1df4fc92-7ed3-4898-bbf7-e2d438f0f15d", "repo_slug": null, "issue_id": null },
+        "walkerDiagnostic": "admission required the issue ref, so NULL correlation on a PR-bearing run cannot arise — fail closed",
+        "ledgerRowsCarryCorrelation": { "repoSlug": "quantum-digital-solutions/qds-audit-demo", "issueId": "1" }
+      },
+      "analysis": "deriveInBoxArgv passes --run-id and deliberately omits --repo-slug/--issue; RUN_ID_CONFLICT in the same file refuses --repo-slug alongside --run-id, so the correlated shape is unreachable from fleet dispatch/run. The correlation the walker requires therefore never reaches the in-box tracer, even though dispatch admitted on (repoSlug, issueId) and the cost ledger records both. The walker's not-applicable escape (BARE_RUN_NULL_CORRELATION_REASON) fires only for the bare run-id ref form, never for a PR URL.",
+      "fix": "Either propagate the correlation into the in-box sessions row (dispatch already has it in the witness), or let hop 2 accept the dispatched-run shape the way it accepts the bare-run one. This is a design decision, not a one-liner.",
+      "reproducedOffline": false
+    },
+    {
+      "id": 3,
+      "severity": "HIGH",
+      "stage": "reverify / open-pr",
+      "title": "Run records store the lowercased canonical repoSlug but .factory allowlists are looked up by exact match, so correctly-cased operator config fails after teardown",
+      "evidence": {
+        "recordRepoSlug": "quantum-digital-solutions/qds-audit-demo",
+        "operatorAllowlistKey": "Quantum-Digital-Solutions/qds-audit-demo",
+        "observedFailure": "reverify verdict=error code=no-host-plan, raised after the box was destroyed and the record closed"
+      },
+      "analysis": "canonicalRepoSlug lowercases the slug into the run record, while resolveHostPlan and resolveRepoEntry both do Object.hasOwn(index.repos, repoSlug). An operator who registers the repository under GitHub's actual casing gets a green dispatch, a green run, a successful harvest and teardown, and then a no-host-plan veto with the box already gone. Worked around this round by adding both spellings to .factory/{pipeline,repos}.json.",
+      "fix": "Canonicalise the lookup key on both allowlist reads, or canonicalise once at registration."
+    },
+    {
+      "id": 4,
+      "severity": "MEDIUM",
+      "stage": "harvest",
+      "title": "Cross-repository dispatch needs the target's base commit fetched into the factory checkout by hand, or harvest dies missing-prerequisite",
+      "analysis": "fill's bundle-push builds its bundle in a temp scratch dir (hostBundle in src/providers/exedev/fill.ts), so the factory repo never acquires the target repo's objects. harvest then runs `git bundle verify` in process.cwd() — the factory checkout — against a bundle whose prerequisite is the target's base commit. Worked around with: git fetch <target-url> <seedSha>:refs/qds-demo/seed before harvest. Every prior live round targeted QDS-Factory itself, where the prerequisite is present by construction, so this path has evidently never been exercised.",
+      "fix": "Have harvest fetch the prerequisite, or run the quarantine fetch in a repo that already has it."
+    },
+    {
+      "id": 5,
+      "severity": "LOW",
+      "stage": "operator setup",
+      "title": "hostRoot must be spelled in canonical filesystem case",
+      "analysis": "On a case-insensitive macOS volume, hostRoot=/Users/steve/qds-factory passes resolve() but fails loadManifest's realpath beneath-root walk, which reports the canonical /Users/steve/QDS-Factory. Caught pre-spend here; mid-round it would surface as a no-host-plan veto after teardown."
+    }
+  ],
+  "roundSetupNotes": [
+    "manifestPath in the brief resolves against the FACTORY checkout, not the target repo — the manifest is host-authored by design (same INV-RV-1 posture as reverify's host plan).",
+    "Only pipeline.yaml and run-context.json are delivered into the box; the roster is NOT. The host roster (dirname(manifestPath)/roster.yaml) feeds the setup gate, while the phase's own spec.roster resolves from the target checkout. Both files are required, in two different places.",
+    "Dispatch caps runBudgetMs at a caller ceiling of 599,998 ms; the manifest was fitted to 570,000 ms (required 565,000).",
+    "The code phase's declared testCommand is what produced the single gate_results row that let hop 9 resolve; without it hop 9 would also have been broken."
+  ],
+  "artifacts": {
+    "walk1Human": "walk-1-human.txt",
+    "walk1Json": "walk-1-chain.json",
+    "walk2Json": "walk-2-chain.json",
+    "negativeProof": "negative-audit-store-absent.txt",
+    "runRecord": "run-record.json",
+    "reverifyReport": "reverify-report.jsonl"
+  }
+}

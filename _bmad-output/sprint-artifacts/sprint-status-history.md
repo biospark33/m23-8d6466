@@ -79,6 +79,29 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # CAPACITY WARNING: v5-S3 goes 25 -> 56 pts / 13 stories — the heaviest band in the plan, more than doubled
 # by the arc. Stated here rather than discovered at standup.
 
+# 2026-09-03 (DF2.10 DONE — the in-box arc's first story lands, and DF1.10 is now the keystone):
+# (drained 2026-09-18 — this note had sat undrained in the yaml header past the 2026-09-10 and
+# 2026-09-12 entries below; inserted at its chronological position. Text verbatim.)
+# PR #207 merged to dev (34316dd) closing DF2.10 after review round 6 and a full live round — all 19 live
+# e2e files green on f5290f, full suite 4995 pass / 0 fail, $0.0201 spend, zero box/key leaks. The pin did
+# NOT move (sha256:92447929, buildId 3cf094fb6990ed66) and the image was deliberately not rebuilt, so
+# tier2-image-contract's gate B stood as a clean control. THIS UNBLOCKS DF1.10: its deps were
+# [DF1.1, DF1.4, DF1.6, DF2.5, DF2.10, DF3.1] and DF2.10 was the last one outstanding.
+# DEPENDENCY STATE as of this note — only THREE stories are unblocked: DF1.10 (8pt), DF3.5 (2pt, already
+# in review as PR #185) and DF5.3. DF1.10 alone gates the rest of the in-box restoration arc.
+# SUPERSEDED 2026-09-08 — the point figures in this 2026-09-03 note are pre-review: DF5.3 is now 6
+# (not 4), DF5.4 5 (not 3), DF5.5 3 (not 2), DF3.6 split into DF3.6a+DF3.6b (3+3), and DF6.1 split
+# into DF6.1a (4) + DF6.1b (3) — DF6.1 no longer exists as an ID. The authoritative slate figures
+# are the 2026-09-08 block below and the per-story rows; this note is retained as the 2026-09-03
+# dependency-state record only. Sequencing DF1.10 next is what kept the arc moving, and it did.
+# DF1.10 also owns four open issues that nothing else can close: #186 (re-pin bundle blocked on the
+# deriveBuildId seam — the 508-line patch is banked at workflow-state/code-review/df2-10-r6/), #181 (in-box
+# ack round trip), and #187/#188 which both need a real build. Note the ADR renumbering still applies:
+# pre-2026-08-31 references to "DF1.10 owns the round trip" mean DF1.11.
+# STALENESS FIXED IN THIS COMMIT: DF2.10 read in-review (merged 2026-09-03) and DF3.5 read ready-for-dev
+# (PR #185 has been open since 2026-09-02, and is 35 commits behind dev). Both corrected against git
+# history rather than against the story docs' own prose.
+
 # 2026-09-10 (DF2.11 post-merge live round 6): the story's merged surface (PR #241 + #246 → dev f1683745)
 # proven on real substrate in five legs, zero model spend — teardown lock busy/stale wording + destructive
 # mark across a real exit (T1.6b/c), readonly ledger with a REAL crashed-WAL refusal then fresh-writer heal
@@ -118,3 +141,24 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # fleet.dispatch error line with payload.providerCode "cap-invalid" (exit 1, generic
 # key-delivery-failed text; CredentialLifecycleError's message/remediation do not survive the
 # catch) — not a no-ceiling exit-5 line. Details in the story's Dev Agent Record.
+
+# 2026-09-13 (DF2.13 DONE — INV-CAP-1 lands with its entry points; the accepted stranded-box cost retired):
+# (drained 2026-09-18. Text verbatim.)
+# PR #254 merged to dev (8494999e) after PR review round 1 (7-reviewer adversarial pass, 14 patched,
+# f96e7b53) and round 2 (3 coderabbit findings verified and applied, de552d7). INV-CAP-1 itself is
+# unchanged: mintRunKey refuses capMicroUsd > defaultKeyCapMicroUsd pre-mint. Round 1's two deferred
+# findings landed as unslotted follow-up DF2.14 (df2-14-cap-followups.md; eb802a6 + f6afc79):
+# D1 — the keyCap bound is now enforced at EVERY entry (CLI --cap-micro-usd parse, fanout
+# validatePatternInput's shared seam, dispatch B1 pre-admission; exit-2 invalid-cap with zero
+# boxes/records/admissions), all derived from the imported constant, no numeric copy; the $1M CLI
+# literal is gone and the AC4 stranding test was rewritten to the pre-admission refusal. D2 — the
+# step-7 catch discriminates by CAPABILITY (structuredErrorParts: string .remediation AND .code), so
+# a CredentialLifecycleError's message survives run-suffixed and its remediation is COMPOSED with the
+# INV-5 line instead of being flattened to generic text. Issue caps stay unbounded — the gate's
+# min(keyCap, remaining) absorbs them — and the mint guard remains the caller-agnostic last line.
+# DF3.6a's standing grant is unchanged: it may implement against
+# capMicroUsd <= defaultKeyCapMicroUsd as a property of the system (the lower chain term stays
+# DF3.6a's own clamp, exactly as the drained 2026-09-12 note recorded — see sprint-status-history.md).
+# Tenth image-pin adoption rode the merge: gate B run 34762465643 printed
+# 31061f54…/a095d2629d5bcc09, walk digest 72d8d83b -> 0c5509f3, adoption commit d63f603 is the
+# healing run (mirror re-push + verify-image-pin follow it).

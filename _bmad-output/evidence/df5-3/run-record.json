@@ -1,0 +1,43 @@
+{
+  "runId": "qds-20260916-01d5c5",
+  "createdAt": "2026-09-16T21:16:54.119Z",
+  "extensions": {
+    "budget": {
+      "schemaVersion": 1,
+      "repoSlug": "quantum-digital-solutions/qds-audit-demo",
+      "issueId": "1",
+      "capMicroUsd": 50000,
+      "spentMicroUsd": 0,
+      "reservedMicroUsd": 0,
+      "admittedCeilingMicroUsd": 50000
+    },
+    "approval": {
+      "schemaVersion": 2,
+      "state": "approved",
+      "proposal": "open a PR for run qds-20260916-01d5c5 at 0241bf914de28fa256abd46d16b6b9f234ca989f",
+      "reportId": "rv-qds-20260916-01d5c5-2026-09-16t21-20-54-448z-37kc3x",
+      "headSha": "0241bf914de28fa256abd46d16b6b9f234ca989f",
+      "requestId": "1df4fc92-7ed3-4898-bbf7-e2d438f0f15d",
+      "requestedAt": "2026-09-16T21:20:55.158Z",
+      "expiresAt": "2026-09-17T21:20:55.158Z",
+      "supersededReportIds": [],
+      "approverId": "df53-demo-operator",
+      "decidedAt": "2026-09-16T21:20:59.941Z",
+      "reason": "DF5.3 N6 live demo: host-side reverify green on both host-pinned gates"
+    },
+    "pr": {
+      "schemaVersion": 1,
+      "prUrl": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/2",
+      "prNumber": 2,
+      "createdAt": "2026-09-16T21:21:05.608Z"
+    }
+  },
+  "vmName": "qds-20260916-01d5c5",
+  "httpsUrl": "https://qds-20260916-01d5c5.exe.xyz",
+  "requestId": "1df4fc92-7ed3-4898-bbf7-e2d438f0f15d",
+  "keyHash": "68179b447b3e4353468188bf08331918f0dcde54b06ad2ea1d5fa2beec10c303",
+  "limitMicroUsd": 50000,
+  "commitSha": "97c27f9f8018d16293a9e8117f80eab1e50e14a3",
+  "spendMicroUsd": 9834,
+  "closedAt": "2026-09-16T21:20:42.098Z"
+}

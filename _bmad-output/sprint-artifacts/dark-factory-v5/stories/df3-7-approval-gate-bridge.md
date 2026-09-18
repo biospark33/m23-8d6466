@@ -3,6 +3,12 @@
 **Story Points:** 4
 **Sprint:** v5-S3 (in-box restoration arc, story 4 of 5 — the last seam the relocation opens, and the smallest)
 
+**Status:** done — PR #257 merged to dev 2026-09-16 (`c30b7072`). Closes #245 (DF2.11's D6
+production wiring: the `recordApprovalPort` closure carries the chain-held `RunLockHandle` —
+`teardownSandbox(teardownDeps, id, deps.runLock, opts)`, no re-acquire — and the gated
+production-closure test lives in `tests/fleet/run-completion.test.ts`; DF2.11's
+Still-deferred section carries the closing record, updated 2026-09-15).
+
 > **Tracked follow-up (2026-09-09, from DF2.11's post-merge review): issue #245** — when this story
 > wires `GateDeps.teardown` in production, the closure must carry the chain's existing
 > `RunLockHandle` (the docblock contract; a `withRunLock` wrap here throws `RunLockReentrantError`)

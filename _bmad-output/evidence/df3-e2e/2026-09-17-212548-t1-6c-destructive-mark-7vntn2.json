@@ -1,0 +1,18 @@
+{
+  "test": "T1.6c",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "marked-exit",
+      "stderr": "!! lock-held: /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t16c-rsbnj2/runs/e2e-t16c-marked-mu61gyss2mln.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t16c-rsbnj2/runs/e2e-t16c-marked-mu61gyss2mln.lock only once you know the teardown state"
+    },
+    {
+      "phase": "marked-later-refusal",
+      "code": "run-locked"
+    }
+  ],
+  "writtenAt": "2026-09-17T21:25:48.565Z",
+  "image": {
+    "note": "T1.6c never creates a box — the substrate is host lock files + real process lifecycles"
+  }
+}
