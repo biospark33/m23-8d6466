@@ -20,6 +20,16 @@ import { hostTag } from "../../scripts/lib/run-lock.ts";
 import type { SweepDeps } from "../../src/providers/reaper.ts";
 import type { LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { seedFleet } from "../providers/fixtures/fleet-state.ts";
+import { useTempAuditStore } from "../fleet/helpers.ts";
+
+// PRE-EXISTING LEAK (found reviewing PR #258). `--yes` makes this CLI a
+// composition root: it calls `openAuditStore()` with no argument, which resolves
+// `QDS_AUDIT_DB ?? ".sandbox/audit.db"` RELATIVE TO CWD — and this suite runs
+// with cwd = repo root. The apply-mode case below therefore opened (and, on a
+// clean checkout, CREATED) the operator's live audit store, co-resident with the
+// evidence of real runs. The helper's own docstring already declares itself
+// mandatory for exactly this shape; this suite predates it.
+useTempAuditStore();
 
 const NOW = new Date("2026-08-20T12:00:00.000Z");
 const HOUR = 3_600_000;

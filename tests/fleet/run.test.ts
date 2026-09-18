@@ -64,6 +64,7 @@ import {
 } from "../../src/providers/run-record.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
+import { useTempAuditStore } from "./helpers.ts";
 
 /** The unit file DF2.10 ships and this verb starts an instance of. */
 const UNIT_FILE = join(import.meta.dir, "../../oci/exedev/systemd/qds-run@.service");
@@ -157,6 +158,15 @@ const isMarkerCat = (argv: string[]): boolean => argv[0] === "sh" && String(argv
 const markerBody = (runId: string, ok: boolean): string =>
   JSON.stringify({ runId, ok, completedAt: "2026-09-03T00:00:00.000Z" });
 
+/**
+ * DF5.3 C11: this suite drives `scripts/fleet.ts`'s `run`, whose `dispatch`
+ * verb is its own audit-store composition root (`openAuditStore()` resolves
+ * `QDS_AUDIT_DB ?? .sandbox/audit.db` relative to CWD). No case here currently
+ * reaches the open — measured — but the seam is one `dispatch` case away, and
+ * the failure mode is silent rows in the operator's live store.
+ */
+useTempAuditStore();
+
 describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => {
   let dir: string;
   let runsDir: string;
@@ -169,7 +179,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     runsDir = join(dir, "runs");
     store = new RunRecordStore({ dir: runsDir });
     fake = new FakeDriver(join(dir, "boxes"));
-    await provisionAdmittedRun(fake, store, { runId });
+    await provisionAdmittedRun(fake, store, { runId, recordAuditLink: () => {} });
   });
 
   afterEach(() => {
@@ -218,7 +228,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
 
   test("the record's requestId rides the result — the dispatch join key, never a fabricated one", async () => {
     const correlated = "qds-20260903-dd44ee";
-    await provisionAdmittedRun(fake, store, { runId: correlated });
+    await provisionAdmittedRun(fake, store, { runId: correlated, recordAuditLink: () => {} });
     store.set(correlated, { requestId: "req-from-dispatch" });
     const driver = stubDriver(ok);
     expect(await startRun(deps(driver), correlated)).toMatchObject({
@@ -720,7 +730,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // extension ONLY on failure, so a healthy run carries none and a
     // presence-based check would refuse every run there is.
     const passed = "qds-20260903-ee55ff";
-    await provisionAdmittedRun(fake, store, { runId: passed });
+    await provisionAdmittedRun(fake, store, { runId: passed, recordAuditLink: () => {} });
     store.set(passed, {
       extensions: { gate: { outcome: "passed", failedAt: new Date().toISOString() } },
     } as never);
@@ -777,7 +787,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // the store spec admits exactly the keys used here.
     for (const state of ["pausing", "awaiting-approval", "approved", "rejected", "timed-out", "from-the-future"]) {
       const id = `qds-20260903-${state.replace(/[^a-z0-9]/g, "")}`.slice(0, 40);
-      await provisionAdmittedRun(fake, store, { runId: id });
+      await provisionAdmittedRun(fake, store, { runId: id, recordAuditLink: () => {} });
       store.set(id, {
         extensions: { approval: { state, proposal: "p", reportId: "rv-0", headSha: "a".repeat(40) } },
       } as never);
@@ -1381,7 +1391,7 @@ describe("DF1.10 AC1 — the `run` verb's registry entry and exit table", () => 
     runsDir = join(dir, "runs");
     store = new RunRecordStore({ dir: runsDir });
     fake = new FakeDriver(join(dir, "boxes"));
-    await provisionAdmittedRun(fake, store, { runId });
+    await provisionAdmittedRun(fake, store, { runId, recordAuditLink: () => {} });
   });
 
   afterEach(() => {
@@ -1510,7 +1520,7 @@ describe("DF1.10 AC1 — the `run` verb's registry entry and exit table", () => 
     ];
     for (const [state, want] of cases) {
       const id = `qds-20260903-${state.replace(/[^a-z0-9]/g, "")}`.slice(0, 40);
-      await provisionAdmittedRun(fake, store, { runId: id });
+      await provisionAdmittedRun(fake, store, { runId: id, recordAuditLink: () => {} });
       store.set(id, {
         extensions: { approval: { state, proposal: "p", reportId: "rv-0", headSha: "a".repeat(40) } },
       } as never);

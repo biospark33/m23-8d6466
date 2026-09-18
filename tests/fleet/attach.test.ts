@@ -140,7 +140,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   async function liveBox(runId: string): Promise<{ driver: FakeDriver; store: RunRecordStore; vm: string }> {
     const driver = new FakeDriver(boxesDir);
     const store = new RunRecordStore({ dir: runsDir });
-    const run = await provisionAdmittedRun(driver, store, { runId });
+    const run = await provisionAdmittedRun(driver, store, { runId, recordAuditLink: () => {} });
     // `provisionAdmittedRun` without an `issue` leaves `requestId` unset
     // (it is optional on the record); DF3.1's dispatch is what stamps it.
     store.set(runId, { requestId: REQUEST_ID });

@@ -23,8 +23,16 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
-import type { ProviderDriver } from "./driver.ts";
-import type { RunRecordStore } from "./run-record.ts";
+import {
+  auditLinkSkip,
+  auditNonEmpty,
+  auditRepoSlug,
+  emitAuditLink,
+  isAuditStoreError,
+  type ProviderAuditLink,
+  type ProviderDriver,
+} from "./driver.ts";
+import type { RunRecord, RunRecordStore } from "./run-record.ts";
 // INV-4: the plaintext key exists in the mint return and nowhere else. Every
 // sink below logs a CAUGHT error's free text, and `deliverRunKey` writes the
 // key through `driver.exec` — an exec wrapper that echoes the argv it ran (the
@@ -200,6 +208,148 @@ export interface CredentialDeps {
    * location and this knob goes away.
    */
   envFile?: string;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. The composition root binds it to `AuditStoreWriter.record`
+   * (see `ProviderAuditLink` in driver.ts). A run whose record carries no
+   * DF2.8 budget attribution emits nothing — the link's columns are NOT NULL
+   * and an invented attribution is exactly what INV-AUDIT-4 forbids.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
+}
+
+/**
+ * The DF5.3 link emit shared by this module's four credential events (hop 4,
+ * run-credential: mint/deliver/revoke/verify-revoked). The record is the ONLY
+ * repoSlug source (DF2.8's budget attribution — never a placeholder), and its
+ * `requestId` is the correlation the chain joins on. Never key material —
+ * `keyHash` only (INV-AUDIT-2); the store's own `record` logs the one
+ * structured line per emit.
+ *
+ * NEITHER identity is ever manufactured. `repoSlug` never was; `requestId`
+ * used to fall back to `deps.requestId ?? newRequestId()`, which stamped a
+ * random join key onto the row the chain JOINS ON — evidence invented at the
+ * emit, the same class INV-AUDIT-4 refuses for `repoSlug`. Both absences now
+ * take the same door: skip the emit, log one line naming the run and the
+ * event, and let the hop report `unlinked` — honest and fail-closed.
+ *
+ * W2-C5 option (c): the RECORD is the only source. `deps.requestId` was
+ * dropped as a fallback because it never supplies a real id the record lacks —
+ * `dispatch.ts` stamps `store.set(runId, { requestId })` as its first write
+ * after provisioning, immediately before the mint, so on every dispatch path
+ * `rec.requestId` is already set. The only callers where the two differ are the
+ * teardown/reap composition roots, which MINT theirs (`fleet.ts`,
+ * `sandbox-teardown.ts`, `reaper.ts`) — so the fallback was purely a laundering
+ * channel for a fabricated id. `deps.requestId` still serves the step log,
+ * which is the job it was added for.
+ */
+function emitCredentialLink(
+  deps: CredentialDeps,
+  rec: RunRecord,
+  runId: string,
+  event: string,
+  detail: Record<string, unknown>,
+  keyHash: string,
+): void {
+  const repoSlug = auditRepoSlug(rec);
+  const requestId = rec.requestId;
+  // C3: ONE non-empty predicate for all three NOT NULL identity columns. Every
+  // guard here was `=== undefined`, so a `requestId: ""` took the EMIT arm and
+  // threw `audit-link-invalid` AFTER the key was minted or already sitting in
+  // the box. The `no-repo-slug` arm now LOGS as well — it used to `return`
+  // silently, while this function's own doc comment above promised a line.
+  const skip = auditLinkSkip(runId, repoSlug, requestId);
+  if (skip !== undefined) {
+    log({
+      // The LOG's own correlation, never the link's: a generated id is fine
+      // for a diagnostic line and is exactly what every other step here logs
+      // under. It is precisely what must not reach `audit_links.request_id`.
+      requestId: deps.requestId ?? newRequestId(),
+      // Shared verbatim with driver.ts's `create`-link skip (and harvest's, if
+      // it lands): one `operation`/`event`/`reason` triple so an operator greps
+      // every C5 skip in the run at once instead of once per emitter.
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId,
+      driver: deps.driver.name,
+      keyHashPrefix: keyHashPrefix(keyHash),
+      event,
+      reason: skip,
+      message:
+        skip === "no-repo-slug"
+          ? `run ${runId} carries no DF2.8 budget attribution — refusing to invent the link's repoSlug (INV-AUDIT-4); hop 4 reports this run unlinked`
+          : skip === "no-run-id"
+            ? `an empty runId reached the ${event} emit — refusing to write a link that cannot name its run (INV-AUDIT-4); hop 4 reports this run unlinked`
+            : `run ${runId} carries no requestId and none was propagated — refusing to invent the chain's join key (INV-AUDIT-4); hop 4 reports this run unlinked`,
+    });
+    return;
+  }
+  if (!auditNonEmpty(repoSlug) || !auditNonEmpty(requestId)) return; // narrowing only — `skip` already decided
+  emitAuditLink(deps.recordAuditLink, {
+    runId,
+    repoSlug,
+    requestId,
+    hop: "run-credential",
+    event,
+    subjectId: keyHash,
+    subjectKind: "credential-key",
+    detail: { keyHash, ...detail },
+  });
+}
+
+/**
+ * The TEARDOWN-path posture for the same emit (N2): catch, log
+ * `providers.audit-link-dropped`, continue.
+ *
+ * `revokeRunKey` and `verifyRevoked` run BEFORE destroy, so a propagating store
+ * refusal there made teardown IMPOSSIBLE: the run aborted with the box live and
+ * billing, the operator's re-run took the identical path and failed identically,
+ * and the remediation the sibling emit sites print — "tear the run down" — was
+ * the very operation that could not complete. Hop 4 reporting `unlinked` is
+ * recoverable; an unteardownable billing box is not. This is the reaper's
+ * existing posture (`providers.reap-audit-link-dropped`), applied to the second
+ * place where the emit is not the thing the caller is trying to do.
+ *
+ * Mint and deliver keep the fail-loud posture: nothing is billing at mint, and
+ * a run whose credential links cannot be written is a run the chain can never
+ * vouch for.
+ */
+function emitCredentialLinkBestEffort(
+  deps: CredentialDeps,
+  rec: RunRecord,
+  runId: string,
+  event: string,
+  detail: Record<string, unknown>,
+  keyHash: string,
+): void {
+  try {
+    emitCredentialLink(deps, rec, runId, event, detail, keyHash);
+  } catch (e) {
+    // Deliberately NOT narrowed to `isAuditStoreError`, unlike the create/fill
+    // sites: there the narrow arm decides which REMEDIATION an operator is
+    // given, here it would decide whether teardown can finish at all. Nothing
+    // thrown out of an audit emit is worth stranding a billing box for.
+    log({
+      requestId: deps.requestId ?? newRequestId(),
+      operation: "providers.audit-link-dropped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId,
+      driver: deps.driver.name,
+      keyHashPrefix: keyHashPrefix(keyHash),
+      event,
+      error: {
+        code: isAuditStoreError(e) ? e.code : "audit-link-emit-failed",
+        message: redactSecrets(e instanceof Error ? e.message : String(e), keyHash),
+      },
+      message: `the ${event} audit link for run ${runId} was DROPPED — teardown continues (a box left billing is worse than an unlinked hop 4); re-run the chain walk after repairing the audit store`,
+    });
+  }
 }
 
 // ─── observability ───────────────────────────────────────────────────────────
@@ -214,7 +364,19 @@ function keyHashPrefix(hash: string | undefined): string | null {
   return hash ? hash.slice(0, 8) : null; // first 8 chars of the HASH, never the key
 }
 
-async function timed<T>(ctx: StepContext, step: string, fn: () => Promise<T>): Promise<T> {
+async function timed<T>(
+  ctx: StepContext,
+  step: string,
+  fn: () => Promise<T>,
+  /**
+   * Result-derived fields for the OK line (same shape as harvest's
+   * `timedStep`). `revokeHash` uses it to report revoked-vs-already-gone: that
+   * fact used to live in the `revoke` LINK's `detail`, where a retry digested
+   * it differently and tripped the store's `divergent` tamper alarm on an
+   * ordinary recovery. It belongs on a log line, which has no digest.
+   */
+  extra?: (result: T) => Record<string, unknown>,
+): Promise<T> {
   const started = Date.now();
   try {
     const result = await fn();
@@ -232,6 +394,7 @@ async function timed<T>(ctx: StepContext, step: string, fn: () => Promise<T>): P
       durationMs,
       outcome: "ok",
       [`${step}_ms`]: durationMs,
+      ...(extra === undefined ? {} : extra(result)),
     });
     return result;
   } catch (e) {
@@ -270,6 +433,79 @@ async function timed<T>(ctx: StepContext, step: string, fn: () => Promise<T>): P
 // ─── lifecycle steps ─────────────────────────────────────────────────────────
 
 /**
+ * `deliverRunKey`'s audit-emit refusal, as distinct from every delivery
+ * failure: the key IS in the box, mode-600 confirmed. `runCredentialLifecycle`
+ * keys its revoke compensation off this code — see there.
+ */
+const DELIVER_AUDIT_LINK_FAILED = "deliver-audit-link-write-failed";
+
+/**
+ * Revoke-and-verify a key `mintRunKey` has already created but can no longer
+ * hand back, then log the attempt either way. Extracted from the record-write
+ * failure arm (it was inline) because the `mint` EMIT needs the identical
+ * compensation: a throwing emit makes `mintRunKey` throw, which drops
+ * `res.key` — the only copy of the plaintext (INV-4) — while
+ * `runCredentialLifecycle` calls `mintRunKey` OUTSIDE its try, so none of the
+ * mint/revoke bracketing runs and a live, spend-capable key survives with
+ * nothing holding it but DF2.6's next orphan sweep.
+ *
+ * Best-effort by construction: the caller rethrows its ORIGINAL cause either
+ * way, and a failed compensation is the line that matters most here (a live,
+ * unreachable, spendable key), so it is logged with the same fields as the
+ * success arm rather than replacing the reported failure.
+ */
+async function compensateMint(deps: CredentialDeps, ctx: StepContext, runId: string, hash: string): Promise<void> {
+  const compStarted = Date.now();
+  try {
+    await revokeAndVerify(deps, hash);
+    // The SUCCESSFUL compensation is logged too, not just the failed one: the
+    // mint line is already in the log and nothing else here ever will be, so
+    // without this the run reads as "a live key was minted for it" forever.
+    // Same operation name and shape as the mint-timeout path's ok line.
+    const compDurationMs = Date.now() - compStarted;
+    log({
+      requestId: ctx.requestId,
+      operation: "credential.mint_compensation",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: compDurationMs,
+      status: "ok",
+      runId,
+      step: "mint_compensation",
+      keyHashPrefix: keyHashPrefix(hash),
+      outcome: "ok",
+      compensated: 1,
+      mint_compensation_ms: compDurationMs,
+    });
+  } catch (revErr) {
+    const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
+    // Same FIELDS as the ok arm above, not just the same operation name: a
+    // dashboard that sums `mint_compensation_ms`/`compensated` over this
+    // operation would otherwise see successes only — and the failures are
+    // the ones that leave a live, unreachable, spendable key.
+    const compDurationMs = Date.now() - compStarted;
+    log({
+      requestId: ctx.requestId,
+      operation: "credential.mint_compensation",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: compDurationMs,
+      status: "error",
+      error: {
+        code: revErrCred.code ?? "compensation_failed",
+        message: redactSecrets(revErrCred.message ?? revErr, hash),
+      },
+      runId,
+      step: "mint_compensation",
+      keyHashPrefix: keyHashPrefix(hash),
+      outcome: "error",
+      compensated: 0,
+      mint_compensation_ms: compDurationMs,
+    });
+  }
+}
+
+/**
  * Mint `sbx-<runId>` capped at the effective cap. Writes ONLY `keyHash` and
  * `limitMicroUsd` into the DF2.1 record; the plaintext exists in the return
  * value for `deliverRunKey` and nowhere else.
@@ -283,7 +519,12 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // provider-side identifier (DF2.1 persists it in the plaintext run record);
   // the remediation must be a copy-pasteable command, and only the plaintext
   // key is credential material.
-  const existing = deps.store.get(runId).keyHash;
+  // Read once, kept: the `mint` emit below needs this record's `extensions.budget`
+  // and `requestId` — neither of which mint writes — so re-reading the store
+  // purely to build the link would put a store fault between a LIVE provider key
+  // and the plaintext this function still has to return (see the emit).
+  const rec = deps.store.get(runId);
+  const existing = rec.keyHash;
   if (existing) {
     throw new CredentialLifecycleError(
       "already-minted",
@@ -431,54 +672,7 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
     // not be written. Nothing downstream will ever learn this hash, so
     // compensate HERE, exactly as the mint-timeout path does, and rethrow the
     // write failure as the reported cause.
-    const compStarted = Date.now();
-    try {
-      await revokeAndVerify(deps, res.hash);
-      // The SUCCESSFUL compensation is logged too, not just the failed one: the
-      // mint line is already in the log and nothing else here ever will be, so
-      // without this the run reads as "a live key was minted for it" forever.
-      // Same operation name and shape as the mint-timeout path's ok line.
-      const compDurationMs = Date.now() - compStarted;
-      log({
-        requestId: ctx.requestId,
-        operation: "credential.mint_compensation",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: compDurationMs,
-        status: "ok",
-        runId,
-        step: "mint_compensation",
-        keyHashPrefix: keyHashPrefix(res.hash),
-        outcome: "ok",
-        compensated: 1,
-        mint_compensation_ms: compDurationMs,
-      });
-    } catch (revErr) {
-      const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
-      // Same FIELDS as the ok arm above, not just the same operation name: a
-      // dashboard that sums `mint_compensation_ms`/`compensated` over this
-      // operation would otherwise see successes only — and the failures are
-      // the ones that leave a live, unreachable, spendable key.
-      const compDurationMs = Date.now() - compStarted;
-      log({
-        requestId: ctx.requestId,
-        operation: "credential.mint_compensation",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: compDurationMs,
-        status: "error",
-        error: {
-          code: revErrCred.code ?? "compensation_failed",
-          message: redactSecrets(revErrCred.message ?? revErr, res.hash),
-        },
-        runId,
-        step: "mint_compensation",
-        keyHashPrefix: keyHashPrefix(res.hash),
-        outcome: "error",
-        compensated: 0,
-        mint_compensation_ms: compDurationMs,
-      });
-    }
+    await compensateMint(deps, ctx, runId, res.hash);
     throw e;
   }
   // INV-CRED-1: an uncapped key must never be minted-and-kept. The same
@@ -514,7 +708,34 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // cap), not in the unreachable-key sense. Revoking a key that IS reachable
   // would throw away a usable run over a store hiccup; the write failure
   // propagates instead, and the caller's teardown revokes by hash.
+  //
+  // The DF5.3 emit below shares this exposure for the RECORD, but NOT for the
+  // plaintext, which is why it is compensated (round 3): a throwing emit makes
+  // this function throw, and the plaintext `res.key` — the only copy, INV-4 —
+  // goes with the stack frame. `runCredentialLifecycle` calls `mintRunKey`
+  // OUTSIDE its try, so its mint/revoke bracketing never runs; nothing at all
+  // would hold a live, spend-capable key. What it must NOT add is a second
+  // store READ: building the link from
+  // `deps.store.get(runId)` put a `get` fault on the same line, and THAT one
+  // discards the plaintext in this function's return value after the provider
+  // already created a spend-capable key. The link is built from `rec` instead
+  // (read at the top; mint writes neither the budget attribution nor the
+  // requestId the link needs).
   deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
+  // DF5.3: the `mint` link — emitted after both record writes landed. The cap
+  // has NO event of its own (INV-AUDIT-4): it is an argument to mint, carried
+  // here as the mint row's `detail.limitMicroUsd` — the APPLIED figure (the
+  // provider's granted µ$, what the record carries), not the requested one.
+  //
+  // FAIL-LOUD (nothing is billing at mint) but COMPENSATED: the key is revoked
+  // and proven absent before the refusal propagates, because the throw takes
+  // the plaintext with it and no caller has a handle to revoke by.
+  try {
+    emitCredentialLink(deps, rec, runId, "mint", { limitMicroUsd: grantedMicroUsd }, res.hash);
+  } catch (e) {
+    await compensateMint(deps, ctx, runId, res.hash);
+    throw e;
+  }
   return { key: res.key, hash: res.hash };
 }
 
@@ -558,8 +779,18 @@ function assertEnvFileSafe(envFile: string): void {
   }
 }
 
-export async function deliverRunKey(deps: CredentialDeps, vm: string, key: string): Promise<void> {
-  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId: null };
+/**
+ * Deliver the secret over the driver's stdin channel into `KEY_ENV_FILE`
+ * (mode 0600). The argv carries only the fixed script — the value never
+ * appears in `ps` on either side (fill.just:147-155). Confirmation is by
+ * `stat` mode, never by echoing the value back.
+ *
+ * DF5.3: `runId` is a parameter (was implicit at the one lifecycle caller) —
+ * the `deliver` link needs the run identity to be attributable, and the
+ * keyHash it digests is read off the record the mint already wrote.
+ */
+export async function deliverRunKey(deps: CredentialDeps, runId: string, vm: string, key: string): Promise<void> {
+  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId };
   const envFile = deps.envFile ?? KEY_ENV_FILE;
   assertEnvFileSafe(envFile);
   const stdin = `${KEY_ENV_VAR}=${key}\n`;
@@ -571,6 +802,58 @@ export async function deliverRunKey(deps: CredentialDeps, vm: string, key: strin
       `key delivery to ${vm}:${envFile} failed (exit ${res.exitCode}, mode ${mode || "unknown"})`,
       "inspect the box by hand, then re-run teardown for the run",
     );
+  }
+  // DF5.3: the `deliver` link, after mode-600 confirmation. keyHash comes off
+  // the record (mint persisted it before delivery) — never from the plaintext.
+  // The record is read BEST-EFFORT: a caller delivering against a run with no
+  // record has nothing to attribute the link to, and the delivery itself has
+  // already succeeded — a store fault here must not turn a delivered key into
+  // a reported delivery failure.
+  let rec: RunRecord | undefined;
+  try {
+    rec = deps.store.get(runId);
+  } catch (e) {
+    rec = undefined; // unattributable — no link is manufactured (INV-AUDIT-4)
+    // The bare `catch {}` this replaces swallowed every store fault with no
+    // signal at all: hop 4 reported partially unlinked and nothing anywhere
+    // said why. A record store that cannot be read on the delivery path is
+    // worth knowing about for reasons past the audit chain.
+    log({
+      requestId: ctx.requestId,
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId,
+      driver: deps.driver.name,
+      event: "deliver",
+      reason: "record-unreadable",
+      error: { code: "record-read-failed", message: redactSecrets(e instanceof Error ? e.message : String(e), key) },
+      message: `run ${runId}'s record could not be read after a SUCCESSFUL delivery — the deliver link is skipped and hop 4 reports this run unlinked; the key IS in the box`,
+    });
+  }
+  // `if (rec?.keyHash)`, matching `revokeRunKey`/`verifyRevoked`/`captureSpend`:
+  // `typeof === "string"` admitted `""`, and the store does NOT length-check
+  // `subjectId`, so an empty-subject credential link — one that attests to a
+  // credential it cannot identify — would land permanently on an append-only
+  // store and collide with any other empty-subject `deliver` emit for the run.
+  if (rec?.keyHash) {
+    try {
+      emitCredentialLink(deps, rec, runId, "deliver", { envFile }, rec.keyHash);
+    } catch (e) {
+      // FAIL-LOUD, but never as a DELIVERY failure. The emit used to propagate
+      // raw into `runCredentialLifecycle`'s catch, whose one interpretation is
+      // "a minted key must never outlive a failed delivery" — so a transient
+      // audit-store hiccup REVOKED a key that was correctly delivered and
+      // reported the audit fault as the delivery error. The distinct code is
+      // what that catch discriminates on (see `DELIVER_AUDIT_LINK_FAILED`).
+      throw new CredentialLifecycleError(
+        DELIVER_AUDIT_LINK_FAILED,
+        `the deliver audit link for run ${runId} could not be recorded (${redactSecrets(e instanceof Error ? e.message : String(e), key)}) — the key WAS delivered to ${vm}:${envFile} (mode 600 confirmed) and is live`,
+        `repair the audit store, then tear the run down when it is finished: bun scripts/fleet.ts teardown ${runId}`,
+      );
+    }
   }
 }
 
@@ -644,12 +927,44 @@ export async function revokeRunKey(deps: CredentialDeps, runId: string): Promise
   const rec = deps.store.get(runId);
   if (!rec.keyHash) return "none"; // no key was ever minted — nothing to revoke
   ctx.keyHash = rec.keyHash;
-  return revokeHash(deps, ctx, rec.keyHash);
+  const outcome = await revokeHash(deps, ctx, rec.keyHash);
+  // DF5.3: the `revoke` link — emitted for BOTH outcomes. `revoked` is the
+  // DELETE landing; `already-gone` is the provider confirming the key is not
+  // live, which is the same event (the key left the live set) resolved at a
+  // different provider answer. The `none` arm above emits NOTHING: no key
+  // ever existed, so no event happened to link (INV-AUDIT-4) — and a link with
+  // an undefined `subjectId` would hit NOT NULL columns anyway.
+  //
+  // A re-run (teardown aborted after revoke, operator retries) re-emits, and
+  // `ON CONFLICT DO NOTHING` collapses it onto the first row: the store's
+  // UNIQUE key is (run_id, hop, event, subject_key) and `subjectId` is
+  // `rec.keyHash`, unchanged across the re-run. The chain sees one `revoke`.
+  //
+  // `outcome` is NOT in `detail` (round 3), and that is what makes the above
+  // true. The collision is resolved on the EVIDENCE DIGEST: a first attempt
+  // digesting `{keyHash, outcome:"revoked"}` and a retry digesting
+  // `{keyHash, outcome:"already-gone"}` — the documented recovery path, since
+  // nothing clears `rec.keyHash` and the provider then answers 404 — collide
+  // with DIFFERENT digests, which the store reports as `divergent`: its
+  // "evidence was tampered with" alarm, raised on an ordinary retry. The
+  // delivery-failure compensation's `compensation:` marker did the same thing
+  // twice more. `detail` therefore carries only facts stable across replays;
+  // the outcome rides the `credential.revoke` step line (`revokeOutcome`),
+  // which carries no digest and can differ per attempt honestly.
+  emitCredentialLinkBestEffort(deps, rec, runId, "revoke", {}, rec.keyHash);
+  return outcome;
 }
 
 /**
  * Record-free variant for DF2.6's orphan sweep: same DELETE → re-list →
  * assert-absent gate against a hash alone. Writes no record, captures no spend.
+ *
+ * Deliberately NOT an emit site (DF5.3): this path runs under a run-less step
+ * context (`runId: null` — the reaper's record-less leaked key, and this
+ * module's own mint/delivery compensation), and `audit_links.run_id` is NOT
+ * NULL. A run-less revocation has no hop to serve, so no link is manufactured
+ * for it; the reaper's own deps literal carries the named no-op sink for the
+ * same reason (W14B-3).
  */
 export async function revokeAndVerify(deps: CredentialDeps, keyHash: string): Promise<void> {
   const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId: null, keyHash };
@@ -662,7 +977,10 @@ async function revokeHash(
   ctx: StepContext,
   keyHash: string,
 ): Promise<"revoked" | "already-gone"> {
-  return timed(ctx, "revoke", async () => {
+  return timed(
+    ctx,
+    "revoke",
+    async () => {
     // INV-CRED-6: prefix re-asserted immediately before the DELETE. An
     // unenumerable list disarms the guard — that is a refusal, not a skip.
     const { entry, truncated } = await deps.keyApi.getKeyEntry(keyHash, MAX_VERIFY_PAGES);
@@ -688,7 +1006,9 @@ async function revokeHash(
       `DELETE /keys/${keyHash} returned ${status} — the key may still be live; VM untouched, record left open`,
       `curl -X DELETE https://openrouter.ai/api/v1/keys/${keyHash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
     );
-  });
+    },
+    (revokeOutcome) => ({ revokeOutcome }),
+  );
 }
 
 /**
@@ -701,6 +1021,11 @@ export async function verifyRevoked(deps: CredentialDeps, runId: string): Promis
   if (!rec.keyHash) return;
   const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId, keyHash: rec.keyHash };
   await verifyHash(deps, ctx, rec.keyHash);
+  // DF5.3: the `verify-revoked` link — the list-authoritative proof, emitted
+  // only after the authoritative list confirmed absence. BEST-EFFORT for the
+  // same reason `revokeRunKey`'s is (N2): this runs before destroy, and an
+  // unwritable audit store must not be what keeps a box billing forever.
+  emitCredentialLinkBestEffort(deps, rec, runId, "verify-revoked", {}, rec.keyHash);
 }
 
 async function verifyHash(deps: CredentialDeps, ctx: StepContext, keyHash: string): Promise<void> {
@@ -743,14 +1068,64 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
   assertEnvFileSafe(deps.envFile ?? KEY_ENV_FILE);
   const minted = await mintRunKey(deps, runId);
   try {
-    await deliverRunKey(deps, rec.vmName, minted.key);
+    await deliverRunKey(deps, runId, rec.vmName, minted.key);
   } catch (e) {
     // A minted key must never outlive a failed delivery: the mint and revoke
     // guarantees must bracket the unhappy path too, or a spend-capable key is
     // stranded at the provider with nothing to revoke it. Best-effort — the
     // delivery error remains the reported failure.
+    //
+    // EXCEPT when the delivery SUCCEEDED and only its audit link failed. That
+    // throw carries `DELIVER_AUDIT_LINK_FAILED` and nothing else does; without
+    // the discrimination this arm's single interpretation ("a minted key must
+    // never outlive a failed delivery") revoked a key sitting correctly in the
+    // box's env file, over a transient audit-store hiccup, and reported the
+    // audit fault as the delivery failure — then ran two more emits through
+    // the same broken store, so the operator saw "delivery failed" +
+    // "compensation failed" for a delivery that worked.
+    if ((e as CredentialLifecycleError).code === DELIVER_AUDIT_LINK_FAILED) throw e;
     try {
       await revokeAndVerify(deps, minted.hash);
+      // DF5.3: the compensation's own `revoke` + `verify-revoked` links. The key
+      // really was revoked and really was proven absent from the authoritative
+      // list, so without these the chain sees a `mint` with no counterpart and
+      // reports hop 4 `unlinked` for a lifecycle that closed cleanly.
+      // `revokeAndVerify` itself stays the named no-op sink (W14B-3/INV-AUDIT-4)
+      // — it normally runs run-less — but HERE the run identity is in scope, so
+      // the emit is attributable and belongs at the call site, not in the sink.
+      // `detail` carries NOTHING about which path produced it (round 3): the
+      // record still holds `keyHash`, so this run's eventual teardown re-emits
+      // the same two events against the same subject, and a
+      // `compensation: "delivery-failed"` marker here made those collide with
+      // DIFFERENT evidence digests — two more `divergent` rows, the store's
+      // tamper alarm, on a lifecycle that behaved exactly as designed. Which
+      // path produced it is on the `credential.delivery_compensation` log line.
+      // INSIDE the try on purpose: an audit-store refusal must not REPLACE the
+      // delivery error the caller is being told about (it is logged by the arm
+      // below as a compensation failure, which under-reports a compensation
+      // that did land — the alternative loses the real cause).
+      emitCredentialLink(deps, rec, runId, "revoke", {}, minted.hash);
+      emitCredentialLink(deps, rec, runId, "verify-revoked", {}, minted.hash);
+      // The SUCCESS line, added in review round 3. Stripping `compensation:`
+      // from `detail` above fixed the `divergent` collision but took the only
+      // signal with it: a compensation that LANDED then wrote two
+      // `{keyHash}`-only rows indistinguishable from an ordinary teardown's,
+      // and this operation was logged on the failure arm alone. Two rows plus
+      // silence is not observability. The marker belongs here, where it costs
+      // the store nothing, and this is the line the comment above promises.
+      log({
+        requestId: deps.requestId ?? newRequestId(),
+        operation: "credential.delivery_compensation",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        runId,
+        step: "delivery_compensation",
+        keyHashPrefix: keyHashPrefix(minted.hash),
+        outcome: "revoked",
+        delivery_compensation_ms: 0,
+      });
     } catch (compErr) {
       // Log the failed compensation so it's observable; the record still
       // carries keyHash, so DF2.6's orphan sweep or a manual re-run reaches it.

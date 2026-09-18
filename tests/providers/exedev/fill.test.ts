@@ -25,7 +25,7 @@
  * (`fakeExeDev`) — every git command below is real git in a real checkout.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +33,24 @@ import { join } from "node:path";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import { QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import { ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
-import { fillRun } from "../../../src/providers/driver.ts";
+import { fillRun, type ProviderAuditLink } from "../../../src/providers/driver.ts";
+
+/**
+ * DF5.3: every `fillRun` here declares `repoSlug: undefined`, so the contract
+ * is that the hop-5 `fill` emit is SKIPPED. A blind `() => {}` sink cannot
+ * observe that absence — an emitter that manufactured a repoSlug to satisfy
+ * the NOT NULL columns (the class INV-AUDIT-4 forbids) passed every test in
+ * this file. One file-wide sweep instead of an assertion per site; the
+ * POSITIVE fill emit is pinned in fake-driver.test.ts's DF5.3 suite (H2).
+ */
+const fillLinks: ProviderAuditLink[] = [];
+const auditSink = (l: ProviderAuditLink): void => {
+  fillLinks.push(l);
+};
+
+afterEach(() => {
+  expect(fillLinks.splice(0).map((l) => `${l.hop}.${l.event}`)).toEqual([]);
+});
 import { fakeExeDev, type FakeCommand, type FakeExeDev } from "./fixtures/fake-exedev.ts";
 import { runLocal } from "./helpers.ts";
 
@@ -227,7 +244,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     await fillRun(driver, "fill-qds-2", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
       { path: `work/${QDS_IN_BOX_DIR}/run-context.json`, content: '{"runId":"fill-qds-2"}\n' },
-    ]);
+    ], { recordAuditLink: auditSink, runId: "fill-qds-2", requestId: "test", repoSlug: undefined });
     const work = join(fake.boxDir("fill-qds-2"), "work");
     expect(existsSync(join(work, QDS_IN_BOX_DIR, "pipeline.yaml"))).toBe(true);
     expect(existsSync(join(work, QDS_IN_BOX_DIR, "run-context.json"))).toBe(true);
@@ -363,7 +380,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     expect(branch.stdout.trim()).toBe("sbx/fill-qds-5");
     await fillRun(driver, "fill-qds-5", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: "{}\n" },
-    ]);
+    ], { recordAuditLink: auditSink, runId: "fill-qds-5", requestId: "test", repoSlug: undefined });
     const porcelain = await driver.exec("fill-qds-5", ["git", "-C", "work", "status", "--porcelain"]);
     expect(porcelain.stdout.trim()).toBe("");
   }, 120_000);
@@ -394,7 +411,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     try {
       await fillRun(driver, "fill-qds-6", [
         { path: "work/pipeline.yaml", content: '{"limitMicroUsd":1,"phases":[]}\n' },
-      ]);
+      ], { recordAuditLink: auditSink, runId: "fill-qds-6", requestId: "test", repoSlug: undefined });
     } catch (e) {
       err = e;
     }
@@ -424,7 +441,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     await runLocal(["git", "-C", work, "checkout", "--", "pipeline.yaml"]);
     await fillRun(driver, "fill-qds-6", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
-    ]);
+    ], { recordAuditLink: auditSink, runId: "fill-qds-6", requestId: "test", repoSlug: undefined });
     const clean = await driver.exec("fill-qds-6", ["git", "-C", "work", "status", "--porcelain"]);
     expect(clean.stdout.trim()).toBe("");
   }, 120_000);
@@ -448,7 +465,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     await fillRun(driver, "fill-qds-7", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
       { path: `work/${QDS_IN_BOX_DIR}/run-context.json`, content: '{"runId":"fill-qds-7"}\n' },
-    ]);
+    ], { recordAuditLink: auditSink, runId: "fill-qds-7", requestId: "test", repoSlug: undefined });
     // `fakeExeDev` runs box commands with cwd = the box dir, which is the
     // substrate's stand-in for the ssh HOME `fillRun` resolves against.
     const home = fake.boxDir("fill-qds-7");

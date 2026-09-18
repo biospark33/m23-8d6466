@@ -121,6 +121,11 @@ import {
   observeAndDriveChain,
   type ChainOutcome,
 } from "../src/fleet/run-completion.ts";
+// DF5.3: the composition roots in this script open the host-side audit-link
+// store and bind its `record` into the provider emit seam (never the reverse —
+// src/providers takes the seam, not this import).
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
+import type { ProviderAuditLink } from "../src/providers/driver.ts";
 // DF3.7: the whole-verb acquire/release wrapper for the observer verb — the
 // same primitive fan-out's loser teardowns and the reaper hold their locks
 // through. Named import from the same module as the DF2.11 block deliberately:
@@ -577,6 +582,36 @@ function asUsage<T>(build: () => T): T {
     // default through the same call keeps one expression rather than two.
     throw usageError(redactSecrets(x.message ?? e), redactSecrets(x.remediation ?? HELP));
   }
+}
+
+/**
+ * DF5.3/C-1: the audit store's open refusal, classified into THIS CLI's table
+ * — the same refusal `scripts/sandbox-teardown.ts` and `scripts/sandbox-reap.ts`
+ * report for the same fault, so one fault class does not produce four
+ * diagnoses across four CLIs (C10).
+ *
+ * `code` is taken ONLY from an `AuditStoreError`. A bare fs errno reached
+ * `report`'s untyped branch, which printed `code: "EACCES"` with the generic
+ * "fix what the errno names" advice — accurate about the syscall and silent
+ * about `QDS_AUDIT_DB`, the one knob that caused it. The errno stays in the
+ * message, where it is diagnosis rather than classification.
+ *
+ * 5, not 1: every caller opens BEFORE it provisions or destroys anything, and a
+ * sealed or unwritable path is identical on every retry — exit 1's `transient`
+ * stamp sends automation back to re-run it forever.
+ */
+function auditStoreUnavailable(e: unknown, consequence: string): FleetError {
+  const typed = e instanceof AuditStoreError ? e : undefined;
+  const x = (e ?? {}) as { message?: string };
+  return new FleetError(
+    5,
+    typed?.code ?? "audit-store-unavailable",
+    // `?? e`, not `?? String(e)` — see `asUsage`: `redactSecrets` takes
+    // `unknown` and cannot throw, where `String` on a null-prototype throw can.
+    `the audit-link store could not be opened: ${redactSecrets(x.message ?? e)} — ${consequence}`,
+    typed?.remediation ??
+      "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run — nothing was mutated",
+  );
 }
 
 /** Errnos a later attempt could clear — a full or failing device, not a typo. */
@@ -1634,6 +1669,15 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
   const usage = "fleet observe <run-id> --driver <name> [--window-ms <ms>]";
   /** 6, not 0, when the chain landed but the ledger would not close (fanout's one cleanup policy). */
   let ledgerCloseFailed = false;
+  /** C10: the audit store's close obeys the SAME policy — one fault, one code. */
+  let auditCloseFailed = false;
+  /**
+   * Latched by the deferred open below when the store would not open: the
+   * chain's links were dropped. Verb-scoped because it feeds the same exit
+   * decision the close failures do — a store that never opened dropped strictly
+   * more evidence than one that would not close cleanly.
+   */
+  let auditLinksDropped = false;
   try {
     if (positionals.length > 2) throw usageError("observe takes exactly one <run-id>", usage);
     if (runIdArg === undefined) throw usageError("observe requires <run-id>", usage);
@@ -1732,6 +1776,54 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
             },
           }),
       );
+      // DF5.3: the chain's teardown emits its `teardown` link — this verb is
+      // the composition root, so the store opens beside the ledger handle and
+      // closes in the same finally.
+      // Opened on the FIRST link, not at the verb's entry: an observation whose
+      // marker never settles inside the window drives nothing and emits
+      // nothing, and must not materialise audit.db (+ its -wal/-shm) — the
+      // file-set discipline F044 set for the ledger and sandbox-reap restates
+      // for its dry run. Nothing is lost by deferring: the run is already
+      // dispatched and BILLING by the time this verb runs, so an eager open
+      // buys no fail-before-spend property (unlike fanout's, which precedes
+      // provisioning and is deliberately kept eager).
+      //
+      // DECIDED (DF5.3 round 3), and the reason the open is not a bare `??=`:
+      // the FIRST link is emitted from inside `emitTeardownLink`, which sits
+      // after destroy, revoke, close and the ledger ingest and PROPAGATES its
+      // refusal — so an unwritable store made a fully successful chain teardown
+      // fail at its final statement, and this verb reported failure for work
+      // that had landed. Here the teardown has already happened: a dropped link
+      // is a recoverable `unlinked` at hop 4/5 (the next teardown's healing arm
+      // re-emits it), an aborted chain is not. So a store-open failure at the
+      // first link is a REPORTED DEGRADATION — classified, logged, and folded
+      // into the exit code below like the close failures — never a throw.
+      // Latched, because `??=` left `chainAudit` undefined after a failed open
+      // and every later link re-attempted and re-threw: one fault, N failures.
+      let chainAudit: AuditStoreWriter | undefined;
+      const recordChainAuditLink = (link: ProviderAuditLink): void => {
+        if (auditLinksDropped) return;
+        if (chainAudit === undefined) {
+          try {
+            chainAudit = openAuditStore();
+          } catch (e) {
+            auditLinksDropped = true;
+            const refusal = auditStoreUnavailable(
+              e,
+              `the chain's links for ${runIdArg} were dropped — the teardown itself is unaffected`,
+            );
+            printError(
+              note,
+              refusal.code,
+              refusal.message,
+              `${refusal.remediation}; hop 4/5 reports this run unlinked until a later \`fleet teardown ${runIdArg}\` re-emits it`,
+              { runId: runIdArg },
+            );
+            return;
+          }
+        }
+        chainAudit.record(link);
+      };
       let chainOutcome: ChainOutcome;
       try {
         chainOutcome = await observeAndDriveChain(runIdArg, {
@@ -1741,6 +1833,7 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
           hostRoot,
           runLock: h,
           keyApi,
+          recordAuditLink: recordChainAuditLink,
           // The RECORD's dispatch stamp is the join key whenever it carries
           // one — the module's recordRequestId applies that truthiness rule,
           // so this invocation's mint is what is passed: `??` here would let
@@ -1764,6 +1857,23 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
             note,
             "ledger-close-failed",
             `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+            "the handle dies with the process; re-run to confirm it still reads",
+          );
+        }
+        // DF5.3: the audit store closes on the same discipline — every link it
+        // wrote is already committed, so a close fault is bookkeeping, not a
+        // verb to retry. C10: it still feeds the exit decision (a store that did
+        // not close cleanly may not have flushed). `?.` because a chain that
+        // emitted nothing never opened one.
+        try {
+          chainAudit?.close();
+        } catch (e) {
+          auditCloseFailed = true;
+          const x = (e ?? {}) as { message?: string };
+          printError(
+            note,
+            "audit-store-close-failed",
+            `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
             "the handle dies with the process; re-run to confirm it still reads",
           );
         }
@@ -1869,7 +1979,10 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
           ? undefined
           : "the typed outcome envelope on stderr is authoritative — this stdout line was a summary; re-check with `fleet status`",
       ) && !outputIncomplete();
-    if (code === 0 && (ledgerCloseFailed || !printed)) code = 6;
+    // `auditLinksDropped` rides the same rule: the chain LANDED and its
+    // evidence did not, which is exactly 6's shape ("done, still needs an
+    // operator") — and never over an outcome code the chain itself produced.
+    if (code === 0 && (ledgerCloseFailed || auditCloseFailed || auditLinksDropped || !printed)) code = 6;
     return finish(requestId, verb, runIdArg, code);
   } catch (e) {
     // AC5: a lock refusal is this verb's exit 5 — refused before anything was
@@ -2264,6 +2377,8 @@ interface VerbCtx {
  */
 interface DestructiveState {
   ledger?: CostLedger;
+  /** DF5.3: the verb's audit-link store, closed in the finally beside the ledger. */
+  audit?: AuditStoreWriter;
   destructiveInFlight: boolean;
 }
 
@@ -2544,6 +2659,12 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
   // is unreachable unless `report` itself throws — and then 1 ("substrate
   // failed") is the honest thing to die with.
   let fanoutCode = 1;
+  // C10: set by the inner `finally` when the audit handle would not release.
+  // Escalated in the OUTER finally, not inline: the inner one runs before the
+  // arm outcomes assign `fanoutCode`, which would overwrite it.
+  let auditCloseFailed = false;
+  /** Set by the emit seam when a link arrives from a pattern that opens no store. */
+  let auditMisordered = false;
   // The error's own retry classification, when it carries one — read in the
   // catch, honored on the completion line below (logVerb derives from exit
   // code alone, and 5 alone would read as do-not-retry "logic").
@@ -2786,20 +2907,91 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
         ),
       );
     }
-    const result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
-      ...seams,
-      driver,
-      keyApi,
-      store,
-      ledgerFactory: deps?.ledgerFactory ?? makeLedgerFactory(store),
-      requestId: fanRequestId,
-      ...(injectedCostLedger === undefined ? {} : { costLedger: injectedCostLedger }),
-      ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
-      ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
-      ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
-      ...(rosterIds === undefined ? {} : { rosterIds: rosterIds }),
-      ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
-    });
+    // DF5.3: a race's loser disposal tears down through teardownSandbox, whose
+    // `teardown` link flows through this seam — the fanout verb is the root,
+    // so the store opens here and closes on every exit of the call.
+    //
+    // Race-only wiring, exactly like the loser ledger above: `disposeLosers` is
+    // the ONLY caller of this seam (fanout-primitive.ts, guarded by
+    // `input.pattern === "race"`), so a parallel/sequential fan-out would
+    // otherwise materialise audit.db (+ -wal/-shm) and emit nothing. Kept EAGER
+    // for a race rather than deferred to the first link: this open precedes
+    // admission and provisioning, so an unopenable store refuses before N boxes
+    // are live and billing — the fail-closed property `observe` has nothing to
+    // gain from and this verb does.
+    //
+    // CLASSIFIED (C-1/C10), like every other refusal this CLI reports: the raw
+    // open threw an fs errno that `report`'s untyped branch printed as
+    // `code: "EACCES"` with advice that never named `QDS_AUDIT_DB`.
+    let fanoutAudit: AuditStoreWriter | undefined;
+    if (pattern === "race") {
+      try {
+        fanoutAudit = openAuditStore();
+      } catch (e) {
+        throw auditStoreUnavailable(
+          e,
+          "the race's loser-disposal links could not be written, so no box was provisioned",
+        );
+      }
+    }
+    let result: Awaited<ReturnType<typeof fanout>>;
+    try {
+      result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
+        ...seams,
+        driver,
+        keyApi,
+        store,
+        ledgerFactory: deps?.ledgerFactory ?? makeLedgerFactory(store),
+        requestId: fanRequestId,
+        ...(injectedCostLedger === undefined ? {} : { costLedger: injectedCostLedger }),
+        ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
+        ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
+        ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
+        ...(rosterIds === undefined ? {} : { rosterIds: rosterIds }),
+        ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
+        recordAuditLink: (link: ProviderAuditLink): void => {
+          // Not optional-chained: an emit on a non-race pattern is a
+          // MIS-ORDERED emit (only `disposeLosers` reaches this seam), and the
+          // story sanctions exactly one silent no-op link sink — this is not
+          // it. Loud beats a dropped link.
+          //
+          // Loud, but not paid for with live infrastructure. This seam is
+          // called from inside `emitAuditLink`, which PROPAGATES by design
+          // (driver.ts), so a throw here aborted the loser disposal it was
+          // raised in — an ordering bug settled by leaving N losers alive and
+          // BILLING. Record it, let the disposal finish, and fail the exit code
+          // afterwards: the same shape the close-failure flags already use.
+          if (fanoutAudit === undefined) {
+            auditMisordered = true;
+            printError(
+              note,
+              "audit-link-misordered",
+              `audit link ${link.hop}/${link.event} was emitted by a ${pattern} fan-out, which opens no audit store — this is a fan-out ordering bug, and the link was dropped`,
+              "file it against the emit site: `disposeLosers` is the only sanctioned caller of this seam and it runs only for a race — the fan-out's own arms are unaffected",
+            );
+            return;
+          }
+          fanoutAudit.record(link);
+        },
+      });
+    } finally {
+      // Every link is already committed, so a close fault is bookkeeping, not a
+      // verb to retry — but C10 still routes it into the exit decision (the
+      // escalation lands in the outer `finally`, which runs after the arm
+      // outcomes set `fanoutCode`, so it can never be overwritten by them).
+      try {
+        fanoutAudit?.close();
+      } catch (e) {
+        auditCloseFailed = true;
+        const x = (e ?? {}) as { message?: string };
+        printError(
+          note,
+          "audit-store-close-failed",
+          `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
+          "the handle dies with the process; re-run to confirm it still reads",
+        );
+      }
+    }
     fanoutId = result.fanoutId;
 
     // One JSON line PER ARM — the status-row idiom: stdout is what a caller
@@ -2917,6 +3109,10 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
         if (fanoutCode === 0) fanoutCode = 6;
       }
     }
+    // Same rule for the audit handle the inner finally already reported, and
+    // for a dropped (mis-ordered) link: never over an arm failure, only over an
+    // otherwise-clean 0. The fan-out's arms landed; its evidence did not.
+    if (fanoutCode === 0 && (auditCloseFailed || auditMisordered)) fanoutCode = 6;
   }
   return finish(
     fanRequestId ?? newRequestId(),
@@ -5144,6 +5340,37 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       throw notFound(e);
     }
 
+    // DF5.3: the destructive verbs are their own composition root — the store
+    // opens beside the ledger handle (`state.ledger`) and closes in the same
+    // finally, so every teardown/harvest of this invocation emits its links.
+    //
+    // D8 — unconditional, deliberately, and not the same case as `observe`'s
+    // deferred open or `sandbox-reap`'s dry run: both of those have a whole
+    // MODE that emits nothing by construction (an unsettled marker, a
+    // classify-only sweep), while every path through this block runs a verb
+    // whose emit site is on its success path — `harvest`'s run-bundle link and
+    // `teardown`'s run-box link. The residue is therefore bounded by the one
+    // case the emitters skip: a record carrying no `repoSlug` or no
+    // `requestId` takes `auditLinkSkip`'s skip-and-log door (C-3), and such an
+    // invocation does leave `audit.db` (+ -wal/-shm) behind having recorded
+    // nothing. That is accepted here rather than deferred like `observe`'s,
+    // because this open precedes the destroy and the revoke: an unwritable
+    // store refuses BEFORE the box comes down, where a deferred open would
+    // discover it from inside the teardown's last statement — the exact
+    // failure `observe`'s degradation arm exists to absorb.
+    //
+    // CLASSIFIED (C-1/C10): the raw open reached `report`'s untyped branch as
+    // `code: "EACCES"` with advice that never named `QDS_AUDIT_DB`.
+    let audit: AuditStoreWriter;
+    try {
+      audit = openAuditStore();
+    } catch (e) {
+      throw auditStoreUnavailable(
+        e,
+        `the ${verb}'s links could not be written, so nothing was torn down — the box and key are untouched`,
+      );
+    }
+    state.audit = audit;
     const tdeps: TeardownDeps = {
       driver,
       store,
@@ -5153,6 +5380,7 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // default` chain: the lock guards `<store.dir>/<runId>.lock`, so the
       // bundle/artifact paths must be under exactly that directory.
       runsDir: store.dir,
+      recordAuditLink: (link) => audit.record(link),
     };
     if (verb === "harvest") {
       code = await runHarvest(ctx, tdeps, runIdArg);
@@ -5195,6 +5423,23 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
           note,
           "ledger-close-failed",
           `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+          "the handle dies with the process; re-run to confirm it still reads",
+        );
+        cleanupFailed();
+      }
+    }
+    // DF5.3: the verb's audit store closes on the same cleanup policy — the
+    // links are already committed, so a close fault is a leftover, not a
+    // retriable failure.
+    if (state.audit !== undefined) {
+      try {
+        state.audit.close();
+      } catch (e) {
+        const x = (e ?? {}) as { message?: string };
+        printError(
+          note,
+          "audit-store-close-failed",
+          `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
         cleanupFailed();

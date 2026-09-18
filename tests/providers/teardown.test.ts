@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createRun, neverPublicDriver, startVisualizer, stopVisualizer, VIZ_PIDFILE } from "../../src/providers/driver.ts";
-import type { ExecResult, ProviderDriver } from "../../src/providers/driver.ts";
+import type { ExecResult, ProviderAuditLink, ProviderDriver } from "../../src/providers/driver.ts";
 import { HarvestError } from "../../src/providers/harvest.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -35,9 +35,23 @@ import { acquireRunLock, releaseRunLock, type RunLockHandle } from "../../script
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 import { hostGit, makeOriginRepo, runLocal, cloneIntoBox, type OriginRepo } from "./fixtures/git-fixture.ts";
+import { useTempAuditStore } from "../fleet/helpers.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "sandbox-teardown.ts");
+
+/**
+ * DF5.3 C-5 — MANDATORY, and this suite is one of the three roots the helper's
+ * docstring names: `cli()` below spawns `scripts/sandbox-teardown.ts`, which
+ * opens the audit store EAGERLY at its composition root — before it reads any
+ * record, so even the `no-such-run` exit-1 case reaches it. `cli()` builds the
+ * child env from `{ ...process.env }` and overrides only QDS_RUNS_DIR /
+ * QDS_FAKE_BOXES_DIR / QDS_PROVIDER_DRIVER / PATH, so an operator (or CI job)
+ * with QDS_AUDIT_DB exported would have fixture rows for ids like
+ * `df25-script-td` appended to their live append-only store. The child inherits
+ * `process.env`, so setting it here covers the spawns for free.
+ */
+useTempAuditStore();
 
 let dir: string;
 let store: RunRecordStore;
@@ -59,6 +73,8 @@ let boxHome: string;
 const fixtureRoots: string[] = [];
 
 beforeEach(() => {
+  auditLinks = [];
+  linkStores.clear();
   dir = mkdtempSync(join(tmpdir(), "qds-df25-td-"));
   store = new RunRecordStore(join(dir, "runs"));
   api = new FakeKeyApi({ usageOnCreateUsd: 0.0081 });
@@ -78,16 +94,84 @@ afterEach(() => {
   // the failure look like a teardown bug rather than a fixture leak.
   for (const lock of locks.values()) releaseRunLock(lock);
   locks.clear();
-  restoreLog?.();
-  rmSync(dir, { recursive: true, force: true });
-  for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  // INV-AUDIT-4, file-wide and free. `auditLinks` is written by every deps()
+  // here and used to be READ by no test at all — a capture that looked like
+  // coverage and provided none. Every link it holds must be attributable to a
+  // record that genuinely CARRIES the DF2.8 budget attribution, so the
+  // unattributed runs that dominate this suite are pinned to emit nothing, and
+  // an emitter that manufactured a repoSlug turns this whole file red. (The
+  // `requestId` half cannot be checked from the record alone — `deps.requestId`
+  // is a legitimate §5.2 source — so it is pinned by the named tests below.)
+  //
+  // COLLECT, clean up, THEN assert. The sweep is designed to fire, and
+  // `store.get` itself THROWS on an unreadable record (readRecord does not
+  // return undefined) — asserting inline would skip `restoreLog` (leaving the
+  // global sink pointed at a dead test's array for the rest of the process),
+  // the `rmSync`, and the `fixtureRoots` splice, turning one red test into a
+  // cascade of leaked /tmp git fixtures and stale entries the NEXT test's sweep
+  // re-inspects.
+  const violations: string[] = [];
+  try {
+    for (const link of auditLinks) {
+      // Not always the file-level `store`: the `--dir` CLI test creates its run
+      // in a second RunRecordStore, and resolving that link through `store`
+      // would surface as an ENOENT pointing at the record store rather than at
+      // the emitter.
+      const recStore = linkStores.get(link.runId) ?? store;
+      let repoSlug: unknown;
+      try {
+        repoSlug = recStore.get(link.runId).extensions?.budget?.repoSlug;
+      } catch (e) {
+        violations.push(`${link.hop}.${link.event}: unreadable run record ${link.runId} — ${(e as Error).message}`);
+        continue;
+      }
+      if (repoSlug !== link.repoSlug) {
+        violations.push(
+          `${link.hop}.${link.event} emitted for ${link.runId} with repoSlug ${JSON.stringify(link.repoSlug)}, record carries ${JSON.stringify(repoSlug)}`,
+        );
+      }
+    }
+  } finally {
+    restoreLog?.();
+    rmSync(dir, { recursive: true, force: true });
+    for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
+  expect(violations).toEqual([]);
 });
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * DF5.3: every deps() construction captures its audit links here; suites that
+ * assert lifecycle behavior read `auditLinks` after the call, and the afterEach
+ * above holds EVERY captured link to INV-AUDIT-4 whether a test reads it or
+ * not. Reset per test in beforeEach like the recording driver (it used to say
+ * beforeEach while resetting in afterEach — same effect, but the two are only
+ * equivalent while nothing reads the array between files).
+ */
+let auditLinks: ProviderAuditLink[] = [];
+
+/**
+ * runId → the record store that run actually lives in, for the afterEach sweep.
+ * Only tests that mint a run OUTSIDE the file-level `store` need to register.
+ */
+const linkStores = new Map<string, RunRecordStore>();
+
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
   // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
-  return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...overrides };
+  return {
+    driver: recording,
+    store,
+    keyApi: api,
+    runsDir: store.dir,
+    workdir: "app",
+    boxRunRoot,
+    boxHome,
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
+    ...overrides,
+  };
 }
 
 /**
@@ -218,7 +302,7 @@ async function fillBox(
  * wrapped call. The unwrapped originals still receive every call, so the
  * FakeKeyApi/RecordingDriver state stays authoritative.
  */
-function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: TeardownDeps } {
+function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; links: ProviderAuditLink[]; deps: TeardownDeps } {
   const calls: string[] = [];
   const keyW = Object.create(api) as FakeKeyApi;
   keyW.getKeyEntry = (hash: string, maxPages?: number) => {
@@ -243,7 +327,25 @@ function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: T
     calls.push("close");
     return store.close(runId, now);
   };
-  return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...base } };
+  // DF5.3: the wrap captures the teardown link alongside the step labels.
+  const links: ProviderAuditLink[] = [];
+  return {
+    calls,
+    links,
+    deps: {
+      driver: driverW,
+      store: storeW,
+      keyApi: keyW,
+      runsDir: store.dir,
+      workdir: "app",
+      boxRunRoot,
+      boxHome,
+      recordAuditLink: (link) => {
+        links.push(link);
+      },
+      ...base,
+    },
+  };
 }
 
 /**
@@ -297,7 +399,7 @@ function assertTeardownOrder(calls: string[]): void {
 }
 
 async function makeRun(runId: string): Promise<void> {
-  await createRun(recording, store, { runId });
+  await createRun(recording, store, { runId, recordAuditLink: (l) => auditLinks.push(l) });
 }
 
 // ─── DF2.11: the teardown lock — AC1 required branded handle, AC2 mismatch ────
@@ -390,6 +492,11 @@ describe("DF2.5 teardownSandbox", () => {
     const host = await makeHostRepo();
     await makeRun(runId);
     await mintFor(runId);
+    // DF5.3: the emits need the DF2.8 attribution — the ONLY repoSlug source —
+    // AND a requestId. CONTRACT C5: an emitter may no longer invent the chain's
+    // join key, so without one all three links below are SKIPPED (pinned by the
+    // C5 test further down). Neither identity is manufactured.
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } } });
     const h = orderDeps({ gitCwd: host });
     const lock = lockFor(runId);
 
@@ -397,6 +504,20 @@ describe("DF2.5 teardownSandbox", () => {
 
     assertTeardownOrder(h.calls);
     expect(store.get(runId).closedAt).toBeString();
+    // DF5.3: the revoke+verify-revoked links ride the forwarded credential
+    // deps (steps 4–5), and exactly one teardown link lands AFTER close — the
+    // event completed, and the detail carries the closedAt it stamped.
+    expect(h.links.map((l) => `${l.hop}.${l.event}`)).toEqual([
+      "run-credential.revoke",
+      "run-credential.verify-revoked",
+      "run-box.teardown",
+    ]);
+    // EXACT, like the identity test below: `detail` is digested into
+    // `evidence_digest` on an append-only store, so its exact shape IS the
+    // contract. A partial match never checked `boxSource`, so a row that lost
+    // it — or gained a stray field — passed here. `createRun` recorded a
+    // `vmName`, hence "record" and not F6's run-id fallback.
+    expect(h.links[2]?.detail).toEqual({ closedAt: store.get(runId).closedAt, boxSource: "record" });
     // destroy really ran: the fake box directory is gone
     expect(existsSync(boxDir(runId))).toBeFalse();
     // DF2.11 AC1's read-only half, on disk rather than through the memoized
@@ -937,6 +1058,10 @@ describe("DF2.5 teardownSandbox", () => {
     await makeRun(runId);
     await mintFor(runId);
     store.set(runId, { commitSha: origin.baseSha });
+    // DF5.3: ATTRIBUTED on purpose. Without this the run emits nothing either
+    // way, and this test — the one place a second teardown is actually run —
+    // could not see a duplicated audit row for one box at all.
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } } });
     await fillBox(runId, runId, origin.originDir, 3, true);
 
     await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
@@ -948,7 +1073,317 @@ describe("DF2.5 teardownSandbox", () => {
     expect(store.get(runId).closedAt).toBe(firstClosedAt);
     // the re-harvest of an already-fetched ref is --force in place: still 3
     expect(await hostGit(origin.originDir, ["rev-parse", "--verify", `refs/sandbox/${runId}`])).toBeString();
+
+    // DF5.3 — what makes the first-close-wins HEALING emit safe. The re-run
+    // deliberately emits a second `run-box.teardown` (a process that died
+    // between store.close and the emit could never land it otherwise, because
+    // the short-circuit sits above the emit site), so the exactly-once property
+    // is NOT "emitted once" — it is that both emits carry the SAME
+    // (run_id, hop, event, subject_key), which `ON CONFLICT DO NOTHING` in
+    // src/audit/link-store.ts collapses onto one row. An emit whose healing arm
+    // resolved a different subject would write a second row for one box, and
+    // nothing else in this file would notice.
+    const teardownLinks = auditLinks.filter((l) => `${l.hop}.${l.event}` === "run-box.teardown");
+    expect(teardownLinks).toHaveLength(2); // fresh close, then the heal
+    const rowKeys = new Set(teardownLinks.map((l) => `${l.runId}|${l.hop}|${l.event}|${l.subjectId}`));
+    expect(rowKeys.size).toBe(1);
+    // And the two emits must describe the SAME fact, not merely collide on the
+    // key: a heal that re-resolved `closedAt`, `boxSource` or the subject from
+    // different state would leave the surviving row and the discarded one
+    // disagreeing about what happened, which no constraint can catch.
+    // Timestamps are the only licensed difference.
+    const sameFact = (l: ProviderAuditLink | undefined): unknown =>
+      l === undefined ? undefined : { ...l, occurredAt: "", recordedAt: "" };
+    expect(sameFact(teardownLinks[0])).toEqual(sameFact(teardownLinks[1]));
+    // The credential links belong to the FIRST teardown alone: the second run
+    // skips every step, so nothing re-emits `revoke`/`verify-revoked` over a
+    // key that is long gone.
+    expect(auditLinks.filter((l) => l.hop === "run-credential").map((l) => l.event)).toEqual([
+      "revoke",
+      "verify-revoked",
+    ]);
   }, 30_000);
+
+  // ─── 8b. DF5.3 — the run-box.teardown link ────────────────────────────────
+
+  describe("DF5.3 the teardown link (hop 5, run-box)", () => {
+    /**
+     * A run whose BOX NAME differs from its run id. Everything about the
+     * `teardown` link's identity is otherwise indistinguishable from the run id
+     * — `subjectId: rec.vmName ?? runId` on a fixture where the two coincide is
+     * satisfied by emitting either one, the wrong `subjectKind`, or the run id
+     * where the box belongs.
+     *
+     * `requestId` is the CALLER's to add — the C5 test below needs a record
+     * that carries none, and an "" sentinel would not exercise the same branch
+     * (the emitter tests for `undefined`).
+     */
+    async function attributedRunWithDistinctBox(runId: string, boxName: string): Promise<void> {
+      store.create(runId);
+      await driver.create(boxName);
+      await mintFor(runId);
+      store.set(runId, {
+        vmName: boxName,
+        extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } },
+      });
+    }
+
+    test("identity: the link names the BOX (not the run), lands AFTER close, and says where the handle came from", async () => {
+      const runId = "df53-box-identity";
+      const boxName = "df53-identity-box"; // DISTINCT from the run id, on purpose
+      const host = await makeHostRepo();
+      await attributedRunWithDistinctBox(runId, boxName);
+      store.set(runId, { requestId: "req-df53" });
+
+      // The ordering claim used to be INFERRED from a comment: the links array
+      // and the call-order array were separate, so "lands AFTER close" was
+      // prose. Push the emit onto the SAME timeline and it becomes an
+      // assertion — which matters now that the emit has MOVED inside the close
+      // step, between `store.close` and the end of that step.
+      const h = orderDeps({ gitCwd: host });
+      const d: TeardownDeps = {
+        ...h.deps,
+        recordAuditLink: (l) => {
+          h.calls.push(`link:${l.event}`);
+          h.links.push(l);
+        },
+      };
+
+      await teardownSandbox(d, runId, lockFor(runId));
+
+      // Subsequence, per the file header — and the link is a REAL position in
+      // it, not an inference. `close` is no longer the last label: the emit
+      // sits inside that step, after the close it reports.
+      const idx = (label: string): number => h.calls.indexOf(label);
+      expect(idx("spend")).toBeGreaterThanOrEqual(0);
+      expect(idx("revoke")).toBeGreaterThan(idx("spend"));
+      expect(idx("destroy")).toBeGreaterThan(idx("revoke"));
+      expect(idx("close")).toBeGreaterThan(idx("destroy"));
+      expect(idx("link:teardown")).toBeGreaterThan(idx("close"));
+      expect(h.calls[h.calls.length - 1]).toBe("link:teardown");
+
+      const link = h.links.find((l) => l.event === "teardown");
+      expect(link).toBeDefined();
+      const rec = store.get(runId);
+      expect(rec.vmName).toBe(boxName);
+      expect(link?.subjectId).toBe(rec.vmName); // the BOX…
+      expect(link?.subjectId).not.toBe(runId); // …which this fixture makes distinguishable
+      expect(link?.subjectKind).toBe("box");
+      expect(link?.hop).toBe("run-box");
+      expect(link?.runId).toBe(runId);
+      expect(link?.repoSlug).toBe("qds/demo");
+      expect(link?.requestId).toBe("req-df53");
+      // `boxSource` keeps the row honest about WHAT came down: a record handle,
+      // not F6's `rec.vmName ?? runId` fallback over a box that may never have
+      // existed.
+      expect(link?.detail).toEqual({ closedAt: rec.closedAt, boxSource: "record" });
+      // …and the box it names really is gone.
+      expect(existsSync(boxDir(boxName))).toBeFalse();
+    }, 30_000);
+
+    test("F6 fallback: a vmName-less record emits boxSource 'run-id-fallback', naming the run id it destroyed", async () => {
+      // The other arm of the same field. `destroy` is contractually idempotent,
+      // so the call this row vouches for may well have no-opped over a box that
+      // never existed — the row must not be indistinguishable from the one
+      // above, which names a recorded handle.
+      const runId = "df53-box-fallback";
+      store.create(runId); // record open, vmName never written (the INV-1 crash window)
+      await driver.create(runId); // the box IS live, named after the run id
+      store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } } });
+
+      await teardownSandbox(deps(), runId, lockFor(runId));
+
+      const link = auditLinks.find((l) => l.event === "teardown");
+      expect(link?.subjectId).toBe(runId);
+      // EXACT: a partial match here never checked `closedAt`, so an F6-fallback
+      // row that omitted it entirely passed — and an absent `closedAt` is
+      // precisely what makes a heal digest differently and collide as
+      // `divergent`.
+      expect(link?.detail).toEqual({ closedAt: store.get(runId).closedAt, boxSource: "run-id-fallback" });
+      expect((await driver.list(runId)).length).toBe(0);
+    }, 30_000);
+
+    test("CONTRACT C5: an attributed run with NO requestId emits nothing and logs audit-link-skipped for the teardown event", async () => {
+      // hop 5 reporting `unlinked` is honest and fail-closed; a stamped random
+      // id is evidence invented at the emit, on the column chain.ts JOINS on.
+      const runId = "df53-teardown-no-request-id";
+      const boxName = "df53-no-req-box";
+      const host = await makeHostRepo();
+      await attributedRunWithDistinctBox(runId, boxName);
+      // No requestId on the RECORD — and `deps.requestId` is deliberately set
+      // to prove it is NOT a fallback (C5 option (c)): the three teardown/reap
+      // composition roots MINT theirs, so honouring it here would launder a
+      // per-invocation id into the column chain.ts joins on. It still serves
+      // the step log, which is the job it was added for.
+
+      await teardownSandbox(deps({ gitCwd: host, requestId: "req-minted-by-the-cli" }), runId, lockFor(runId));
+
+      // The teardown COMPLETED — the skip is fail-closed about the audit row,
+      // not about the box.
+      expect(store.get(runId).closedAt).toBeString();
+      expect(existsSync(boxDir(boxName))).toBeFalse();
+      expect(auditLinks).toHaveLength(0);
+      const skip = logs.find((l) => l.operation === "providers.audit-link-skipped" && l.event === "teardown");
+      expect(skip).toBeDefined();
+      expect(skip?.status).toBe("error");
+      expect(skip?.reason).toBe("no-request-id");
+      expect(String(skip?.message)).toContain(runId);
+      // The minted id is on the LOG line (its legitimate home) and nowhere near
+      // a link — there is no link.
+      expect(skip?.requestId).toBe("req-minted-by-the-cli");
+      // Hop 4's own emits take the same door through the forwarded credential
+      // deps — C5 is not cosmetic on one emitter while another launders an id.
+      expect(
+        logs.filter((l) => l.operation === "providers.audit-link-skipped").map((l) => l.event),
+      ).toEqual(["revoke", "verify-revoked", "teardown"]);
+    }, 30_000);
+
+    test("an audit-store refusal is DROPPED, teardown completes — and the operator's re-run HEALS the lost link", async () => {
+      // ROUND 3 / N2 inverted the first half of this test, deliberately. The
+      // emit sits inside the close step, AFTER destroy and AFTER `store.close`
+      // — which is irreversible — so a propagating refusal turned a fully
+      // successful teardown (box destroyed, key revoked and verified, record
+      // closed) into a reported failure, and the operator's natural re-run
+      // healed through the SAME store and failed the same way. On the
+      // credential half the same refusal ran BEFORE destroy and left the box
+      // alive and billing with no path to take it down. Hop 5 reporting
+      // `unlinked` is recoverable; an unteardownable billing box is not — so
+      // the teardown path takes the reaper's posture: log
+      // `providers.audit-link-dropped` and continue. Mint and deliver keep the
+      // fail-loud posture (nothing is billing yet at mint).
+      const runId = "df53-sink-refuses";
+      const boxName = "df53-refuse-box";
+      const host = await makeHostRepo();
+      await attributedRunWithDistinctBox(runId, boxName);
+      store.set(runId, { requestId: "req-df53" });
+
+      // Refuses the BOX write only: the credential emits at steps 4-5 must
+      // still land, or this would abort at revoke and prove nothing about close.
+      const refusing = deps({
+        gitCwd: host,
+        recordAuditLink: (l) => {
+          if (l.hop === "run-box") throw new Error("store refused");
+          auditLinks.push(l);
+        },
+      });
+
+      // NO THROW. The refusal costs an audit row, never the teardown.
+      await teardownSandbox(refusing, runId, lockFor(runId));
+
+      // BLAST RADIUS: everything irreversible happened and is reported as
+      // having happened. The record is CLOSED and the box is GONE.
+      const closedAt = store.get(runId).closedAt;
+      expect(closedAt).toBeString();
+      expect(existsSync(boxDir(boxName))).toBeFalse();
+      // ATTRIBUTABLE: one dropped-link line, on the close step, naming the
+      // refusal and saying plainly that the box IS down.
+      const dropped = logs.filter((l) => l.operation === "providers.audit-link-dropped");
+      expect(dropped).toHaveLength(1);
+      expect(dropped[0]?.status).toBe("error");
+      expect(dropped[0]?.event).toBe("teardown");
+      expect(dropped[0]?.step).toBe("close");
+      // An untyped throw is NOT relabelled as the store's own refusal.
+      expect((dropped[0] as unknown as { error: { code: string; message: string } }).error.code).toBe(
+        "audit-link-emit-failed",
+      );
+      expect((dropped[0] as unknown as { error: { message: string } }).error.message).toContain("store refused");
+      // The close step itself did NOT fail.
+      expect(logs.filter((l) => l.operation === "teardown.close" && l.status === "error")).toEqual([]);
+
+      // RETRYABLE: the re-run short-circuits on first-close-wins, and the
+      // healing emit lands the row the refusal lost. Without that arm this link
+      // could never be written — the short-circuit sits above the emit site.
+      auditLinks.length = 0;
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
+      const healed = auditLinks.filter((l) => `${l.hop}.${l.event}` === "run-box.teardown");
+      expect(healed).toHaveLength(1);
+      expect(healed[0]?.subjectId).toBe(boxName);
+      expect(healed[0]?.detail).toEqual({ closedAt, boxSource: "record" });
+      // C-2: the healed row's `occurredAt` is the CLOSE's time, not the heal's
+      // — which is what makes it byte-identical to the row the fresh arm would
+      // have written, instead of a second digest the store reports as
+      // `divergent`. `recordedAt` keeps the clock read, so the two differ here.
+      expect(healed[0]?.occurredAt).toBe(closedAt as string);
+      expect(Date.parse(healed[0]!.recordedAt)).toBeGreaterThanOrEqual(Date.parse(closedAt as string));
+      // The re-run is all-skipped, so nothing re-emits over the dead key.
+      expect(auditLinks.filter((l) => l.hop === "run-credential")).toHaveLength(0);
+    }, 30_000);
+
+    test("the HEAL is gated on the box being provably gone — a closed record with a LIVE box emits nothing", async () => {
+      // ROUND 3. `closedAt !== undefined` alone is not evidence of a teardown:
+      // `scripts/run-record.ts` exposes a bare `close <id>` verb that closes a
+      // record with no provider call at all, and closed-record-plus-live-box is
+      // exactly the state the reaper documents and collects. Healing there
+      // writes a `run-box.teardown` row — the attestation that the run's box
+      // CAME DOWN — for a box this process never touched and that may still be
+      // billing. The check is the reaper's own (`driver.list(name)` ⇒ empty)
+      // and it fails CLOSED.
+      const runId = "df53-heal-live-box";
+      const boxName = "df53-heal-live-box-vm";
+      const host = await makeHostRepo();
+      await attributedRunWithDistinctBox(runId, boxName);
+      store.set(runId, { requestId: "req-df53" });
+      // Closed WITHOUT a teardown — the bare `close` verb's state.
+      store.close(runId, new Date());
+      expect(existsSync(boxDir(boxName))).toBeTrue();
+      auditLinks.length = 0;
+
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
+
+      expect(auditLinks).toEqual([]);
+      const skip = logs.find((l) => l.operation === "providers.audit-link-skipped" && l.event === "teardown");
+      expect(skip?.reason).toBe("box-not-proven-gone");
+      expect(String(skip?.message)).toContain(boxName);
+      // The box is untouched — the re-run short-circuits, it does not destroy.
+      expect(existsSync(boxDir(boxName))).toBeTrue();
+    }, 30_000);
+
+    test("an UNENUMERABLE listing on the heal path fails CLOSED — no attestation from a driver that threw", async () => {
+      const runId = "df53-heal-list-throws";
+      const boxName = "df53-heal-list-throws-vm";
+      const host = await makeHostRepo();
+      await attributedRunWithDistinctBox(runId, boxName);
+      store.set(runId, { requestId: "req-df53" });
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
+      // The box really is gone, so only the throwing listing separates this
+      // from a heal that would legitimately land.
+      expect(existsSync(boxDir(boxName))).toBeFalse();
+      auditLinks.length = 0;
+      logs.length = 0;
+
+      const blind = Object.create(recording) as RecordingDriver;
+      blind.list = () => Promise.reject(new Error("provider list unavailable"));
+      await teardownSandbox(deps({ gitCwd: host, driver: blind }), runId, lockFor(runId));
+
+      expect(auditLinks).toEqual([]);
+      const skip = logs.find((l) => l.operation === "providers.audit-link-skipped" && l.event === "teardown");
+      expect(skip?.reason).toBe("box-not-proven-gone");
+    }, 30_000);
+
+    test("a FAILED destroy emits no teardown link — the row never vouches for a box that is still up", async () => {
+      // AC3's core claim on hop 5. revoke and verify-revoked genuinely
+      // completed and keep their rows; the box did not come down, the record
+      // stays open, and no `teardown` row claims otherwise.
+      const runId = "df53-destroy-fails";
+      const boxName = "df53-destroy-fail-box";
+      const host = await makeHostRepo();
+      await attributedRunWithDistinctBox(runId, boxName);
+      store.set(runId, { requestId: "req-df53" });
+      const failing = Object.create(recording) as RecordingDriver;
+      failing.destroy = () => Promise.reject(new Error("substrate could not confirm destroy"));
+
+      await expect(
+        teardownSandbox(deps({ gitCwd: host, driver: failing }), runId, lockFor(runId)),
+      ).rejects.toThrow();
+
+      expect(auditLinks.map((l) => `${l.hop}.${l.event}`)).toEqual([
+        "run-credential.revoke",
+        "run-credential.verify-revoked",
+      ]);
+      expect(store.get(runId).closedAt).toBeUndefined();
+      expect(existsSync(boxDir(boxName))).toBeTrue();
+    }, 30_000);
+  });
 
   // ─── 9. No-key run ────────────────────────────────────────────────────────
 
@@ -958,7 +1393,7 @@ describe("DF2.5 teardownSandbox", () => {
     await makeRun(runId);
     store.set(runId, { commitSha: "0123456789abcdef0123456789abcdef01234567" });
     // no keyHash, and deps carries NO keyApi field at all — works offline
-    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome };
+    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome, recordAuditLink: (l) => auditLinks.push(l) };
 
     await teardownSandbox(keyless, runId, lockFor(runId));
 
@@ -2333,7 +2768,8 @@ describe("DF2.5 teardownSandbox", () => {
       // without --dir the CLI would fail no-record against $QDS_RUNS_DIR.
       const altDir = join(dir, "alt-runs");
       const altStore = new RunRecordStore(altDir);
-      await createRun(recording, altStore, { runId });
+      linkStores.set(runId, altStore); // the afterEach sweep must resolve this run's links here
+      await createRun(recording, altStore, { runId, recordAuditLink: (l) => auditLinks.push(l) });
       altStore.set(runId, { commitSha: origin.baseSha });
       await fillBox(runId, runId, origin.originDir, 3, true);
 

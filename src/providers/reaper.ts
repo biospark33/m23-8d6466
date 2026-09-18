@@ -32,11 +32,17 @@ import {
   type KeyEntry,
 } from "./credentials.ts";
 import {
+  auditLinkSkip,
+  auditNonEmpty,
+  auditRepoSlug,
   driverListing,
+  emitAuditLink,
+  isAuditStoreError,
   ProvisionRefusedError,
   RUN_ID_SHAPE,
   SBX_OWNERSHIP_TAG,
   unverifiedVmListingRefusal,
+  type ProviderAuditLink,
   type ProviderDriver,
   type ProviderVm,
 } from "./driver.ts";
@@ -184,6 +190,13 @@ export interface SweepDeps {
    * never restored). Optional only so non-CLI embedders keep compiling.
    */
   costLedger?: TeardownDeps["costLedger"];
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. It serves the orphan-path `reap` link here and rides the
+   * sweep's `teardownDeps` so a reaper-initiated `teardownSandbox` emits its
+   * own `teardown` link. See `ProviderAuditLink` (driver.ts).
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export interface SweepOptions {
@@ -737,9 +750,30 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     requestId,
     gitCwd: process.cwd(),
     runsDir: deps.store.dir,
+    // DF5.3: a reaper-initiated teardown emits its own `teardown` link through
+    // the same seam the orphan-path `reap` emit below uses.
+    recordAuditLink: deps.recordAuditLink,
     ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
   };
-  const credDeps: CredentialDeps = { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId };
+  // W14B-3, narrowed. The posture is unchanged: `revokeAndVerify` runs under a
+  // run-less step context (`runId: null`, credentials.ts) and
+  // `audit_links.run_id` is NOT NULL, so a run-less revocation — the
+  // record-less leaked key — has no hop to serve and INV-AUDIT-4 forbids
+  // manufacturing one. What enforces it is that `revokeAndVerify` is not an
+  // emit site BY CONSTRUCTION (`revokeHash`/`verifyHash` emit nothing;
+  // `verifyRevoked`, which does emit, takes a runId and the sweep never calls
+  // it). A `() => {}` bound HERE enforced nothing of the kind — it blinded the
+  // whole deps object, so any present or future credential call routed through
+  // it would silently drop a link INV-AUDIT-4 wanted written, which is the
+  // exact failure mode this story exists to eliminate. The seam stays live; the
+  // one non-emitting site stays non-emitting where that is actually decided.
+  const credDeps: CredentialDeps = {
+    keyApi: deps.keyApi,
+    driver: deps.driver,
+    store: deps.store,
+    requestId,
+    recordAuditLink: deps.recordAuditLink,
+  };
   // R4-9: the lock path resolves through the SAME expression teardownSandbox's
   // head check uses (`deps.runsDir ?? deps.store.dir`) — the acquire below and
   // the head check inside the call must name one file, however the teardownDeps
@@ -885,6 +919,100 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           } else {
             executed.destroy.push(unit.id);
             await withTimeout(deps.driver.destroy(unit.id), actionTimeoutMs, `driver.destroy(${unit.id})`);
+            // DF5.3: the `reap` link (hop 5, run-box) — the ORPHAN PATH ONLY.
+            // A cleanly torn-down run never reaches this arm (AC5 resolves
+            // `reap` as not-applicable there), so an emitted link exists only
+            // for a box the reaper actually collected. Emitted only when a
+            // record resolves with a DF2.8 attribution: a record-less leak has
+            // no runId/repoSlug/requestId to serve the NOT NULL columns, and
+            // manufacturing a link for it is exactly what INV-AUDIT-4 forbids
+            // (the run-less credential posture above is the same reasoning).
+            //
+            // The emit is guarded SEPARATELY from the unit's own try/catch,
+            // because by this line the destroy has already SUCCEEDED and
+            // `unit.id` is already in `executed.destroy`. A store refusal
+            // (ENOSPC, SQLITE_BUSY from a concurrent dispatch, a closed handle)
+            // falling through to the unit catch pushed
+            // `{vm, code: "destroy-failed"}` WITHOUT splicing the id back out
+            // of `executed` (the RunLockedError arm above does splice; that one
+            // did not) — so one report counted the same box as destroyed AND as
+            // failed to destroy, and sent the operator to destroy a box that no
+            // longer exists. A dropped link is a real problem, but it is not a
+            // failed destroy: log it and let the sweep finish. `SweepReport` has
+            // no non-fatal channel to carry it (`failures` feeds the apply
+            // exit code), and inventing one is not this fix's business.
+            const reapRec = recordError === undefined ? claimed : undefined;
+            const reapRepoSlug = auditRepoSlug(reapRec);
+            // The RECORD's requestId, with no fallback to the sweep's own
+            // (C5/option-c, the fourth emitter). `requestId` here is
+            // `deps.requestId ?? newRequestId()` and sandbox-reap supplies a
+            // minted one, so the fallback could only ever stamp a per-invocation
+            // id — a FALSE join the walker acts on (it JOINs
+            // `sessions.request_id` / `gate_results.request_id`), on the path
+            // where the record is most likely to be incomplete.
+            // C3: the shared non-empty predicate, so a `""` identity takes this
+            // skip door instead of the store's `audit-link-invalid` throw. A
+            // record-LESS leak (`reapRec === undefined`) still says nothing: it
+            // has no run to name, and the sweep's own report covers the box.
+            const reapSkip =
+              reapRec === undefined ? undefined : auditLinkSkip(reapRec.runId, reapRepoSlug, reapRec.requestId);
+            if (reapRec !== undefined && reapSkip !== undefined) {
+              log({
+                requestId,
+                operation: "providers.audit-link-skipped",
+                agentId: null,
+                timestamp: new Date().toISOString(),
+                duration: 0,
+                status: "error",
+                runId: reapRec.runId,
+                vm: unit.id,
+                event: "reap",
+                // `no-repo-slug` logs too (round 3): it used to return silently
+                // here and at three of the other four emitters, though the skip
+                // line is what the comments tell operators to grep for.
+                reason: reapSkip,
+                message: `hop run-box goes unlinked for reaped box ${unit.id}: its record carries no ${reapSkip === "no-repo-slug" ? "DF2.8 budget attribution" : reapSkip === "no-run-id" ? "runId" : "requestId"}`,
+              });
+            } else if (reapRec !== undefined && auditNonEmpty(reapRepoSlug) && auditNonEmpty(reapRec.requestId)) {
+              try {
+                emitAuditLink(deps.recordAuditLink, {
+                  runId: reapRec.runId,
+                  repoSlug: reapRepoSlug,
+                  requestId: reapRec.requestId,
+                  hop: "run-box",
+                  event: "reap",
+                  subjectId: unit.id,
+                  subjectKind: "box",
+                  detail: { vm: unit.id, class: "leaked-vm" },
+                });
+              } catch (e) {
+                const err = (e ?? {}) as { code?: string; message?: string };
+                log({
+                  requestId,
+                  operation: "providers.reap-audit-link-dropped",
+                  agentId: null,
+                  timestamp: new Date().toISOString(),
+                  duration: 0,
+                  status: "error",
+                  runId: reapRec.runId,
+                  vm: unit.id,
+                  error: {
+                    // The store's own code when it IS a store refusal;
+                    // otherwise an honest emitter-fault code. `?? "audit-link-
+                    // write-failed"` labelled a `JSON.stringify` TypeError on a
+                    // BigInt/circular `detail` as a store write failure. The
+                    // catch itself stays broad on purpose (unlike the
+                    // driver's): by this line the destroy has SUCCEEDED and the
+                    // box is in `executed.destroy`, and rethrowing would reach
+                    // the unit catch as `destroy-failed` — counting one box as
+                    // both destroyed and failed-to-destroy, the bug this arm's
+                    // separate guard exists to prevent.
+                    code: isAuditStoreError(e) ? e.code : "audit-link-emit-failed",
+                    message: scrub(err.message ?? String(e)),
+                  },
+                });
+              }
+            }
           }
         } else if (unit.hash !== undefined) {
           executed.revoke.push(unit.id);

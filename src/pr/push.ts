@@ -326,12 +326,69 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   // An approval of an EARLIER verdict never authorizes a later re-harvest, so
   // the decision must post-date the report it claims to authorize. Both stamps
   // are host clocks (DF5.1 and DF3.4 both write host-side), so they compare.
+  // DF5.3 (AC7) tightened the boundary from `decided < completed` to
+  // `decided <= completed`: an ordering that cannot distinguish the decision
+  // from the evidence has not demonstrated the decision FOLLOWED it, and the
+  // audit chain's own strict comparison (same host clocks) refuses the pair
+  // this used to admit.
   const decided = Date.parse(decidedAt);
   const completed = Date.parse(report.completedAt);
-  if (!Number.isFinite(decided) || !Number.isFinite(completed) || decided < completed) {
+  // An UNPARSEABLE stamp is its own fault, with its own refusal: reported as an
+  // ordering violation it sent an operator hunting for a clock skew between two
+  // timestamps, one of which is not a timestamp at all.
+  if (!Number.isFinite(decided) || !Number.isFinite(completed)) {
     throw new PrRefusalError(
+      "approval-timestamp-unparseable",
+      `approval for ${runId} cannot be ordered against report ${report.reverifyId}: ${
+        !Number.isFinite(decided)
+          ? `the approval's decidedAt ${JSON.stringify(decidedAt)}`
+          : `the report's completedAt ${JSON.stringify(report.completedAt)}`
+      } is not a parseable timestamp`,
+      { reportPath: rp },
+    );
+  }
+  // PARSEABLE is not enough: the comparison assumes both stamps are on the same
+  // clock basis. `decidedAt` always is (`nowOf(deps).toISOString()`), but
+  // `completedAt` is read off disk under a `z.string().min(1)` that constrains
+  // no format, and `Date.parse("2026-09-17T10:00:00")` — no `Z`, no offset — is
+  // parsed as LOCAL time. East of UTC that makes an offsetless stamp parse
+  // EARLIER than it is, so `decided <= completed` admits an approval that in
+  // fact preceded its report: the exact defeat AC7's tightening closes. West of
+  // UTC it refuses a correctly-ordered pair. Both pass the guard above, so the
+  // rule is the audit store's own (`validateAndBind`): canonical UTC or refuse.
+  // Its OWN code — `approval-precedes-report` would send an operator looking
+  // for an ordering fault in a pair that was never comparable.
+  const stamps = [
+    ["the approval's decidedAt", decidedAt],
+    ["the report's completedAt", report.completedAt],
+  ] as const;
+  // Safe after the guard above: `new Date(s)` and `Date.parse(s)` share one
+  // parser, so a finite parse means `toISOString()` cannot throw.
+  const nonCanonical = stamps.find(([, stamp]) => new Date(stamp).toISOString() !== stamp);
+  if (nonCanonical !== undefined) {
+    throw new PrRefusalError(
+      "approval-timestamp-non-canonical",
+      `approval for ${runId} cannot be ordered against report ${report.reverifyId}: ${nonCanonical[0]} ${JSON.stringify(
+        nonCanonical[1],
+      )} is not a canonical UTC timestamp (YYYY-MM-DDTHH:MM:SS.sssZ), so the two stamps are not on the same clock basis`,
+      { reportPath: rp },
+    );
+  }
+  if (decided <= completed) {
+    throw new PrRefusalError(
+      // The CODE is unchanged — an operator's greps and anything keying on it
+      // predate this PR. Only the MESSAGE moves, because `<=` admits the
+      // EQUALITY case, for which "before" is factually false and two identical
+      // timestamps under that word read as a clock bug that does not exist.
       "approval-precedes-report",
-      `approval for ${runId} was decided at ${decidedAt}, before report ${report.reverifyId} completed at ${report.completedAt}`,
+      `approval for ${runId} was decided at ${decidedAt}, which does not strictly follow report ${report.reverifyId} completed at ${report.completedAt}${
+        // The equality case has no ordering to fix: neither stamp can be moved
+        // (`decidedAt` is written once under the approval lock, the re-verify
+        // report is immutable), so the refusal is a dead end without this.
+        decided === completed
+          ? " — the two stamps are identical, so nothing here can be corrected in place: re-run the re-verify, then re-approve against the new report"
+          : ""
+      }`,
       { reportPath: rp },
     );
   }

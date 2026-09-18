@@ -23,10 +23,16 @@
 
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { Database } from "bun:sqlite";
 
+import {
+  type AuditLinkRow,
+  openAuditStore,
+  openAuditStoreForWalk,
+} from "../../../src/audit/link-store.ts";
+import type { ProviderAuditLink } from "../../../src/providers/driver.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import { MAX_VERIFY_PAGES, mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
 import type { KeyApi } from "../../../src/providers/credentials.ts";
@@ -81,6 +87,82 @@ export function liveGate(tier: "1" | "2"): void {
 /** The todoIf condition every live test uses: off unless the master flag is set. */
 export function liveTodoOff(): boolean {
   return process.env.QDS_E2E_LIVE !== "1";
+}
+
+// ─── the round's own audit-link store (DF5.3) ────────────────────────────────
+
+/**
+ * Where a live round's `run-credential` / `run-box` links land: beside the
+ * round's evidence, never the operator's `.sandbox/audit.db`.
+ *
+ * `QDS_E2E_EVIDENCE_DIR` moves it with the evidence, for the same reason
+ * `writeEvidence` honours that variable.
+ *
+ * ONE file per evidence directory, and it ACCUMULATES: `openAuditStore` appends,
+ * so round N+1's links pile onto round N's. Per-`runId` reads stay correct (every
+ * assertion here is `linksForRun`), so the growth is the only cost — and because
+ * this repo does track `.db` files under `_bmad-output/evidence/`, the file would
+ * otherwise be offered for commit as an opaque growing binary. The choice made
+ * (DF5.3 D9): `.gitignore` carries an `audit-links.db` glob under
+ * `_bmad-output/evidence/` (spelled out there — the pattern's own `*`s cannot
+ * be written inside a block comment).
+ * Per-round naming (`audit-links-<roundId>.db`) is deliberately DEFERRED — it
+ * would split one round's links across files the moment a round is resumed.
+ */
+export function liveAuditStorePath(): string {
+  return join(process.env.QDS_E2E_EVIDENCE_DIR?.trim() || EVIDENCE_DIR, "audit-links.db");
+}
+
+/**
+ * The audit seam every credential/box helper in this harness passes down.
+ *
+ * It used to be `() => {}` at six call sites on the money path, so a live
+ * TIER-1/TIER-2 round minted, delivered and revoked REAL keys with the
+ * `run-credential` hop written nowhere — and an audit walk over a
+ * harness-provisioned run then reported `unlinked` for hops that were in fact
+ * performed. The story sanctions exactly ONE silent link sink (the reaper's
+ * run-less `revokeAndVerify`, INV-AUDIT-4) and none of those six was it.
+ *
+ * GATED, belt and braces: every caller already sits inside a
+ * `test.todoIf(liveTodoOff())` body, and this returns before opening anything
+ * when `QDS_E2E_LIVE !== "1"`. A plain `bun test` therefore creates no store,
+ * touches no evidence directory and reaches no paid path through this seam.
+ *
+ * OPEN → record → CLOSE, per link, rather than a memoised round-long handle.
+ * The handle was cached with a docblock promising it was "closed when the
+ * process exits" and no `process.on("exit")` anywhere to back that up, and the
+ * cache also froze `liveAuditStorePath()` at first-link time — so a later
+ * `QDS_E2E_EVIDENCE_DIR` change kept writing to the old store while
+ * {@link liveAuditLinksFor} read the new path and reported `[]`. Writer and
+ * reader now resolve the path the same way on every call, and nothing is left
+ * open. The cost is one SQLite open per link on a path whose peers are real ssh
+ * round trips.
+ */
+export function recordLiveAuditLink(link: ProviderAuditLink): void {
+  if (liveTodoOff()) return;
+  mkdirSync(dirname(liveAuditStorePath()), { recursive: true });
+  const store = openAuditStore(liveAuditStorePath());
+  try {
+    store.record(link);
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Read this round's links back — what a tier test asserts the hops it performed
+ * actually landed. Returns `[]` when no link was ever written (no store, so no
+ * walk): the absence IS the answer, and `openAuditStoreForWalk` refuses to
+ * create one.
+ */
+export function liveAuditLinksFor(runId: string): AuditLinkRow[] {
+  if (!existsSync(liveAuditStorePath())) return [];
+  const handle = openAuditStoreForWalk(liveAuditStorePath());
+  try {
+    return handle.linksForRun(runId);
+  } finally {
+    handle.close();
+  }
 }
 
 // ─── preflight ───────────────────────────────────────────────────────────────
@@ -888,7 +970,10 @@ export async function mintCappedKey(
   capMicroUsd: number,
 ): Promise<{ hash: string }> {
   const keyApi: KeyApi = openRouterKeyApi();
-  const res = await mintRunKey({ store, keyApi, driver, capMicroUsd }, runId);
+  const res = await mintRunKey(
+    { store, keyApi, driver, capMicroUsd, recordAuditLink: recordLiveAuditLink },
+    runId,
+  );
   return { hash: res.hash };
 }
 
@@ -1036,7 +1121,10 @@ export async function revokeQuietly(
       return; // no key was ever minted — nothing to revoke
     }
     const keyApi: KeyApi = openRouterKeyApi();
-    const result = await revokeRunKey({ keyApi, driver, store }, runId);
+    const result = await revokeRunKey(
+      { keyApi, driver, store, recordAuditLink: recordLiveAuditLink },
+      runId,
+    );
     evidence.push({ phase: "finally-revoke", runId, result, ok: result !== "none" });
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);

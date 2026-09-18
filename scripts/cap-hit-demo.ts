@@ -46,6 +46,8 @@ import { newId, RunRecordStore, type RunRecord } from "../src/providers/run-reco
 // rule is how a sink drifts out of sync with it.
 import { redactSecrets } from "../src/providers/step-log.ts";
 import { shQuote } from "../src/providers/exedev/transport.ts";
+import type { ProviderAuditLink } from "../src/providers/driver.ts";
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   classifyRunExit,
@@ -87,6 +89,13 @@ export interface CapHitDemoDeps {
    * (production — the provider the key lives on).
    */
   probe?: (key: string, model: string) => Promise<{ status: number; body: string }>;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. The demo's runs are budget-less, so its emitters skip the
+   * links — the seam is threaded regardless (compile-time loudness), bound by
+   * main() to `openAuditStore().record` and closed in its finally.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 export interface CapHitDemoOptions {
@@ -571,7 +580,7 @@ export async function runCapHitDemo(
                 // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
               }
               await teardownSandbox(
-                { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+                { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
                 runId,
                 h,
               );
@@ -624,7 +633,7 @@ export async function runCapHitDemo(
     }
   };
 
-  const vm = await createRun(deps.driver, deps.store, { runId });
+  const vm = await createRun(deps.driver, deps.store, { runId, recordAuditLink: deps.recordAuditLink });
   const vmName = vm.vmName ?? runId;
 
   // Per-phase elapsed trackers. setupMs is declared here — before finishEarly,
@@ -658,7 +667,7 @@ export async function runCapHitDemo(
         "cap-hit-demo teardown",
         (h) =>
           teardownSandbox(
-            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
             runId,
             h,
           ),
@@ -756,7 +765,7 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       const minted = await mintRunKey(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile, recordAuditLink: deps.recordAuditLink },
         runId,
       );
       key = minted.key;
@@ -809,7 +818,9 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       await deliverRunKey(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile, recordAuditLink: deps.recordAuditLink },
+        // DF5.3: the deliver link needs the run identity beside the deps.
+        runId,
         vmName,
         key,
       );
@@ -881,7 +892,15 @@ export async function runCapHitDemo(
         return finishEarly("models-json-missing");
       }
       const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
-      await fillRun(deps.driver, vmName, files);
+      await fillRun(deps.driver, vmName, files, {
+        // DF5.3/C7: stated, not omitted — the demo's runs are deliberately
+        // budget-less, so the fill link is (correctly) not emitted; the seam is
+        // still threaded, loud.
+        repoSlug: undefined,
+        recordAuditLink: deps.recordAuditLink,
+        runId,
+        requestId,
+      });
       await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha, workdir: LIVE_WORKDIR });
       // Warm pi's streaming path BEFORE the gate: on a FRESH box the first pi
       // calls nondeterministically stall (no request timeout in pi's client);
@@ -1240,7 +1259,7 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       spendMicroUsd = await captureSpend(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, recordAuditLink: deps.recordAuditLink },
         runId,
       );
       captureSpendMs = Date.now() - started;
@@ -1331,7 +1350,7 @@ export async function runCapHitDemo(
         "cap-hit-demo teardown",
         (h) =>
           teardownSandbox(
-            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
             runId,
             h,
           ),
@@ -1601,6 +1620,64 @@ async function main(argv: readonly string[]): Promise<number> {
   // Fake driver uses box-relative paths; live substrate uses absolute contract
   // envFile is substrate-resolved inside runCapHitDemo (live: /home/exedev/.env).
 
+  // DF5.3: the demo's composition root opens the audit-link store ONCE (the
+  // default path; QDS_AUDIT_DB resolves inside the store) and closes it on
+  // every exit of the run — the SIGNAL path included.
+  //
+  // It opens BEFORE the signal handlers are registered, not after: the
+  // handler's cleanup tears the run down through `teardownSandbox`, whose
+  // `teardown` link is written through this handle, so a handler that can fire
+  // while the store is not open (or, worse, already closed) reports a failed
+  // cleanup for a teardown that actually landed. Nothing billable exists yet
+  // at this line, so nothing is lost by refusing here.
+  //
+  // C-1: a store that cannot open fails the process loud, carrying the store's
+  // OWN code and remediation when it has them — `code` is accepted only from an
+  // `AuditStoreError`, because a bare fs errno (EACCES/ENOSPC/EROFS) in that
+  // slot names no knob, and the residual handler then prints no `next:` line at
+  // all. `redactSecrets` (never `String`) coerces the thrown value: it is total
+  // over `unknown` and cannot itself throw while reporting.
+  let auditStore: AuditStoreWriter;
+  try {
+    auditStore = openAuditStore();
+  } catch (e) {
+    const typed = e instanceof AuditStoreError ? e : undefined;
+    const x = (e ?? {}) as { message?: string };
+    const err = new Error(
+      `the audit-link store could not be opened: ${redactSecrets(x.message ?? e)} — nothing was provisioned`,
+    ) as Error & { code: string; remediation: string };
+    err.code = typed?.code ?? "audit-store-unavailable";
+    err.remediation =
+      typed?.remediation ?? "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run";
+    throw err;
+  }
+  /** Set when the handle would not release — feeds the exit below. */
+  let auditCloseFailed = false;
+  let auditClosed = false;
+  /**
+   * Idempotent, because BOTH exits close it: the `finally` below and the signal
+   * path, which never unwinds `main` at all (it ends in `process.exit`). A
+   * SIGINT during the run used to leave this handle closed by nobody — and by
+   * this story's own premise ("a store that did not close cleanly may not have
+   * flushed"), the links most at risk were precisely the interrupt-time
+   * teardown's, documenting a box that really was destroyed.
+   */
+  const closeAuditStore = (): void => {
+    if (auditClosed) return;
+    auditClosed = true;
+    try {
+      auditStore.close();
+    } catch (e) {
+      auditCloseFailed = true;
+      const x = (e ?? {}) as { message?: string };
+      writeSync(
+        2,
+        `!! audit-store-close-failed: could not close the audit-link store: ${redactSecrets(x.message ?? e)}\n`,
+      );
+      writeSync(2, "next: the handle dies with the process; re-run to confirm it still reads\n");
+    }
+  };
+
   // NOTE: signal handling — register cleanup thunk updated as state progresses.
   // Idempotent, never throws, exits 1 with inconclusive log after cleanup. The
   // note getter is what the cleanup actually did (D2, round 3): a refused lock
@@ -1616,6 +1693,10 @@ async function main(argv: readonly string[]): Promise<number> {
         // Cleanup must never throw — already guarded by the thunk, but belt-and-suspenders.
       }
     }
+    // AFTER the cleanup — which writes the interrupt-time teardown's links
+    // through this handle — and before the process goes: this path exits
+    // without unwinding `main`, so the `finally` below never runs for it.
+    closeAuditStore();
     const cleanupNote = currentCleanupNote?.() ?? "no cleanup was registered (nothing had been created yet)";
     process.stderr.write(`!! received ${signal}, ${cleanupNote}, exiting inconclusive\n`);
     process.exitCode = 1;
@@ -1647,25 +1728,52 @@ async function main(argv: readonly string[]): Promise<number> {
     return n;
   };
 
-  // Register signal handlers before the run starts.
+  // Register signal handlers before the run starts — and after the audit store
+  // is open, so the handler's cleanup has somewhere to write its links.
   registerHandlers();
 
-  const result = await runCapHitDemo(
-    { driver, keyApi, store, requestId, evidenceDir },
-    {
-      capMicroUsd: positiveInt(args.capMicroUsd, "cap"),
-      wallClockMs: positiveInt(args.wallClockMs, "wall-clock-ms"),
-      runBudgetCapMicros: positiveInt(args.runBudgetCapMicros, "budget-cap"),
-      residentCeilingMicros: positiveInt(args.residentCeilingMicros, "ceiling"),
-      repoUrl: args.repoUrl,
-      commitSha: args.commitSha,
-      rosterPath: args.rosterPath,
-      registerCleanup: (cleanup, cleanupNote) => { currentCleanup = cleanup; currentCleanupNote = cleanupNote; },
-    },
-  );
-
-  // Normal completion: unregister signal handlers so a late signal doesn't re-trigger cleanup.
-  unregisterHandlers?.();
+  let result: CapHitDemoResult;
+  try {
+    result = await runCapHitDemo(
+      {
+        driver,
+        keyApi,
+        store,
+        requestId,
+        evidenceDir,
+        recordAuditLink: (link) => auditStore.record(link),
+      },
+      {
+        capMicroUsd: positiveInt(args.capMicroUsd, "cap"),
+        wallClockMs: positiveInt(args.wallClockMs, "wall-clock-ms"),
+        runBudgetCapMicros: positiveInt(args.runBudgetCapMicros, "budget-cap"),
+        residentCeilingMicros: positiveInt(args.residentCeilingMicros, "ceiling"),
+        repoUrl: args.repoUrl,
+        commitSha: args.commitSha,
+        rosterPath: args.rosterPath,
+        registerCleanup: (cleanup, cleanupNote) => { currentCleanup = cleanup; currentCleanupNote = cleanupNote; },
+      },
+    );
+  } finally {
+    // Handlers FIRST, store second, and both in the `finally` so the THROW path
+    // gets them too. `unregisterHandlers?.()` used to sit after this block, so
+    // an exception left the handlers live behind a closed store for the whole
+    // propagation and residual-spend path: a late signal then ran the cleanup's
+    // teardown, whose `record()` throws on a closed bun:sqlite handle — and the
+    // operator was told cleanup FAILED for a teardown that had succeeded (the
+    // emit sits after destroy, revoke and close).
+    unregisterHandlers?.();
+    // DF5.3, C10 — the same close discipline as sandbox-teardown/sandbox-reap/
+    // fleet: guarded, because a throw raised in a `finally` REPLACES the block's
+    // completion value (a completed billable run's `result` discarded, or the
+    // original exception and its residual-spend reporting swallowed by a
+    // bookkeeping fault). Every link is already committed, so this is a
+    // leftover, not a verb to retry — but it still sets the flag the exit
+    // decision reads: a store that did not close cleanly may not have flushed.
+    // Idempotent (see `closeAuditStore`): the signal path may already have run
+    // it, and the error coercion there is the guarded, total form.
+    closeAuditStore();
+  }
 
   // Single-line JSON: stdout's last line is machine-parsed (tests/CI); humans
   // read the stderr step log.
@@ -1673,8 +1781,10 @@ async function main(argv: readonly string[]): Promise<number> {
   writeSync(1, `${JSON.stringify(output)}\n`);
 
   // Only a demonstrated run is success: an inconclusive (or unknown) verdict
-  // must fail the process, not just say so in JSON.
-  return result.verdict === "demonstrated" ? 0 : 1;
+  // must fail the process, not just say so in JSON. C10: an audit-store close
+  // failure is the same kind of cleanup failure the other three CLIs fail on —
+  // this CLI's table is 0/1, so it is 1 here where `fleet` can afford its 6.
+  return result.verdict === "demonstrated" && !auditCloseFailed ? 0 : 1;
 }
 
 if (import.meta.main) {

@@ -36,7 +36,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { FakeDriver, FakeDriverError } from "../../src/providers/fake-driver.ts";
-import { createRun, type ExecResult } from "../../src/providers/driver.ts";
+import { createRun, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { RunRecordStore, type ExtensionEntry } from "../../src/providers/run-record.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { setLogSink } from "../../src/swarmclaw/log.ts";
@@ -55,6 +55,12 @@ import {
   type ChainOutcome,
   type RunCompletionDeps,
 } from "../../src/fleet/run-completion.ts";
+// The store is opened on a per-test tmp path (never QDS_AUDIT_DB / the
+// operator's `.sandbox/audit.db`): nothing in this file reaches an audit
+// composition root, the links here arrive through the injected
+// `recordAuditLink` seam, and the store is used only to prove the double
+// teardown emit COALESCES to one row.
+import { openAuditStore, openAuditStoreForWalk } from "../../src/audit/link-store.ts";
 import type { ApprovalPort } from "../../src/reverify/approval.ts";
 import { reverify } from "../../src/reverify/runner.ts";
 
@@ -286,6 +292,10 @@ function baseDeps(
     costLedger: (over.costLedger ?? quietLedger().hook) as RunCompletionDeps["costLedger"],
     maxTicks: over.maxTicks,
     windowMs: over.windowMs,
+    // Overridable like every other dep here. As a bare `() => {}` no test could
+    // ever see the links this chain emits through the REAL `teardownSandbox`,
+    // so deleting the teardown emit left the suite green (DF5.3 review, H/M1).
+    recordAuditLink: over.recordAuditLink ?? (() => {}),
   };
 }
 
@@ -455,7 +465,7 @@ async function seedGreenRun(
   runId: string,
   marker: { ok: boolean },
 ): Promise<string> {
-  const rec = await createRun(driver, s, { runId });
+  const rec = await createRun(driver, s, { runId, recordAuditLink: () => {} });
   seedBoxGit(driver, rec.vmName!, host, runId);
   s.set(runId, {
     commitSha: host.baseSha,
@@ -1361,9 +1371,21 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
       const vm = await seedGreenRun(s.store, driver, host, "run-d1", { ok: true });
       const ledger = quietLedger();
+      // DF5.3: the chain's own audit seam, CAPTURED. `chainTeardownDeps`
+      // forwards `recordAuditLink` into the real `teardownSandbox`, so this is
+      // the only place the hop-6 teardown link is observable from — and while
+      // `baseDeps` hardcoded a `() => {}` nothing in this file could see it.
+      const links: ProviderAuditLink[] = [];
       const out = await observeAndDriveChain(
         "run-d1",
-        baseDeps("run-d1", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir, costLedger: ledger.hook as never }),
+        baseDeps("run-d1", {
+          driver,
+          store: s.store,
+          runsDir: s.dir,
+          hostRoot: host.dir,
+          costLedger: ledger.hook as never,
+          recordAuditLink: (link) => links.push(link),
+        }),
       );
       expect(out).toMatchObject({ kind: "driven", markerOk: true });
       expect(typeof (out as { chainMs: number }).chainMs).toBe("number");
@@ -1373,6 +1395,60 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
       expect(fs.existsSync(path.join(s.dir, "run-d1.bundle"))).toBe(true); // harvest's bundle
       expect(driver.destroyed).toEqual([vm]); // the box is gone
       expect(ledger.ingested.length).toBeGreaterThan(0); // box-hours priced through the caller's ledger
+      // The box is gone, the bundle was fetched and verified, and the chain
+      // said so. No key was ever minted here, so no credential link is owed.
+      expect(new Set(links.map((l) => `${l.hop}/${l.event}`))).toEqual(
+        new Set(["run-bundle/bundle-verify", "run-bundle/bundle-fetch", "run-box/teardown"]),
+      );
+      // `teardown` is emitted TWICE on this path and that is BY DESIGN: the
+      // fresh close emits it (teardown.ts, inside the close step) and the
+      // approval gate's own teardown re-enters `teardownSandbox`, which
+      // short-circuits on first-close-wins and re-emits so a process that died
+      // between the close and the emit still lands the row. It is harmless only
+      // because every copy carries the SAME subject and the SAME evidence
+      // digest — which is exactly what the store's
+      // `UNIQUE (run_id, hop, event, subject_key)` + `ON CONFLICT DO NOTHING`
+      // coalesces on, so the STORE holds one row.
+      //
+      // Pinned through the STORE, not through the digests. `evidenceDigest` is
+      // `sha256(canonicalJson(detail ?? null))` and nothing else feeds it
+      // (driver.ts `emitAuditLink`), so "two emits with the same detail share a
+      // digest" is arithmetic, not a property of this chain — the digest-set
+      // check could only fail if `detail` drifted, which the `toMatchObject`
+      // loop below already covers field by field. Replaying both emits into a
+      // real store and reading ONE row back is the actual claim, and it is the
+      // one that fails if the healing arm ever derives `occurredAt` or `detail`
+      // differently (the store records that as `divergent` and keeps the first
+      // row, so the second's facts are lost).
+      const teardowns = links.filter((l) => l.event === "teardown");
+      expect(teardowns).toHaveLength(2);
+      const coalesceDir = fs.mkdtempSync(path.join(os.tmpdir(), "qds-df53-coalesce-"));
+      try {
+        const store = openAuditStore(path.join(coalesceDir, "audit.db"));
+        try {
+          for (const l of teardowns) store.record(l);
+        } finally {
+          store.close();
+        }
+        const handle = openAuditStoreForWalk(path.join(coalesceDir, "audit.db"));
+        try {
+          expect(handle.linksForRun("run-d1").filter((r) => r.event === "teardown")).toHaveLength(1);
+        } finally {
+          handle.close();
+        }
+      } finally {
+        fs.rmSync(coalesceDir, { recursive: true, force: true });
+      }
+      for (const l of teardowns) {
+        expect(l).toMatchObject({
+          runId: "run-d1",
+          repoSlug: "acme/widget", // the record's own attribution (INV-AUDIT-4)
+          requestId: "req-df37",
+          hop: "run-box",
+          subjectKind: "box",
+          subjectId: vm,
+        });
+      }
       // O16: guardedTeardown clears the destructive mark ON success — the
       // driven posture leaves an unmarked lock, same as the teardown verb.
       expect(isRunLockDestructive(lockHandle(s.dir, "run-d1"))).toBe(false);
@@ -1426,7 +1502,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-v1" });
+      await createRun(driver, s.store, { runId: "run-v1", recordAuditLink: () => {} });
       // vmName set, NO commitSha: harvest short-circuits "none", teardown
       // completes, reverify throws no-base-sha inside its own try → error
       // report → approval null.
@@ -1454,7 +1530,7 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      const rec = await createRun(driver, s.store, { runId: "run-v2" });
+      const rec = await createRun(driver, s.store, { runId: "run-v2", recordAuditLink: () => {} });
       // The box has no git at all → harvest Step A answers NOREPO → outcome
       // none; the record pins a base the host knows, but no sandbox ref
       // exists → reverify's nothing-to-verify preflight (runner.ts:280-291).
@@ -1485,14 +1561,32 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-c1" });
+      await createRun(driver, s.store, { runId: "run-c1", recordAuditLink: () => {} });
       driver.plan = [{ body: { runId: "run-c1", ok: true } }];
       driver.destroyThrows = true;
+      // DF5.3: CAPTURED here too, not only on the happy `driven` path. This is
+      // the file's one failure-shaped teardown, and until it captured, nothing
+      // observed whether a `run-box/teardown` link was written for a box that
+      // was NOT destroyed. A regression that emits the link before
+      // `driver.destroy()` resolves would record "box torn down" for a box
+      // still alive and billing, and the suite would stay green.
+      const links: ProviderAuditLink[] = [];
       const out = await observeAndDriveChain(
         "run-c1",
-        baseDeps("run-c1", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+        baseDeps("run-c1", {
+          driver,
+          store: s.store,
+          runsDir: s.dir,
+          hostRoot: host.dir,
+          recordAuditLink: (link) => links.push(link),
+        }),
       );
       expect(out).toMatchObject({ kind: "chain-failed", step: "teardown" });
+      // NO teardown link: the emit lives inside the `close` step, which the
+      // unconfirmed destroy aborts before. The link vouches for a destroyed
+      // box, so an undestroyed box owes none — the hop reporting `unlinked`
+      // is the honest answer while the record is still open.
+      expect(links.filter((l) => l.hop === "run-box" && l.event === "teardown")).toEqual([]);
       expect((out as { error: string }).error).toContain("destruction");
       expect(s.store.get("run-c1").closedAt).toBeUndefined(); // abort ⇒ record open
       // The destructive window was entered and did not complete, so the mark
@@ -1516,7 +1610,7 @@ describe("chain-failed: a step other than the approval leg threw (W16-2)", () =>
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-c2" });
+      await createRun(driver, s.store, { runId: "run-c2", recordAuditLink: () => {} });
       s.store.set("run-c2", {
         commitSha: host.baseSha,
         requestId: "req-df37",
@@ -1690,7 +1784,7 @@ describe("#245 — the production closure carries the chain's RunLockHandle (Clo
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-245n" });
+      await createRun(driver, s.store, { runId: "run-245n", recordAuditLink: () => {} });
       driver.plan = [{ body: { runId: "run-245n", ok: true } }];
       const out = await observeAndDriveChain(
         "run-245n",
@@ -1855,7 +1949,7 @@ describe("malformed marker payloads (F): present + unjudgeable is unusable, stre
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-f2" });
+      await createRun(driver, s.store, { runId: "run-f2", recordAuditLink: () => {} });
       driver.plan = [{ body: { ok: true } }];
       const out = await observeAndDriveChain(
         "run-f2",
@@ -1941,7 +2035,7 @@ describe("the reverify redaction map (I)", () => {
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      await createRun(driver, s.store, { runId: "run-i1" });
+      await createRun(driver, s.store, { runId: "run-i1", recordAuditLink: () => {} });
       s.store.set("run-i1", {
         commitSha: host.baseSha,
         keyHash: "key-hash-for-the-redaction-test",
@@ -1984,7 +2078,7 @@ describe("the stranded-pause promotion (B): a promotable pausing record, driven 
   ): Promise<{ vmName: string; driver: ProbeDriver; reportId: string; head: string }> {
     const head = quarantine(host, runId);
     const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-    const rec = await createRun(driver, s.store, { runId });
+    const rec = await createRun(driver, s.store, { runId, recordAuditLink: () => {} });
     seedBoxGit(driver, rec.vmName!, host, runId);
     s.store.set(runId, {
       commitSha: host.baseSha,
@@ -2101,7 +2195,7 @@ describe("veto arms (O13): a genuine RED, and the flag-less approval-null string
     const host = gitHost();
     try {
       const driver = new ProbeDriver(path.join(s.dir, "boxes"));
-      const rec = await createRun(driver, s.store, { runId: "run-red1" });
+      const rec = await createRun(driver, s.store, { runId: "run-red1", recordAuditLink: () => {} });
       s.store.set("run-red1", {
         commitSha: host.baseSha,
         requestId: "req-df37",

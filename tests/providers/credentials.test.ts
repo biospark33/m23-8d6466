@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createRun } from "../../src/providers/driver.ts";
+import { createRun , type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
@@ -43,6 +43,7 @@ let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 
 beforeEach(() => {
+  auditLinks = [];
   dir = mkdtempSync(join(tmpdir(), "qds-cred-"));
   store = new RunRecordStore(join(dir, "runs"));
   api = new FakeKeyApi();
@@ -53,13 +54,55 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  restoreLog?.();
-  rmSync(dir, { recursive: true, force: true });
+  // INV-AUDIT-4, file-wide and free — the same backstop teardown.test.ts got,
+  // in the file with the same capture pattern and ~50 pre-existing tests that
+  // never read `auditLinks`. Every captured link must be attributable to a
+  // record that genuinely CARRIES the DF2.8 budget attribution, so an emitter
+  // that manufactured a repoSlug for one of this file's many unattributed runs
+  // turns the whole file red. COLLECT first, clean up in a `finally`, assert
+  // last: `store.get` THROWS on an unreadable record, and asserting inline
+  // would leave the global log sink pointed at a dead test's array and the
+  // temp dir on disk. (The `requestId` half cannot be checked from the record
+  // alone — `deps.requestId` is a legitimate §5.2 source — so it is pinned by
+  // the named C5 tests below.)
+  const violations: string[] = [];
+  try {
+    for (const link of auditLinks) {
+      let repoSlug: unknown;
+      try {
+        repoSlug = store.get(link.runId).extensions?.budget?.repoSlug;
+      } catch (e) {
+        violations.push(`${link.hop}.${link.event}: unreadable run record ${link.runId} — ${(e as Error).message}`);
+        continue;
+      }
+      if (repoSlug !== link.repoSlug) {
+        violations.push(
+          `${link.hop}.${link.event} emitted for ${link.runId} with repoSlug ${JSON.stringify(link.repoSlug)}, record carries ${JSON.stringify(repoSlug)}`,
+        );
+      }
+    }
+  } finally {
+    restoreLog?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  expect(violations).toEqual([]);
 });
+
+/** DF5.3: every deps() captures its links here — see the DF5.3 lifecycle test. */
+let auditLinks: ProviderAuditLink[] = [];
 
 function deps(overrides: Partial<CredentialDeps> = {}): CredentialDeps {
   // fake boxes are plain host dirs — deliver to a box-relative path
-  return { keyApi: api, driver: recording, store, envFile: "app/.env", ...overrides };
+  return {
+    keyApi: api,
+    driver: recording,
+    store,
+    envFile: "app/.env",
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
+    ...overrides,
+  };
 }
 
 /** Any >=8-char substring of the secret found in any corpus, else null. */
@@ -74,11 +117,448 @@ function leakScan(secret: string, ...corpora: string[]): string | null {
 }
 
 async function makeRun(runId: string): Promise<string> {
-  const rec = await createRun(recording, store, { runId });
+  const rec = await createRun(recording, store, { runId, recordAuditLink: (l) => auditLinks.push(l) });
   return rec.vmName ?? runId;
 }
 
 describe("DF2.3 credential lifecycle", () => {
+  test("DF5.3: the credential links land in lifecycle order — mint → deliver → revoke → verify-revoked (hop run-credential, keyHash subject)", async () => {
+    const runId = "df53-links";
+    await makeRun(runId);
+    // The record's DF2.8 attribution is the ONLY repoSlug source an emitter may
+    // use, and `requestId` is the chain's join key — CONTRACT C5: an emitter may
+    // no longer invent one, so a record without it SKIPS every emit (pinned by
+    // the C5 test below). Both identities are fixture, never manufactured.
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    await runCredentialLifecycle(deps(), runId);
+
+    expect(auditLinks.map((l) => l.event)).toEqual(["mint", "deliver", "revoke", "verify-revoked"]);
+    const hash = store.get(runId).keyHash as string;
+    for (const l of auditLinks) {
+      expect(l.hop).toBe("run-credential");
+      expect(l.runId).toBe(runId);
+      expect(l.repoSlug).toBe("qds/demo");
+      expect(l.requestId).toBe("req-df53"); // the record's own id, never an invented one (C5)
+      expect(l.subjectKind).toBe("credential-key");
+      expect(l.subjectId).toBe(hash); // NEVER key material — keyHash only (INV-AUDIT-2)
+    }
+    // No plaintext ANYWHERE in the emitted links — the whole serialised array,
+    // scanned with the same ≥8-char substring tool this file already points at
+    // the record, the logs and argv. The old check was `not.toMatch(/sk-/i)`
+    // over `l.detail` alone: it matched only FakeKeyApi's literal prefix, so a
+    // key DERIVATIVE (`key.slice(3)`, the tail, a base64 form) or the plaintext
+    // in any field other than `detail` — `subjectId`, a future `note` — passed,
+    // into a durable, append-only, operator-readable store. (It would also have
+    // failed a correctly redacted `sk-***` placeholder.)
+    const plaintext = api.plaintexts.get(hash);
+    expect(plaintext).toBeString();
+    expect(leakScan(plaintext as string, JSON.stringify(auditLinks))).toBeNull();
+    // The cap has no event of its own: it rides the MINT row's detail.limitMicroUsd.
+    // The EXACT value, not expect.any(Number) — that matcher passes for 0, for
+    // an unclamped request and for deps.capMicroUsd alike, and this number IS
+    // the cap's whole audit trail. The granted-≠-requested case is pinned
+    // separately below (a matcher cannot tell the two figures apart here,
+    // because the default cap is granted in full).
+    expect(auditLinks[0]?.detail).toEqual({ keyHash: hash, limitMicroUsd: defaultKeyCapMicroUsd });
+    // The `deliver` row's `envFile` — the one detail field that is
+    // caller-supplied and path-shaped, i.e. the field an operator reads to
+    // learn WHERE the credential was written. Exact, like its neighbours: it
+    // was the only lifecycle row with no assertion at all, so dropping it,
+    // renaming it, or emitting the raw `deps.envFile` instead of the resolved
+    // `KEY_ENV_FILE` default all passed.
+    expect(auditLinks[1]?.detail).toEqual({ keyHash: hash, envFile: "app/.env" });
+    // ROUND 3: the revoke row's `detail` carries NO `outcome`. Two attempts at
+    // the documented retry (teardown aborted after revoke; nothing clears
+    // `rec.keyHash`, so the provider then answers 404) would digest
+    // `{keyHash, outcome:"revoked"}` and `{keyHash, outcome:"already-gone"}` —
+    // colliding on the store's UNIQUE key with DIFFERENT evidence digests,
+    // which it reports as `divergent`: a tamper alarm raised by an ordinary
+    // retry. The outcome now rides the `credential.revoke` STEP LINE, which
+    // carries no digest and may honestly differ per attempt.
+    expect(auditLinks[2]?.detail).toEqual({ keyHash: hash });
+    expect(auditLinks[3]?.detail).toEqual({ keyHash: hash });
+    expect(logs.filter((l) => l.operation === "credential.revoke").map((l) => l.revokeOutcome)).toEqual(["revoked"]);
+    // AC7: non-decreasing occurred_at (≤ — two links may share a millisecond).
+    const stamps = auditLinks.map((l) => Date.parse(l.occurredAt));
+    for (let i = 1; i < stamps.length; i++) expect(stamps[i]!).toBeGreaterThanOrEqual(stamps[i - 1]!);
+  });
+
+  test("DF5.3: an unattributed run emits nothing (INV-AUDIT-4 — no invented repoSlug)", async () => {
+    const runId = "df53-nolinks";
+    await makeRun(runId);
+    await runCredentialLifecycle(deps(), runId);
+    expect(auditLinks).toHaveLength(0);
+    // ANCHORED: a zero-length array is also what an early no-op return produces,
+    // so the claim "emitted nothing" is only worth anything beside proof that
+    // the lifecycle ran in full. It did: a key was minted and recorded, its
+    // spend captured, and the DELETE issued.
+    const rec = store.get(runId);
+    expect(rec.keyHash).toBeString();
+    expect(rec.spendMicroUsd).toBeNumber();
+    expect(api.keys).toHaveLength(1);
+    expect(api.requests.some((r) => r.method === "DELETE" && r.path === `/keys/${rec.keyHash}`)).toBeTrue();
+  });
+
+  test("CONTRACT C5: an attributed run with NO requestId anywhere emits nothing and logs one audit-link-skipped per event", async () => {
+    // The other half of INV-AUDIT-4. `requestId` is what chain.ts JOINS on
+    // (`sessions.request_id` / `gate_results.request_id`), so a freshly minted
+    // id is not a weak correlation — it is a false one. The emitter used to
+    // invent one; now the emit is SKIPPED and hop 4 reports the run `unlinked`,
+    // which is honest and fail-closed.
+    const runId = "df53-no-request-id";
+    await makeRun(runId);
+    // Attributed — so repoSlug is NOT what suppresses these emits — but no
+    // requestId on the record, and `deps()` propagates none either.
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    await runCredentialLifecycle(deps(), runId);
+
+    expect(auditLinks).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeString(); // the lifecycle really ran
+    const skips = logs.filter((l) => l.operation === "providers.audit-link-skipped");
+    // ROUND 3: the leading `create` is `makeRun`'s — `provisionAdmittedRun`
+    // runs before this test attaches the attribution, and its `no-repo-slug`
+    // arm used to skip SILENTLY. It logs now, so the file-wide count of these
+    // lines changed; the four credential events are still the subject here.
+    expect(skips.map((l) => l.event)).toEqual(["create", "mint", "deliver", "revoke", "verify-revoked"]);
+    expect(skips.map((l) => l.reason)).toEqual([
+      "no-repo-slug",
+      "no-request-id",
+      "no-request-id",
+      "no-request-id",
+      "no-request-id",
+    ]);
+    for (const s of skips) {
+      expect(s.status).toBe("error");
+      expect(s.runId).toBe(runId);
+      // The LOG's own correlation is present (a generated id is fine for a
+      // diagnostic line) — it is precisely what must not reach the link.
+      expect(s.requestId).toBeString();
+    }
+  });
+
+  test("CONTRACT C5 option (c): deps.requestId is NOT a fallback — a record without one skips even when deps propagates one", async () => {
+    // The RECORD is the only source. `dispatch.ts` stamps
+    // `store.set(runId, { requestId })` as its first write after provisioning,
+    // so on every dispatch path the record already has it; the callers where
+    // the two differ are the teardown/reap composition roots, which MINT theirs
+    // — so a deps fallback is a laundering channel for a fabricated id, not a
+    // second real source. Pinned so re-adding `?? deps.requestId` (the obvious
+    // "fix" for a run that reports `unlinked`) fails here instead of quietly
+    // stamping the chain's join column with a per-invocation id.
+    const runId = "df53-deps-request-id";
+    await makeRun(runId);
+    store.set(runId, { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    await runCredentialLifecycle(deps({ requestId: "req-minted-by-the-cli" }), runId);
+
+    expect(auditLinks).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeString(); // the lifecycle ran in full
+    const skips = logs.filter((l) => l.operation === "providers.audit-link-skipped");
+    // The leading `create` is `makeRun`'s unattributed skip — see the sibling
+    // test. It carries a MINTED log correlation (createRun was given none),
+    // which is why the deps-propagated-id assertion below skips it.
+    expect(skips.map((l) => l.event)).toEqual(["create", "mint", "deliver", "revoke", "verify-revoked"]);
+    expect(skips[0]!.reason).toBe("no-repo-slug");
+    // The propagated id still does the job it was added for — the STEP LOG's
+    // correlation — which is exactly where a minted id is legitimate.
+    for (const s of skips.slice(1)) expect(s.requestId).toBe("req-minted-by-the-cli");
+    expect(logs.some((l) => l.operation === "credential.mint" && l.requestId === "req-minted-by-the-cli")).toBeTrue();
+  });
+
+  test("DF5.3: the mint row carries the GRANTED µ$, not the requested cap (the cap's only audit trail)", async () => {
+    // The production comment is explicit that `detail.limitMicroUsd` is the
+    // APPLIED figure. With a provider that clamps DOWN, requested (1_000_000)
+    // and granted (250_000) are different numbers, so the row can no longer be
+    // satisfied by the request, by `deps.capMicroUsd`, or by 0.
+    api = new FakeKeyApi({ returnedLimitUsd: 0.25 });
+    const runId = "df53-mint-granted";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    const minted = await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+
+    expect(auditLinks).toHaveLength(1);
+    expect(auditLinks[0]?.event).toBe("mint");
+    expect(auditLinks[0]?.detail).toEqual({ keyHash: minted.hash, limitMicroUsd: 250_000 });
+    // …which is exactly what the record kept, and NOT the request.
+    expect(store.get(runId).limitMicroUsd).toBe(250_000);
+    expect(api.requests.find((r) => r.method === "POST")?.limitUsd).toBe(1);
+  });
+
+  test("DF5.3: a refused mint (ceiling mismatch) emits NOTHING — AC3's core claim", async () => {
+    // The refusal fires AFTER the provider created a live key, so a `mint` row
+    // emitted before it would vouch for an event that never completed. The
+    // round-4 failure tests capture links and never read them; this one reads.
+    api = new FakeKeyApi({ returnedLimitUsd: 5 }); // 5 USD granted against a 1 USD request
+    const runId = "df53-mint-refused";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    await expect(mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId)).rejects.toThrow();
+
+    expect(auditLinks).toHaveLength(0);
+    // The key IS live and recorded (INV-CRED-1's reachability) — so "nothing
+    // was emitted" is not merely "nothing happened".
+    expect(store.get(runId).keyHash).toBeString();
+    expect(store.get(runId).limitMicroUsd).toBeUndefined();
+  });
+
+  test("DF5.3: the delivery-failure compensation emits mint, then revoke + verify-revoked marked compensation", async () => {
+    // Without these two the chain sees a `mint` with no counterpart and reports
+    // hop 4 `unlinked` for a lifecycle that closed cleanly. `revokeAndVerify`
+    // itself stays the run-less no-op sink (W14B-3/INV-AUDIT-4) — the emit
+    // belongs at this call site, where the run identity is in scope.
+    const runId = "df53-delivery-comp";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const failing = Object.create(recording) as typeof recording;
+    failing.exec = () => Promise.reject(new Error("box unreachable"));
+
+    await expect(runCredentialLifecycle(deps({ driver: failing }), runId)).rejects.toThrow("box unreachable");
+
+    const hash = store.get(runId).keyHash as string;
+    expect(auditLinks.map((l) => l.event)).toEqual(["mint", "revoke", "verify-revoked"]);
+    // No `deliver` row: the delivery is the thing that failed.
+    expect(auditLinks.some((l) => l.event === "deliver")).toBeFalse();
+    // ROUND 3: `detail` is `{keyHash}` only. The `compensation:` marker made
+    // these two rows digest DIFFERENTLY from the ordinary revoke/verify-revoked
+    // rows for the same (run_id, hop, event, subject_key) — so a replay through
+    // the other path collided as `divergent`, the store's tamper alarm, on a
+    // path that is itself a recovery. Which path produced the row is on the
+    // `credential.delivery_compensation` step line, which carries no digest.
+    expect(auditLinks[1]?.detail).toEqual({ keyHash: hash });
+    expect(auditLinks[2]?.detail).toEqual({ keyHash: hash });
+    // …and the step line the comment above points at actually exists on the
+    // SUCCESS arm. It did not, until round 3's follow-up: stripping the
+    // `compensation:` marker from `detail` fixed the `divergent` collision but
+    // left a compensation that LANDED writing two `{keyHash}`-only rows
+    // indistinguishable from an ordinary teardown's, with this operation logged
+    // on the failure arm alone. Two rows plus silence is not observability, and
+    // the comment four lines up would have been describing a line nothing wrote.
+    const comp = logs.filter((l) => l.operation === "credential.delivery_compensation");
+    expect(comp).toHaveLength(1);
+    expect(comp[0]?.status).toBe("ok");
+    expect(comp[0]?.outcome).toBe("revoked");
+    expect(comp[0]?.runId).toBe(runId);
+    expect(comp[0]?.step).toBe("delivery_compensation");
+    // The prefix, never the hash: INV-AUDIT-2 applies to the step log too.
+    // Asserted as a PROPERTY (a strict prefix, materially shorter) rather than
+    // by restating the production slice — round 3 flagged that shape elsewhere,
+    // since an expectation computed the same way the code computes it pins
+    // nothing about the guarantee.
+    const prefix = comp[0]?.keyHashPrefix as string;
+    expect(hash.startsWith(prefix)).toBeTrue();
+    expect(prefix.length).toBeLessThan(hash.length / 2);
+    expect(JSON.stringify(comp[0])).not.toContain(hash);
+    // …and the compensation really happened: the key is gone from the list.
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+  });
+
+  test("DF5.3: a store refusal DURING the delivery compensation is SWALLOWED — deliberate, pinned in both directions", async () => {
+    // The ONE emit site that swallows a store refusal, and it relabels a
+    // compensation that fully SUCCEEDED as a failed one: both compensation
+    // emits sit inside the `try` whose `catch (compErr)` logs
+    // `credential.delivery_compensation` with `status: "error"`. That is the
+    // opposite posture from `mintRunKey`/`deliverRunKey`, whose
+    // propagate-on-refusal behaviour the two tests above pin — so without this
+    // test a reviewer cannot tell a deliberate asymmetry from a regression, and
+    // a flip in EITHER direction is invisible.
+    const runId = "df53-delivery-comp-storefail";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const failing = Object.create(recording) as typeof recording;
+    failing.exec = () => Promise.reject(new Error("box unreachable"));
+
+    let emits = 0;
+    await expect(
+      runCredentialLifecycle(
+        deps({
+          driver: failing,
+          recordAuditLink: (link) => {
+            auditLinks.push(link);
+            // The mint link lands; the two compensation emits refuse.
+            if (++emits > 1) throw new Error("store refused");
+          },
+        }),
+        runId,
+      ),
+      // The DELIVERY failure is what reaches the operator — not the store's
+      // refusal. The original cause is never masked by the compensation.
+    ).rejects.toThrow("box unreachable");
+
+    const hash = store.get(runId).keyHash as string;
+    expect(auditLinks.map((l) => l.event)).toEqual(["mint", "revoke"]); // the second emit threw before pushing verify-revoked
+    // The line claims the compensation FAILED …
+    const comp = logs.filter((l) => l.operation === "credential.delivery_compensation");
+    expect(comp).toHaveLength(1);
+    expect(comp[0]!.status).toBe("error");
+    // … and yet the revoke AND the verify both genuinely landed: the key is
+    // gone from the authoritative list. That under-report is the documented
+    // trade-off, not a lost compensation.
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+  });
+
+  test("DF5.3: the revoke STEP LINE resolves to already-gone when the provider says the key is not live", async () => {
+    // `revoked` and `already-gone` are the same event resolved at two different
+    // provider answers — both emit, and something must say WHICH. ROUND 3 moved
+    // that "which" off `detail` and onto the `credential.revoke` step line:
+    // `detail` is digested into `evidence_digest`, so the documented retry
+    // (revoked, then 404 on the re-run) produced two DIFFERENT digests for the
+    // same UNIQUE key and the store raised `divergent` — its tamper alarm — on
+    // an ordinary recovery. The step line carries no digest.
+    const runId = "df53-already-gone";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const hash = (await mintRunKey(deps(), runId)).hash;
+    await api.deleteKey(hash); // revoked out of band — the next DELETE 404s
+    auditLinks.length = 0;
+    logs.length = 0;
+
+    expect(await revokeRunKey(deps(), runId)).toBe("already-gone");
+
+    expect(auditLinks).toHaveLength(1);
+    expect(auditLinks[0]?.detail).toEqual({ keyHash: hash });
+    expect(logs.filter((l) => l.operation === "credential.revoke").map((l) => l.revokeOutcome)).toEqual([
+      "already-gone",
+    ]);
+  });
+
+  test("DF5.3: revoke's FAILURE arm emits nothing — a 5xx DELETE leaves no row vouching for the key", async () => {
+    // `revokeHash` throws `revoke-failed` BEFORE the emit, so no `revoke` row
+    // exists for a key the provider may still be serving. Untested until now:
+    // the pre-existing 5xx test asserts `code` and never looks at the links.
+    api = new FakeKeyApi({ deleteStatus: 500 });
+    const runId = "df53-revoke-failed-nolinks";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    await mintRunKey(deps(), runId);
+    const hash = store.get(runId).keyHash as string;
+    auditLinks.length = 0;
+
+    await expect(revokeRunKey(deps(), runId)).rejects.toThrow();
+
+    expect(auditLinks).toEqual([]);
+    // The key really IS still live — that is what makes the absence load-bearing.
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeTrue();
+  });
+
+  test("DF5.3: a still-listed key emits a revoke row but NEVER a verify-revoked one", async () => {
+    // The safety-critical arm the whole hop exists for. The DELETE succeeded,
+    // so `revoke` is honest; but the authoritative list still shows the key, so
+    // `verifyHash` throws `still-listed` and the `verify-revoked` emit — which
+    // sits AFTER that await — never runs. Hoisting either emit above its await
+    // (the natural refactor when someone wants the row "even if verification is
+    // flaky") would ship a retroactive row asserting a revocation that did not
+    // happen, with every other test in this file green.
+    api = new FakeKeyApi({ staleListAfterDelete: true });
+    const runId = "df53-still-listed-nolinks";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    await mintRunKey(deps(), runId);
+    auditLinks.length = 0;
+
+    expect(await revokeRunKey(deps(), runId)).toBe("revoked");
+    const err = await verifyRevoked(deps(), runId).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("still-listed");
+
+    expect(auditLinks.map((l) => l.event)).toEqual(["revoke"]);
+    // The record keeps the hash: it is the operator's only handle on the key.
+    expect(store.get(runId).keyHash).toBeString();
+  });
+
+  test("DF5.3: revokeRunKey's keyless arm returns 'none' and emits nothing (the NOT NULL columns)", async () => {
+    // The `none` arm returns before the emit. A link added there would carry an
+    // undefined `subjectId` straight into NOT NULL columns — and no event
+    // happened to link: no key ever existed for this run.
+    const runId = "df53-keyless-revoke";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    auditLinks.length = 0;
+
+    expect(await revokeRunKey(deps(), runId)).toBe("none");
+
+    expect(auditLinks).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeUndefined();
+  });
+
+  test("DF5.3: an audit-store refusal PROPAGATES out of mintRunKey — and the key is COMPENSATED first", async () => {
+    // driver.ts documents that a typed AuditStoreError propagates "for the
+    // credential/box/bundle emits". Nothing made `recordAuditLink` throw, so a
+    // plausible `try {} catch {}` "don't let audit break the mint" patch would
+    // turn the chain best-effort with a green suite.
+    //
+    // ROUND 3 fixed the exposure this test used to PIN: `mintRunKey`'s throw
+    // takes the plaintext `res.key` — the only copy (INV-4) — with the stack
+    // frame, and `runCredentialLifecycle` calls `mintRunKey` OUTSIDE its try,
+    // so its mint/revoke bracketing never ran and nothing at all held a live,
+    // spend-capable key. The emit is still FAIL-LOUD (nothing is billing at
+    // mint) but now COMPENSATED: revoked and proven absent before the refusal
+    // propagates.
+    const runId = "df53-mint-sink-throws";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+
+    await expect(
+      mintRunKey(
+        deps({
+          recordAuditLink: () => {
+            throw new Error("store refused");
+          },
+        }),
+        runId,
+      ),
+    ).rejects.toThrow("store refused");
+
+    // Blast radius: the record still names the key (the operator's handle, and
+    // what DF2.6's orphan sweep reaches) …
+    const rec = store.get(runId);
+    expect(rec.keyHash).toBeString();
+    expect(rec.limitMicroUsd).toBe(50_000_000);
+    // … but the key itself is GONE from the authoritative list, and the
+    // compensation said so on its own line.
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === rec.keyHash)).toBeFalse();
+    const comp = logs.filter((l) => l.operation === "credential.mint_compensation");
+    expect(comp).toHaveLength(1);
+    expect(comp[0]!.status).toBe("ok");
+    expect(comp[0]!.compensated).toBe(1);
+  });
+
+  test("DF5.3: a store refusal turns a SUCCESSFUL 0600 delivery into a reported failure — deliberate, pinned", async () => {
+    // The severe half of the same posture: the key really did land at mode 600,
+    // and `deliverRunKey` still rejects because the audit row did not. Pinned so
+    // the choice is visible rather than discovered by an operator.
+    const runId = "df53-deliver-sink-throws";
+    await makeRun(runId);
+    store.set(runId, { requestId: "req-df53", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const minted = await mintRunKey(deps(), runId);
+
+    await expect(
+      deliverRunKey(
+        deps({
+          recordAuditLink: () => {
+            throw new Error("store refused");
+          },
+        }),
+        runId,
+        runId,
+        minted.key,
+      ),
+    ).rejects.toThrow("store refused");
+
+    // The delivery SUCCEEDED before the emit: the file is there at 0600.
+    const stat = await driver.exec(runId, [
+      "sh",
+      "-c",
+      `python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' app/.env`,
+    ]);
+    expect(stat.exitCode).toBe(0);
+    expect(stat.stdout.trim()).toBe("600");
+  });
+
   test("defaultKeyCapMicroUsd is the documented 50_000_000 µ$ backstop", () => {
     expect(defaultKeyCapMicroUsd).toBe(50_000_000);
   });
@@ -423,7 +903,7 @@ describe("DF2.3 credential lifecycle", () => {
     for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", "", "-x"]) {
       let err: unknown;
       try {
-        await deliverRunKey(deps({ envFile: bad }), "vm-df23-envfile", minted.key);
+        await deliverRunKey(deps({ envFile: bad }), runId, "vm-df23-envfile", minted.key);
       } catch (e) {
         err = e;
       }
@@ -452,7 +932,7 @@ describe("DF2.3 credential lifecycle", () => {
       },
     } as unknown as typeof recording;
 
-    await expect(deliverRunKey(deps({ driver: echoing }), `vm-${runId}`, minted.key)).rejects.toThrow();
+    await expect(deliverRunKey(deps({ driver: echoing }), runId, `vm-${runId}`, minted.key)).rejects.toThrow();
 
     const deliverLines = logs.filter((l) => l.operation === "credential.deliver");
     expect(deliverLines.length).toBeGreaterThan(0);

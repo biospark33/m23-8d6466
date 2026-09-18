@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
-import { VIZ_PIDFILE, createRun, type ExecResult, type ProviderDriver } from "../../src/providers/driver.ts";
+import { VIZ_PIDFILE, createRun, type ExecResult, type ProviderAuditLink, type ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { CostLedger, type RunCostRecord } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -58,9 +58,30 @@ let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 const heldLocks: RunLockHandle[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
+/**
+ * DF5.3: the IN-PROCESS racer's audit links. The child racers' emits used to be
+ * invisible here by construction (a no-op sink in another process), which left
+ * the arrangement MOST likely to produce a duplicate `run-box.teardown` — two
+ * processes racing the same lock, child winning — covered by nothing. The child
+ * scripts now append each link as a JSON line to `childLinkLog`, and the
+ * contention test asserts over the UNION of both sides.
+ */
+let auditLinks: ProviderAuditLink[] = [];
+/** Where the child racers append their emitted links, one JSON object per line. */
+let childLinkLog: string;
+/** The child-side links, read back after a race. */
+function readChildLinks(): ProviderAuditLink[] {
+  if (!existsSync(childLinkLog)) return [];
+  return readFileSync(childLinkLog, "utf8")
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as ProviderAuditLink);
+}
 
 beforeEach(() => {
+  auditLinks = [];
   root = mkdtempSync(join(tmpdir(), "qds-df211-race-"));
+  childLinkLog = join(root, "child-audit-links.jsonl");
   runsDir = join(root, "runs");
   store = new RunRecordStore(runsDir);
   repoDir = join(root, "host-repo");
@@ -160,12 +181,16 @@ async function fillBox(vmName: string, runId: string): Promise<void> {
 /** Open record + live fake box + minted key + pinned base — the pre-teardown world. */
 async function seedRun(runId: string): Promise<{ baseSha: string; vmName: string }> {
   const baseSha = seedHostRepo();
-  await createRun(recording, store, { runId });
+  await createRun(recording, store, { runId, recordAuditLink: () => {} });
   const vmName = store.get(runId).vmName as string;
   await fillBox(vmName, runId);
   const mint = await api.createKey(`${SBX_KEY_PREFIX}${runId}`, 50);
   store.set(runId, { keyHash: mint.hash, limitMicroUsd: 50_000_000 });
   store.set(runId, { commitSha: baseSha });
+  // DF5.3: ATTRIBUTED, so the teardown actually emits. Unattributed (or with no
+  // requestId) every emit is skipped and the exactly-once property this file
+  // exists to prove would be vacuous for the audit row.
+  store.set(runId, { requestId: "req-df211-race", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
   return { baseSha, vmName };
 }
 
@@ -179,6 +204,9 @@ function deps(driver: ProviderDriver, gitCwd: string): TeardownDeps {
     workdir: "app",
     boxRunRoot: boxRunRootDir,
     boxHome: boxHomeDir,
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
   };
 }
 
@@ -198,10 +226,24 @@ function countingRecording(): { driver: ProviderDriver; destroys(): number } {
  * `teardownSandbox`. The winner holds the claim, so acquire refuses BEFORE
  * teardown runs; the child prints the refusal's code/message/remediation and
  * exits 1. Reaching the success line means the race was LOST.
+ *
+ * `recordAuditLink` is REQUIRED — the seam is non-optional on `TeardownDeps`,
+ * and nothing typechecks inside a template string, so omitting it leaves a
+ * child that calls `undefined` the moment `emitTeardownLink` gets past its
+ * attribution guard, surfacing as a missing "RACER WON"/"LOSER" line a mile
+ * from the cause.
+ *
+ * It appends to `linkLog` rather than no-opping (round 3): a no-op made the
+ * child's emits unobservable BY CONSTRUCTION, so the arrangement most likely
+ * to produce a duplicate `run-box.teardown` — two processes racing the same
+ * lock, the CHILD winning — was covered by nothing, and the exactly-once
+ * property was pinned only where the in-process side always wins. One JSON
+ * object per line, read back by `readChildLinks()`.
  */
-function loserScript(runsDirPath: string, runId: string, gitCwd: string): string {
+function loserScript(runsDirPath: string, runId: string, gitCwd: string, linkLog: string): string {
   return `(async () => {
   try {
+    const { appendFileSync } = await import("node:fs");
     const { withRunLock } = await import(${JSON.stringify(join(REPO_ROOT, "scripts", "lib", "run-lock.ts"))});
     const { teardownSandbox } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "teardown.ts"))});
     const { RunRecordStore } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "run-record.ts"))});
@@ -210,7 +252,7 @@ function loserScript(runsDirPath: string, runId: string, gitCwd: string): string
     const loserDriver = new FakeDriver(${JSON.stringify(boxesRoot)});
     await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-loser", () =>
       teardownSandbox(
-        { driver: loserDriver, store: loserStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)} },
+        { driver: loserDriver, store: loserStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)}, recordAuditLink: (l) => appendFileSync(${JSON.stringify(linkLog)}, JSON.stringify(l) + "\\n") },
         ${JSON.stringify(runId)},
       ),
     );
@@ -231,10 +273,16 @@ function loserScript(runsDirPath: string, runId: string, gitCwd: string): string
  * pre-lock timer, then attempts `withRunLock`. On a lost race it prints the
  * refusal's code and exits 1; on a won race it runs the FULL teardown and says
  * so on stdout.
+ *
+ * Carries the same appending `recordAuditLink` as `loserScript`, for the reason
+ * given there — and it matters more here, because this child is the one that
+ * actually REACHES the teardown when it wins, and is therefore the only side
+ * that can emit a SECOND `run-box.teardown` row for one box.
  */
-function racerScript(runsDirPath: string, runId: string, gitCwd: string): string {
+function racerScript(runsDirPath: string, runId: string, gitCwd: string, linkLog: string): string {
   return `(async () => {
   try {
+    const { appendFileSync } = await import("node:fs");
     const { withRunLock } = await import(${JSON.stringify(join(REPO_ROOT, "scripts", "lib", "run-lock.ts"))});
     const { teardownSandbox } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "teardown.ts"))});
     const { RunRecordStore } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "run-record.ts"))});
@@ -245,7 +293,7 @@ function racerScript(runsDirPath: string, runId: string, gitCwd: string): string
     await Bun.sleep(15);
     await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-child", (h) =>
       teardownSandbox(
-        { driver: racerDriver, store: racerStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)} },
+        { driver: racerDriver, store: racerStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)}, recordAuditLink: (l) => appendFileSync(${JSON.stringify(linkLog)}, JSON.stringify(l) + "\\n") },
         ${JSON.stringify(runId)},
         h,
       ),
@@ -307,7 +355,7 @@ describe("DF2.11 e2e teardown race", () => {
 
       const counting = countingRecording();
       const winner = teardownSandbox(deps(counting.driver, repoDir), RUN_ID, lock);
-      const child = Bun.spawn(["bun", "-e", loserScript(runsDir, RUN_ID, repoDir)], {
+      const child = Bun.spawn(["bun", "-e", loserScript(runsDir, RUN_ID, repoDir, childLinkLog)], {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -372,6 +420,22 @@ describe("DF2.11 e2e teardown race", () => {
       expect(logs.filter((l) => l.operation === "teardown.destroy" && l.outcome === "ran")).toHaveLength(1);
       expect(logs.filter((l) => l.operation === "teardown.close" && l.outcome === "ran")).toHaveLength(1);
 
+      // DF5.3 — exactly one `run-box.teardown` link belongs in this list beside
+      // "one destroy, one close": a racer that emitted before losing the lock
+      // would duplicate an audit row for one box and nothing else here would
+      // notice. The loser is refused BEFORE teardownSandbox runs, so one box
+      // teardown means one row, named for the box that came down.
+      const boxLinks = auditLinks.filter((l) => `${l.hop}.${l.event}` === "run-box.teardown");
+      expect(boxLinks).toHaveLength(1);
+      expect(boxLinks[0]?.subjectId).toBe(vmName);
+      expect(boxLinks[0]?.repoSlug).toBe("qds/demo");
+      expect(boxLinks[0]?.requestId).toBe("req-df211-race");
+      // The winner's credential half landed too, once each.
+      expect(auditLinks.filter((l) => l.hop === "run-credential").map((l) => l.event)).toEqual([
+        "revoke",
+        "verify-revoked",
+      ]);
+
       console.log(
         `DF2.11 lockrace evidence: revCount=${revCount} destroyCount=${counting.destroys()} ` +
           `bundleVerifyExit=${verify.status} loserExit=${loserExit} ` +
@@ -391,10 +455,14 @@ describe("DF2.11 e2e teardown race", () => {
       // under test — exactly one lock claim, one harvest, one destroy, one
       // close — do not involve the key lifecycle.
       const baseSha = seedHostRepo();
-      await createRun(recording, store, { runId: RUN_ID });
+      await createRun(recording, store, { runId: RUN_ID, recordAuditLink: (l) => auditLinks.push(l) });
       const vmName = store.get(RUN_ID).vmName as string;
       await fillBox(vmName, RUN_ID);
       store.set(RUN_ID, { commitSha: baseSha });
+      // DF5.3: ATTRIBUTED, like `seedRun`. Without this every emit on both
+      // sides is skipped and the union assertion below would pass by observing
+      // zero — the exact vacuousness the child's no-op sink used to guarantee.
+      store.set(RUN_ID, { requestId: "req-df211-race", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
 
       // Both racers run the full withRunLock → teardownSandbox. F8: a startup
       // barrier replaces the old overlap-by-luck window — the child announces
@@ -410,7 +478,7 @@ describe("DF2.11 e2e teardown race", () => {
       // that started slow made the attempts CONSECUTIVE, which the lock
       // legitimately allows, and the XOR below failed as a flake.
       const counting = countingRecording();
-      const child = Bun.spawn(["bun", "-e", racerScript(runsDir, RUN_ID, repoDir)], {
+      const child = Bun.spawn(["bun", "-e", racerScript(runsDir, RUN_ID, repoDir, childLinkLog)], {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -523,6 +591,27 @@ describe("DF2.11 e2e teardown race", () => {
       // harvest.summary is the in-process sink's line: exactly one when the
       // host won, none when the child did (its line went to child stdout).
       expect(logs.filter((l) => l.operation === "harvest.summary")).toHaveLength(hostWon ? 1 : 0);
+      // DF5.3, over the UNION of both processes' emits. Whichever side won,
+      // exactly ONE `run-box.teardown` row exists for this box: the loser is
+      // refused at the lock before `teardownSandbox` runs, so it emits nothing,
+      // and the winner's close runs once. This is the arrangement a duplicate
+      // would come from — two processes on one lock — and the serialized test
+      // above cannot show it, because there the in-process side always wins.
+      const childLinks = readChildLinks();
+      const allLinks = [...auditLinks, ...childLinks];
+      // The winner's teardown emits the whole set once: harvest's two hop-6
+      // rows plus the hop-5 close. Exactly one of each, over both processes.
+      expect(allLinks.map((l) => `${l.hop}.${l.event}`).sort()).toEqual([
+        "run-box.teardown",
+        "run-bundle.bundle-fetch",
+        "run-bundle.bundle-verify",
+      ]);
+      const teardownRow = allLinks.find((l) => `${l.hop}.${l.event}` === "run-box.teardown");
+      expect(teardownRow?.runId).toBe(RUN_ID);
+      expect(teardownRow?.subjectId).toBe(vmName);
+      // …and every one of them came from the side that actually won: the loser
+      // is refused at the lock claim, before `teardownSandbox` runs.
+      expect(childLinks).toHaveLength(hostWon ? 0 : 3);
 
       console.log(
         `DF2.11 contention evidence: winner=${hostWon ? "host" : "child"} revCount=3 ` +

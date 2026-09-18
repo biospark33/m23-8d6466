@@ -29,14 +29,14 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { VIZ_PIDFILE, type ExecResult } from "../../src/providers/driver.ts";
+import { VIZ_PIDFILE, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { type BoxFileRead, DEFAULT_EXEC_TIMEOUT_MS, shellQuote } from "../../src/providers/exedev/transport.ts";
 import { BOX_RUN_ROOT } from "../../src/providers/harvest.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { TimeoutError } from "../../src/providers/timeout.ts";
 import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { goodLedger } from "./helpers.ts";
+import { goodLedger, useTempAuditStore } from "./helpers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import {
@@ -73,6 +73,16 @@ function driverOf(legs: Array<ExecResult | Error>, calls: number[] = []) {
     },
   };
 }
+
+/**
+ * DF5.3 C11: this suite drives a real `dispatch()` (through `scripts/fleet.ts`
+ * or `fanout()`), and `dispatch` is its own audit-store composition root — it
+ * calls `openAuditStore()`, which resolves `QDS_AUDIT_DB ?? .sandbox/audit.db`
+ * RELATIVE TO CWD. Without this the suite appends real rows to the operator's
+ * live store. Registered at file scope so it also covers the `bun
+ * scripts/fleet.ts` subprocesses, which inherit `process.env`.
+ */
+useTempAuditStore();
 
 describe("classifyMarkerRead — the four BoxFileRead verdicts (AC5)", () => {
   test("absent with a CLEAN probe exit is `absent`, the reading that resets a corruption streak", () => {
@@ -665,6 +675,7 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
       pollIntervalMs: TICK_MS,
       perCallDeadlineMs: DEADLINE_MS,
       ceilingMs: 10_000,
+      recordAuditLink: () => {},
       ...overrides,
     };
   }
@@ -991,7 +1002,17 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
       claimed.set(vm, runId);
       plantMarker(driver, vm, { runId, ok: true });
     };
-    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    // DF5.3: the fan-out's own audit seam, CAPTURED. `FanoutDeps.recordAuditLink`
+    // is forwarded into the loser's REAL `teardownSandbox`, and this override is
+    // the only place that emit is observable — every other test here leaves the
+    // `() => {}` default in place, so deleting the forward changed nothing.
+    const links: ProviderAuditLink[] = [];
+    const res = await fanout(
+      "race",
+      2,
+      brief(),
+      raceDeps({ rosterIds: ["r0", "r1"], recordAuditLink: (l) => links.push(l) }),
+    );
     expect(res.winner).not.toBeNull();
     const won = res.arms[res.winner as number];
     expect(won?.outcome).toBe("ready");
@@ -1001,6 +1022,29 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     // direction that type-checks without it — the record's stamped runId
     // equals the id the run record scan found for that vm.
     expect(won?.runId).toBe(claimed.get(won?.vmName as string));
+    // The loser's box was destroyed, and the chain says so on the loser's own
+    // box — never on the winner's, which is still alive and billing.
+    //
+    // THE LOSER IS PINNED FIRST, as the sibling in patterns.test.ts does it.
+    // `loserVms` was `.filter`ed to `string` with nothing asserting a loser
+    // existed, so an arm that never reached a `vmName` (provision refused,
+    // roster exhausted, race short-circuit) made both sides `[]` — `toEqual`
+    // passed with ZERO links observed, and `not.toContain` was vacuous too.
+    // This is the only place `FanoutDeps.recordAuditLink` → `teardownSandbox`
+    // is observable, so a green vacuous assertion here is the whole forward
+    // going unwatched.
+    const losers = res.arms.filter((_, i) => i !== res.winner);
+    expect(losers).toHaveLength(1);
+    for (const loser of losers) {
+      expect(loser.outcome).toBe("lostRace");
+      expect(typeof loser.vmName).toBe("string");
+      expect(boxExists(driver, loser.vmName)).toBe(false);
+    }
+    const torndown = links
+      .filter((l) => l.hop === "run-box" && l.event === "teardown")
+      .map((l) => l.subjectId);
+    expect(torndown.sort()).toEqual(losers.map((l) => l.vmName as string).sort());
+    expect(torndown).not.toContain(won?.vmName);
   }, 20_000);
 
   // ── the per-loser run lock (DF2.5 disposal wiring) ───────────────────────────

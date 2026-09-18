@@ -18,7 +18,7 @@ import { IMAGE_MARKER_PATH } from "../../../src/providers/exedev/transport.ts";
 import { ASSERTION_CODE } from "../../../src/providers/exedev/setup-gate.ts";
 import { setupGate } from "../../../src/providers/exedev/setup-gate.ts";
 import { RosterError } from "../../../src/phase-engine/roster/schema.ts";
-import { provisionAdmittedRun, ProvisionRefusedError } from "../../../src/providers/driver.ts";
+import { provisionAdmittedRun, ProvisionRefusedError, type ProviderAuditLink } from "../../../src/providers/driver.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import {
@@ -1948,6 +1948,10 @@ describe("setup gate — input contract (D9/D10/D14)", () => {
     // record (INV-1) before it would touch the driver, and the timeout guard runs
     // BEFORE that — so an EEXIST here would mean the guard moved or was lost.
     const storeRoot = mkdtempSync(join(tmpdir(), "qds-sg-timeout-"));
+    // DF5.3: this run IS attributed, so the create emit's repoSlug guard is
+    // not what suppresses the link — the refusal is. A blind `() => {}` sink
+    // could not tell the two apart.
+    const links: ProviderAuditLink[] = [];
     try {
       for (const bad of [0, -5, Number.NaN]) {
         let err: unknown;
@@ -1957,6 +1961,7 @@ describe("setup gate — input contract (D9/D10/D14)", () => {
             new RunRecordStore(join(storeRoot, `runs-${String(bad).replace(".", "")}`)),
             {
               runId: "timeout-invalid-run",
+              recordAuditLink: (l) => links.push(l),
               budget: {
                 repoSlug: "qds/demo",
                 issueId: "42",
@@ -1976,6 +1981,8 @@ describe("setup gate — input contract (D9/D10/D14)", () => {
         // The remediation must not send an operator hunting a provider outage
         // that was a caller bug.
         expect((err as ProvisionRefusedError).remediation).toContain("omit actionTimeoutMs");
+        // No `run-box.create` row vouches for a box that was never created.
+        expect(links).toEqual([]);
         // EACCES-on-box-hours-remediation aside, nothing else happened: no box
         // (the fake's boxes dir never materializes without create), and this
         // refusal precedes even the INV-1 record write.

@@ -23,13 +23,26 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ProviderDriver } from "../../src/providers/driver.ts";
+import type { ProviderAuditLink, ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore, CORE_FIELDS, type RunRecord } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 import { leakScan } from "./fixtures/leak-scan.ts";
+import { useTempAuditStore } from "../fleet/helpers.ts";
+
+/**
+ * DF5.3 C-5 — MANDATORY. `scripts/cap-hit-demo.ts` became an audit composition
+ * root in this PR: it calls `openAuditStore()`, which resolves
+ * `QDS_AUDIT_DB ?? ".sandbox/audit.db"` RELATIVE TO CWD — and `cli()` below
+ * spawns it with `cwd: REPO_ROOT`. Without this, every run of this file chmods
+ * the operator's live `.sandbox/audit.db`, takes a `BEGIN IMMEDIATE` on it and
+ * execs the schema, and an attributed demo appends real rows to an append-only
+ * store of real-run evidence. `cli()` copies `process.env`, so the child
+ * inherits the temp path for free.
+ */
+useTempAuditStore();
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "cap-hit-demo.ts");
@@ -44,6 +57,7 @@ let driver: FakeDriver;
 let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 let evidenceDir: string;
+let previousRunsDir: string | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df24-"));
@@ -52,19 +66,68 @@ beforeEach(() => {
   recording = new RecordingDriver(driver);
   api = new FakeKeyApi();
   logs = [];
+  auditLinks = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
   evidenceDir = join(dir, "evidence");
+  // The IN-PROCESS tests need this too, not only `cli()`: the demo's two
+  // `teardownSandbox` deps literals pass `gitCwd` but no `runsDir`, so
+  // `harvest.ts`'s `resolveRunsDir()` falls through to `QDS_RUNS_DIR` and then
+  // to `.sandbox/runs` — which it `mkdirSync`s under the operator's repo, with
+  // the bundle path resolving there too.
+  previousRunsDir = process.env.QDS_RUNS_DIR;
+  process.env.QDS_RUNS_DIR = join(dir, "runs");
 });
 
 afterEach(() => {
   restoreLog?.();
+  // biome-ignore lint/performance/noDelete: unsetting an env var requires delete
+  if (previousRunsDir === undefined) delete process.env.QDS_RUNS_DIR;
+  else process.env.QDS_RUNS_DIR = previousRunsDir;
   rmSync(dir, { recursive: true, force: true });
 });
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * DF5.3: links captured by `deps()` — the shared factory used by every test in
+ * this file, which is the only suite that drives a whole create→mint→deliver
+ * →revoke→verify→teardown lifecycle in one run. It used to bind a no-op sink,
+ * so all six audit forwardings in scripts/cap-hit-demo.ts could have been
+ * deleted with the suite green. Cleared per test in beforeEach.
+ */
+let auditLinks: ProviderAuditLink[] = [];
+
 function deps(overrides: Partial<CapHitDemoDeps> = {}): CapHitDemoDeps {
-  return { driver: recording, keyApi: api, store, evidenceDir, envFile: "app/.env", ...overrides };
+  return {
+    driver: recording,
+    keyApi: api,
+    store,
+    evidenceDir,
+    envFile: "app/.env",
+    recordAuditLink: (link) => auditLinks.push(link),
+    ...overrides,
+  };
+}
+
+/**
+ * A store that stamps every record it mints with a DF2.8 attribution and a
+ * requestId — the two things every emitter needs and the demo's own runs
+ * deliberately lack (`createRun` passes no `budget`, so `auditRepoSlug` is
+ * always `undefined` on that path; see the note on the marquee test).
+ *
+ * This is the ONLY way to observe the demo's forwardings end to end without
+ * changing what the demo does: the attribution lands on the record between
+ * `store.create` and the `create` emit's `auditRepoSlug(record)` read, exactly
+ * where a real admitted dispatch would have put it.
+ */
+class AttributedStore extends RunRecordStore {
+  override create(runId: string, now: Date = new Date()): RunRecord {
+    super.create(runId, now);
+    return this.set(runId, {
+      requestId: "req-df53-demo",
+      extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } },
+    });
+  }
 }
 
 /** Default opts for fake substrate (driver.name !== "exedev"). */
@@ -183,6 +246,64 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.timings.reprobe_ms).toBeNumber();
     expect(result.artifact.timings.capture_spend_ms).toBeNumber();
     expect(result.artifact.timings.teardown_ms).toBeNumber();
+
+    // DF5.3 — the HONEST fact about this run, not a silence to be misread as a
+    // bug: the demo's runs are deliberately UNATTRIBUTED. `createRun` passes no
+    // `budget` to `provisionAdmittedRun`, which mints a FRESH record and writes
+    // `extensions.budget` only when one is supplied, so `auditRepoSlug` is
+    // `undefined` for the whole lifecycle and every emitter correctly skips
+    // (INV-AUDIT-4 — the columns are NOT NULL and an invented attribution is
+    // exactly what it forbids). `fillRun`'s site states it outright
+    // (`repoSlug: undefined`, cap-hit-demo.ts). The test below runs the same
+    // lifecycle over an ATTRIBUTED record and pins the full ordered set, so
+    // this zero is a consequence of the demo's inputs and not of a dropped
+    // forwarding.
+    expect(auditLinks).toEqual([]);
+  });
+
+  test("DF5.3: over an ATTRIBUTED record the same lifecycle emits its links in order", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    store = new AttributedStore(join(dir, "runs-attributed"));
+    const result = await runCapHitDemo(
+      deps({ store }),
+      defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\nturn_end\\n'"] }),
+    );
+    expect(result.verdict).toBe("demonstrated");
+
+    // The ORDERED SET for one run, end to end. Any of the six forwardings in
+    // scripts/cap-hit-demo.ts going missing — or emitting under the wrong
+    // hop/event — fails here and nowhere else in the repository.
+    expect(auditLinks.map((l) => `${l.hop}.${l.event}`)).toEqual([
+      "run-box.create",
+      "run-credential.mint",
+      "run-credential.deliver",
+      "run-credential.revoke",
+      "run-credential.verify-revoked",
+      "run-box.teardown",
+    ]);
+    // Every link belongs to THIS run, under the record's own attribution and
+    // its own requestId — never a minted one (C5).
+    for (const l of auditLinks) {
+      expect(l.runId).toBe(result.artifact.runId);
+      expect(l.repoSlug).toBe("qds/demo");
+      expect(l.requestId).toBe("req-df53-demo");
+    }
+    // ROUND 3 (C-2): `occurredAt` is the EVENT's time, `recordedAt` the clock
+    // read. They coincide for every emitter that passes no `occurredAt` — but
+    // NOT for `teardown`, which passes the record's own `closedAt` on BOTH
+    // arms. That is the whole point of the split: the healing re-run may fire
+    // days after the close, and its row is the only row whenever the original
+    // emit never landed, so it must state when the teardown actually happened
+    // — and passing `closedAt` on the fresh arm too is what makes a healed row
+    // byte-identical to a fresh one instead of a `divergent` tamper alarm.
+    for (const l of auditLinks.filter((x) => x.event !== "teardown")) {
+      expect(l.occurredAt).toBe(l.recordedAt);
+    }
+    const teardownLink = auditLinks.find((l) => l.event === "teardown");
+    const closedAt = store.get(result.artifact.runId).closedAt;
+    expect(closedAt).toBeString();
+    expect(teardownLink?.occurredAt).toBe(closedAt as string);
+    expect(teardownLink?.detail).toEqual({ closedAt, boxSource: "record" });
   });
 
   // ─── 2. AC2 self-report trap ────────────────────────────────────────────────

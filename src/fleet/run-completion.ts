@@ -28,7 +28,7 @@
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { KeyApi } from "../providers/credentials.ts";
-import type { ProviderDriver } from "../providers/driver.ts";
+import type { ProviderAuditLink, ProviderDriver } from "../providers/driver.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
@@ -101,6 +101,12 @@ export interface RunCompletionDeps {
   /** Unset ⇒ poll to windowMs. DF3.8's sweep passes 1 — a sweep is not a wait. */
   maxTicks?: number;
   windowMs?: number;
+  /**
+   * DF5.3: the audit emit seam, required so an unwired construction fails at
+   * compile time. The chain's teardown emits its `teardown` link through it.
+   * The composition root binds it to `AuditStoreWriter.record`.
+   */
+  recordAuditLink: (link: ProviderAuditLink) => void;
 }
 
 // ─── observability (the emitLine/log idiom, fanout-primitive.ts:1538-1550) ────
@@ -175,6 +181,9 @@ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): Teardown
     runsDir: deps.runsDir,
     costLedger: deps.costLedger,
     gitCwd: deps.hostRoot,
+    // DF5.3: the chain's teardown emits its `teardown` link through the same
+    // required seam every other construction threads.
+    recordAuditLink: deps.recordAuditLink,
   };
 }
 

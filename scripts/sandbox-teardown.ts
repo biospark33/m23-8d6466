@@ -38,6 +38,7 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
+import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
@@ -183,6 +184,48 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   });
   const store = new RunRecordStore({ ...(parsed.dir === undefined ? {} : { dir: parsed.dir }), requestId });
 
+  // DF5.3: this CLI is the composition root for the links the teardown/harvest
+  // emits — the store opens ONCE here (default path; QDS_AUDIT_DB resolves
+  // inside the store) and closes in the finally below, beside the ledger.
+  //
+  // CLASSIFIED, like every other refusal this CLI reports. The open throws on
+  // an unwritable path (`QDS_AUDIT_DB` under a sealed directory, ENOSPC, a
+  // corrupt file) and sat OUTSIDE the try below, so the throw escaped `run()`
+  // entirely: `import.meta.main`'s residual handler printed a bare
+  // `EACCES: permission denied` with no code and no remediation, and the
+  // operator was told nothing about the knob that caused it. The remediation is
+  // the store's own, verbatim from `AuditStoreError` when it carries one.
+  //
+  // Nothing is leaked by returning here: the store is closed in the `finally`
+  // below only once it has been successfully OPENED, and this line precedes
+  // both the lock and the ledger, so no handle and no lock file exists yet.
+  //
+  // Nor by any LATER exit: every step from the record probe onwards — the lock
+  // acquire included — runs INSIDE the try whose `finally` closes this handle,
+  // so a lock refusal (the one early-exit an operator meets routinely) unwinds
+  // through the close like any other failure. The file SET is the deliberate
+  // half: `audit.db` (+ -wal/-shm) does appear for an invocation that then
+  // refuses, which is the price of refusing before the lock rather than after.
+  let audit: AuditStoreWriter;
+  try {
+    audit = openAuditStore();
+  } catch (e) {
+    // C-1: `err.code` is this CLI's closed code vocabulary ONLY when the store
+    // classified the failure. A bare fs errno took that slot and printed
+    // `!! EACCES: …` for this hunk's own worked example (a sealed
+    // QDS_AUDIT_DB) — ENOSPC/EROFS/EISDIR the same — so a consumer matching
+    // the documented codes saw none of them. The errno stays in the MESSAGE,
+    // where it is diagnosis rather than classification.
+    const typed = e instanceof AuditStoreError ? e : undefined;
+    const err = (e ?? {}) as { message?: string };
+    reportFailure(
+      out,
+      typed?.code ?? "audit-store-unavailable",
+      `the audit-link store could not be opened: ${err.message ?? String(e)} — the teardown's box/bundle links could not be written, so nothing was torn down`,
+      typed?.remediation ?? "fix or clear the store path (QDS_AUDIT_DB, default .sandbox/audit.db), then re-run the teardown",
+    );
+    return 1;
+  }
   const deps: TeardownDeps = {
     driver,
     store,
@@ -192,6 +235,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // default` chain: the lock guards `<store.dir>/<runId>.lock`, so the
     // bundle/artifact paths must be under exactly that directory.
     runsDir: store.dir,
+    recordAuditLink: (link) => audit.record(link),
   };
   // Branded: only a lock THIS invocation acquired may reach teardownSandbox's
   // head check (and the release primitives) — a hand-joined path string would
@@ -325,13 +369,26 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     const cleanupFailed = (): void => {
       if (outcome === 0) outcome = 1;
     };
+    // DF5.3: the audit store closes on the same cleanup discipline — every
+    // emitted link is already committed, so a close fault is bookkeeping only.
+    try {
+      audit.close();
+    } catch (e) {
+      // Guarded coercion (C10): a thrown null/undefined would raise a SECOND
+      // error from inside this catch, escaping the `finally` and masking the
+      // outcome the catch exists to report.
+      const x = (e ?? {}) as { message?: string };
+      reportFailure(out, "audit-store-close-failed", `could not close the audit-link store: ${x.message ?? String(e)}`, "the handle dies with the process; re-run to confirm it still reads");
+      cleanupFailed();
+    }
     // Close the ledger handle here so every exit path (success, teardown
     // failure, harvest return) releases it.
     if (ledger !== undefined) {
       try {
         ledger.close();
       } catch (e) {
-        reportFailure(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
+        const x = (e ?? {}) as { message?: string };
+        reportFailure(out, "ledger-close-failed", `could not close the cost ledger: ${x.message ?? String(e)}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
         cleanupFailed();
       }
     }

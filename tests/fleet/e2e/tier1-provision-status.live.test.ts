@@ -31,6 +31,7 @@ import {
   liveGate,
   liveTodoOff,
   preflight,
+  recordLiveAuditLink,
   runFleet,
   runIdFor,
   settleRun,
@@ -74,7 +75,16 @@ test.todoIf(liveTodoOff())(
       approvalStore = store;
 
       // ── createRun: headroom (real driver.list) + record → real box ────────
-      const record = await createRun(ctx.driver, store, { runId });
+      // The seam is real but this call site can never reach it, BY CONSTRUCTION:
+      // `createRun` refuses a delegated admission (`assertAdmissionNotDelegated`),
+      // so it never passes a `budget` to `provisionAdmittedRun`, so the record it
+      // provisions carries no `extensions.budget` — `auditRepoSlug(record)` is
+      // always `undefined` there and the `create` link is skipped-unattributed
+      // (driver.ts, `CreateRunOptions.recordAuditLink`'s own docblock). The real
+      // sink is wired anyway rather than `() => {}` so that a future budgeted
+      // path through this seam records instead of silently dropping; the hop
+      // assertions for this round live in T1.7, whose record IS attributed.
+      const record = await createRun(ctx.driver, store, { runId, recordAuditLink: recordLiveAuditLink });
       evidence.push({ phase: "createRun", ok: true, runId, vmName: record.vmName });
       expect(record.vmName).toBe(runId);
 

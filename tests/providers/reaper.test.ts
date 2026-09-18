@@ -32,7 +32,7 @@ import {
 } from "../../src/providers/reaper.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { SBX_OWNERSHIP_TAG, type ExecResult } from "../../src/providers/driver.ts";
+import { SBX_OWNERSHIP_TAG, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import type { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { seedFleet, type FleetState, type SeededFleet } from "./fixtures/fleet-state.ts";
 import { runLocal } from "./fixtures/git-fixture.ts";
@@ -70,6 +70,8 @@ let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 /** mkdtemp roots to clean in afterEach (the test dir + any host/demo repos). */
 const roots: string[] = [];
+/** DF5.3: capture of the sweep's audit links; cleared per test in beforeEach. */
+let auditLinks: ProviderAuditLink[] = [];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df26-reap-"));
@@ -83,6 +85,12 @@ beforeEach(() => {
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   if (prevQuotaEnv !== undefined) delete process.env.QDS_QUOTA_LIMITS_FILE;
   logs = [];
+  // Reset HERE, not inside the DF5.3 tests: `deps()` is the shared factory for
+  // every sweep in this file and pushes into `auditLinks`, so an array only the
+  // audit tests cleared accumulated links from the whole run. Correctness then
+  // rested on those tests self-resetting last — which any test inserted between
+  // them, or a `--test-name-pattern` run, silently breaks.
+  auditLinks = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
 });
 
@@ -109,6 +117,9 @@ function deps(fleet: SeededFleet, overrides: Partial<SweepDeps> = {}): SweepDeps
     reapDir: join(dir, "reap"),
     requestId: "req-df26-test",
     now: () => NOW,
+    recordAuditLink: (link) => {
+      auditLinks.push(link);
+    },
     ...overrides,
   };
 }
@@ -1467,5 +1478,222 @@ describe("DF2.6 sweep", () => {
     // The OLDEST stamp-shaped seeds went, not an arbitrary slice.
     expect(after).not.toContain(seedName(0));
     expect(after).toContain(seedName(seeded - 1));
+  });
+});
+
+describe("DF5.3 — the reap link is the orphan path's emit", () => {
+  const BUDGET = { repoSlug: "qds/demo", issueId: "42" };
+
+  /**
+   * Seed one leaked box: a CLOSED record claims a live VM, so classification
+   * says leaked-vm (the destroy never landed) while the record still resolves
+   * and can serve the link's identity.
+   *
+   * The record is seeded OPEN and closed here, after the stamp: `requestId` is
+   * a CORE field and `store.set` refuses core keys on a closed record
+   * ("record … is closed; core key not writable"), while `extensions` is
+   * writable either way. `attributed: false` is the C5 arm — attributed but
+   * never stamped.
+   */
+  async function seedLeak(runId: string, opts: { requestId?: string } = {}): Promise<SeededFleet> {
+    const fleet = await seedFleet(dir, { vms: [{ name: runId }], records: [{ runId }] }, NOW);
+    fleet.store.set(runId, {
+      ...(opts.requestId === undefined ? {} : { requestId: opts.requestId }),
+      extensions: { budget: BUDGET },
+    });
+    fleet.store.close(runId, NOW);
+    return fleet;
+  }
+
+  test("apply mode destroying a leaked owned VM emits one `reap` link (hop run-box); a dry run emits nothing", async () => {
+    const runId = "df53-reap-20260915-000001";
+    // The record's DF2.8 attribution is the only repoSlug an emitter may use,
+    // and its own `requestId` is the only join key — `reap` is the fourth C5
+    // option-(c) emitter, so there is no fallback to the sweep's minted id.
+    const fleet = await seedLeak(runId, { requestId: "req-df26-test" });
+    // The box the reaper actually destroys, observed rather than assumed — the
+    // subject must be THAT box, not a constant the fixture happens to share.
+    // (It cannot be made textually distinct from the runId: the emit's record
+    // comes from `store.get(unit.id)` and `readRecord` REFUSES a record whose
+    // `runId` differs from its filename stem — run-record.ts:1094. vmName ≡
+    // runId ≡ unit.id is forced on this path; see the report.)
+    const destroyed: string[] = [];
+    const spy = Object.assign(Object.create(fleet.driver) as FakeDriver, {
+      destroy: async (name: string): Promise<void> => {
+        destroyed.push(name);
+        await fleet.driver.destroy(name);
+      },
+    });
+
+    await sweep(deps(fleet)); // dry run: zero calls, zero links
+    expect(auditLinks).toHaveLength(0);
+
+    const before = Date.now();
+    const report = await sweep(deps({ ...fleet, driver: spy }, {}), { yes: true });
+    const after = Date.now();
+    expect(report.executed.destroy).toEqual([runId]);
+    expect(destroyed).toEqual([runId]);
+    expect(auditLinks.map((l) => `${l.hop}.${l.event}`)).toEqual(["run-box.reap"]);
+    const link = auditLinks[0]!;
+    expect(link.runId).toBe(runId);
+    expect(link.repoSlug).toBe("qds/demo");
+    // The RECORD's id. It happens to equal `deps().requestId` here, so the
+    // absence test below is what proves the record is the source: strip the
+    // field and the link disappears rather than inheriting the sweep's.
+    expect(link.requestId).toBe("req-df26-test");
+    expect(link.subjectId).toBe(destroyed[0]);
+    expect(link.subjectKind).toBe("box");
+    // The detail shape, previously unasserted: a link reporting the wrong
+    // class (or an empty detail) was indistinguishable from a correct one.
+    expect(link.detail).toEqual({ vm: runId, class: "leaked-vm" });
+    // INV-AUDIT-4, "never retroactive" — a BOUND check. `occurredAt ===
+    // recordedAt` cannot fail for an emitter that passes no `occurredAt` (one
+    // local is assigned to both in `emitAuditLink`), so it re-stated the
+    // helper rather than the emitter. The reap row's event time IS the emit —
+    // unlike `teardown`, which now passes the record's `closedAt` (C-2).
+    expect(Date.parse(link.occurredAt)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(link.occurredAt)).toBeLessThanOrEqual(after);
+  });
+
+  // "Orphan path ONLY" is an ABSENCE claim, and the test above proves only the
+  // presence half. These three pin the absence on each of the arms the sweep
+  // can take — including the two the sweep now forwards a LIVE audit sink into
+  // (`TeardownDeps` and the internal `CredentialDeps`), where a stray `reap`
+  // emit would double-count a box the operator already tore down cleanly.
+  test("ABSENCE: a TEARDOWN unit emits its own links and NEVER a run-box.reap", async () => {
+    await enterHostRepo();
+    const runId = RUN_B; // open record, aged past staleAfterMs ⇒ teardown unit
+    const fleet = await seedFleet(
+      dir,
+      { vms: [{ name: runId }], keys: [{ runId, createdAt: iso(NOW.getTime() - OLD) }], records: [{ runId, ageMs: OLD }] },
+      NOW,
+    );
+    // requestId as well as the budget: post-C5 every emitter takes the join
+    // key from the RECORD with no `deps` fallback, so without this field the
+    // teardown arm emits nothing and "no reap here" would pass VACUOUSLY —
+    // absence because nothing can emit at all, which is the opposite of the
+    // property. `req-df26-test` is the id `deps()` already uses.
+    fleet.store.set(runId, { requestId: "req-df26-test", extensions: { budget: BUDGET } });
+
+    const report = await sweep(deps(fleet), { yes: true });
+    expect(report.executed.teardown).toEqual([runId]);
+    expect(report.executed.destroy).toEqual([]);
+    const events = auditLinks.map((l) => `${l.hop}.${l.event}`);
+    // The seam really is live down this arm — otherwise "no reap here" would
+    // be vacuous, satisfied by a deps object that emits nothing at all.
+    expect(events).toContain("run-box.teardown");
+    expect(events).not.toContain("run-box.reap");
+    for (const l of auditLinks) expect(l.runId).toBe(runId);
+  });
+
+  test("ABSENCE: a RECORD-LESS leaked VM is destroyed and emits nothing (INV-AUDIT-4)", async () => {
+    const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
+    const report = await sweep(deps(fleet), { yes: true });
+    expect(report.executed.destroy).toEqual([VM_ORPHAN]);
+    // No record ⇒ no runId/repoSlug/requestId for the NOT NULL columns.
+    // Manufacturing them is what INV-AUDIT-4 forbids.
+    expect(auditLinks).toEqual([]);
+  });
+
+  test("ABSENCE: the run-less revoke path emits nothing at all — by construction", async () => {
+    // `revokeAndVerify` runs under a run-less step context; `audit_links.run_id`
+    // is NOT NULL, so there is no hop to serve. What ENFORCES that is that
+    // `revokeHash`/`verifyHash` are not emit sites — NOT a blinded sink: the
+    // sweep's internal CredentialDeps now binds the live `recordAuditLink`,
+    // because a `() => {}` there would silently drop any link a future
+    // credential call routed through it did want written. This test is what
+    // keeps the live seam honest.
+    const fleet = await seedFleet(
+      dir,
+      { keys: [{ runId: RUN_ORPHAN_KEY, createdAt: iso(NOW.getTime() - OLD) }] },
+      NOW,
+    );
+    const report = await sweep(deps(fleet), { yes: true });
+    expect(report.executed.revoke).toHaveLength(1);
+    expect(auditLinks).toEqual([]);
+  });
+
+  test("C5: an attributed leak with NO requestId emits nothing and says so — the box is still destroyed", async () => {
+    const runId = "df53-reapnoreq-20260915-000003";
+    const fleet = await seedFleet(dir, { vms: [{ name: runId }], records: [{ runId, closed: true }] }, NOW);
+    fleet.store.set(runId, { extensions: { budget: BUDGET } }); // attributed, never stamped
+    const report = await sweep(deps(fleet), { yes: true });
+
+    // The collection is the reaper's job and happens either way — a missing
+    // join key must never leave a billing box alive.
+    expect(report.executed.destroy).toEqual([runId]);
+    expect(report.failures).toEqual([]);
+    expect(auditLinks).toEqual([]);
+    const skipped = logs.filter((l) => l.operation === "providers.audit-link-skipped");
+    expect(skipped).toHaveLength(1);
+    expect((skipped[0] as unknown as { reason: string }).reason).toBe("no-request-id");
+    expect((skipped[0] as unknown as { event: string }).event).toBe("reap");
+    expect(skipped[0]!.runId).toBe(runId);
+  });
+
+  test("a store refusal on the reap link is LOGGED and the sweep finishes — never counted as destroy-failed", async () => {
+    // The emit fires AFTER the destroy has already succeeded and the id is
+    // already in `executed.destroy`. Falling through to the unit catch pushed
+    // `{vm, code: "destroy-failed"}` without splicing it back out, so one
+    // report counted the same box as destroyed AND as failed to destroy — and
+    // sent the operator after a box that no longer exists.
+    const runId = "df53-reapfail-20260915-000002";
+    // `requestId` is what makes this test REACH the refusing emit at all: post
+    // C5 option-(c) a record without one skips before the store is touched, so
+    // a refusal could never fire and the assertions below would pass vacuously.
+    // Seeded through `seedLeak`, which stamps BEFORE closing — `requestId` is a
+    // CORE field and `store.set` refuses core keys on an already-closed record.
+    const fleet = await seedLeak(runId, { requestId: "req-df26-test" });
+
+    const report = await sweep(
+      deps(fleet, {
+        recordAuditLink: () => {
+          throw Object.assign(new Error("audit store is read-only"), { code: "audit-link-write-failed" });
+        },
+      }),
+      { yes: true },
+    );
+    expect(report.executed.destroy).toEqual([runId]);
+    expect(report.failures).toEqual([]);
+    expect((await fleet.driver.list()).map((v) => v.name)).toEqual([]);
+    const dropped = logs.filter((l) => l.operation === "providers.reap-audit-link-dropped");
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.runId).toBe(runId);
+    expect((dropped[0] as unknown as { vm: string }).vm).toBe(runId);
+    // ROUND 3: the reaper's catch stays BROAD on purpose (rethrowing here hits
+    // the unit catch as `destroy-failed` for a box already in
+    // `executed.destroy` — the double-count above), but its `code` is now
+    // HONEST. This throw is a plain `Error` carrying a `code` property, which
+    // is NOT the store's typed refusal (`isAuditStoreError` matches
+    // structurally on `name === "AuditStoreError"`), so the line no longer
+    // repeats an attacker-or-caller-supplied `code` as if the store had said it.
+    expect((dropped[0] as unknown as { error: { code: string } }).error.code).toBe("audit-link-emit-failed");
+  });
+
+  test("a TYPED AuditStoreError on the reap link is logged with the STORE's own code", async () => {
+    // The other half of the honest-code pair: when the throw really is the
+    // store's typed refusal, its `code` is what the operator needs and it is
+    // forwarded verbatim — so the two arms are distinguishable in the log.
+    const runId = "df53-reapfail-20260915-000003";
+    const fleet = await seedLeak(runId, { requestId: "req-df26-test" });
+
+    const report = await sweep(
+      deps(fleet, {
+        recordAuditLink: () => {
+          const e = Object.assign(new Error("cannot use the audit-link store"), {
+            code: "audit-store-unwritable",
+            remediation: "check the uid, the mount and the free space on the store's device",
+          });
+          e.name = "AuditStoreError";
+          throw e;
+        },
+      }),
+      { yes: true },
+    );
+    expect(report.executed.destroy).toEqual([runId]);
+    expect(report.failures).toEqual([]);
+    const dropped = logs.filter((l) => l.operation === "providers.reap-audit-link-dropped");
+    expect(dropped).toHaveLength(1);
+    expect((dropped[0] as unknown as { error: { code: string } }).error.code).toBe("audit-store-unwritable");
   });
 });
