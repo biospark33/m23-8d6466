@@ -1083,7 +1083,9 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      "oci/exedev/Dockerfile": "499109821e37444b652eec783c1387e02fd482219f012f9b909eca1072d35136",
+      // 23edf4b9: the 2026-09-18 COPY-set convergence (five new COPYs for the
+      // engine's provider/swarmclaw reach — see the walk-digest note below).
+      "oci/exedev/Dockerfile": "23edf4b9838e9802c30f18f1c5b3aa148ae2214f77cc1e2485e712b77c4cc9c2",
       "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1296,7 +1298,20 @@ describe("buildIdFileInputs", () => {
       // untouched by this PR. The box-side provenance debt that IS owed — the
       // published image ships the pre-DF5.3 `pipeline-run.ts` — is unchanged in
       // kind from the entries above and settles on the next adoption.
-      "f145ef42a9bfa551ce05f6b5b8921b689d08ce0c4464bad811358b9dabea827e",
+      //
+      // 48d3b237: moved by the 2026-09-18 COPY-set convergence (the DF5.3
+      // merge's publish refused at the engine stage's resolution probe —
+      // `Could not resolve: "../src/providers/step-log.ts"` — because the
+      // enumerated provider COPY set had fallen behind the engine's import
+      // graph). The Dockerfile gained five COPYs —
+      // `src/providers/{step-log,cap-rejection,run-record,fs-atomic}.ts` and
+      // `src/swarmclaw/` — so the walk grew from 75 to 87 tracked inputs (the
+      // five plus the transitive files under existing directory COPYs they
+      // pulled in). Converged by the scratch-tree probe loop this file's own
+      // Dockerfile comment documents; measured, not inferred, via
+      // `buildIdFileInputs(realDockerfile())` on the tree this literal lands
+      // with, same-commit re-pin per the discipline above.
+      "48d3b237c7eb27c5fae957ecda76064421d989e71d0ee522e93e449cc14e5804",
     );
   });
 });

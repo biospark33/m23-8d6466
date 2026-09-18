@@ -123,6 +123,16 @@ on:
       # have baked a QDS_GIT_SHA and SOURCE_DATE_EPOCH for a revision that
       # PREDATES the content it shipped.
       - src/providers/timeout.ts
+      # 2026-09-18 COPY-set convergence (post-DF5.3): the engine stage's
+      # resolution probe refused on "../src/providers/step-log.ts" because the
+      # provider reach had grown past the two-file set. Five new COPYs, and
+      # both lists take all five — the "exactly" test below catches the next
+      # one that tries to land in only one list.
+      - src/providers/step-log.ts
+      - src/providers/cap-rejection.ts
+      - src/providers/run-record.ts
+      - src/providers/fs-atomic.ts
+      - src/swarmclaw/**
       - cli-anything/src/**
       - cli-anything/scripts/**
       - pi-vs-claude-code-vendor/coms-core.ts
@@ -508,6 +518,8 @@ jobs:
                         package.json bun.lock .dockerignore \
                         src/fleet src/lib src/phase-engine src/providers/bounded-exec.ts \
                         src/providers/timeout.ts \
+                        src/providers/step-log.ts src/providers/cap-rejection.ts \
+                        src/providers/run-record.ts src/providers/fs-atomic.ts src/swarmclaw \
                         cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts \
                         cli-anything/package.json pi-vs-claude-code-vendor/package.json \
                         visualizer/package.json)

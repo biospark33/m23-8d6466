@@ -300,6 +300,25 @@ COPY src/providers/bounded-exec.ts src/providers/bounded-exec.ts
 # set in a scratch tree and re-running the probe until it passed, which is the
 # only method that measures the same property the build does.
 COPY src/providers/timeout.ts src/providers/timeout.ts
+# The 2026-09-18 publish (post-DF5.3 merge) refused at this stage's probe the
+# same way the timeout precedent above did — `error: Could not resolve:
+# "../src/providers/step-log.ts"` — because the engine's provider reach grew
+# past the two-file set and no offline check walks this COPY enumeration
+# against the import graph (the buildId walk hashes the Dockerfile as ONE
+# input; it does not parse its COPY set). Five additions, converged by the
+# same scratch-tree probe loop this file already documents:
+#   step-log.ts     — redaction/echo primitives; pulled by src/fleet/{verbs,status}
+#                     and scripts/pipeline-run.ts itself
+#   cap-rejection.ts— sibling import of step-log.ts
+#   run-record.ts   — the record store, reached through the src/fleet chain
+#   fs-atomic.ts    — sibling import of run-record.ts
+#   src/swarmclaw/  — the structured log sink; imported as ../swarmclaw/log.ts
+#                     from nine files under src/fleet/
+COPY src/providers/step-log.ts src/providers/step-log.ts
+COPY src/providers/cap-rejection.ts src/providers/cap-rejection.ts
+COPY src/providers/run-record.ts src/providers/run-record.ts
+COPY src/providers/fs-atomic.ts src/providers/fs-atomic.ts
+COPY src/swarmclaw/ src/swarmclaw/
 COPY cli-anything/src/ cli-anything/src/
 COPY cli-anything/scripts/ cli-anything/scripts/
 COPY pi-vs-claude-code-vendor/coms-core.ts pi-vs-claude-code-vendor/coms-core.ts
