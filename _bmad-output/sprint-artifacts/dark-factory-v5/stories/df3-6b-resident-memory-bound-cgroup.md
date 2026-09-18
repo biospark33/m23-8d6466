@@ -549,6 +549,38 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 
 <!-- Empty placeholder — filled during development. -->
 
+### Handed off from DF3.6a's review round 1 (2026-09-18, PR #263) — read before scoping
+
+Four items from DF3.6a's adversarial review round land here by ownership, recorded so
+they are not lost (full detail: `sprint-artifacts/deferred-work.md`, section dated
+2026-09-18; ledger: DF3.6a story's Review Findings):
+
+1. **`lastMemory` dep (this story's edit-list item 5) is landed and UNUSED** —
+   `createSteering` accepts it, nothing reads it yet. Your `exitStatus:"overflow"`
+   writer is its consumer; until you land edit (iv), a grep for `lastMemory` in
+   `src/phase-engine/steering.ts` showing one reference is CORRECT, not drift.
+2. **`residentRssBytes` is validated + carried but has ZERO behavioral tests** — DF3.6a
+   pinned its schema/loader refusal shape only. Your cgroup enforcement is the first
+   consumer; its breach shape, arithmetic, and `watchdog_kill` path are untested
+   anywhere. Budget test coverage for the bound itself, not just the cgroup mechanics.
+3. **Dup phase names share one iteration budget** (`createBoundsGuard` counters keyed by
+   phase NAME, `src/phase-engine/resident-bounds.ts`). DF3.6a deferred the fix because it
+   needs a phase ordinal (or name-set check) through the steering↔guard interface —
+   wider than 6a's closed edit list, but YOU already widen that seam (`lastMemory`,
+   cgroup deps). Fold the ordinal in while you are in there, or record the S3-7
+   config-level precedent decision as deliberate.
+4. **Tripwire `code`/`bound` keys spec contradiction** — DF3.6a's Observability Contract
+   names `{code, bound, cause, phase}` on breach tripwires; `ResidentTripwire` (DF3.3's
+   closed type) has neither. 6a followed the closed type. You emit `watchdog_kill`
+   tripwires — resolve the contradiction in whichever direction you rule (widen the
+   type with 6a's record, or amend 6a's contract sentence) and record it either way.
+
+Also observed, NOT yours: DF2.8-owned follow-up — admission-reservation release API
+(`resident-ceiling-unfundable` strands headroom until orphan aging; remediation text
+warns, the API is the fix) — and pre-existing `yaml.safe_load` failures in
+`workflow-state/qds-dev/{df2-2,df3-1}/state.yaml` (same plain-scalar colon defect
+CodeRabbit caught in df3-6a's file, fixed there).
+
 ---
 
 ## Split Record — 2026-09-08 (QDS story-review campaign)
