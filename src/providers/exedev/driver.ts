@@ -394,8 +394,13 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // entry + placement tie in the same change). The tracked-inputs literal
 // already carries this tree's walk; the private mirror re-push and the live
 // boot proof follow this commit (#226's closer, now for the seventh pin).
+// Eleventh pin (2026-09-18): gate B pair from run 35296406698 at src_sha
+// 91fd14c3 — the DF5.3 merge's publish first refused at the engine stage's
+// resolution probe (the COPY-set convergence commit names the five COPYs that
+// fixed it), and this build off the converged tree pushed
+// sha256:de9d165e… / buildId 289c1f234f14102b.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:31061f54805e70d65ba1a7c03bf1616631969d5e7e3688028c32f7c1fc254e67";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:de9d165e49ec9932e06c2e2c841e654a70ff20017f1cae9b0135dd435521ac5e";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -459,7 +464,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "a095d2629d5bcc09";
+export const DEFAULT_IMAGE_BUILD_ID = "289c1f234f14102b";
 
 
 
