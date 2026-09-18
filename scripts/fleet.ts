@@ -121,6 +121,12 @@ import {
   observeAndDriveChain,
   type ChainOutcome,
 } from "../src/fleet/run-completion.ts";
+// DF3.8: the `--all` sweep (src/fleet/observe.ts). A separate statement, not
+// an extension of the DF3.7 block: this file's DF3.8 edits are adds-only. The
+// sweep takes the per-run lock ITSELF, per candidate, so this wiring builds
+// only what its deps ask for — driver, read-mode store, and the per-run chain
+// context builders mirrored from runObserve's in-lock block.
+import { observeSweep } from "../src/fleet/observe.ts";
 // DF5.3: the composition roots in this script open the host-side audit-link
 // store and bind its `record` into the provider emit seam (never the reverse —
 // src/providers takes the seam, not this import).
@@ -1666,7 +1672,10 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
   const driverName = flags.get("--driver");
   const windowRaw = flags.get("--window-ms");
   const requestId = newRequestId();
-  const usage = "fleet observe <run-id> --driver <name> [--window-ms <ms>]";
+  const usage = "fleet observe <run-id>|--all --driver <name> [--window-ms <ms>]";
+  // DF3.8: the `--all` sweep — its own arm, returning BEFORE the single-run
+  // path below, whose behavior stays byte-identical (AC5/AC6).
+  if (ctx.bools.has("--all")) return runObserveSweep(ctx, requestId, usage);
   /** 6, not 0, when the chain landed but the ledger would not close (fanout's one cleanup policy). */
   let ledgerCloseFailed = false;
   /** C10: the audit store's close obeys the SAME policy — one fault, one code. */
@@ -1993,6 +2002,162 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
       return finish(requestId, verb, runIdArg, 5);
     }
     return finish(requestId, verb, runIdArg, reportCode(note, e));
+  }
+}
+
+/**
+ * `fleet observe --all` — DF3.8's host-side sweep: the argv/exit surface over
+ * `observeSweep` (src/fleet/observe.ts), exactly as `runObserve` is the
+ * surface over the single-run module.
+ *
+ * THE EXIT TABLE IS DF3.7'S, CITED AND NOT RESTATED: a pass that COMPLETES
+ * exits 0 whatever its candidates did — empty, all-refused, partial — because
+ * a per-run refusal (completion-unwitnessed, run-lost-to-reboot,
+ * sweep-engine-dead, sweep-box-unreachable, a busy or stale lock) is a
+ * counted, logged skip, and the exit code belongs to the invocation, which
+ * did not fail. Only a failure to complete the pass itself is non-zero:
+ * usage 2, the module's typed start-up refusals 5 (non-worktree hostRoot,
+ * unverified box listing — refused before anything was mutated and identical
+ * on every retry), substrate failures through `reportCode`.
+ */
+async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): Promise<number> {
+  const { deps, verb, flags, dir, storeOpts, note, finish, reportCompletion, outputIncomplete } = ctx;
+  const driverName = flags.get("--driver");
+  try {
+    if (ctx.positionals.length > 1) {
+      throw usageError("observe --all takes no <run-id> — sweep the whole candidate set, or observe one run", usage);
+    }
+    if (flags.get("--window-ms") !== undefined) {
+      // Not pedantry: an operator reaching for a wait on the sweep form has
+      // misread what --all is, and honoring the flag would park the whole
+      // serial pass behind one unfinished run (the exact hazard the story's
+      // Technical Notes reject inheriting the window for).
+      throw usageError("--window-ms is the single-run form's wait — a sweep is not a wait (one bounded read per candidate)", usage);
+    }
+    assertDriverChosen(verb, driverName, deps?.driver);
+    assertRecordsDirUsable(dir, deps?.store);
+    // Cleanup posture, teardown's: a settled candidate's chain destroys the
+    // box, so an operator collecting runs must not be blocked by the
+    // create-time driver gates on the way to them.
+    const driver = deps?.driver ?? asUsage(() => resolveCleanupDriver(driverName as string, { requestId }));
+    // Read-mode first (runObserve's round-11 twin): a NAMED --dir is never
+    // created by a refused sweep. The writable store the chain writes through
+    // opens lazily, inside the sweep, at the first candidate past its in-lock
+    // re-read — the record's existence is the proof the dir is a runs dir.
+    const store: RunRecordStore =
+      deps?.store ??
+      asUsage(() => new RunRecordStore({ ...storeOpts, ...(dir === undefined ? {} : { create: false }), requestId }));
+
+    const outcome = await observeSweep({
+      driver,
+      store,
+      runsDir: store.dir,
+      hostRoot: process.cwd(),
+      requestId,
+      // The per-run chain context, mirrored from runObserve's in-lock block:
+      // key fail-closed on a keyed record, the write-path ledger WITH the
+      // readRunRecord seam, the deferred-open audit store with its latched
+      // drop policy — per candidate, closed by the sweep after each chain.
+      buildChainCtx: (rec) => {
+        const runId = rec.runId;
+        const keyApi = deps?.keyApi ?? (rec.keyHash !== undefined ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
+        const costLedger = asUsage(
+          () =>
+            new CostLedger({
+              ...costLedgerOpts(store.dir),
+              runsDir: store.dir,
+              readRunRecord: (id: string) => {
+                try {
+                  return store.get(id);
+                } catch (e) {
+                  if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+                  throw e;
+                }
+              },
+            }),
+        );
+        // Opened on the FIRST link, not at entry, and latched on open failure
+        // — runObserve's DF5.3 round-3 decision, per run: a store-open failure
+        // at the first link is a REPORTED DEGRADATION, never a throw that
+        // would abort an already-landed teardown.
+        let chainAudit: AuditStoreWriter | undefined;
+        let auditLinksDropped = false;
+        const recordChainAuditLink = (link: ProviderAuditLink): void => {
+          if (auditLinksDropped) return;
+          if (chainAudit === undefined) {
+            try {
+              chainAudit = openAuditStore();
+            } catch (e) {
+              auditLinksDropped = true;
+              const refusal = auditStoreUnavailable(
+                e,
+                `the chain's links for ${runId} were dropped — the teardown itself is unaffected`,
+              );
+              printError(
+                note,
+                refusal.code,
+                refusal.message,
+                `${refusal.remediation}; hop 4/5 reports this run unlinked until a later \`fleet teardown ${runId}\` re-emits it`,
+                { runId },
+              );
+              return;
+            }
+          }
+          chainAudit.record(link);
+        };
+        return {
+          keyApi,
+          costLedger,
+          recordAuditLink: recordChainAuditLink,
+          close: () => {
+            // Best-effort by contract; each fault is a typed note, and the
+            // pass's exit is unaffected (a completed pass is a completed pass).
+            try {
+              costLedger.close();
+            } catch (e) {
+              const x = (e ?? {}) as { message?: unknown };
+              printError(
+                note,
+                "ledger-close-failed",
+                `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+                "the handle dies with the process; re-run to confirm it still reads",
+              );
+            }
+            try {
+              chainAudit?.close();
+            } catch (e) {
+              const x = (e ?? {}) as { message?: unknown };
+              printError(
+                note,
+                "audit-store-close-failed",
+                `could not close the audit-link store: ${redactSecrets(x.message ?? e)}`,
+                "the handle dies with the process; re-run to confirm it still reads",
+              );
+            }
+          },
+        };
+      },
+      // The writable twin, load-bearing only when a NAMED --dir was opened
+      // read-mode above; with an injected store or the default runs dir it is
+      // the same store.
+      writableStore: deps?.store !== undefined || dir === undefined ? () => store : () => asUsage(() => new RunRecordStore({ ...storeOpts, requestId })),
+    });
+
+    if (outcome.kind === "refused") {
+      // The module's start-up refusals — refused before any box was touched.
+      printError(note, outcome.code, redactSecrets(outcome.message), outcome.remediation);
+      return finish(requestId, verb, undefined, 5);
+    }
+    // ONE stdout summary line for the completed pass, with the standing 6
+    // every emitting verb applies to a line that would not print. The raw
+    // uptime evidence stays on the log channel (sweep-complete's line already
+    // carries the derived counters).
+    const { uptime_evidence: _evidence, ...counters } = outcome.summary;
+    const printed =
+      reportCompletion([`${JSON.stringify({ all: true, ...counters })}\n`], undefined) && !outputIncomplete();
+    return finish(requestId, verb, undefined, printed ? 0 : 6);
+  } catch (e) {
+    return finish(requestId, verb, undefined, reportCode(note, e));
   }
 }
 
