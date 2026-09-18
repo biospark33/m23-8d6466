@@ -1345,7 +1345,15 @@ describe("buildIdFileInputs", () => {
       // Received from this test's own failing run on the post-merge dev tree;
       // the adoption commit's driver.ts/test edits are outside the walk, so
       // the value the suite received is the value the committed tree hashes.
-      "8fb0156e68b29bade036d738e5cd570c51de3e591963c9280c96e33d9d1792b0",
+      //
+      // 99af1da0: moved from 8fb0156e by the DF3.8 margin re-derivation
+      // (feature/df3-8-margin) — ONE walked input, comment-only:
+      // `src/fleet/observe.ts` (PROVISION_LAG_MARGIN_MS's docblock, OPEN
+      // MEASUREMENT → RE-DERIVED; the constant's value is unchanged).
+      // PAIRING DEBT, declared per the DF1.10 playbook: this moves on the
+      // branch tree only; the merge's publish + adoption ritual re-pins the
+      // IMAGE pair, and this literal rides that same ritual.
+      "99af1da05614970c0bea63e28877bd947a63ba7d89c8fb2134217e82516f6f30",
     );
   });
 });
