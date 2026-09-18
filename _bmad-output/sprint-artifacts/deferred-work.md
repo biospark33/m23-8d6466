@@ -19,13 +19,17 @@
   The contract sentence is a spec-internal contradiction (the E2E Slice blesses "the full
   shipped shape" which has no such fields). Resolution belongs to the story that next owns
   the tripwire type.
-- **Admission-reservation release API** — `resident-ceiling-unfundable` refuses
-  pre-provision but `admitIssue`'s reservation strands the issue's remaining headroom until
-  orphan aging (`ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS`); an immediate retry reads
-  a misleading `budget-exceeded`. `src/providers/cost-ledger.ts` is DF2.8-owned; the
-  compensating release (`admitIssue` gains a release this layer calls on pre-provision
-  refusals) is a DF2.8-owned schema/API addition. Interim: the refusal's remediation text
-  warns the operator (wait out the window or pick another issue).
+- **~~Admission-reservation release API~~ — RESOLVED 2026-09-18, shipped in PR #263**
+  (operator-sanctioned in-round): `CostLedger.releaseAdmission` + append-only
+  `gate_admission_releases` table; both pre-provision refusals release best-effort; retry
+  after a config fix now admits. Residual kept open below (driver-layer per-cause retirement).
+- **Driver-layer reservation retirement (per-cause)** — DF2.8's own 2026-08-20 deferred item:
+  `provisionAdmittedRun`'s budget `store.set` failure orphans the admission reservation.
+  NOT covered by `releaseAdmission` (different semantics): ordinary write failure wants a
+  release but the driver holds no ledger handle; `budget-write-lock-timeout` must NOT release
+  (another writer may recreate the record); box-create failure's retirement is
+  teardown/close. Needs a per-cause policy + a release callback/handle into the provision
+  catch. `src/providers/driver.ts:847-870`.
 - **Sibling workflow-state YAML parse failures (pre-existing)** —
   `_bmad-output/workflow-state/qds-dev/df2-2/state.yaml` and `df3-1/state.yaml` fail
   `yaml.safe_load` with the same plain-scalar colon defect CodeRabbit caught in df3-6a's

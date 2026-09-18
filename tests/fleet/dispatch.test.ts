@@ -87,6 +87,7 @@ import {
   closeThrowsLedger,
   goodLedger,
   overBudgetLedger,
+  type AdmitCall,
   useTempAuditStore,
 } from "./helpers.ts";
 import {
@@ -1941,6 +1942,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           unpricedRows: 0,
         };
       },
+      // Never reached on this path (admission refused, so no guard fires), but
+      // LedgerLike demands it — a stub, not a fake with state.
+      releaseAdmission() {
+        return { released: false };
+      },
       close() {
         closeCalls += 1;
       },
@@ -1994,6 +2000,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
     expectSingleRefusalLine("resident-ceiling-unfundable");
     expect(ledger.closeCalls).toBe(1);
+    // DF3.6a release (2026-09-18): the refusal no longer strands the issue's
+    // reservation. The guard releases THIS dispatch's admission on the
+    // still-open handle BEFORE the close above — one admit, one release, one
+    // close, same handle — keyed to the exact correlation admitIssue recorded.
+    expect(ledger.releaseCalls).toHaveLength(1);
+    const released = ledger.releaseCalls[0] as AdmissionInput;
+    expect(released).toEqual((ledger.admitCalls[0] as AdmitCall).input);
   });
 
   test("DF3.6a: an admitted ceiling EXACTLY EQUAL to the resident ceiling proceeds (the ≤ chain admits equality)", async () => {
@@ -2056,6 +2069,49 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(readdirSync(store.dir)).toHaveLength(0);
     }
     expectSingleRefusalLine("resident-cap-above-backstop");
+    expect(ledger.closeCalls).toBe(1);
+    // Same release contract as link 1's refusal above: the stranded
+    // reservation is compensated on the open handle, before the close.
+    expect(ledger.releaseCalls).toHaveLength(1);
+    const released = ledger.releaseCalls[0] as AdmissionInput;
+    expect(released).toEqual((ledger.admitCalls[0] as AdmitCall).input);
+  });
+
+  test("DF3.6a: a release that THROWS changes nothing — exit 5, zero provisioning, one warn line", async () => {
+    // The refusal is the commitment; the release is best-effort compensation
+    // (the ledger's orphan window stays the fallback). A fake whose
+    // releaseAdmission throws is the SQLITE_BUSY shape: the guard must still
+    // refuse unfundable with the same exit code, provision nothing, and NAME
+    // the failed release on one structured line instead of crashing — the
+    // same contract the ledger-close-failed handler below the admission
+    // already states for `close()`.
+    const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+    driver.create = createSpy;
+    const ledger = goodLedger(5_000); // unfundable against the 8,000 µ$ fallback
+    ledger.releaseAdmission = () => {
+      throw new Error("release exploded");
+    };
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("resident-ceiling-unfundable");
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(readdirSync(store.dir)).toHaveLength(0);
+    }
+    expectSingleRefusalLine("resident-ceiling-unfundable");
+    // The warn, not a crash: the failure is named and carries the refusal's
+    // code, so an operator can tell a stranded reservation from a released one.
+    const warn = entries.filter(
+      (e) => (e.error as { code?: string } | undefined)?.code === "reservation-release-failed",
+    );
+    expect(warn).toHaveLength(1);
+    expect(((warn[0] as LogEntry).error as { message?: string }).message).toContain("resident-ceiling-unfundable");
+    // The handle lifecycle is unchanged: one close on the same (only) handle.
     expect(ledger.closeCalls).toBe(1);
   });
 
@@ -2164,6 +2220,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         asked = true; // the gate WAS reached…
         throw new Error("admission exploded"); // …and blew up instead of admitting
       },
+      // Unreachable (the gate threw before any guard), stubbed for the type.
+      releaseAdmission() {
+        return { released: false };
+      },
       close() {
         closeCalls += 1;
       },
@@ -2234,6 +2294,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           remainingMicroUsd: defaultKeyCapMicroUsd,
           unpricedRows: 0,
         };
+      },
+      // The admitted ceiling equals the backstop, so no refusal guard fires and
+      // no release is owed — stubbed for the type.
+      releaseAdmission() {
+        return { released: false };
       },
       close() {
         closeCalls += 1;

@@ -531,18 +531,24 @@ Dismissed (4): box-hour rate late-fail at teardown — spec-mandated surfacing, 
 
 ### Follow-ups owned here (recorded by DF3.6a + its review round 1, 2026-09-18 — this story's file owns `cost-ledger.ts`; landed post-DF2.8, tracked so they surface when this ledger is next opened)
 
-- [ ] **Admission-reservation release API.** DF3.6a's dispatch added a `resident-ceiling-unfundable`
-  **pre-provision** refusal (and its review round added `resident-cap-above-backstop`) — both refuse
-  AFTER `admitIssue` reserved `min(keyCap, remaining)` but BEFORE any run record exists, so the
-  reservation strands the issue's ENTIRE remaining headroom until orphan aging
-  (`ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS`), and a bare retry against the same issue
-  misreads as `budget-exceeded`. Interim: the refusal's remediation text warns the operator (wait
-  out the window or pick another issue). The fix is an API this file owns: a compensating release
-  (`admitIssue` gains a release path, or the `cancelAdmission`-shaped retirement policy this
-  story's own 2026-08-20 review already deferred for the store.set-orphan case — **same family,
-  one API can serve both**; that deferred item is the kinship citation, not a new requirement).
-  Full context: `sprint-artifacts/deferred-work.md` (2026-09-18 section), DF3.6a story Review
-  Findings.
+- [x] **Admission-reservation release API — SHIPPED in PR #263 (DF3.6a review round, operator
+  sanction 2026-09-18):** `CostLedger.releaseAdmission(input)` + the append-only
+  `gate_admission_releases` companion table (PK `(request_id, run_id)`, own INV-COST-1
+  no-update/no-delete triggers; both reservation sums — `admitIssue`'s and
+  `issueBudgetSnapshot`'s — exclude released admissions via `NOT EXISTS`; keyed to the pair so a
+  run's second unreleased admission stays counted). Typed errors
+  `admission-release-unknown` / `admission-release-mismatch`; idempotent re-release; read-only
+  refusal; new replay guard `ledger-admission-released` (a released admission's exact replay
+  cannot re-mint its ceiling). Called best-effort from both DF3.6a pre-provision refusals —
+  the refusal is the commitment, the release is compensation, aging stays the fallback for
+  crashed refusals (pinned by test). Remediation texts updated (retry now admits after a
+  config fix). Tests: reservation suite 21→28, dispatch +1 release-failure leg, INV-COST-2
+  census + DF2.11 write-completeness extended.
+  **Residual (still a follow-up, per-cause semantics this API deliberately does not force):**
+  the driver-layer store.set-orphan retirement this story's 2026-08-20 review deferred — the
+  ordinary-write-failure arm wants a release but the driver holds no ledger handle;
+  `budget-write-lock-timeout` must NOT release (another writer may recreate the record). Needs
+  a per-cause policy + handle plumbing, not this API.
 - [ ] **Global-default resident spend ceiling config key.** The DF3.6a operator ruling (2026-09-13)
   made the resident ceiling user policy with a *global default* rung — but `CONFIG_KEYS` is exactly
   `[defaultCapMicroUsd, perIssueOverrides, boxHourRateMicroUsd]` and none is a ceiling carrier, so

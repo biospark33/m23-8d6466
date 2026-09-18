@@ -414,6 +414,29 @@ BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
 CREATE TRIGGER IF NOT EXISTS gate_admissions_no_delete
 BEFORE DELETE ON gate_admissions
 BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
+
+-- Admission RELEASES (DF2.8-owned API, added 2026-09-18 under the operator
+-- sanction from DF3.6a's review round): gate_admissions is append-only
+-- (INV-COST-1), so retiring a reservation cannot mark the admission row — a
+-- release is a COMPENSATING INSERT keyed to the admission's own PRIMARY KEY,
+-- and every reservation sum (admitIssue, issueBudgetSnapshot) excludes
+-- admissions that have one. Append-only itself, same invariant: a release is
+-- a ledger fact about a refusal, not state to edit.
+CREATE TABLE IF NOT EXISTS gate_admission_releases (
+  request_id        TEXT NOT NULL,
+  run_id            TEXT NOT NULL,
+  repo_slug         TEXT NOT NULL,
+  issue_id          TEXT NOT NULL,
+  ceiling_micro_usd INTEGER NOT NULL,
+  released_at       TEXT NOT NULL,
+  PRIMARY KEY (request_id, run_id)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS gate_admission_releases_no_update
+BEFORE UPDATE ON gate_admission_releases
+BEGIN SELECT RAISE(ABORT, 'gate_admission_releases is append-only (INV-COST-1)'); END;
+CREATE TRIGGER IF NOT EXISTS gate_admission_releases_no_delete
+BEFORE DELETE ON gate_admission_releases
+BEGIN SELECT RAISE(ABORT, 'gate_admission_releases is append-only (INV-COST-1)'); END;
 `;
 
 // ─── errors ──────────────────────────────────────────────────────────────────
@@ -2212,8 +2235,9 @@ export class CostLedger {
         `SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${issueScopeSql()} AND unpriced = 0`,
       )
       .get(...scopeKeys) as { total: number };
-    // Same per-run MAX and settled-run exclusion as admitIssue's reservation
-    // sum: ONE live ceiling per run, retired once the run reports real spend.
+    // Same per-run MAX, settled-run and RELEASED exclusion as admitIssue's
+    // reservation sum: ONE live ceiling per run, retired once the run reports
+    // real spend, and dropped the moment its admission is released.
     const reservedRow = this.db
       .prepare(
         `SELECT COALESCE(SUM(ceiling), 0) AS total FROM (
@@ -2223,6 +2247,10 @@ export class CostLedger {
              AND NOT EXISTS (
                SELECT 1 FROM cost_events ce
                WHERE ce.run_id = a.run_id AND ce.unpriced = 0 AND ce.cost_micro_usd > 0
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM gate_admission_releases r
+               WHERE r.request_id = a.request_id AND r.run_id = a.run_id
              )
            GROUP BY a.run_id
          )`,
@@ -2384,6 +2412,18 @@ export class CostLedger {
              AND NOT EXISTS (
                SELECT 1 FROM cost_events ce
                WHERE ce.run_id = a.run_id AND ce.unpriced = 0 AND ce.cost_micro_usd > 0
+             )
+             -- RELEASED (DF2.8 releaseAdmission, 2026-09-18): the compensating
+             -- insert keyed to this admission's PRIMARY KEY. gate_admissions is
+             -- append-only (INV-COST-1), so retirement-by-release is a READ-side
+             -- exclusion exactly like the aging one classifyReservation applies
+             -- below — the admission row itself never changes. Keyed to the
+             -- (request_id, run_id) PAIR, not the run: a run holding a second,
+             -- unreleased admission row keeps its ceiling counted (fail-safe
+             -- direction, INV-COST-6).
+             AND NOT EXISTS (
+               SELECT 1 FROM gate_admission_releases r
+               WHERE r.request_id = a.request_id AND r.run_id = a.run_id
              )
            -- ONE reservation per run, whatever the request id. gate_admissions'
            -- PRIMARY KEY is (request_id, run_id), so retrying a run under a
@@ -2631,6 +2671,22 @@ export class CostLedger {
             "re-run the dispatch with a fresh requestId AND runId: a (requestId, runId) pair belongs to exactly one (repoSlug, issueId)",
           );
         }
+        // A RELEASED admission holds no reservation — releaseAdmission's
+        // compensating insert excludes it from the sum above — so replaying
+        // this correlation id must not mint its ceiling back. That is the
+        // "ceiling in NO row" hole the DO NOTHING branch exists to close,
+        // re-entered through the release door; fail closed exactly like the
+        // mismatch above.
+        const releasedRow = this.db
+          .prepare("SELECT 1 AS one FROM gate_admission_releases WHERE request_id = ? AND run_id = ?")
+          .get(input.requestId, input.runId) as { one: number } | null | undefined;
+        if (releasedRow != null) {
+          throw new CostLedgerError(
+            "ledger-admission-released",
+            `request ${input.requestId} / run ${input.runId} holds a RELEASED admission — its ceiling reserves nothing and cannot be re-minted`,
+            "re-run the dispatch with a fresh requestId AND runId: a released admission is a refused dispatch's residue, not a replayable reservation",
+          );
+        }
         // CLAMPED to the headroom recomputed just now, not handed back raw.
         // The recorded ceiling fit the headroom its ORIGINAL admission saw, and
         // that headroom can only have shrunk since: spend the run has not yet
@@ -2692,6 +2748,133 @@ export class CostLedger {
       sum_query_ms: durationMs,
     });
     return decision;
+  }
+
+  /**
+   * RELEASE the reservation one admission holds — the compensating write for a
+   * dispatch that admitted and then refused BEFORE any run record existed
+   * (DF3.6a's `resident-ceiling-unfundable` and `resident-cap-above-backstop`
+   * in src/fleet/dispatch.ts). Those refusals used to strand the issue's
+   * entire remaining admission headroom until the orphan window aged the
+   * reservation out, and the operator's reflexive retry read
+   * `spend-cap-exceeded`. DF2.8-owned API, added 2026-09-18 under the operator
+   * sanction recorded in DF3.6a's review round.
+   *
+   * Append-only mechanics (INV-COST-1): `gate_admissions` carries BEFORE
+   * UPDATE/DELETE triggers, so a release CANNOT mark the admission row. It is
+   * a COMPENSATING INSERT into `gate_admission_releases`, keyed to the
+   * admission's own PRIMARY KEY; admitIssue's and issueBudgetSnapshot's
+   * reservation sums exclude admissions that have one — the same read-side
+   * retirement shape the aging fallback uses, never a row mutation.
+   *
+   * AGING STAYS THE FALLBACK: a caller that crashes between admitIssue and
+   * this call leaves an unreleased reservation, and the orphan window
+   * (ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) retires it exactly as
+   * before. Release covers only the refusal paths callers control; it does
+   * not shorten or weaken that window, and `classifyReservation` (F042) is
+   * untouched — a released row never reaches it.
+   *
+   * Idempotent for an already-released admission (`released: false`, no
+   * second row). Typed errors for an admission that does not exist
+   * (`admission-release-unknown` — fail-loud, because a caller releasing a
+   * missing admission has lost the correlation and the reservation it MEANT
+   * to retire is still counting) or belongs to another (repoSlug, issueId)
+   * (`admission-release-mismatch`, the same fail-closed identity rule
+   * admitIssue's replay branch states). No spend check is owed: a run that
+   * already reported priced spend was excluded from every reservation sum
+   * already, so releasing it retires nothing the cap was counting.
+   *
+   * No transaction: the SELECT→INSERT pair races only against another release
+   * of the same admission, and `ON CONFLICT DO NOTHING` makes that race
+   * idempotent — admission rows themselves are immutable (INV-COST-1).
+   */
+  releaseAdmission(input: AdmissionInput): { released: boolean } {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
+    const started = Date.now();
+    // Same SQL-bind discipline as admitIssue: the lookups below key on
+    // request_id/run_id, and a NULL bind turns every equality silently
+    // unsatisfiable under SQLite's three-valued logic.
+    for (const field of ["repoSlug", "issueId", "runId", "requestId"] as const) {
+      const v = (input as unknown as Record<string, unknown>)[field];
+      if (typeof v !== "string" || v.length === 0) {
+        throw new CostLedgerError(
+          "admission-release-input-invalid",
+          `admission release input is missing ${field} — refusing to release against a NULL bind`,
+          "supply the { repoSlug, issueId, runId, requestId } of the admission being released, exactly as its admitIssue call did",
+        );
+      }
+    }
+    assertCanonicalIdentity(
+      "admission-release-input-invalid",
+      input.repoSlug,
+      input.issueId,
+      "supply the { repoSlug, issueId, runId, requestId } of the admission being released, exactly as its admitIssue call did",
+    );
+    const repoSlug = canonicalRepoSlug(input.repoSlug);
+    const issueId = canonicalIssueId(input.issueId);
+    this.assertQueryable();
+    try {
+      const prior = this.db
+        .prepare(
+          "SELECT repo_slug AS repoSlug, issue_id AS issueId, ceiling_micro_usd AS ceiling FROM gate_admissions WHERE request_id = ? AND run_id = ?",
+        )
+        .get(input.requestId, input.runId) as
+        | { repoSlug: string; issueId: string; ceiling: number }
+        | null
+        | undefined;
+      if (prior == null) {
+        throw new CostLedgerError(
+          "admission-release-unknown",
+          `no admission for request ${input.requestId} / run ${input.runId} — there is no reservation to release`,
+          "release the admission this dispatch's own admitIssue minted, by its exact (requestId, runId)",
+        );
+      }
+      // Canonicalized on the STORED side, both halves — the same rule
+      // admitIssue's replay branch applies: a release may only retire a
+      // reservation THIS (repoSlug, issueId) budget is holding.
+      if (canonicalRepoSlug(prior.repoSlug) !== repoSlug || canonicalIssueId(prior.issueId) !== issueId) {
+        throw new CostLedgerError(
+          "admission-release-mismatch",
+          `request ${input.requestId} / run ${input.runId} holds an admission for ${prior.repoSlug}#${prior.issueId}, not ${repoSlug}#${issueId} — refusing to release another issue's reservation`,
+          "release against the (repoSlug, issueId) the admission was minted under",
+        );
+      }
+      const { changes } = this.db
+        .prepare(
+          `INSERT INTO gate_admission_releases (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, released_at)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(request_id, run_id) DO NOTHING`,
+        )
+        .run(input.requestId, input.runId, repoSlug, issueId, prior.ceiling, new Date().toISOString());
+      // Never silent: name the retired figure so an operator can tell a
+      // release from a reservation that merely aged out. `changes === 0` means
+      // already released — said, not re-written (there is nothing to update;
+      // INV-COST-1).
+      emitGuarded({
+        requestId: input.requestId,
+        operation: "cost-ledger.gate",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: Date.now() - started,
+        status: "ok",
+        runId: input.runId,
+        repoSlug,
+        issueId,
+        code: "reservation-released",
+        releasedCeilingMicroUsd: prior.ceiling,
+        message: `released the reservation for request ${input.requestId} / run ${input.runId} (${prior.ceiling} µ$) — ${
+          changes === 1 ? "the issue's admission headroom is back" : "already released; no second row written (INV-COST-1)"
+        }`,
+        outcome: changes === 1 ? "reservation-released" : "reservation-release-idempotent",
+      });
+      return { released: changes === 1 };
+    } catch (e) {
+      // The typed errors above escape UNtranslated; only driver-level
+      // contention maps to `ledger-busy`, the same contract as admitIssue's
+      // own probe.
+      if (e instanceof CostLedgerError) throw e;
+      throw ledgerBusyError(e) ?? e;
+    }
   }
 
   /**

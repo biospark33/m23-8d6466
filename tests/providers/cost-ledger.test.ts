@@ -515,7 +515,10 @@ describe("DF2.8 store invariants (INV-COST-1/2/4)", () => {
     const cols = (db.prepare("PRAGMA table_info(cost_events)").all() as { name: string }[]).map((c) => c.name);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name);
     db.close();
-    expect(tables).toEqual(["cost_events", "gate_admissions"]);
+    // gate_admission_releases (2026-09-18): the compensating-release table
+    // DF3.6a's pre-provision refusals write — append-only like its parent, and
+    // carrying no spend figure cost_events does not already own.
+    expect(tables).toEqual(["cost_events", "gate_admissions", "gate_admission_releases"]);
     for (const forbidden of ["issue_cost", "total", "total_micro_usd", "spend"]) {
       expect(cols).not.toContain(forbidden);
     }
@@ -3188,7 +3191,10 @@ describe("DF2.11 openReadOnly", () => {
       // Every method NOT on the read list must be proven to refuse — the
       // guard is each write method's first statement, so a no-arg call that
       // reports anything other than `ledger-readonly` fails here.
-      const WRITES = ["ingestCostEvent", "ingestBoxHours", "admitIssue"];
+      // `releaseAdmission` (2026-09-18): the DF2.8 compensating release — a
+      // write (it inserts into gate_admission_releases), so it refuses here
+      // like every other one.
+      const WRITES = ["ingestCostEvent", "ingestBoxHours", "admitIssue", "releaseAdmission"];
 
       const methods = Object.getOwnPropertyNames(CostLedger.prototype).filter(
         (name) =>
