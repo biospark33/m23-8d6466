@@ -1001,8 +1001,12 @@ export type RunLockHandle = string & { readonly [RUN_LOCK_BRAND]: true };
  * steals: a stale lock means an uncertain teardown state, which is exactly the
  * moment an operator — not a heuristic — should decide.
  *
- * ponytail: library callers bypass the lock — the CLIs are the operator surface.
- * Upgrade trigger: an embedder (not a CLI) becomes a supported caller.
+ * DF3.8 retired the ponytail note that lived here ("library callers bypass
+ * the lock — upgrade trigger: an embedder (not a CLI) becomes a supported
+ * caller"): the embedder landed. `src/fleet/observe.ts`'s `fleet observe
+ * --all` sweep is a supported library caller — per-candidate
+ * acquire/release through acquireRunLock/releaseRunLock, the same dance the
+ * CLIs hand-roll, which is why the acquire stayed caller-side.
  */
 export function acquireRunLock(runsDir: string, runId: string, holder = "invocation"): RunLockHandle {
   // The id is joined into a filesystem path: validate BEFORE the join, on the

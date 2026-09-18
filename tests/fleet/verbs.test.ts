@@ -532,6 +532,18 @@ describe("verbs.ts (registry)", () => {
       { name: "--help", required: false, valueType: "boolean" },
     ],
     observe: [
+      // DF3.8: the sweep flag, pinned verbatim like every other note-bearing
+      // flag. The interval digits are a RESOLVED copy of
+      // SWEEP_INTERVAL_MINUTES (30 at landing), hard-coded here on the same
+      // convention as --window-ms's "7200000": repricing the constant without
+      // touching this pin must fail this test, the one place a silent reprice
+      // of the documented cron line would otherwise land unreviewed.
+      {
+        name: "--all",
+        required: false,
+        valueType: "boolean",
+        note: "sweep every open record once (no run-id); schedule it yourself: */30 * * * * cd /path/to/QDS-Factory && bun scripts/fleet.ts observe --all --driver exedev >> ~/.qds/observe.log 2>&1 — 30 min = the reaper's 4h staleAfterMs over 8 (derivation on SWEEP_INTERVAL_MINUTES in src/fleet/observe.ts)",
+      },
       { name: "--dir", required: false, valueType: "path" },
       { name: "--driver", required: true, valueType: "string" },
       { name: "--help", required: false, valueType: "boolean" },

@@ -33,6 +33,11 @@
 // stays data-first, and nothing in run-completion.ts's graph imports this
 // file back (no cycle).
 import { DEFAULT_OBSERVATION_WINDOW_MS } from "./run-completion.ts";
+// DF3.8: the sweep interval's derivation, imported for the same reason as the
+// DF3.7 constant above — `--help` prints the real number, not a string copy
+// that drifts when the heuristic is repriced. Second import, additive: nothing
+// in observe.ts's graph imports this file back (no cycle).
+import { SWEEP_INTERVAL_MINUTES } from "./observe.ts";
 
 export interface VerbFlag {
   name: string;
@@ -495,6 +500,18 @@ export function listVerbs(): VerbEntry[] {
         // driver port) and drives a teardown — it must never default a driver.
         { name: "--driver", required: true, valueType: "string" },
         { name: "--dir", required: false, valueType: "path" },
+        // DF3.8: the sweep form — bounded, re-entrant, EXITING (no daemon, no
+        // PID file; INV-IBOX-16's no-watcher-process limb holds only because
+        // no process is installed). The note IS the operator surface for the
+        // schedule (the --window-ms precedent), and the schedule it documents
+        // is the operator's own cron — `--all` adds no exit code: every
+        // per-run refusal is a counted skip inside a pass that still exits 0.
+        {
+          name: "--all",
+          required: false,
+          valueType: "boolean",
+          note: `sweep every open record once (no run-id); schedule it yourself: */${SWEEP_INTERVAL_MINUTES} * * * * cd /path/to/QDS-Factory && bun scripts/fleet.ts observe --all --driver exedev >> ~/.qds/observe.log 2>&1 — ${SWEEP_INTERVAL_MINUTES} min = the reaper's 4h staleAfterMs over 8 (derivation on SWEEP_INTERVAL_MINUTES in src/fleet/observe.ts)`,
+        },
         // "string", like --port: the CLI range-checks it as a positive number
         // of milliseconds rather than trusting Number()'s coercions. The note
         // is where `--help` documents the default — there is no verb-specific
