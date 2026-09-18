@@ -399,8 +399,16 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // resolution probe (the COPY-set convergence commit names the five COPYs that
 // fixed it), and this build off the converged tree pushed
 // sha256:de9d165e… / buildId 289c1f234f14102b.
+// Twelfth pin (2026-09-18): gate B pair from run 35404469575 at src_sha
+// dcfa3c1e — the DF3.8 merge (#265). The eleventh pin predated DF3.6a
+// (35d8d5b6, which added the resident bound manifest fields), so the
+// image-baked engine rejected DF3.6a-schema manifests ("Unrecognized
+// key(s) in object: 'residentSpendCeilingMicros', …") and the DF3.8
+// tier-3 observe round died engine-start-refused on a 6.3 s run. This
+// build carries DF3.6a and DF3.8 both and pushed
+// sha256:8f5941e0… / buildId 438fe0b7d10a3923.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:de9d165e49ec9932e06c2e2c841e654a70ff20017f1cae9b0135dd435521ac5e";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8f5941e04d714f0fa3abd5508cc74ab2915ff924517ee113c6284bc14cf13cf9";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -464,7 +472,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "289c1f234f14102b";
+export const DEFAULT_IMAGE_BUILD_ID = "438fe0b7d10a3923";
 
 
 

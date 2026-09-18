@@ -1333,7 +1333,19 @@ describe("buildIdFileInputs", () => {
       // iterations() copy), `src/fleet/dispatch.ts` (link-2
       // resident-cap-above-backstop mirror + unfundable remediation text).
       // Same failing-run receive on the post-fix tree — same-commit re-pin.
-      "5d5b84b65546db511f4b5628a7574680aae401dc394cd0c4ef9ef4e3c69c8069",
+      //
+      // 8fb0156e: moved from 5d5b84b6 by DF3.8 (PR #265, a3011530) — the
+      // walked inputs it edited, measured via `buildIdFileInputs` membership
+      // over the merge's changed files (3 hits, every other changed file
+      // absent from the live walk): NEW `src/fleet/observe.ts` (enters under
+      // the `src/fleet/` directory COPY :279), `src/fleet/verbs.ts` (same
+      // COPY), and `scripts/lib/run-lock.ts` (:278, COMMENT-ONLY — the
+      // retired ponytail embedder note). The dp-scanner round's annotations
+      // and every test file the merge touched are NOT walked inputs.
+      // Received from this test's own failing run on the post-merge dev tree;
+      // the adoption commit's driver.ts/test edits are outside the walk, so
+      // the value the suite received is the value the committed tree hashes.
+      "8fb0156e68b29bade036d738e5cd570c51de3e591963c9280c96e33d9d1792b0",
     );
   });
 });
