@@ -1,0 +1,43 @@
+{
+  "runId": "qds-20260918-cc93a3",
+  "createdAt": "2026-09-18T02:47:11.701Z",
+  "extensions": {
+    "budget": {
+      "schemaVersion": 1,
+      "repoSlug": "quantum-digital-solutions/qds-audit-demo",
+      "issueId": "9",
+      "capMicroUsd": 50000,
+      "spentMicroUsd": 0,
+      "reservedMicroUsd": 0,
+      "admittedCeilingMicroUsd": 50000
+    },
+    "approval": {
+      "schemaVersion": 2,
+      "state": "approved",
+      "proposal": "open a PR for run qds-20260918-cc93a3 at 4762832d618a2eae924b17dc96fec1ebe4fdfaa3",
+      "reportId": "rv-qds-20260918-cc93a3-2026-09-18t02-49-30-702z-gyiyex",
+      "headSha": "4762832d618a2eae924b17dc96fec1ebe4fdfaa3",
+      "requestId": "894bcb72-837e-4560-9826-4aec24875c8d",
+      "requestedAt": "2026-09-18T02:49:32.221Z",
+      "expiresAt": "2026-09-19T02:49:32.221Z",
+      "supersededReportIds": [],
+      "approverId": "df53-demo-operator",
+      "decidedAt": "2026-09-18T02:49:51.924Z",
+      "reason": "DF5.3 N6 run 4: single-observe chain, reverify green; eleventh pin; purpose COMPLETE ten-hop walk"
+    },
+    "pr": {
+      "schemaVersion": 1,
+      "prUrl": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/10",
+      "prNumber": 10,
+      "createdAt": "2026-09-18T02:49:54.371Z"
+    }
+  },
+  "vmName": "qds-20260918-cc93a3",
+  "httpsUrl": "https://qds-20260918-cc93a3.exe.xyz",
+  "requestId": "894bcb72-837e-4560-9826-4aec24875c8d",
+  "keyHash": "092e4b5f5bcee04636563c9e8c9fb18302a1c68882d95edcd79e87c46007734c",
+  "limitMicroUsd": 50000,
+  "commitSha": "aab3c81865780a9f62a8a4e1e75de759311d3ff1",
+  "spendMicroUsd": 2184,
+  "closedAt": "2026-09-18T02:49:30.671Z"
+}

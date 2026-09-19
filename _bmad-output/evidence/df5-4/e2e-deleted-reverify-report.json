@@ -1,0 +1,127 @@
+{
+  "gate": "df5-lights-on",
+  "gate_version": "1.0.0",
+  "clause_map_version": "1.0.0",
+  "request_id": "df54-mu8biglb-wp8m",
+  "report": {
+    "timestamp": "2026-09-19T11:42:26.688Z",
+    "overall": "FAIL",
+    "assertions": [
+      {
+        "id": "DF5.4-P1",
+        "story": "DF5.4",
+        "prd_clause": "§8 step 5 — run of record",
+        "status": "pass",
+        "pass": true,
+        "detail": "run of record qds-20260918-cc93a3 exists, parses and names its runId — evidence-of-record /tmp/df54-e2e-del-Rk6Q/qds-20260918-cc93a3.json (recorded live run, not re-executed by this gate)",
+        "duration_ms": 0
+      },
+      {
+        "id": "DF5.4-C1",
+        "story": "DF3.1/DF2.8",
+        "prd_clause": "§8 step 5 — channel",
+        "status": "pass",
+        "pass": true,
+        "detail": "dispatch went through the channel: requestId present, budget admitted quantum-digital-solutions/qds-audit-demo#9 at 50000 micro-USD — evidence-of-record /tmp/df54-e2e-del-Rk6Q/qds-20260918-cc93a3.json (recorded live run, not re-executed by this gate)",
+        "duration_ms": 2
+      },
+      {
+        "id": "DF5.4-C2",
+        "story": "DF3.1/DF2.2/DF2.5",
+        "prd_clause": "§8 step 5 — fleet",
+        "status": "pass",
+        "pass": true,
+        "detail": "fleet lifecycle finished: closed at a pinned SHA, no extensions.gate namespace (green leaves no positive trace), approval approved, spend 2184 micro-USD — evidence-of-record /tmp/df54-e2e-del-Rk6Q/qds-20260918-cc93a3.json (recorded live run, not re-executed by this gate)",
+        "duration_ms": 2
+      },
+      {
+        "id": "DF5.4-C3",
+        "story": "DF1.6",
+        "prd_clause": "§8 step 5 — team",
+        "status": "pass",
+        "pass": true,
+        "detail": "14 well-formed NDJSON lines, 0 malformed — claim-integrity only: proves the team's claim arrived intact, never that it is true — evidence-of-record /tmp/df54-e2e-del-Rk6Q/qds-20260918-cc93a3-artifacts/trace/events.jsonl (harvested in-box claim — integrity asserted, truth is DF5.1's host-side re-verify asserted by DF5.4-C6; recorded live run, not re-executed by this gate)",
+        "duration_ms": 2
+      },
+      {
+        "id": "DF5.4-C4",
+        "story": "DF1.2/DF1.4",
+        "prd_clause": "§8 step 5 — gates",
+        "status": "pass",
+        "pass": true,
+        "detail": "1 gate_results rows joined on request_id, every passed a literal 0/1 — claim-integrity only (INV-GATE-4): an in-box green can never be the proof a gate passed — evidence-of-record /tmp/df54-e2e-del-Rk6Q/qds-20260918-cc93a3-artifacts/trace/trace.db (harvested in-box claim — integrity asserted, truth is DF5.1's host-side re-verify asserted by DF5.4-C6; recorded live run, not re-executed by this gate)",
+        "duration_ms": 2
+      },
+      {
+        "id": "DF5.4-C5",
+        "story": "DF2.5",
+        "prd_clause": "§8 step 5 — bundle",
+        "status": "pass",
+        "pass": true,
+        "detail": "refs/sandbox/qds-20260918-cc93a3 → 4762832d618a2eae924b17dc96fec1ebe4fdfaa3 — ref refs/sandbox/qds-20260918-cc93a3 in --git-dir /tmp/df54-e2e-del-Rk6Q/refs.git (frozen fixture bare repo; the operator's working repo is never resolved)",
+        "duration_ms": 36
+      },
+      {
+        "id": "DF5.4-C6",
+        "story": "DF5.1",
+        "prd_clause": "§8 step 5 — host-side re-verify",
+        "status": "skip",
+        "pass": false,
+        "detail": "no reverify reports at /tmp/df54-e2e-del-Rk6Q/reverify/qds-20260918-cc93a3.jsonl (unreadable evidence is skip, not fail)",
+        "duration_ms": 0
+      },
+      {
+        "id": "DF5.4-C7",
+        "story": "DF3.4",
+        "prd_clause": "§8 step 5 — approval",
+        "status": "skip",
+        "pass": false,
+        "detail": "C7 ordering input gone: no reverify reports at /tmp/df54-e2e-del-Rk6Q/reverify/qds-20260918-cc93a3.jsonl",
+        "duration_ms": 0
+      },
+      {
+        "id": "DF5.4-C8",
+        "story": "DF5.2",
+        "prd_clause": "§8 step 5 — PR",
+        "status": "pass",
+        "pass": true,
+        "detail": "runId, Issue: line and cost line present — frozen body /tmp/df54-e2e-del-Rk6Q/pr-body.txt (captured at freeze time — no live GitHub read)",
+        "duration_ms": 0
+      },
+      {
+        "id": "DF5.4-C9",
+        "story": "DF5.3",
+        "prd_clause": "§8 step 5 — audit",
+        "status": "fail",
+        "pass": false,
+        "detail": "walker exit code 1; runs[qds-20260918-cc93a3] hop run-reverify: status broken; runs[qds-20260918-cc93a3] hop run-approval: status broken — stderr tail: …2:26.722Z\",\"duration\":7,\"status\":\"error\",\"ref\":\"qds-20260918-cc93a3\",\"refKind\":\"run-id\",\"complete\":false,\"brokenHops\":[{\"hop\":\"run-reverify\",\"status\":\"broken\"},{\"hop\":\"run-approval\",\"status\":\"broken\"}],\"pr_fetch_ms\":0,\"per_hop_ms\":{\"pr-run\":3,\"run-issue\":1,\"run-cost\":1,\"run-credential\":0,\"run-box\":0,\"run-bundle\":0,\"run-reverify\":1,\"run-approval\":0,\"run-gate-evidence\":0,\"memory-retain-receipt\":0}} ⏎  — walked scripts/qds-audit.ts --json qds-20260918-cc93a3 by runId against the frozen run of record (read-only evidence; hop 1 resolves locally, no network access)",
+        "duration_ms": 30
+      },
+      {
+        "id": "DF5.4-C10",
+        "story": "DF2.8/DF2.11",
+        "prd_clause": "§8 step 5 — cost",
+        "status": "pass",
+        "pass": true,
+        "detail": "ledger total 141082 µ$ over 5 events (hasEvents=true); record spendMicroUsd 2184 µ$ ≤ admitted ceiling 50000 µ$ — read CostLedger.openReadOnly /tmp/df54-e2e-del-Rk6Q/cost-ledger.db for qds-20260918-cc93a3 (recorded evidence; the gate never dispatches spend)",
+        "duration_ms": 2
+      },
+      {
+        "id": "DF5.4-V1",
+        "story": "DF5.4 (step 6)",
+        "prd_clause": "§8 step 5 — memory",
+        "status": "void",
+        "pass": false,
+        "detail": "VOID — OQ-4 unresolved — Hindsight has never booted on this host (arm64 libpq/openssl@3; :8888 collides with a local Jupyter); step-6 memory wiring is outside the v5 horizon",
+        "duration_ms": 0
+      }
+    ],
+    "summary": {
+      "pass": 8,
+      "fail": 1,
+      "skip": 2,
+      "void": 1
+    },
+    "total_duration_ms": 38
+  }
+}

@@ -1,0 +1,29 @@
+Run: qds-20260918-cc93a3
+Issue: Closes #9
+Cost: $0.141082 (5 events, 0 unpriced)
+Re-verify: green — 2/2 checks
+Approved by: df53-demo-operator at 2026-09-18T02:49:51.924Z
+Flags: none
+Head: 4762832d618a2eae924b17dc96fec1ebe4fdfaa3 (base aab3c81865780a9f62a8a4e1e75de759311d3ff1)
+
+## Verified checks (2/2 checks)
+
+- ok — host-artifact-present
+- ok — host-seed-intact
+
+## Changed files (1)
+
+- DEMO.md
+
+---
+Re-verified host-side, out of the sandbox, before this PR was opened. The trace database,
+compiled prompts and agent transcripts are host-side artifacts and are deliberately not published here.
+
+<!-- This is an auto-generated comment: release notes by coderabbit.ai -->
+
+## Summary by CodeRabbit
+
+* **Documentation**
+  * Updated the documented phase-engine base commit reference.
+
+<!-- end of auto-generated comment: release notes by coderabbit.ai -->

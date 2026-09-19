@@ -380,4 +380,25 @@ clause.)*
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+Implemented 2026-09-19 on `feature/df5-4-lights-on-gate` (unlazy scope `.unlazy/df5-4/`, 7 leaves + 2 nodes, PLAN rev 2).
+
+**Run of record:** `qds-20260918-cc93a3` — the DF3.8 live e2e round-2 GREEN run (real boxes, real spend 2184 µ$, PR [#10](https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/10)). Captured once via `scripts/dev/capture-run-of-record.ts` (live step: `PRAGMA wal_checkpoint(TRUNCATE)` on the real ledger, one `gh pr view 10` read for the frozen body, `refs.git` built by ref-limited `git bundle` + fetch with `cat-file -e` verification) into `tests/gate/fixtures/df5-run-of-record/`.
+
+**Files (as specified):** `src/gate/assertions/{df5-execution,df5-boundary,df5-accounting}.ts`; `src/gate/assertions/lib/verdict.ts` (additive: `scanNdjson`, `strictBeforeMs`, `selectBoundReport`, `readJsonEvidence`); `scripts/df5-lights-on-gate.ts`; `scripts/dev/capture-run-of-record.ts`; `tests/gate/df5-assertions.test.ts` (125 tests: verdict-lib 20 + execution 48 + boundary 27 + accounting 30, consolidated from three dev-time private suites, executed-count equality asserted); `tests/gate/df5-lights-on-gate.test.ts` (16 tests); the fixture directory. Chassis (`gate-runner.ts`) untouched — `git diff dev` proves it.
+
+**E2E demo (three arms, evidence in `_bmad-output/evidence/df5-4/`):**
+- GREEN: 11 pass + `DF5.4-V1` void with the imported `OQ4_VOID_REASON`, `DF_GATE: PASS`, exit 0, schema-valid versioned wrapper.
+- Reverify deleted: `DF5.4-C6` skip naming the jsonl path, `DF5.4-C7` skip, `DF5.4-C9` fail (walker refuses on the missing hop-7 artefact), `DF_GATE: FAIL`, exit 1 — three clauses strand, not one.
+- Reverify red: `DF5.4-C6` fail naming `verdict=red`, `DF5.4-C9` fail on `evidence-mismatch` (second-walk digest), exit 1.
+
+**Deviations and drift notes (recorded per the deviation clause, never silently reinterpreted):**
+1. Story line-cite drift vs code: `src/gate/gate-runner.ts` (kebab-case), `src/fleet/dispatch.ts`, `src/phase-engine/trace/schema.ts:84-93`; `GateAssertionResult.duration_ms`; harvest WAL handling at `src/providers/harvest.ts:643-676`; `CostLedger.openReadOnly` carries a fourth refusal code `ledger-unopenable` (C10 skips name all four).
+2. `strictBeforeMs` accepts the canonical instant with its necessarily-`.000` milliseconds elided (`…54Z` ≡ `…54.000Z`) — a literal `toISOString()` round-trip would reject the story's own example stamp; one notch looser than chain.ts `msOf`, documented in the helper's JSDoc.
+3. Identity-window arm: interposing a swap inside the walker's probe→bind window is not deterministically constructible from outside the process (microsecond window; a race would flake). Asserted instead at the opener the gate invokes (`__auditStoreTestHooks.probeAndBind`, rename-based inode replacement, refusal + byte-identical replacement + zero-write proof) with the gate-level red consequence covered by the absent-store, swapped-store, tamper and depth arms.
+4. Audit-links link check fires for every non-BAD hop status (story: unconditional on hops 4/5/6) but skips statuses already reporting a BAD-hop violation, so one defect is not double-counted as two violations.
+5. Suite consolidation ran with executed-count equality (125 = 20+48+27+30) as the preservation oracle; raw `test(`-declaration grep was rejected (matches docblocks/paths).
+6. Fixture layout: the freeze tool stores the reverify jsonl as `<runId>.reverify.jsonl`; harnesses rename it to `readReports`' `<runId>.jsonl` convention when copying to scratch — documented in the driver help and both suite headers.
+7. Fixture ledger copy is converted to DELETE journal mode after the checkpoint (`selfContainLedgerCopy`): a WAL-mode db with no `-shm` beside it is exactly DF2.11's `ledger-unopenable` on readonly open (rehearsal-proven), and a copied `-shm` is nondeterministic — the ×3 file-set snapshot requires exact bytes.
+8. W2 module subagents died to a provider 429 mid-flight; the driver session completed and verified the remaining leaves per the operator's finish directive (all leaf ledgers green under driver re-verification).
+
+**Gates:** full `bun test` + `bun run typecheck` + `bunx biome check` green; `check-defensive-programming.sh --base origin/dev` clean (one real fix: the C6 `as unknown as` double cast replaced by an `every()`-guarded narrow; remaining sites annotated `dp:ok` with reasons); `check-pr-conflicts.sh --base origin/dev` no overlaps; `detect_changes` low risk, zero affected processes, zero chassis deltas.
