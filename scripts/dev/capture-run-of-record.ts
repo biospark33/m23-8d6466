@@ -44,12 +44,13 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import { Database } from "bun:sqlite";
 
@@ -58,6 +59,7 @@ import { DEFAULT_COST_LEDGER_FILE } from "../../src/providers/cost-ledger.ts";
 import { resolveRunsDir } from "../../src/providers/run-record.ts";
 import { DEFAULT_REVERIFY_DIR } from "../../src/reverify/report.ts";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
+import { acquireRunLock, releaseRunLock, RunLockedError, type RunLockHandle } from "../lib/run-lock.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 
@@ -250,10 +252,37 @@ function assertArtifactsWalkable(artifactsDir: string): void {
 }
 
 /** Segment-based containment: is `descendant` inside (or equal to) `ancestor`?
- * A string prefix lies — `/tmp/out` does not contain `/tmp/outfox`. */
-function pathContains(ancestor: string, descendant: string): boolean {
+ * A string prefix lies — `/tmp/out` does not contain `/tmp/outfox`.
+ * Exported for tests (tests/scripts/capture-run-of-record.test.ts). */
+export function pathContains(ancestor: string, descendant: string): boolean {
   const head = relative(ancestor, descendant).split(sep)[0];
   return head !== "..";
+}
+
+/** Resolve `path` through every symlink an EXISTING component carries, then
+ * re-join the not-yet-created tail lexically. `resolve()` is purely lexical:
+ * it never consults the filesystem, so `--out /link/fixture` where `/link`
+ * points into the runs directory passes a lexical containment check and then
+ * mkdirSync plants the fixture inside live capture evidence. The deepest
+ * EXISTING component is the one that redirects the writes, so it is the one
+ * that must be resolved; a missing leaf resolves through its existing parent
+ * the same way the kernel will when mkdir(2) creates it. A symlink cycle
+ * (ELOOP) and every other non-ENOENT stat fault propagate — the caller turns
+ * them into a typed refusal. Exported for tests. */
+export function realpathThroughAbsent(path: string): string {
+  let p = resolve(path);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(p), ...tail);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      const parent = dirname(p);
+      if (parent === p) return p; // the filesystem root — nothing left to climb
+      tail.unshift(basename(p));
+      p = parent;
+    }
+  }
 }
 
 interface Sources {
@@ -273,10 +302,10 @@ interface Sources {
 /** Path-only value flags → the Args field they fill (table replaces a switch). */
 const PATH_FLAGS: Record<string, keyof Args> = { "--out": "out", "--runs-dir": "runsDir", "--reverify-dir": "reverifyDir", "--ledger": "ledger", "--audit-db": "auditDb", "--git-dir": "gitDir" };
 
-/** Resolve + verify EVERY source before any write: a half-frozen fixture is worse than none (the gate would read a fixture silently missing a seam). */
-async function resolveSources(args: Args): Promise<Sources> {
+/** Resolve + verify EVERY source before any write: a half-frozen fixture is worse than none (the gate would read a fixture silently missing a seam).
+ * `runsDir` is threaded in by main so the run lock names the same directory the sources resolve from. */
+async function resolveSources(args: Args, runsDir: string): Promise<Sources> {
   const runId = args.runId;
-  const runsDir = args.runsDir ?? resolve(resolveRunsDir());
   const reverifyDir = args.reverifyDir ?? resolve(DEFAULT_REVERIFY_DIR);
   const ledgerPath = args.ledger ?? resolve(process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE);
   const auditDbPath = args.auditDb ?? resolve(process.env.QDS_AUDIT_DB ?? DEFAULT_AUDIT_DB_FILE);
@@ -634,6 +663,50 @@ async function resolvePrBody(args: Args, s: Sources): Promise<{ text: string; or
   return { text: gh.stdoutRaw, origin: `gh pr view ${s.prNumber} --repo ${s.repoSlug}` };
 }
 
+/** The `--dry-run` plan: verify sources + print what a real freeze would write.
+ * Runs BEFORE the lock is taken — a preview writes nothing and must not serialize
+ * against a live harvest/teardown. Returns the process exit code (0 ok, 1 not-ok). */
+async function printDryRun(args: Args, s: Sources): Promise<number> {
+  const wal = `${s.ledgerPath}-wal`;
+  const walBytes = existsSync(wal) ? fileSize(wal) : -1;
+  console.log("dry-run: nothing will be written (no ledger checkpoint, no fixture files)");
+  console.log("sources resolved:");
+  console.log(manifestLine(`run-record ${s.recordPath}`, fileSize(s.recordPath)));
+  console.log(manifestLine(`reverify ${s.reverifyPath}`, fileSize(s.reverifyPath)));
+  console.log(manifestLine(`bundle ${s.bundlePath}`, fileSize(s.bundlePath)));
+  console.log(`  artifacts ${s.artifactsDir} (trace/events.jsonl + trace/trace.db present)`);
+  console.log(`  ledger ${s.ledgerPath} (${fileSize(s.ledgerPath)} bytes; -wal ${walBytes < 0 ? "absent" : `${walBytes} bytes`} — would PRAGMA wal_checkpoint(TRUNCATE))`);
+  console.log(manifestLine(`audit-db ${s.auditDbPath}`, fileSize(s.auditDbPath)));
+  console.log(`  ref ${s.ref} -> ${s.refSha} (verified in git-dir ${s.gitDir})`);
+  const missing: string[] = [];
+  if (args.prBodySource.startsWith("file:")) {
+    const p = resolve(args.prBodySource.slice("file:".length));
+    // Probe by READING, not existsSync: a dir at the path or an unreadable file must
+    // fail the dry-run exactly where the real run would fail (C-edge#4).
+    let text: string | undefined;
+    try {
+      text = await Bun.file(p).text();
+    } catch {
+      text = undefined;
+    }
+    console.log(`  pr-body file:${p} (${text === undefined ? "MISSING or unreadable" : `${Buffer.byteLength(text)} bytes`})`);
+    if (text === undefined) missing.push(`pr-body file at ${p}`);
+  } else {
+    // residue is consulted for auto only (resolvePrBody's contract) — gh goes straight to the live read (C2).
+    const residue = args.prBodySource === "auto" ? residueBody(join(REPO_ROOT, ".sandbox", "pr"), args.runId) : undefined;
+    console.log(residue !== undefined ? `  pr-body residue ${residue.origin} (${residue.text.length} chars)` : `  pr-body will fetch: gh pr view ${s.prNumber} --repo ${s.repoSlug} (not fetched in dry-run)`);
+  }
+  console.log(`fixture plan (--out ${args.out}):`);
+  console.log(`  ${args.runId}.json, ${args.runId}.reverify.jsonl, ${args.runId}.bundle, audit.db, cost-ledger.db, pr-body.txt`);
+  console.log(`  ${args.runId}-artifacts/ (recursive copy) + refs.git/ (bare, ${s.ref} -> ${s.refSha})`);
+  if (missing.length > 0) {
+    console.log(`dry-run: NOT ok — ${missing.join("; ")} missing`);
+    return 1;
+  }
+  console.log("dry-run ok: all sources resolved");
+  return 0;
+}
+
 function manifestLine(rel: string, bytes: number): string {
   return `  ${rel.padEnd(48)} ${bytes} bytes`;
 }
@@ -656,8 +729,23 @@ function listFrozen(out: string, artifactsName: string): Array<[string, number]>
 /** `--out` must be disjoint from every capture source dir, both directions (C-edge#7):
  * `--out` inside a source dir would self-copy the fixture into live evidence; a source
  * dir inside `--out` would have the freeze read what it is writing. Containment is a
- * relative-segment check, not a string prefix (`/tmp/out` does not contain `/tmp/outfox`). */
+ * relative-segment check, not a string prefix (`/tmp/out` does not contain `/tmp/outfox`).
+ *
+ * BOTH sides are resolved through their existing components FIRST (realpathThroughAbsent):
+ * `resolve()` is lexical, so `--out /link/fixture` over a symlinked runs dir would pass a
+ * lexical check and then mkdirSync/sentinel/cpSync would write the fixture into live
+ * evidence. Resolving the deepest existing component on each side is what mkdir(2) will
+ * actually walk. ponytail ceiling: this is a check-then-act — a component swapped to a
+ * symlink AFTER the check and BEFORE the writes still races; the exclusive mkdir on the
+ * leaf closes the leaf case (mkdir(2) never follows an existing entry), and the residual
+ * intermediate-component race needs O_NOFOLLOW-style openat chains if it ever matters. */
 function refuseOutOverlap(out: string, s: Sources): void {
+  let realOut: string;
+  try {
+    realOut = realpathThroughAbsent(out);
+  } catch (e) {
+    refuse("out-unresolvable", `cannot resolve --out ${out} through the filesystem (${(e as Error).message})`, "replace the symlink cycle or unreadable directory on --out's path with a plain directory and re-run");
+  }
   const sourceDirs: Array<[string, string]> = [
     ["--runs-dir", dirname(s.recordPath)],
     ["--reverify-dir", dirname(s.reverifyPath)],
@@ -666,11 +754,17 @@ function refuseOutOverlap(out: string, s: Sources): void {
     ["--git-dir", s.gitDir],
   ];
   for (const [what, dir] of sourceDirs) {
-    if (pathContains(dir, out)) {
-      refuse("out-overlaps-source", `--out ${out} is inside ${what} ${dir} — the freeze would write the fixture into a live capture source`, "pick an --out outside every capture source directory and re-run");
+    let realDir: string;
+    try {
+      realDir = realpathThroughAbsent(dir);
+    } catch (e) {
+      refuse("source-unresolvable", `cannot resolve ${what} ${dir} through the filesystem (${(e as Error).message})`, "fix the symlink cycle or unreadable directory on the source's path and re-run; the freeze must know where it reads from");
     }
-    if (pathContains(out, dir)) {
-      refuse("out-overlaps-source", `${what} ${dir} is inside --out ${out} — the freeze would read the fixture it is writing`, "pick an --out outside every capture source directory and re-run");
+    if (pathContains(realDir, realOut)) {
+      refuse("out-overlaps-source", `--out ${out} resolves to ${realOut}, inside ${what} ${realDir} — the freeze would write the fixture into a live capture source`, "pick an --out outside every capture source directory and re-run");
+    }
+    if (pathContains(realOut, realDir)) {
+      refuse("out-overlaps-source", `${what} ${dir} resolves to ${realDir}, inside --out ${out} (${realOut}) — the freeze would read the fixture it is writing`, "pick an --out outside every capture source directory and re-run");
     }
   }
 }
@@ -678,10 +772,22 @@ function refuseOutOverlap(out: string, s: Sources): void {
 /** What stands at --out right now — the idempotence guard's whole question.
  * A directory holding ONLY a capture-in-progress sentinel is its own kind: it
  * is not a partial frozen fixture (nothing was written yet), so the refusal it
- * earns is the stale-sentinel one, not the immutable-fixture one. */
-function outKind(path: string): "absent" | "file" | "empty" | "sentinel-only" | "non-empty" {
-  if (!existsSync(path)) return "absent";
-  if (!statSync(path).isDirectory()) return "file";
+ * earns is the stale-sentinel one, not the immutable-fixture one.
+ *
+ * lstat, not existsSync+stat: a symlink AT --out (dangling included) is its own
+ * kind — existsSync followed it and misread a dangling link as "absent", which
+ * sent the exclusive mkdirSync into a guaranteed EEXIST it would have mislabeled
+ * as a concurrent capture. The freeze writes a REAL directory and refuses to
+ * write through a link, wherever it points. */
+function outKind(path: string): "absent" | "file" | "symlink" | "empty" | "sentinel-only" | "non-empty" {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(path);
+  } catch {
+    return "absent";
+  }
+  if (st.isSymbolicLink()) return "symlink";
+  if (!st.isDirectory()) return "file";
   const entries = readdirSync(path);
   if (entries.length === 0) return "empty";
   return entries.length === 1 && entries[0] === "capture-in-progress" ? "sentinel-only" : "non-empty";
@@ -690,11 +796,45 @@ function outKind(path: string): "absent" | "file" | "empty" | "sentinel-only" | 
 // dp:ok (main) — the import.meta.main caller wraps main in the exit-2 catch; a throw here is a fatal usage fault, never a silent crash.
 async function main(): Promise<number> { // dp:ok — caller wraps main in the exit-2 catch; a throw is a fatal fault, never a silent crash
   const args = parseArgs(Bun.argv.slice(2));
-  const s = await resolveSources(args);
+  const runsDir = args.runsDir ?? resolve(resolveRunsDir());
+
+  if (args.dryRun) {
+    const s = await resolveSources(args, runsDir);
+    refuseOutOverlap(args.out, s);
+    return await printDryRun(args, s);
+  }
+
+  // The DF2.5 per-run invocation lock — the SAME `<runsDir>/<runId>.lock` the harvest and
+  // teardown CLIs acquire caller-side around their verbs (pullArtifacts takes none itself;
+  // the acquire has always stayed with the caller). A concurrent re-harvest of this run
+  // rm+renames `<runId>-artifacts` into place, so without this lock the tree
+  // assertArtifactsWalkable vetted could be swapped out from under cpSync — a fixture
+  // mixing two harvested generations. Held from BEFORE source validation through the
+  // artifacts copy. Release: explicitly on the success and failure paths below; every
+  // refuse() in between process.exit()s, and the lock module's own `process.on("exit")`
+  // handler (installed by acquireRunLock) releases any non-destructive claim on the way
+  // out — this capture never marks the lock destructive. `--dry-run` writes nothing and
+  // deliberately takes no lock (a preview must not serialize against a live verb).
+  let lock: RunLockHandle;
+  // The lock file lives IN the runs dir, so a missing/unreadable runs dir must refuse
+  // HERE, before the acquire turns it into a raw ENOENT — the same typed shape a
+  // source-resolution fault gets below.
+  mustExistDir(runsDir, "runs-dir-absent", "run-record directory");
+  try {
+    lock = acquireRunLock(runsDir, args.runId, "capture-run-of-record");
+  } catch (e) {
+    if (e instanceof RunLockedError) {
+      refuse("run-locked", e.message, e.remediation);
+    }
+    refuse("run-lock-failed", `cannot acquire the per-run lock in ${runsDir} (${e instanceof Error ? e.message : String(e)})`, "fix the filesystem fault named above and re-run; the lock never steals — a held lock means another invocation of this run is live");
+  }
+
+  const s = await resolveSources(args, runsDir);
   refuseOutOverlap(args.out, s);
 
   // Idempotence: a frozen fixture is immutable. Existing-but-EMPTY is allowed (an interrupted earlier attempt may have left the shell behind).
   const out = outKind(args.out);
+  if (out === "symlink") refuse("fixture-exists", `--out ${args.out} is a symlink, not a directory`, "the freeze writes a real directory and refuses to write through a link — remove or rename the symlink and re-run");
   if (out === "file") refuse("fixture-exists", `--out ${args.out} exists and is a file, not a directory`, "a frozen fixture is a directory — move the file aside and re-run");
   if (out === "sentinel-only") {
     // Before the non-empty check: a stale sentinel guards an EMPTY shell — it
@@ -703,48 +843,6 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
     refuse("capture-in-progress", `--out ${args.out} holds only a stale capture-in-progress sentinel — an earlier capture died before writing any fixture content`, `if no capture is running, remove that one file (${join(args.out, "capture-in-progress")}) and re-run`);
   }
   if (out === "non-empty") refuse("fixture-exists", `--out ${args.out} already exists and is non-empty (possibly a partial from an earlier failed capture)`, "a frozen fixture is immutable — move or delete it by hand, then re-run");
-
-  const wal = `${s.ledgerPath}-wal`;
-  const walBytes = existsSync(wal) ? fileSize(wal) : -1;
-
-  if (args.dryRun) {
-    console.log("dry-run: nothing will be written (no ledger checkpoint, no fixture files)");
-    console.log("sources resolved:");
-    console.log(manifestLine(`run-record ${s.recordPath}`, fileSize(s.recordPath)));
-    console.log(manifestLine(`reverify ${s.reverifyPath}`, fileSize(s.reverifyPath)));
-    console.log(manifestLine(`bundle ${s.bundlePath}`, fileSize(s.bundlePath)));
-    console.log(`  artifacts ${s.artifactsDir} (trace/events.jsonl + trace/trace.db present)`);
-    console.log(`  ledger ${s.ledgerPath} (${fileSize(s.ledgerPath)} bytes; -wal ${walBytes < 0 ? "absent" : `${walBytes} bytes`} — would PRAGMA wal_checkpoint(TRUNCATE))`);
-    console.log(manifestLine(`audit-db ${s.auditDbPath}`, fileSize(s.auditDbPath)));
-    console.log(`  ref ${s.ref} -> ${s.refSha} (verified in git-dir ${s.gitDir})`);
-    const missing: string[] = [];
-    if (args.prBodySource.startsWith("file:")) {
-      const p = resolve(args.prBodySource.slice("file:".length));
-      // Probe by READING, not existsSync: a dir at the path or an unreadable file must
-      // fail the dry-run exactly where the real run would fail (C-edge#4).
-      let text: string | undefined;
-      try {
-        text = await Bun.file(p).text();
-      } catch {
-        text = undefined;
-      }
-      console.log(`  pr-body file:${p} (${text === undefined ? "MISSING or unreadable" : `${Buffer.byteLength(text)} bytes`})`);
-      if (text === undefined) missing.push(`pr-body file at ${p}`);
-    } else {
-      // residue is consulted for auto only (resolvePrBody's contract) — gh goes straight to the live read (C2).
-      const residue = args.prBodySource === "auto" ? residueBody(join(REPO_ROOT, ".sandbox", "pr"), args.runId) : undefined;
-      console.log(residue !== undefined ? `  pr-body residue ${residue.origin} (${residue.text.length} chars)` : `  pr-body would fetch: gh pr view ${s.prNumber} --repo ${s.repoSlug} (not fetched in dry-run)`);
-    }
-    console.log(`fixture plan (--out ${args.out}; ${out}):`);
-    console.log(`  ${args.runId}.json, ${args.runId}.reverify.jsonl, ${args.runId}.bundle, audit.db, cost-ledger.db, pr-body.txt`);
-    console.log(`  ${args.runId}-artifacts/ (recursive copy) + refs.git/ (bare, ${s.ref} -> ${s.refSha})`);
-    if (missing.length > 0) {
-      console.log(`dry-run: NOT ok — ${missing.join("; ")} missing`);
-      return 1;
-    }
-    console.log("dry-run ok: all sources resolved");
-    return 0;
-  }
 
   // PR body FIRST: it is the one source that can still refuse (network) — a refusal after the writes would leave a partial fixture the guard then locks.
   const body = await resolvePrBody(args, s);
@@ -810,13 +908,21 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
     chmodFixturePrivate(args.out);
   } catch (e) {
     // refuse() is process.exit and would skip a finally-based cleanup (C6 precedent), so clean
-    // first, then refuse.
+    // first, then refuse. The run lock releases here too — a failed capture is a
+    // non-destructive lock hold, released normally exactly like withRunLock's throw arm
+    // (a release failure is swallowed: the lock module's exit handler retries it).
     rmSync(sentinel, { force: true });
     cleanupPartialFixture(args.out, createdOut, args.runId);
+    try {
+      releaseRunLock(lock);
+    } catch {
+      // releaseHeldRunLocks retries at exit and reports; this refusal must not be masked.
+    }
     if (e instanceof FreezeRefusal) refuse(e.code, e.message, e.remediation);
     refuse("copy-failed", `the freeze/copy phase failed after creating ${args.out} (${e instanceof Error ? e.message : String(e)})`, "clear the environmental fault named in the message (disk full, permissions), then remove the partial fixture directory and re-run; this was not a flag error");
   }
   rmSync(sentinel, { force: true }); // gone before the fixture is declared frozen
+  releaseRunLock(lock); // the fixture is frozen — release before the manifest prints
 
   console.log(`froze fixture at ${args.out}`);
   for (const name of [`${args.runId}.json`, `${args.runId}.reverify.jsonl`, `${args.runId}.bundle`, "audit.db", "cost-ledger.db", "pr-body.txt"]) {
