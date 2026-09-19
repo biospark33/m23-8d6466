@@ -1360,8 +1360,7 @@ describe("buildIdFileInputs", () => {
       // branch tree only; the merge's publish + adoption ritual re-pins the
       // IMAGE pair, and this literal rides that same ritual.
       //
-      // PLACEHOLDER_PREFIX: moved from b3c30d0c by DF3.6b, by FOUR walked
-      "PLACEHOLDER_WALK_DIGEST",
+      // 297f1580: moved from b3c30d0c by DF3.6b. FOUR walked
       // tracked inputs — `oci/exedev/systemd/qds-run@.service`
       // (+`Delegate=memory`), `src/fleet/resident.ts` (the whole cgroup
       // mechanism), `src/phase-engine/steering.ts` (the OOM writer) and
@@ -1377,16 +1376,19 @@ describe("buildIdFileInputs", () => {
       // provenance note that blames a file which cannot move this hash sends
       // the next re-pinner to bisect files that cannot move it (the same
       // correction this ledger already carries above). Same failing-run
-      // receive, same-commit re-pin. THE PUBLISH IS STILL OWED:
+      // receive, same-commit re-pin.
+      //
+      // MOVED WITHIN THE STORY, twice, by COMMENT-ONLY edits to walked inputs —
+      // `src/fleet/resident.ts`, `src/phase-engine/steering.ts` and
+      // `scripts/pipeline-run.ts` — made while resolving review rounds 7 and 8.
+      // Comment-only still moves this literal (the `99af1da0` entry above is the
+      // same case), which is why the re-pin happens LAST, after the final fixer
+      // lands, rather than once per round. THE PUBLISH IS STILL OWED:
       // the unit is baked into a digest-pinned image, so a run against the
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-<<<<<<< HEAD
-      "PLACEHOLDER_WALK_DIGEST",
-=======
-      "05d922c43a078e189cf61db1a57ba5aadd34dcb0780c146b72d37e8bdff23cb1",
->>>>>>> 2293dd53 (fix(df3.6b): specify the OOM verdict instead of patching it — counter conjunction plus a peak floor)
+      "297f1580dc04f3051c717d6316a026e85a8ca0f130c0d1437eeff6dbb27e65c1",
     );
   });
 });

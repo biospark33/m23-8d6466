@@ -4254,7 +4254,9 @@ async function main(argv: readonly string[]): Promise<number> {
         // this line — so on every path that constructs steering, bounds exist.
         bounds: boundsGuard,
         // DF3.6b edit (iv): the kernel's account of the last solicitation —
-        // `memory.peak` and whether the leaf was OOM-killed. A structural
+        // `memory.peak`, the bound it was taken against, and whether the leaf
+        // was OOM-killed by ITS OWN limit (fleet applies ruling 8's full rule;
+        // this side just carries the verdict). A structural
         // callback, never a fleet import: the engine learns WHETHER the kernel
         // killed, never how to. It is what discriminates an OOM (a signal
         // death at the process level) from a timeout or an external kill.

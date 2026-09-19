@@ -67,7 +67,7 @@ is sent by the engine and no sample is taken — the journal records `resident.e
 and a `residentTripwire` row `{runId, cause:"watchdog_kill", phase, detail}` whose `detail` carries
 the `memory.peak` reading and the bound it crossed, the solicitation's cgroup is removed, and
 **every remaining phase and gate executes on the deterministic path**. Observable artifacts: the
-harvested journal, and `memory.events`' counters read before removal — the verdict is the CONJUNCTION `oom > 0 && (oom_kill > 0 || oom_group_kill > 0)`, not `oom_kill` alone (Dev Agent Record ruling 8; amended 2026-09-19).
+harvested journal, and the leaf's kernel record read before removal — `memory.events`' counters AND `memory.peak`. The verdict is the three-part rule of **Dev Agent Record ruling 8**: `oom > 0 && (oom_kill > 0 || oom_group_kill > 0) && memory.peak >= bound - 2 MiB` — where the third conjunct is SKIPPED when the measurement is unavailable (`memory.peak` reads 0 on a pre-5.19 kernel, or no bound was supplied), because suppressing a real kill on a missing measurement is the worse direction. Ruling 8 has the full statement; do not implement the strict form from this line alone. Not `oom_kill` alone, and not the two counters alone either — they are independent, so without the peak floor a global OOM that killed the resident far below its own bound still reads as this bound firing (amended 2026-09-19).
 
 **This slice runs live, and it runs in-box.** It is a `qds-live-e2e` roster-**tier-4** assertion
 against a real exe.dev box and real OpenRouter spend, per
@@ -216,7 +216,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 |-----------|-------------------------------|-------------------------|
 | cgroup delegation | `Delegate=memory` on `oci/exedev/systemd/qds-run@.service` (DF2.10's unit; systemd 255, cgroup v2 unified). Delegation is what chowns the unit's cgroup directory, `cgroup.procs` and `cgroup.subtree_control` to `User=exedev`, so the engine can create the resident's child cgroup **without root, without D-Bus and without polkit** | build-time: DF2.10's Dockerfile unit scan gains a positive `grep -qE '^Delegate=memory$'` assertion, the same shape as the existing `RuntimeDirectoryPreserve=yes` check (the unit scan in `oci/exedev/Dockerfile`), so the directive cannot be silently dropped. Run time: absent delegation ⇒ resident **not started** (AC3) |
 | resident memory bound | cgroup v2 `memory.max` on a per-solicitation child cgroup created by the fleet spawn path, valued from the manifest's `residentRssBytes` (validated by DF3.6a) | kernel-enforced. The engine passes the **value**; it never signals, never samples, and never learns a pid. The live round asserts an allocator past the bound is OOM-killed and the run still completes deterministically |
-| resident memory telemetry | `memory.peak` and `memory.events` (`oom` **and** `oom_kill`/`oom_group_kill` — the conjunction, ruling 8; `oom_kill` alone counts a global OOM that merely picked pi) read from that cgroup before it is removed | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the bounds-check log line and `detail` on the `watchdog_kill` row |
+| resident memory telemetry | `memory.peak` and `memory.events` read from that cgroup before it is removed. BOTH are verdict inputs, not just telemetry: ruling 8's rule is `oom > 0 && (oom_kill > 0 \|\| oom_group_kill > 0) && memory.peak >= bound - 2 MiB`, with the peak conjunct SKIPPED when either figure is unavailable (see ruling 8 for the escape). `oom_kill` alone counts a global OOM that merely picked pi, and the two counters alone still admit one that killed the resident far below its own bound | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the bounds-check log line and `detail` on the `watchdog_kill` row |
 | image digest pin | DF2.10's pin ritual — the unit is **baked into the image**, so this story's one-directive change requires a rebuild, a re-publish and a moved digest pin, not just a file edit | see the DoD item; a green local gate against a stale pinned image is exactly the failure this prerequisite exists to prevent |
 
 ## Technical Notes
@@ -250,15 +250,20 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   residentRssBytes?: number;
 
   // src/fleet/resident.ts — on ResidentSpawn, beside exitStatus()
-  /** DF3.6b: last solicitation's cgroup accounting — `memory.peak` and whether
-   *  the kernel OOM-killed it. Read before the cgroup is removed. */
-  lastMemory(): { peakBytes: number; oomKilled: boolean } | null;
+  /** DF3.6b: last solicitation's cgroup accounting — `memory.peak`, whether the
+   *  kernel OOM-killed it (ruling 8's rule, applied fleet-side), and the BOUND
+   *  that reading was taken against. `boundBytes` is on this object because
+   *  AC1 and the DoD require the `watchdog_kill` row's `detail` to name "the
+   *  bound it crossed", and the engine is forbidden to import fleet code or
+   *  read the manifest here — so the value has to ride the accounting. Read
+   *  before the cgroup is removed. */
+  lastMemory(): { peakBytes: number; oomKilled: boolean; boundBytes: number } | null;
 
   // src/phase-engine/steering.ts — the third createSteering dep, landed in
   // DF3.6a's diff (its Files list item 5) because the deps object is one
   // literal and two stories must not edit it. A structural callback, NOT a
   // fleet import: the engine learns whether the kernel killed, never how to.
-  lastMemory?: () => { peakBytes: number; oomKilled: boolean } | null;
+  lastMemory?: () => { peakBytes: number; oomKilled: boolean; boundBytes?: number } | null;
   ```
 
   `scripts/pipeline-run.ts` wires the third to the second (`lastMemory: spawned.lastMemory`). The
@@ -314,14 +319,29 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   Writing pi's pid to `cgroup.procs` *after* `Bun.spawn` leaves a window in which pi runs unbounded.
   Instead the child places itself before it becomes pi, and **refuses to become pi if the placement
   fails**:
-  `sh -c 'echo $$ > "$1"/cgroup.procs || exit 97; shift; exec "$@"' _ <cgroupDir> <pi argv…>` —
-  positional passing, so the rendered prompt stays its own argv element and is never interpolated
-  into a shell string. **`|| exit 97` is load-bearing, not defensive:** `;` is unconditional
-  sequencing, so a failed redirection — leaf removed by a concurrent teardown, `+memory` not enabled
-  in `cgroup.subtree_control`, `EPERM`/`ENOENT`/`EBUSY`, or an empty `$1` — would print to stderr
-  and fall straight through to `exec`, running pi with no `memory.max`. That is precisely the silent
-  degradation to an unbounded agent INV-MEM-2 forbids, and AC3's check is at **arming, once**, so
-  nothing re-checks per solicitation. Exit 97 is classified `unenforceable` by the caller: the
+  **AMENDED 2026-09-19 (review round 1, finding 5) — the wrapper below is what SHIPS; the
+  `'echo $$ > "$1"/cgroup.procs || exit 97; …'` form this section originally specified was rejected
+  during development and must not be built from this paragraph.**
+
+  ```sh
+  sh -c 'echo $$ >> "$1"/cgroup.procs 2>/dev/null; \
+         ok=0; while IFS= read -r p; do [ "$p" = "$$" ] && ok=1; done < "$1"/cgroup.procs 2>/dev/null; \
+         [ "$ok" = 1 ] || exit 97; shift; exec "$@"' _ <cgroupDir> <pi argv…>
+  ```
+
+  Positional passing, so the rendered prompt stays its own argv element and is never interpolated
+  into a shell string. **The refusal is keyed on VERIFIED MEMBERSHIP, not on the write's exit
+  status**, and that is the load-bearing part: `cgroup.procs` rejects at WRITE time as well as at
+  open time — EBUSY when the target is not a leaf, EOPNOTSUPP, EINVAL — and whether a guard on the
+  redirection fires then depends on the shell propagating a deferred write error (busybox `ash`
+  returns 1, `dash` raises an I/O error and exits **2**). A generic non-zero exit is NOT classified
+  `unenforceable` by the engine; it takes the one-way `"degraded"` latch, which is exactly the
+  misclassification AC4 exists to prevent. Reading `cgroup.procs` back and looking for our own pid
+  is decisive on every shell and every failure mode, and uses only POSIX shell built-ins (no `grep`,
+  no `awk`) so it cannot depend on what the image happens to stage. The original concern stands and
+  is subsumed: an unconditional `;` sequence would fall straight through to `exec` and run pi with
+  no `memory.max` — the silent degradation to an unbounded agent INV-MEM-2 forbids — and AC3's check
+  is at **arming, once**, so nothing re-checks per solicitation. Exit 97 is classified `unenforceable` by the caller: the
   solicitation fails, the resident is stopped, and no unbounded call is ever issued. The key remains
   env-borne, never argv (`src/fleet/resident.ts:137-141`), unchanged by this wrapper.
   `ponytail:` the `sh -c` wrapper exists only to close the placement race; if Bun ever exposes
@@ -573,8 +593,11 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       box carries no such line, so the production pi runs there. It allocates past the fixture bound in a
       loop and exits; the cgroup machinery, the `memory.max` write and the `oom.group=1` write are
       the production ones. This leg costs **≈zero spend** (it never calls the model) and is
-      *producible by construction*: its falsifier is `memory.events`' `oom_kill` count `0` or the
-      leaf surviving `rmdir` — a crossing that does not fire falsifies the story. **Leg B — the
+      *producible by construction*: its falsifier is the SHIPPED VERDICT reading false — ruling 8's
+      full rule, not `oom_kill` alone, since `oom_kill > 0` can hold while the verdict is correctly
+      false: a real crossing must leave `oom > 0`, a kill counter > 0 AND `memory.peak` at the
+      bound. The leaf surviving `rmdir` falsifies it too. A crossing that does not fire falsifies
+      the story. **Leg B — the
       attachment (proves the real-pi precondition: a normal solicitation runs inside a real leaf,
       under the bound, and the telemetry reads are live).** The round's real solicitation
       (~401 µ$ measured on the tier's host-side leg — the ~25 µ$/$0.000025 figure is the tier-2
@@ -665,18 +688,19 @@ and records `{...e}` (which carries `bound`/`allowed`/`cause`/`exitCode`) on the
    spends MORE solicitations than intended but can never refuse a legitimate one. **Owner: a
    follow-up on DF3.6a's ledger, not this story.**
 
-### Ruling 8 — the OOM verdict is a counter CONJUNCTION, and nothing else
+### Ruling 8 — the OOM verdict is the kernel's own record: two counters PLUS a peak floor
 
-Recorded because this predicate was corrected four times from four different doors before it was
+Recorded because this predicate was corrected five times from five different doors before it was
 specified rather than patched, and the next reader should find the specification, not the scar
 tissue. The claim the verdict makes is *"a process in THIS leaf was killed by the kernel BECAUSE
-THIS leaf hit THIS bound"* — two independent facts, both published by the kernel in
-`memory.events`:
+THIS leaf hit THIS bound"* — three facts, all published by the kernel: two in `memory.events` and
+one in `memory.peak`.
 
-| fact | counter |
-|------|---------|
-| this leaf hit **its own** `memory.max` and could not reclaim | `oom` — raised only on the own-limit charge path, never for a global or an ancestor's OOM |
-| a process in this leaf was **killed** by an OOM killer | `oom_kill` / `oom_group_kill` — **any** OOM killer, own or global |
+| fact | where the kernel publishes it |
+|------|-------------------------------|
+| this leaf hit **its own** `memory.max` and could not reclaim | `memory.events`' `oom` — raised only on the own-limit charge path, never for a global or an ancestor's OOM |
+| a process in this leaf was **killed** by an OOM killer | `memory.events`' `oom_kill` / `oom_group_kill` — **any** OOM killer, own or global |
+| the kill happened **at** the limit, not far below it | `memory.peak` — an own-limit kill cannot happen below the limit, so the high-water mark must have reached it, within one failing allocation (see the slack paragraph) |
 
 **Neither alone is the predicate**, and each alone shipped a false `watchdog_kill` here: `oom_kill`
 alone counts a system-wide OOM that merely picked pi; `oom_group_kill` alone is **not**
@@ -685,7 +709,9 @@ from the victim, finds this leaf's `oom.group=1`, group-kills it and increments 
 *here*; and `oom` alone can be a graceful `-ENOMEM` the task survives.
 
 **RULED: `oomKilled = oom > 0 && (oom_kill > 0 || oom_group_kill > 0) && memory.peak reached the
-bound`, from the kernel's own record alone.** The two counters are INDEPENDENT, so the conjunction
+bound`, from the kernel's own record alone — with the peak conjunct SKIPPED when either figure is
+unavailable (the escape is the last sentence of the "slack must not be grown" paragraph
+below; it is part of the rule, not an implementation detail).** The two counters are INDEPENDENT, so the conjunction
 of them only NARROWS the global-OOM false positive: a solicitation that took a graceful `-ENOMEM`
 early (`oom` 1, survived) and was LATER picked by the system-wide OOM killer (`oom_kill` 1) sets
 both, and nothing in the counters says the two events are unrelated — a pairing that is not exotic,
@@ -715,9 +741,12 @@ under AC2 — the bound this story enforces is the leaf's — but it means ances
 invisible to this verdict.
 The process's exit shape — `signalCode`, exit 137, "did we send the SIGKILL" — is deliberately NOT
 consulted: it is a proxy for *was it killed* that cannot say *by whom*, which is the entire
-discrimination, and it counted this layer's own `stop()` SIGKILL as the kernel's. The four doors it
-failed through, kept as the reason the rule is stated this strongly: a global kill, a graceful
-`-ENOMEM`, an assumed kill in `stop()`, and a `QDS_PI_BIN` free to exit 137 of its own accord.
+discrimination, and it counted this layer's own `stop()` SIGKILL as the kernel's. The five doors it
+failed through, kept as the reason the rule is stated this strongly: (1) a global kill counted by
+`oom_kill`; (2) a graceful `-ENOMEM` where `oom` fired and nothing died; (3) an assumed kill in
+`stop()`, which counted this layer's own SIGKILL as the kernel's; (4) a `QDS_PI_BIN` free to exit
+137 of its own accord; and (5) the two-counter residual — a graceful `-ENOMEM` early paired with a
+global kill later, which sets both counters and is separated only by the peak floor.
 
 ### Ruling 6 — M1's "skipped, not faked" clause
 
@@ -799,11 +828,13 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   64 MiB E2E fixture bound proves attachment rather than crossing; a baseline ≥ 256 MiB means the
   512 MiB production default has under one doubling of headroom and must be re-set before this
   ships.
-- **The DF2.10 image ritual** — `Delegate=memory` is in the unit file and fenced at build time, but
-  the image has NOT been rebuilt, re-published, or its digest pin moved, and `deriveBuildId`'s
-  inputs have not been re-derived. **A run against the currently pinned digest boots a unit with no
-  `Delegate=`, so the resident refuses to start (AC3).** This is exactly the "green local gate
-  against a stale pinned image" failure that DoD item exists to prevent, and it is open.
+- **The DF2.10 image ritual — the OFFLINE half is DONE, the PUBLISH half is open.** `Delegate=memory`
+  is in the unit file and fenced at build time, and `deriveBuildId`'s tracked inputs HAVE been
+  re-derived in-commit (both asset digests and the whole-walk literal, per that file's same-commit
+  re-pin discipline). What remains: the image has NOT been rebuilt, re-published, or its digest pin
+  moved. **A run against the currently pinned digest boots a unit with no `Delegate=`, so the
+  resident refuses to start (AC3).** This is exactly the "green local gate against a stale pinned
+  image" failure that DoD item exists to prevent, and that half is open.
 - **Refresh precedence (vii), the half that needs a kill:** the "probe fills when the engine wrote
   none" direction is covered host-side (the existing `exitStatus:"transient"` e2e). The "engine's
   `overflow` survives the refresh" direction needs an engine-written `overflow`, which needs a

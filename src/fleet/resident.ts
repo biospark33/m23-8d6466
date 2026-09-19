@@ -467,7 +467,10 @@ function readLeaf(dir: string, boundBytes?: number): { peakBytes: number; oomKil
     // discrimination — and every attempt to carry the verdict on it failed from
     // a different door: a global kill, a graceful `-ENOMEM`, an assumed kill in
     // `stop()`, and a `QDS_PI_BIN` free to exit 137 of its own accord. The
-    // counters answer both halves; nothing else is consulted.
+    // KERNEL'S OWN RECORD answers every part — these two counters and, below,
+    // the peak. The exit shape is consulted nowhere. (Read on: the two counters
+    // are not sufficient BY THEMSELVES either, which is what the third fact is
+    // for. Do not stop at this paragraph break.)
     //
     // A THIRD FACT, because the two counters are INDEPENDENT and the
     // conjunction alone only NARROWS the global-OOM false positive rather than
@@ -514,10 +517,16 @@ function readLeaf(dir: string, boundBytes?: number): { peakBytes: number; oomKil
  * The fail-closed placement wrapper. The CHILD places itself before it becomes
  * pi, and refuses to become pi if the placement fails.
  *
- * `|| exit 97` is load-bearing, not defensive: `;` is unconditional sequencing,
- * so a failed redirection — leaf removed by a concurrent teardown, `+memory`
- * disabled, EPERM/ENOENT/EBUSY — would print to stderr and fall straight
- * through to `exec`, running pi with NO `memory.max`. That is the silent
+ * WHAT SHIPS IS THE MEMBERSHIP CHECK. An earlier form guarded the redirection
+ * itself (`echo $$ > "$1"/cgroup.procs || exit 97; …`) and was REJECTED in
+ * review round 1 — the paragraph below says why. It is described here only so
+ * the rejection is legible; it is not the shipped guard, and the `|| exit 97`
+ * in the script below sits on the membership check, not on the write.
+ *
+ * The concern that motivated the rejected form still stands and is subsumed: an
+ * unconditional `;` sequence would let a failed redirection — leaf removed by a
+ * concurrent teardown, `+memory` disabled, EPERM/ENOENT/EBUSY — fall straight
+ * through to `exec` and run pi with NO `memory.max`. That is the silent
  * degradation to an unbounded agent INV-MEM-2 forbids, and AC3's check is at
  * arming, once, so nothing else re-checks per solicitation.
  *
@@ -1035,12 +1044,14 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
    * two paths that can reach it — the call's own `finally`, or `stop()` when it
    * resumes first — with `currentLeaf` as the ownership handle.
    *
-   * The OOM verdict takes NO argument from this layer: `readLeaf`'s counter
-   * conjunction is the whole predicate (see its comment). An earlier shape
-   * ANDed it with "did the process die by signal", which is a proxy for "was it
-   * killed" that cannot say BY WHOM — and it counted OUR OWN `stop()` SIGKILL
-   * as the kernel's. The counters answer both halves; the exit shape answers
-   * neither.
+   * The OOM verdict takes no EXIT-SHAPE argument from this layer. The only
+   * thing this layer hands `readLeaf` is the BOUND (`readLeaf(dir, boundBytes)`
+   * below), which arms the peak floor; the rule itself — two counters plus that
+   * floor — lives in `readLeaf` and is spelled out in its comment. An earlier
+   * shape ANDed the verdict with "did the process die by signal", which is a
+   * proxy for "was it killed" that cannot say BY WHOM — and it counted OUR OWN
+   * `stop()` SIGKILL as the kernel's. The kernel's record answers every part;
+   * the exit shape answers none.
    *
    * Every step is best-effort: telemetry must never turn a completed call into
    * a throw, and a leaf that outlives its call is a warn, not a failure.

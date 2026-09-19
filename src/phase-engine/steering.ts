@@ -1219,8 +1219,11 @@ export function createSteering(deps: {
         // DF3.6b AC1/AC5: the kernel OOM-killed this solicitation's cgroup.
         // The call arrives here as a SIGNAL DEATH — indistinguishable at the
         // process level from a timeout or an external kill — so the kernel's
-        // own account is what discriminates it: `memory.events`' oom_kill
-        // count, read off the leaf before it was removed. Ordered BEFORE the
+        // own account is what discriminates it — the leaf's `memory.events`
+        // counters AND its `memory.peak`, read before it was removed. NOT
+        // `oom_kill` alone, which counts a global OOM that merely picked pi:
+        // fleet's `readLeaf` applies the full rule (story ruling 8) and this
+        // arm consumes its boolean. Ordered BEFORE the
         // degrade write below, because a resident whose bound fired is
         // "stopped" (this pair's enforcement is the proximate cause, AC5) and
         // never "degraded", and the journal must not read `status:"degraded"`
