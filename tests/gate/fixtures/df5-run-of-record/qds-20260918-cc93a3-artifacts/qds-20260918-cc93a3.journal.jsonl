@@ -1,0 +1,78 @@
+{
+  "version": "1.0.0",
+  "runId": "qds-20260918-cc93a3",
+  "ok": true,
+  "completedAt": "2026-09-18T02:48:51.667Z",
+  "resident": {
+    "status": "active",
+    "directives": 2,
+    "directivesRejected": 0,
+    "steeringIterations": {},
+    "spendMicros": 112,
+    "exitStatus": "success",
+    "tripwires": []
+  },
+  "phases": [
+    {
+      "runId": "qds-20260918-cc93a3",
+      "requestId": "894bcb72-837e-4560-9826-4aec24875c8d",
+      "pipelineId": "qds-audit-demo-chain",
+      "phaseId": "qds-20260918-cc93a3:0:audit-demo-team",
+      "name": "audit-demo-team",
+      "kind": "dispatch_task",
+      "status": "success",
+      "startedAt": "2026-09-18T02:48:01.761Z",
+      "updatedAt": "2026-09-18T02:48:51.626Z",
+      "durationMs": 49860,
+      "malformedLines": 0,
+      "droppedOversizeLines": 0,
+      "subTimings": {
+        "team_execution_ms": 48854,
+        "manifest_load_ms": 2,
+        "phase_body_ms": 49860,
+        "journal_write_ms": 2
+      },
+      "exitStatus": "success"
+    },
+    {
+      "runId": "qds-20260918-cc93a3",
+      "requestId": "894bcb72-837e-4560-9826-4aec24875c8d",
+      "pipelineId": "qds-audit-demo-chain",
+      "phaseId": "qds-20260918-cc93a3:1:audit-demo-commit",
+      "name": "audit-demo-commit",
+      "kind": "code",
+      "status": "success",
+      "startedAt": "2026-09-18T02:48:51.629Z",
+      "updatedAt": "2026-09-18T02:48:51.664Z",
+      "durationMs": 32,
+      "subTimings": {
+        "manifest_load_ms": 0,
+        "phase_body_ms": 32,
+        "journal_write_ms": 2
+      },
+      "exitStatus": "success"
+    }
+  ],
+  "gateEvents": [
+    {
+      "runId": "qds-20260918-cc93a3",
+      "phaseId": "qds-20260918-cc93a3:1:audit-demo-commit",
+      "type": "gate_pass",
+      "name": "commandGate(testCommand:audit-demo-commit)",
+      "requestId": "894bcb72-837e-4560-9826-4aec24875c8d",
+      "phase": "audit-demo-commit",
+      "attempt": 1,
+      "gate_exec_ms": 7,
+      "gate_report_ms": 0,
+      "gate_ms": 7,
+      "violations": [],
+      "checks": [
+        {
+          "item": "testCommand:audit-demo-commit",
+          "ok": true,
+          "note": "exit 0"
+        }
+      ]
+    }
+  ]
+}

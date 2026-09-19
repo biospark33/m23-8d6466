@@ -1,0 +1,31 @@
+{"requestId":"b50620a0-4034-4b95-be94-5cfe1d049a56","operation":"cost-ledger.open","agentId":null,"timestamp":"2026-09-19T11:42:13.696Z","duration":1,"status":"ok","mode":"read-only","ledgerPath":"/tmp/df54-e2e-red-reverify-0O0s/cost-ledger.db","outcome":"opened","durationMs":1,"ledgerOpenMs":1,"message":"opened /tmp/df54-e2e-red-reverify-0O0s/cost-ledger.db read-only — no mkdir, chmod, mode assert, schema or persistent pragma effect was performed; busy_timeout is connection-local (INV-COST-7)"}
+[PASS] DF5.4-P1 (DF5.4, §8 step 5 — run of record) 0ms
+    run of record qds-20260918-cc93a3 exists, parses and names its runId — evidence-of-record /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3.json (recorded live run, not re-executed by this gate)
+[PASS] DF5.4-C1 (DF3.1/DF2.8, §8 step 5 — channel) 4ms
+    dispatch went through the channel: requestId present, budget admitted quantum-digital-solutions/qds-audit-demo#9 at 50000 micro-USD — evidence-of-record /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3.json (recorded live run, not re-executed by this gate)
+[PASS] DF5.4-C2 (DF3.1/DF2.2/DF2.5, §8 step 5 — fleet) 3ms
+    fleet lifecycle finished: closed at a pinned SHA, no extensions.gate namespace (green leaves no positive trace), approval approved, spend 2184 micro-USD — evidence-of-record /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3.json (recorded live run, not re-executed by this gate)
+[PASS] DF5.4-C3 (DF1.6, §8 step 5 — team) 3ms
+    14 well-formed NDJSON lines, 0 malformed — claim-integrity only: proves the team's claim arrived intact, never that it is true — evidence-of-record /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3-artifacts/trace/events.jsonl (harvested in-box claim — integrity asserted, truth is DF5.1's host-side re-verify asserted by DF5.4-C6; recorded live run, not re-executed by this gate)
+[PASS] DF5.4-C4 (DF1.2/DF1.4, §8 step 5 — gates) 3ms
+    1 gate_results rows joined on request_id, every passed a literal 0/1 — claim-integrity only (INV-GATE-4): an in-box green can never be the proof a gate passed — evidence-of-record /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3-artifacts/trace/trace.db (harvested in-box claim — integrity asserted, truth is DF5.1's host-side re-verify asserted by DF5.4-C6; recorded live run, not re-executed by this gate)
+[PASS] DF5.4-C5 (DF2.5, §8 step 5 — bundle) 29ms
+    refs/sandbox/qds-20260918-cc93a3 → 4762832d618a2eae924b17dc96fec1ebe4fdfaa3 — ref refs/sandbox/qds-20260918-cc93a3 in --git-dir /tmp/df54-e2e-red-reverify-0O0s/refs.git (frozen fixture bare repo; the operator's working repo is never resolved)
+[FAIL] DF5.4-C6 (DF5.1, §8 step 5 — host-side re-verify) 1ms
+    bound report verdict=red (expected "green") — bound report rv-qds-20260918-cc93a3-2026-09-18t02-49-30-702z-gyiyex from /tmp/df54-e2e-red-reverify-0O0s/reverify/qds-20260918-cc93a3.jsonl (bound via extensions.approval.reportId — never the jsonl last line); PR stamp from /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3.json (host clock, never GitHub's created_at)
+[PASS] DF5.4-C7 (DF3.4, §8 step 5 — approval) 1ms
+    approved (decidedAt=2026-09-18T02:49:51.924Z) strictly between bound completedAt and PR creation — extensions.approval from /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3.json; bound report rv-qds-20260918-cc93a3-2026-09-18t02-49-30-702z-gyiyex from /tmp/df54-e2e-red-reverify-0O0s/reverify/qds-20260918-cc93a3.jsonl (same selection discipline as C6)
+[PASS] DF5.4-C8 (DF5.2, §8 step 5 — PR) 0ms
+    runId, Issue: line and cost line present — frozen body /tmp/df54-e2e-red-reverify-0O0s/pr-body.txt (captured at freeze time — no live GitHub read)
+[FAIL] DF5.4-C9 (DF5.3, §8 step 5 — audit) 32ms
+    walker exit code 1; runs[qds-20260918-cc93a3] hop run-reverify: status evidence-mismatch — stderr tail: …l,"timestamp":"2026-09-19T11:42:13.726Z","duration":8,"status":"error","ref":"qds-20260918-cc93a3","refKind":"run-id","complete":false,"brokenHops":[{"hop":"run-reverify","status":"evidence-mismatch"}],"pr_fetch_ms":0,"per_hop_ms":{"pr-run":3,"run-issue":1,"run-cost":1,"run-credential":0,"run-box":1,"run-bundle":0,"run-reverify":1,"run-approval":0,"run-gate-evidence":0,"memory-retain-receipt":0}} ⏎  — walked scripts/qds-audit.ts --json qds-20260918-cc93a3 by runId against the frozen run of record (read-only evidence; hop 1 resolves locally, no network access)
+[PASS] DF5.4-C10 (DF2.8/DF2.11, §8 step 5 — cost) 3ms
+    ledger total 141082 µ$ over 5 events (hasEvents=true); record spendMicroUsd 2184 µ$ ≤ admitted ceiling 50000 µ$ — read CostLedger.openReadOnly /tmp/df54-e2e-red-reverify-0O0s/cost-ledger.db for qds-20260918-cc93a3 (recorded evidence; the gate never dispatches spend)
+[VOID] DF5.4-V1 (DF5.4 (step 6), §8 step 5 — memory) 0ms
+    VOID — OQ-4 unresolved — Hindsight has never booted on this host (arm64 libpq/openssl@3; :8888 collides with a local Jupyter); step-6 memory wiring is outside the v5 horizon
+
+Totals: 9 pass, 2 fail, 0 skip, 1 void (12 clauses)
+Blocking assertions:
+  DF5.4-C6 — bound report verdict=red (expected "green") — bound report rv-qds-20260918-cc93a3-2026-09-18t02-49-30-702z-gyiyex from /tmp/df54-e2e-red-reverify-0O0s/reverify/qds-20260918-cc93a3.jsonl (bound via extensions.approval.reportId — never the jsonl last line); PR stamp from /tmp/df54-e2e-red-reverify-0O0s/qds-20260918-cc93a3.json (host clock, never GitHub's created_at)
+  DF5.4-C9 — walker exit code 1; runs[qds-20260918-cc93a3] hop run-reverify: status evidence-mismatch — stderr tail: …l,"timestamp":"2026-09-19T11:42:13.726Z","duration":8,"status":"error","ref":"qds-20260918-cc93a3","refKind":"run-id","complete":false,"brokenHops":[{"hop":"run-reverify","status":"evidence-mismatch"}],"pr_fetch_ms":0,"per_hop_ms":{"pr-run":3,"run-issue":1,"run-cost":1,"run-credential":0,"run-box":1,"run-bundle":0,"run-reverify":1,"run-approval":0,"run-gate-evidence":0,"memory-retain-receipt":0}} ⏎  — walked scripts/qds-audit.ts --json qds-20260918-cc93a3 by runId against the frozen run of record (read-only evidence; hop 1 resolves locally, no network access)
+DF_GATE: FAIL

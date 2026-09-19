@@ -1353,7 +1353,22 @@ describe("buildIdFileInputs", () => {
       // PAIRING DEBT, declared per the DF1.10 playbook: this moves on the
       // branch tree only; the merge's publish + adoption ritual re-pins the
       // IMAGE pair, and this literal rides that same ritual.
-      "99af1da05614970c0bea63e28877bd947a63ba7d89c8fb2134217e82516f6f30",
+      //
+      // b3c30d0c: moved from 99af1da0 — ALREADY STALE ON `dev` BEFORE DF5.4
+      // cut its branch, verified the DF5.3 way: the whole working tree
+      // stashed, the digest recomputed on the clean dev checkout (7f4854fb)
+      // — b3c30d0c, byte-identical to the branch tree's. DF5.4 itself moved
+      // NOTHING in the walk (intersection of the branch's 56 changed files
+      // with the live `buildIdFileInputs` set: empty; the gate code, fixture,
+      // tests, story artifact and `.unlazy/` are all outside the COPY set).
+      // The mover is upstream of this branch — the DF3.8 margin merge
+      // (#267) landing after the 13th-pin adoption, the same
+      // landed-without-touching-this-literal shape #238 and DF5.3 hit. This
+      // adoption is the same-commit re-pin the ritual names, taken on the
+      // branch that happened to run the full suite next; no image republish
+      // is owed by it (no walked bytes changed here) — the next publisher's
+      // src_sha carries whatever dev hashes then.
+      "b3c30d0caa211e49ccb26f89b0e54ee4a3182fae7602aefa211246c0035f0e95",
     );
   });
 });

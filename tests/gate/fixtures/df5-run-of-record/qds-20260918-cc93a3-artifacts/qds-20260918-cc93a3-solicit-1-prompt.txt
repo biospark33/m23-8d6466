@@ -1,0 +1,16 @@
+Steering point: run_start.
+pipeline qds-audit-demo-chain run qds-20260918-cc93a3
+requestId: 894bcb72-837e-4560-9826-4aec24875c8d
+repoSlug: quantum-digital-solutions/qds-audit-demo
+issueId: 9
+issueUrl: https://github.com/Quantum-Digital-Solutions/qds-audit-demo/issues/9
+effectiveCeilingMicros: 50000
+phases: audit-demo-team(dispatch_task), audit-demo-commit(code)
+You are the resident orchestrator for this run. Reply with ONE JSON object and nothing else.
+Keep the reply at or under 1024 output tokens.
+The object must match exactly one member of this closed union:
+{"action":"proceed"}
+{"action":"retry","guidance":string}
+{"action":"select_roster","phase":string,"rosterId":string}
+{"action":"abort","reason":string}
+Each member may also carry an optional "note" string. No other actions, no other fields.
