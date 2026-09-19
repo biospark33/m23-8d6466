@@ -392,11 +392,37 @@ function removeLeaf(dir: string): void {
   }
 }
 
+/**
+ * How far below the bound `memory.peak` may sit on a genuine own-limit kill: one
+ * failing allocation's worth, since the charge that triggers the OOM is never
+ * added to `memory.current`. Sized to a THP fault (`HPAGE_PMD_SIZE`, 2 MiB on
+ * x86-64 and on arm64 with the 4 KiB granule — what the in-box hosts run),
+ * which is the only ROUTINE multi-page charge on this path;
+ * `MEMCG_CHARGE_BATCH` is 256 KiB. hugetlb is not charged through `memory.max`
+ * at all without its own controller, and a large kmalloc is capped well under
+ * this by `KMALLOC_MAX_CACHE_SIZE`.
+ *
+ * DO NOT GROW IT "to be safe". This is the one direction in which the peak
+ * conjunct can be DISARMED: at 2 MiB against a 64 MiB bound it admits peaks
+ * down to 96.9% of the limit, which still rejects the global-OOM victim the
+ * conjunct exists to catch (whose peak sits far below). At 16 MiB it would
+ * start passing those again, and the false `watchdog_kill` rows come back.
+ *
+ * SCALE-DEPENDENT, and stated so a fifth door does not rediscover it: the slack
+ * is a constant, so it loosens as a fraction as the bound shrinks. A story that
+ * lowers `residentRssBytes` below ~32 MiB — where 2 MiB exceeds 6% of it — must
+ * revisit this, e.g. as `min(2 MiB, bound / 16)`. Not now, at 512 MiB.
+ */
+const OOM_PEAK_SLACK_BYTES = 2 * 1024 * 1024;
+
 /** The kernel's account of one solicitation, read BEFORE the leaf is removed.
- *  `memory.peak` is a high-water mark; `memory.events`' `oom_kill` count is the
- *  kill itself. Both are best-effort reads — `memory.peak` needs kernel 5.19+,
- *  and a missing file must degrade the TELEMETRY, never the call. */
-function readLeaf(dir: string): { peakBytes: number; oomKilled: boolean } {
+ *  `memory.peak` is a high-water mark; the OOM verdict is the CONJUNCTION spelled
+ *  out in the body — `oom` (this leaf's own limit fired) AND a kill counter AND
+ *  the peak having reached the bound. `oom_kill` alone is exactly what that
+ *  conjunction exists to reject. Both files are best-effort reads —
+ *  `memory.peak` needs kernel 5.19+, and a missing file must degrade the
+ *  TELEMETRY, never the call. */
+function readLeaf(dir: string, boundBytes?: number): { peakBytes: number; oomKilled: boolean } {
   let peakBytes = 0;
   try {
     const n = Number(readFileSync(join(dir, "memory.peak"), "utf8").trim());
@@ -411,22 +437,73 @@ function readLeaf(dir: string): { peakBytes: number; oomKilled: boolean } {
       const m = new RegExp(`^${name} (\\d+)$`, "m").exec(events);
       return m === null ? 0 : Number(m[1]);
     };
-    // DISCRIMINATION, and it is not a detail: `oom_kill` counts processes in
-    // this cgroup killed by ANY kind of OOM killer — including the SYSTEM-WIDE
-    // one and an ancestor's limit. A `dispatch_task` worker ballooning in
-    // `supervisor/` can drive the box into global OOM, the kernel can pick pi,
-    // and `oom_kill` then reads 1 on a leaf whose `memory.peak` sits far BELOW
-    // its bound. Keying the verdict on that counter stops the resident for a
-    // bound it never crossed and files a `watchdog_kill` row whose own detail
-    // contradicts itself — and those rows are the evidence D4's month-1
-    // evaluator uses to demote tier 2.
+    // THE PREDICATE, stated from first principles rather than patched:
+    // "a process in THIS leaf was killed by the kernel BECAUSE THIS leaf hit
+    // THIS bound." That is TWO independent facts, and the kernel publishes both
+    // — in the counters, never in the exit shape:
     //
-    // The kernel already discriminates this exactly, so the engine does not
-    // re-derive it: `oom_group_kill` counts the GROUP kills this leaf's
-    // `memory.oom.group=1` produces (5.17+), and `oom` counts the times THIS
-    // cgroup hit ITS OWN limit and could not reclaim. Either is an own-limit
-    // event; `oom_kill` alone is not, and is kept for telemetry only.
-    oomKilled = counter("oom_group_kill") > 0 || counter("oom") > 0;
+    //   `oom`                        this leaf hit ITS OWN `memory.max` and
+    //                                could not reclaim. Raised only on the
+    //                                own-limit charge path (`mem_cgroup_oom`),
+    //                                never for a global or an ancestor's OOM.
+    //   `oom_kill` / `oom_group_kill`  a process in this leaf was KILLED by an
+    //                                OOM killer — ANY of them, own or global.
+    //
+    // NEITHER ALONE IS THE PREDICATE, and each one alone has already produced a
+    // false `watchdog_kill` here:
+    //   - `oom_kill` alone: a `dispatch_task` worker balloons, the box goes into
+    //     system-wide OOM, the kernel picks pi. The leaf reads a kill with
+    //     `memory.peak` far BELOW the bound.
+    //   - `oom_group_kill` alone: same scenario, and it is NOT own-limit-only
+    //     either — on a global OOM `oom_domain` is the root, so the kernel walks
+    //     up from the victim, finds THIS leaf's `oom.group=1`, group-kills it
+    //     and increments `oom_group_kill` HERE.
+    //   - `oom` alone: an own-limit event where the allocation failed gracefully
+    //     (`-ENOMEM`) and the task survived to exit on its own.
+    //
+    // THE CONJUNCTION is the predicate, and it needs no exit code at all. The
+    // exit shape (`signalCode`, 137, "did we send the SIGKILL") is a proxy for
+    // "was it killed" that cannot say BY WHOM — which is the whole
+    // discrimination — and every attempt to carry the verdict on it failed from
+    // a different door: a global kill, a graceful `-ENOMEM`, an assumed kill in
+    // `stop()`, and a `QDS_PI_BIN` free to exit 137 of its own accord. The
+    // counters answer both halves; nothing else is consulted.
+    //
+    // A THIRD FACT, because the two counters are INDEPENDENT and the
+    // conjunction alone only NARROWS the global-OOM false positive rather than
+    // removing it: pi takes a graceful `-ENOMEM` early in a solicitation
+    // (`oom` 1, survives), and later a `dispatch_task` worker drives the box
+    // into system-wide OOM and the kernel picks pi (`oom_kill` 1). Both
+    // counters are then set on this leaf and nothing in them says the two
+    // events are unrelated. That pairing is not exotic — global OOM happens
+    // exactly when the box is thrashing, and the near-bound resident is the
+    // likeliest victim.
+    //
+    // The discriminator is the high-water mark: an own-limit kill cannot happen
+    // below the limit, so `memory.peak` must have REACHED the bound, while a
+    // global victim's peak sits under it. Applied only when both figures are
+    // actually available — a pre-5.19 kernel has no `memory.peak` and reads 0
+    // here, and suppressing a real kill on a missing measurement would trade
+    // this false positive for a false negative, which is the worse direction.
+    //
+    // The peak comparison carries SLACK, and the slack is not defensive
+    // padding: `memory.peak` tracks `memory.current`, and the charge that
+    // TRIGGERS the OOM is the one that FAILS, so it is never added to
+    // `current`. At the moment of the kill, usage sits below `memory.max` by up
+    // to the size of the failing allocation — ordinary page charges come in
+    // `MEMCG_CHARGE_BATCH` units (64 pages, 256 KiB), but a THP fault charges
+    // 2 MiB in one go. A strict `>=` therefore reports a genuine own-limit kill
+    // as a routine degrade whenever the last charge was large, which is the
+    // direction the missing-measurement escape above exists to avoid. The false
+    // positive this conjunct targets is a peak sitting FAR below the bound (a
+    // global victim picked while nowhere near its own limit), not one 2 MiB
+    // short. (`boundBytes` is what we WROTE; the kernel `PAGE_ALIGN`s
+    // `memory.max` upward, which moves the real limit away from the peak — the
+    // safe direction, so no adjustment is needed for it.)
+    const ownLimit = counter("oom") > 0 && (counter("oom_kill") > 0 || counter("oom_group_kill") > 0);
+    const reachedBound =
+      peakBytes === 0 || boundBytes === undefined || peakBytes >= boundBytes - OOM_PEAK_SLACK_BYTES;
+    oomKilled = ownLimit && reachedBound;
   } catch {
     /* no memory.events means no kill this layer can attest to */
   }
@@ -958,20 +1035,20 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
    * two paths that can reach it — the call's own `finally`, or `stop()` when it
    * resumes first — with `currentLeaf` as the ownership handle.
    *
-   * `killed` says whether the process died by SIGNAL. It is ANDed with the
-   * kernel's own-limit counters: the counters say the limit fired, this says
-   * the process died of it (an own-limit `oom` can be a graceful -ENOMEM the
-   * task survives). A `stop()` kill passes `true` and is harmless — on a stop
-   * that is not a bound breach the counters are zero and the AND is false.
+   * The OOM verdict takes NO argument from this layer: `readLeaf`'s counter
+   * conjunction is the whole predicate (see its comment). An earlier shape
+   * ANDed it with "did the process die by signal", which is a proxy for "was it
+   * killed" that cannot say BY WHOM — and it counted OUR OWN `stop()` SIGKILL
+   * as the kernel's. The counters answer both halves; the exit shape answers
+   * neither.
    *
    * Every step is best-effort: telemetry must never turn a completed call into
    * a throw, and a leaf that outlives its call is a warn, not a failure.
    */
-  const teardownLeaf = (dir: string, killed: boolean): void => {
+  const teardownLeaf = (dir: string): void => {
     const t1 = performance.now();
     try {
-      const account = readLeaf(dir);
-      lastMem = { ...account, oomKilled: account.oomKilled && killed, boundBytes: boundBytes ?? 0 };
+      lastMem = { ...readLeaf(dir, boundBytes), boundBytes: boundBytes ?? 0 };
     } catch (err) {
       warn(`resident cgroup accounting read failed: ${errMsg(err)}`);
     }
@@ -1063,17 +1140,6 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     // solicitation can never report the previous one's memory.peak.
     let leafDir: string | null = null;
 
-    // DF3.6b (rebase review, finding 3): an own-limit `oom` event is NOT by
-    // itself a kill — when an allocation can fail gracefully the kernel returns
-    // -ENOMEM and the task survives. pi can take that, finish, exit 0, and the
-    // call can still reject afterwards on a reply-artifact persist failure or a
-    // provider 429. Reporting `oomKilled` on those rejections lands a
-    // `watchdog_kill` row with `status:"stopped"` / `exitStatus:"overflow"` for
-    // a host-side persistence fault — and those rows are D4's tier-2 demotion
-    // evidence. Only the signal-death branch below can be a kill, so the
-    // verdict is ANDed with it: the kernel's counters say the limit fired, this
-    // flag says the process actually died of it.
-    let killedBySignal = false;
     if (cgroupRoot !== null && boundBytes !== undefined) {
       const t0 = performance.now();
       leafSetupMs = 0;
@@ -1213,7 +1279,6 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
       // otherwise the kill would fall into the generic non-zero branch and skip
       // both the "transient" classification and the quarantine.
       if (proc.exitCode === null || proc.signalCode !== null || proc.exitCode === 137) {
-        killedBySignal = true;
         // Killed by signal — the native timeout's SIGKILL, stop(), or an
         // external kill. S2-8 (round 7): the CC-1 ExitStatus enum cannot widen,
         // so a PLANNED stop() kill is recorded "transient" here — deliberately
@@ -1306,7 +1371,7 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
         // `resident_cgroup` line, and then warned a spurious ENOENT.
         if (currentLeaf === leafDir) {
           currentLeaf = null;
-          teardownLeaf(leafDir, killedBySignal);
+          teardownLeaf(leafDir);
         }
         leafDir = null;
       }
@@ -1346,25 +1411,17 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
         if (current === proc) current = null;
         // Finish the interrupted call's teardown rather than racing it: the
         // call's own `finally` still has streams to drain, and a caller that
-        // exits on `await stop()` must not leave a live leaf behind.
-        // Finish the interrupted call's teardown rather than racing it — and
-        // through the SAME helper, so the accounting is read before the leaf is
-        // removed and the observability line carries real values. `stop()` is a
-        // signal death by construction (it SIGKILLs), so `killed` is true; the
-        // kernel's counters decide whether that was the bound firing.
+        // exits on `await stop()` must not leave a live leaf behind. Ownership
+        // is the clearing of `currentLeaf` — whoever gets there first performs
+        // the whole teardown, the other skips.
         const leaf = currentLeaf;
         if (leaf !== null) {
           currentLeaf = null;
-          // `killed` is the child's ACTUAL end, read off the settled handle —
-          // not an assumed `true` because we sent a signal. A child that exited
-          // on its own an instant before our SIGKILL landed did not die of the
-          // bound, and assuming otherwise re-opens the graceful-`-ENOMEM` false
-          // positive through the stop path: a leaf carrying an own-limit `oom`
-          // counter would report `oomKilled: true` for a Ctrl-C. Same
-          // discriminator the call side uses.
-          const diedBySignal =
-            proc.exitCode === null || proc.signalCode !== null || proc.exitCode === 137;
-          teardownLeaf(leaf, diedBySignal);
+          // No exit-shape argument: the kernel's counters decide, and OUR
+          // SIGKILL increments none of them. A stop that is not a bound breach
+          // therefore reads `oomKilled: false` on its own evidence rather than
+          // on a flag this layer has to get right.
+          teardownLeaf(leaf);
         }
       } finally {
         LIVE_SESSION_PATHS.delete(sessionPath);

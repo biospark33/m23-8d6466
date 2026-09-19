@@ -67,7 +67,7 @@ is sent by the engine and no sample is taken — the journal records `resident.e
 and a `residentTripwire` row `{runId, cause:"watchdog_kill", phase, detail}` whose `detail` carries
 the `memory.peak` reading and the bound it crossed, the solicitation's cgroup is removed, and
 **every remaining phase and gate executes on the deterministic path**. Observable artifacts: the
-harvested journal, and `memory.events`' `oom_kill` count read before removal.
+harvested journal, and `memory.events`' counters read before removal — the verdict is the CONJUNCTION `oom > 0 && (oom_kill > 0 || oom_group_kill > 0)`, not `oom_kill` alone (Dev Agent Record ruling 8; amended 2026-09-19).
 
 **This slice runs live, and it runs in-box.** It is a `qds-live-e2e` roster-**tier-4** assertion
 against a real exe.dev box and real OpenRouter spend, per
@@ -203,7 +203,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 | Trigger | Status | E2E Test | Follow-Up |
 |---------|--------|----------|-----------|
 | per-solicitation cgroup create + `memory.max` write at spawn | in-scope | the **dedicated in-box dispatch** (E2E Slice — the tier-2-gated `fleet run` round under `qds-run@.service`; the kernel is the enforcer and no host-side test can prove an OOM-kill; **not** the host-side `tier4-resident.live.test.ts`, whose every leg runs `pipeline-run.ts` on the darwin operator host) | — |
-| `memory.peak` / `memory.events` read + cgroup removal after the call | in-scope | `tests/fleet/resident.test.ts` (fs-level, host-side) + the live round | — |
+| `memory.peak` / `memory.events` read + cgroup removal after the call | in-scope | `tests/fleet/resident-cgroup.test.ts` (fs-level, host-side; the file that shipped — see Files to Modify) + the live round | — |
 | one-time delegated-subtree split at engine start | in-scope | `tests/fleet/resident.test.ts` | — |
 | `Delegate=memory` present in the shipped unit | in-scope | `oci/exedev/Dockerfile` build-time scan + `tests/providers/exedev/image-assets.test.ts` | — |
 | spend ceiling / iteration bound | out-of-scope | — | **DF3.6a** |
@@ -216,7 +216,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 |-----------|-------------------------------|-------------------------|
 | cgroup delegation | `Delegate=memory` on `oci/exedev/systemd/qds-run@.service` (DF2.10's unit; systemd 255, cgroup v2 unified). Delegation is what chowns the unit's cgroup directory, `cgroup.procs` and `cgroup.subtree_control` to `User=exedev`, so the engine can create the resident's child cgroup **without root, without D-Bus and without polkit** | build-time: DF2.10's Dockerfile unit scan gains a positive `grep -qE '^Delegate=memory$'` assertion, the same shape as the existing `RuntimeDirectoryPreserve=yes` check (the unit scan in `oci/exedev/Dockerfile`), so the directive cannot be silently dropped. Run time: absent delegation ⇒ resident **not started** (AC3) |
 | resident memory bound | cgroup v2 `memory.max` on a per-solicitation child cgroup created by the fleet spawn path, valued from the manifest's `residentRssBytes` (validated by DF3.6a) | kernel-enforced. The engine passes the **value**; it never signals, never samples, and never learns a pid. The live round asserts an allocator past the bound is OOM-killed and the run still completes deterministically |
-| resident memory telemetry | `memory.peak` and `memory.events` (`oom_kill`) read from that cgroup before it is removed | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the bounds-check log line and `detail` on the `watchdog_kill` row |
+| resident memory telemetry | `memory.peak` and `memory.events` (`oom` **and** `oom_kill`/`oom_group_kill` — the conjunction, ruling 8; `oom_kill` alone counts a global OOM that merely picked pi) read from that cgroup before it is removed | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the bounds-check log line and `detail` on the `watchdog_kill` row |
 | image digest pin | DF2.10's pin ritual — the unit is **baked into the image**, so this story's one-directive change requires a rebuild, a re-publish and a moved digest pin, not just a file edit | see the DoD item; a green local gate against a stale pinned image is exactly the failure this prerequisite exists to prevent |
 
 ## Technical Notes
@@ -664,6 +664,60 @@ and records `{...e}` (which carries `bound`/`allowed`/`cause`/`exitCode`) on the
    config-level precedent: under-refusal only, never over-refusal, so a duplicate-name manifest
    spends MORE solicitations than intended but can never refuse a legitimate one. **Owner: a
    follow-up on DF3.6a's ledger, not this story.**
+
+### Ruling 8 — the OOM verdict is a counter CONJUNCTION, and nothing else
+
+Recorded because this predicate was corrected four times from four different doors before it was
+specified rather than patched, and the next reader should find the specification, not the scar
+tissue. The claim the verdict makes is *"a process in THIS leaf was killed by the kernel BECAUSE
+THIS leaf hit THIS bound"* — two independent facts, both published by the kernel in
+`memory.events`:
+
+| fact | counter |
+|------|---------|
+| this leaf hit **its own** `memory.max` and could not reclaim | `oom` — raised only on the own-limit charge path, never for a global or an ancestor's OOM |
+| a process in this leaf was **killed** by an OOM killer | `oom_kill` / `oom_group_kill` — **any** OOM killer, own or global |
+
+**Neither alone is the predicate**, and each alone shipped a false `watchdog_kill` here: `oom_kill`
+alone counts a system-wide OOM that merely picked pi; `oom_group_kill` alone is **not**
+own-limit-only either, because on a global OOM the kernel's `oom_domain` is the root, so it walks up
+from the victim, finds this leaf's `oom.group=1`, group-kills it and increments `oom_group_kill`
+*here*; and `oom` alone can be a graceful `-ENOMEM` the task survives.
+
+**RULED: `oomKilled = oom > 0 && (oom_kill > 0 || oom_group_kill > 0) && memory.peak reached the
+bound`, from the kernel's own record alone.** The two counters are INDEPENDENT, so the conjunction
+of them only NARROWS the global-OOM false positive: a solicitation that took a graceful `-ENOMEM`
+early (`oom` 1, survived) and was LATER picked by the system-wide OOM killer (`oom_kill` 1) sets
+both, and nothing in the counters says the two events are unrelated — a pairing that is not exotic,
+since global OOM happens exactly when the box is thrashing and the near-bound resident is the
+likeliest victim. The third fact closes it: an own-limit kill cannot happen BELOW the limit, so
+`memory.peak` must have reached the bound, while a global victim's sits under it. **The comparison
+carries 2 MiB of slack, and the slack is part of the rule rather than padding:** `memory.peak`
+tracks `memory.current`, and the charge that TRIGGERS the OOM is the one that FAILS, so it is never
+added to `current` — at the kill, usage sits below `memory.max` by up to the failing allocation,
+which is 2 MiB for a THP fault (ordinary page charges come in 256 KiB batches). A strict comparison
+would report a genuine own-limit kill as a routine degrade whenever the last charge was large. The
+false positive being targeted is a peak sitting FAR below the bound, not one 2 MiB short.
+
+**The slack must not be grown "to be safe", and it is SCALE-DEPENDENT.** It is the one direction in
+which the peak conjunct can be disarmed: 2 MiB against a 512 MiB bound (or the 64 MiB fixture) still
+rejects the global-OOM victim, whose peak sits far below; at 16 MiB it would start passing those
+again and the false `watchdog_kill` rows return. Because it is a constant it loosens as a fraction
+as the bound shrinks — **a future story that lowers `residentRssBytes` below ~32 MiB, where 2 MiB
+exceeds 6% of it, must revisit this** (e.g. `min(2 MiB, bound / 16)`). Recorded here so it is not
+rediscovered from a fifth door. The peak conjunct is applied only when both figures are available — a pre-5.19 kernel has no `memory.peak` and reads
+0, and suppressing a real kill on a missing measurement would trade this false positive for a false
+negative, which is the worse direction.
+
+**Accepted and stated rather than hidden:** an ANCESTOR-limit OOM raises `oom` on the ancestor, not
+on this leaf (`memory.events` aggregates upward, not down), so it reads false here. That is correct
+under AC2 — the bound this story enforces is the leaf's — but it means ancestor pressure is
+invisible to this verdict.
+The process's exit shape — `signalCode`, exit 137, "did we send the SIGKILL" — is deliberately NOT
+consulted: it is a proxy for *was it killed* that cannot say *by whom*, which is the entire
+discrimination, and it counted this layer's own `stop()` SIGKILL as the kernel's. The four doors it
+failed through, kept as the reason the rule is stated this strongly: a global kill, a graceful
+`-ENOMEM`, an assumed kill in `stop()`, and a `QDS_PI_BIN` free to exit 137 of its own accord.
 
 ### Ruling 6 — M1's "skipped, not faked" clause
 

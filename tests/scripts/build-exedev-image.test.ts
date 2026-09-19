@@ -1360,22 +1360,8 @@ describe("buildIdFileInputs", () => {
       // branch tree only; the merge's publish + adoption ritual re-pins the
       // IMAGE pair, and this literal rides that same ritual.
       //
-      // b3c30d0c: moved from 99af1da0 — ALREADY STALE ON `dev` BEFORE DF5.4
-      // cut its branch, verified the DF5.3 way: the whole working tree
-      // stashed, the digest recomputed on the clean dev checkout (7f4854fb)
-      // — b3c30d0c, byte-identical to the branch tree's. DF5.4 itself moved
-      // NOTHING in the walk (intersection of the branch's 56 changed files
-      // with the live `buildIdFileInputs` set: empty; the gate code, fixture,
-      // tests, story artifact and `.unlazy/` are all outside the COPY set).
-      // The mover is upstream of this branch — the DF3.8 margin merge
-      // (#267) landing after the 13th-pin adoption, the same
-      // landed-without-touching-this-literal shape #238 and DF5.3 hit. This
-      // adoption is the same-commit re-pin the ritual names, taken on the
-      // branch that happened to run the full suite next; no image republish
-      // is owed by it (no walked bytes changed here) — the next publisher's
-      // src_sha carries whatever dev hashes then.
-      //
       // PLACEHOLDER_PREFIX: moved from b3c30d0c by DF3.6b, by FOUR walked
+      "PLACEHOLDER_WALK_DIGEST",
       // tracked inputs — `oci/exedev/systemd/qds-run@.service`
       // (+`Delegate=memory`), `src/fleet/resident.ts` (the whole cgroup
       // mechanism), `src/phase-engine/steering.ts` (the OOM writer) and
@@ -1396,7 +1382,11 @@ describe("buildIdFileInputs", () => {
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
+<<<<<<< HEAD
       "PLACEHOLDER_WALK_DIGEST",
+=======
+      "05d922c43a078e189cf61db1a57ba5aadd34dcb0780c146b72d37e8bdff23cb1",
+>>>>>>> 2293dd53 (fix(df3.6b): specify the OOM verdict instead of patching it — counter conjunction plus a peak floor)
     );
   });
 });

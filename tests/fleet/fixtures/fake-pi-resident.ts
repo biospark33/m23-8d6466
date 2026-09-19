@@ -106,10 +106,16 @@ if (sessionFlag !== -1) {
 const forcedExit = process.env.QDS_FAKE_PI_EXIT;
 if (forcedExit !== undefined) process.exit(Number(forcedExit));
 
-// DF3.6b: die by SIGNAL, the way a cgroup OOM kill ends a process. The
-// resident's own-limit verdict requires BOTH the kernel's counters AND an
-// actual signal death, so a test that stages counters on a cleanly-exiting
-// child is asserting the negative control, not the kill.
+// DF3.6b: die by SIGNAL, the way a cgroup OOM kill ends a process.
+//
+// THIS DOES NOT AFFECT THE VERDICT, and the note is here because an earlier
+// version of it said the opposite and would have talked the next reader
+// straight back into the bug: the resident's own-limit verdict is the kernel's
+// counters plus the peak, and it does NOT consult the process end at all
+// (story ruling 8). A test may stage counters on a cleanly-exiting child and
+// still be asserting a KILL. This knob exists so the kill rows exercise a
+// realistic process end alongside realistic counters, not because the end is
+// what decides.
 if (process.env.QDS_FAKE_PI_SIGKILL !== undefined) {
   process.kill(process.pid, "SIGKILL");
 }

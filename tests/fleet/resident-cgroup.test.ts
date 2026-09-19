@@ -413,6 +413,10 @@ describe("DF3.6b — the per-solicitation leaf: armed with the bound, removed af
       if (leaves.length === 1 && existsSync(join(root, leaves[0] as string, "memory.peak"))) break;
       await Bun.sleep(5);
     }
+    // Falling through the poll without the staged file would make every
+    // assertion below hold vacuously — the same defect class as an
+    // under-budgeted timeout. Assert the precondition rather than assume it.
+    expect(readdirSync(root).some((e) => existsSync(join(root, e, "memory.peak")))).toBe(true);
     await spawn.stop();
     await inFlight;
     // The accounting survived the teardown — a racing implementation reports 0.
@@ -784,8 +788,11 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
    *  way production takes it: from the live leaf, before removal. */
   async function verdictFor(
     events: string,
-    opts: { signalDeath?: boolean } = {},
+    opts: { signalDeath?: boolean; peakBase?: string } = {},
   ): Promise<{ peakBytes: number; oomKilled: boolean } | null> {
+    // `signalDeath` drives the CHILD's end, not the verdict: the verdict is the
+    // counter conjunction alone. Kept so the kill cases exercise a realistic
+    // process end alongside realistic counters.
     const root = useRoot(fakeRoot(`events-${Math.random().toString(36).slice(2)}`));
     const dir = caseDir("events-session");
     const spawn = enabled(
@@ -800,6 +807,7 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
           QDS_FAKE_PI_EVENTS: events,
           QDS_FAKE_PI_EVENTS_ROOT: root,
           ...(opts.signalDeath === true ? { QDS_FAKE_PI_SIGKILL: "1" } : {}),
+          ...(opts.peakBase === undefined ? {} : { QDS_FAKE_PI_PEAK_BASE: opts.peakBase }),
         }),
         residentRssBytes: BOUND,
       }),
@@ -831,6 +839,19 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     expect(v?.oomKilled).toBe(true);
   });
 
+  test("a GLOBAL OOM that GROUP-KILLS through this leaf is still not this bound firing", async () => {
+    // The case `oom_group_kill` alone gets wrong, and the reason the verdict is
+    // a CONJUNCTION rather than a better-chosen single counter. On a global OOM
+    // the kernel's `oom_domain` is the root, so it walks up from the victim,
+    // finds THIS leaf's `oom.group=1`, group-kills it and increments
+    // `oom_group_kill` HERE — on a leaf whose own limit never fired. `oom`
+    // stays 0, which is what distinguishes it.
+    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\noom_group_kill 1\n", {
+      signalDeath: true,
+    });
+    expect(v?.oomKilled).toBe(false);
+  });
+
   test("an own-limit OOM on a pre-5.17 kernel (no oom_group_kill line) still counts", async () => {
     const v = await verdictFor("low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n", { signalDeath: true });
     expect(v?.oomKilled).toBe(true);
@@ -848,6 +869,200 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     const v = await verdictFor("low 0\nhigh 4\nmax 9\noom 1\noom_kill 0\noom_group_kill 0\n");
     expect(v).not.toBeNull();
     expect(v?.oomKilled).toBe(false);
+  });
+
+  test("a VOLUNTARY exit 137 is not proof of a kill — 137 is an exit code any binary can choose", async () => {
+    // CodeRabbit, PR #264 round 2, kept as the REGRESSION row for the door it
+    // came in through. Its counters are deliberately the graceful-`-ENOMEM`
+    // shape; what differs is the exit code. A verdict that reads the exit shape
+    // at all — and every version before ruling 8 did — files a `watchdog_kill`
+    // here, because `QDS_PI_BIN` is free to exit 137 and DF3.3's branch treats
+    // 137 as a signal death (a Bun-quirk fallback, correct for ITS purpose of
+    // session quarantine). Under the conjunction the exit code is not consulted
+    // and `oom_kill` is 0, so the answer falls out of the counters. The row
+    // exists so a correction #5 that re-reads the exit shape fails here too.
+    const root = useRoot(fakeRoot("voluntary-137"));
+    const dir = caseDir("voluntary-137-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-137",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+          // The limit fired and reclaim failed — but the process chose to exit.
+          QDS_FAKE_PI_EVENTS: "low 0\nhigh 1\nmax 3\noom 1\noom_kill 0\noom_group_kill 0\n",
+          QDS_FAKE_PI_EXIT: "137",
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT).catch(() => undefined);
+      expect(spawn.lastMemory()).not.toBeNull();
+      expect(spawn.lastMemory()?.oomKilled).toBe(false);
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("the TIMEOUT's own SIGKILL is not the kernel's — a wedged pi on a leaf with a graceful `oom` is a timeout", async () => {
+    // Finding 2A. pi takes an own-limit `-ENOMEM`, survives, then wedges; the
+    // native solicit timeout SIGKILLs it. Any verdict keyed on "did it die by
+    // signal" reads true here and files a TIMEOUT as a `watchdog_kill` with
+    // `exitStatus:"overflow"`. The counters do not: we killed it, and our
+    // SIGKILL increments no OOM counter.
+    const root = useRoot(fakeRoot("timeout-kill"));
+    const dir = caseDir("timeout-kill-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-tmo",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_MODE: "hang",
+          // 3000, not 150: at 150 ms the SIGKILL lands during the fixture's own
+          // startup, BEFORE it stages `memory.events`, so the leaf is empty at
+          // teardown and `oomKilled` reads false for the WRONG reason — the test
+          // then passes against the very code it exists to catch. Measured: at
+          // 150 ms it passes pre-rewrite; at 3000 ms it fails pre-rewrite with
+          // `oomKilled: true`, which is the regression.
+          QDS_RESIDENT_TIMEOUT_MS: "3000",
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+          QDS_FAKE_PI_EVENTS: "low 0\nhigh 2\nmax 4\noom 1\noom_kill 0\noom_group_kill 0\n",
+          QDS_FAKE_PI_PEAK_BASE: "8192",
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      const err = await spawn.caller.call(PROMPT).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect((err as Error).message).toContain("timed out");
+      // The staging LANDED — without this a future timing shift silently
+      // re-empties the leaf and the assertion below holds for the wrong reason,
+      // which is exactly how this test was vacuous when first written.
+      expect(spawn.lastMemory()?.peakBytes).toBe(8192);
+      expect(spawn.lastMemory()?.oomKilled).toBe(false);
+    } finally {
+      await spawn.stop();
+    }
+  }, 20_000);
+
+  test("stop()'s own SIGKILL on a LIVE child is not the kernel's either", async () => {
+    // Finding 2B. The operator interrupts; `stop()` SIGKILLs a live child, so
+    // the settled handle reads `signalCode: "SIGKILL"`. Reading the child's end
+    // off the handle distinguishes only the child that had ALREADY exited — in
+    // the ordinary Ctrl-C we killed it, and an exit-shape verdict reads true.
+    const root = useRoot(fakeRoot("stop-kill"));
+    const dir = caseDir("stop-kill-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-stopkill",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+          QDS_FAKE_PI_EVENTS: "low 0\nhigh 2\nmax 4\noom 1\noom_kill 0\noom_group_kill 0\n",
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    const inFlight = spawn.caller.call(PROMPT).catch(() => undefined);
+    for (let i = 0; i < 400; i += 1) {
+      const leaves = readdirSync(root).filter((e) => e.startsWith("resident."));
+      if (leaves.length === 1 && existsSync(join(root, leaves[0] as string, "memory.events"))) break;
+      await Bun.sleep(5);
+    }
+    // Falling through the poll without the staged file would make every
+    // assertion below hold vacuously — the same defect class as an
+    // under-budgeted timeout. Assert the precondition rather than assume it.
+    expect(readdirSync(root).some((e) => existsSync(join(root, e, "memory.events")))).toBe(true);
+    await spawn.stop();
+    await inFlight;
+    expect(spawn.lastMemory()).not.toBeNull();
+    expect(spawn.lastMemory()?.oomKilled).toBe(false);
+  }, 20_000);
+
+  test("a REAL own-limit kill that surfaces as exit 137 with a null signalCode is still a kill", async () => {
+    // Finding 3, the other direction. The file guards for a Bun quirk in which
+    // a SIGKILL surfaces as 128+9 with no `signalCode`. A verdict keyed on the
+    // exit shape has to choose: admit 137 and accept the voluntary-137 false
+    // positive, or exclude it and MISS a real kill — a resident that blows its
+    // bound every solicitation while the run records a routine degrade. The
+    // counters need no choice: `oom_kill` is 1 here and 0 in the voluntary case.
+    const root = useRoot(fakeRoot("quirk-137"));
+    const dir = caseDir("quirk-137-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-quirk",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+          QDS_FAKE_PI_EVENTS: "low 0\nhigh 3\nmax 7\noom 1\noom_kill 1\noom_group_kill 1\n",
+          QDS_FAKE_PI_EXIT: "137",
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT).catch(() => undefined);
+      expect(spawn.lastMemory()?.oomKilled).toBe(true);
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("an own-limit kill on a leaf whose process exited CLEANLY still reads as a kill", async () => {
+    // The property ruling 8 asserts, pinned directly: the verdict does not
+    // consult the process end AT ALL. A correction #5 that re-introduces an
+    // exit-shape conjunction — for any reason, however locally sensible — fails
+    // this test, which is the point of it. (The combination is reachable: with
+    // `oom.group=1` the kernel kills the tree, but a shell wrapper or a
+    // supervising child can still report a clean status to the parent.)
+    const v = await verdictFor("low 0\nhigh 3\nmax 6\noom 1\noom_kill 1\noom_group_kill 1\n");
+    expect(v?.oomKilled).toBe(true);
+  });
+
+  test("a graceful `oom` EARLIER plus a global OOM kill LATER is still not this bound firing", async () => {
+    // The residual the two-counter conjunction only NARROWS: the counters are
+    // independent, so a solicitation that took a graceful `-ENOMEM` (`oom` 1,
+    // survived) and was LATER picked by the system-wide OOM killer (`oom_kill`
+    // 1) sets both, and nothing in them says the two events are unrelated. That
+    // pairing is not exotic — global OOM happens exactly when the box is
+    // thrashing, and the near-bound resident is the likeliest victim. The third
+    // fact closes it: an own-limit kill cannot happen BELOW the limit, so
+    // `memory.peak` must have reached the bound, and a global victim's sits
+    // under it. Here the peak is 4096 against a 64 MiB bound.
+    const v = await verdictFor("low 0\nhigh 5\nmax 9\noom 1\noom_kill 1\noom_group_kill 0\n", {
+      signalDeath: true,
+      peakBase: "4096",
+    });
+    expect(v?.peakBytes).toBe(4096);
+    expect(v?.oomKilled).toBe(false);
+  });
+
+  test("a real kill whose peak stopped ONE ALLOCATION short of the bound still counts", async () => {
+    // The peak conjunct needs slack, and the slack is not padding: `memory.peak`
+    // tracks `memory.current`, and the charge that TRIGGERS the OOM is the one
+    // that FAILS — it is never added to `current`. At the kill, usage sits below
+    // `memory.max` by up to the failing allocation, which for a THP fault is
+    // 2 MiB. A strict `>=` reports that genuine kill as a routine degrade.
+    // Here the peak is exactly `BOUND - 2 MiB`.
+    const v = await verdictFor("low 0\nhigh 8\nmax 12\noom 1\noom_kill 1\noom_group_kill 1\n", {
+      signalDeath: true,
+      peakBase: String(BOUND - 2 * 1024 * 1024),
+    });
+    expect(v?.peakBytes).toBe(BOUND - 2 * 1024 * 1024);
+    expect(v?.oomKilled).toBe(true);
   });
 
   test("a clean call reads false on every counter", async () => {
