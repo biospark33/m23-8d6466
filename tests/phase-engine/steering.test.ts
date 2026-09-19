@@ -1852,3 +1852,134 @@ describe("resident cost attribution (DF2.12)", () => {
     expect(c.lastAttributionErrorReason).toBeNull();
   });
 });
+
+// ─── DF3.6b: the kernel memory bound's engine-side classification ────────────
+
+describe("DF3.6b AC1/AC5 — a kernel OOM-kill stops the resident and says so", () => {
+  /** A call that dies the way a cgroup OOM-kill dies: a SIGNAL death, which at
+   *  the process level is indistinguishable from a timeout or an external
+   *  kill. The kernel's own account (`lastMemory`) is the discriminator. */
+  const signalDeath = () => new Error("resident pi killed by signal SIGKILL before exit");
+
+  test("status is `stopped` and exitStatus `overflow` — never `degraded` beside `overflow`", async () => {
+    const s = scriptedCaller([{ error: signalDeath() }]);
+    const breaches: unknown[] = [];
+    const tripwires: ResidentTripwire[] = [];
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      onTripwire: (t) => tripwires.push(t),
+      onBoundBreach: (e) => {
+        breaches.push(e);
+      },
+      // DISTINCT values, deliberately: a shared number lets the assertion below
+      // pass against a `detail` that reports only one field, or substitutes one
+      // for the other.
+      lastMemory: () => ({ peakBytes: 70_254_592, oomKilled: true, boundBytes: 67_108_864 }),
+    });
+    expect(await c.solicit("post_gate_failure", ctx({ phase: "code" }))).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("stopped");
+    expect(c.telemetry.exitStatus).toBe("overflow");
+    // An implementation leaning on the "degraded" status gate instead of the
+    // stop() latch leaves the journal reading `degraded` beside `overflow` — a
+    // combination no story owns, and the negative control AC5 names.
+    expect(c.telemetry.status).not.toBe("degraded");
+    expect(breaches).toEqual([
+      {
+        bound: "rss",
+        allowed: false,
+        cause: "watchdog_kill",
+        runId: "run-1",
+        requestId: "req-1",
+        phase: "code",
+      },
+    ]);
+    expect(tripwires).toHaveLength(1);
+    expect(tripwires[0]?.cause).toBe("watchdog_kill");
+    // The NUMERIC contract: the row names the peak and the bound it crossed,
+    // so an implementation whose assertions pass with any bound value cannot
+    // satisfy this one.
+    expect(tripwires[0]?.detail).toContain("70254592"); // the measured peak
+    expect(tripwires[0]?.detail).toContain("67108864"); // the bound it crossed
+    expect(c.telemetry.tripwires.map((t) => t.cause)).toEqual(["watchdog_kill"]);
+  });
+
+  test("no further solicitation is issued after the kill — the status gate holds", async () => {
+    const s = scriptedCaller([{ error: signalDeath() }]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      lastMemory: () => ({ peakBytes: 1, oomKilled: true, boundBytes: 2 }),
+    });
+    await c.solicit("run_start", ctx());
+    expect(s.calls()).toBe(1);
+    await c.solicit("run_end", ctx());
+    expect(s.calls()).toBe(1);
+  });
+
+  test("NEGATIVE CONTROL — the same signal death with NO kill on the leaf degrades, as it always did", async () => {
+    // Without this, the arm above would pass against an implementation that
+    // classified every call failure as an OOM — which would relabel every
+    // timeout and every unreachable resident a watchdog_kill.
+    const s = scriptedCaller([{ error: signalDeath() }]);
+    const breaches: unknown[] = [];
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      onBoundBreach: (e) => {
+        breaches.push(e);
+      },
+      lastMemory: () => ({ peakBytes: 4096, oomKilled: false, boundBytes: 67_108_864 }),
+    });
+    expect(await c.solicit("run_start", ctx())).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("degraded");
+    expect(c.telemetry.exitStatus).toBeNull();
+    expect(breaches).toEqual([]);
+    expect(c.telemetry.tripwires).toEqual([]);
+  });
+
+  test("NEGATIVE CONTROL — with no `lastMemory` dep at all (the pre-DF3.6b shape) nothing changes", async () => {
+    const s = scriptedCaller([{ error: signalDeath() }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.status).toBe("degraded");
+    expect(c.telemetry.exitStatus).toBeNull();
+  });
+
+  test("a THROWING lastMemory is a sidecar fault: it degrades, it never fails the solicitation", async () => {
+    const s = scriptedCaller([{ error: signalDeath() }]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      lastMemory: () => {
+        throw new Error("accounting read failed");
+      },
+    });
+    expect(await c.solicit("run_start", ctx())).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("degraded");
+  });
+
+  test("the OOM arm outranks the degrade arm even when the reply would otherwise be retried", async () => {
+    // Ordering is the assertion: an implementation writing "degraded" first and
+    // "stopped" second leaves the one-way latch pointing at the wrong value.
+    const s = scriptedCaller([{ error: signalDeath() }]);
+    const seen: string[] = [];
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      onBoundBreach: () => {
+        // Fired AFTER the enforcement writes, per DF3.6a's rule — so the
+        // observer already sees the settled status.
+        seen.push(c.telemetry.status);
+      },
+      lastMemory: () => ({ peakBytes: 9, oomKilled: true, boundBytes: 8 }),
+    });
+    await c.solicit("run_start", ctx());
+    expect(seen).toEqual(["stopped"]);
+    // `status` alone does NOT discriminate the inversion: writing "degraded"
+    // first and "stopped" second still reads "stopped" at breach time. The
+    // observable that does is the degradation reason, which the wrong order
+    // sets and the right one never touches.
+    expect(c.lastDegradationReason).toBeNull();
+  });
+});

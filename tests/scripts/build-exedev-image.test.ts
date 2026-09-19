@@ -1083,10 +1083,16 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      // 23edf4b9: the 2026-09-18 COPY-set convergence (five new COPYs for the
-      // engine's provider/swarmclaw reach — see the walk-digest note below).
-      "oci/exedev/Dockerfile": "23edf4b9838e9802c30f18f1c5b3aa148ae2214f77cc1e2485e712b77c4cc9c2",
-      "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
+      // 47e9b084 / 24958f40: DF3.6b. The unit gains `Delegate=memory` (the
+      // engine cannot create the resident's cgroup or write its `memory.max`
+      // as User=exedev without it) and the Dockerfile gains the positive
+      // `^Delegate=memory$` scan that fences it. Both are image inputs, so the
+      // published digest and DEFAULT_IMAGE_BUILD_ID are stale until the image
+      // is rebuilt and re-published — recorded as OPEN in the story's Dev Agent
+      // Record, because this re-pin is the OFFLINE half of DF2.10's ritual and
+      // the publish is the other.
+      "oci/exedev/Dockerfile": "47e9b084a1b8a47ee1ec9e74a32cceade2b57f47814966b80017575e3ed14761",
+      "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
     const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
@@ -1368,7 +1374,29 @@ describe("buildIdFileInputs", () => {
       // branch that happened to run the full suite next; no image republish
       // is owed by it (no walked bytes changed here) — the next publisher's
       // src_sha carries whatever dev hashes then.
-      "b3c30d0caa211e49ccb26f89b0e54ee4a3182fae7602aefa211246c0035f0e95",
+      //
+      // PLACEHOLDER_PREFIX: moved from b3c30d0c by DF3.6b, by FOUR walked
+      // tracked inputs — `oci/exedev/systemd/qds-run@.service`
+      // (+`Delegate=memory`), `src/fleet/resident.ts` (the whole cgroup
+      // mechanism), `src/phase-engine/steering.ts` (the OOM writer) and
+      // `scripts/pipeline-run.ts` (the bound hand-off and the arming refusal).
+      // `oci/exedev/Dockerfile` also changed in this story (the
+      // `^Delegate=memory$` unit-scan fence) and is NOT one of them: it is
+      // `deriveBuildId`'s own `field("dockerfile", …)`
+      // (`scripts/build-exedev-image.ts:652`), while THIS literal is computed
+      // strictly over `files()` — `buildIdFileInputs` (`:1544`) returns 89
+      // entries and the Dockerfile is absent from all of them. Verified by
+      // calling it directly rather than assumed; the grep-line edit added no
+      // COPY, so the walk set is unchanged at 89. Named precisely because a
+      // provenance note that blames a file which cannot move this hash sends
+      // the next re-pinner to bisect files that cannot move it (the same
+      // correction this ledger already carries above). Same failing-run
+      // receive, same-commit re-pin. THE PUBLISH IS STILL OWED:
+      // the unit is baked into a digest-pinned image, so a run against the
+      // currently pinned digest boots a unit with NO `Delegate=`, and the
+      // resident refuses to start (DF3.6b AC3). Recorded as open in that
+      // story's Dev Agent Record.
+      "PLACEHOLDER_WALK_DIGEST",
     );
   });
 });

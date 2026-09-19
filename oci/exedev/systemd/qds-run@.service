@@ -104,6 +104,28 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 UMask=0077
 
+# DF3.6b — CGROUP DELEGATION, and it is load-bearing, not hardening decoration.
+# The resident agent's memory bound is enforced by the KERNEL (`memory.max` on a
+# per-solicitation child cgroup rooted at pi's own pid), never sampled by the
+# engine. Creating that child cgroup and writing its `memory.max` requires the
+# unit's cgroup directory, `cgroup.procs` and `cgroup.subtree_control` to be
+# writable by `User=exedev` — which is exactly what `Delegate=` does, and it is
+# the ONLY mechanism that does it without root, without D-Bus and without
+# polkit. (`systemd-run --scope` needs the system manager over D-Bus, which a
+# `User=exedev` process inside a system unit cannot reach non-interactively.)
+#
+# SCOPED to `memory` on purpose: a bare `Delegate=yes` hands over every
+# controller the manager has, which is a far wider grant than one memory bound
+# needs. The engine enables `+memory` in its own subtree after moving itself
+# into a `supervisor/` leaf (cgroup v2's no-internal-processes rule).
+#
+# Absent this directive the resident is NOT STARTED (DF3.6b AC3 / INV-MEM-2):
+# the engine never runs an agent whose memory it cannot bound. That is why the
+# Dockerfile's unit scan asserts it POSITIVELY — a later edit that drops this
+# line does not fail loudly at boot, it silently disables the resident on every
+# run, and the image is where that regression has to be caught.
+Delegate=memory
+
 # THE ENGINE'S RUNTIME DIRECTORIES, and this unit is where they belong.
 #
 # MEASURED FAILURE, first live in-box round (2026-09-04): the engine died at

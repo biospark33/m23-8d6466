@@ -17,13 +17,25 @@
  * (:542-659); reply/usage come from its exported harvestPiStream (message_end
  * totals only, INV-COST-3). Rates come from resolveRate — never re-derived.
  */
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { redactSecrets, SECRET_KEY_RE } from "../../cli-anything/src/redact.ts";
 import { harvestPiStream } from "../../cli-anything/scripts/team-lead-driver.ts";
 import type { ExitStatus } from "../../cli-anything/src/types.ts";
-import { SOLICIT_TIMEOUT_MS, type ResidentCaller } from "../phase-engine/steering.ts";
+import { PlacementRefusedError, SOLICIT_TIMEOUT_MS, type ResidentCaller } from "../phase-engine/steering.ts";
 import { resolveRate, type RateSources } from "../phase-engine/roster/validate.ts";
 
 /**
@@ -113,6 +125,393 @@ async function collectBounded(
 const TRANSIENT_STDERR_RE =
   /\b429\b|rate.?limit|too many requests|\b5(?:00|02|03|04)\b|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed/i;
 
+// ─── DF3.6b: kernel-enforced memory bound (cgroup v2) ───────────────────────
+//
+// The engine passes a VALUE (`residentRssBytes`, engine-owned policy validated
+// by DF3.6a); this layer supplies the MECHANISM and nothing else — it never
+// chooses, defaults or clamps the bound (INV-MEM-1). Nothing here samples: the
+// kernel enforces `memory.max` on a per-solicitation leaf that contains only pi
+// and its descendants (INV-MEM-2 / AC2), and `memory.peak` is a kernel
+// high-water mark a poller could not match.
+
+/** The unified-hierarchy mount point. cgroup v2 only — v1's split hierarchy has
+ *  no `memory.max`, and a v1 box classifies unenforceable (INV-MEM-2). */
+const CGROUP_MOUNT = "/sys/fs/cgroup";
+
+/** The leaf the engine moves ITSELF into so `+memory` can be enabled on the
+ *  delegated root. cgroup v2's no-internal-processes rule forbids enabling a
+ *  controller in `cgroup.subtree_control` on a cgroup that directly holds
+ *  processes, and the unit's cgroup holds the engine (and, in-box, every
+ *  tier-3 `dispatch_task` worker — which is exactly why the bound is rooted at
+ *  pi's own leaf and never at the unit, AC2/F064). */
+const SUPERVISOR_LEAF = "supervisor";
+
+/**
+ * DF3.6b AC3 / INV-MEM-2: the bound cannot be ENFORCED here — no delegation, no
+ * `memory` controller, not cgroup v2, an unwritable `memory.max`. The resident
+ * is then NOT started; the engine never runs an agent whose memory it cannot
+ * bound. Typed so `scripts/pipeline-run.ts` can classify it at the arming
+ * boundary beside the rate refusal instead of rethrowing it into a
+ * tracer-closed, marker-absent box.
+ */
+export class CgroupUnenforceableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CgroupUnenforceableError";
+  }
+}
+
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** This process's cgroup v2 directory, from the sole `0::` line of
+ *  /proc/self/cgroup. Any other shape means no unified hierarchy. */
+function selfCgroupDir(): string {
+  let raw: string;
+  try {
+    raw = readFileSync("/proc/self/cgroup", "utf8");
+  } catch (err) {
+    throw new CgroupUnenforceableError(`/proc/self/cgroup is unreadable: ${errMsg(err)}`);
+  }
+  const line = raw.split("\n").find((l) => l.startsWith("0::"));
+  if (line === undefined) {
+    throw new CgroupUnenforceableError(
+      "/proc/self/cgroup carries no unified (`0::`) entry — this box is not on cgroup v2",
+    );
+  }
+  const rel = line.slice("0::".length).trim();
+  if (!rel.startsWith("/")) {
+    throw new CgroupUnenforceableError(`/proc/self/cgroup unified path ${JSON.stringify(rel)} is not absolute`);
+  }
+  return join(CGROUP_MOUNT, rel);
+}
+
+/** Memoized delegated root — the split is once per ENGINE PROCESS, not once per
+ *  solicitation, and re-running it would try to move the engine out of a leaf
+ *  it already lives in. */
+let delegatedRoot: string | null = null;
+
+/** Test seam (the `_injectRateSources` convention): resets the once-per-process
+ *  split memo so a test can drive `ensureDelegatedSubtree` against a fresh
+ *  fake hierarchy. Documented private seam — never called in production. */
+export function _resetCgroupSplit(): void {
+  delegatedRoot = null;
+}
+
+/** Test seam: overrides `/proc/self/cgroup` resolution so the host-side suite
+ *  can point the mechanism at a temp-dir fake of the delegated tree. Absent in
+ *  production, where the real unified hierarchy is the only source. */
+let _selfCgroupDirOverride: (() => string) | null = null;
+export function _injectSelfCgroupDir(fn: (() => string) | null): void {
+  _selfCgroupDirOverride = fn;
+  delegatedRoot = null;
+}
+
+/**
+ * The one-time delegated-subtree split (systemd's documented `Delegate=`
+ * pattern), idempotent across engine restarts on the same box: move every
+ * process in the delegated root into `supervisor/`, then enable `+memory` on
+ * the root so per-solicitation leaves can carry `memory.max`.
+ *
+ * Idempotence matters twice: a restarted engine finds itself ALREADY in the
+ * `supervisor` leaf (so the root is its parent, not itself), and `+memory`
+ * already present in `subtree_control` makes the write a no-op success.
+ */
+function ensureDelegatedSubtree(): string {
+  if (delegatedRoot !== null) return delegatedRoot;
+  const self = (_selfCgroupDirOverride ?? selfCgroupDir)();
+  const root = basename(self) === SUPERVISOR_LEAF ? dirname(self) : self;
+  const supervisor = join(root, SUPERVISOR_LEAF);
+  // `memory` must be DELEGATED to us before anything else is worth trying —
+  // `Delegate=memory` on the unit is what puts it in the root's
+  // `cgroup.controllers` and chowns the tree to User=exedev.
+  let controllers: string;
+  try {
+    controllers = readFileSync(join(root, "cgroup.controllers"), "utf8");
+  } catch (err) {
+    throw new CgroupUnenforceableError(`cgroup.controllers unreadable at ${root}: ${errMsg(err)}`);
+  }
+  if (!controllers.split(/\s+/).includes("memory")) {
+    throw new CgroupUnenforceableError(
+      `the memory controller is not delegated to ${root} (controllers: ${controllers.trim() || "<none>"}) — the unit needs Delegate=memory`,
+    );
+  }
+  try {
+    mkdirSync(supervisor, { recursive: true });
+  } catch (err) {
+    throw new CgroupUnenforceableError(`cannot create the supervisor leaf ${supervisor}: ${errMsg(err)}`);
+  }
+  // No-internal-processes: the root must hold NO processes directly before
+  // `+memory` can be enabled in its subtree_control. One pid per write — the
+  // kernel accepts a single pid per `cgroup.procs` write and nothing else.
+  let pids: string[];
+  try {
+    pids = readFileSync(join(root, "cgroup.procs"), "utf8").split("\n").filter((p) => p.trim() !== "");
+  } catch (err) {
+    throw new CgroupUnenforceableError(`cgroup.procs unreadable at ${root}: ${errMsg(err)}`);
+  }
+  const supervisorProcs = join(supervisor, "cgroup.procs");
+  for (const pid of pids) {
+    try {
+      // APPEND, not truncate. On cgroupfs every write is its own migration and
+      // the flag is immaterial; on the fs-level fake the host-side suite drives,
+      // a truncating write makes `cgroup.procs` unable to hold more than one pid
+      // — so a multi-pid root, which is the whole reason the split exists,
+      // could not be tested at all (review round 3).
+      appendFileSync(supervisorProcs, `${pid}\n`);
+    } catch (err) {
+      // ESRCH: the process exited between the read and the write — it is no
+      // longer in the root, which is all this loop needs. Anything else means
+      // the root still holds a process and `+memory` below would fail EBUSY,
+      // so refuse HERE with the cause rather than there without it.
+      if ((err as NodeJS.ErrnoException)?.code !== "ESRCH") {
+        throw new CgroupUnenforceableError(`cannot move pid ${pid} into ${supervisor}: ${errMsg(err)}`);
+      }
+    }
+  }
+  try {
+    writeFileSync(join(root, "cgroup.subtree_control"), "+memory");
+  } catch (err) {
+    throw new CgroupUnenforceableError(`cannot enable +memory on ${root}: ${errMsg(err)}`);
+  }
+  delegatedRoot = root;
+  return root;
+}
+
+/**
+ * Create one solicitation's leaf and arm it. `memory.oom.group=1` is what makes
+ * "the kernel OOM-kills that cgroup" true rather than approximately true: at
+ * the kernel default (0) the OOM killer picks a SINGLE task, leaving siblings
+ * alive — which leaves the leaf un-`rmdir`-able (EBUSY) and produces exactly
+ * the orphaned child AC1 says cannot exist.
+ */
+function createLeaf(root: string, name: string, bytes: number): string {
+  const dir = join(root, name);
+  // A leaf surviving from a torn-down predecessor would carry ITS memory.peak
+  // into this solicitation's reading. Remove before create — but with a PLAIN
+  // `rmdir`, never `removeLeaf`: that helper's first action is a `cgroup.kill`
+  // write (round 1, finding 3), which empties a LIVE leaf and then removes it
+  // successfully. Using it here would silently SIGKILL whatever process tree
+  // occupies a colliding leaf name instead of failing EBUSY — and "a live leaf
+  // cannot be rmdir'd, so this never steals one" is exactly the property this
+  // pre-clean relies on. An EBUSY here propagates as a placement refusal, which
+  // is the correct fail-closed outcome for a name collision.
+  try {
+    rmdirSync(dir);
+  } catch {
+    /* absent is the normal case; EBUSY means occupied and mkdir below refuses */
+  }
+  mkdirSync(dir);
+  // UNWIND OUR OWN MKDIR on a partial failure (review round 3). `+memory`
+  // disabled in the root's `cgroup.subtree_control` between arming and this
+  // solicitation leaves a root that still accepts `mkdir` but a leaf with no
+  // `memory.max` to write — ENOENT, mid-create. The caller assigns `leafDir`
+  // only on success, so its `finally` teardown never fires and the half-made
+  // leaf would survive for the life of the box, breaking AC1's post-run
+  // "the solicitation cgroup is removed" check. Round 1 fixed this for the
+  // ARMING probe; the per-solicitation path is the same defect and gets the
+  // same remedy, here rather than at each call site so it cannot be missed a
+  // third time.
+  try {
+    writeFileSync(join(dir, "memory.max"), String(bytes));
+    writeFileSync(join(dir, "memory.oom.group"), "1");
+  } catch (err) {
+    try {
+      removeLeaf(dir);
+    } catch {
+      /* the create failure is the one worth reporting */
+    }
+    throw err;
+  }
+  return dir;
+}
+
+/**
+ * Remove a leaf. On real cgroupfs a leaf is removed with `rmdir` alone — its
+ * control files are kernel-generated and `unlink` on them is EPERM, which is
+ * why the unlink pass below is best-effort and its failures are ignored. The
+ * pass exists because the same code has to run against the fs-level fake the
+ * host-side suite drives, where the control files are ORDINARY files and
+ * `rmdir` would fail ENOTEMPTY — a mechanism whose teardown cannot be exercised
+ * off a real box is a mechanism whose teardown is untested until production.
+ *
+ * Nothing here removes a LIVE leaf: a cgroup still holding processes refuses
+ * `rmdir` with EBUSY, which is exactly the signal `memory.oom.group=1` exists
+ * to make impossible on the kill path.
+ */
+function removeLeaf(dir: string): void {
+  // FINDING 3 (review round 1). `rmdir` on a cgroup that still holds a task is
+  // EBUSY, and two ordinary paths leave one:
+  //
+  //   - the OOM path, briefly: `memory.oom.group=1` SIGKILLs every task in the
+  //     leaf, but a task leaves `cgroup.procs` only when it is REAPED, and pi's
+  //     descendants are reparented to systemd and reaped asynchronously.
+  //     `proc.exited` waits on pi alone, so there is a real window in which the
+  //     leaf is un-removable — and AC1's post-run "the cgroup is removed" check
+  //     would be intermittently red for a run that was otherwise correct.
+  //   - the timeout/stop paths, permanently: the engine's SIGKILL reaches pi
+  //     ONLY (`oom.group` governs the kernel's OOM kill, never a signal the
+  //     engine sends), so any pi descendant survives, stays in the leaf forever,
+  //     and the leaf is never removable. That is a permanent cgroup plus a
+  //     permanent orphan per run — R3's group-kill doctrine, which the kernel
+  //     discharges on the OOM path, still has to be honoured on these.
+  //
+  // `cgroup.kill` (cgroup v2, 5.14+ — below this story's other kernel floors)
+  // is the one write that covers both: it SIGKILLs the whole subtree, including
+  // descendants the engine never learned the pids of. Best-effort, then a
+  // bounded retry of the rmdir while the reaps land.
+  try {
+    writeFileSync(join(dir, "cgroup.kill"), "1");
+  } catch {
+    /* pre-5.14, or already empty — the retry below is the verdict */
+  }
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    /* already gone, or unreadable — rmdir below is the verdict */
+  }
+  for (const entry of entries) {
+    try {
+      unlinkSync(join(dir, entry));
+    } catch {
+      /* cgroupfs: EPERM on a kernel control file, and rmdir does not need it */
+    }
+  }
+  // Bounded, synchronous retry: the reaps that clear `cgroup.procs` land within
+  // milliseconds of `cgroup.kill`, and a call is already off the hot path here.
+  // Unbounded waiting would trade a leaked cgroup for a wedged run, which is the
+  // worse failure — after the last attempt the throw reaches the caller's warn.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmdirSync(dir);
+      return;
+    } catch (err) {
+      if (attempt >= LEAF_RMDIR_ATTEMPTS - 1 || (err as NodeJS.ErrnoException)?.code !== "EBUSY") throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LEAF_RMDIR_BACKOFF_MS);
+    }
+  }
+}
+
+/** The kernel's account of one solicitation, read BEFORE the leaf is removed.
+ *  `memory.peak` is a high-water mark; `memory.events`' `oom_kill` count is the
+ *  kill itself. Both are best-effort reads — `memory.peak` needs kernel 5.19+,
+ *  and a missing file must degrade the TELEMETRY, never the call. */
+function readLeaf(dir: string): { peakBytes: number; oomKilled: boolean } {
+  let peakBytes = 0;
+  try {
+    const n = Number(readFileSync(join(dir, "memory.peak"), "utf8").trim());
+    if (Number.isFinite(n) && n >= 0) peakBytes = n;
+  } catch {
+    /* pre-5.19 kernels have no memory.peak — 0 reads as "not measured" */
+  }
+  let oomKilled = false;
+  try {
+    const events = readFileSync(join(dir, "memory.events"), "utf8");
+    const counter = (name: string): number => {
+      const m = new RegExp(`^${name} (\\d+)$`, "m").exec(events);
+      return m === null ? 0 : Number(m[1]);
+    };
+    // DISCRIMINATION, and it is not a detail: `oom_kill` counts processes in
+    // this cgroup killed by ANY kind of OOM killer — including the SYSTEM-WIDE
+    // one and an ancestor's limit. A `dispatch_task` worker ballooning in
+    // `supervisor/` can drive the box into global OOM, the kernel can pick pi,
+    // and `oom_kill` then reads 1 on a leaf whose `memory.peak` sits far BELOW
+    // its bound. Keying the verdict on that counter stops the resident for a
+    // bound it never crossed and files a `watchdog_kill` row whose own detail
+    // contradicts itself — and those rows are the evidence D4's month-1
+    // evaluator uses to demote tier 2.
+    //
+    // The kernel already discriminates this exactly, so the engine does not
+    // re-derive it: `oom_group_kill` counts the GROUP kills this leaf's
+    // `memory.oom.group=1` produces (5.17+), and `oom` counts the times THIS
+    // cgroup hit ITS OWN limit and could not reclaim. Either is an own-limit
+    // event; `oom_kill` alone is not, and is kept for telemetry only.
+    oomKilled = counter("oom_group_kill") > 0 || counter("oom") > 0;
+  } catch {
+    /* no memory.events means no kill this layer can attest to */
+  }
+  return { peakBytes, oomKilled };
+}
+
+/**
+ * The fail-closed placement wrapper. The CHILD places itself before it becomes
+ * pi, and refuses to become pi if the placement fails.
+ *
+ * `|| exit 97` is load-bearing, not defensive: `;` is unconditional sequencing,
+ * so a failed redirection — leaf removed by a concurrent teardown, `+memory`
+ * disabled, EPERM/ENOENT/EBUSY — would print to stderr and fall straight
+ * through to `exec`, running pi with NO `memory.max`. That is the silent
+ * degradation to an unbounded agent INV-MEM-2 forbids, and AC3's check is at
+ * arming, once, so nothing else re-checks per solicitation.
+ *
+ * FINDING 5 (review round 1): the refusal is keyed on VERIFIED MEMBERSHIP, not
+ * on the write's exit status. `cgroup.procs` rejects at WRITE time as well as at
+ * open time — EBUSY when the target is not a leaf (`+memory` in its
+ * `subtree_control`), EOPNOTSUPP, EINVAL — and whether `|| exit 97` fires then
+ * depends on the shell propagating a deferred write error: busybox `ash` returns
+ * 1, `dash` raises an I/O error and exits 2. A generic non-zero exit is NOT
+ * classified `unenforceable` by the engine; it takes the one-way "degraded"
+ * latch, which is precisely the misclassification AC4 exists to prevent. Reading
+ * `cgroup.procs` back and looking for our own pid is decisive on every shell and
+ * every failure mode, and it uses only POSIX shell built-ins (no `grep`, no
+ * `awk`) so it cannot depend on what the image happens to stage.
+ *
+ * INV-MEM-3: pi's argv is passed POSITIONALLY, so a rendered prompt is never
+ * interpolated into a shell string, and the per-run key stays env-borne.
+ */
+export const _PLACEMENT_SCRIPT =
+  'echo $$ >> "$1"/cgroup.procs 2>/dev/null; ' +
+  'ok=0; while IFS= read -r p; do [ "$p" = "$$" ] && ok=1; done < "$1"/cgroup.procs 2>/dev/null; ' +
+  '[ "$ok" = 1 ] || exit 97; shift; exec "$@"';
+
+/**
+ * The exit code the placement wrapper refuses with. Classified `unenforceable`
+ * by the caller and carried to the engine on `PlacementRefusedError`.
+ *
+ * COLLISION, stated rather than left to be discovered (FINDING 4, review round
+ * 1): `sh` `exec`s pi, so the wrapper is gone by the time pi picks an exit code.
+ * A pi — or any `QDS_PI_BIN` override — that exits 97 of its own accord is
+ * indistinguishable from a placement refusal, and the engine will stop the
+ * resident for the rest of the run over an ordinary application exit code. The
+ * direction is fail-closed (a resident stopped for the wrong reason never spends
+ * and never runs unbounded), which is why it is accepted rather than designed
+ * around; the out-of-band alternative is a sentinel on a pre-opened fd.
+ * **Consequence for AC1's live Leg A: the synthetic allocator staged as that
+ * leg's `QDS_PI_BIN` MUST NOT exit 97, or the leg proves a placement refusal
+ * instead of a crossing.**
+ */
+export const _PLACEMENT_REFUSED_EXIT = 97;
+
+/**
+ * The argv of the most recent `Bun.spawn` in `call()`. Documented private test
+ * seam (the `_injectRateSources` convention), never read in production.
+ *
+ * It exists because nothing else can see WHICH argv a bounded call spawns
+ * (rebase review, finding 4): an implementation that deletes the wrapper and
+ * writes `proc.pid` into `cgroup.procs` from the parent AFTER the spawn passes
+ * every other assertion in the suite — the one-pid read-back, the numeric
+ * contract, the exit-97 arm (which keys on the exit code and `leafDir`, not on
+ * the wrapper) and the INV-MEM-3 argv test (which reads pi's own argv, identical
+ * either way) — while re-opening the exact window in which pi runs unbounded
+ * that the wrapper exists to close.
+ */
+let _lastSpawnArgv: readonly string[] = [];
+/** How much of the argv the seam retains: `sh -c <script> _ <leaf> <bin>` — the
+ *  wrapper shape the tests assert, and nothing after it. The tail is pi's own
+ *  argv, which ENDS IN THE RENDERED PROMPT: keeping it alive module-globally
+ *  for the process lifetime would be a retained allocation and a heap/core-dump
+ *  exposure, in a file that routes every other egress through `redact`. */
+const SPAWN_ARGV_SEAM_PREFIX = 6;
+export function _lastSpawnArgvForTest(): readonly string[] {
+  return _lastSpawnArgv;
+}
+
+/** Bounded retry for the leaf `rmdir` while `cgroup.kill`'s reaps land. Four
+ *  attempts at 25 ms covers the reap window by two orders of magnitude without
+ *  turning a leaked cgroup into a wedged run. */
+const LEAF_RMDIR_ATTEMPTS = 4;
+const LEAF_RMDIR_BACKOFF_MS = 25;
+
 export interface ResidentSpawn {
   /** Implements ResidentCaller over a pi subprocess (one process per call). */
   caller: ResidentCaller;
@@ -124,6 +523,15 @@ export interface ResidentSpawn {
   exitStatus(): Promise<ExitStatus | null>;
   /** SIGKILL the in-flight call, if any. DF3.6 decides when; this supplies how. */
   stop(): Promise<void>;
+  /**
+   * DF3.6b: the last solicitation's cgroup accounting — `memory.peak` and
+   * whether the kernel OOM-killed the leaf — read before the leaf is removed.
+   * Null when no solicitation has run under a bound (the host-side context,
+   * where `residentRssBytes` is absent and no cgroup machinery runs at all).
+   * `boundBytes` is the bound that reading was taken against, so the engine can
+   * name it in a tripwire without holding the manifest.
+   */
+  lastMemory(): { peakBytes: number; oomKilled: boolean; boundBytes: number } | null;
 }
 
 export interface ResidentSpawnOpts {
@@ -143,6 +551,21 @@ export interface ResidentSpawnOpts {
   bin?: string;
   /** Prompt/reply artifacts persist here, redacted, when set (§5.2). */
   persistDir?: string;
+  /**
+   * DF3.6b: the engine-owned RSS bound, read from the frozen manifest and
+   * validated by DF3.6a. Fleet applies it as `memory.max` on the
+   * per-solicitation cgroup; fleet NEVER chooses or defaults it (INV-MEM-1).
+   *
+   * OPTIONAL, and the optionality IS the seam (INV-MEM-2 Scope): absent means
+   * no cgroup machinery runs at all — the host-side unit-test context, where
+   * there are no cgroups. In production it is never absent, because DF3.6a
+   * refuses the run at manifest load on a missing or non-positive value.
+   * Present-but-unenforceable ⇒ the resident is not started (INV-MEM-2), which
+   * is `CgroupUnenforceableError` out of `startResident`.
+   *
+   * Same division of labour as stop(): "DF3.6 decides when; this supplies how".
+   */
+  residentRssBytes?: number;
 }
 
 // ponytail: rate-source injection seam for tests (dispatch-task _injectRunner
@@ -427,6 +850,50 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   // zero filesystem side effects and no claim to leak (the runId/slug/rate
   // refusals above already ran, so this is the last pre-arm gate).
   assertRunKeyPresent(childEnv);
+  // DF3.6b AC3 / INV-MEM-2: arm the kernel bound against a REAL object before
+  // anything else exists. Placed after the key gate and BEFORE the session dir
+  // and the session claim, so a refusal leaves no session tree and no claim to
+  // leak (the INV-RES-3 rule, extended to this gate).
+  //
+  // The value is the engine's; fleet only refuses garbage it could not apply —
+  // a plain Error, not CgroupUnenforceableError: an out-of-range operand is a
+  // CALLER fault (DF3.6a's loader refuses it upstream), not a box that cannot
+  // enforce, and misclassifying it would disable a resident over a typo.
+  let cgroupRoot: string | null = null;
+  const boundBytes = opts.residentRssBytes;
+  if (boundBytes !== undefined) {
+    if (!Number.isSafeInteger(boundBytes) || boundBytes <= 0) {
+      throw new Error(
+        `resident refused: residentRssBytes ${String(boundBytes)} is not a positive safe integer — the bound is engine-owned policy and fleet never defaults it (INV-MEM-1)`,
+      );
+    }
+    const root = ensureDelegatedSubtree();
+    // "Against a real object, not against a process that does not yet exist":
+    // create and arm a probe leaf with THIS run's bound, then remove it. A box
+    // that cannot do this cannot bound a solicitation either.
+    const probe = `resident.${opts.runId}.arm`;
+    try {
+      // The cleanup is its OWN finally (review round 1, finding 6): a
+      // `createLeaf` that throws AFTER its mkdir — the `memory.oom.group` write
+      // failing on a kernel that has `memory.max` but not `oom.group`, say —
+      // would otherwise leak the probe leaf on a path whose whole point is that
+      // it left nothing behind.
+      try {
+        createLeaf(root, probe, boundBytes);
+      } finally {
+        try {
+          removeLeaf(join(root, probe));
+        } catch {
+          /* never created, or already gone */
+        }
+      }
+    } catch (err) {
+      throw new CgroupUnenforceableError(
+        `cannot arm a memory-bounded leaf under ${root} (${probe}): ${errMsg(err)}`,
+      );
+    }
+    cgroupRoot = root;
+  }
   const redact = bindRedact(childEnv);
   const timeoutMs = solicitTimeoutMs(childEnv);
   /** The single warn chokepoint: redacted, tail-bounded, never throws. */
@@ -450,6 +917,21 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   let lastExit: ExitStatus | null = null;
   let current: Bun.Subprocess | null = null;
   let stopped = false;
+  /** DF3.6b: the most recent solicitation's kernel accounting. Null until a
+   *  bounded solicitation has run — and reset at every leaf create, so a second
+   *  solicitation reports ITS OWN memory.peak and never the previous one's. */
+  let lastMem: { peakBytes: number; oomKilled: boolean; boundBytes: number } | null = null;
+  /** The in-flight solicitation's leaf, visible to stop() (rebase review,
+   *  finding 5). `stop()` resolves as soon as `proc.exited` does, while the
+   *  interrupted call still has to drain both output streams before its own
+   *  `finally` reaches the teardown — so a caller that ends the process on
+   *  `await stop()` would leave the leaf in place with `cgroup.kill` never
+   *  written. stop() finishes the teardown itself; whichever path gets there
+   *  second finds the leaf gone and its ENOENT is swallowed. */
+  let currentLeaf: string | null = null;
+  /** The in-flight solicitation's cgroup setup cost, reported on the
+   *  `resident_cgroup` line by whichever path performs the teardown. */
+  let leafSetupMs = 0;
 
   /**
    * S2-1 (round 7): ANY signal death of the child — the native timeout's
@@ -470,7 +952,73 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     }
   };
 
+  /**
+   * The per-solicitation leaf's end, in one place: read the kernel's account,
+   * remove the leaf, emit the observability line. Called by exactly ONE of the
+   * two paths that can reach it — the call's own `finally`, or `stop()` when it
+   * resumes first — with `currentLeaf` as the ownership handle.
+   *
+   * `killed` says whether the process died by SIGNAL. It is ANDed with the
+   * kernel's own-limit counters: the counters say the limit fired, this says
+   * the process died of it (an own-limit `oom` can be a graceful -ENOMEM the
+   * task survives). A `stop()` kill passes `true` and is harmless — on a stop
+   * that is not a bound breach the counters are zero and the AND is false.
+   *
+   * Every step is best-effort: telemetry must never turn a completed call into
+   * a throw, and a leaf that outlives its call is a warn, not a failure.
+   */
+  const teardownLeaf = (dir: string, killed: boolean): void => {
+    const t1 = performance.now();
+    try {
+      const account = readLeaf(dir);
+      lastMem = { ...account, oomKilled: account.oomKilled && killed, boundBytes: boundBytes ?? 0 };
+    } catch (err) {
+      warn(`resident cgroup accounting read failed: ${errMsg(err)}`);
+    }
+    try {
+      removeLeaf(dir);
+    } catch (err) {
+      // EBUSY here means a process survived the call in the leaf — which
+      // `memory.oom.group=1` exists to make impossible on the kill path.
+      warn(`resident cgroup leaf ${dir} not removed: ${errMsg(err)}`);
+    }
+    // The Observability Contract's cgroup half, on the FLEET chokepoint — which
+    // is where it has to be, and the story's contract is amended to say so
+    // (review round 1, finding 6). This layer holds no `requestId` and no
+    // `phase`: both are engine-side facts that never cross into fleet (the
+    // engine passes a prompt, not a ctx), so a line emitted here structurally
+    // cannot carry them, and inventing a channel for them would widen the seam
+    // this story's Technical Notes exist to keep narrow. `seq` is the
+    // per-resident correlation key it CAN carry, and the engine-side breach
+    // line keeps DF3.6a's shape with the join keys. The `[resident] ` prefix is
+    // this chokepoint's, on every line it has ever emitted; fd-2 is harvested
+    // with the journal either way.
+    warn(
+      `${JSON.stringify({
+        event: "resident_cgroup",
+        bound: "rss",
+        allowed: !(lastMem?.oomKilled ?? false),
+        runId: opts.runId,
+        seq,
+        residentRssBytes: boundBytes,
+        rssPeakBytes: lastMem?.peakBytes ?? 0,
+        oomKilled: lastMem?.oomKilled ?? false,
+        cgroup_setup_ms: Math.round(leafSetupMs),
+        cgroup_teardown_ms: Math.round(performance.now() - t1),
+      })}`,
+    );
+  };
+
   const call = async (prompt: string) => {
+    // DF3.6b (review round 3): the accounting is cleared at the TOP of the
+    // call, not at leaf creation. `lastMemory()` must mean "this solicitation's
+    // reading, or none" — the engine keys its OOM arm on it for ANY call
+    // rejection, including the ones that throw BEFORE a leaf exists (the busy
+    // guard, an empty or over-ceiling prompt, a prompt-artifact persist
+    // failure). Clearing it later would let a previous solicitation's reading
+    // relabel a host-side persistence fault as a `watchdog_kill` with
+    // `status:"stopped"` and `exitStatus:"overflow"`.
+    lastMem = null;
     if (stopped) throw new Error("resident stopped: stop() was called before this call");
     // S2-5: the ResidentCaller contract is strictly sequential — `current` is
     // a single slot and every call appends the SAME session file, so an
@@ -508,168 +1056,261 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
         );
       }
     }
-    // Timeout via Bun.spawn native timeout + SIGKILL (exedev/transport.ts:64-77
-    // pattern). Bun.spawn THROWS synchronously on a missing binary (ENOENT) —
-    // that throw IS the AC3 unreachable path.
-    let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
-    try {
-      proc = Bun.spawn(
-        [
-          bin,
-          "--provider",
-          "openrouter",
-          "--model",
-          modelArg,
-          "--mode",
-          "json",
-          "--no-tools",
-          "--session",
-          sessionPath,
-          "-p",
-          prompt,
-        ],
-        {
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: timeoutMs,
-          killSignal: "SIGKILL",
-          env: childEnv,
-        },
-      );
-    } catch (err) {
-      // Bun.spawn throws synchronously on a missing binary (ENOENT) — a
-      // configuration fault (wrong QDS_PI_BIN / pi not installed). S2-3
-      // (round 7): no process ever ran, so lastExit stays untouched (the
-      // busy-path rule). S2-7 (round 7): the message passes the redact
-      // chokepoint like every other error — a spawn error can echo argv or
-      // env fragments.
-      throw new Error(
-        `resident pi spawn failed: ${redact(err instanceof Error ? err.message : String(err))}`,
-      );
-    }
-    current = proc;
-    const spawnedAt = performance.now();
-    let stdout = "";
-    let stderr = "";
-    try {
-      const [out, errText] = await Promise.all([
-        // S2-4 (round 7): bounded collectors — a looping pi hits the byte cap
-        // (and is killed) long before it can exhaust host memory; the native
-        // timeout bounds TIME, not bytes.
-        collectBounded(proc.stdout, MAX_STDOUT_BYTES, "stdout"),
-        collectBounded(proc.stderr, MAX_STDERR_BYTES, "stderr"),
-        // NOTE: on a signal death `exited` resolves 128+signal (137 for
-        // SIGKILL), NOT null — the reliable signals are the post-exit
-        // `exitCode`/`signalCode` properties checked below.
-        proc.exited,
-      ]);
-      stdout = out;
-      stderr = errText;
-    } catch (err) {
-      // S2-8: a stream-read failure (or an S2-4 cap trip) must not orphan the
-      // child — kill it BEFORE dropping the handle, or it lives until the
-      // native timeout and stop() can never reach it again.
+    // DF3.6b: the per-solicitation leaf. Created here — after every pre-flight
+    // refusal and after the prompt artifact, so a refused call makes no cgroup
+    // at all — and torn down in the `finally` below on EVERY exit path,
+    // including the OOM one. `lastMem` is cleared at create so a second
+    // solicitation can never report the previous one's memory.peak.
+    let leafDir: string | null = null;
+
+    // DF3.6b (rebase review, finding 3): an own-limit `oom` event is NOT by
+    // itself a kill — when an allocation can fail gracefully the kernel returns
+    // -ENOMEM and the task survives. pi can take that, finish, exit 0, and the
+    // call can still reject afterwards on a reply-artifact persist failure or a
+    // provider 429. Reporting `oomKilled` on those rejections lands a
+    // `watchdog_kill` row with `status:"stopped"` / `exitStatus:"overflow"` for
+    // a host-side persistence fault — and those rows are D4's tier-2 demotion
+    // evidence. Only the signal-death branch below can be a kill, so the
+    // verdict is ANDed with it: the kernel's counters say the limit fired, this
+    // flag says the process actually died of it.
+    let killedBySignal = false;
+    if (cgroupRoot !== null && boundBytes !== undefined) {
+      const t0 = performance.now();
+      leafSetupMs = 0;
       try {
-        proc.kill("SIGKILL");
-      } catch {
-        // already gone — the awaited exit below is the truth
-      }
-      await proc.exited.catch(() => {});
-      current = null;
-      if (err instanceof OutputCapError) {
-        // S2-4: we SIGKILLed the child mid-append, so the session jsonl may
-        // be torn — quarantine exactly like any other signal death (S2-1).
-        // "logic": a flood is a pi-side fault a retry will not fix. The cap
-        // message is byte counts only, so the raw rethrow leaks no content.
-        quarantineSession("output cap");
-        lastExit = "logic";
-        throw err;
-      }
-      lastExit = "transient";
-      throw err;
-    }
-    current = null;
-    // S2-1: pi wrote the session jsonl with its own default mode and it holds
-    // the RAW prompt + reply — clamp it after every call. Best-effort: a
-    // chmod failure warns through the chokepoint, never breaks the call.
-    try {
-      if (existsSync(sessionPath)) chmodSync(sessionPath, 0o600);
-    } catch (err) {
-      warn(`chmod 0600 on session file failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    // S2-10 (round 7): Bun reports a signal death as signalCode set /
-    // exitCode null, but if it ever reports SIGKILL as exitCode 137
-    // (128+SIGKILL) with a null signalCode, treat that as a signal death too —
-    // otherwise the kill would fall into the generic non-zero branch and skip
-    // both the "transient" classification and the quarantine.
-    if (proc.exitCode === null || proc.signalCode !== null || proc.exitCode === 137) {
-      // Killed by signal — the native timeout's SIGKILL, stop(), or an
-      // external kill. S2-8 (round 7): the CC-1 ExitStatus enum cannot widen,
-      // so a PLANNED stop() kill is recorded "transient" here — deliberately
-      // indistinguishable from a genuine transient crash; the error text
-      // thrown below keeps the timeout-vs-stop distinction for humans.
-      lastExit = "transient";
-      // S2-1 (round 7): quarantine for ANY signal death, not just the
-      // timeout's — a stop()/external SIGKILL can tear the session jsonl
-      // mid-append too, and the next call must not resume a truncated file.
-      quarantineSession("signal death");
-      // S2-7: Bun exposes no timed-out flag, so elapsed time discriminates
-      // the native timeout from stop()/external kills (25 ms slack for timer
-      // scheduling — a stop() landing inside the slack reads as a timeout).
-      // S2-6 (round 7): only trust the discriminator when timeoutMs clears
-      // the slack — at timeoutMs <= 25 the clamp floor (1 ms) makes
-      // `elapsed >= timeoutMs - 25` true for EVERY signal death, so those
-      // classify as plain signal deaths instead.
-      if (timeoutMs > 25 && performance.now() - spawnedAt >= timeoutMs - 25) {
-        throw new Error(`resident pi timed out after ${timeoutMs} ms (SIGKILL on native timeout)`);
-      }
-      throw new Error(`resident pi killed by signal ${proc.signalCode ?? "unknown"} before exit`);
-    }
-    const exitCode = proc.exitCode;
-    if (exitCode !== 0) {
-      // Redact FULL output, THEN cut (command-gate rule): cutting first can
-      // split a secret at the boundary and leak the surviving fragment.
-      const detail = redact(stderr).slice(-400);
-      // S2-3: provider 429/5xx and network failures are transient (they heal
-      // on retry); every other non-zero exit stays "logic". Conservative:
-      // unmatched stderr means logic.
-      lastExit = TRANSIENT_STDERR_RE.test(detail) ? "transient" : "logic";
-      throw new Error(`resident pi exited ${exitCode}: ${detail}`);
-    }
-    lastExit = "success";
-    // S2-12: warnings/deprecations pi prints on a successful call are the
-    // only signal of a degrading provider — surface them once (warn redacts
-    // and bounds the line).
-    if (stderr.trim().length > 0) {
-      warn(`pi wrote to stderr on a successful call (${opts.runId} solicit ${seq}): ${stderr.trim()}`);
-    }
-    const harvest = harvestPiStream(stdout);
-    // S2-11: exit 0 with NO harvested message_end is not a success — the
-    // solicitation silently produced nothing. Classify the process end
-    // "logic" (pi exited clean but its stream is unharvestable, which a
-    // retry will not fix); the empty raw still flows to steering, whose
-    // reply validation fails closed downstream.
-    if (harvest.turnCount === 0) lastExit = "logic";
-    if (opts.persistDir !== undefined) {
-      // §5.2 is fail-closed for replies too (S2-14): an unpersisted raw reply
-      // must NOT flow to steering to be parsed and acted on — throwing here
-      // degrades the resident to the deterministic default, matching the
-      // prompt path. lastExit stays "success": the fault is host-side
-      // persistence, not the process end. The message passes the redact
-      // chokepoint like every other error (S2-10).
-      try {
-        persistArtifact(opts.persistDir, `${opts.runId}-solicit-${seq}-reply.txt`, redact(harvest.text), warn);
+        leafDir = createLeaf(cgroupRoot, `resident.${opts.runId}.${seq}`, boundBytes);
+        currentLeaf = leafDir;
       } catch (err) {
-        throw new Error(
-          `resident reply artifact not persisted (${opts.runId}-solicit-${seq}): ${redact(err instanceof Error ? err.message : String(err))}`,
+        // The leaf could not be armed for THIS call, so no bounded call can be
+        // issued — the same fail-closed outcome as the wrapper's exit 97, and
+        // the engine classifies both through one typed rejection (AC4).
+        throw new PlacementRefusedError(
+          _PLACEMENT_REFUSED_EXIT,
+          `resident cgroup leaf could not be armed: ${redact(errMsg(err))}`,
         );
       }
+      leafSetupMs = performance.now() - t0;
     }
-    return {
-      raw: harvest.text,
-      usage: { inputTokens: harvest.inputTokens, outputTokens: harvest.outputTokens },
-    };
+    try {
+      // Timeout via Bun.spawn native timeout + SIGKILL (exedev/transport.ts:64-77
+      // pattern). Bun.spawn THROWS synchronously on a missing binary (ENOENT) —
+      // that throw IS DF3.3's AC3 unreachable path.
+      //
+      // DF3.6b NARROWS THAT, and the narrowing is stated because the comment
+      // above is load-bearing documentation (review round 1, finding 6): on the
+      // BOUNDED path the child is `sh`, which always exists, so a missing
+      // `QDS_PI_BIN` is no longer a synchronous spawn throw — it is `exec`
+      // failing inside the wrapper, which exits 127 and classifies through the
+      // generic non-zero arm as "logic". Same fail-closed outcome, different
+      // diagnostic: the message is pi's own `exec: not found` rather than this
+      // file's `resident pi spawn failed`.
+      let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+      // `--no-tools` is LOAD-BEARING SECURITY CONFIGURATION for DF3.6b, not a
+      // cost knob (INV-MEM-1 as amended in review round 1): pi is `exec`'d into
+      // the solicitation leaf as the SAME uid that created it, so the leaf's
+      // `memory.max` is a file pi's uid owns. A pi that could run an arbitrary
+      // command or write an arbitrary path could raise its own bound, and the
+      // engine would not notice — it reads the accounting only after the call.
+      // Enabling tools on the resident re-opens that and needs a different
+      // containment answer (a second uid for pi), never just this flag's removal.
+      const piArgv = [
+        bin,
+        "--provider",
+        "openrouter",
+        "--model",
+        modelArg,
+        "--mode",
+        "json",
+        "--no-tools",
+        "--session",
+        sessionPath,
+        "-p",
+        prompt,
+      ];
+      // DF3.6b: the CHILD places itself in the leaf before it becomes pi, and
+      // refuses to become pi if the placement fails. Writing pi's pid from
+      // HERE, after the spawn, would leave a window in which pi runs unbounded.
+      // argv is positional (INV-MEM-3): the rendered prompt stays its own argv
+      // element and is never interpolated into a shell string.
+      const argv = leafDir === null ? piArgv : ["sh", "-c", _PLACEMENT_SCRIPT, "_", leafDir, ...piArgv];
+      _lastSpawnArgv = argv.slice(0, SPAWN_ARGV_SEAM_PREFIX);
+      try {
+        proc = Bun.spawn(
+          argv,
+          {
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            timeout: timeoutMs,
+            killSignal: "SIGKILL",
+            env: childEnv,
+          },
+        );
+      } catch (err) {
+        // Bun.spawn throws synchronously on a missing binary (ENOENT) — a
+        // configuration fault (wrong QDS_PI_BIN / pi not installed). S2-3
+        // (round 7): no process ever ran, so lastExit stays untouched (the
+        // busy-path rule). S2-7 (round 7): the message passes the redact
+        // chokepoint like every other error — a spawn error can echo argv or
+        // env fragments.
+        throw new Error(
+          `resident pi spawn failed: ${redact(err instanceof Error ? err.message : String(err))}`,
+        );
+      }
+      current = proc;
+      const spawnedAt = performance.now();
+      let stdout = "";
+      let stderr = "";
+      try {
+        const [out, errText] = await Promise.all([
+          // S2-4 (round 7): bounded collectors — a looping pi hits the byte cap
+          // (and is killed) long before it can exhaust host memory; the native
+          // timeout bounds TIME, not bytes.
+          collectBounded(proc.stdout, MAX_STDOUT_BYTES, "stdout"),
+          collectBounded(proc.stderr, MAX_STDERR_BYTES, "stderr"),
+          // NOTE: on a signal death `exited` resolves 128+signal (137 for
+          // SIGKILL), NOT null — the reliable signals are the post-exit
+          // `exitCode`/`signalCode` properties checked below.
+          proc.exited,
+        ]);
+        stdout = out;
+        stderr = errText;
+      } catch (err) {
+        // S2-8: a stream-read failure (or an S2-4 cap trip) must not orphan the
+        // child — kill it BEFORE dropping the handle, or it lives until the
+        // native timeout and stop() can never reach it again.
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // already gone — the awaited exit below is the truth
+        }
+        await proc.exited.catch(() => {});
+        current = null;
+        if (err instanceof OutputCapError) {
+          // S2-4: we SIGKILLed the child mid-append, so the session jsonl may
+          // be torn — quarantine exactly like any other signal death (S2-1).
+          // "logic": a flood is a pi-side fault a retry will not fix. The cap
+          // message is byte counts only, so the raw rethrow leaks no content.
+          quarantineSession("output cap");
+          lastExit = "logic";
+          throw err;
+        }
+        lastExit = "transient";
+        throw err;
+      }
+      current = null;
+      // S2-1: pi wrote the session jsonl with its own default mode and it holds
+      // the RAW prompt + reply — clamp it after every call. Best-effort: a
+      // chmod failure warns through the chokepoint, never breaks the call.
+      try {
+        if (existsSync(sessionPath)) chmodSync(sessionPath, 0o600);
+      } catch (err) {
+        warn(`chmod 0600 on session file failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // S2-10 (round 7): Bun reports a signal death as signalCode set /
+      // exitCode null, but if it ever reports SIGKILL as exitCode 137
+      // (128+SIGKILL) with a null signalCode, treat that as a signal death too —
+      // otherwise the kill would fall into the generic non-zero branch and skip
+      // both the "transient" classification and the quarantine.
+      if (proc.exitCode === null || proc.signalCode !== null || proc.exitCode === 137) {
+        killedBySignal = true;
+        // Killed by signal — the native timeout's SIGKILL, stop(), or an
+        // external kill. S2-8 (round 7): the CC-1 ExitStatus enum cannot widen,
+        // so a PLANNED stop() kill is recorded "transient" here — deliberately
+        // indistinguishable from a genuine transient crash; the error text
+        // thrown below keeps the timeout-vs-stop distinction for humans.
+        lastExit = "transient";
+        // S2-1 (round 7): quarantine for ANY signal death, not just the
+        // timeout's — a stop()/external SIGKILL can tear the session jsonl
+        // mid-append too, and the next call must not resume a truncated file.
+        quarantineSession("signal death");
+        // S2-7: Bun exposes no timed-out flag, so elapsed time discriminates
+        // the native timeout from stop()/external kills (25 ms slack for timer
+        // scheduling — a stop() landing inside the slack reads as a timeout).
+        // S2-6 (round 7): only trust the discriminator when timeoutMs clears
+        // the slack — at timeoutMs <= 25 the clamp floor (1 ms) makes
+        // `elapsed >= timeoutMs - 25` true for EVERY signal death, so those
+        // classify as plain signal deaths instead.
+        if (timeoutMs > 25 && performance.now() - spawnedAt >= timeoutMs - 25) {
+          throw new Error(`resident pi timed out after ${timeoutMs} ms (SIGKILL on native timeout)`);
+        }
+        throw new Error(`resident pi killed by signal ${proc.signalCode ?? "unknown"} before exit`);
+      }
+      const exitCode = proc.exitCode;
+      // DF3.6b AC4: the placement wrapper refused — `cgroup.procs` could not be
+      // written, so pi was NEVER `exec`'d and no unbounded call was issued.
+      // Classified by TYPE on the ResidentCaller contract so the engine's catch
+      // takes its `instanceof` arm instead of the one-way "degraded" latch.
+      // `lastExit` stays untouched: pi never ran, so there is no process end to
+      // report (the busy/empty-prompt rule).
+      if (leafDir !== null && exitCode === _PLACEMENT_REFUSED_EXIT) {
+        throw new PlacementRefusedError(
+          _PLACEMENT_REFUSED_EXIT,
+          `resident cgroup placement refused: the wrapper could not join ${leafDir} and did not exec pi`,
+        );
+      }
+      if (exitCode !== 0) {
+        // Redact FULL output, THEN cut (command-gate rule): cutting first can
+        // split a secret at the boundary and leak the surviving fragment.
+        const detail = redact(stderr).slice(-400);
+        // S2-3: provider 429/5xx and network failures are transient (they heal
+        // on retry); every other non-zero exit stays "logic". Conservative:
+        // unmatched stderr means logic.
+        lastExit = TRANSIENT_STDERR_RE.test(detail) ? "transient" : "logic";
+        throw new Error(`resident pi exited ${exitCode}: ${detail}`);
+      }
+      lastExit = "success";
+      // S2-12: warnings/deprecations pi prints on a successful call are the
+      // only signal of a degrading provider — surface them once (warn redacts
+      // and bounds the line).
+      if (stderr.trim().length > 0) {
+        warn(`pi wrote to stderr on a successful call (${opts.runId} solicit ${seq}): ${stderr.trim()}`);
+      }
+      const harvest = harvestPiStream(stdout);
+      // S2-11: exit 0 with NO harvested message_end is not a success — the
+      // solicitation silently produced nothing. Classify the process end
+      // "logic" (pi exited clean but its stream is unharvestable, which a
+      // retry will not fix); the empty raw still flows to steering, whose
+      // reply validation fails closed downstream.
+      if (harvest.turnCount === 0) lastExit = "logic";
+      if (opts.persistDir !== undefined) {
+        // §5.2 is fail-closed for replies too (S2-14): an unpersisted raw reply
+        // must NOT flow to steering to be parsed and acted on — throwing here
+        // degrades the resident to the deterministic default, matching the
+        // prompt path. lastExit stays "success": the fault is host-side
+        // persistence, not the process end. The message passes the redact
+        // chokepoint like every other error (S2-10).
+        try {
+          persistArtifact(opts.persistDir, `${opts.runId}-solicit-${seq}-reply.txt`, redact(harvest.text), warn);
+        } catch (err) {
+          throw new Error(
+            `resident reply artifact not persisted (${opts.runId}-solicit-${seq}): ${redact(err instanceof Error ? err.message : String(err))}`,
+          );
+        }
+      }
+      return {
+        raw: harvest.text,
+        usage: { inputTokens: harvest.inputTokens, outputTokens: harvest.outputTokens },
+      };
+    } finally {
+      if (leafDir !== null) {
+        // SINGLE OWNER, and the ownership test is the clearing of
+        // `currentLeaf` (review round 6): `stop()` can resume before this
+        // `finally` does — it waits only on `proc.exited`, while this path
+        // additionally drains both output streams — so BOTH sides can reach a
+        // teardown for the same leaf. Whoever clears the handle first performs
+        // it; the other skips. Racing them instead (the earlier fix) let
+        // `stop()` remove the leaf before this side could read it, so a
+        // signal-terminated run reported `{peakBytes:0, oomKilled:false}` for a
+        // solicitation that may have been OOM-killed, emitted a falsified
+        // `resident_cgroup` line, and then warned a spurious ENOENT.
+        if (currentLeaf === leafDir) {
+          currentLeaf = null;
+          teardownLeaf(leafDir, killedBySignal);
+        }
+        leafDir = null;
+      }
+    }
   };
 
   return {
@@ -678,6 +1319,10 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     // null before any call: a never-solicited resident has no process end to
     // report, and "transient" would be a fact about nothing.
     exitStatus: async () => lastExit,
+    // DF3.6b: null until a BOUNDED solicitation has run — the host-side context
+    // (no `residentRssBytes`) never creates a leaf, so there is nothing to
+    // report and the engine's OOM arm can never fire on it.
+    lastMemory: () => lastMem,
     stop: async () => {
       stopped = true;
       const proc = current;
@@ -699,6 +1344,28 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
         // while the dying child can still append to it.
         await proc.exited.catch(() => {});
         if (current === proc) current = null;
+        // Finish the interrupted call's teardown rather than racing it: the
+        // call's own `finally` still has streams to drain, and a caller that
+        // exits on `await stop()` must not leave a live leaf behind.
+        // Finish the interrupted call's teardown rather than racing it — and
+        // through the SAME helper, so the accounting is read before the leaf is
+        // removed and the observability line carries real values. `stop()` is a
+        // signal death by construction (it SIGKILLs), so `killed` is true; the
+        // kernel's counters decide whether that was the bound firing.
+        const leaf = currentLeaf;
+        if (leaf !== null) {
+          currentLeaf = null;
+          // `killed` is the child's ACTUAL end, read off the settled handle —
+          // not an assumed `true` because we sent a signal. A child that exited
+          // on its own an instant before our SIGKILL landed did not die of the
+          // bound, and assuming otherwise re-opens the graceful-`-ENOMEM` false
+          // positive through the stop path: a leaf carrying an own-limit `oom`
+          // counter would report `oomKilled: true` for a Ctrl-C. Same
+          // discriminator the call side uses.
+          const diedBySignal =
+            proc.exitCode === null || proc.signalCode !== null || proc.exitCode === 137;
+          teardownLeaf(leaf, diedBySignal);
+        }
       } finally {
         LIVE_SESSION_PATHS.delete(sessionPath);
       }

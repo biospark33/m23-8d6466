@@ -1,0 +1,925 @@
+/**
+ * DF3.6b — host-side coverage of the kernel-enforced resident memory bound.
+ *
+ * What a host-side suite CAN prove and what it cannot, stated once so nothing
+ * here is mistaken for the make-or-break:
+ *
+ *   - PROVEN HERE: the delegated-subtree split and its idempotence, the leaf
+ *     lifecycle (`memory.max` + `memory.oom.group=1` written, leaf removed on
+ *     every exit path, a fresh leaf and a fresh `memory.peak` per solicitation),
+ *     the numeric contract (the bound written is the bound supplied, byte for
+ *     byte), the fail-closed placement wrapper's `|| exit 97` semantics against
+ *     a positive control, the INV-MEM-2 Scope seam (absent bound ⇒ no cgroup
+ *     machinery at all), and the arming refusal (AC3).
+ *   - NOT PROVABLE HERE, at all: that the KERNEL OOM-kills the leaf (AC1). The
+ *     enforcer is the kernel and darwin has no cgroups. That is the live in-box
+ *     round's two legs, and this file never pretends otherwise — every test
+ *     below drives the mechanism against a FAKE hierarchy in a temp dir, which
+ *     proves the writes, never the enforcement.
+ *
+ * The fake hierarchy is a plain directory tree with the files the mechanism
+ * reads and writes. It is honest about what it is: `cgroup.procs` is an ordinary
+ * file here, so a write to it SUCCEEDS on any platform — which is exactly why
+ * the placement test below drives the refusal through a MISSING leaf rather than
+ * through a permission the fake cannot model.
+ */
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  _injectRateSources,
+  _lastSpawnArgvForTest,
+  _injectSelfCgroupDir,
+  _PLACEMENT_REFUSED_EXIT,
+  _PLACEMENT_SCRIPT,
+  _resetCgroupSplit,
+  CgroupUnenforceableError,
+  DEFAULT_RESIDENT_SLUG,
+  startResident,
+  type ResidentSpawn,
+} from "../../src/fleet/resident.ts";
+import { PlacementRefusedError } from "../../src/phase-engine/steering.ts";
+import type { RateSources } from "../../src/phase-engine/roster/validate.ts";
+
+const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "df3-6b-cgroup-")));
+const fakePi = join(import.meta.dir, "fixtures", "fake-pi-resident.ts");
+afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+const SECRET = "sk-or-v1-df36b-resident-fixture-secret-00000011111";
+const PROMPT = "Resident: read the dispatch brief and steer at the next point.";
+/** 64 MiB — the story's E2E fixture bound, used here only as a distinctive
+ *  number the assertions can read back byte for byte. */
+const BOUND = 67_108_864;
+
+const TEST_SOURCES: RateSources = {
+  bundled: {
+    unit: "usd-per-mtok",
+    entries: new Map([
+      [`openrouter/${DEFAULT_RESIDENT_SLUG}`, { input: 0.08, output: 0.18, cacheRead: 0.016, cacheWrite: 0.018 }],
+    ]),
+  },
+  custom: { unit: "usd-per-mtok", entries: new Map() },
+};
+
+function brief(): Record<string, unknown> {
+  return { repoSlug: "Quantum-Digital-Solutions/QDS-Factory", issueId: 36, commitSha: "b".repeat(40), manifestPath: "pipeline.yaml" };
+}
+
+function caseDir(name: string): string {
+  return realpathSync(mkdtempSync(join(tmpRoot, `${name}-`)));
+}
+
+function piEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (/^(QDS_FAKE_PI_|FAKE_RESIDENT_)/.test(key)) continue;
+    if (key === "QDS_RESIDENT_TIMEOUT_MS" || key === "QDS_PI_BIN") continue;
+    env[key] = value;
+  }
+  return { ...env, OPENROUTER_API_KEY: SECRET, ...over };
+}
+
+function enabled(res: ReturnType<typeof startResident>): ResidentSpawn {
+  expect(res).not.toHaveProperty("disabled");
+  return res as ResidentSpawn;
+}
+
+/**
+ * A fake delegated cgroup root: the two files `ensureDelegatedSubtree` reads,
+ * plus whatever pids the caller wants the root to "hold". `controllers` is the
+ * knob the unenforceable cases turn — an empty one is `Delegate=memory` absent.
+ */
+function fakeRoot(name: string, opts: { controllers?: string; procs?: string[] } = {}): string {
+  const root = join(caseDir(name), "qds-run@r.service");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "cgroup.controllers"), opts.controllers ?? "cpu memory pids\n");
+  writeFileSync(join(root, "cgroup.procs"), `${(opts.procs ?? []).join("\n")}\n`);
+  writeFileSync(join(root, "cgroup.subtree_control"), "");
+  return root;
+}
+
+/** Point the mechanism at a fake root and return it. */
+function useRoot(root: string): string {
+  _injectSelfCgroupDir(() => root);
+  return root;
+}
+
+beforeEach(() => {
+  chmodSync(fakePi, 0o755);
+  _injectRateSources(TEST_SOURCES);
+});
+afterEach(() => {
+  _injectRateSources(null);
+  _injectSelfCgroupDir(null);
+  _resetCgroupSplit();
+});
+
+// ─── the one-time delegated-subtree split ───────────────────────────────────
+
+describe("DF3.6b — the delegated-subtree split (cgroup v2's no-internal-processes rule)", () => {
+  test("moves EVERY process in the root into supervisor/ and enables +memory", () => {
+    // MORE THAN ONE PID, deliberately: the root the split exists for holds the
+    // engine AND, in-box, every tier-3 `dispatch_task` worker, and cgroup v2's
+    // no-internal-processes rule refuses `+memory` while ANY of them is still
+    // there. A single-pid fixture cannot tell a loop from a one-shot move — and
+    // could not until the mechanism stopped truncating `cgroup.procs` on each
+    // write (review round 3, finding 5).
+    const root = useRoot(fakeRoot("split", { procs: [String(process.pid), "4242", "4243"] }));
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-split",
+        sessionDir: caseDir("split-session"),
+        bin: fakePi,
+        env: piEnv(),
+        residentRssBytes: BOUND,
+      }),
+    );
+    expect(
+      readFileSync(join(root, "supervisor", "cgroup.procs"), "utf8").split("\n").filter((l) => l !== ""),
+    ).toEqual([String(process.pid), "4242", "4243"]);
+    expect(readFileSync(join(root, "cgroup.subtree_control"), "utf8")).toBe("+memory");
+    return spawn.stop();
+  });
+
+  test("is idempotent across engine restarts: a self already IN supervisor/ splits at the parent", () => {
+    const root = fakeRoot("restart", { procs: [] });
+    mkdirSync(join(root, "supervisor"), { recursive: true });
+    writeFileSync(join(root, "supervisor", "cgroup.procs"), "");
+    // A restarted engine reads its OWN cgroup as `.../supervisor` — the root to
+    // split is its PARENT. Rooting at the leaf would nest supervisor/supervisor
+    // and enable +memory on a cgroup that is not the delegated one.
+    useRoot(join(root, "supervisor"));
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-restart",
+        sessionDir: caseDir("restart-session"),
+        bin: fakePi,
+        env: piEnv(),
+        residentRssBytes: BOUND,
+      }),
+    );
+    expect(existsSync(join(root, "supervisor", "supervisor"))).toBe(false);
+    expect(readFileSync(join(root, "cgroup.subtree_control"), "utf8")).toBe("+memory");
+    return spawn.stop();
+  });
+});
+
+// ─── AC3 / INV-MEM-2: unenforceable means NOT STARTED ───────────────────────
+
+describe("DF3.6b AC3 / INV-MEM-2 — an unenforceable bound refuses the resident, typed", () => {
+  test("Delegate=memory absent (no `memory` in cgroup.controllers) ⇒ CgroupUnenforceableError", () => {
+    useRoot(fakeRoot("nodelegate", { controllers: "cpu pids\n" }));
+    let thrown: unknown;
+    try {
+      startResident({
+        brief: brief(),
+        runId: "run-nodelegate",
+        sessionDir: caseDir("nodelegate-session"),
+        bin: fakePi,
+        env: piEnv(),
+        residentRssBytes: BOUND,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CgroupUnenforceableError);
+    expect((thrown as Error).message).toContain("Delegate=memory");
+  });
+
+  test("no unified hierarchy at all (unreadable root) ⇒ CgroupUnenforceableError, and NOTHING is started", () => {
+    const missing = join(caseDir("nov2"), "absent");
+    useRoot(missing);
+    const sessionDir = join(caseDir("nov2-session"), "sessions");
+    expect(() =>
+      startResident({
+        brief: brief(),
+        runId: "run-nov2",
+        sessionDir,
+        bin: fakePi,
+        env: piEnv(),
+        residentRssBytes: BOUND,
+      }),
+    ).toThrow(CgroupUnenforceableError);
+    // The refusal precedes the session tree, so it leaves no filesystem side
+    // effect and no session claim to leak — the INV-RES-3 rule, extended.
+    expect(existsSync(sessionDir)).toBe(false);
+  });
+
+  test("a garbage bound is a CALLER fault, not an unenforceable box (it must not disable a resident over a typo)", () => {
+    useRoot(fakeRoot("garbage"));
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      let thrown: unknown;
+      try {
+        startResident({
+          brief: brief(),
+          runId: "run-garbage",
+          sessionDir: caseDir("garbage-session"),
+          bin: fakePi,
+          env: piEnv(),
+          residentRssBytes: bad,
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown).not.toBeInstanceOf(CgroupUnenforceableError);
+      expect((thrown as Error).message).toContain("residentRssBytes");
+    }
+  });
+
+  test("the arming check runs against a REAL object: a root that reads enforceable but cannot hold a leaf still refuses", () => {
+    const root = useRoot(fakeRoot("readonly"));
+    // The controllers file says `memory`; the split succeeds; the probe leaf is
+    // what fails. A check that stopped at "does the controller exist?" passes
+    // this box and arms a resident whose bound can never be written.
+    mkdirSync(join(root, "supervisor"), { recursive: true });
+    chmodSync(root, 0o500);
+    try {
+      expect(() =>
+        startResident({
+          brief: brief(),
+          runId: "run-readonly",
+          sessionDir: caseDir("readonly-session"),
+          bin: fakePi,
+          env: piEnv(),
+          residentRssBytes: BOUND,
+        }),
+      ).toThrow(CgroupUnenforceableError);
+    } finally {
+      chmodSync(root, 0o700);
+    }
+  });
+});
+
+// ─── INV-MEM-2 Scope: the host-side seam ────────────────────────────────────
+
+describe("DF3.6b INV-MEM-2 Scope — an ABSENT bound runs no cgroup machinery at all", () => {
+  test("omitting residentRssBytes arms normally and touches no hierarchy", async () => {
+    // The injected resolver THROWS: if any cgroup code ran on this path, this
+    // test fails loudly instead of passing for the wrong reason. This is what
+    // keeps DF3.3's 42 host-side arming sites — and its INV-RES-3 second-mint
+    // exhibit, a shipped security control — green on darwin.
+    _injectSelfCgroupDir(() => {
+      throw new Error("cgroup resolution must not run when residentRssBytes is absent");
+    });
+    const dir = caseDir("noseam");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-noseam",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT);
+      expect(spawn.lastMemory()).toBeNull();
+      // The wrapper is absent from argv too: the child IS pi, not `sh -c`.
+      const argv: string[] = JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).argv;
+      expect(argv.join(" ")).not.toContain("cgroup.procs");
+    } finally {
+      await spawn.stop();
+    }
+  });
+});
+
+// ─── the leaf lifecycle and the numeric contract ────────────────────────────
+
+describe("DF3.6b — the per-solicitation leaf: armed with the bound, removed after the call", () => {
+  test("memory.max carries the SUPPLIED bound byte for byte, and memory.oom.group is 1", async () => {
+    // Two different bounds through the same code path: an implementation that
+    // wrote a constant, a rounded value, or its own default passes a
+    // single-value assertion and fails this one. This is the numeric contract
+    // the DF3.6a handoff says has zero behavioural coverage anywhere else.
+    //
+    // DETERMINISTIC, not polled: the CHILD records the leaf's armed state from
+    // inside the call, which is the only moment the leaf exists. An earlier
+    // version polled the root from the parent and raced the `finally` teardown
+    // — a flake on the one test that must never be quarantined as flaky.
+    for (const bound of [BOUND, 12_345_678]) {
+      const root = useRoot(fakeRoot(`bound-${bound}`));
+      const dir = caseDir(`bound-${bound}-session`);
+      const leafOut = join(dir, "leaf.json");
+      const spawn = enabled(
+        startResident({
+          brief: brief(),
+          runId: "run-bound",
+          sessionDir: dir,
+          bin: fakePi,
+          env: piEnv({ QDS_FAKE_PI_EVENTS_ROOT: root, QDS_FAKE_PI_LEAF_OUT: leafOut }),
+          residentRssBytes: bound,
+        }),
+      );
+      try {
+        // The arming probe leaf is removed, so the root is clean before the call.
+        expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+        await spawn.caller.call(PROMPT);
+        const armed = JSON.parse(readFileSync(leafOut, "utf8")) as {
+          leaf: string;
+          max: string | null;
+          oomGroup: string | null;
+        };
+        expect(armed.max).toBe(String(bound));
+        expect(armed.oomGroup).toBe("1");
+        // The leaf pi ran in was this solicitation's own, and it is gone after.
+        expect(armed.leaf).toBe("resident.run-bound.1");
+        expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+      } finally {
+        await spawn.stop();
+        _resetCgroupSplit();
+      }
+    }
+  });
+
+  test("a second solicitation gets a FRESH leaf and a fresh memory.peak — asserted by VALUE, not by object identity", async () => {
+    const root = useRoot(fakeRoot("two-calls"));
+    const dir = caseDir("two-calls-session");
+    // The fake stages `memory.peak` as 1000 × the leaf's own seq, so the two
+    // calls produce DIFFERENT readings. Object identity would prove nothing
+    // here: the resident rebuilds the reading as a fresh object literal every
+    // call, so `.not.toBe` holds even for an implementation that re-read the
+    // PREVIOUS leaf and reported its numbers again.
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-two",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_PEAK_BASE: "1000", QDS_FAKE_PI_EVENTS_ROOT: root }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT);
+      const first = spawn.lastMemory();
+      expect(first?.boundBytes).toBe(BOUND);
+      expect(first?.oomKilled).toBe(false);
+      expect(first?.peakBytes).toBe(1000);
+      expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+      await spawn.caller.call(PROMPT);
+      expect(spawn.lastMemory()?.peakBytes).toBe(2000);
+      expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("stop() during an in-flight call tears the leaf down ONCE, reading the accounting before removing it", async () => {
+    // Review round 6. `stop()` resumes on `proc.exited` alone, while the
+    // interrupted call additionally drains both output streams — so stop()
+    // reaches the teardown first essentially always. An implementation that
+    // lets both sides run it raced them: stop() removed the leaf, the call's
+    // own read then returned `{peakBytes:0, oomKilled:false}` silently for a
+    // solicitation that may have been OOM-killed, the `resident_cgroup` line
+    // was emitted with falsified values, and the call warned a spurious ENOENT.
+    // Whoever clears the handle first owns the teardown; the other skips.
+    const root = useRoot(fakeRoot("stop-race"));
+    const dir = caseDir("stop-race-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-stoprace",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+          QDS_FAKE_PI_PEAK_BASE: "4096",
+          QDS_FAKE_PI_EVENTS: "low 0\nhigh 1\nmax 2\noom 0\noom_kill 0\noom_group_kill 0\n",
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    const inFlight = spawn.caller.call(PROMPT).catch(() => undefined);
+    // Wait for the child to have staged the leaf files, so the assertion below
+    // distinguishes "read before removal" from "nothing was ever there".
+    for (let i = 0; i < 400; i += 1) {
+      const leaves = readdirSync(root).filter((e) => e.startsWith("resident."));
+      if (leaves.length === 1 && existsSync(join(root, leaves[0] as string, "memory.peak"))) break;
+      await Bun.sleep(5);
+    }
+    await spawn.stop();
+    await inFlight;
+    // The accounting survived the teardown — a racing implementation reports 0.
+    expect(spawn.lastMemory()?.peakBytes).toBe(4096);
+    // …and the leaf is gone, exactly once, with no second remove to fail.
+    expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+  }, 20_000);
+
+  test("the leaf is removed on a FAILING call too — an error path must not leak a cgroup", async () => {
+    const root = useRoot(fakeRoot("failpath"));
+    const dir = caseDir("failpath-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-fail",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_MODE: "fail" }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
+      expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+      // The kernel's account is still readable after a failed call: the read
+      // happens BEFORE the removal, on every path.
+      expect(spawn.lastMemory()).not.toBeNull();
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("AC2 — the bound lands on the LEAF and nowhere else: never on the delegated root, never on supervisor/", async () => {
+    // The wrong implementation this codebase is one line away from is NOT a
+    // directive typed into the unit file (the test below covers that) — it is
+    // writing `memory.max` on the DELEGATED ROOT that `ensureDelegatedSubtree`
+    // returns. That root holds the engine and, in-box, every tier-3
+    // `dispatch_task` worker, so a bound there charges a bun team-lead's memory
+    // to a resident bound and trips on the first dispatch phase of every real
+    // run (F064, already found and fixed once). It would leave the unit file
+    // untouched and the leaf lifecycle intact.
+    const root = useRoot(fakeRoot("ac2-root"));
+    const dir = caseDir("ac2-session");
+    const procsOut = join(dir, "leaf-procs.txt");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-ac2",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_EVENTS_ROOT: root, QDS_FAKE_PI_PROCS_OUT: procsOut }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT);
+      for (const where of [root, join(root, "supervisor")]) {
+        for (const knob of ["memory.max", "memory.high", "memory.oom.group"]) {
+          expect(existsSync(join(where, knob)), `${where}/${knob}`).toBe(false);
+        }
+      }
+      // …and exactly ONE pid was ever placed in the leaf: pi's own, written by
+      // the placement wrapper. A second pid would mean something that is not the
+      // resident's process tree is inside the resident's bound.
+      //
+      // The wrapper APPENDS (`>>`), so this read-back is a property of the
+      // mechanism rather than of shell redirection truncating a regular file —
+      // an earlier `>` would have made the assertion unfalsifiable. What the
+      // fake still cannot model is the kernel's own bookkeeping: on real
+      // cgroupfs `cgroup.procs` also lists pi's DESCENDANTS, which inherit the
+      // cgroup and never appear here. That half is the live round's.
+      const placed = readFileSync(procsOut, "utf8").split("\n").filter((l) => l.trim() !== "");
+      expect(placed).toHaveLength(1);
+      expect(placed[0]).not.toBe(String(process.pid)); // never the engine's own pid
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("AC2 — nothing writes a unit-level MemoryMax=: an engine-rooted bound is unrepresentable in the shipped unit", () => {
+    // The F064 invariant, asserted where it can be: an engine-rooted bound
+    // charges every in-box `dispatch_task` worker's memory to a resident bound.
+    // The shipped unit must therefore carry NO unit-level memory directive —
+    // only `Delegate=memory`, which hands the engine a subtree to root its own
+    // leaf in.
+    const unit = readFileSync(join(import.meta.dir, "..", "..", "oci", "exedev", "systemd", "qds-run@.service"), "utf8");
+    expect(unit).toMatch(/^Delegate=memory$/m);
+    expect(unit).not.toMatch(/^Memory(Max|High|Limit)=/m);
+  });
+});
+
+// ─── AC4: the fail-closed placement wrapper ─────────────────────────────────
+
+describe("DF3.6b AC4 — the placement wrapper refuses to become pi when the placement fails", () => {
+  /** Runs the SHIPPED script (imported, never re-typed) against a cgroup dir,
+   *  with a "pi" that leaves a marker file if it is ever exec'd. */
+  async function runWrapper(script: string, cgroupDir: string): Promise<{ code: number | null; piRan: boolean }> {
+    const dir = caseDir("wrapper");
+    const marker = join(dir, "pi-ran");
+    const proc = Bun.spawn(["sh", "-c", script, "_", cgroupDir, "sh", "-c", `: > "${marker}"`], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await proc.exited;
+    return { code: proc.exitCode, piRan: existsSync(marker) };
+  }
+
+  test("a placement that FAILS exits 97 and never execs pi", async () => {
+    const gone = join(caseDir("gone"), "resident.1"); // the leaf a concurrent teardown removed
+    const res = await runWrapper(_PLACEMENT_SCRIPT, gone);
+    expect(res.code).toBe(_PLACEMENT_REFUSED_EXIT);
+    expect(res.piRan).toBe(false);
+  });
+
+  test("POSITIVE CONTROL — the same script execs pi when the placement SUCCEEDS", async () => {
+    // Without this, the test above would pass against a script that always
+    // exits 97, which proves nothing about the wrapper.
+    const leaf = caseDir("live-leaf");
+    writeFileSync(join(leaf, "cgroup.procs"), "");
+    const res = await runWrapper(_PLACEMENT_SCRIPT, leaf);
+    expect(res.code).toBe(0);
+    expect(res.piRan).toBe(true);
+  });
+
+  test("NEGATIVE CONTROL — an unconditional `;` wrapper execs pi UNBOUNDED on the same failure, and must not be what ships", async () => {
+    // `;` is unconditional sequencing: the failed redirection prints to stderr
+    // and falls straight through to `exec`, running pi with no memory.max —
+    // the silent degradation to an unbounded agent INV-MEM-2 forbids.
+    const unconditional = 'echo $$ > "$1"/cgroup.procs 2>/dev/null; shift; exec "$@"';
+    const gone = join(caseDir("gone2"), "resident.1");
+    const res = await runWrapper(unconditional, gone);
+    expect(res.piRan).toBe(true);
+    expect(res.code).toBe(0);
+    // …and the shipped script does the opposite on the identical input.
+    expect(await runWrapper(_PLACEMENT_SCRIPT, gone)).toEqual({ code: _PLACEMENT_REFUSED_EXIT, piRan: false });
+  });
+
+  test("the refusal is keyed on VERIFIED MEMBERSHIP, so a placement that silently did not take still exits 97", async () => {
+    // FINDING 5 (review round 1). `cgroup.procs` rejects at WRITE time as well
+    // as at open time — EBUSY when the target is not a leaf, EOPNOTSUPP, EINVAL
+    // — and whether a `|| exit 97` on the redirection fires then depends on the
+    // shell propagating a deferred write error: busybox `ash` returns 1, `dash`
+    // raises an I/O error and exits 2. A generic non-zero exit is NOT the
+    // `unenforceable` classification; the engine latches "degraded", which is
+    // the misclassification AC4 exists to prevent.
+    //
+    // A true write-time rejection is a kernel behaviour no fake can produce, so
+    // what is asserted here is the property that makes the shell irrelevant:
+    // the wrapper reads `cgroup.procs` back and refuses unless its OWN pid is
+    // in it. A leaf whose `cgroup.procs` accepts the write and does not retain
+    // the pid — an ordinary empty file that something else truncates, the
+    // portable stand-in — must still exit 97 and never exec pi.
+    const leaf = caseDir("not-a-member");
+    // Read-only file: the write fails or is dropped, and in EITHER case our pid
+    // is not in it afterwards. A status-trusting wrapper is at the mercy of the
+    // shell here; this one is not.
+    writeFileSync(join(leaf, "cgroup.procs"), "");
+    chmodSync(join(leaf, "cgroup.procs"), 0o444);
+    try {
+      expect(await runWrapper(_PLACEMENT_SCRIPT, leaf)).toEqual({
+        code: _PLACEMENT_REFUSED_EXIT,
+        piRan: false,
+      });
+    } finally {
+      chmodSync(join(leaf, "cgroup.procs"), 0o644);
+    }
+  });
+
+  test("a BOUNDED call actually spawns THROUGH the wrapper — not pi directly with a parent-side placement", async () => {
+    // Rebase-review finding 4. Every other assertion in this file survives an
+    // implementation that deletes the wrapper and writes `proc.pid` into
+    // `cgroup.procs` from the PARENT right after `Bun.spawn`: the one-pid
+    // read-back still sees one pid, the numeric contract and two-calls tests
+    // never inspect argv, the exit-97 arm keys on the exit code plus `leafDir`
+    // rather than on the wrapper, `runWrapper` exercises the script standalone,
+    // and INV-MEM-3's test reads pi's own argv, which is identical either way.
+    // That implementation re-opens precisely the window in which pi runs
+    // unbounded — between `Bun.spawn` returning and the parent's write landing —
+    // which is the only reason the wrapper exists.
+    const root = useRoot(fakeRoot("spawn-shape"));
+    const dir = caseDir("spawn-shape-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-shape",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv(),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT);
+      const argv = _lastSpawnArgvForTest();
+      expect(argv[0]).toBe("sh");
+      expect(argv[1]).toBe("-c");
+      expect(argv[2]).toBe(_PLACEMENT_SCRIPT);
+      // `_` is $0, then the leaf, then pi's own argv — positional (INV-MEM-3).
+      expect(argv[3]).toBe("_");
+      expect(argv[4]).toContain(`${root}/resident.run-shape.`);
+      expect(argv[5]).toBe(fakePi);
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("NEGATIVE CONTROL — an UNBOUNDED call spawns pi directly, with no wrapper at all", async () => {
+    _injectSelfCgroupDir(() => {
+      throw new Error("no cgroup machinery on an unbounded call");
+    });
+    const dir = caseDir("spawn-shape-unbounded");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-shape-unbounded",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv(),
+      }),
+    );
+    try {
+      await spawn.caller.call(PROMPT);
+      const argv = _lastSpawnArgvForTest();
+      expect(argv[0]).toBe(fakePi);
+      expect(argv).not.toContain(_PLACEMENT_SCRIPT);
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("INV-MEM-3 — pi's argv is passed POSITIONALLY: the prompt is never interpolated into a shell string", async () => {
+    useRoot(fakeRoot("argv"));
+    const dir = caseDir("argv-session");
+    // A prompt carrying shell metacharacters. Interpolated into `sh -c`, the
+    // substitution would run; passed positionally, it is one inert argv element.
+    const hostile = `${PROMPT} $(touch ${join(dir, "pwned")}) \`touch ${join(dir, "pwned2")}\``;
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-argv",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      await spawn.caller.call(hostile);
+      const rec = JSON.parse(readFileSync(join(dir, "record.json"), "utf8")) as { argv: string[] };
+      expect(rec.argv).toContain(hostile); // one element, verbatim
+      expect(existsSync(join(dir, "pwned"))).toBe(false);
+      expect(existsSync(join(dir, "pwned2"))).toBe(false);
+      // The key stays env-borne, never argv (resident.ts's shipped rule,
+      // unchanged by this wrapper).
+      expect(rec.argv.join(" ")).not.toContain(SECRET);
+      // The leaf the wrapper placed pi into was this root's, not some other
+      // tree's — the argv element carrying it is asserted in the spawn-shape
+      // test above; here it is enough that the call ran under a bound at all.
+      expect(spawn.lastMemory()).not.toBeNull();
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("a CHILD that exits 97 rejects with the typed PlacementRefusedError — the wrapper's refusal reaches the engine as a type", async () => {
+    // The join neither half covered on its own (review round 3): the shell
+    // script is exercised standalone through `runWrapper`, and the typed
+    // rejection through a leaf-arming failure — but nothing ran a spawned child
+    // that exits 97 from inside `call()`. Delete the exit-code arm and the rest
+    // of the suite stays green while a real placement refusal degrades into the
+    // generic non-zero path: `lastExit = "logic"`, a plain `Error`, and the
+    // engine's one-way "degraded" latch instead of `unenforceable`.
+    const root = useRoot(fakeRoot("exit97"));
+    const dir = caseDir("exit97-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-exit97",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_EXIT: String(_PLACEMENT_REFUSED_EXIT) }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      const err = await spawn.caller.call(PROMPT).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(PlacementRefusedError);
+      expect((err as PlacementRefusedError).exitCode).toBe(_PLACEMENT_REFUSED_EXIT);
+      // pi never ran, so there is no process end to report — the busy/empty
+      // prompt rule, applied to a refusal that happened before `exec`.
+      expect(await spawn.exitStatus()).toBeNull();
+      // …and the leaf is still torn down: a refusal must not leak a cgroup.
+      expect(readdirSync(root).filter((e) => e.startsWith("resident."))).toEqual([]);
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("NEGATIVE CONTROL — an UNBOUNDED call exiting 97 is an ordinary pi failure, not a placement refusal", async () => {
+    // Without the `leafDir !== null` guard on that arm, a host-side resident
+    // (no bound, no cgroup, no wrapper) exiting 97 would be reported as a
+    // placement refusal for a placement that never happened.
+    _injectSelfCgroupDir(() => {
+      throw new Error("no cgroup machinery on an unbounded call");
+    });
+    const dir = caseDir("exit97-unbounded");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-exit97-unbounded",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_EXIT: String(_PLACEMENT_REFUSED_EXIT) }),
+      }),
+    );
+    try {
+      const err = await spawn.caller.call(PROMPT).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).not.toBeInstanceOf(PlacementRefusedError);
+      expect((err as Error).message).toContain("exited 97");
+    } finally {
+      await spawn.stop();
+    }
+  });
+
+  test("a leaf that cannot be armed at solicitation time rejects with the TYPED PlacementRefusedError, not an opaque Error", async () => {
+    const root = useRoot(fakeRoot("armfail"));
+    const dir = caseDir("armfail-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-armfail",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv(),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      // The delegated root goes read-only between arming and the call — the
+      // leaf can no longer be created, and an unbounded call must NOT be
+      // issued. The engine classifies this by TYPE (its `instanceof` arm),
+      // never through the one-way "degraded" latch.
+      chmodSync(root, 0o500);
+      const err = await spawn.caller.call(PROMPT).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(PlacementRefusedError);
+      expect((err as PlacementRefusedError).exitCode).toBe(_PLACEMENT_REFUSED_EXIT);
+    } finally {
+      chmodSync(root, 0o700);
+      await spawn.stop();
+    }
+  });
+});
+
+// ─── the OOM verdict discriminates an own-limit kill from a global one ──────
+
+describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'something OOM-killed pi'", () => {
+  /** Drive `readLeaf` through a leaf whose `memory.events` the test writes. The
+   *  leaf is the one a solicitation leaves behind, so the reading is taken the
+   *  way production takes it: from the live leaf, before removal. */
+  async function verdictFor(
+    events: string,
+    opts: { signalDeath?: boolean } = {},
+  ): Promise<{ peakBytes: number; oomKilled: boolean } | null> {
+    const root = useRoot(fakeRoot(`events-${Math.random().toString(36).slice(2)}`));
+    const dir = caseDir("events-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-events",
+        sessionDir: dir,
+        bin: fakePi,
+        // The fake pi writes the events file from INSIDE the leaf's lifetime,
+        // which is the only window in which it exists.
+        env: piEnv({
+          QDS_FAKE_PI_EVENTS: events,
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+          ...(opts.signalDeath === true ? { QDS_FAKE_PI_SIGKILL: "1" } : {}),
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      // A signal death rejects the call; a clean one resolves. Either way the
+      // reading is taken in the call's `finally`, before the leaf is removed.
+      await spawn.caller.call(PROMPT).catch(() => undefined);
+      return spawn.lastMemory();
+    } finally {
+      await spawn.stop();
+      _resetCgroupSplit();
+    }
+  }
+
+  test("a GLOBAL OOM kill (oom_kill set, oom/oom_group_kill zero) is NOT this bound firing", async () => {
+    // The box went into system-wide OOM and the kernel picked pi. `oom_kill`
+    // counts processes in this cgroup killed by ANY OOM killer, so keying the
+    // verdict on it stops the resident for a bound it never crossed and files a
+    // watchdog_kill row whose detail contradicts itself (peak far below bound).
+    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\noom_group_kill 0\n");
+    expect(v?.oomKilled).toBe(false);
+  });
+
+  test("a GROUP kill on this leaf (oom_group_kill set) IS this bound firing", async () => {
+    const v = await verdictFor("low 0\nhigh 2\nmax 5\noom 1\noom_kill 1\noom_group_kill 1\n", {
+      signalDeath: true,
+    });
+    expect(v?.oomKilled).toBe(true);
+  });
+
+  test("an own-limit OOM on a pre-5.17 kernel (no oom_group_kill line) still counts", async () => {
+    const v = await verdictFor("low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n", { signalDeath: true });
+    expect(v?.oomKilled).toBe(true);
+  });
+
+  test("counters set but the process SURVIVED is NOT a kill — an own-limit `oom` can be a graceful -ENOMEM", async () => {
+    // Rebase-review finding 3. `oom` counts the times this cgroup hit its own
+    // limit and could not reclaim; where the allocation can fail gracefully the
+    // kernel returns -ENOMEM and the task lives. pi can take that, finish, and
+    // the CALL can still reject afterwards — on a reply-artifact persist
+    // failure, or a provider 429 classified transient. Reporting a kill there
+    // files a `watchdog_kill` row with `status:"stopped"` and
+    // `exitStatus:"overflow"` for a host-side fault, and those rows are D4's
+    // tier-2 demotion evidence.
+    const v = await verdictFor("low 0\nhigh 4\nmax 9\noom 1\noom_kill 0\noom_group_kill 0\n");
+    expect(v).not.toBeNull();
+    expect(v?.oomKilled).toBe(false);
+  });
+
+  test("a clean call reads false on every counter", async () => {
+    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n");
+    expect(v?.oomKilled).toBe(false);
+  });
+});
+
+// ─── M1: reclaimable pressure is the OTHER backstop, not a silent miss ──────
+
+describe("DF3.6b M1 — reclaimable (file-backed) pressure classifies as a TIMEOUT, never as a silent pass", () => {
+  test("a solicitation that thrashes at the limit times out, and its leaf reports NO kill even though the limit was hit", async () => {
+    // The DoD's claim is a CLASSIFICATION claim: file-backed growth at
+    // `memory.max` reclaims rather than OOMs, so the backstop that fires is the
+    // per-call wall clock (`SOLICIT_TIMEOUT_MS`), not the bound — and a missing
+    // `oom_kill` count on that path must read as "the other backstop fired",
+    // never as "the bound is absent".
+    //
+    // WHAT IS AND IS NOT PROVEN HERE. Real reclaim is a kernel behaviour no
+    // host-side fake can produce; the live round is the only place that lands.
+    // The DoD says "skipped, not faked, where cgroups do not exist"; this test
+    // is faked and unconditional, and the story's DoD sentence is amended to
+    // match (ruling 6) rather than the claim being left to contradict the code.
+    // The reason: a skip proves nothing anywhere, while a staged-counter
+    // classification test fails for a real class of wrong implementation.
+    // What IS proven, and what an earlier version of this test could not prove:
+    // the leaf's own counters are STAGED WITH A LIMIT THAT WAS HIT AND
+    // RECLAIMED (`max` non-zero, `oom`/`oom_group_kill` zero) and the verdict is
+    // still `oomKilled: false` while the call classifies as a timeout. An
+    // implementation reading `max` — the "times the limit was hit" counter,
+    // which a thrashing solicitation increments on every reclaim — as a kill
+    // reports a `watchdog_kill` for a run that only ran slowly, and MUST fail
+    // this test. An earlier version asserted `oomKilled` on a leaf with NO
+    // `memory.events` at all, where `false` was the unconditional default and
+    // the assertion held for every implementation, right or wrong.
+    const root = useRoot(fakeRoot("thrash"));
+    const dir = caseDir("thrash-session");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-thrash",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "150",
+          // The limit was hit 17 times and reclaimed every time — the shape a
+          // page-cache-thrashing solicitation leaves behind.
+          QDS_FAKE_PI_EVENTS: "low 0\nhigh 9\nmax 17\noom 0\noom_kill 0\noom_group_kill 0\n",
+          QDS_FAKE_PI_EVENTS_ROOT: root,
+        }),
+        residentRssBytes: BOUND,
+      }),
+    );
+    try {
+      const err = await spawn.caller.call(PROMPT).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      // The wall clock is what fired, and it says so.
+      expect((err as Error).message).toContain("timed out");
+      const mem = spawn.lastMemory();
+      // Not vacuous: the events file EXISTS and records a limit that was hit.
+      expect(mem).not.toBeNull();
+      expect(mem?.oomKilled).toBe(false);
+      // The assertion above is discriminating rather than always-false because
+      // the SAME staged-counter machinery reads `true` when the counters say an
+      // own-limit kill AND the child died by signal — see the "`oomKilled`
+      // means THIS leaf hit ITS OWN limit" block below, whose group-kill and
+      // pre-5.17 cases stage exactly that and assert `true`.
+    } finally {
+      await spawn.stop();
+    }
+  }, 20_000);
+});

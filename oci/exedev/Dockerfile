@@ -838,7 +838,8 @@ RUN set -e; \
       grep -qE "^RuntimeDirectory=.*qds-run/%i/${d}\b" "${unit}" || { echo "the unit does not declare RuntimeDirectory=qds-run/%i/${d}; the engine runs as User=exedev and cannot mkdir under root-owned /run (EACCES, first live round), and a non-%i literal would put every instance back on one shared root (#217 F-D1)" >&2; exit 1; }; \
     done; \
     grep -qE '^RuntimeDirectory=qds-run/%i/journal qds-run/%i/trace$' "${unit}" || { echo "the unit's RuntimeDirectory= is not exactly the per-instance pair qds-run/%i/journal qds-run/%i/trace — the engine's runMarkerRoot(runId) derives this exact tree and the two halves must not drift (#217 F-D1)" >&2; exit 1; }; \
-    grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete the per-run tree at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }
+    grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete the per-run tree at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }; \
+    grep -qE '^Delegate=memory$' "${unit}" || { echo "the unit does not set Delegate=memory; the engine runs as User=exedev and could not create the resident's per-solicitation cgroup or write its memory.max, so DF3.6b's kernel-enforced memory bound is unenforceable and every run would start with the resident DISABLED (INV-MEM-2) instead of failing loudly" >&2; exit 1; }
 
 # DoD (a): a malformed unit would otherwise surface first in DF1.10, on a real
 # box, mid-run. Verify it here, at build time, as a hard failure.

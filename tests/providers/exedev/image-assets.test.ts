@@ -395,6 +395,11 @@ const POLICIES: Policy[] = [
         ["NoNewPrivileges", "yes"],
         ["PrivateTmp", "yes"],
         ["UMask", "0077"],
+        // DF3.6b: `Delegate=yes` would also pass `directive-set` (which
+        // compares KEY NAMES and ignores values) while handing over every
+        // controller the manager has — a far wider grant than one memory bound
+        // needs. The VALUE is the policy, so the value is what is pinned.
+        ["Delegate", "memory"],
       ];
       return want
         .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
@@ -493,6 +498,10 @@ const POLICIES: Policy[] = [
           "NoNewPrivileges",
           "PrivateTmp",
           "UMask",
+          // DF3.6b: cgroup delegation. Added DELIBERATELY and visibly — the
+          // resident's memory bound is kernel-enforced on a child cgroup the
+          // engine creates as User=exedev, which is impossible without it.
+          "Delegate",
           // DF1.10: the engine's two tmpfs runtime directories. Added
           // DELIBERATELY and visibly, which is what this policy exists to force.
           // `/run` is root-owned and the unit runs as `User=exedev`, so the
@@ -1078,6 +1087,32 @@ function tmpfilesViolations(text: string): string[] {
   return bad;
 }
 
+describe("DF3.6b — the Dockerfile's Delegate=memory scan is itself fenced", () => {
+  /**
+   * The DoD item reads: "the Dockerfile unit scan fails the build when
+   * `Delegate=memory` is removed from `qds-run@.service` — the assertion is the
+   * fence." Nothing in this repo runs a docker build, so the scan line can be
+   * deleted and every MUTATIONS row above still passes: those rows mutate the
+   * UNIT and are rejected by TypeScript policies, not by the Dockerfile. This
+   * test is the fence for the fence — the cheapest thing that fails when the
+   * build-time assertion is dropped. (The same gap exists for the pre-existing
+   * `RuntimeDirectoryPreserve` scan; it is pinned here too so the pair cannot
+   * drift apart again.)
+   */
+  const DOCKERFILE = readFileSync(join(import.meta.dir, "..", "..", "..", "oci", "exedev", "Dockerfile"), "utf8");
+
+  test("the unit scan asserts Delegate=memory positively, anchored, in the shipped Dockerfile", () => {
+    expect(DOCKERFILE).toContain("grep -qE '^Delegate=memory$'");
+    // Anchored on BOTH ends: an unanchored pattern would accept
+    // `#Delegate=memory` in a comment, or `Delegate=memory-foo`.
+    expect(DOCKERFILE).not.toContain("grep -qE 'Delegate=memory'");
+  });
+
+  test("its sibling scan is still there too — the two are the unit's only build-time value fences", () => {
+    expect(DOCKERFILE).toContain("grep -qE '^RuntimeDirectoryPreserve=yes$'");
+  });
+});
+
 describe("DF2.10 AC6 — qds-steering.conf is one line, and the five copies agree", () => {
   test("exactly `d /run/steering 0700 exedev exedev`", () => {
     const entries = tmpfilesEntries(TMPFILES_TEXT);
@@ -1409,6 +1444,16 @@ const MUTATIONS: Mutation[] = [
     why: "AssertPathExists repointed off KEY_ENV_FILE — the unit then starts against a credential file that is not the one DF2.3 delivers, and the mandatory EnvironmentFile= is the only thing left to refuse it",
     mutate: (t) => t.replace(`AssertPathExists=${EXPECTED_ENV_FILE}`, `AssertPathExists=/home/${BOX_USER}/app/env`),
     rejectedBy: ["unit-asserts"],
+  },
+  {
+    why: "Delegate=memory DELETED — nothing fails at boot: the engine starts, the resident's cgroup cannot be created, and DF3.6b's INV-MEM-2 disables the resident on EVERY run. A silently resident-less fleet is exactly the regression an image-level fence exists to catch",
+    mutate: (t) => t.replace("Delegate=memory\n", ""),
+    rejectedBy: ["directive-set", "hardened"],
+  },
+  {
+    why: "Delegate=yes — passes `directive-set` untouched (it compares key names, not values) while delegating EVERY controller the manager has, not just memory",
+    mutate: (t) => t.replace("Delegate=memory", "Delegate=yes"),
+    rejectedBy: ["hardened"],
   },
   {
     why: "RuntimeDirectoryPreserve=no — the key survives `directive-set` untouched, and systemd deletes /run/journal at unit stop, so the terminal marker fleet status (AC5) and harvest (AC4) read is gone",
