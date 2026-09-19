@@ -778,8 +778,14 @@ function refuseOutOverlap(out: string, s: Sources): void {
  * kind — existsSync followed it and misread a dangling link as "absent", which
  * sent the exclusive mkdirSync into a guaranteed EEXIST it would have mislabeled
  * as a concurrent capture. The freeze writes a REAL directory and refuses to
- * write through a link, wherever it points. */
-function outKind(path: string): "absent" | "file" | "symlink" | "empty" | "sentinel-only" | "non-empty" {
+ * write through a link, wherever it points.
+ *
+ * A directory that is searchable but NOT readable (mode x-without-r) lstats fine
+ * and then throws EACCES from readdirSync — an environment fault that used to
+ * escape to main's exit-2 usage catch. It is its own kind instead; main turns it
+ * into the typed out-unreadable refusal. Exported for tests
+ * (tests/scripts/capture-run-of-record.test.ts). */
+export function outKind(path: string): "absent" | "file" | "symlink" | "unreadable" | "empty" | "sentinel-only" | "non-empty" {
   let st: ReturnType<typeof lstatSync>;
   try {
     st = lstatSync(path);
@@ -788,7 +794,12 @@ function outKind(path: string): "absent" | "file" | "symlink" | "empty" | "senti
   }
   if (st.isSymbolicLink()) return "symlink";
   if (!st.isDirectory()) return "file";
-  const entries = readdirSync(path);
+  let entries: string[];
+  try {
+    entries = readdirSync(path);
+  } catch {
+    return "unreadable";
+  }
   if (entries.length === 0) return "empty";
   return entries.length === 1 && entries[0] === "capture-in-progress" ? "sentinel-only" : "non-empty";
 }
@@ -835,6 +846,7 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
   // Idempotence: a frozen fixture is immutable. Existing-but-EMPTY is allowed (an interrupted earlier attempt may have left the shell behind).
   const out = outKind(args.out);
   if (out === "symlink") refuse("fixture-exists", `--out ${args.out} is a symlink, not a directory`, "the freeze writes a real directory and refuses to write through a link — remove or rename the symlink and re-run");
+  if (out === "unreadable") refuse("out-unreadable", `--out ${args.out} is a directory this user cannot list`, "fix the permissions on --out so its entries can be listed, and re-run; the idempotence guard must see what the directory holds before the freeze writes into it");
   if (out === "file") refuse("fixture-exists", `--out ${args.out} exists and is a file, not a directory`, "a frozen fixture is a directory — move the file aside and re-run");
   if (out === "sentinel-only") {
     // Before the non-empty check: a stale sentinel guards an EMPTY shell — it
