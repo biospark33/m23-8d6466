@@ -159,6 +159,18 @@ describe("e2e demo — three arms against the frozen run of record", () => {
     expect(report.overall).toBe("FAIL");
     // An implementation collapsing skip and fail into one status fails here.
     expect(new Set([st["DF5.4-C6"], st["DF5.4-C9"]]).size).toBe(2);
+    // G2 re-pin: the structured per-assertion lines reach stderr (with a
+    // remediation hint on the failing/skipping rows) while stdout stays the
+    // human render table — a PASS tag only ever appears as a table row, never
+    // as a verdict claim, and the terminal marker stays FAIL.
+    expect(r.stderr).toContain('"assertionId":"DF5.4-C9"');
+    expect(r.stderr).toContain('"status":"fail"');
+    expect(r.stderr).toContain("remediation");
+    for (const l of r.stdout.split("\n")) {
+      if (!l.includes("PASS")) continue;
+      expect(l.trimStart().startsWith("[PASS] ")).toBe(true);
+    }
+    expect(r.stdout.trimEnd().endsWith("DF_GATE: FAIL")).toBe(true);
   }, 120_000);
 
   test("RED reverify record: C6 fail naming the verdict, FAIL, exit 1", async () => {
@@ -215,7 +227,7 @@ describe("determinism, non-vacuity, preflight fail-fast", () => {
     expect(r.exit).toBe(1);
     const { report } = readReport(s);
     expect(row(report, "DF5.4-P1")?.status).toBe("skip");
-    for (const id of ["DF5.4-C1", "DF5.4-C5", "DF5.4-C9", "DF5.4-C10"]) {
+    for (const id of ["DF5.4-C1", "DF5.4-C2", "DF5.4-C3", "DF5.4-C4", "DF5.4-C5", "DF5.4-C6", "DF5.4-C7", "DF5.4-C8", "DF5.4-C9", "DF5.4-C10"]) {
       const main = row(report, id);
       expect(main?.status).toBe("skip");
       expect(main?.detail).toBe("not attempted — preflight assertion(s) did not pass (fail-fast)");
@@ -281,20 +293,23 @@ describe("INV-GATE-1 — the gate writes nothing but the report", () => {
     // the window (rename, never truncate-rewrite — that keeps the inode), then
     // bind: the opener must refuse BEFORE any write lands in the replacement.
     const probe = __auditStoreTestHooks.probeAuditStore(store);
-    const alt = path.join(s.root, "replacement.db");
-    fs.copyFileSync(store, alt);
-    const replacementBytes = fs.readFileSync(alt);
-    fs.renameSync(alt, store);
-    let refusal: unknown;
     try {
-      __auditStoreTestHooks.probeAndBind(store, probe);
-      throw new Error("bind unexpectedly succeeded across the identity window");
-    } catch (e) {
-      refusal = e;
+      const alt = path.join(s.root, "replacement.db");
+      fs.copyFileSync(store, alt);
+      const replacementBytes = fs.readFileSync(alt);
+      fs.renameSync(alt, store);
+      let refusal: unknown;
+      try {
+        __auditStoreTestHooks.probeAndBind(store, probe);
+        throw new Error("bind unexpectedly succeeded across the identity window");
+      } catch (e) {
+        refusal = e;
+      }
+      expect((refusal as { code?: string }).code).toBe("audit-store-identity-changed");
+      expect(fs.readFileSync(store).equals(replacementBytes)).toBe(true);
+    } finally {
+      probe.close(); // the probe must close even when an expect above throws
     }
-    expect((refusal as { code?: string }).code).toBe("audit-store-identity-changed");
-    expect(fs.readFileSync(store).equals(replacementBytes)).toBe(true);
-    probe.close();
   });
 
   test("swapped store consequence: full gate red on C9 (no emitted links for the run)", async () => {
@@ -350,16 +365,26 @@ describe("C9 tamper — evidence-mismatch is a second-walk guarantee", () => {
 // ---------------------------------------------------------------------------
 
 describe("INV-GATE-2 — redaction", () => {
-  test("no token/key/PII shape reaches any assertion detail or report field (green + red reports)", async () => {
+  test("no token/key/PII shape reaches any assertion detail, report field, or streamed stdout/stderr (green + red)", async () => {
     const patterns = [/ghp_[A-Za-z0-9]{10,}/, /github_pat_[A-Za-z0-9]{10,}/, /sk-[A-Za-z0-9]{10,}/, /xoxb-[A-Za-z0-9-]{10,}/, /AKIA[A-Z0-9]{12,}/];
     const green = makeScratch();
-    expect((await runGateCli(gateArgs(green))).exit).toBe(0);
+    const greenRun = await runGateCli(gateArgs(green));
+    expect(greenRun.exit).toBe(0);
     const red = makeScratch();
     fs.rmSync(path.join(red.root, "reverify", `${RUN_ID}.jsonl`));
-    expect((await runGateCli(gateArgs(red))).exit).toBe(1);
-    for (const s of [green, red]) {
-      const blob = fs.readFileSync(s.report, "utf8");
-      for (const p of patterns) expect(blob.match(p)).toBeNull();
+    const redRun = await runGateCli(gateArgs(red));
+    expect(redRun.exit).toBe(1);
+    // Three surfaces, not one: the report file AND the streamed stdout/stderr
+    // of both arms (the structured log lines carry per-assertion details).
+    for (const [name, s, r] of [["green", green, greenRun], ["red", red, redRun]] as Array<[string, Scratch, RunResult]>) {
+      const surfaces: Array<[string, string]> = [
+        ["report", fs.readFileSync(s.report, "utf8")],
+        ["stdout", r.stdout],
+        ["stderr", r.stderr],
+      ];
+      for (const [surface, blob] of surfaces) {
+        for (const p of patterns) expect(blob.match(p), `pattern ${p} leaked on ${name} ${surface}`).toBeNull();
+      }
     }
   }, 240_000);
 });
@@ -386,11 +411,19 @@ describe("fixture hygiene and the exit-2 fatal path", () => {
     const r = await runGateCli([process.execPath, DRIVER, "--report", s.report]);
     expect(r.exit).toBe(2);
     expect(fs.existsSync(s.report)).toBe(false);
-  });
+  }, 60_000);
+
+  test("usage fault (run-id path traversal `..`): exit 2, stderr names the run-id rule, no report", async () => {
+    const s = makeScratch();
+    const r = await runGateCli([process.execPath, DRIVER, "--run-id", "..", "--report", s.report]);
+    expect(r.exit).toBe(2);
+    expect(r.stderr).toContain("--run-id must match");
+    expect(fs.existsSync(s.report)).toBe(false);
+  }, 60_000);
 
   test("unknown flag: exit 2 with the usage prefix", async () => {
     const r = await runGateCli([process.execPath, DRIVER, "--run-id", RUN_ID, "--bogus", "x"]);
     expect(r.exit).toBe(2);
     expect(r.stderr).toContain("usage");
-  });
+  }, 60_000);
 });

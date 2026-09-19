@@ -400,5 +400,86 @@ Implemented 2026-09-19 on `feature/df5-4-lights-on-gate` (unlazy scope `.unlazy/
 6. Fixture layout: the freeze tool stores the reverify jsonl as `<runId>.reverify.jsonl`; harnesses rename it to `readReports`' `<runId>.jsonl` convention when copying to scratch — documented in the driver help and both suite headers.
 7. Fixture ledger copy is converted to DELETE journal mode after the checkpoint (`selfContainLedgerCopy`): a WAL-mode db with no `-shm` beside it is exactly DF2.11's `ledger-unopenable` on readonly open (rehearsal-proven), and a copied `-shm` is nondeterministic — the ×3 file-set snapshot requires exact bytes.
 8. W2 module subagents died to a provider 429 mid-flight; the driver session completed and verified the remaining leaves per the operator's finish directive (all leaf ledgers green under driver re-verification).
+9. `--run-id` is a hard-required driver flag although the spec's Trigger Surface/E2E command and DoD flag list omit it — the gate asserts exactly one run of record, so the flag is load-bearing; help text documents it (review round 1, auditor).
+10. C8 accepts any non-empty `Issue:` value, not only a resolved reference or the literal `unresolved` — the mirror index is out of the v5 slate, so demanding resolution could never go green on an issue-less run; the DoD's two C8 controls (unresolved passes, absent line fails) both hold (review round 1, auditor).
+11. The versioned wrapper carries an additive `request_id` key beyond the pinned `{gate, gate_version, clause_map_version, report}` shape — the Observability Contract's "requestId … stamped on the report" wants it; `GateReportSchema` validation is unaffected (review round 1, auditor).
+12. The frozen fixture ships one extra file beyond the story manifest: `<runId>.bundle` — C9's run-bundle hop digest-checks it against the audit link rows; without it C9 could never go green (review round 1, auditor).
 
 **Gates:** full `bun test` + `bun run typecheck` + `bunx biome check` green; `check-defensive-programming.sh --base origin/dev` clean (one real fix: the C6 `as unknown as` double cast replaced by an `every()`-guarded narrow; remaining sites annotated `dp:ok` with reasons); `check-pr-conflicts.sh --base origin/dev` no overlaps; `detect_changes` low risk, zero affected processes, zero chassis deltas.
+
+---
+
+**Status:** done (review round 1 complete — 41 source findings patched, 20 test arms added/re-pinned, 9 dismissed as noise/declared; all gates green)
+
+### Review Findings (round 1 — bmad adversarial review, 2026-09-19)
+
+7 review agents (3 blind-hunter chunks, 3 edge-hunter chunks, 1 acceptance auditor) over the PR 269 diff; 98 raw findings → triaged to 41 source patches (3 fixer waves, disjoint clusters), 20 test-side items (2 fixer waves), 4 story-doc declarations (deviations 9–12 above), 9 dismissals. All patches applied and verified; 0 deferred, 0 decision-needed (conservative fail-safe applied where ambiguous — C7 malformed-approval now FAILs per its own INV-GATE-5 doctrine).
+
+Patched (checked off):
+
+Source — driver (`scripts/df5-lights-on-gate.ts`):
+- [x] `--run-id` unvalidated (traversal into `<runsDir>/<runId>.json`, refs, walker argv) → RUN_ID_RE + `.`/`..` reject (HIGH)
+- [x] stderr verdict lines emitted before `GateReportSchema.parse` — exit-2 paths claimed PASS → emission moved after parse (contract: exit 2 = no verdict claimed)
+- [x] clause failures carried no `{code, message, remediation}` (Observability Contract) → remediation on fail/skip log lines + Blocking list
+- [x] dead `?? 0` after unconditional `exitCode` assignment; duplicated `dp:ok` comment
+
+Source — capture tool (`scripts/dev/capture-run-of-record.ts`):
+- [x] dry-run with missing `file:` body still exited 0 "ok" → NOT ok + exit 1
+- [x] dry-run residue line printed for `gh` though gh ignores residue
+- [x] residue scan `startsWith(runId)` prefix-matched sibling runs (`qds-1` vs `qds-12.json`)
+- [x] `audit.db` copied with no `-wal` sidecar check → `audit-wal-live` refusal
+- [x] hot `trace.db-wal` frozen verbatim → `artifacts-wal-live` refusal
+- [x] `refuse()` inside `freezeRefs` try skipped the tmp-bundle `finally` (process.exit) → typed throw, cleanup before exit
+- [x] plain copies preceded `freezeRefs` — ref-freeze refusal locked a partial fixture → refreeze-first order
+- [x] concurrent captures both passed the idempotence guard → exclusive mkdir, `capture-in-progress`
+- [x] ledger TOCTOU (writer resumes between checkpoint and copy) → post-copy `-wal` re-check refusal
+- [x] sha256 refs (64-hex) misdiagnosed `sandbox-ref-absent` → 40|64 accepted
+- [x] worktree `.git` file refused → `gitdir:` pointer followed
+- [x] no subprocess timeout (hung gh hung capture) → 120 s SIGKILL
+- [x] `mustExistFile` stat outside try / FIFO-blocking probe → stat-first, non-regular refused before open
+- [x] symlinked artifacts entries escaped the frozen copy → `dereference: true`
+- [x] frozen PR body lost whitespace to `trim()` → raw stdout carried
+- [x] only pr-body.txt was 0600 → all frozen top-level files 0600
+- [x] RUN_ID_RE admitted `.`/`..`
+
+Source — assertion modules (`lib/verdict.ts`, `df5-{execution,boundary,accounting}.ts`):
+- [x] C10 threw on JSON-`null` record (`=== undefined` guard) → object-shape guard, typed skip (HIGH, edge)
+- [x] `auditChainReport` threw on `null` walker stdout → non-object = parse failure
+- [x] `boundStderrTail` sliced BEFORE scrubbing — straddled token escaped every redaction shape → scrub-then-slice
+- [x] `selectBoundReport` absent-check before superseded-check → superseded first
+- [x] duplicate bound `reverifyId` lines: first-wins arbitrary → `bound-report-duplicate` reason
+- [x] torn/invalid final jsonl line invisible (`readReports` drops + discards tail flag) → `readReportsWithTail`; C6/C7 skip naming the torn line, never green on partial evidence (HIGH, edge)
+- [x] C7: approval present-but-malformed SKIPped, contradicting its own "absent/malformed FAILS" doctrine → now FAILs (behavior change; C6 unchanged)
+- [x] C5 git spawn had no timeout → 15 s SIGKILL
+- [x] C9 pass detail hardcoded "ten hops" → interpolated `AUDIT_HOPS.length`
+- [x] dead NaN clamp on constant walker budget; `repoRoot` fallthrough + double call → typed `walker-script-missing`, single call; `describeWalkerExit` labeled every null exit SIGKILL-timeout → signal vs abnormal-exit split
+- [x] `unreadableRecord` wording hid parse-invalid; `auditPrBody` substring runId match → token-boundary
+- [x] SECRET_SHAPES lacked JWT shape → added; C10 accepted negative spend / non-positive ceiling → positive-assertion leg
+- [x] `scanNdjson` counted bare scalars as well-formed (vacuous C3 green) → non-object = malformed; BOM malformated line 1 → stripped
+- [x] `loadEvidence` catch comment claimed rethrow the code didn't do → comment states actual contract
+
+Tests (`tests/gate/df5-assertions.test.ts` 125→143, `tests/gate/df5-lights-on-gate.test.ts` 16→17):
+- [x] re-pinned 3 tests to wave-1 behavior (scanNdjson scalars, superseded-first, 10-hop oracle)
+- [x] `@ts-expect-error` "inert directive" (blind HIGH) — FALSE POSITIVE, probe-proven: removing it produces TS2741 (directive honored despite continuation comment line); tsc green both ways
+- [x] scrub test planted a token it never asserted → `sk_` underscore arm (8+ char floor as src defines)
+- [x] "unreadable record" arm was a missing-file mutant → chmod-000 variant (root+win32 guarded)
+- [x] C7 equality mutant hard-coded stamp → derived from bound report
+- [x] hop-count oracles loose substrings → structural exact-match assertions
+- [x] NaN-row multiplicity over-pin; dead `fixtureRecord` null guard; Windows chmod guard on mode-000 arm
+- [x] new arms: torn final line (C6+C7), malformed-approval FAIL, `extensions.pr` absent, C10 null-record / negative-spend / string-spend, empty runs map, straddled-token redaction, prBody boundary (2), BOM, garbage trace.db, unjoinable requestId, mode-000 trace.db, strictBeforeMs NaN, duplicate bound id, `--run-id ..` usage fault
+- [x] e2e INV-GATE-2 redaction now scans report + stdout + stderr; identity-window `probe.close()` in finally; preflight fail-fast asserts all 10 clauses; fatal-path arms get explicit timeouts
+
+Dismissed (9, verified against source / declared records):
+- Default `--report` concurrent collision — documented default is spec-pinned; single-operator CLI; `request_id` correlates on stderr.
+- Unreachable pure-auditor branches — intentional: the spec mandates exported pure auditors; production closures guard first.
+- Grep-parity test asserting source text — that IS the declared DoD control ("imported, never re-declared").
+- buildId pin staleness race — ritual-owned; provenance re-verified (dev@7f4854fb, empty intersection); close-gate re-verifies at merge.
+- Driver-suite runtime (~13 gate spawns) — spec-mandated arms; budgets documented.
+- Boundary suite pointing `--git-dir` at the frozen refs.git — the git ops in play (rev-parse/cat-file) are read-only; fixture byte-checks would catch drift.
+- Identity-window test is not a true race — declared deviation 3.
+- stderr cosmetic pins (µ$ glyph, key order) — the log format is the contract.
+- Reverify fixture layout mismatch (`<runId>.reverify.jsonl` vs `--reverify-dir` default) — declared deviation 6; harnesses rename on scratch copy; documented in driver help + suite headers.
+
+False-positive pushback: none of the auditor's five findings were code defects — all four undeclared-deviation items (9–12 above) are now declared; the Observability-Contract remediation gap was real and is patched.
+
+Gates after round 1: focal suites 394 pass / 0 fail (3 PR test files); biome clean on all 8 touched files; `bunx tsc --noEmit` clean; `detect_changes` low risk, 0 affected processes (changed symbols confined to the PR's own modules).

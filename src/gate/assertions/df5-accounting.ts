@@ -137,6 +137,7 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /xox[baprs]-[A-Za-z0-9-]{10,}/g,
   /AKIA[0-9A-Z]{16}/g,
   /Bearer\s+[A-Za-z0-9._-]{16,}/gi,
+  /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
 ];
 
 export function scrubSecrets(text: string): string {
@@ -147,8 +148,11 @@ export function scrubSecrets(text: string): string {
 
 /** Bounded, scrubbed, single-line stderr tail — the only stderr a detail may embed. */
 export function boundStderrTail(stderr: string): string {
-  const tail = stderr.length > STDERR_TAIL_MAX_CHARS ? `…${stderr.slice(-STDERR_TAIL_MAX_CHARS)}` : stderr;
-  return scrubSecrets(tail).replace(/\s*\n\s*/g, " ⏎ ");
+  // Scrub the FULL stderr first: slicing first could cut a token shape so its
+  // surviving half matches no SECRET_SHAPES regex (INV-GATE-2).
+  const scrubbed = scrubSecrets(stderr);
+  const tail = scrubbed.length > STDERR_TAIL_MAX_CHARS ? `…${scrubbed.slice(-STDERR_TAIL_MAX_CHARS)}` : scrubbed;
+  return tail.replace(/\s*\n\s*/g, " ⏎ ");
 }
 
 /** Typed walker/ledger code names (e.g. `audit-store-absent`) when present in stderr. */
@@ -157,9 +161,10 @@ function typedCodes(stderr: string): string {
   return matches.join(", ");
 }
 
-/** Names a non-zero walker exit, including the SIGKILL timeout arm. */
+/** Names a non-zero walker exit: signal-kill (null), abnormal exit, or the exit code. */
 function describeWalkerExit(exit: number | null): string {
-  if (exit === null || exit < 0) return `killed by signal (timeout budget ${WALKER_TIMEOUT_MS}ms, SIGKILL)`;
+  if (exit === null) return `killed by signal (walker budget ${WALKER_TIMEOUT_MS}ms)`;
+  if (exit < 0) return `abnormal exit ${exit}`;
   return `exit code ${exit}`;
 }
 
@@ -172,7 +177,7 @@ function repoRoot(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return dir;
+  throw new Error(`walker script missing: scripts/qds-audit.ts not found above ${dir}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,10 +186,9 @@ function repoRoot(): string {
 
 async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcome> {
   const provenance = `walked scripts/qds-audit.ts --json ${deps.runId} by runId against the frozen run of record (read-only evidence; hop 1 resolves locally, no network access)`;
-  const script = join(repoRoot(), "scripts", "qds-audit.ts");
-  // FINITE-guarded clamp (transport.ts precedent): Bun.spawn refuses a NaN
-  // timeout with a RangeError, which would masquerade as a chain fault.
-  const timeout = Number.isFinite(WALKER_TIMEOUT_MS) ? Math.max(1, WALKER_TIMEOUT_MS) : 30_000;
+  const root = repoRoot();
+  const script = join(root, "scripts", "qds-audit.ts");
+  const timeout = Math.max(1, WALKER_TIMEOUT_MS);
   const proc = Bun.spawn({
     cmd: [
       process.execPath,
@@ -200,7 +204,7 @@ async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcom
       "--reverify-dir",
       deps.reverifyDir,
     ],
-    cwd: repoRoot(),
+    cwd: root,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -219,7 +223,14 @@ async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcom
   let report: ChainReport | undefined;
   let parseFailure = "";
   try {
-    report = JSON.parse(stdout) as ChainReport;
+    const parsed: unknown = JSON.parse(stdout);
+    if (parsed !== null && typeof parsed === "object") {
+      report = parsed as ChainReport;
+    } else {
+      // `"null"` and bare scalars parse clean but auditChainReport would
+      // throw reading `report.runs` — treat them as a parse failure.
+      parseFailure = "not a JSON object";
+    }
   } catch (err) {
     parseFailure = err instanceof Error ? err.message : String(err);
   }
@@ -241,7 +252,9 @@ async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcom
   }
   return {
     pass: true,
-    detail: `ten-hop chain green for ${deps.runId}: 10 hops under every key, hop 10 void, emitted links on run-credential/run-box/run-bundle — ${provenance}`,
+    detail:
+      `${AUDIT_HOPS.length}-hop chain green for ${deps.runId}: ${AUDIT_HOPS.length} hops under every key, ` +
+      `hop 10 void, emitted links on run-credential/run-box/run-bundle — ${provenance}`,
   };
 }
 
@@ -286,17 +299,23 @@ async function checkCostLedger(deps: Df5AccountingDeps): Promise<GateCheckOutcom
   const record = readJsonEvidence(recordPath) as
     | { spendMicroUsd?: unknown; extensions?: { budget?: { admittedCeilingMicroUsd?: unknown } } }
     | undefined;
-  if (record === undefined) {
+  if (record === undefined || typeof record !== "object" || record === null) {
     return {
       pass: false,
       skip: true,
-      detail: `run record unreadable at ${recordPath} — the spend-vs-ceiling leg cannot be evaluated — ${provenance}`,
+      detail:
+        `run record unreadable or not a JSON object at ${recordPath}` +
+        ` — the spend-vs-ceiling leg cannot be evaluated — ${provenance}`,
     };
   }
   const spend = record.spendMicroUsd;
   const ceiling = record.extensions?.budget?.admittedCeilingMicroUsd;
   if (typeof spend !== "number" || typeof ceiling !== "number") {
     failures.push("record lacks numeric spendMicroUsd / extensions.budget.admittedCeilingMicroUsd");
+  } else if (spend < 0 || ceiling <= 0) {
+    failures.push(
+      `record spendMicroUsd ${spend} µ$ / admittedCeilingMicroUsd ${ceiling} µ$ (expected spend >= 0 and ceiling > 0 — INV-GATE-5 positive assertion)`,
+    );
   } else if (spend > ceiling) {
     failures.push(`record spendMicroUsd ${spend} µ$ exceeds admittedCeilingMicroUsd ${ceiling} µ$`);
   }

@@ -68,17 +68,25 @@ export interface NdjsonScan {
 
 /**
  * Classifies every non-empty line of an NDJSON text (1-based line numbers):
- * parsed lines land in `wellFormed`, rejected lines in `malformed` with the
- * parser's message. Blank/whitespace-only lines are ignored. Empty text
- * yields both arrays empty.
+ * lines that parse to a JSON object land in `wellFormed`, everything else in
+ * `malformed` — a parse failure carries the parser's message, a parsed scalar
+ * or `null` carries "not a JSON object". Blank/whitespace-only lines are
+ * ignored, and a leading UTF-8 BOM is stripped so it cannot malform line 1.
+ * Empty text yields both arrays empty.
  */
 export function scanNdjson(text: string): NdjsonScan {
   const scan: NdjsonScan = { wellFormed: [], malformed: [] };
-  const lines = text.split(/\r?\n/);
+  const bomless = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const lines = bomless.split(/\r?\n/);
   for (const [i, line] of lines.entries()) {
     if (line.trim() === "") continue;
     try {
-      scan.wellFormed.push(JSON.parse(line));
+      const parsed: unknown = JSON.parse(line);
+      if (parsed !== null && typeof parsed === "object") {
+        scan.wellFormed.push(parsed);
+      } else {
+        scan.malformed.push({ line: i + 1, error: "not a JSON object" });
+      }
     } catch (error) {
       scan.malformed.push({
         line: i + 1,
@@ -117,20 +125,26 @@ export function strictBeforeMs(a: string, b: string): number | null {
  * Selects the bound report — the one whose `reverifyId` equals
  * `approval.reportId`, never an id listed in `supersededReportIds` — so C6/C7
  * share one selection and cannot drift. Returns the report, or a typed
- * failure reason: `bound-report-absent:<id>:<path>` (no line resolves) or
- * `bound-report-superseded:<id>` (the bound id was superseded).
+ * failure reason, checked in this order: `bound-report-superseded:<id>` (the
+ * bound id was superseded — before any lookup, so a missing line cannot mask
+ * it), `bound-report-absent:<id>:<path>` (no line resolves) or
+ * `bound-report-duplicate:<id>:<path>` (more than one line resolves — on an
+ * append-only file anyone can write, first-wins would verify an arbitrary
+ * line).
  */
 export function selectBoundReport<Report extends { reverifyId: string }>(
   reports: ReadonlyArray<Report>,
   approval: { reportId: string; supersededReportIds: string[] },
   path: string,
 ): { report: Report } | { reason: string } {
-  const report = reports.find((r) => r.reverifyId === approval.reportId);
-  if (!report) return { reason: `bound-report-absent:${approval.reportId}:${path}` };
   if (approval.supersededReportIds.includes(approval.reportId)) {
     return { reason: `bound-report-superseded:${approval.reportId}` };
   }
-  return { report };
+  const matches = reports.filter((r) => r.reverifyId === approval.reportId);
+  if (matches.length === 0) return { reason: `bound-report-absent:${approval.reportId}:${path}` };
+  if (matches.length > 1) return { reason: `bound-report-duplicate:${approval.reportId}:${path}` };
+  // length === 1 is proven above; the cast carries that proof.
+  return { report: matches[0] as Report };
 }
 
 /**

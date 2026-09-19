@@ -57,6 +57,11 @@ const DEFAULT_REPORT = join(REPO_ROOT, "_bmad-output", "evidence", "df5-4", "df5
 /** The surviving 60 s-per-assertion / 5-min-total discipline (p1-17:38), not the chassis defaults. */
 const RUN_OPTIONS = { assertionTimeoutMs: 60_000, totalTimeoutMs: 300_000 } as const;
 
+/** Run id is interpolated into `<runsDir>/${runId}.json`, `refs/sandbox/${runId}` and the
+ *  DF5.3 walker argv — the capture-tool charset, plus an explicit `.`/`..` exclusion the
+ *  charset alone lets through. */
+const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+
 const VALUE_FLAGS = [
   "--run-id",
   "--report",
@@ -116,6 +121,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     help: HELP,
   });
   if (!a["--run-id"]) throw new Error("missing --run-id <id> — the gate asserts one run of record");
+  if (!RUN_ID_RE.test(a["--run-id"]) || a["--run-id"] === "." || a["--run-id"] === "..") {
+    throw new Error(
+      `--run-id must match ${RUN_ID_RE.source} excluding . and .. (got ${JSON.stringify(a["--run-id"])})`,
+    );
+  }
   const runsDir = resolve(a["--runs-dir"] ?? resolveRunsDir());
   return {
     runId: a["--run-id"],
@@ -174,7 +184,7 @@ export function buildAssertions(deps: Df5GateDeps): GateAssertion[] {
 
 /** `[PASS|FAIL|SKIP|VOID] id (story, prd_clause) Xms` + indented detail, then
  *  totals, blocking list, and the terminal marker — phase0-exit-gate.ts render. */
-function render(report: GateReport): string {
+function render(report: GateReport, runId: string): string {
   const lines: string[] = [];
   for (const row of report.assertions) {
     const tag = row.status.toUpperCase();
@@ -188,6 +198,7 @@ function render(report: GateReport): string {
   if (blocking.length > 0) {
     lines.push("Blocking assertions:");
     for (const row of blocking) lines.push(`  ${row.id} — ${row.detail ?? "no detail"}`);
+    lines.push(`  remediation: re-run bun scripts/df5-lights-on-gate.ts --run-id ${runId} --report <path> after restoring the named evidence`);
   }
   lines.push(`DF_GATE: ${report.overall}`);
   return lines.join("\n");
@@ -202,7 +213,7 @@ function mintRequestId(): string {
 }
 
 // dp:ok (main) — the import.meta.main caller wraps main in the exit-2 catch; a throw here is a fatal usage fault, never a silent crash.
-async function main(): Promise<number> { // dp:ok — caller wraps main in the exit-2 catch; a throw is a fatal usage fault, never a silent crash
+async function main(): Promise<number> {
   const args = parseArgs(Bun.argv.slice(2));
   const requestId = mintRequestId();
   const assertions = buildAssertions(args);
@@ -211,8 +222,13 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
   const report = await runGate(assertions, RUN_OPTIONS);
   const ranInMs = Date.now() - startedAt;
 
+  // The report the chassis produced is contract-shaped before anything claims a
+  // verdict — exit 2 from here must mean no PASS ever reached stderr.
+  const validated = GateReportSchema.parse(report);
+
   // Observability contract: one structured line per assertion + a summary, on
-  // stderr so stdout stays the human table + terminal marker.
+  // stderr so stdout stays the human table + terminal marker. Emitted only once
+  // the report shape is proven (see above) — a fatal fault never prints PASS.
   for (const row of report.assertions) {
     console.error(
       JSON.stringify({
@@ -222,6 +238,9 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
         story: row.story,
         status: row.status,
         duration_ms: row.duration_ms,
+        ...(row.status === "fail" || row.status === "skip"
+          ? { remediation: `inspect the named evidence paths, then re-run: bun scripts/df5-lights-on-gate.ts --run-id ${args.runId}` }
+          : {}),
       }),
     );
   }
@@ -237,9 +256,6 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
       total_duration_ms: report.total_duration_ms,
     }),
   );
-
-  // The report the chassis produced is contract-shaped before it is wrapped.
-  const validated = GateReportSchema.parse(report);
 
   const writeStartedAt = Date.now();
   const outDir = dirname(args.report);
@@ -263,10 +279,11 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
     JSON.stringify({ requestId, gate: GATE_NAME, report_path: args.report, report_write_ms: reportWriteMs, ran_ms: ranInMs }),
   );
 
-  console.log(render(report));
+  console.log(render(report, args.runId));
   console.error(`gate report written to ${args.report}`);
-  process.exitCode = report.overall === "PASS" ? 0 : 1;
-  return process.exitCode ?? 0;
+  const code = report.overall === "PASS" ? 0 : 1;
+  process.exitCode = code;
+  return code;
 }
 
 if (import.meta.main) {

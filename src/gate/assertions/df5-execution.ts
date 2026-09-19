@@ -241,7 +241,7 @@ export function df5ExecutionAssertions(deps: Df5ExecutionDeps): GateAssertion[] 
   const unreadableRecord = (): GateCheckOutcome => ({
     pass: false,
     skip: true,
-    detail: `run of record not readable (missing or unreadable): ${recordPath}`,
+    detail: `run of record not readable (missing, unreadable, or not valid JSON): ${recordPath}`,
   });
 
   return [

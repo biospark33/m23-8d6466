@@ -110,9 +110,19 @@ describe("verdict lib — scanNdjson classifies every line, drops none", () => {
     expect(jammed.malformed[0]?.line).toBe(1);
   });
 
-  test("non-object JSON scalars count as well-formed lines", () => {
+  test("non-object JSON scalars and null are malformed ('not a JSON object'); arrays count as objects", () => {
+    // The C3 clause counts well-formed OBJECT lines only — a scalar or null
+    // line parses clean but carries no object, so it is malformed, never a
+    // silent pass and never dropped.
     const scan = scanNdjson('42\n"a string"\ntrue\nnull\n[]\n');
-    expect(scan.wellFormed).toEqual([42, "a string", true, null, []]);
+    expect(scan.wellFormed).toEqual([[]]);
+    expect(scan.malformed).toHaveLength(4);
+    for (const entry of scan.malformed) expect(entry.error).toBe("not a JSON object");
+  });
+
+  test("a leading UTF-8 BOM is stripped, so line 1 stays well-formed", () => {
+    const scan = scanNdjson('\uFEFF{"a":1}\n{"b":2}\n');
+    expect(scan.wellFormed).toEqual([{ a: 1 }, { b: 2 }]);
     expect(scan.malformed).toEqual([]);
   });
 });
@@ -153,6 +163,11 @@ describe("verdict lib — strictBeforeMs refuses non-canonical stamps with null"
     expect(strictBeforeMs("2026-09-18", "2026-09-19T00:00:00Z")).toBeNull();
     expect(strictBeforeMs("2026-09-18T04:49:54+02:00", "2026-09-18T04:49:55+02:00")).toBeNull();
   });
+
+  test("a non-date string parses to NaN: null, never a number", () => {
+    expect(strictBeforeMs("not-a-date", "2026-09-18T02:49:55Z")).toBeNull();
+    expect(strictBeforeMs("2026-09-18T02:49:54Z", "not-a-date")).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -186,11 +201,24 @@ describe("verdict lib — selectBoundReport binds reportId, never a superseded i
     expect(picked).toEqual({ reason: "bound-report-superseded:rv-old" });
   });
 
-  test("absent wins over superseded when the id is both missing from reports and listed", () => {
-    // Pins the check order: a listed-but-absent id names the absent reason
-    // (id + path), because the first-order problem is that no line resolves.
+  test("superseded wins over absent when the id is both missing from reports and listed", () => {
+    // Pins the check order: supersededReportIds is consulted BEFORE any
+    // lookup, so a listed bound id names the superseded reason (bare id, no
+    // path) even when no line resolves — a masked supersession must not read
+    // as a missing evidence file.
     const picked = selectBoundReport(REPORTS, { reportId: "rv-gone", supersededReportIds: ["rv-gone"] }, "/evidence/run.jsonl");
-    expect(picked).toEqual({ reason: "bound-report-absent:rv-gone:/evidence/run.jsonl" });
+    expect(picked).toEqual({ reason: "bound-report-superseded:rv-gone" });
+  });
+
+  test("duplicate lines sharing the bound reverifyId: reason 'bound-report-duplicate:<id>:<path>' — never verifies against the first line", () => {
+    // Append-only jsonl anyone can write: first-wins would verify an
+    // arbitrary line, so two matching lines refuse the selection outright.
+    const dup: FakeReport[] = [
+      { reverifyId: "rv-bound", verdict: "green" },
+      { reverifyId: "rv-bound", verdict: "red" },
+    ];
+    const picked = selectBoundReport(dup, { reportId: "rv-bound", supersededReportIds: [] }, "/evidence/run.jsonl");
+    expect(picked).toEqual({ reason: "bound-report-duplicate:rv-bound:/evidence/run.jsonl" });
   });
 
   test("empty reports array yields the absent reason", () => {
@@ -460,6 +488,17 @@ describe("DF5.4-C1 channel — requestId + admitted budget", () => {
   test("check with unreadable record → skip naming the path", async () => {
     await expectSkip("DF5.4-C1", newScratch(), `${RUN_ID}.json`);
   });
+
+  // Root bypasses permission checks and Windows chmod does not revoke read —
+  // the same guards as P1's mode-000 arm above.
+  test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "check with mode-000 record → skip naming the path",
+    async () => {
+      const dir = scratchWithRecord(() => {});
+      fs.chmodSync(path.join(dir, `${RUN_ID}.json`), 0o000);
+      await expectSkip("DF5.4-C1", dir, `${RUN_ID}.json`);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -691,6 +730,29 @@ describe("DF5.4-C4 gates — harvested gate_results rows, claim-integrity only",
     db.close();
     await expectFail("DF5.4-C4", dir, "passed=NaN");
   });
+
+  test("check mutant: garbage trace.db bytes → skip naming the store as not readable", async () => {
+    const dir = scratchWithTraceDb([{ request_id: REQUEST_ID, passed: 1 }]);
+    fs.writeFileSync(path.join(dir, `${RUN_ID}-artifacts`, "trace", "trace.db"), "not a database at all");
+    await expectSkip("DF5.4-C4", dir, "not readable", "trace.db");
+  });
+
+  test("check mutant: record requestId not a string → skip 'cannot be joined' (no silent zero-row fail)", async () => {
+    const dir = scratchWithTraceDb([{ request_id: REQUEST_ID, passed: 1 }]);
+    fs.writeFileSync(path.join(dir, `${RUN_ID}.json`), JSON.stringify({ runId: RUN_ID, requestId: 42 }), "utf8");
+    await expectSkip("DF5.4-C4", dir, "cannot be joined", `${RUN_ID}.json`);
+  });
+
+  // Root bypasses permission checks and Windows chmod does not revoke read —
+  // the same guards as P1's mode-000 arm above.
+  test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "check mutant: unreadable trace.db (mode 000) → skip naming the copy as not copyable",
+    async () => {
+      const dir = scratchWithTraceDb([{ request_id: REQUEST_ID, passed: 1 }]);
+      fs.chmodSync(path.join(dir, `${RUN_ID}-artifacts`, "trace", "trace.db"), 0o000);
+      await expectSkip("DF5.4-C4", dir, "not copyable", "trace.db");
+    },
+  );
 });
 
 // ===========================================================================
@@ -951,11 +1013,14 @@ describe("C7 mutants (approval)", () => {
 
   test("decidedAt equals bound completedAt → C7 fails (strict ordering)", async () => {
     const s = boundScratch();
+    // Derived from the fixture's bound report, not hard-coded: if the fixture
+    // stamp moves, the equality leg must stay the equality leg.
+    const boundCompletedAt = cloneBoundReport(s).completedAt;
     editRecord(s, (rec) => {
-      rec.extensions.approval.decidedAt = "2026-09-18T02:49:31.080Z";
+      rec.extensions.approval.decidedAt = boundCompletedAt;
     });
     const out = await check(s, "DF5.4-C7");
-    expectOutcomeFail(out, "F10", "2026-09-18T02:49:31.080Z");
+    expectOutcomeFail(out, "F10", boundCompletedAt);
   });
 
   test("state awaiting-approval → C7 fails (non-terminal state)", async () => {
@@ -983,6 +1048,24 @@ describe("C7 mutants (approval)", () => {
     });
     const out = await check(s, "DF5.4-C7");
     expectOutcomeFail(out, "decidedAt");
+  });
+
+  test("approval PRESENT but missing reportId/supersededReportIds → C7 FAILS naming the malformed approval (E7), it does not skip", async () => {
+    const s = boundScratch();
+    editRecord(s, (rec) => {
+      rec.extensions.approval = { state: "approved", approverId: "df53-demo-operator" };
+    });
+    const out = await check(s, "DF5.4-C7");
+    expectOutcomeFail(out, "malformed", "INV-GATE-5", rvPath(s));
+  });
+
+  test("extensions.pr absent with the approval intact → C7 FAILS on the typeof ordering guard, not skip", async () => {
+    const s = boundScratch();
+    editRecord(s, (rec) => {
+      rec.extensions.pr = undefined;
+    });
+    const out = await check(s, "DF5.4-C7");
+    expectOutcomeFail(out, "ordering stamps must be strings", "prCreatedAt=undefined");
   });
 
   test("approval-shaped file on disk + no extensions.approval → C7 FAILS (fs-reading impl must not pass)", async () => {
@@ -1035,6 +1118,20 @@ describe("C8 mutants (PR body shape)", () => {
     const out = await check(s, "DF5.4-C8");
     expectOutcomeFail(out, RUN_ID);
   });
+
+  test("runId embedded inside a longer alphanumeric token → C8 fails (token-boundary, E14)", async () => {
+    const s = boundScratch();
+    editPrBody(s, (lines) => lines.map((l) => l.replaceAll(RUN_ID, `x${RUN_ID}y`)));
+    const out = await check(s, "DF5.4-C8");
+    expectOutcomeFail(out, "absent from body");
+  });
+
+  test("runId properly delimited (its own token) → C8 passes", async () => {
+    const s = boundScratch();
+    editPrBody(s, (lines) => lines.map((l) => l.replaceAll(RUN_ID, `${RUN_ID}-ref`)));
+    const out = await check(s, "DF5.4-C8");
+    expectOutcomePass(out);
+  });
 });
 
 describe("edge hunt — untrusted record, append-only jsonl", () => {
@@ -1056,6 +1153,13 @@ describe("edge hunt — untrusted record, append-only jsonl", () => {
     });
     expectOutcomeSkip(await check(s, "DF5.4-C6"), "approval");
     expectOutcomeFail(await check(s, "DF5.4-C7"), "extensions.approval");
+  });
+
+  test("torn (unparsable) FINAL jsonl line → C6 and C7 skip naming the torn evidence, never fail green", async () => {
+    const s = boundScratch();
+    fs.appendFileSync(rvPath(s), '{"reverifyId": "rv-torn", "verdict": "gre');
+    expectOutcomeSkip(await check(s, "DF5.4-C6"), "torn final line", rvPath(s));
+    expectOutcomeSkip(await check(s, "DF5.4-C7"), "torn final line", rvPath(s));
   });
 });
 
@@ -1243,13 +1347,25 @@ describe("auditChainReport — synthetic shape mutants", () => {
   test("nine-hop chain violates, naming the expected count of ten", () => {
     const report = synthReport({ dropHop: "run-cost" });
     const violations = auditChainReport(report, RUN_ID);
-    expect(violations.some((v) => v.includes("9") && v.includes("10"))).toBe(true);
+    const hopCounts = violations.filter((v) => /^runs\[[^\]]*\]: \d+ hops, expected exactly \d+$/.test(v));
+    expect(hopCounts).toHaveLength(1);
+    expect(hopCounts[0]).toBe(`runs[${RUN_ID}]: 9 hops, expected exactly ${AUDIT_HOPS.length}`);
     expect(violations.some((v) => v.includes("run-cost") && v.includes("missing"))).toBe(true);
   });
 
   test("eleven-hop chain violates", () => {
     const report = synthReport({ extraHop: "run-extra" });
-    expect(auditChainReport(report, RUN_ID).some((v) => v.includes("11"))).toBe(true);
+    const hopCounts = auditChainReport(report, RUN_ID).filter((v) =>
+      /^runs\[[^\]]*\]: \d+ hops, expected exactly \d+$/.test(v),
+    );
+    expect(hopCounts).toHaveLength(1);
+    expect(hopCounts[0]).toBe(`runs[${RUN_ID}]: 11 hops, expected exactly ${AUDIT_HOPS.length}`);
+  });
+
+  test("empty runs map violates exactly once, naming the walk's contributing-runId failure", () => {
+    expect(auditChainReport({ runs: {} } as ChainReport, RUN_ID)).toEqual([
+      "runs map is empty — the walk produced no contributing runId",
+    ]);
   });
 
   test("hop 10 not void violates", () => {
@@ -1302,6 +1418,12 @@ describe("boundStderrTail / scrubSecrets — INV-GATE-2 redaction", () => {
     expect(scrubbed).toContain("[redacted]");
   });
 
+  test("an sk_ underscore-prefixed token is redacted by the same shape family", () => {
+    const scrubbed = scrubSecrets("key sk_ant-abcdefgh12 here");
+    expect(scrubbed).not.toContain("sk_ant-abcdefgh12");
+    expect(scrubbed).toContain("[redacted]");
+  });
+
   test("ordinary diagnostics pass through untouched", () => {
     const text = "audit-store-absent: no audit store at /tmp/x/audit.db";
     expect(scrubSecrets(text)).toBe(text);
@@ -1313,6 +1435,19 @@ describe("boundStderrTail / scrubSecrets — INV-GATE-2 redaction", () => {
     expect(tail.length).toBeLessThanOrEqual(430);
     expect(tail).toContain("tail-marker");
     expect(tail).not.toContain("ghp_0123456789");
+  });
+
+  test("a token straddling the 400-char boundary leaves no fragment in the tail (scrub-before-slice)", () => {
+    // The raw 400-char cut lands mid-token (token spans raw chars 20..54,
+    // cut at 39): slicing first would leave "hp_ZZZ…" unscrubbable. The full
+    // stderr is scrubbed BEFORE slicing, so neither the prefix nor the token
+    // body can survive.
+    const stderr = `${"x".repeat(20)}ghp_${"Z".repeat(30)} tail ${"y".repeat(379)}`;
+    const tail = boundStderrTail(stderr);
+    expect(tail).not.toContain("ghp_");
+    expect(tail).not.toContain("ZZZ");
+    expect(tail).toContain("tail");
+    expect(tail.length).toBeLessThanOrEqual(430);
   });
 });
 
@@ -1326,7 +1461,11 @@ describe("DF5.4-C9 — spawned qds-audit walk", () => {
     const [c9] = df5AccountingAssertions(deps).filter((a) => a.id === "DF5.4-C9");
     expect(c9).toBeDefined();
     const outcome = await c9!.check();
-    expect(outcome).toEqual({ pass: true, detail: expect.stringContaining("ten-hop") });
+    // The detail interpolates AUDIT_HOPS.length — the walker's own hop oracle.
+    expect(outcome).toEqual({
+      pass: true,
+      detail: expect.stringContaining(`${AUDIT_HOPS.length}-hop chain green for ${RUN_ID}`),
+    });
   }, 90_000);
 
   test("absent audit.db: FAIL (not skip) naming audit-store-absent, and the file is STILL absent (INV-GATE-1)", async () => {
@@ -1433,6 +1572,44 @@ describe("DF5.4-C10 — read-only ledger + separate spend meter", () => {
     const outcome = await c10!.check();
     expect(outcome.pass).toBe(false);
     expect(outcome.detail).toContain("admittedCeilingMicroUsd");
+  }, 30_000);
+
+  test("JSON null record file: skip (not throw), naming the record as not a JSON object", async () => {
+    const deps = makeScratch();
+    fs.writeFileSync(join(deps.runsDir, `${RUN_ID}.json`), "null", "utf8");
+    const [c10] = df5AccountingAssertions(deps).filter((a) => a.id === "DF5.4-C10");
+    const outcome = await c10!.check();
+    expect(outcome.pass).toBe(false);
+    expect(outcome.skip).toBe(true);
+    expect(outcome.detail).toContain("not a JSON object");
+    expect(outcome.detail).toContain(join(deps.runsDir, `${RUN_ID}.json`));
+  }, 30_000);
+
+  test("negative spendMicroUsd / zero admittedCeilingMicroUsd: fail naming both non-positive values", async () => {
+    const deps = makeScratch({
+      mutateRecord: (record) => {
+        record.spendMicroUsd = -500;
+        ((record.extensions as Record<string, unknown>).budget as Record<string, unknown>).admittedCeilingMicroUsd = 0;
+      },
+    });
+    const [c10] = df5AccountingAssertions(deps).filter((a) => a.id === "DF5.4-C10");
+    const outcome = await c10!.check();
+    expect(outcome.pass).toBe(false);
+    expect(outcome.skip).toBeUndefined();
+    expect(outcome.detail).toContain("spendMicroUsd -500");
+    expect(outcome.detail).toContain("admittedCeilingMicroUsd 0");
+  }, 30_000);
+
+  test("string-typed spendMicroUsd: fail with the record-lacks-numeric message, never coerced", async () => {
+    const deps = makeScratch({
+      mutateRecord: (record) => {
+        (record as { spendMicroUsd?: unknown }).spendMicroUsd = "2184";
+      },
+    });
+    const [c10] = df5AccountingAssertions(deps).filter((a) => a.id === "DF5.4-C10");
+    const outcome = await c10!.check();
+    expect(outcome.pass).toBe(false);
+    expect(outcome.detail).toContain("record lacks numeric spendMicroUsd");
   }, 30_000);
 });
 

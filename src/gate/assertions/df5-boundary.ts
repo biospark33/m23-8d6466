@@ -23,7 +23,7 @@
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { GateAssertion, GateCheckOutcome } from "../gate-runner.ts";
-import { readReports, reportPath, type ReverifyReport } from "../../reverify/report.ts";
+import { readReportsWithTail, reportPath, type ReverifyReport } from "../../reverify/report.ts";
 import { readJsonEvidence, selectBoundReport, strictBeforeMs } from "./lib/verdict.ts";
 
 // ---------------------------------------------------------------------------
@@ -171,8 +171,17 @@ export function auditApproval(ev: ApprovalEvidence): { failures: string[] } {
 }
 
 /**
+ * Token-boundary presence: the runId as its own token, never as a substring
+ * inside an unrelated hash or URL.
+ */
+function bodyContainsRunId(text: string, runId: string): boolean {
+  const escaped = runId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:[^A-Za-z0-9]|$)`).test(text);
+}
+
+/**
  * C8: the PR body's SHAPE, never P1.3's mapping quality. Pinned exactly:
- *  - the runId appears somewhere in the body;
+ *  - the runId appears somewhere in the body (as a whole token);
  *  - a line matching /^Issue:\s*\S+ — a labelled line with a non-empty value.
  *    The literal `unresolved` is explicitly acceptable (DF5.2 AC2); whether a
  *    non-`unresolved` value is actually RESOLVED is the mirror index's concern
@@ -182,7 +191,7 @@ export function auditApproval(ev: ApprovalEvidence): { failures: string[] } {
 export function auditPrBody(text: string, runId: string): { failures: string[] } {
   const failures: string[] = [];
   const lines = text.split(/\r?\n/);
-  if (!text.includes(runId)) {
+  if (!bodyContainsRunId(text, runId)) {
     failures.push(`runId ${runId} absent from body`);
   }
   if (!lines.some((line) => /^Issue:\s*\S+/.test(line))) {
@@ -221,8 +230,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 interface BoundaryEvidence {
   recordOk: boolean;
   reports: ReverifyReport[];
+  /** True when the jsonl's FINAL line was dropped as unreadable (torn evidence). */
+  tornTail: boolean;
   /** extensions.approval, when present and object-shaped. */
   approval?: Record<string, unknown>;
+  /** extensions.approval is present but unusable for bound-report selection — C7 fails on it. */
+  approvalMalformed?: string;
   prCreatedAt?: unknown;
   /** Bound-report selection; a reason when the approval shape is unusable. */
   bound?: { report: ReverifyReport } | { reason: string };
@@ -232,13 +245,16 @@ function loadEvidence(deps: Df5BoundaryDeps, recordFile: string, rvFile: string)
   const record = readJsonEvidence(recordFile);
   const recordOk = isRecord(record);
   let reports: ReverifyReport[] = [];
+  let tornTail = false;
   try {
-    reports = readReports(deps.reverifyDir, deps.runId);
+    const read = readReportsWithTail(deps.reverifyDir, deps.runId);
+    reports = read.reports;
+    tornTail = read.lastLineInvalid;
   } catch {
-    // Non-ENOENT read failure (readReports rethrows those): unreadable
-    // evidence is skip, and the caller treats an empty list as exactly that.
+    // Any read failure (ENOENT aside, permission included) collapses to an
+    // empty list, so callers skip with the path named — red either way.
   }
-  const evidence: BoundaryEvidence = { recordOk, reports };
+  const evidence: BoundaryEvidence = { recordOk, reports, tornTail };
   if (!recordOk) return evidence;
 
   const extensions = isRecord(record.extensions) ? record.extensions : {};
@@ -246,6 +262,7 @@ function loadEvidence(deps: Df5BoundaryDeps, recordFile: string, rvFile: string)
   if (isRecord(extensions.pr)) evidence.prCreatedAt = extensions.pr.createdAt;
 
   const { approval } = evidence;
+  const unusableApproval = `extensions.approval carries no usable reportId/supersededReportIds (${recordFile})`;
   if (
     approval !== undefined &&
     typeof approval.reportId === "string" &&
@@ -259,9 +276,10 @@ function loadEvidence(deps: Df5BoundaryDeps, recordFile: string, rvFile: string)
       supersededReportIds: approval.supersededReportIds as string[],
     }, rvFile);
   } else {
-    evidence.bound = {
-      reason: `extensions.approval carries no usable reportId/supersededReportIds (${recordFile})`,
-    };
+    evidence.bound = { reason: unusableApproval };
+    // A PRESENT approval that cannot select a bound report is a malformed
+    // approval: C7 fails on it (INV-GATE-5), C6 keeps its skip.
+    if (approval !== undefined) evidence.approvalMalformed = unusableApproval;
   }
   return evidence;
 }
@@ -285,6 +303,8 @@ export function df5BoundaryAssertions(deps: Df5BoundaryDeps): GateAssertion[] {
         const proc = Bun.spawn(["git", "--git-dir", deps.gitDir, "rev-parse", "--verify", ref], {
           stdout: "pipe",
           stderr: "pipe",
+          timeout: 15_000,
+          killSignal: "SIGKILL",
         });
         const [stdout, stderr] = await Promise.all([
           new Response(proc.stdout).text(),
@@ -309,6 +329,9 @@ export function df5BoundaryAssertions(deps: Df5BoundaryDeps): GateAssertion[] {
       check: async () => {
         const ev = loadEvidence(deps, recordFile, rvFile);
         if (!ev.recordOk) return skip(`run record unreadable: ${recordFile}`);
+        if (ev.tornTail) {
+          return skip(`torn final line in reverify evidence (unreadable evidence is skip, not fail): ${rvFile}`);
+        }
         if (ev.reports.length === 0) {
           return skip(`no reverify reports at ${rvFile} (unreadable evidence is skip, not fail)`);
         }
@@ -350,6 +373,19 @@ export function df5BoundaryAssertions(deps: Df5BoundaryDeps): GateAssertion[] {
             prCreatedAt: undefined,
           });
           return { pass: false, detail: `${failures.join("; ")} — ${recordFile}` };
+        }
+        // A present-but-malformed approval FAILS, it does not skip — the same
+        // doctrine the absent arm above already applies (INV-GATE-5).
+        if (ev.approvalMalformed !== undefined) {
+          return {
+            pass: false,
+            detail:
+              `extensions.approval malformed for bound-report selection: ${ev.approvalMalformed}` +
+              ` — a malformed approval fails (INV-GATE-5), it does not skip — ${rvFile}`,
+          };
+        }
+        if (ev.tornTail) {
+          return skip(`torn final line in reverify evidence (unreadable evidence is skip, not fail): ${rvFile}`);
         }
         if (ev.reports.length === 0) {
           return skip(`C7 ordering input gone: no reverify reports at ${rvFile}`);
