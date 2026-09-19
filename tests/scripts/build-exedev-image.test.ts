@@ -1358,7 +1358,7 @@ describe("buildIdFileInputs", () => {
       // cut its branch, verified the DF5.3 way: the whole working tree
       // stashed, the digest recomputed on the clean dev checkout (7f4854fb)
       // — b3c30d0c, byte-identical to the branch tree's. DF5.4 itself moved
-      // NOTHING in the walk (intersection of the branch's 50 changed files
+      // NOTHING in the walk (intersection of the branch's 56 changed files
       // with the live `buildIdFileInputs` set: empty; the gate code, fixture,
       // tests, story artifact and `.unlazy/` are all outside the COPY set).
       // The mover is upstream of this branch — the DF3.8 margin merge

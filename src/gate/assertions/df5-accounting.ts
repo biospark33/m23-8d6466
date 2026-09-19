@@ -19,8 +19,9 @@
  *    imported `OQ4_VOID_REASON`, byte-identical by construction. The chassis
  *    never invokes its check and excludes it from the verdict.
  *
- * INV-GATE-2: no assertion detail embeds a secret. The walker's stderr tail is
- * bounded AND scrubbed of token shapes before it can reach a detail.
+ * INV-GATE-2: no assertion detail embeds a secret. Text reaching a detail is
+ * scrubbed at the one place each module composes it — C9's assembled problems
+ * string and the walker's stderr tail (bounded AND scrubbed of token shapes).
  */
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -110,7 +111,12 @@ export function auditChainReport(report: ChainReport, runId: string): string[] {
   return violations;
 }
 
-/** Link ids an outcome carries: 1 for a top-level `linkId`, else `detail.linkIds.length`. */
+/**
+ * Link ids an outcome carries: 1 for a top-level `linkId` on a resolved hop,
+ * else `detail.linkIds.length` when the resolved hop carries a `linkIds`
+ * array, else 0. Both counting paths are gated on `status === "resolved"` —
+ * any other status contributes no ids.
+ */
 function emittedLinkCount(out: HopOutcome): number {
   if (out.status === "resolved" && typeof out.linkId === "number") return 1;
   const detail: unknown = out.status === "resolved" ? out.detail : undefined;
@@ -149,10 +155,14 @@ export function scrubSecrets(text: string): string {
 /** Bounded, scrubbed, single-line stderr tail — the only stderr a detail may embed. */
 export function boundStderrTail(stderr: string): string {
   // Scrub the FULL stderr first: slicing first could cut a token shape so its
-  // surviving half matches no SECRET_SHAPES regex (INV-GATE-2).
+  // surviving half matches no SECRET_SHAPES regex (INV-GATE-2). Then collapse
+  // newlines, THEN slice: collapsing after the slice could push the tail past
+  // the ceiling (each collapsed newline grows the text by two chars).
   const scrubbed = scrubSecrets(stderr);
-  const tail = scrubbed.length > STDERR_TAIL_MAX_CHARS ? `…${scrubbed.slice(-STDERR_TAIL_MAX_CHARS)}` : scrubbed;
-  return tail.replace(/\s*\n\s*/g, " ⏎ ");
+  const singleLine = scrubbed.replace(/\s*\n\s*/g, " ⏎ ");
+  return singleLine.length > STDERR_TAIL_MAX_CHARS
+    ? `…${singleLine.slice(-STDERR_TAIL_MAX_CHARS)}`
+    : singleLine;
 }
 
 /** Typed walker/ledger code names (e.g. `audit-store-absent`) when present in stderr. */
@@ -161,9 +171,17 @@ function typedCodes(stderr: string): string {
   return matches.join(", ");
 }
 
-/** Names a non-zero walker exit: signal-kill (null), abnormal exit, or the exit code. */
-function describeWalkerExit(exit: number | null): string {
-  if (exit === null) return `killed by signal (walker budget ${WALKER_TIMEOUT_MS}ms)`;
+/**
+ * Names a non-zero walker exit: a signal kill (null exit code with a spawn
+ * signal — the budget's SIGKILL or an external kill), a null exit with no
+ * signal, an abnormal exit, or the exit code.
+ */
+function describeWalkerExit(exit: number | null, signalCode: string | null): string {
+  if (exit === null) {
+    return signalCode !== null
+      ? `killed by signal ${signalCode} (walker budget ${WALKER_TIMEOUT_MS}ms or external kill)`
+      : `no exit code reported — walker budget ${WALKER_TIMEOUT_MS}ms is the likely cause`;
+  }
   if (exit < 0) return `abnormal exit ${exit}`;
   return `exit code ${exit}`;
 }
@@ -237,7 +255,7 @@ async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcom
   const problems: string[] = [];
   if (exit !== 0) {
     const codes = typedCodes(stderr);
-    problems.push(`walker ${describeWalkerExit(exit)}${codes ? ` (typed code ${codes})` : ""}`);
+    problems.push(`walker ${describeWalkerExit(exit, proc.signalCode)}${codes ? ` (typed code ${codes})` : ""}`);
   }
   if (report === undefined) {
     problems.push(`stdout did not parse as a ChainReport (${parseFailure})`);
@@ -245,9 +263,12 @@ async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcom
     problems.push(...auditChainReport(report, deps.runId));
   }
   if (problems.length > 0) {
+    // INV-GATE-2 choke point: the problems string embeds the parsed report's
+    // own runs keys, so it is scrubbed here at composition — the pure
+    // `auditChainReport` keeps returning its violations raw.
     return {
       pass: false,
-      detail: `${problems.join("; ")} — stderr tail: ${boundStderrTail(stderr)} — ${provenance}`,
+      detail: `${scrubSecrets(problems.join("; "))} — stderr tail: ${boundStderrTail(stderr)} — ${provenance}`,
     };
   }
   return {

@@ -404,12 +404,77 @@ Implemented 2026-09-19 on `feature/df5-4-lights-on-gate` (unlazy scope `.unlazy/
 10. C8 accepts any non-empty `Issue:` value, not only a resolved reference or the literal `unresolved` — the mirror index is out of the v5 slate, so demanding resolution could never go green on an issue-less run; the DoD's two C8 controls (unresolved passes, absent line fails) both hold (review round 1, auditor).
 11. The versioned wrapper carries an additive `request_id` key beyond the pinned `{gate, gate_version, clause_map_version, report}` shape — the Observability Contract's "requestId … stamped on the report" wants it; `GateReportSchema` validation is unaffected (review round 1, auditor).
 12. The frozen fixture ships one extra file beyond the story manifest: `<runId>.bundle` — C9's run-bundle hop digest-checks it against the audit link rows; without it C9 could never go green (review round 1, auditor).
+13. `tests/scripts/build-exedev-image.test.ts` carries a `buildIdFileInputs` pin update (`99af1da0…` → `b3c30d0c…`) outside this story's Files to Modify — pairing-debt adoption, proven stale on clean `dev` before this branch (changed-files ∩ walk = ∅, digest recomputed byte-identical); documented in-code, listed here per the deviation clause (review round 2, auditor).
+14. Off-story evidence regeneration reverted: running the DF1.4 e2e suite on the branch rewrote `_bmad-output/evidence/df1-4/{e2e-two-phase-trace.db,two-page-read.json}` in place; both restored to the `dev` versions in review round 2 (review round 2, auditor).
 
 **Gates:** full `bun test` + `bun run typecheck` + `bunx biome check` green; `check-defensive-programming.sh --base origin/dev` clean (one real fix: the C6 `as unknown as` double cast replaced by an `every()`-guarded narrow; remaining sites annotated `dp:ok` with reasons); `check-pr-conflicts.sh --base origin/dev` no overlaps; `detect_changes` low risk, zero affected processes, zero chassis deltas.
 
 ---
 
-**Status:** done (review round 1 complete — 41 source findings patched, 20 test arms added/re-pinned, 9 dismissed as noise/declared; all gates green)
+**Status:** done (review round 2 complete — 35 verified findings patched across driver/capture/assertion modules and both test suites, 1 reviewer HIGH dismissed as false positive with chassis-source proof, 2 further dismissals verified; all gates green)
+
+### Review Findings (round 2 — bmad adversarial review, 2026-09-19)
+
+7 review agents (2 blind-hunter chunks, 4 edge-hunter chunks, 1 acceptance auditor) over the post-round-1 PR diff; 47 raw findings → triaged to 28 wave-1 source patches (3 disjoint fixer clusters: driver, capture tool, assertion modules), 9 wave-2 test items (2 fixers), 2 lead items (evidence revert + this deviation entry), 3 dismissals. 0 deferred, 0 decision-needed (conservative fail-safe applied: every ambiguous call resolved fail-closed).
+
+Patched — driver (`scripts/df5-lights-on-gate.ts`):
+- [x] Verdict lines (incl `overall:"PASS"` summary) hit stderr BEFORE the report write; a write fault exited 2 "usage" with PASS already claimed → report written atomically FIRST (tmp+`renameSync`, tmp unlinked on failure), then verdict emission; header contract now true in both directions (HIGH-adjacent, 3 reviewers converged)
+- [x] Non-atomic `writeFileSync` could strand truncated JSON at the evidence path while exit 2 claimed "no report written" → tmp+rename
+- [x] `existsSync` before `mkdirSync(recursive)` TOCTOU → guard dropped (mkdir is idempotent)
+- [x] `--run-id` shape: `..` substring, leading `.`, leading `-` (`--run-id=--runs-dir` flag-mangled the C9 walker argv — verified live), trailing `.lock` all admitted → rejected with per-rule messages
+- [x] No length bound (NAME_MAX blowup misreported as usage) → 128-char cap
+- [x] Every post-flag fault printed "usage … try --help" → phase tracking: `usage` prefix for flag faults, `error` prefix + honest remediation after
+- [x] Observability Contract: fail/skip stderr lines carried `remediation` but no `code`/`message` → both added (`code` = typed-code extracted from detail, else `evidence-unreadable`/`assertion-failed`)
+- [x] Deviation-6 reverify rename absent from operator-facing `--help` → documented
+
+Patched — capture tool (`scripts/dev/capture-run-of-record.ts`):
+- [x] audit.db live-writer guard checked `-wal` but the store journals DELETE (`link-store.ts` asserts it) — the real signal is a non-empty `-journal`, and a mid-transaction copy shipped a torn db undetected → `-journal` refusal + post-copy recheck (HIGH)
+- [x] Copy-phase faults (ENOSPC/EACCES) exited 2 "usage", printed no remediation, locked the partial fixture → typed `copy-failed` + cleanup + stale comment fixed
+- [x] `freezeRefs` created `<out>/refs.git` before any verifiable step; every ref-class refusal left `<out>` locked → created-output cleanup on freeze failure (C7 invariant restored)
+- [x] Dry-run probed `file:` PR-body with `existsSync` only (EISDIR/EACCES passed dry-run) → real read probe
+- [x] 0-byte/table-less ledger & audit.db froze as success; bundle never verified → schema-presence assertions (`ledger-schema-absent`/`audit-schema-absent`) + `git bundle verify`
+- [x] `cpSync(dereference:true)` hangs on symlink→FIFO, ELOOP on cycles → bounded lstat pre-walk refusing irregular entries
+- [x] No `--out`-vs-source containment → `relative()`-segment overlap refusal
+- [x] Pre-existing-empty `<out>` skipped the concurrency guard → exclusive `capture-in-progress` sentinel in both branches
+- [x] Residue scan stat/read unguarded (dangling symlink → exit 2 "usage") → typed `residue-unreadable`
+- [x] Empty PR body reported as gh failure ("failed (exit 0)") → distinct `pr-body-empty`
+- [x] Only top-level files 0600; artifacts + refs.git world-readable → full-fixture 0600 chmod walk
+- [x] Docblock dry-run exception sentence inverted → fixed
+- [x] cwd- vs REPO_ROOT-anchored split-brain → HELP note (cwd anchoring matches the gate's own resolution)
+- [x] (same class, found during arm testing) `out-unwritable` typed refusal for non-EEXIST create failures
+
+Patched — assertion modules (`src/gate/assertions/*`):
+- [x] `verdict()` router saw only `{failures}` and returned PASS for auditors' `{failures:[], skip}` arms — skip enforced by closure convention → router accepts `skip` and fails closed (shipped closures byte-identical)
+- [x] INV-GATE-2 gap: `auditChainReport` interpolated raw runs keys into violations; C5 embedded raw git stderr — unscrubbed → scrub at each module's detail-composition choke point
+- [x] P1 misdiagnosed a mid-gate read failure as "not valid JSON" (accessSync→read race) → atomic read+parse with distinct read-failure skip wording; `readJsonEvidenceDiagnosed` added additively
+- [x] `describeWalkerExit` labeled every null exit "walker budget" → signal-aware (names SIGKILL source honestly)
+- [x] `boundStderrTail` sliced before newline collapse (~3× ceiling escape) → collapse-then-slice
+- [x] `emittedLinkCount` docblock contradicted resolved-gated code → comment fixed
+- [x] C8 token boundary admitted hyphen-extension (`run-123-extra` satisfied `run-123`) → boundary class excludes `-` (intentional behavior change; suite re-pinned)
+
+Patched — tests (`df5-assertions.test.ts` 143→147, `df5-lights-on-gate.test.ts` 17→20, `build-exedev-image.test.ts` comment):
+- [x] Vacuous `detail.linkIds` arm (spread kept `linkId:3711`; second counting path never reachable) → hops rebuilt without `linkId` + non-array `linkIds` mutant proving the branch load-bearing
+- [x] C9 depth arm's needle satisfied by walker stderr echo alone → checker-authored per-hop phrase asserted; walker-exit-0 variant proven non-constructible (chain.ts: resolved link-bearing hops always carry `linkId`; missing rows are `unlinked` → exit 1) and documented on the arm
+- [x] `toContain("2")` vacuous needle → `toContain("exit code 2")`
+- [x] P1 mode-000 arm lacked win32 guard its sibling comments claimed parity with → guard added, comments made truthful
+- [x] C8 never-touches-network now TESTED (fetch spy asserted zero calls), not just by construction
+- [x] Hygiene arm red on root lanes (rev-parse of the checked-in fixture under git dubious-ownership) → `skipIf(root)` (b5f71bd7 precedent)
+- [x] Orphan driver could outlive test timeout and recreate deleted scratch → `afterAll` child sweep before rmSync
+- [x] "50 changed files" audit-trail comment → 56 (count + intersection-empty re-verified)
+- [x] Hot-WAL DoD arm asserted via raw readonly sqlite open, not the named seam → `CostLedger.openReadOnly().readRunCost()` asserting `hasEvents` + non-zero total (also pins the read path's own refusal classes)
+- [x] New wave-1 behavior pinned: run-id shape arms (4), length boundary (129 rejects / 128 runs), post-flag `error`-prefix fatal, `code`/`message` on skip lines (default + typed `audit-store-absent`)
+- [x] C7 inverted arm + hyphen-extension fails + punctuation-delimited passes
+
+Lead items:
+- [x] `_bmad-output/evidence/df1-4/*` regenerated in-PR by running the DF1.4 e2e suite on the branch (undeclared off-story mutation of another story's audit chain) → reverted to `dev` versions; recorded as deviation 14
+- [x] buildId re-pin undeclared in this record → deviation 13 above
+
+Dismissed (3, verified against source):
+- [HIGH→FALSE POSITIVE] "Report can carry fewer assertion rows than submitted; verdict computed over a truncated set" — chassis-proven impossible: `gate-runner.ts:290-303` fills budget-expired AND unsettled holes with `fail` rows ("assertion never produced a result"); the chassis is already fail-closed, the driver receives all rows.
+- Default `--report` path clobber across runs — round-1 dismissal stands (spec-pinned path, single-operator CLI, `request_id` correlates).
+- C6/C7/P1/C1/C2 evaluate independent evidence snapshots — frozen-of-record is the contract; an active rewriter of host evidence is outside the threat model; snapshot caching would add staleness for no modeled adversary.
+
+Gates after round 2: focal suites 401 pass / 0 fail (3 files); biome clean on all 9 touched files; `bunx tsc --noEmit` exit 0; `detect_changes` low risk, 0 changed symbols, 0 affected processes; capture-tool refusal arms 12/12 typed exit 1 with typed messages (fixer-verified).
 
 ### Review Findings (round 1 — bmad adversarial review, 2026-09-19)
 

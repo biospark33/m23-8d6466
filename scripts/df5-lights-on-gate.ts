@@ -27,12 +27,16 @@
  * (src/gate/gate-runner.ts) is reused unchanged — this driver adds clauses,
  * never chassis behavior.
  *
- * Output: a per-clause verdict table on stdout, one structured log line per
- * assertion plus a summary on stderr, a versioned JSON report at --report,
- * stdout terminating `DF_GATE: PASS|FAIL`. Exit 0 = PASS, 1 = FAIL, 2 = fatal
- * (no report written, no verdict claimed).
+ * Output, in order: the versioned JSON report at --report, written FIRST and
+ * ATOMICALLY (same-dir tmp + renameSync) after GateReportSchema.parse proves
+ * its shape; then one structured log line per assertion plus a summary on
+ * stderr; then the per-clause verdict table on stdout terminating
+ * `DF_GATE: PASS|FAIL`. Exit 0 = PASS, 1 = FAIL, 2 = fatal — and exit 2 is
+ * bidirectional: no verdict line ever precedes it (the report is on disk
+ * before any PASS reaches stderr), and it always leaves nothing at --report
+ * (the tmp+rename write cannot strand truncated JSON there).
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -58,9 +62,14 @@ const DEFAULT_REPORT = join(REPO_ROOT, "_bmad-output", "evidence", "df5-4", "df5
 const RUN_OPTIONS = { assertionTimeoutMs: 60_000, totalTimeoutMs: 300_000 } as const;
 
 /** Run id is interpolated into `<runsDir>/${runId}.json`, `refs/sandbox/${runId}` and the
- *  DF5.3 walker argv — the capture-tool charset, plus an explicit `.`/`..` exclusion the
- *  charset alone lets through. */
+ *  DF5.3 walker argv — the capture-tool charset, plus shape rules the charset
+ *  alone lets through and that break those interpolations: `.`/`..` and any
+ *  `..` substring escape a path segment, a leading `.` hides the record, a
+ *  leading `-` reaches the walker argv as a flag, a trailing `.lock` collides
+ *  with lock-file naming. Length is capped at RUN_ID_MAX_CHARS so a long id
+ *  fails validation, not NAME_MAX at first file touch. */
 const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+const RUN_ID_MAX_CHARS = 128;
 
 const VALUE_FLAGS = [
   "--run-id",
@@ -88,6 +97,11 @@ const HELP = [
   "  The gate is read-only except for the report file and the first-observation",
   "  digest rows the DF5.3 walker inserts into the audit store itself (INV-GATE-1).",
   "  Against a frozen fixture, point every seam inside the fixture copy.",
+  "",
+  "  Frozen-fixture layout (story deviation 6): the fixture stores the reverify",
+  "  record as <runId>.reverify.jsonl. A harness must rename it to",
+  "  reverify/<runId>.jsonl under the scratch copy — --reverify-dir reads only",
+  "  the renamed location.",
 ] as const;
 
 /** Drift notes recorded per the story's deviation clause — never silent reinterpretation:
@@ -121,9 +135,22 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     help: HELP,
   });
   if (!a["--run-id"]) throw new Error("missing --run-id <id> — the gate asserts one run of record");
-  if (!RUN_ID_RE.test(a["--run-id"]) || a["--run-id"] === "." || a["--run-id"] === "..") {
+  const runId = a["--run-id"];
+  if (runId.length > RUN_ID_MAX_CHARS) {
     throw new Error(
-      `--run-id must match ${RUN_ID_RE.source} excluding . and .. (got ${JSON.stringify(a["--run-id"])})`,
+      `--run-id must be at most ${RUN_ID_MAX_CHARS} characters (got ${runId.length}) — longer ids overflow NAME_MAX and cannot form a run-record path`,
+    );
+  }
+  // The charset alone lets path-hostile shapes through; name every rejected
+  // shape in the message so the operator sees why, not just the regex.
+  const shapeRejections: string[] = [];
+  if (runId.includes("..")) shapeRejections.push("a '..' substring");
+  if (runId.startsWith(".")) shapeRejections.push("a leading '.'");
+  if (runId.startsWith("-")) shapeRejections.push("a leading '-'");
+  if (runId.endsWith(".lock")) shapeRejections.push("a trailing '.lock'");
+  if (!RUN_ID_RE.test(runId) || shapeRejections.length > 0) {
+    throw new Error(
+      `--run-id must match ${RUN_ID_RE.source} excluding . and .., a '..' substring, a leading '.', a leading '-', and a trailing '.lock' (got ${JSON.stringify(runId)})`,
     );
   }
   const runsDir = resolve(a["--runs-dir"] ?? resolveRunsDir());
@@ -212,9 +239,46 @@ function mintRequestId(): string {
   return `df54-${Date.now().toString(36)}-${rand}`;
 }
 
-// dp:ok (main) — the import.meta.main caller wraps main in the exit-2 catch; a throw here is a fatal usage fault, never a silent crash.
+/** The typed code for a blocking row's log line: the first walker/ledger code
+ *  shape in the detail (same family as the accounting module's typedCodes —
+ *  e.g. `audit-store-absent`), else the honest status default. A skip means
+ *  the evidence could not be read at all; a fail means the assertion ran and
+ *  did not hold. */
+function rowCode(status: GateReport["assertions"][number]["status"], detail: string): string {
+  const typed = detail.match(/\b(?:audit-store|audit-chain|ledger)-[a-z]{2,}(?:-[a-z]+)*\b/);
+  if (typed) return typed[0];
+  return status === "skip" ? "evidence-unreadable" : "assertion-failed";
+}
+
+/** Write via a same-dir tmp + renameSync: the rename is atomic on a local
+ *  filesystem, so a mid-write fault (ENOSPC, SIGKILL) leaves nothing at the
+ *  report path — never truncated JSON at the evidence location while the
+ *  process claims exit 2 "no report written". The tmp is unlinked on failure
+ *  so the fault doesn't litter the scratch. */
+function writeReportAtomically(reportPath: string, body: string): void {
+  const tmp = `${reportPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    writeFileSync(tmp, body);
+    renameSync(tmp, reportPath);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // the tmp may never have been created — nothing to clean
+    }
+    throw e;
+  }
+}
+
+/** Fatal-fault phase: "usage" until the flags validate, then "run" — the gate
+ *  execution and the report write are the environment's fault, not a typo, and
+ *  the exit-2 label says so. */
+let flagsValidated = false;
+
+// dp:ok (main) — the import.meta.main caller wraps main in the exit-2 catch; a throw here is a fatal fault, never a silent crash.
 async function main(): Promise<number> {
   const args = parseArgs(Bun.argv.slice(2));
+  flagsValidated = true;
   const requestId = mintRequestId();
   const assertions = buildAssertions(args);
 
@@ -222,45 +286,16 @@ async function main(): Promise<number> {
   const report = await runGate(assertions, RUN_OPTIONS);
   const ranInMs = Date.now() - startedAt;
 
-  // The report the chassis produced is contract-shaped before anything claims a
-  // verdict — exit 2 from here must mean no PASS ever reached stderr.
+  // The report the chassis produced is contract-shaped before anything claims
+  // a verdict, and it goes to disk BEFORE any verdict line is emitted — exit 2
+  // from here means nothing was left at the report path and no PASS ever
+  // reached stderr, in both directions.
   const validated = GateReportSchema.parse(report);
-
-  // Observability contract: one structured line per assertion + a summary, on
-  // stderr so stdout stays the human table + terminal marker. Emitted only once
-  // the report shape is proven (see above) — a fatal fault never prints PASS.
-  for (const row of report.assertions) {
-    console.error(
-      JSON.stringify({
-        requestId,
-        gate: GATE_NAME,
-        assertionId: row.id,
-        story: row.story,
-        status: row.status,
-        duration_ms: row.duration_ms,
-        ...(row.status === "fail" || row.status === "skip"
-          ? { remediation: `inspect the named evidence paths, then re-run: bun scripts/df5-lights-on-gate.ts --run-id ${args.runId}` }
-          : {}),
-      }),
-    );
-  }
-  console.error(
-    JSON.stringify({
-      requestId,
-      gate: GATE_NAME,
-      overall: report.overall,
-      pass: report.summary.pass,
-      fail: report.summary.fail,
-      skip: report.summary.skip,
-      void: report.summary.void,
-      total_duration_ms: report.total_duration_ms,
-    }),
-  );
-
   const writeStartedAt = Date.now();
-  const outDir = dirname(args.report);
-  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  writeFileSync(
+  // mkdirSync recursive is idempotent — no existsSync guard (a TOCTOU wait for
+  // a race that cannot fail here).
+  mkdirSync(dirname(args.report), { recursive: true });
+  writeReportAtomically(
     args.report,
     `${JSON.stringify(
       {
@@ -279,6 +314,42 @@ async function main(): Promise<number> {
     JSON.stringify({ requestId, gate: GATE_NAME, report_path: args.report, report_write_ms: reportWriteMs, ran_ms: ranInMs }),
   );
 
+  // Observability contract: one structured line per assertion + a summary, on
+  // stderr so stdout stays the human table + terminal marker. Emitted only
+  // once the report is durably on disk (see above) — a fatal fault never
+  // prints PASS.
+  for (const row of report.assertions) {
+    console.error(
+      JSON.stringify({
+        requestId,
+        gate: GATE_NAME,
+        assertionId: row.id,
+        story: row.story,
+        status: row.status,
+        duration_ms: row.duration_ms,
+        ...(row.status === "fail" || row.status === "skip"
+          ? {
+              code: rowCode(row.status, row.detail ?? ""),
+              message: row.detail ?? "",
+              remediation: `inspect the named evidence paths, then re-run: bun scripts/df5-lights-on-gate.ts --run-id ${args.runId}`,
+            }
+          : {}),
+      }),
+    );
+  }
+  console.error(
+    JSON.stringify({
+      requestId,
+      gate: GATE_NAME,
+      overall: report.overall,
+      pass: report.summary.pass,
+      fail: report.summary.fail,
+      skip: report.summary.skip,
+      void: report.summary.void,
+      total_duration_ms: report.total_duration_ms,
+    }),
+  );
+
   console.log(render(report, args.runId));
   console.error(`gate report written to ${args.report}`);
   const code = report.overall === "PASS" ? 0 : 1;
@@ -290,7 +361,18 @@ if (import.meta.main) {
   try {
     await main();
   } catch (e) {
-    // Usage/schema faults conclude nothing — exit 2, no report claims a verdict.
-    exitWithFailure("df5-lights-on-gate: usage", 2, [e instanceof Error ? e.message : String(e), "try --help"]);
+    // A fatal concludes nothing — exit 2, nothing left at --report, no verdict
+    // claimed. The phase decides the label: a bad flag is the caller's typo
+    // ("usage … try --help"); once the flags validate, the same fault is the
+    // environment (locked store, full disk, budget) and gets an honest
+    // remediation instead of a pointer back at --help.
+    const message = e instanceof Error ? e.message : String(e);
+    exitWithFailure(
+      flagsValidated ? "df5-lights-on-gate: error" : "df5-lights-on-gate: usage",
+      2,
+      flagsValidated
+        ? [message, "no verdict was claimed and no report was left at the --report path; fix the named fault, then re-run"]
+        : [message, "try --help"],
+    );
   }
 }

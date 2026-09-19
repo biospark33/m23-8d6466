@@ -401,10 +401,11 @@ describe("DF5.4-P1 preflight — run of record", () => {
     await expectSkip("DF5.4-P1", newScratch(), "not readable");
   });
 
-  // Root bypasses permission checks — mode 000 reads fine as UID 0, so the
-  // skip arm proves nothing there. Root lanes must still run this suite as a
-  // non-root user or this arm ships uncovered.
-  test.skipIf(process.getuid?.() === 0)(
+  // Guard set: skipped as root (UID 0 reads through mode 000, so the skip arm
+  // proves nothing there) and on win32 (chmod does not revoke read there).
+  // Root lanes must still run this suite as a non-root user or this arm ships
+  // uncovered.
+  test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
     "mutant: unreadable record (mode 000) → skip naming the path",
     async () => {
       const dir = scratchWithRecord(() => {});
@@ -489,8 +490,9 @@ describe("DF5.4-C1 channel — requestId + admitted budget", () => {
     await expectSkip("DF5.4-C1", newScratch(), `${RUN_ID}.json`);
   });
 
-  // Root bypasses permission checks and Windows chmod does not revoke read —
-  // the same guards as P1's mode-000 arm above.
+  // Guard set (stated here, not assumed by reference to P1's arm above):
+  // skipped as root (UID 0 reads through mode 000) and on win32 (chmod does
+  // not revoke read there).
   test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
     "check with mode-000 record → skip naming the path",
     async () => {
@@ -743,8 +745,9 @@ describe("DF5.4-C4 gates — harvested gate_results rows, claim-integrity only",
     await expectSkip("DF5.4-C4", dir, "cannot be joined", `${RUN_ID}.json`);
   });
 
-  // Root bypasses permission checks and Windows chmod does not revoke read —
-  // the same guards as P1's mode-000 arm above.
+  // Guard set (stated here, not assumed by reference to P1's arm above):
+  // skipped as root (UID 0 reads through mode 000) and on win32 (chmod does
+  // not revoke read there).
   test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
     "check mutant: unreadable trace.db (mode 000) → skip naming the copy as not copyable",
     async () => {
@@ -1126,11 +1129,49 @@ describe("C8 mutants (PR body shape)", () => {
     expectOutcomeFail(out, "absent from body");
   });
 
-  test("runId properly delimited (its own token) → C8 passes", async () => {
+  // C7's boundary class excludes `-` on BOTH sides (df5-boundary.ts
+  // bodyContainsRunId): a hyphen-extended id is NOT the runId as its own
+  // token, so a body carrying only `<runId>-ref` FAILS the runId leg — the
+  // false positive the old "properly delimited → C8 passes" arm pinned is
+  // gone on purpose.
+  test("runId hyphen-extended in body (`<runId>-ref` only) → C8 fails (a hyphen extension is not the token)", async () => {
     const s = boundScratch();
     editPrBody(s, (lines) => lines.map((l) => l.replaceAll(RUN_ID, `${RUN_ID}-ref`)));
     const out = await check(s, "DF5.4-C8");
+    expectOutcomeFail(out, "absent from body");
+  });
+
+  test("runId hyphen-extended in body (`<runId>-extra` only) → C8 fails, same boundary rule on the suffix side", async () => {
+    const s = boundScratch();
+    editPrBody(s, (lines) => lines.map((l) => l.replaceAll(RUN_ID, `${RUN_ID}-extra`)));
+    const out = await check(s, "DF5.4-C8");
+    expectOutcomeFail(out, "absent from body");
+  });
+
+  test("runId delimited by punctuation/whitespace (`(<runId>)`) → C8 passes (the legit match still works)", async () => {
+    const s = boundScratch();
+    editPrBody(s, (lines) => lines.map((l) => l.replaceAll(RUN_ID, `(${RUN_ID})`)));
+    const out = await check(s, "DF5.4-C8");
     expectOutcomePass(out);
+  });
+
+  test("C8 never touches the network: globalThis.fetch is not called during the check (readFileSync-only, by construction)", async () => {
+    const s = boundScratch();
+    const calls: unknown[][] = [];
+    const realFetch = globalThis.fetch;
+    // Pin the no-network contract against future drift: any live GitHub read
+    // added to C8 would surface here as a call (and the throw would turn the
+    // pass expectation red with the reason in the message).
+    globalThis.fetch = ((...args: unknown[]) => {
+      calls.push(args);
+      throw new Error("C8 must not reach the network — the frozen body is read from disk only");
+    }) as unknown as typeof fetch;
+    try {
+      expectOutcomePass(await check(s, "DF5.4-C8"), s.prBodyFile);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(calls).toEqual([]);
   });
 });
 
@@ -1239,6 +1280,13 @@ function resolved(hop: string, extra: Partial<Extract<HopOutcome, { status: "res
   return { status: "resolved", hop: hop as HopOutcome["hop"], runId: RUN_ID, subjectId: "subj", ...extra };
 }
 
+/** A resolved hop with its top-level linkId OMITTED (detail.linkIds tests rely on the omission). */
+function withoutLinkId(base: HopOutcome): HopOutcome {
+  if (base.status !== "resolved") return base;
+  const { linkId: _dropped, ...rest } = base;
+  return rest;
+}
+
 /** The three hops whose emitted audit_links rows C9 requires by name. */
 const LINK_BEARING = new Set(["run-credential", "run-box", "run-bundle"]);
 
@@ -1286,16 +1334,36 @@ describe("auditChainReport — synthetic shape mutants", () => {
 
   test("credential link ids counted from detail.linkIds when linkId is absent", () => {
     // The (e) arm's second counting path: an emitted link row id surfaced as
-    // detail.linkIds rather than a top-level linkId.
+    // detail.linkIds rather than a top-level linkId. linkId is OMITTED, not
+    // overwritten — a bare spread would carry the base hop's linkId 3711
+    // through and the arm would go green via the FIRST counting path while
+    // the detail.linkIds path stayed unexercised.
     const report = synthReport({
       perHop: (hop, base) =>
         hop === "run-box" && base.status === "resolved"
-          ? { ...base, detail: { linkIds: [41, 42] } }
+          ? { ...withoutLinkId(base), detail: { linkIds: [41, 42] } }
           : hop === "run-bundle" && base.status === "resolved"
-            ? { ...base, detail: { linkIds: [7] } }
+            ? { ...withoutLinkId(base), detail: { linkIds: [7] } }
             : base,
     });
     expect(auditChainReport(report, RUN_ID)).toEqual([]);
+  });
+
+  test("mutant: detail.linkIds present but not an array counts zero — the link-count violation fires (branch is load-bearing)", () => {
+    // A string (or any non-array) in detail.linkIds must contribute ZERO ids
+    // and violate — never throw on the untrusted shape and never read .length
+    // off the string. The violation names the checker's own link-count
+    // phrasing from auditChainReport.
+    const report = synthReport({
+      perHop: (hop, base) =>
+        hop === "run-box" && base.status === "resolved"
+          ? { ...withoutLinkId(base), detail: { linkIds: "garbage" } }
+          : base,
+    });
+    const violations = auditChainReport(report, RUN_ID);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain("run-box");
+    expect(violations[0]).toContain("no emitted audit_links row id");
   });
 
   test("missing credential link rows (unlinked hop) violates, naming the hop and status", () => {
@@ -1475,11 +1543,23 @@ describe("DF5.4-C9 — spawned qds-audit walk", () => {
     expect(outcome.pass).toBe(false);
     expect(outcome.skip).toBeUndefined();
     expect(outcome.detail).toContain("audit-store-absent");
-    expect(outcome.detail).toContain("2"); // the walker's exit code is named too
+    expect(outcome.detail).toContain("exit code 2"); // the walker's exit code is named too (describeWalkerExit's normal-branch wording)
     expect(fs.existsSync(deps.auditDb)).toBe(false); // no-create proof
   }, 90_000);
 
   test("depth mutant: run-credential link rows deleted from the scratch audit.db — C9 fails naming the hop", async () => {
+    // DoD's "fails even when the walker exits 0" is NOT constructible over a
+    // real walk: the walker only ever emits `void` on hop 10 and every
+    // resolved link-bearing hop carries a numeric top-level linkId taken
+    // straight off the store's primary key (chain.ts hops 4/5/6), while any
+    // missing-rows shape is `unlinked` — which `breaksChain` scores against
+    // the chain, so the walker exits 1 whenever emitted-link evidence is
+    // absent. emittedLinkCount's second link-counting leg therefore only
+    // fires on a non-resolved, non-broken status the walker never emits on a
+    // link-bearing hop; that leg is pinned at unit level by the
+    // detail.linkIds arms under `auditChainReport` above. The residual value
+    // of THIS arm is that the gate still flips on a tampered frozen store:
+    // C9 audits the PARSED report, never the walker's own verdict line.
     const deps = makeScratch({
       mutateAuditDb: (db) => {
         // INV-AUDIT-4 triggers guard the real store; a mutant drops them on
@@ -1493,7 +1573,13 @@ describe("DF5.4-C9 — spawned qds-audit walk", () => {
     const [c9] = df5AccountingAssertions(deps).filter((a) => a.id === "DF5.4-C9");
     const outcome = await c9!.check();
     expect(outcome.pass).toBe(false);
-    expect(outcome.detail).toContain("run-credential");
+    // The checker-authored per-hop violation phrasing from auditChainReport
+    // (df5-accounting.ts) — proving the parsed-report audit leg ran, not
+    // merely that the walker's stderr echoed the hop name. scrubSecrets at
+    // detail assembly is a no-op for this clean text, so the needles hold.
+    expect(outcome.detail).toContain("hop run-credential: status unlinked");
+    // The gate flips on the walk outcome too, not only the report shape:
+    expect(outcome.detail).toContain("exit code 1");
   }, 90_000);
 });
 

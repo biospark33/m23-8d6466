@@ -158,3 +158,28 @@ export function readJsonEvidence(file: string): unknown | undefined {
     return undefined;
   }
 }
+
+/**
+ * Same read+parse as `readJsonEvidence`, but callers that phrase their detail
+ * from the failure MODE get it: a read failure (the file vanished, chmoded or
+ * became unreadable between an existence check and the read) is a different
+ * sentence than a parse failure (bytes arrived but are not JSON). Pure
+ * additive sibling — `readJsonEvidence` and its callers are untouched.
+ */
+export type JsonEvidenceRead =
+  | { ok: true; value: unknown }
+  | { ok: false; kind: "read" | "parse"; error: string };
+
+export function readJsonEvidenceDiagnosed(file: string): JsonEvidenceRead {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    return { ok: false, kind: "read", error: error instanceof Error ? error.message : String(error) };
+  }
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch (error) {
+    return { ok: false, kind: "parse", error: error instanceof Error ? error.message : String(error) };
+  }
+}

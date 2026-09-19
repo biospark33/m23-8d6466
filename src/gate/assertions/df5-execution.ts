@@ -21,7 +21,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { GateAssertion, GateCheckOutcome } from "../gate-runner.ts";
-import { readJsonEvidence, scanNdjson, type NdjsonScan } from "./lib/verdict.ts";
+import { readJsonEvidence, readJsonEvidenceDiagnosed, scanNdjson, type NdjsonScan } from "./lib/verdict.ts";
 import { meetsMinCount } from "./p0-2-coms.ts";
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,21 @@ export interface Df5ExecutionDeps {
   runsDir: string;
 }
 
-function verdict(audit: { failures: string[] }, passDetail: string, provenance: string): GateCheckOutcome {
+/**
+ * Folds an audit into one GateCheckOutcome. A skip marker wins BEFORE the
+ * failures check: an auditor that could not evaluate its evidence is red
+ * (`skip: true`), never green, even though its skip arm carries no failures —
+ * the router enforces INV-GATE-5 fail-closed instead of trusting each closure
+ * to hand-route its skip. The shipped closures hardcode the affirmative
+ * (`exists: true`, `joinedOnRequestId: true`) so their outcomes are unchanged;
+ * the arm exists for any auditor result that carries a marker.
+ */
+function verdict(
+  audit: { failures: string[]; skip?: string },
+  passDetail: string,
+  provenance: string,
+): GateCheckOutcome {
+  if (audit.skip !== undefined) return { pass: false, skip: true, detail: audit.skip };
   return audit.failures.length > 0
     ? { pass: false, detail: `${audit.failures.join("; ")} — ${provenance}` }
     : { pass: true, detail: `${passDetail} — ${provenance}` };
@@ -252,18 +266,20 @@ export function df5ExecutionAssertions(deps: Df5ExecutionDeps): GateAssertion[] 
       description: "The run of record exists at <runsDir>/<runId>.json, parses, and names a runId",
       group: "preflight",
       check: async () => {
-        try {
-          fs.accessSync(recordPath, fs.constants.R_OK);
-        } catch {
-          return unreadableRecord();
-        }
-        const record = readJsonEvidence(recordPath);
-        if (record === undefined) {
+        // One atomic read, no accessSync pre-check: a record that exists at
+        // access time but cannot be read a moment later reports its read
+        // failure (path + fs error), not a bogus "not valid JSON".
+        const read = readJsonEvidenceDiagnosed(recordPath);
+        if (!read.ok) {
+          if (read.kind === "read") {
+            return { pass: false, skip: true, detail: `run of record not readable (${read.error}): ${recordPath}` };
+          }
           return {
             pass: false,
-            detail: `run of record is present and readable but is not valid JSON — ${recordProvenance}`,
+            detail: `run of record is present and readable but is not valid JSON (${read.error}) — ${recordProvenance}`,
           };
         }
+        const record = read.value;
         const runId = nonEmptyString(fieldOf(record, "runId"));
         if (runId === undefined) {
           return {

@@ -8,7 +8,8 @@
  * gate never reads the developer's live `.sandbox/`. This tool is the only
  * sanctioned bridge between the two. It freezes: the run record, the reverify
  * jsonl (renamed `<runId>.reverify.jsonl`), `audit.db` (plain copy — the link
- * store journals on DELETE, no sidecars), `cost-ledger.db` (only after a
+ * store journals on DELETE, so the live-writer guard is a non-empty `-journal`
+ * sibling, re-checked after the copy), `cost-ledger.db` (only after a
  * TRUNCATE checkpoint on the REAL ledger; a still-non-empty `-wal` REFUSES —
  * DF2.11 would hot-WAL-refuse that shape forever; the COPY is then converted
  * to DELETE journal mode — see selfContainLedgerCopy), the harvest `<runId>.bundle`
@@ -23,8 +24,10 @@
  * of logical content) and a temp bundle under `os.tmpdir()`. `--dry-run` does
  * neither and writes nothing. Exit codes per repo CLI convention: 0 success,
  * 1 typed refusal ({code, message, remediation} on stderr), 2 usage/fatal.
- * The one exception: `--dry-run` over a missing source exits 1 with a plain
- * `dry-run: NOT ok` line (no typed payload — it never began a capture).
+ * Exception: `resolveSources` runs BEFORE the dry-run branch, so a missing run
+ * record, ledger, bundle, or artifacts dir refuses with its typed payload even
+ * under `--dry-run`; the one plain line is `dry-run: NOT ok` for a `file:` PR
+ * body that cannot be read (no typed payload — it never began a capture).
  */
 
 import {
@@ -33,6 +36,8 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  type Dirent,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -43,7 +48,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { Database } from "bun:sqlite";
 
@@ -67,6 +72,8 @@ const HELP = [
   "  --git-dir <repo .git>    host git dir holding refs/sandbox/<runId> (default <repo>/.git)",
   "  --pr-body-source <s>     auto | gh | file:<path> (default auto)",
   "  --dry-run                verify sources + print the freeze plan; write nothing",
+  "",
+  "  Source defaults are cwd-anchored — run from the repo root the run of record lives in (the same resolution the gate uses for its own seams).",
 ] as const;
 
 const VALUE_FLAGS = ["--run-id", "--out", "--runs-dir", "--reverify-dir", "--ledger", "--audit-db", "--git-dir", "--pr-body-source"] as const;
@@ -137,9 +144,11 @@ function refuse(code: string, message: string, remediation: string): never {
   exitWithFailure(`capture-run-of-record: ${code}`, 1, [message, `remediation: ${remediation}`]);
 }
 
-/** freezeRefs' refusals INSIDE its tmp-bundle try must throw, not call refuse():
- * refuse() → process.exit() skips the `finally` that removes the temp bundle
- * (C6). The outer catch converts this back to the typed exit after cleanup ran. */
+/** Every fault AFTER `<out>` exists (freezeRefs, ledger self-containment, the
+ * copy/TOCTOU phase) must throw, not call refuse(): refuse() → process.exit()
+ * skips pending `finally` blocks (C6), and the caller must first remove what
+ * this run created so the fixture never locks behind the idempotence guard.
+ * main's catch converts the throw back to the typed exit after cleanup ran. */
 class FreezeRefusal extends Error {
   constructor(
     readonly code: string,
@@ -210,6 +219,42 @@ function fileSize(path: string): number {
   }
 }
 
+/** Bounded lstat walk of the artifacts tree, run before the dereferencing copy:
+ * `cpSync(dereference: true)` would block forever on a symlink→FIFO and fail
+ * ELOOP on a symlink cycle, so every entry must be a real directory or a real
+ * file (lstat — a symlink counts as irregular even when its target is tame). */
+function assertArtifactsWalkable(artifactsDir: string): void {
+  const visit = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      refuse("artifacts-irregular-entry", `cannot list the artifacts directory ${dir} (${(e as Error).message})`, "fix the unreadable artifacts entry and re-run; the freeze refuses to dereference-copy a tree it cannot fully enumerate");
+    }
+    for (const e of entries.sort((x, y) => x.name.localeCompare(y.name))) {
+      const p = join(dir, e.name);
+      let st: ReturnType<typeof lstatSync>;
+      try {
+        st = lstatSync(p);
+      } catch (err) {
+        refuse("artifacts-irregular-entry", `cannot stat artifacts entry ${p} (${(err as Error).message})`, "fix or remove the unreadable artifacts entry and re-run");
+      }
+      if (st.isDirectory()) visit(p);
+      else if (!st.isFile()) {
+        refuse("artifacts-irregular-entry", `artifacts entry ${p} is neither a regular file nor a directory (${st.isSymbolicLink() ? "symlink" : st.isFIFO() ? "FIFO" : st.isSocket() ? "socket" : st.isBlockDevice() ? "block device" : st.isCharacterDevice() ? "character device" : "irregular"})`, "remove or replace the irregular artifacts entry and re-run; dereferencing it would hang (FIFO) or loop (symlink cycle) the copy");
+      }
+    }
+  };
+  visit(artifactsDir);
+}
+
+/** Segment-based containment: is `descendant` inside (or equal to) `ancestor`?
+ * A string prefix lies — `/tmp/out` does not contain `/tmp/outfox`. */
+function pathContains(ancestor: string, descendant: string): boolean {
+  const head = relative(ancestor, descendant).split(sep)[0];
+  return head !== "..";
+}
+
 interface Sources {
   recordPath: string;
   reverifyPath: string;
@@ -278,16 +323,45 @@ async function resolveSources(args: Args): Promise<Sources> {
   if (existsSync(traceWal) && fileSize(traceWal) > 0) {
     refuse("artifacts-wal-live", `${traceWal} is non-empty — the harvest's trace writer is still live`, "re-run after the harvest's WAL is drained, or capture a quiesced run");
   }
+  // The copy dereferences — a FIFO or symlink cycle in the tree would hang or ELOOP it (C-edge#6).
+  assertArtifactsWalkable(artifactsDir);
   // The harvest bundle: C9's run-bundle hop digest-checks it against the audit link rows.
   const bundlePath = join(runsDir, `${runId}.bundle`);
   mustExistFile(bundlePath, "bundle-absent", "harvest bundle");
+  // SQLite opens a 0-byte or foreign db without complaint; prove the bundle is a real bundle
+  // (read-only) before freezing it as C9's digest anchor (C-edge#5). `bundle verify` refuses a
+  // bare --git-dir ("need a repository") — the repo must come from -C.
+  const bverify = await run(["git", "-C", gitDir, "bundle", "verify", bundlePath]);
+  if (bverify.code !== 0) {
+    refuse("bundle-unverifiable", `git bundle verify ${bundlePath} failed: ${stderrTail(bverify.stderr)}`, "the harvest bundle is corrupt or truncated — re-harvest to regenerate it, then re-run capture");
+  }
   mustExistFile(ledgerPath, "ledger-absent", "cost ledger");
   mustExistFile(auditDbPath, "audit-db-absent", "audit-links store");
   // audit.db ships as a plain copy — no checkpoint, no sidecar — so a live audit writer would be
-  // frozen mid-write (C4).
+  // frozen mid-write (C4). The store journals on DELETE (link-store.ts asserts it on open), so
+  // the writer's signal is a non-empty `-journal` (removed on commit), not `-wal`.
   const auditWal = `${auditDbPath}-wal`;
   if (existsSync(auditWal) && fileSize(auditWal) > 0) {
     refuse("audit-wal-live", `${auditWal} is non-empty — a live writer holds the audit-links store`, "quiesce the audit writer, confirm the -wal drains, and re-run; the freeze ships the audit store as a plain sidecar-less copy");
+  }
+  const auditJournal = `${auditDbPath}-journal`;
+  if (existsSync(auditJournal) && fileSize(auditJournal) > 0) {
+    refuse("audit-journal-live", `${auditJournal} is non-empty — an audit transaction is mid-flight in the store's DELETE journal`, "quiesce the audit writer, confirm the -journal drains, and re-run; the freeze ships the audit store as a plain sidecar-less copy");
+  }
+  // And prove the store is real before freezing it: a table-less audit.db would freeze as success.
+  let auditHasTable: unknown;
+  try {
+    const adb = new Database(auditDbPath, { readonly: true });
+    try {
+      auditHasTable = adb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_links'").get();
+    } finally {
+      adb.close();
+    }
+  } catch (e) {
+    refuse("audit-schema-absent", `cannot open the audit-links store read-only at ${auditDbPath} (${(e as Error).message})`, "check permissions and locks on the store and re-run; the freeze must read its schema before shipping it");
+  }
+  if (auditHasTable === null || auditHasTable === undefined) {
+    refuse("audit-schema-absent", `${auditDbPath} opens but carries no audit_links table — this is not the real audit-links store`, "point --audit-db at the store src/audit/link-store.ts creates and re-run");
   }
   mustExistDir(gitDir, "git-dir-absent", "host git dir");
 
@@ -311,6 +385,11 @@ function checkpointLedger(ledgerPath: string): void {
     refuse("ledger-unopenable", `cannot open the cost ledger read-write for checkpoint (${(e as Error).message})`, `the existence probe passed, so check permissions on ${ledgerPath} and re-run`);
   }
   try {
+    // A 0-byte or foreign db opens fine — prove it is the real ledger before checkpointing it (C-edge#5).
+    const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cost_events'").get();
+    if (table === null || table === undefined) {
+      refuse("ledger-schema-absent", `${ledgerPath} opens but carries no cost_events table — this is not the real cost ledger`, "point --ledger at the ledger src/providers/cost-ledger.ts creates and re-run");
+    }
     db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); // tracer.ts:916 precedent
   } catch (e) {
     refuse("ledger-checkpoint-failed", `PRAGMA wal_checkpoint(TRUNCATE) failed on ${ledgerPath} (${(e as Error).message})`, "stop writers on the ledger and re-run; the freeze refuses to ship an un-checkpointed WAL");
@@ -340,12 +419,12 @@ function selfContainLedgerCopy(fixtureLedger: string): void {
   try {
     db = new Database(fixtureLedger);
   } catch (e) {
-    refuse("ledger-fixture-unopenable", `cannot open the copied ledger at ${fixtureLedger} for journal conversion (${(e as Error).message})`, "remove the partial fixture dir and re-run");
+    throw new FreezeRefusal("ledger-fixture-unopenable", "remove the partial fixture dir and re-run", `cannot open the copied ledger at ${fixtureLedger} for journal conversion (${(e as Error).message})`);
   }
   try {
     const mode = db.prepare("PRAGMA journal_mode = DELETE;").get() as Record<string, unknown>;
     if (mode?.journal_mode !== "delete") {
-      refuse("ledger-fixture-unopenable", `journal_mode = DELETE did not take on ${fixtureLedger} (got ${JSON.stringify(mode?.journal_mode)})`, "remove the partial fixture dir and re-run");
+      throw new FreezeRefusal("ledger-fixture-unopenable", "remove the partial fixture dir and re-run", `journal_mode = DELETE did not take on ${fixtureLedger} (got ${JSON.stringify(mode?.journal_mode)})`);
     }
   } finally {
     try {
@@ -362,45 +441,95 @@ function selfContainLedgerCopy(fixtureLedger: string): void {
     ro.query("select count(*) as n from sqlite_master").get();
     ro.close();
   } catch (e) {
-    refuse("ledger-fixture-unopenable", `the frozen ledger copy at ${fixtureLedger} fails the read-only open C10 performs (${(e as Error).message})`, "remove the partial fixture dir and re-run");
+    throw new FreezeRefusal("ledger-fixture-unopenable", "remove the partial fixture dir and re-run", `the frozen ledger copy at ${fixtureLedger} fails the read-only open C10 performs (${(e as Error).message})`);
   }
 }
 
-/** Build `<out>/refs.git`: a bare repo carrying exactly the sandbox ref + its reachable objects, via a temp bundle under os.tmpdir(). */
+/** Build `<out>/refs.git`: a bare repo carrying exactly the sandbox ref + its reachable objects, via a temp bundle under os.tmpdir().
+ * Every fault throws FreezeRefusal — main's catch removes what this run created before refusing (C-edge#3). */
 async function freezeRefs(out: string, s: Sources): Promise<string> {
   const refsGit = join(out, "refs.git");
   const init = await run(["git", "init", "--bare", "--quiet", refsGit]);
   if (init.code !== 0) {
-    refuse("refs-init-failed", `git init --bare ${refsGit} failed: ${stderrTail(init.stderr)}`, "remove the partial fixture dir and re-run");
+    throw new FreezeRefusal("refs-init-failed", "remove the partial fixture dir and re-run", `git init --bare ${refsGit} failed: ${stderrTail(init.stderr)}`);
   }
   const tmp = mkdtempSync(join(tmpdir(), "df54-capture-"));
   try {
-    try {
-      const bundle = join(tmp, `${s.refSha}.bundle`);
-      const create = await run(["git", "--git-dir", s.gitDir, "bundle", "create", bundle, s.ref]);
-      if (create.code !== 0) {
-        throw new FreezeRefusal("bundle-create-failed", `the ref resolved in ${s.gitDir}; re-run, and if it persists inspect the object store by hand`, `git bundle create for ${s.ref} failed: ${stderrTail(create.stderr)}`);
-      }
-      const fetch = await run(["git", "--git-dir", refsGit, "fetch", "--quiet", bundle, `${s.ref}:${s.ref}`]);
-      if (fetch.code !== 0) {
-        throw new FreezeRefusal("refs-fetch-failed", "remove the partial fixture dir and re-run", `fetching the bundle into ${refsGit} failed: ${stderrTail(fetch.stderr)}`);
-      }
-    } finally {
-      rmSync(tmp, { recursive: true, force: true }); // cleanup runs even through a refusal (C6)
+    const bundle = join(tmp, `${s.refSha}.bundle`);
+    const create = await run(["git", "--git-dir", s.gitDir, "bundle", "create", bundle, s.ref]);
+    if (create.code !== 0) {
+      throw new FreezeRefusal("bundle-create-failed", `the ref resolved in ${s.gitDir}; re-run, and if it persists inspect the object store by hand`, `git bundle create for ${s.ref} failed: ${stderrTail(create.stderr)}`);
     }
-  } catch (e) {
-    if (e instanceof FreezeRefusal) refuse(e.code, e.message, e.remediation);
-    throw e;
+    const fetch = await run(["git", "--git-dir", refsGit, "fetch", "--quiet", bundle, `${s.ref}:${s.ref}`]);
+    if (fetch.code !== 0) {
+      throw new FreezeRefusal("refs-fetch-failed", "remove the partial fixture dir and re-run", `fetching the bundle into ${refsGit} failed: ${stderrTail(fetch.stderr)}`);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true }); // cleanup runs even through a refusal (C6)
   }
   const v = await run(["git", "--git-dir", refsGit, "rev-parse", "--verify", s.ref]);
   if (v.code !== 0 || v.stdout !== s.refSha) {
-    refuse("refs-verify-failed", `refs.git verification failed: expected ${s.ref} -> ${s.refSha}, got exit ${v.code} ${v.stdout}`, "the fixture is partial; remove it and re-run");
+    throw new FreezeRefusal("refs-verify-failed", "the fixture is partial; remove it and re-run", `refs.git verification failed: expected ${s.ref} -> ${s.refSha}, got exit ${v.code} ${v.stdout}`);
   }
   const cat = await run(["git", "--git-dir", refsGit, "cat-file", "-e", s.refSha]);
   if (cat.code !== 0) {
-    refuse("refs-object-missing", `cat-file -e ${s.refSha} failed in refs.git — the ref resolves but its object did not travel`, "remove the partial fixture dir and re-run");
+    throw new FreezeRefusal("refs-object-missing", "remove the partial fixture dir and re-run", `cat-file -e ${s.refSha} failed in refs.git — the ref resolves but its object did not travel`);
   }
   return s.refSha;
+}
+
+/** Post-copy TOCTOU rechecks: a writer resuming between checkpoint and copy ships a
+ * stale/torn db (C9, C-edge#1). These run after `<out>` exists, so they throw for
+ * cleanup-first refusing instead of refusing in place. */
+function throwIfLedgerWriterResumed(ledgerPath: string): void {
+  const wal = `${ledgerPath}-wal`;
+  if (existsSync(wal) && fileSize(wal) > 0) {
+    throw new FreezeRefusal("ledger-wal-live", "quiesce the ledger writers, remove the partial fixture, re-run", `${wal} is non-empty after the copy — a writer resumed mid-capture; the frozen copy may be stale`);
+  }
+}
+
+function throwIfAuditWriterResumed(auditDbPath: string): void {
+  for (const [suffix, what] of [["-journal", "an audit transaction is mid-flight in the DELETE journal"], ["-wal", "a live writer holds the audit-links store"]] as const) {
+    const sidecar = `${auditDbPath}${suffix}`;
+    if (existsSync(sidecar) && fileSize(sidecar) > 0) {
+      throw new FreezeRefusal("audit-journal-live", "quiesce the audit writer, remove the partial fixture, re-run", `${sidecar} is non-empty after the copy — ${what}; the plain copy may be torn`);
+    }
+  }
+}
+
+/** Remove what THIS run created so the idempotence guard never locks a partial
+ * fixture behind `fixture-exists` (C7, C-edge#3): the whole `<out>` when this run
+ * made it, else only the refs.git/artifacts subtrees and top-level names the freeze
+ * phase writes. Best-effort — the refusal that follows still names the fixture. */
+function cleanupPartialFixture(out: string, createdOut: boolean, runId: string): void {
+  try {
+    if (createdOut) {
+      rmSync(out, { recursive: true, force: true });
+      return;
+    }
+    rmSync(join(out, "refs.git"), { recursive: true, force: true });
+    rmSync(join(out, `${runId}-artifacts`), { recursive: true, force: true });
+    for (const name of [`${runId}.json`, `${runId}.reverify.jsonl`, `${runId}.bundle`, "audit.db", "audit.db-journal", "audit.db-wal", "cost-ledger.db", "cost-ledger.db-wal", "cost-ledger.db-shm", "pr-body.txt"]) {
+      rmSync(join(out, name), { force: true });
+    }
+  } catch {
+    // Best-effort: the typed refusal below still tells the operator what to remove by hand.
+  }
+}
+
+/** 0600 every FILE in the fixture — top level, artifacts, and refs.git — since the
+ * ledger/audit rows and the trace are secret-adjacent and copies land world-readable
+ * otherwise (C16, C-edge#13). Directory modes stay: git objects read fine for the
+ * owning user. */
+function chmodFixturePrivate(out: string): void {
+  const visit = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) visit(p);
+      else if (e.isFile()) chmodSync(p, 0o600);
+    }
+  };
+  visit(out);
 }
 
 /** `.sandbox/pr` residue scan: a non-refusals file for THIS run carrying a
@@ -412,8 +541,20 @@ function residueBody(prDir: string, runId: string): { text: string; origin: stri
   for (const f of readdirSync(prDir).sort()) {
     if (!f.startsWith(`${runId}.`) || f.includes(".refusals.") || f.startsWith(".")) continue;
     const full = join(prDir, f);
-    if (!statSync(full).isFile()) continue;
-    for (const line of readFileSync(full, "utf8").split("\n")) {
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(full);
+    } catch (e) {
+      refuse("residue-unreadable", `cannot stat .sandbox/pr residue entry ${full} (${(e as Error).message})`, "fix or remove the unreadable residue entry (dangling symlink, chmod-000) and re-run; the scan must prove the residue clean before the freeze falls through to gh");
+    }
+    if (!st.isFile()) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(full, "utf8");
+    } catch (e) {
+      refuse("residue-unreadable", `cannot read .sandbox/pr residue entry ${full} (${(e as Error).message})`, "fix or remove the unreadable residue entry and re-run; the scan must prove the residue clean before the freeze falls through to gh");
+    }
+    for (const line of raw.split("\n")) {
       const t = line.trim();
       if (!t.startsWith("{")) continue;
       try {
@@ -447,8 +588,12 @@ async function resolvePrBody(args: Args, s: Sources): Promise<{ text: string; or
     if (residue !== undefined) return residue;
   }
   const gh = await run(["gh", "pr", "view", String(s.prNumber), "--json", "body", "-q", ".body", "--repo", s.repoSlug]);
-  if (gh.code !== 0 || gh.stdout.length === 0) {
+  if (gh.code !== 0) {
     refuse("pr-body-unavailable", `gh pr view ${s.prNumber} --repo ${s.repoSlug} failed (exit ${gh.code}): ${stderrTail(gh.stderr)}`, "authenticate gh (its token is read from the environment, never logged here) or pass --pr-body-source file:<path>; the freeze refuses to ship no body");
+  }
+  // gh succeeded but the PR genuinely has no body — a distinct fault from a failed fetch (C-edge#12).
+  if (gh.stdout.length === 0) {
+    refuse("pr-body-empty", `the PR has no body: gh pr view ${s.prNumber} --repo ${s.repoSlug} returned an empty body`, "C8 audits pr-body.txt, so the freeze refuses to ship no body — give the PR a body, or pass --pr-body-source file:<path>");
   }
   // stdoutRaw: the trimmed field would shave meaningful leading/trailing whitespace off the body (C15).
   return { text: gh.stdoutRaw, origin: `gh pr view ${s.prNumber} --repo ${s.repoSlug}` };
@@ -473,6 +618,28 @@ function listFrozen(out: string, artifactsName: string): Array<[string, number]>
   return rows;
 }
 
+/** `--out` must be disjoint from every capture source dir, both directions (C-edge#7):
+ * `--out` inside a source dir would self-copy the fixture into live evidence; a source
+ * dir inside `--out` would have the freeze read what it is writing. Containment is a
+ * relative-segment check, not a string prefix (`/tmp/out` does not contain `/tmp/outfox`). */
+function refuseOutOverlap(out: string, s: Sources): void {
+  const sourceDirs: Array<[string, string]> = [
+    ["--runs-dir", dirname(s.recordPath)],
+    ["--reverify-dir", dirname(s.reverifyPath)],
+    ["--ledger", dirname(s.ledgerPath)],
+    ["--audit-db", dirname(s.auditDbPath)],
+    ["--git-dir", s.gitDir],
+  ];
+  for (const [what, dir] of sourceDirs) {
+    if (pathContains(dir, out)) {
+      refuse("out-overlaps-source", `--out ${out} is inside ${what} ${dir} — the freeze would write the fixture into a live capture source`, "pick an --out outside every capture source directory and re-run");
+    }
+    if (pathContains(out, dir)) {
+      refuse("out-overlaps-source", `${what} ${dir} is inside --out ${out} — the freeze would read the fixture it is writing`, "pick an --out outside every capture source directory and re-run");
+    }
+  }
+}
+
 /** What stands at --out right now — the idempotence guard's whole question. */
 function outKind(path: string): "absent" | "file" | "empty" | "non-empty" {
   if (!existsSync(path)) return "absent";
@@ -484,6 +651,7 @@ function outKind(path: string): "absent" | "file" | "empty" | "non-empty" {
 async function main(): Promise<number> { // dp:ok — caller wraps main in the exit-2 catch; a throw is a fatal fault, never a silent crash
   const args = parseArgs(Bun.argv.slice(2));
   const s = await resolveSources(args);
+  refuseOutOverlap(args.out, s);
 
   // Idempotence: a frozen fixture is immutable. Existing-but-EMPTY is allowed (an interrupted earlier attempt may have left the shell behind).
   const out = outKind(args.out);
@@ -506,9 +674,16 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
     const missing: string[] = [];
     if (args.prBodySource.startsWith("file:")) {
       const p = resolve(args.prBodySource.slice("file:".length));
-      const present = existsSync(p);
-      console.log(`  pr-body file:${p} (${present ? `${fileSize(p)} bytes` : "MISSING"})`);
-      if (!present) missing.push(`pr-body file at ${p}`);
+      // Probe by READING, not existsSync: a dir at the path or an unreadable file must
+      // fail the dry-run exactly where the real run would fail (C-edge#4).
+      let text: string | undefined;
+      try {
+        text = await Bun.file(p).text();
+      } catch {
+        text = undefined;
+      }
+      console.log(`  pr-body file:${p} (${text === undefined ? "MISSING or unreadable" : `${Buffer.byteLength(text)} bytes`})`);
+      if (text === undefined) missing.push(`pr-body file at ${p}`);
     } else {
       // residue is consulted for auto only (resolvePrBody's contract) — gh goes straight to the live read (C2).
       const residue = args.prBodySource === "auto" ? residueBody(join(REPO_ROOT, ".sandbox", "pr"), args.runId) : undefined;
@@ -533,7 +708,8 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
   // When --out is absent, create it EXCLUSIVELY so two concurrent captures cannot both proceed:
   // the loser sees EEXIST and refuses instead of interleaving writes into the same fixture (C8).
   // existing-but-empty falls through: the shell left by an interrupted attempt is ours to fill.
-  if (out === "absent") {
+  const createdOut = out === "absent";
+  if (createdOut) {
     mkdirSync(dirname(args.out), { recursive: true });
     try {
       mkdirSync(args.out);
@@ -541,36 +717,56 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
       if ((e as Error & { code?: string }).code === "EEXIST") {
         refuse("capture-in-progress", `${args.out} was created concurrently by another capture`, "let the other capture finish; a frozen fixture is immutable — never delete one to squeeze a second in");
       }
-      throw e;
+      // Flags parsed long ago — a failure here is environmental, never "usage" (C-edge#2).
+      refuse("out-unwritable", `cannot create --out ${args.out} (${(e as Error).message})`, "fix the permissions on the parent directory and re-run");
     }
+  }
+  // The sentinel is taken in BOTH branches (C-edge#8): a concurrent capture that adopted the same
+  // empty shell must lose here too instead of interleaving its writes with ours.
+  const sentinel = join(args.out, "capture-in-progress");
+  try {
+    closeSync(openSync(sentinel, "wx"));
+  } catch (e) {
+    if ((e as Error & { code?: string }).code === "EEXIST") {
+      refuse("capture-in-progress", `another capture holds the exclusive sentinel at ${sentinel}`, "let the other capture finish; if no capture is running (a crashed attempt leaves the sentinel behind), remove that one file and re-run");
+    }
+    refuse("out-unwritable", `cannot write the capture sentinel in ${args.out} (${(e as Error).message})`, "fix the permissions on --out and re-run");
   }
 
   // Ref-freeze BEFORE any fixture write: a ref-freeze refusal (network/git class) must not lock a
-  // partial fixture behind the idempotence guard (C7). freezeRefs creates out/refs.git itself;
-  // local-disk copy failures below stay fatal-unusual, covered by the existing remediation text.
-  const sha = await freezeRefs(args.out, s);
+  // partial fixture behind the idempotence guard (C7). Every fault from here to the final print
+  // throws (FreezeRefusal or plain) — the catch removes what this run created, then refuses with
+  // a typed payload; the usage prefix is for flag parsing only (C-edge#2, C-edge#3).
+  let sha: string;
+  try {
+    sha = await freezeRefs(args.out, s);
 
-  copyFileSync(s.recordPath, join(args.out, `${args.runId}.json`));
-  copyFileSync(s.reverifyPath, join(args.out, `${args.runId}.reverify.jsonl`));
-  copyFileSync(s.bundlePath, join(args.out, `${args.runId}.bundle`));
-  copyFileSync(s.auditDbPath, join(args.out, "audit.db"));
-  copyFileSync(s.ledgerPath, join(args.out, "cost-ledger.db"));
-  selfContainLedgerCopy(join(args.out, "cost-ledger.db"));
-  // dereference: a symlink in the harvest becomes a real file in the frozen copy (C14) — links
-  // would escape it, and the manifest would undercount.
-  cpSync(s.artifactsDir, join(args.out, `${args.runId}-artifacts`), { recursive: true, dereference: true });
+    copyFileSync(s.recordPath, join(args.out, `${args.runId}.json`));
+    copyFileSync(s.reverifyPath, join(args.out, `${args.runId}.reverify.jsonl`));
+    copyFileSync(s.bundlePath, join(args.out, `${args.runId}.bundle`));
+    copyFileSync(s.auditDbPath, join(args.out, "audit.db"));
+    copyFileSync(s.ledgerPath, join(args.out, "cost-ledger.db"));
+    selfContainLedgerCopy(join(args.out, "cost-ledger.db"));
+    // dereference: a symlink in the harvest becomes a real file in the frozen copy (C14) — links
+    // would escape it, and the manifest would undercount. assertArtifactsWalkable already
+    // refused FIFOs/sockets/symlinks, so the dereference cannot hang or loop.
+    cpSync(s.artifactsDir, join(args.out, `${args.runId}-artifacts`), { recursive: true, dereference: true });
 
-  // TOCTOU: a ledger writer may have resumed between checkpointLedger and the copy (C9).
-  const ledgerWal = `${s.ledgerPath}-wal`;
-  if (existsSync(ledgerWal) && fileSize(ledgerWal) > 0) {
-    refuse("ledger-wal-live", `${ledgerWal} is non-empty after the copy — a writer resumed mid-capture; the frozen copy may be stale`, "quiesce writers, remove the partial fixture, re-run");
+    // TOCTOU: a writer may have resumed between checkpoint/open and the copy (C9, C-edge#1).
+    throwIfLedgerWriterResumed(s.ledgerPath);
+    throwIfAuditWriterResumed(s.auditDbPath);
+
+    writeFileSync(join(args.out, "pr-body.txt"), body.text, { mode: 0o600 });
+    chmodFixturePrivate(args.out);
+  } catch (e) {
+    // refuse() is process.exit and would skip a finally-based cleanup (C6 precedent), so clean
+    // first, then refuse.
+    rmSync(sentinel, { force: true });
+    cleanupPartialFixture(args.out, createdOut, args.runId);
+    if (e instanceof FreezeRefusal) refuse(e.code, e.message, e.remediation);
+    refuse("copy-failed", `the freeze/copy phase failed after creating ${args.out} (${e instanceof Error ? e.message : String(e)})`, "clear the environmental fault named in the message (disk full, permissions), then remove the partial fixture directory and re-run; this was not a flag error");
   }
-
-  writeFileSync(join(args.out, "pr-body.txt"), body.text, { mode: 0o600 });
-  // The frozen top-level files are secret-adjacent (ledger, audit links) — 0600 across them too (C16).
-  for (const name of [`${args.runId}.json`, `${args.runId}.reverify.jsonl`, `${args.runId}.bundle`, "audit.db", "cost-ledger.db"]) {
-    chmodSync(join(args.out, name), 0o600);
-  }
+  rmSync(sentinel, { force: true }); // gone before the fixture is declared frozen
 
   console.log(`froze fixture at ${args.out}`);
   for (const name of [`${args.runId}.json`, `${args.runId}.reverify.jsonl`, `${args.runId}.bundle`, "audit.db", "cost-ledger.db", "pr-body.txt"]) {

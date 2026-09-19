@@ -25,6 +25,7 @@ import { join } from "node:path";
 import type { GateAssertion, GateCheckOutcome } from "../gate-runner.ts";
 import { readReportsWithTail, reportPath, type ReverifyReport } from "../../reverify/report.ts";
 import { readJsonEvidence, selectBoundReport, strictBeforeMs } from "./lib/verdict.ts";
+import { scrubSecrets } from "./df5-accounting.ts";
 
 // ---------------------------------------------------------------------------
 // Pure auditors
@@ -172,11 +173,13 @@ export function auditApproval(ev: ApprovalEvidence): { failures: string[] } {
 
 /**
  * Token-boundary presence: the runId as its own token, never as a substring
- * inside an unrelated hash or URL.
+ * inside an unrelated hash or URL — and never as a prefix of a hyphen-extended
+ * id (`run-123-extra` is not `run-123`): the boundary class excludes `-` on
+ * both sides, so only a non-word char (or an edge) ends the token.
  */
 function bodyContainsRunId(text: string, runId: string): boolean {
   const escaped = runId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:[^A-Za-z0-9]|$)`).test(text);
+  return new RegExp(`(?:^|[^A-Za-z0-9-])${escaped}(?:[^A-Za-z0-9-]|$)`).test(text);
 }
 
 /**
@@ -313,8 +316,11 @@ export function df5BoundaryAssertions(deps: Df5BoundaryDeps): GateAssertion[] {
         const exitCode = await proc.exited;
         const { failures, sha } = auditBundleRef({ exitCode, stdout, stderr }, { gitDir: deps.gitDir, ref });
         const provenance = `ref ${ref} in --git-dir ${deps.gitDir} (frozen fixture bare repo; the operator's working repo is never resolved)`;
+        // INV-GATE-2 choke point: the failure string embeds git's raw stderr,
+        // so it is scrubbed here at composition — the pure `auditBundleRef`
+        // keeps returning its failures raw.
         return failures.length > 0
-          ? { pass: false, detail: `${failures.join("; ")} — ${provenance}` }
+          ? { pass: false, detail: `${scrubSecrets(failures.join("; "))} — ${provenance}` }
           : { pass: true, detail: `${ref} → ${sha} — ${provenance}` };
       },
     },
