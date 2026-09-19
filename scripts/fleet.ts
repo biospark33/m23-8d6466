@@ -2048,6 +2048,12 @@ async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): 
       deps?.store ??
       asUsage(() => new RunRecordStore({ ...storeOpts, ...(dir === undefined ? {} : { create: false }), requestId }));
 
+    // Pass-level tally of the audit-link drops latched inside buildChainCtx:
+    // each drop already prints its own stderr note, but on the unattended cron
+    // surface those per-run lines can be lost to log handling while the
+    // invocation still exits 0 — the completed pass restates the count once.
+    let auditLinksDroppedCount = 0;
+
     const outcome = await observeSweep({
       driver,
       store,
@@ -2089,6 +2095,7 @@ async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): 
               chainAudit = openAuditStore();
             } catch (e) {
               auditLinksDropped = true;
+              auditLinksDroppedCount += 1;
               const refusal = auditStoreUnavailable(
                 e,
                 `the chain's links for ${runId} were dropped — the teardown itself is unaffected`,
@@ -2150,11 +2157,25 @@ async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): 
     }
     // ONE stdout summary line for the completed pass, with the standing 6
     // every emitting verb applies to a line that would not print. The raw
-    // uptime evidence stays on the log channel (sweep-complete's line already
-    // carries the derived counters).
+    // per-box uptime evidence has NO emitted channel: sweep-complete's line
+    // carries the derived counters only, so the evidence stays here in the
+    // returned summary (channel gap tracked as #266).
     const { uptime_evidence: _evidence, ...counters } = outcome.summary;
     const printed =
       reportCompletion([`${JSON.stringify({ all: true, ...counters })}\n`], undefined) && !outputIncomplete();
+    // The single-run form exits 6 on this same event — "the chain landed and
+    // its evidence did not" is exactly 6's shape there — but a sweep's exit
+    // belongs to the invocation, and a completed pass is a completed pass: the
+    // latched drops become ONE stderr note naming the count, never an exit.
+    if (auditLinksDroppedCount > 0) {
+      printError(
+        note,
+        "audit-links-dropped",
+        `${auditLinksDroppedCount} driven run${auditLinksDroppedCount === 1 ? "" : "s"} finished with audit links dropped — the sweep continued past each, teardowns unaffected`,
+        "the per-run audit-links-dropped notes above name each affected run; a later `fleet teardown <run-id>` re-emits one unlinked",
+        { runs: auditLinksDroppedCount },
+      );
+    }
     return finish(requestId, verb, undefined, printed ? 0 : 6);
   } catch (e) {
     return finish(requestId, verb, undefined, reportCode(note, e));

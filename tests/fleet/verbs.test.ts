@@ -50,6 +50,9 @@ import {
 } from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
+// DF3.8 T23: the derivation behind the --all cron note's */N step — imported
+// from the source of truth so a reprice that forgets the note fails HERE.
+import { SWEEP_INTERVAL_MINUTES } from "../../src/fleet/observe.ts";
 // The marker-path GRAMMAR, not a path copy: the observe exit-6 probe's double
 // keys its interception on the shape of the box marker path exactly as
 // patterns.test.ts's and cli.test.ts's marker doubles do.
@@ -837,6 +840,15 @@ describe("verbs.ts (registry)", () => {
   test("the snapshot records cover exactly the registry's verbs", () => {
     expect(Object.keys(EXPECTED_FLAGS).sort()).toEqual(listVerbs().map((v) => v.verb).sort());
     expect(Object.keys(EXPECTED_EXIT_CODES).sort()).toEqual(Object.keys(EXPECTED_FLAGS).sort());
+  });
+
+  test("T23 (DF3.8): the --all cron note's */N step derives from SWEEP_INTERVAL_MINUTES — repricing drift fails here", () => {
+    // The verbatim snapshot above binds the registry's note to the literal;
+    // THIS binds the registry's note to the source constant. Chained, a
+    // reprice of SWEEP_INTERVAL_MINUTES that leaves the note's cron step (or
+    // the "30 min = …over 8" gloss beside it) stale fails one of the two.
+    const note = listVerbs().find((v) => v.verb === "observe")?.flags.find((f) => f.name === "--all")?.note;
+    expect(note).toContain(`*/${SWEEP_INTERVAL_MINUTES} * * * *`);
   });
 
   test("verbs are unique", () => {

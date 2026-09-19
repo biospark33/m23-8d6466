@@ -48,6 +48,12 @@ const FLEET_TS_PATH = path.join(REPO_ROOT, "scripts", "fleet.ts");
 // ─── log sink idioms (run-completion.test.ts) ────────────────────────────────
 
 const quietLogRestores: Array<() => void> = [];
+/**
+ * T11: every throwaway git worktree baseDeps mints when a test names no
+ * hostRoot, cleaned per test — no sweep can ever touch the developer's live
+ * checkout because an ordering drift sent reverify at REPO_ROOT.
+ */
+const sweepHostCleanups: Array<() => void> = [];
 function quietLogs(): void {
   quietLogRestores.push(setLogSink(() => undefined));
 }
@@ -62,6 +68,7 @@ function captureLogs(): Array<Record<string, unknown>> {
 }
 afterEach(() => {
   for (const restore of quietLogRestores.splice(0)) restore();
+  for (const cleanup of sweepHostCleanups.splice(0)) cleanup();
   disarmFakeClock();
 });
 
@@ -209,12 +216,13 @@ function ageRecord(s: RunRecordStore, runId: string, ageMs: number): void {
 }
 
 const SHA_A = "a".repeat(40);
-const approvalExt = (state: string): ExtensionEntry => ({
+/** A record's approval extension (run-completion.test.ts's shape; reportId/headSha overridable for the rebind arms). */
+const approvalExt = (state: string, reportId = "rv-other-actor", headSha = SHA_A): ExtensionEntry => ({
   schemaVersion: 2,
   state,
   proposal: "open a PR",
-  reportId: "rv-other-actor",
-  headSha: SHA_A,
+  reportId,
+  headSha,
   requestedAt: "2026-09-15T00:00:00.000Z",
   expiresAt: "2099-01-01T00:00:00.000Z",
   supersededReportIds: [],
@@ -275,12 +283,56 @@ class SnapshotListStore extends RunRecordStore {
   }
 }
 
+/**
+ * T5: the store overlay run-completion.test.ts drives the chain's gate arms
+ * with, copied trimmed — approval-failed (a bundle hollowed at close, so the
+ * gate's request leg refuses) and handed-off (an approval extension that
+ * appears only at the gate's startup read) are CHAIN outcomes the sweep must
+ * count, and this is the public seam that arranges them: `store` is a sweep
+ * dep, the overlay is read-through before close, and the chain writes through
+ * the very same instance.
+ */
+class OverlayStore extends RunRecordStore {
+  closedRun: string | null = null;
+  overlay: ExtensionEntry | null = null;
+  /** Post-close `get`s that stay CLEAN before the overlay lands (run-completion.test.ts's pinned read order). */
+  skip = 0;
+  #served = 0;
+  #closed = false;
+  onClose: () => void = () => undefined;
+
+  override close(runId: string, now?: Date): ReturnType<RunRecordStore["close"]> {
+    const r = now === undefined ? super.close(runId) : super.close(runId, now);
+    if (runId === this.closedRun) {
+      this.#closed = true;
+      this.onClose();
+    }
+    return r;
+  }
+
+  override get(runId: string): ReturnType<RunRecordStore["get"]> {
+    const r = super.get(runId);
+    if (this.#closed && runId === this.closedRun && this.overlay !== null && this.#served++ >= this.skip) {
+      return { ...r, extensions: { ...r.extensions, approval: this.overlay } } as ReturnType<RunRecordStore["get"]>;
+    }
+    return r;
+  }
+}
+
 function quietLedger(): { hook: { ingestBoxHours(ctx: Record<string, unknown>): void }; ingested: Array<Record<string, unknown>> } {
   const ingested: Array<Record<string, unknown>> = [];
   return { hook: { ingestBoxHours: (ctx) => ingested.push(ctx) }, ingested };
 }
 
 const chainCtxCalls: Array<{ runId: string }> = [];
+/** T10: one captured ingested-array per chain context baseDeps builds, so a driven run's ledger ingest is assertable. */
+const ledgerIngests: Array<Array<Record<string, unknown>>> = [];
+/** T11: mkGitHost with per-test cleanup — baseDeps's default hostRoot is ALWAYS a throwaway worktree. */
+function throwawayHost(): string {
+  const host = mkGitHost();
+  sweepHostCleanups.push(host.cleanup);
+  return host.dir;
+}
 function baseDeps(over: {
   driver: SweepDriver;
   store: RunRecordStore;
@@ -289,30 +341,36 @@ function baseDeps(over: {
   buildChainCtx?: ObserveSweepDeps["buildChainCtx"];
   maxCandidatesPerPass?: number;
   wallClockBudgetMs?: number;
+  writableStore?: () => RunRecordStore;
   recordAuditLink?: (link: ProviderAuditLink) => void;
 }): ObserveSweepDeps {
   chainCtxCalls.length = 0;
+  ledgerIngests.length = 0;
   return {
     driver: over.driver,
     store: over.store,
     runsDir: over.runsDir,
-    // The CALLER's worktree assert: the repo itself for every leg that never
-    // enters reverify, a plain tmpdir for the refusal leg.
-    hostRoot: over.hostRoot ?? REPO_ROOT,
+    // T11: a FRESH throwaway git worktree by default, never the live checkout
+    // — a test that drifts into reverify on a default hostRoot can only ever
+    // judge a temp repo. Tests that mean a specific root name it.
+    hostRoot: over.hostRoot ?? throwawayHost(),
     requestId: "req-df38-sweep",
     buildChainCtx:
       over.buildChainCtx ??
       ((rec: RunRecord) => {
         chainCtxCalls.push({ runId: rec.runId });
+        const ledger = quietLedger();
+        ledgerIngests.push(ledger.ingested);
         return {
           keyApi: new FakeKeyApi() as never,
-          costLedger: quietLedger().hook as never,
+          costLedger: ledger.hook as never,
           recordAuditLink: over.recordAuditLink ?? (() => {}),
           close: () => {},
         };
       }),
     ...(over.maxCandidatesPerPass === undefined ? {} : { maxCandidatesPerPass: over.maxCandidatesPerPass }),
     ...(over.wallClockBudgetMs === undefined ? {} : { wallClockBudgetMs: over.wallClockBudgetMs }),
+    ...(over.writableStore === undefined ? {} : { writableStore: over.writableStore }),
   };
 }
 
@@ -337,11 +395,15 @@ async function moduleSource(): Promise<string> {
 }
 
 const FORBIDDEN_DIRECT = ["./approval-gate.ts", "./approvers.ts", "../pr/push.ts", "./index.ts"];
+/** T3: the run-record read-name fence rides the SAME specifier set plus run-record itself. */
+const FENCED_SPECIFIERS = [...FORBIDDEN_DIRECT, "../providers/run-record.ts"];
 
 function importSpecifiers(src: string): string[] {
   const specifiers: string[] = [];
-  for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\s[^;]*?from\s*["']([^"']+)["']/g)) specifiers.push(m[1]!);
-  for (const m of src.matchAll(/(?:^|\n)\s*import\s*["']([^"']+)["']/g)) specifiers.push(m[1]!);
+  // T3: backticks quote a specifier exactly as well as ' or " — an unfenced
+  // `import { gate } from `./approval-gate.ts`` must not sail through.
+  for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\s[^;]*?from\s*([`"'])([^`"']+)\1/g)) specifiers.push(m[2]!);
+  for (const m of src.matchAll(/(?:^|\n)\s*import\s*([`"'])([^`"']+)\1/g)) specifiers.push(m[2]!);
   return specifiers;
 }
 
@@ -349,11 +411,26 @@ function fenceViolations(src: string): string[] {
   return importSpecifiers(src).filter((s) => FORBIDDEN_DIRECT.includes(s));
 }
 
+/** T3: `require("…")` of a fenced specifier is the same reach as importing it. */
+function requireViolations(src: string): string[] {
+  const found: string[] = [];
+  for (const m of src.matchAll(/\brequire\s*\(\s*([`"'])([^`"']+)\1/g)) {
+    if (FENCED_SPECIFIERS.includes(m[2]!)) found.push(m[2]!);
+  }
+  return found;
+}
+
 function runRecordImportNames(src: string): string[] {
-  const rrLine = src.match(/(?:^|\n)(\s*import[^;\n]*from\s*["']\.\.\/providers\/run-record\.ts["'];?)/)?.[1] ?? ""; // dp:ok "" is the no-run-record-import sentinel (DF3.7's run-completion.test.ts helper, copied verbatim; callers treat "" as absent)
+  const rrLine = src.match(/(?:^|\n)(\s*import[^;\n]*from\s*["'`]\.\.\/providers\/run-record\.ts["'`];?)/)?.[1] ?? ""; // dp:ok "" is the no-run-record-import sentinel (DF3.7's run-completion.test.ts helper, copied verbatim; callers treat "" as absent)
   const braceStart = rrLine.indexOf("{");
   const braceEnd = rrLine.lastIndexOf("}");
-  if (braceStart === -1 || braceEnd === -1) return [];
+  if (braceStart === -1 || braceEnd === -1) {
+    // T3: a BRACELESS run-record import (namespace `import * as rr`, default
+    // `import rr`) binds every export — the writers included — so it is a
+    // violation of the read-names-only pin, never "no names" (the vacuous []
+    // that used to let it pass).
+    return rrLine === "" ? [] : ["* namespace-or-default"];
+  }
   return rrLine
     .slice(braceStart + 1, braceEnd)
     .split(",")
@@ -369,6 +446,7 @@ describe("AC1 import fence + composition (source contract)", () => {
   test("the fence: no forbidden specifier, the composition and classifier required, run-record read-names only (negative control)", async () => {
     const src = await moduleSource();
     expect(fenceViolations(src)).toEqual([]);
+    expect(requireViolations(src)).toEqual([]); // T3: require() is the same reach as import
     // REQUIRED — a second CALLER of the one entry point, and the shared paths.
     expect(importSpecifiers(src)).toContain("./run-completion.ts");
     expect(importSpecifiers(src)).toContain("./fanout-primitive.ts");
@@ -383,6 +461,7 @@ describe("AC1 import fence + composition (source contract)", () => {
       'import type { RunLockHandle } from "../../scripts/lib/run-lock.ts";',
     ].join("\n");
     expect(fenceViolations(synthetic)).toEqual([]);
+    expect(requireViolations(synthetic)).toEqual([]);
   });
 
   test("the fence has TEETH: every forbidden specifier and a run-record writer symbol actually violate", async () => {
@@ -392,6 +471,16 @@ describe("AC1 import fence + composition (source contract)", () => {
     }
     const corrupt = 'import { type RunRecord, RunRecordStore, setApproval } from "../providers/run-record.ts";';
     expect(runRecordImportNames(corrupt).every((n) => RUN_RECORD_READ_NAMES.includes(n))).toBe(false);
+    // T3: the three holes a brace-and-quote-only fence missed — a NAMESPACE
+    // (or default) run-record import binds the writers with no braces for the
+    // read-name pin to see, a backtick-quoted specifier escapes the quote
+    // class, and require() loads the module without importing it.
+    const namespace = 'import * as rr from "../providers/run-record.ts";';
+    expect(runRecordImportNames(namespace)).toEqual(["* namespace-or-default"]);
+    expect(runRecordImportNames(namespace).every((n) => RUN_RECORD_READ_NAMES.includes(n))).toBe(false);
+    expect(fenceViolations("import { gate } from `./approval-gate.ts`;\n")).toContain("./approval-gate.ts");
+    expect(requireViolations('const gate = require("./approval-gate.ts");\n')).toContain("./approval-gate.ts");
+    expect(requireViolations('const rr = require("../providers/run-record.ts");\n')).toContain("../providers/run-record.ts");
   });
 
   test("no dynamic imports, no inlined chain (no teardown/reverify import), maxTicks: 1 pinned", async () => {
@@ -401,7 +490,8 @@ describe("AC1 import fence + composition (source contract)", () => {
     expect(importSpecifiers(src)).not.toContain("../reverify/runner.ts");
     expect(importSpecifiers(src)).not.toContain("../reverify/approval.ts");
     expect(src).toContain("observeAndDriveChain(");
-    expect(src).toContain("maxTicks: 1");
+    // T6: anchored — the bare substring also matched a hypothetical `maxTicks: 10`.
+    expect(src).toMatch(/maxTicks:\s*1\b/);
   });
 
   test("the named bounds exist and are positive", () => {
@@ -416,7 +506,7 @@ describe("AC1 import fence + composition (source contract)", () => {
 
 describe("AC2 enumeration + lock discipline", () => {
   test("candidates = open record ∩ live listable box — closed, approval-carrying and box-less records are not enumerated", async () => {
-    quietLogs();
+    const lines = captureLogs();
     const s = store();
     try {
       const driver = new SweepDriver(path.join(s.dir, "boxes"));
@@ -440,6 +530,41 @@ describe("AC2 enumeration + lock discipline", () => {
       expect(out.summary.candidates_enumerated).toBe(1);
       expect(identityHolds(out.summary)).toBe(1);
       expect(out.summary.completion_unwitnessed).toBe(0); // never enumerated, never refused
+      // T-new-S13: the vmName-less open record over a live runId-named box is
+      // excluded SILENTLY no longer — exactly ONE sweep-record-no-vmname line
+      // names it (visibility, not a disposition: identity still holds at 1).
+      const noVm = lines.filter((l) => l.event === "sweep-record-no-vmname");
+      expect(noVm).toHaveLength(1);
+      expect(noVm[0]).toMatchObject({ runId: "run-leaked", box: "run-leaked" });
+      // A record that CARRIES a vmName (even one whose box is dead) is not the
+      // leak shape — no line for run-boxless.
+      expect(noVm.some((l) => l.runId === "run-boxless")).toBe(false);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T-new-S12: a vmName whose box is dead while a runId-named box is live is NOT enumerated (the joinedBox runId leg is gone) — and vmName:\"\" never targets a box", async () => {
+    quietLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      // The divergent shape: record carries vmName "vm-dead" (no such box) but
+      // a box named after the runId IS live. The old joinedBox fallback leg
+      // enumerated this record and then read the dead vmName box forever while
+      // the live runId-named box leaked — the filter must require the record's
+      // OWN box directly.
+      await seedCandidate(s.store, driver, "run-divergent");
+      s.store.set("run-divergent", { vmName: "vm-dead" } as never);
+      // S9: the empty-string vmName would target box "" every tick.
+      await seedCandidate(s.store, driver, "run-emptyname");
+      s.store.set("run-emptyname", { vmName: "" } as never);
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.candidates_enumerated).toBe(0);
+      expect(identityHolds(out.summary)).toBe(0);
+      expect(driver.calls.length).toBe(0); // neither record drove a single box read
     } finally {
       s.cleanup();
     }
@@ -509,8 +634,11 @@ describe("AC2 enumeration + lock discipline", () => {
 
   test("busy lock → counted lock-refused skip (stale:false), remediation carried, pass still completes", async () => {
     quietLogs();
-    const s = store();
+    // T13: the holder is minted BEFORE the tmpdir, and the try starts at the
+    // first allocation whose cleanup lives in it — no arrange line between
+    // store() and try can leak s.dir.
     const holder = liveChild();
+    const s = store();
     try {
       const driver = new SweepDriver(path.join(s.dir, "boxes"));
       await seedCandidate(s.store, driver, "run-busy");
@@ -528,10 +656,40 @@ describe("AC2 enumeration + lock discipline", () => {
     }
   });
 
-  test("STALE lock → its own line with stale:true and the rm remediation — never folded into the benign skip", async () => {
+  test("T16 (S1): a NON-RunLockedError acquire failure (this process already holds the lock) folds into runs_chain_failed with its code verbatim — the pass still completes", async () => {
     const lines = captureLogs();
     const s = store();
-    const corpse = await deadPid();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-reent");
+      // In-process holder: acquireRunLock refuses re-entry as
+      // RunLockReentrantError (code run-lock-reentrant) — NOT RunLockedError,
+      // so this is the S1 arm the old `throw e` aborted the whole pass on.
+      const handle = acquireRunLock(s.dir, "run-reent", "test-holder");
+      let out: Awaited<ReturnType<typeof observeSweep>>;
+      try {
+        out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
+      } finally {
+        releaseRunLock(handle);
+      }
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.runs_chain_failed).toBe(1);
+      expect(out.summary.lock_refused).toBe(0); // re-entrant is a programming error, not contention
+      expect(identityHolds(out.summary)).toBe(1);
+      const line = lines.find((l) => l.event === "sweep-chain-failed");
+      expect(line).toMatchObject({ runId: "run-reent", code: "run-lock-reentrant" });
+      expect(lines.some((l) => l.event === "sweep-complete")).toBe(true); // the wedge no longer eats the pass
+      expect(driver.calls.length).toBe(0); // refused before any box touch
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("STALE lock → its own line with stale:true and the rm remediation — never folded into the benign skip", async () => {
+    const lines = captureLogs();
+    const corpse = await deadPid(); // T13: minted before the tmpdir it outlives
+    const s = store();
     try {
       const driver = new SweepDriver(path.join(s.dir, "boxes"));
       await seedCandidate(s.store, driver, "run-stale");
@@ -616,10 +774,42 @@ describe("AC3 the collection window (reaper / concurrent teardown)", () => {
     }
   });
 
+  test("T17: a record file that vanishes between enumeration and the in-lock re-read (store.get THROWS) → the UNREADABLE arm of completion-unwitnessed, zero driver calls", async () => {
+    const lines = captureLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-vanished");
+      const snap = new SnapshotListStore({ dir: s.dir });
+      snap.freeze(); // enumeration's view: the record is there and open
+      fs.rmSync(s.store.path("run-vanished")); // EACCES/EIO's sibling: the get() itself throws
+      const out = await observeSweep(baseDeps({ driver, store: snap, runsDir: s.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.completion_unwitnessed).toBe(1);
+      expect(identityHolds(out.summary)).toBe(1);
+      expect(driver.calls.length).toBe(0); // the re-read precedes every box read
+      const line = lines.find((l) => l.event === "completion-unwitnessed");
+      expect(line).toMatchObject({ runId: "run-vanished", code: "completion-unwitnessed" });
+      // S6's wording: an unreadable record is NOT a witness — the message must
+      // not claim the collection window the closedAt branch owns.
+      expect(String(line!.message)).toContain("unreadable");
+      expect(String(line!.message)).not.toContain("the collection window");
+      expect(String(line!.remediation)).toContain("inspect it by hand");
+    } finally {
+      s.cleanup();
+    }
+  });
+
   test("source pin: the in-lock re-read precedes the chain call — no witnessed-re-entry branch", async () => {
     const src = await moduleSource();
-    const rereadAt = src.indexOf("completion-unwitnessed");
-    const chainAt = src.indexOf("observeAndDriveChain(");
+    // T9: indexed from driveOne's body, never file-wide — the docblock above
+    // the function names this event too, and file-wide indexOf hits it first.
+    const driveAt = src.indexOf("const driveOne");
+    expect(driveAt).toBeGreaterThanOrEqual(0);
+    const driveSrc = src.slice(driveAt);
+    const rereadAt = driveSrc.indexOf("completion-unwitnessed");
+    const chainAt = driveSrc.indexOf("observeAndDriveChain(");
     expect(rereadAt).toBeGreaterThanOrEqual(0);
     expect(chainAt).toBeGreaterThan(rereadAt);
     expect(src).not.toContain("markerWitnessed");
@@ -668,14 +858,19 @@ describe("AC4 the reboot measurement", () => {
       const recFile = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>; // dp:ok parses the record this test just seeded through the store — a parse failure IS the test failure
       recFile.createdAt = new Date(t0 - 3_600_000).toISOString();
       fs.writeFileSync(p, JSON.stringify(recFile));
-      driver.uptimeSeconds = (3_600_000 - PROVISION_LAG_MARGIN_MS) / 1000;
+      // T8: the expected lag is computed through the SAME seconds→ms round
+      // trip the evidence uses (Math.round(uptimeSeconds * 1000)), so a
+      // future reprice of the margin to a non-ms-round value fails only on
+      // real drift, never on float representation.
+      const uptimeS = (3_600_000 - PROVISION_LAG_MARGIN_MS) / 1000;
+      driver.uptimeSeconds = uptimeS;
       const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
       expect(out.kind).toBe("sweep");
       if (out.kind !== "sweep") return;
       expect(out.summary.box_reboot_after_dispatch).toBe(0);
       expect(out.summary.uptime_unknown).toBe(1);
       expect(out.summary.runs_lost_to_reboot).toBe(0);
-      expect(out.summary.uptime_evidence[0]!.provisionLagMs).toBe(PROVISION_LAG_MARGIN_MS);
+      expect(out.summary.uptime_evidence[0]!.provisionLagMs).toBeCloseTo(3_600_000 - Math.round(uptimeS * 1000), 6);
     } finally {
       s.cleanup();
     }
@@ -780,6 +975,26 @@ describe("AC4 the reboot measurement", () => {
     }
   });
 
+  test("T21: NEGATIVE uptime content ('-5 …') parses to null → uptime_unknown, never a zero and never 'no reboot'", async () => {
+    quietLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-neg");
+      ageRecord(s.store, "run-neg", 3_600_000);
+      driver.uptimeSeconds = -5; // parseUptimeSeconds' `s >= 0` guard — a guessed 0 would read as "up since boot"
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.uptime_unknown).toBe(1);
+      expect(out.summary.box_reboot_after_dispatch).toBe(0);
+      expect(out.summary.runs_lost_to_reboot).toBe(0);
+      expect(out.summary.uptime_evidence[0]).toMatchObject({ runId: "run-neg", uptimeSeconds: null, provisionLagMs: null });
+    } finally {
+      s.cleanup();
+    }
+  });
+
   test("absent /proc/uptime → uptime_unknown (a failed measurement is not a zero) with a null-valued evidence entry (F5)", async () => {
     quietLogs();
     const s = store();
@@ -837,6 +1052,70 @@ describe("AC4 the reboot measurement", () => {
       expect(out.summary.runs_box_unreachable).toBe(1); // the chain's classified read decided
       expect(identityHolds(out.summary)).toBe(1);
       expect(driver.destroyed).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T-new-S11: a reboot-confirmed box whose marker probe exits 255 (ssh never answered) is NOT run-lost-to-reboot — only CLEAN absence decides, the chain classifies", async () => {
+    const lines = captureLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-probe255");
+      ageRecord(s.store, "run-probe255", 3_600_000);
+      driver.uptimeSeconds = 300; // the reboot arithmetic fires…
+      driver.plan = [{ forcedProbeExit: 255 }]; // …but `test -f` exited 255: {kind:"absent", probeExit:255} is UNPROVEN absence
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.box_reboot_after_dispatch).toBe(1); // the MEASUREMENT stands
+      expect(out.summary.runs_lost_to_reboot).toBe(0); // no teardown advice on an unread marker
+      expect(out.summary.runs_box_unreachable).toBe(1); // the chain's classified read: probeExit 255 → skip verdict
+      expect(identityHolds(out.summary)).toBe(1);
+      expect(lines.some((l) => l.event === "run-lost-to-reboot")).toBe(false);
+      expect(driver.destroyed).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T19 (catExit): the marker's cat leg failing ({kind:\"unreadable\"}) is NOT absence in the reboot arm — present-but-unjudgeable unsettles", async () => {
+    quietLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-catexit");
+      ageRecord(s.store, "run-catexit", 3_600_000);
+      driver.uptimeSeconds = 300; // reboot arithmetic fires
+      driver.plan = [{ catExit: 1 }]; // `test -f` says PRESENT, `cat` fails → BoxFileRead {kind:"unreadable"}
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.box_reboot_after_dispatch).toBe(1);
+      expect(out.summary.runs_lost_to_reboot).toBe(0); // unreadable ≠ absent — the marker may still be there
+      expect(out.summary.runs_unsettled).toBe(1); // the chain's verdict: unusable at maxTicks 1
+      expect(out.summary.runs_box_unreachable).toBe(0); // the box ANSWERED — an unusable read is not a skip
+      expect(identityHolds(out.summary)).toBe(1);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T19 (unitProbeExit): a transport-FAILED `systemctl is-active` (exit 255) classifies unknown — never a death certificate, never unreachable", async () => {
+    quietLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-unit255");
+      driver.unitProbeExit = 255; // ssh never connected — the WORD on stdout is not systemd's
+      driver.plan = [{ body: null }]; // marker cleanly absent
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.runs_engine_dead).toBe(0); // a naive "exitCode !== 0 ⇒ failed" reading fails HERE
+      expect(out.summary.runs_unsettled).toBe(1); // unknown liveness + absent marker: the still-walking shape
+      expect(identityHolds(out.summary)).toBe(1);
     } finally {
       s.cleanup();
     }
@@ -934,6 +1213,12 @@ describe("the chain through the sweep (AC1 driven / outcome counters)", () => {
       expect(line).toMatchObject({ runId, requestId: "req-df38-sweep", operation: "fleet.observe" });
       expect(typeof line!.chain_ms).toBe("number");
       expect(typeof line!.sweep_ms).toBe("number");
+      expect(line!.marker_ok).toBe(true); // T22: the settled read's own verdict rides the sweep's line
+      // T10: the ledger fixture is assertable at last — the driven run's
+      // teardown ingested its attributed box-hours through the chain context.
+      expect(chainCtxCalls).toEqual([{ runId }]);
+      expect(ledgerIngests.length).toBe(1);
+      expect(ledgerIngests[0]!.length).toBeGreaterThanOrEqual(1);
     } finally {
       host.cleanup();
       s.cleanup();
@@ -1019,6 +1304,9 @@ describe("the chain through the sweep (AC1 driven / outcome counters)", () => {
       expect(identityHolds(out.summary)).toBe(2);
       expect(s.store.get("run-boom").closedAt).toBeUndefined(); // abort ⇒ record open
       expect(lines.some((l) => l.event === "sweep-chain-failed" && l.runId === "run-boom")).toBe(true);
+      // T18: the destructive-marked lock is left for the operator — still on
+      // disk after the pass (releaseRunLock refuses a marked lock by design).
+      expect(fs.existsSync(path.join(s.dir, "run-boom.lock"))).toBe(true);
     } finally {
       // The chain's destructive mark is process-global state — keep it out of later tests.
       clearRunLockDestructive(path.join(s.dir, "run-boom.lock"));
@@ -1057,6 +1345,216 @@ describe("the chain through the sweep (AC1 driven / outcome counters)", () => {
       expect(identityHolds(out.summary)).toBe(2);
       const line = lines.find((l) => l.event === "sweep-chain-failed");
       expect(line).toMatchObject({ runId: "run-nokey", code: "no-key-env" });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T5: a green chain whose gate REQUEST leg fails → runs_approval_failed with its own line (never driven, never refused)", async () => {
+    const lines = captureLogs();
+    const s = store();
+    const host = mkGitHost();
+    try {
+      quarantine(host, "run-af");
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      const runId = "run-af";
+      const rec = await createRun(driver, s.store, { runId, recordAuditLink: () => {} });
+      seedBoxGit(driver, rec.vmName!, host, runId);
+      s.store.set(runId, {
+        commitSha: host.baseSha,
+        requestId: "req-dispatch-stamp",
+        extensions: { budget: { repoSlug: "acme/widget", issueId: "7" } },
+      } as never);
+      driver.plan = [{ body: { runId, ok: true, completedAt: "2026-09-18T00:00:00.000Z" } }];
+      // The overlay hollows the harvested bundle AT CLOSE — the gate's port
+      // then refuses (reverify flattens it to approval-request-failed), the
+      // run-completion.test.ts arrangement driven through the SWEEP's seam.
+      const overlay = new OverlayStore({ dir: s.dir });
+      overlay.closedRun = runId;
+      overlay.onClose = () => {
+        fs.truncateSync(path.join(s.dir, `${runId}.bundle`));
+      };
+      const out = await observeSweep(baseDeps({ driver, store: overlay, runsDir: s.dir, hostRoot: host.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.runs_approval_failed).toBe(1);
+      expect(out.summary.runs_observed).toBe(0);
+      expect(identityHolds(out.summary)).toBe(1);
+      expect(lines.some((l) => l.event === "sweep-approval-failed" && l.runId === runId)).toBe(true);
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 180_000);
+
+  test("T5: a decision landing between pre-flight and gate → runs_handed_off{already-decided} with its own line (nothing re-ran)", async () => {
+    const lines = captureLogs();
+    const s = store();
+    const host = mkGitHost();
+    try {
+      const head = quarantine(host, "run-ho");
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      const runId = "run-ho";
+      const rec = await createRun(driver, s.store, { runId, recordAuditLink: () => {} });
+      seedBoxGit(driver, rec.vmName!, host, runId);
+      s.store.set(runId, {
+        commitSha: host.baseSha,
+        requestId: "req-dispatch-stamp",
+        extensions: { budget: { repoSlug: "acme/widget", issueId: "7" } },
+      } as never);
+      driver.plan = [{ body: { runId, ok: true, completedAt: "2026-09-18T00:00:00.000Z" } }];
+      // The approved extension appears only at the gate's startup read
+      // (skip=3, the post-close read order run-completion.test.ts pins).
+      const overlay = new OverlayStore({ dir: s.dir });
+      overlay.closedRun = runId;
+      overlay.overlay = approvalExt("approved", "rv-other-actor", head);
+      overlay.skip = 3;
+      const out = await observeSweep(baseDeps({ driver, store: overlay, runsDir: s.dir, hostRoot: host.dir }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.runs_handed_off).toBe(1);
+      expect(out.summary.runs_observed).toBe(0);
+      expect(identityHolds(out.summary)).toBe(1);
+      const line = lines.find((l) => l.event === "sweep-handed-off");
+      expect(line).toMatchObject({ runId });
+      expect(String(line!.outcome)).toContain("already-decided");
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 180_000);
+
+  test("T12: one mixed pass — lock-refused + engine-dead + unsettled + chain-failed + vetoed — the identity holds AND each counter stands alone", async () => {
+    const lines = captureLogs();
+    const s = store();
+    const holder = liveChild(); // T13: minted before the tmpdir it must outlive
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-mix-lock");
+      await seedCandidate(s.store, driver, "run-mix-dead");
+      await seedCandidate(s.store, driver, "run-mix-walk");
+      await seedCandidate(s.store, driver, "run-mix-ctx");
+      await seedCandidate(s.store, driver, "run-mix-veto");
+      // Oldest-first: lock-refused head, dead unit, walker, ctx failure, veto.
+      ageRecord(s.store, "run-mix-lock", 5 * 60_000);
+      ageRecord(s.store, "run-mix-dead", 4 * 60_000);
+      ageRecord(s.store, "run-mix-walk", 3 * 60_000);
+      ageRecord(s.store, "run-mix-ctx", 2 * 60_000);
+      ageRecord(s.store, "run-mix-veto", 1 * 60_000);
+      forgeLock(s.dir, "run-mix-lock", holder.pid, lockHostToken(s.dir));
+      driver.activityByVm.set("run-mix-dead", "failed");
+      driver.uptimeSeconds = 7_200; // every box up longer than its run — no reboot arm fires
+      // Marker ticks are consumed in drive order: dead (absent), walk
+      // (absent), veto (settled) — run-mix-ctx never reaches the chain.
+      driver.plan = [{ body: null }, { body: null }, { body: { runId: "run-mix-veto", ok: true } }];
+      const out = await observeSweep(
+        baseDeps({
+          driver,
+          store: s.store,
+          runsDir: s.dir,
+          buildChainCtx: (rec: RunRecord) => {
+            if (rec.runId === "run-mix-ctx") throw Object.assign(new Error("context refused by the test seam"), { code: "no-key-env" });
+            chainCtxCalls.push({ runId: rec.runId });
+            const ledger = quietLedger();
+            ledgerIngests.push(ledger.ingested);
+            return {
+              keyApi: new FakeKeyApi() as never,
+              costLedger: ledger.hook as never,
+              recordAuditLink: () => {},
+              close: () => {},
+            };
+          },
+        }),
+      );
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.candidates_enumerated).toBe(5);
+      expect(out.summary.lock_refused).toBe(1);
+      expect(out.summary.runs_engine_dead).toBe(1);
+      expect(out.summary.runs_unsettled).toBe(1);
+      expect(out.summary.runs_chain_failed).toBe(1);
+      expect(out.summary.runs_vetoed).toBe(1);
+      expect(identityHolds(out.summary)).toBe(5); // the identity under stress, not on a single-disposition pass
+      expect(lines.some((l) => l.event === "sweep-complete")).toBe(true);
+    } finally {
+      holder.kill();
+      s.cleanup();
+    }
+  }, 120_000);
+
+  test("T15a: the writable store opens lazily — ONE open for N drivable candidates, ZERO on empty and all-refused passes", async () => {
+    quietLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-w1");
+      await seedCandidate(s.store, driver, "run-w2");
+      await seedCandidate(s.store, driver, "run-w3");
+      let opens = 0;
+      const writable = (): RunRecordStore => {
+        opens += 1;
+        return s.store;
+      };
+      const driven = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir, writableStore: writable }));
+      expect(driven.kind).toBe("sweep");
+      expect(opens).toBe(1); // first drivable candidate only — never per candidate
+
+      const empty = store();
+      const emptyDriver = new SweepDriver(path.join(empty.dir, "boxes"));
+      let emptyOpens = 0;
+      const emptyWritable = (): RunRecordStore => {
+        emptyOpens += 1;
+        return empty.store;
+      };
+      const refused = await observeSweep(baseDeps({ driver: emptyDriver, store: empty.store, runsDir: empty.dir, writableStore: emptyWritable }));
+      expect(refused.kind).toBe("sweep");
+      expect(emptyOpens).toBe(0); // nothing found ⇒ the named --dir was never created-for
+      empty.cleanup();
+
+      // All-refused: the acquire fails before the open, every candidate.
+      const holder2 = liveChild();
+      const busy = store();
+      try {
+        const busyDriver = new SweepDriver(path.join(busy.dir, "boxes"));
+        await seedCandidate(busy.store, busyDriver, "run-busy-w");
+        forgeLock(busy.dir, "run-busy-w", holder2.pid, lockHostToken(busy.dir));
+        let busyOpens = 0;
+        const busyWritable = (): RunRecordStore => {
+          busyOpens += 1;
+          return busy.store;
+        };
+        const locked = await observeSweep(baseDeps({ driver: busyDriver, store: busy.store, runsDir: busy.dir, writableStore: busyWritable }));
+        expect(locked.kind).toBe("sweep");
+        if (locked.kind === "sweep") expect(locked.summary.lock_refused).toBe(1);
+        expect(busyOpens).toBe(0); // a refusing head never opens the writable store
+      } finally {
+        holder2.kill();
+        busy.cleanup();
+      }
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T15b (S4): a writableStore open that THROWS escapes the pass — observeSweep itself rejects (invocation-class, never a per-candidate fold)", async () => {
+    quietLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-wthrow1");
+      await seedCandidate(s.store, driver, "run-wthrow2");
+      const boom = (): RunRecordStore => {
+        throw Object.assign(new Error("writable store refused by the test seam"), { code: "EACCES" });
+      };
+      await expect(observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir, writableStore: boom }))).rejects.toThrow(
+        "writable store refused by the test seam",
+      );
+      // The escape is BEFORE any chain context (the F2 net does not cover the
+      // open), and the first candidate's lock was still released by the
+      // finally — nothing is wedged behind the rejection. Counters the pass
+      // had accumulated are discarded with it: the CLI turns this into exit 2.
+      expect(chainCtxCalls).toEqual([]);
+      expect(fs.readdirSync(s.dir).filter((n) => n.endsWith(".lock"))).toEqual([]);
     } finally {
       s.cleanup();
     }
@@ -1105,6 +1603,50 @@ describe("AC6 pass shape, hostRoot, help, no daemon", () => {
       expect(skipped).toBeDefined();
       expect(skipped!.left_behind).toBe(1);
       expect(skipped!.chain_ms).toBeUndefined(); // absent, never 0 — 0 is a lie shaped like an instant chain
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T4: a ZERO wall-clock budget skips the very first candidate — one wall-clock-budget line, no chain involvement at all", async () => {
+    const lines = captureLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-budget0");
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir, wallClockBudgetMs: 0 }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.candidates_enumerated).toBe(1); // enumerated…
+      expect(out.summary.candidates_skipped).toBe(1); // …and never reached: 0 ≥ 0 is already over budget
+      expect(identityHolds(out.summary)).toBe(1);
+      const skipped = lines.find((l) => l.event === "candidate-skipped");
+      expect(skipped).toMatchObject({ left_behind: 1, reason: "wall-clock-budget" });
+      // The check sits BETWEEN candidates, before driveOne: no lock taken, no
+      // uptime read, no marker read, no chain context — zero box contact.
+      expect(driver.calls.length).toBe(0);
+      expect(chainCtxCalls).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("T20: exactly AT maxCandidatesPerPass is NOT a partial pass — 2 candidates, cap 2, no skip line, nothing left behind", async () => {
+    const lines = captureLogs();
+    const s = store();
+    try {
+      const driver = new SweepDriver(path.join(s.dir, "boxes"));
+      await seedCandidate(s.store, driver, "run-cap1");
+      await seedCandidate(s.store, driver, "run-cap2");
+      ageRecord(s.store, "run-cap1", 60_000); // deterministic order
+      const out = await observeSweep(baseDeps({ driver, store: s.store, runsDir: s.dir, maxCandidatesPerPass: 2 }));
+      expect(out.kind).toBe("sweep");
+      if (out.kind !== "sweep") return;
+      expect(out.summary.candidates_enumerated).toBe(2);
+      expect(out.summary.candidates_skipped).toBe(0); // `processed >= max` never fires at exactly-at
+      expect(out.summary.runs_unsettled).toBe(2); // both were driven
+      expect(identityHolds(out.summary)).toBe(2);
+      expect(lines.find((l) => l.event === "candidate-skipped")).toBeUndefined();
     } finally {
       s.cleanup();
     }
@@ -1159,6 +1701,7 @@ describe("AC6 pass shape, hostRoot, help, no daemon", () => {
   test("no daemon: no interval timer in the module, --all is a boolean flag, no process ships", async () => {
     const src = await moduleSource();
     expect(src).not.toContain("setInterval");
+    expect(src).not.toMatch(/setTimeout\s*\(/); // T7: self-rescheduling is a daemon too
     expect(src).not.toContain("--daemon");
     const entry = listVerbs().find((v) => v.verb === "observe")!;
     expect(entry.flags.find((f) => f.name === "--all")).toMatchObject({ required: false, valueType: "boolean" });
@@ -1174,7 +1717,12 @@ describe("AC6 pass shape, hostRoot, help, no daemon", () => {
     const block = fleetSrc.slice(start, end);
     const allAt = block.indexOf("bools.has(\"--all\")");
     const lockAt = block.indexOf("withRunLock");
-    const readAt = Math.min(...[block.indexOf("assertRunExists"), block.indexOf("store.get")].filter((i) => i >= 0));
+    // T1: Math.min over the FOUND indices only — with both markers gone the
+    // old `Math.min(...[].filter(i => i >= 0))` was Infinity, which passes any
+    // `>= 0` pin vacuously.
+    const readIdx = [block.indexOf("assertRunExists"), block.indexOf("store.get")].filter((i) => i >= 0);
+    expect(readIdx.length).toBeGreaterThan(0);
+    const readAt = Math.min(...readIdx);
     expect(allAt).toBeGreaterThanOrEqual(0);
     expect(lockAt).toBeGreaterThanOrEqual(0);
     expect(readAt).toBeGreaterThanOrEqual(0);
@@ -1207,8 +1755,9 @@ describe("CLI: fleet observe --all (exit-0 contract)", () => {
 
   test("an all-refused sweep (busy lock) still exits 0 — the exit code belongs to the invocation, not the candidate", async () => {
     quietLogs();
-    const s = store();
+    // T13: the holder outlives the tmpdir it is forged into — minted first.
     const holder = liveChild();
+    const s = store();
     const out: string[] = [];
     const err: string[] = [];
     try {
@@ -1218,6 +1767,13 @@ describe("CLI: fleet observe --all (exit-0 contract)", () => {
       const code = await fleetRun(["observe", "--all", "--driver", "fake"], (l) => out.push(l), cliDeps(driver, s.store), (l) => err.push(l));
       expect(code).toBe(0);
       expect(err.some((l) => l.includes("run-locked") || l.includes("lock"))).toBe(false); // counted on the log channel, not the exit surface
+      // T2: the arrange is REAL — the CLI resolves runsDir from the injected
+      // store's own dir (fleet.ts: runsDir: store.dir), which is s.dir, where
+      // the lock was forged. Positive proof: the one stdout summary line the
+      // completed pass prints carries lock_refused: 1.
+      const summaryLine = out.find((l) => l.startsWith('{"all":true'));
+      expect(summaryLine).toBeDefined();
+      expect((JSON.parse(summaryLine!) as { lock_refused: number }).lock_refused).toBe(1);
     } finally {
       holder.kill();
       s.cleanup();
@@ -1270,6 +1826,60 @@ describe("CLI: fleet observe --all (exit-0 contract)", () => {
       process.chdir(cwd);
       fs.rmSync(notARepo, { recursive: true, force: true });
       s.cleanup();
+    }
+  });
+
+  test("T15c (S4 posture, CLI): the writable twin opens lazily through the CLI's OWN construction — a driven candidate re-permissions the named --dir, an empty pass never touches it", async () => {
+    quietLogs();
+    // NO injected store or driver: the CLI resolves both itself (the fake
+    // driver's boxes root via QDS_FAKE_BOXES_DIR), so the lazy writable twin
+    // is runObserveSweep's own RunRecordStore construction.
+    //
+    // Why the exit-2 ESCAPE arm is not driven here (skipped-with-reason; the
+    // unit tier's T15b pins the rejection shape): the writable constructor's
+    // mode check is assertDirMode0700, which CHMODS a writable dir to 0700
+    // before asserting — a directory this process can write to never refuses.
+    // A directory it cannot write to refuses EARLIER, at the run-lock acquire,
+    // which S1 folds as a per-candidate outcome (exit 0). The exit-2 window
+    // is exactly a dir writable-but-not-chmod-able (someone else's), which no
+    // CI process can own. What the CLI CAN prove is the posture either side
+    // of that window: the re-permission happens only at a driven candidate.
+    const boxesRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-df38-cliw-boxes-"));
+    const runsDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-df38-cliw-runs-"));
+    const emptyDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-df38-cliw-empty-"));
+    const out: string[] = [];
+    const err: string[] = [];
+    const savedBoxesDir = process.env.QDS_FAKE_BOXES_DIR;
+    const summaryOf = (lines: string[]): Record<string, unknown> => {
+      const line = lines.find((l) => l.startsWith('{"all":true'));
+      expect(line).toBeDefined();
+      return JSON.parse(line!) as Record<string, unknown>;
+    };
+    try {
+      const seeder = new SweepDriver(boxesRoot);
+      const seedStore = new RunRecordStore({ dir: runsDir });
+      await seedCandidate(seedStore, seeder, "run-cli-w"); // a real candidate: record + live box
+      fs.chmodSync(runsDir, 0o755);
+      process.env.QDS_FAKE_BOXES_DIR = boxesRoot;
+      // The real fake substrate has no /run marker and no systemctl answer, so
+      // the chain settles UNSETTLED — one driven candidate, no teardown.
+      const code = await fleetRun(["observe", "--all", "--driver", "fake", "--dir", runsDir], (l) => out.push(l), undefined, (l) => err.push(l));
+      expect(code).toBe(0);
+      expect(summaryOf(out).runs_unsettled).toBe(1); // the candidate really drove
+      expect(fs.statSync(runsDir).mode & 0o777).toBe(0o700); // the writable twin OPENED — lazily, at that candidate
+
+      out.length = 0;
+      fs.chmodSync(emptyDir, 0o755);
+      const emptyCode = await fleetRun(["observe", "--all", "--driver", "fake", "--dir", emptyDir], (l) => out.push(l), undefined, (l) => err.push(l));
+      expect(emptyCode).toBe(0);
+      expect(summaryOf(out).candidates_enumerated).toBe(0);
+      expect(fs.statSync(emptyDir).mode & 0o777).toBe(0o755); // nothing found ⇒ the named --dir was never touched
+    } finally {
+      if (savedBoxesDir === undefined) Reflect.deleteProperty(process.env, "QDS_FAKE_BOXES_DIR");
+      else process.env.QDS_FAKE_BOXES_DIR = savedBoxesDir;
+      fs.rmSync(boxesRoot, { recursive: true, force: true });
+      fs.rmSync(runsDir, { recursive: true, force: true });
+      fs.rmSync(emptyDir, { recursive: true, force: true });
     }
   });
 });

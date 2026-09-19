@@ -78,7 +78,11 @@
  * 1 key capped at 50,000 µ$ (the setup gate's C/D roster-model pings + the
  * armed resident's run_start/run_end solicitations) + ONE box for up to the
  * runner ceiling below (8,500 s ≈ 2.4 h at 230,000 µ$/h ≈ 543,000 µ$).
- * Worst case ≈ $0.60. A HEALTHY round finishes in minutes.
+ * Worst case ≈ $0.60. A HEALTHY round finishes in minutes. The machine-checked
+ * box-hours ceiling in step 13 is TIGHTER than that approval on purpose
+ * (T38_BOX_HOURS_CEILING_MICRO_USD — the PLANNED window, ≈ 499,000 µ$), so a
+ * box that out-bills the plan fails the audit while the round's assertions
+ * still run, not only on the abort path where no assertion runs at all.
  *
  * LIVE-ROUND RUNNER (L16): the whole file is ONE todoIf test — a round that
  * never selected it reports one `(todo)` and a green summary. Name this path
@@ -104,6 +108,7 @@ import { join } from "node:path";
 import { boxMarkerPath, classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from "../../../src/fleet/fanout-primitive.ts";
 import { runUnitName } from "../../../src/fleet/run.ts";
 import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
+import type { BoxFileRead } from "../../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 // Verb tails are pre-redacted (B24: a tail slice can CUT a credential
 // mid-token, which the evidence scrub cannot match but its refusal assert
@@ -142,28 +147,29 @@ const T38_BOX_HOUR_RATE_MICRO_USD = 230_000;
 
 /**
  * The bun runner ceiling for this whole test — the budget audit at the foot of
- * the file prices every inner ceiling up to this total plus margin, and it is
- * also what the box-hours assertion below bounds against (the box cannot
- * outlive the round except on the abort that skips the `finally`, where no
- * assertion runs anyway). Same figure as T2.8's: this round REDISTRIBUTES
- * T2.8's 3,600 s observe term (window 2,700 + chain 900) as engine poll 2,700
- * + sweep 900 — the audit's sum is unchanged, and the derivation is stated in
- * the footer.
+ * the file prices every inner ceiling up to this total plus margin. Same
+ * figure as T2.8's: this round REDISTRIBUTES T2.8's 3,600 s observe term
+ * (window 2,700 + chain 900) as engine poll 2,700 + sweep 900 — the audit's
+ * sum is unchanged, and the derivation is stated in the footer. (The box-hours
+ * ASSERTION no longer derives from this figure — see
+ * T38_BOX_HOURS_CEILING_MICRO_USD below for why the runner-derived bound was
+ * circular.)
  */
 const T38_RUNNER_TIMEOUT_MS = 8_500_000;
 
-/** The box-hours ceiling: the WHOLE runner ceiling at the configured rate —
- * 8 500 000 ms ≈ 2.36 h × 230 000 µ$/h ≈ 543 056 µ$, the figure the SPEND
- * header prices as "~543,000 µ$". */
-const T38_BOX_HOURS_CEILING_MICRO_USD = Math.ceil((T38_RUNNER_TIMEOUT_MS / 3_600_000) * T38_BOX_HOUR_RATE_MICRO_USD);
-
 /**
  * The scratchClone ceiling, named so the budget audit's scratchClone row names
- * it too. Belt-and-braces: scratchClone runs its git steps synchronously
- * (`spawnSync`), so while a fetch is wedged the event loop is blocked and a
- * ceiling cannot fire mid-call — the load-bearing guard for this test is the
- * pre-dispatch http(s)-origin refusal in the body. The named ceiling keeps the
- * audit row honest and bounds any FUTURE async shape of the helper.
+ * it too. CURRENTLY DECORATIVE, said plainly (T30): scratchClone runs its git
+ * steps synchronously (`spawnSync`), so the whole clone completes — or wedges
+ * with the event loop blocked — before `awaitWithCeiling` ever receives the
+ * promise, and a ceiling cannot fire on an already-settled value. The guards
+ * that actually bound this leg are (1) the PRE-DISPATCH http(s)-origin scheme
+ * refusal in the body (an ssh:// fetch ignores git's stall switch and would
+ * be bounded by nothing but this test's refusal) and (2) scratchClone's own
+ * in-git `http.lowSpeedLimit/lowSpeedTime` stall switch (a fetch moving
+ * < 1 B/s for 180 s aborts) — which is why the audit row still prices 180 s.
+ * The named ceiling bounds any FUTURE async shape of the helper and keeps the
+ * audit arithmetic honest.
  */
 const T38_CLONE_TIMEOUT_MS = 180_000;
 
@@ -216,6 +222,81 @@ const T38_SWEEP_VERB_TIMEOUT_MS = 900_000;
 const T38_CLEANUP_TEARDOWN_TIMEOUT_MS = 180_000;
 
 /**
+ * The PLANNED box-billing window (T31): the span from the box's creation
+ * inside the dispatch verb to its destruction in the finally, priced at the
+ * audit rows' DECLARED ceilings — every term below is a line in the footer's
+ * audit, none is latency. The preflight and baseline-key rows are deliberately
+ * absent (they run before the box exists and bill nothing); the post-destroy
+ * cleanup tail (leftovers/keyLeak/evidence) is deliberately INCLUDED as
+ * headroom: the substrate's destroy lag means billing realistically stops
+ * somewhere inside `fleetLeftovers`' poll, and a ceiling must sit at or above
+ * every legitimate billing shape.
+ *
+ *   dispatch 900 + list 120 + clone 180 + run 180 + liveness 60 + marker 20
+ *   + engine window 2 700 + sweep 900 + post keys 240 + teardown 180
+ *   + destroy 600 + leftovers 1 360 + keyLeak 360 + evidence 10 = 7 810 s
+ */
+const T38_BOX_PLANNED_WINDOW_MS =
+  T38_DISPATCH_TIMEOUT_MS +
+  120_000 +
+  T38_CLONE_TIMEOUT_MS +
+  T38_RUN_VERB_TIMEOUT_MS +
+  60_000 +
+  20_000 +
+  T38_ENGINE_WINDOW_MS +
+  T38_SWEEP_VERB_TIMEOUT_MS +
+  240_000 +
+  T38_CLEANUP_TEARDOWN_TIMEOUT_MS +
+  600_000 +
+  1_360_000 +
+  360_000 +
+  10_000;
+
+/**
+ * The box-hours ceiling (T31): the PLANNED window above at the configured
+ * rate — 7 810 000 ms ≈ 2.17 h × 230 000 µ$/h ≈ 498 973 µ$. The PREVIOUS
+ * derivation (the whole T38_RUNNER_TIMEOUT_MS ≈ 543 056 µ$) was circular: a
+ * box can only out-bill the RUNNER ceiling on the timeout abort that skips
+ * the finally — the one path where no assertion runs — so the old bound could
+ * never fire on a round that reaches its own audit. This one can: a round
+ * that COMPLETES with a box-hours total over the plan fails here while every
+ * other assertion still ran. Headroom check against reality: the observed
+ * green round billed ~175 s ≈ 11 000 µ$, 45× under this ceiling, so a
+ * healthy-but-slow round does not flake on it.
+ */
+const T38_BOX_HOURS_CEILING_MICRO_USD = Math.ceil((T38_BOX_PLANNED_WINDOW_MS / 3_600_000) * T38_BOX_HOUR_RATE_MICRO_USD);
+
+/**
+ * The post-dispatch positive-control `driver.list()` ceiling (T26) — the
+ * audit's 120 s "positive control" row, now NAMED because the await it bounds
+ * is a raw driver call with no self-bound of its own. An unbounded one is
+ * exactly the runner-timeout-abort path whose finally-skip leaks the billing
+ * box this very control proved listed.
+ */
+const T38_LIST_CEILING_MS = 120_000;
+
+/**
+ * The F17 key-listing ceiling (T26) — the audit's 240 s "post keys" row, now
+ * NAMED. The post-chain `listedKeyHashes()` is a raw HTTP walk with pages; a
+ * wedged listing hangs the await with the box still owned, which is the same
+ * abort path. (The PRE-TRY baseline listing at the top of the try owns
+ * nothing — no box, no key — so a hang there costs a dead round, never a
+ * leak; it stays unwrapped by scope, not by oversight.)
+ */
+const T38_KEY_LIST_CEILING_MS = 240_000;
+
+/**
+ * The engine-settled poll's consecutive-unreadable fast-fail bound (T32).
+ * `unusable` markers already break the poll immediately; what could spin the
+ * whole 45-min window was the COUNTABLE-but-non-settled tick class — reads
+ * that REJECT (transport throws, T27) and `skip` verdicts (probe exit 255:
+ * the box never answered). Ten consecutive such ticks (≤ ~2.5 min at the 5 s
+ * tick + 10 s read deadline) means the marker is persistently UNREADABLE, not
+ * absent and not slow — fail then, before the window bills the rest of itself.
+ */
+const T38_POLL_UNREADABLE_LIMIT = 10;
+
+/**
  * Every `{…}` JSON line a fleet verb wrote on a stream, parsed defensively and
  * REDACTED at parse (the file's B24 rule applied to structured lines: a
  * secret-like field inside a parsed line reaches the evidence write raw, and
@@ -238,6 +319,24 @@ function jsonLines(text: string): { lines: Record<string, unknown>[]; dropped: {
     }
   }
   return { lines, dropped: { count: droppedCount, first: firstDropped } };
+}
+
+/**
+ * A REJECTED `readBoxFile` rendered as the transport's own fail-closed
+ * `unreadable` shape (T27): `readBoxFile` can THROW (driver exec failure, a
+ * `withTimeout` fire), and the transport's contract is "EVERY caller handles
+ * a rejection" — this file's three direct call sites used not to. `exitCode
+ * -1` is the transport's "no process ever ran" sentinel, so the classifier
+ * reads it as present-or-unknown and unjudgeable — never a fabricated
+ * absence — and the rejection's own text rides `stderr` where every
+ * diagnostic below looks.
+ */
+function rejectedBoxRead(e: unknown): BoxFileRead {
+  return {
+    kind: "unreadable",
+    exitCode: -1,
+    stderr: `readBoxFile rejected (transport throw): ${e instanceof Error ? e.message : String(e)}`,
+  };
 }
 
 test.todoIf(liveTodoOff())(
@@ -400,8 +499,13 @@ test.todoIf(liveTodoOff())(
       writeFileSync(orphanRecoveryPath, `${JSON.stringify({ runId, vmName, keyHash: null })}\n`);
       // POSITIVE CONTROL for the final-ls verdict (T5.1's shape): prove the
       // listing CAN see this run's box before the end of the round asserts
-      // no box of ours survives.
-      expect((await ctx.driver.list()).some((b) => b.name === vmName)).toBeTrue();
+      // no box of ours survives. CEILED (T26): a raw `driver.list()` await
+      // has no self-bound, and a wedged listing here is exactly the
+      // runner-timeout abort whose finally-skip leaks the box + the minted
+      // key — the audit's own thesis. The ceiling is the audit's 120 s row,
+      // now named (T38_LIST_CEILING_MS).
+      const listedBoxes = await awaitWithCeiling(ctx.driver.list(), T38_LIST_CEILING_MS, "t3.8-positive-control-list");
+      expect(listedBoxes.some((b) => b.name === vmName)).toBeTrue();
 
       // ── 2. the record carries the identity every join below keys on ──────
       const store = new RunRecordStore({ dir: recordsDir });
@@ -538,12 +642,34 @@ test.todoIf(liveTodoOff())(
       // can already be finished here). `deactivating` is that same fast exit
       // caught mid-cleanup. `inactive` on any other result — or `failed` —
       // never armed, and this leg fails by name.
+      //
+      // T28 closes the one posture those states could not discriminate: a
+      // unit that sat IDLE its whole life also reports
+      // ActiveState=inactive / Result=success / ExecMainStatus=0 — systemd's
+      // defaults for a unit whose start job never ran a main process. The
+      // `ExecMainPID` property is the discriminator: systemd assigns it at
+      // fork and RETAINS the last main PID after the process exits (only
+      // `MainPID` zeroes), so > 0 proves an engine process actually exec'd
+      // under this unit — live OR already-finished — while an idle stand-in
+      // reads 0 and fails by name below.
       const { driver } = ctx; // narrowed here; the closure below cannot keep the outer `let` narrowed
       const unitShow = (): Promise<string> =>
         driver
           .execTimed(
             vmName,
-            ["systemctl", "show", runUnitName(runId), "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus"],
+            [
+              "systemctl",
+              "show",
+              runUnitName(runId),
+              "-p",
+              "ActiveState",
+              "-p",
+              "Result",
+              "-p",
+              "ExecMainStatus",
+              "-p",
+              "ExecMainPID",
+            ],
             30_000,
           )
           .then((r) => r.stdout);
@@ -565,9 +691,11 @@ test.todoIf(liveTodoOff())(
       const activeState = /ActiveState=(\S*)/.exec(unitStdout)?.[1] ?? ""; // dp:ok an unmatched capture reads "" and fails the armed check below BY NAME, with this raw value in the message; tier2-run-completion.live.test.ts:520 verbatim
       const probeResult = /Result=(\S*)/.exec(unitStdout)?.[1] ?? ""; // dp:ok an unmatched capture reads "" and fails the armed check below BY NAME, with this raw value in the message; tier2-run-completion.live.test.ts:521 verbatim
       const mainStatus = /ExecMainStatus=(\S*)/.exec(unitStdout)?.[1] ?? ""; // dp:ok an unmatched capture reads "" and fails the armed check below BY NAME, with this raw value in the message; tier2-run-completion.live.test.ts:522 verbatim
+      const mainPid = Number(/ExecMainPID=(\S*)/.exec(unitStdout)?.[1] ?? ""); // dp:ok an unmatched/missing property reads NaN and fails the > 0 term of the armed check below BY NAME, with this raw value in the message (T28)
       const armed =
-        ["activating", "active", "reloading", "deactivating"].includes(activeState) ||
-        (activeState === "inactive" && probeResult === "success" && mainStatus === "0");
+        mainPid > 0 &&
+        (["activating", "active", "reloading", "deactivating"].includes(activeState) ||
+          (activeState === "inactive" && probeResult === "success" && mainStatus === "0"));
       evidence.push({
         phase: "unit-liveness",
         runId,
@@ -575,11 +703,12 @@ test.todoIf(liveTodoOff())(
         activeState,
         result: probeResult,
         mainStatus,
+        mainPid,
         armed,
       });
       if (!armed) {
         throw new Error(
-          `unit-liveness control failed: ${runUnitName(runId)} never armed (ActiveState=${activeState} Result=${probeResult} ExecMainStatus=${mainStatus}) — fleet run exited 0 without a running engine`,
+          `unit-liveness control failed: ${runUnitName(runId)} never armed (ActiveState=${activeState} Result=${probeResult} ExecMainStatus=${mainStatus} ExecMainPID=${/ExecMainPID=(\S*)/.exec(unitStdout)?.[1] ?? "(missing)"}) — fleet run exited 0 without an engine process having run under the unit (T28: an idle unit cannot stand in for the engine)`,
         );
       }
 
@@ -593,10 +722,21 @@ test.todoIf(liveTodoOff())(
       // engine finished) or `settled` with `ok:true` (a very fast engine). A
       // foreign or hand-planted marker classifies `unusable` and this leg
       // names the code.
-      let markerRead = await readBoxFile(driver, vmName, boxMarkerPath(runId), DEFAULT_PER_CALL_DEADLINE_MS);
+      //
+      // T27: a REJECTED read folds into that same one-retry arm — the
+      // rejection is rendered as the transport's fail-closed `unreadable`
+      // sentinel (`rejectedBoxRead`), so it consumes the retry, and a
+      // rejection on the retry TOO classifies `unusable` and fails BY NAME
+      // through the expect below, never as an unhandled rejection escaping
+      // the leg.
+      let markerRead = await readBoxFile(driver, vmName, boxMarkerPath(runId), DEFAULT_PER_CALL_DEADLINE_MS).catch(rejectedBoxRead);
       if (markerRead.kind === "unreadable") {
-        evidence.push({ phase: "marker-read-retry", kind: markerRead.kind });
-        markerRead = await readBoxFile(driver, vmName, boxMarkerPath(runId), DEFAULT_PER_CALL_DEADLINE_MS);
+        evidence.push({
+          phase: "marker-read-retry",
+          kind: markerRead.kind,
+          stderr: redactSecrets(markerRead.stderr.trim().slice(0, 200)),
+        });
+        markerRead = await readBoxFile(driver, vmName, boxMarkerPath(runId), DEFAULT_PER_CALL_DEADLINE_MS).catch(rejectedBoxRead);
       }
       const preSweep = classifyMarkerRead(markerRead, runId);
       evidence.push({
@@ -622,21 +762,65 @@ test.todoIf(liveTodoOff())(
       // temp+rename, so persistence means corruption). A window expiry fails
       // the leg BY NAME rather than handing the sweep an unsettled candidate
       // it would correctly count `runs_unsettled` and leave behind.
+      //
+      // T27 + T32 on the tick itself: a REJECTED read (transport throw) is a
+      // COUNTABLE non-settled tick — one blip must not fail the round — but a
+      // PERSISTENT streak of rejections (and `skip` verdicts: probe exit 255,
+      // the box never answered) is the marker being UNREADABLE, not absent,
+      // and burns 45 min of billing before a misleading "never settled"
+      // expiry. The consecutive counter fast-fails that streak at
+      // T38_POLL_UNREADABLE_LIMIT ticks, naming the actual condition; a clean
+      // `absent` (engine still walking) resets it.
       const pollStartedAt = Date.now();
       const kindCounts: Record<string, number> = {};
       let settledOk: boolean | undefined;
+      let unreadableStreak = 0;
+      let lastUnreadableWhy = "";
       for (;;) {
-        const read = await readBoxFile(driver, vmName, boxMarkerPath(runId), DEFAULT_PER_CALL_DEADLINE_MS); // live-mirror: boxMarkerPath(runId) (fanout-primitive.ts) — same shipped path the sweep's one-tick read uses
-        const verdict = classifyMarkerRead(read, runId);
-        kindCounts[verdict.kind] = (kindCounts[verdict.kind] ?? 0) + 1;
-        if (verdict.kind === "settled") {
-          settledOk = verdict.ok;
-          break;
+        // The discriminated tick: `read === undefined` ⇔ the read REJECTED —
+        // TS narrows on it, and the two arms below never disagree.
+        const tick = await readBoxFile(driver, vmName, boxMarkerPath(runId), DEFAULT_PER_CALL_DEADLINE_MS).then(
+          (read): { read: BoxFileRead; rejection?: undefined } => ({ read }), // live-mirror: boxMarkerPath(runId) (fanout-primitive.ts) — same shipped path the sweep's one-tick read uses
+          (e: unknown): { read: undefined; rejection: string } => ({
+            read: undefined,
+            rejection: e instanceof Error ? e.message : String(e),
+          }),
+        );
+        if (tick.read === undefined) {
+          kindCounts["(read-rejected)"] = (kindCounts["(read-rejected)"] ?? 0) + 1;
+          unreadableStreak += 1;
+          lastUnreadableWhy = `readBoxFile rejected: ${tick.rejection}`;
+        } else {
+          const verdict = classifyMarkerRead(tick.read, runId);
+          kindCounts[verdict.kind] = (kindCounts[verdict.kind] ?? 0) + 1;
+          if (verdict.kind === "settled") {
+            settledOk = verdict.ok;
+            break;
+          }
+          if (verdict.kind === "unusable") {
+            evidence.push({ phase: "engine-settled-poll", ok: false, kindCounts, code: verdict.code, pollMs: Date.now() - pollStartedAt });
+            throw new Error(
+              `engine-settled poll read an unusable marker (code ${verdict.code}) — present but unjudgeable; the sweep would refuse it identically`,
+            );
+          }
+          if (verdict.kind === "skip") {
+            unreadableStreak += 1;
+            lastUnreadableWhy = `${verdict.code}: ${verdict.error instanceof Error ? verdict.error.message : String(verdict.error)}`;
+          } else {
+            unreadableStreak = 0;
+          }
         }
-        if (verdict.kind === "unusable") {
-          evidence.push({ phase: "engine-settled-poll", ok: false, kindCounts, code: verdict.code, pollMs: Date.now() - pollStartedAt });
+        if (unreadableStreak >= T38_POLL_UNREADABLE_LIMIT) {
+          evidence.push({
+            phase: "engine-settled-poll",
+            ok: false,
+            kindCounts,
+            unreadableStreak,
+            lastUnreadableWhy: redactSecrets(lastUnreadableWhy.slice(0, 300)),
+            pollMs: Date.now() - pollStartedAt,
+          });
           throw new Error(
-            `engine-settled poll read an unusable marker (code ${verdict.code}) — present but unjudgeable; the sweep would refuse it identically`,
+            `engine-settled poll: the marker was UNREADABLE for ${unreadableStreak} consecutive ticks (${redactSecrets(lastUnreadableWhy.slice(0, 300))}) — NOT absent and not a slow engine: the reads rejected or the presence probe never answered, so the box is unreachable-or-wedged while it may still be billing. Failing now instead of burning the rest of the window on a misleading "never settled" expiry.`,
           );
         }
         if (Date.now() - pollStartedAt > T38_ENGINE_WINDOW_MS) break;
@@ -725,6 +909,23 @@ test.todoIf(liveTodoOff())(
       expect(sweepCompleteLines.length).toBeGreaterThanOrEqual(1);
       expect(Number(sweepCompleteLine?.candidates_enumerated)).toBeGreaterThanOrEqual(1);
       expect(Number(sweepCompleteLine?.runs_observed)).toBeGreaterThanOrEqual(1);
+      // T37: the ZERO side, without which the ≥ asserts above were one-sided
+      // — a pass that drove its one candidate AND ALSO left it unsettled,
+      // refused its lock, lost it to a reboot count, or skipped it, still
+      // satisfied every bound above. This round hands the sweep exactly ONE
+      // already-settled candidate and must see it driven: every disposition
+      // EXCEPT runs_observed (asserted > 0 above) has to be 0. `Number()`
+      // maps a DROPPED field to NaN, which fails too — a counter that left
+      // the summary is not a zero we verified. Field set checked against
+      // SweepSummary (src/fleet/observe.ts).
+      expect(Number(sweepCompleteLine?.runs_unsettled)).toBe(0);
+      expect(Number(sweepCompleteLine?.lock_refused)).toBe(0);
+      expect(Number(sweepCompleteLine?.runs_lost_to_reboot)).toBe(0);
+      expect(Number(sweepCompleteLine?.runs_engine_dead)).toBe(0);
+      expect(Number(sweepCompleteLine?.runs_box_unreachable)).toBe(0);
+      expect(Number(sweepCompleteLine?.runs_chain_failed)).toBe(0);
+      expect(Number(sweepCompleteLine?.candidates_skipped)).toBe(0);
+      expect(Number(sweepCompleteLine?.completion_unwitnessed)).toBe(0);
 
       // ── 10. ONE gate `pause` event, joined on the record's dispatch id ───
       // The event is the GATE's (emitPause), riding the sweep invocation's
@@ -795,22 +996,35 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "spend", capMicroUsd: T38_CAP_MICRO_USD, actualMicroUsd: driven.spendMicroUsd });
       // The box-hours half, machine-checked: the close step ingests ONE
       // box_hours row (its digest dedups a re-ingest), priced at
-      // T38_BOX_HOUR_RATE_MICRO_USD, whose total cannot exceed the whole
-      // round's runner ceiling — a box cannot outlive the round except on the
-      // abort that skips the finally, where no assertion runs anyway.
-      const boxHourRows = ledgerRows<{ cost_micro_usd: number }>(
+      // T38_BOX_HOUR_RATE_MICRO_USD, whose total cannot exceed the round's
+      // PLANNED window at that rate (T38_BOX_HOURS_CEILING_MICRO_USD — see
+      // its derivation comment; a box that out-bills the plan fails HERE,
+      // while the round's assertions still run, not only on the runner-abort
+      // path where no assertion executes).
+      // T33 on the sum: `Number(null) === 0`, so a NULL-cost row used to ride
+      // the total as costless. A non-finite cost on an INGESTED row is an
+      // audit defect this leg fails BY NAME — never a zero the ceiling then
+      // passes.
+      const boxHourRows = ledgerRows<{ cost_micro_usd: number | null }>(
         recordsDir,
         "SELECT cost_micro_usd FROM cost_events WHERE run_id = ? AND kind = 'box_hours'",
         runId,
       );
-      const boxHoursMicroUsd = boxHourRows.reduce((sum, r) => sum + Number(r.cost_micro_usd), 0);
+      const nonFiniteCostRows = boxHourRows.filter((r) => !Number.isFinite(r.cost_micro_usd));
+      if (nonFiniteCostRows.length > 0) {
+        throw new Error(
+          `box_hours ledger rows with non-finite cost_micro_usd for ${runId} (${nonFiniteCostRows.length} of ${boxHourRows.length} rows; first: ${JSON.stringify(nonFiniteCostRows[0])}) — a NULL/invalid cost on an ingested row is an audit defect, not a costless box`,
+        );
+      }
+      const boxHoursMicroUsd = boxHourRows.reduce((sum, r) => sum + (r.cost_micro_usd ?? 0), 0);
       evidence.push({
         phase: "box-hours",
         rows: boxHourRows.length,
         rateMicroUsdPerHour: T38_BOX_HOUR_RATE_MICRO_USD,
         actualMicroUsd: boxHoursMicroUsd,
         ceilingMicroUsd: T38_BOX_HOURS_CEILING_MICRO_USD,
-        ceilingDerivedFrom: "T38_RUNNER_TIMEOUT_MS (the round's whole runner ceiling) at the configured rate",
+        ceilingDerivedFrom:
+          "T38_BOX_PLANNED_WINDOW_MS (dispatch→destroy at the audit rows' declared ceilings, post-destroy tail included as headroom) at the configured rate",
       });
       expect(boxHourRows.length).toBeGreaterThanOrEqual(1);
       expect(boxHoursMicroUsd).toBeLessThanOrEqual(T38_BOX_HOURS_CEILING_MICRO_USD);
@@ -820,7 +1034,15 @@ test.todoIf(liveTodoOff())(
       // TYPE the hash first (P7): a chain defect that nulled keyHash would
       // otherwise make the `not.toContain` below pass vacuously.
       expect(typeof driven.keyHash).toBe("string");
-      expect(await listedKeyHashes()).not.toContain(driven.keyHash);
+      // CEILED (T26): a raw `listedKeyHashes()` await is an unbounded HTTP
+      // walk, and a wedged listing here — box still owned, key revocation
+      // unverified — is the runner-timeout abort whose finally-skip leaks
+      // both. The ceiling is the audit's 240 s "post keys" row, named as
+      // T38_KEY_LIST_CEILING_MS. (A listing that comes back TRUNCATED throws
+      // by contract — D6 — which lands in the catch as a held failure, the
+      // correct fail-closed posture, not a spurious green.)
+      const postChainKeyHashes = await awaitWithCeiling(listedKeyHashes(), T38_KEY_LIST_CEILING_MS, "t3.8-post-chain-key-list");
+      expect(postChainKeyHashes).not.toContain(driven.keyHash);
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (EB3): the post-finally verdicts below must render
@@ -893,7 +1115,14 @@ test.todoIf(liveTodoOff())(
               at: "t3.8-cleanup",
               runId,
               expected: "lock left by the chain-failed posture",
-              note: "the cleanup teardown's refusal is the posture working — the chain deliberately left the run lock; the box destroy below is unaffected",
+              // T29: the refusal's OWN error text (already scrubbed by
+              // teardownQuietly) rides the demoted entry, so the round record
+              // shows WHAT refused — a genuine teardown defect (EACCES, a bad
+              // flag, a dead store) arriving in this posture is visible as a
+              // non-lock cause instead of laundering through "expected
+              // posture"; an actual lock refusal reads `run-locked` here.
+              refusal: torn.error,
+              note: "the cleanup teardown's refusal is DEMOTED to expected by posture (record open + lock present) — the refusal text above is what actually refused; the box destroy below is unaffected",
             });
           } else {
             destroyFailures.push(`${runId}: ${torn.error}`);
@@ -933,6 +1162,49 @@ test.todoIf(liveTodoOff())(
           evidence.push({ phase: "key-leak-sweep-failed", ok: false, error: keyProblems[0] });
         }
       }
+      // T36: INVALIDATE the reaper's file when THIS finally actually finished
+      // the recovery the file exists to trigger — box destroyed (the final
+      // listing found nothing this run owns) AND the key revocation verified
+      // (keyProblems empty). The file still naming {runId, vmName, keyHash}
+      // on a round whose cleanup SUCCEEDED would send an out-of-band reaper
+      // after a box and key that no longer exist. On a FULL-green round this
+      // is moot (the workspace rmSync below deletes the file outright); the
+      // tombstone is for the RED-round-with-clean-cleanup posture, where the
+      // workspace is kept for forensics and the file would otherwise live on
+      // armed. An UNMEASURED fleet (finalBoxes undefined) does not earn the
+      // tombstone — no verdict, no claim.
+      if (orphanRecoveryPath !== "" && finalBoxes !== undefined && finalBoxes.length === 0 && keyProblems.length === 0) {
+        try {
+          writeFileSync(
+            orphanRecoveryPath,
+            `${JSON.stringify({ phase: "handled", runId, vmName, note: "box destroyed and key revocation verified by this round's finally — nothing left to reap" })}\n`,
+          );
+          evidence.push({ phase: "orphan-recovery-tombstoned", ok: true, path: orphanRecoveryPath, runId, vmName });
+        } catch (e) {
+          // best-effort by design: a reaper chasing an already-destroyed box
+          // wastes a call, it does not lose resources — recorded, not thrown.
+          evidence.push({
+            phase: "orphan-recovery-tombstoned",
+            ok: false,
+            path: orphanRecoveryPath,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      // T24: the RED-arm workspace-keep entry is pushed BEFORE the evidence
+      // write so it RIDES the serialized payload — the old order pushed it
+      // after `writeEvidenceQuietly` had already stringified, so the entry
+      // never landed in any JSON the round left behind. The refused-write arm
+      // is decided only BY the write itself, and when it fires there IS no
+      // JSON to land in (the write failed); its entry still lands in the
+      // array and on stderr below.
+      if (workspace !== "" && failure !== undefined) {
+        evidence.push({
+          phase: "workspace-kept",
+          workspace,
+          reason: "RED round — forensics kept (bundle + records under runs/)",
+        });
+      }
       const evidencePath = writeEvidenceQuietly(
         "T3.8",
         "df3-8-observe-detached",
@@ -958,15 +1230,14 @@ test.todoIf(liveTodoOff())(
       // round (P6): the rmSync below then skips and the workspace — clone,
       // bundle, records, reaper file included — survives silently, so the
       // note fires whenever the workspace is kept, whatever the posture.
-      if (workspace !== "" && (failure !== undefined || evidencePath === "")) {
+      if (workspace !== "" && failure === undefined && evidencePath === "") {
         evidence.push({
           phase: "workspace-kept",
           workspace,
-          reason:
-            failure !== undefined
-              ? "RED round — forensics kept (bundle + records under runs/)"
-              : "GREEN round but the evidence write was refused — workspace kept (bundle + records under runs/); delete by hand once triaged",
+          reason: "GREEN round but the evidence write was refused — workspace kept (bundle + records under runs/); delete by hand once triaged",
         });
+      }
+      if (workspace !== "" && (failure !== undefined || evidencePath === "")) {
         try {
           process.stderr.write(
             failure !== undefined
@@ -1008,24 +1279,41 @@ test.todoIf(liveTodoOff())(
   // therefore sum identically to T2.8's figures:
   //
   //   preflight          driver.whoami(), one control exec class          120 s
-  //   pre-try keys       listedKeyHashes BEFORE the try (F17 baseline)     240 s
+  //   baseline keys      listedKeyHashes INSIDE the try, first await after
+  //                      preflight (P28's placement; the F17 baseline — the
+  //                      row's old "BEFORE the try" text was wrong, T35).
+  //                      Unwrapped by scope, not oversight: at this point
+  //                      the round owns no box and no key, so a hang costs
+  //                      a dead round, never a leak                   240 s
   //   dispatch verb      T38_DISPATCH_TIMEOUT_MS                          900 s
-  //   positive control   one driver.list (the final-ls arm's proof)       120 s
-  //   scratchClone       awaitWithCeiling T38_CLONE_TIMEOUT_MS (named
-  //                      ceiling; scratchClone's own http.lowSpeed* switch
-  //                      is the in-git backstop on http transports)      180 s
+  //   positive control   one driver.list, CEILED by awaitWithCeiling at
+  //                      T38_LIST_CEILING_MS (T26: a raw driver await has
+  //                      no self-bound; the abort it prevents is the one
+  //                      whose finally-skip leaks the box)              120 s
+  //   scratchClone       180 s PRICED, but not by T38_CLONE_TIMEOUT_MS —
+  //                      that ceiling is DECORATIVE (T30): scratchClone
+  //                      runs its git steps spawnSync, so the promise is
+  //                      already settled when awaitWithCeiling wraps it.
+  //                      What actually bounds this leg: the PRE-DISPATCH
+  //                      http(s)-scheme refusal (an ssh:// fetch ignores
+  //                      git's stall switch) + scratchClone's in-git
+  //                      http.lowSpeed* switch on http transports      180 s
   //   run verb           T38_RUN_VERB_TIMEOUT_MS — the verb EXITS here    180 s
   //   unit liveness      one systemctl show (execTimed 30 s), 1 retry      60 s
   //   marker read        readMarkerTolerant shape, 2 × 10 s (retry arm)    20 s
   //   engine poll        T38_ENGINE_WINDOW_MS — the DEGRADED-round bound
   //                      (a healthy t3 manifest settles in minutes); each
-  //                      tick is one bounded readBoxFile (10 s class)   2 700 s
+  //                      tick is one bounded readBoxFile (10 s class);
+  //                      rejected reads and skip verdicts are countable
+  //                      non-settled ticks (T27), fast-failed at
+  //                      T38_POLL_UNREADABLE_LIMIT consecutive (T32)  2 700 s
   //   sweep verb         T38_SWEEP_VERB_TIMEOUT_MS: enumeration (2 × 10 s
   //                      reads per candidate, one candidate) + ONE chain
   //                      — teardown ~300 s + reverify ~420 s (T5.1's own
   //                      measured ceilings) + margin; NO window term, the
   //                      sweep does not wait (maxTicks 1)                900 s
-  //   post keys          listedKeyHashes (revoke verify)                  240 s
+  //   post keys          listedKeyHashes (revoke verify), CEILED at
+  //                      T38_KEY_LIST_CEILING_MS (T26)                   240 s
   //   local reads        record/bundle/rev-parse, local                     ~0 s
   //                                                            body ────────
   //                                                             5 660 s
@@ -1045,7 +1333,9 @@ test.todoIf(liveTodoOff())(
   //
   // Hence T38_RUNNER_TIMEOUT_MS (8 500 000 ms — 330 s of margin over the
   // audit). Whoever raises an inner ceiling (the engine window, the sweep
-  // verb, a cleanup step) must re-add it HERE, and the HEADER's box-time line
+  // verb, a cleanup step) must re-add it HERE, in T38_BOX_PLANNED_WINDOW_MS
+  // (the box-hours ceiling derives from these rows, T31), and the HEADER's
+  // box-time line
   // with it.
   T38_RUNNER_TIMEOUT_MS,
 );
