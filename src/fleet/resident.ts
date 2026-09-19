@@ -394,13 +394,20 @@ function removeLeaf(dir: string): void {
 
 /**
  * How far below the bound `memory.peak` may sit on a genuine own-limit kill: one
- * failing allocation's worth, since the charge that triggers the OOM is never
- * added to `memory.current`. Sized to a THP fault (`HPAGE_PMD_SIZE`, 2 MiB on
- * x86-64 and on arm64 with the 4 KiB granule — what the in-box hosts run),
- * which is the only ROUTINE multi-page charge on this path;
- * `MEMCG_CHARGE_BATCH` is 256 KiB. hugetlb is not charged through `memory.max`
- * at all without its own controller, and a large kmalloc is capped well under
- * this by `KMALLOC_MAX_CACHE_SIZE`.
+ * failing charge's worth, since the charge that triggers the OOM is rolled back
+ * before it reaches the watermark (`page_counter_try_charge()` subtracts and
+ * `goto failed` ahead of the `WRITE_ONCE(c->watermark, new)`).
+ *
+ * SIZED TO THE BATCH PATH, not to a THP fault — corrected after review found
+ * the original rationale backwards. `mem_cgroup_oom()` opens with
+ * `if (order > PAGE_ALLOC_COSTLY_ORDER) return OOM_SKIPPED;` BEFORE it raises
+ * `MEMCG_OOM`, so a failed THP charge (order 9) never produces the `oom` event
+ * this predicate requires, and cannot be the failing charge here at all. The
+ * charges that CAN raise it are order <= 3 and the `MEMCG_CHARGE_BATCH` path
+ * (64 pages, 256 KiB). 2 MiB is therefore ~8x more headroom than the
+ * implication needs — kept because the conjunct is a consistency check rather
+ * than a discriminator (see `readLeaf`), so the extra margin costs nothing and
+ * shrinking it would only move toward false negatives.
  *
  * DO NOT GROW IT "to be safe". This is the one direction in which the peak
  * conjunct can be DISARMED: at 2 MiB against a 64 MiB bound it admits peaks
@@ -482,27 +489,65 @@ function readLeaf(dir: string, boundBytes?: number): { peakBytes: number; oomKil
     // exactly when the box is thrashing, and the near-bound resident is the
     // likeliest victim.
     //
-    // The discriminator is the high-water mark: an own-limit kill cannot happen
-    // below the limit, so `memory.peak` must have REACHED the bound, while a
-    // global victim's peak sits under it. Applied only when both figures are
-    // actually available — a pre-5.19 kernel has no `memory.peak` and reads 0
-    // here, and suppressing a real kill on a missing measurement would trade
-    // this false positive for a false negative, which is the worse direction.
+    // WHAT NARROWS IT IS `oom`, NOT THE PEAK — corrected here because an earlier
+    // version of this comment credited the peak floor with work it cannot do,
+    // and that claim was repeated downstream before it was caught. `oom > 0` is
+    // what excludes the plain global victim: `oom` is raised only in
+    // `mem_cgroup_oom()`, on the memcg whose OWN `memory.max` a charge was about
+    // to exceed, so a resident picked by a system-wide OOM while nowhere near
+    // its bound reads `oom` 0 and the predicate is already false without any
+    // peak comparison.
     //
-    // The peak comparison carries SLACK, and the slack is not defensive
-    // padding: `memory.peak` tracks `memory.current`, and the charge that
-    // TRIGGERS the OOM is the one that FAILS, so it is never added to
-    // `current`. At the moment of the kill, usage sits below `memory.max` by up
-    // to the size of the failing allocation — ordinary page charges come in
-    // `MEMCG_CHARGE_BATCH` units (64 pages, 256 KiB), but a THP fault charges
-    // 2 MiB in one go. A strict `>=` therefore reports a genuine own-limit kill
-    // as a routine degrade whenever the last charge was large, which is the
-    // direction the missing-measurement escape above exists to avoid. The false
-    // positive this conjunct targets is a peak sitting FAR below the bound (a
-    // global victim picked while nowhere near its own limit), not one 2 MiB
-    // short. (`boundBytes` is what we WROTE; the kernel `PAGE_ALIGN`s
-    // `memory.max` upward, which moves the real limit away from the peak — the
-    // safe direction, so no adjustment is needed for it.)
+    // The peak floor is a CONSISTENCY CHECK, not a discriminator, and on this
+    // topology it is strictly implied: `oom > 0` means the failing charge was
+    // about to cross the limit, that charge is never added to `memory.current`,
+    // and `memory.peak` is a monotonic high-water mark we never reset (the reset
+    // API is 6.11+). So `oom > 0` ⟹ `peak >= bound - <failing charge>`, which is
+    // exactly the slack below. It is kept because it is free — one read we
+    // already do — because it catches a self-contradictory reading, and because
+    // it stops being implied the moment this leaf gains children: `memory.events`
+    // aggregates UPWARD, so a child with a smaller limit could fire `oom` far
+    // below THIS bound, and then the floor is load-bearing.
+    //
+    // Applied only when both figures are actually available — a pre-5.19 kernel
+    // has no `memory.peak` and reads 0 here, and suppressing a real kill on a
+    // missing measurement would trade a false positive for a false negative,
+    // which is the worse direction.
+    //
+    // THE RESIDUAL THIS DOES NOT CLOSE, stated because it is irreducible from
+    // this interface and the next reader deserves to find it rather than
+    // rediscover it: a global OOM that kills a resident whose leaf had ALREADY
+    // registered its own `oom` event and survived it (a graceful `-ENOMEM`)
+    // presents identically to an own-limit kill — `oom>=1, oom_kill>=1,
+    // oom_group_kill>=1, peak≈bound, current≈0`. No readable cgroup v2 file
+    // separates them: `memory.events.local` equals `memory.events` on a childless
+    // leaf, and `oom_group_kill` is credited to whichever ancestor sets
+    // `oom.group`, which for a global OOM is still this leaf. The one true
+    // attribution signal is the kernel's own OOM report — `oom_memcg=` versus
+    // `global_oom` in `mem_cgroup_print_oom_context()` — and it is unreachable
+    // for `User=exedev`: `/dev/kmsg` and `syslog(2)` need `CAP_SYSLOG` under
+    // `kernel.dmesg_restrict=1` (the Debian/Ubuntu default), and journald ACLs
+    // the kernel journal to groups a service user is not in. Buying it costs an
+    // `AmbientCapabilities=CAP_SYSLOG` on the unit plus a log-parsing and
+    // time-correlation path, to remove a residual whose cost is a mislabel.
+    //
+    // The peak comparison carries SLACK because the charge that TRIGGERS the OOM
+    // is the one that FAILS: `page_counter_try_charge()` rolls it back and
+    // `goto failed` BEFORE the `WRITE_ONCE(c->watermark, new)`, so it never
+    // reaches the high-water mark. Committed usage therefore sits below the
+    // limit by up to that charge's size at the moment of the event.
+    //
+    // SIZED TO THE BATCH PATH (64 pages, 256 KiB) and order <= 3 — NOT to a THP
+    // fault, which an earlier version of this comment claimed. `mem_cgroup_oom()`
+    // returns `OOM_SKIPPED` for `order > PAGE_ALLOC_COSTLY_ORDER` BEFORE raising
+    // `MEMCG_OOM`, so a failed THP charge never produces the `oom` event this
+    // predicate requires and cannot be the failing charge here. 2 MiB is thus
+    // ~8x more headroom than the implication needs; see OOM_PEAK_SLACK_BYTES for
+    // why it is kept at that value anyway.
+    //
+    // (`boundBytes` is what we WROTE; the kernel `PAGE_ALIGN`s `memory.max`
+    // upward, which moves the real limit away from the peak — the safe
+    // direction, so no adjustment is needed for it.)
     const ownLimit = counter("oom") > 0 && (counter("oom_kill") > 0 || counter("oom_group_kill") > 0);
     const reachedBound =
       peakBytes === 0 || boundBytes === undefined || peakBytes >= boundBytes - OOM_PEAK_SLACK_BYTES;

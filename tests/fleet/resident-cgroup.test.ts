@@ -1039,7 +1039,10 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     // 1) sets both, and nothing in them says the two events are unrelated. That
     // pairing is not exotic — global OOM happens exactly when the box is
     // thrashing, and the near-bound resident is the likeliest victim. The third
-    // fact closes it: an own-limit kill cannot happen BELOW the limit, so
+    // fact NARROWS it — and, per ruling 9, is implied by `oom` rather than
+    // independent of it, so what this row actually pins is the `oom`-driven
+    // rejection with the floor as a consistency check on top: an own-limit kill
+    // cannot happen BELOW the limit, so
     // `memory.peak` must have reached the bound, and a global victim's sits
     // under it. Here the peak is 4096 against a 64 MiB bound.
     const v = await verdictFor("low 0\nhigh 5\nmax 9\noom 1\noom_kill 1\noom_group_kill 0\n", {
@@ -1054,8 +1057,11 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     // The peak conjunct needs slack, and the slack is not padding: `memory.peak`
     // tracks `memory.current`, and the charge that TRIGGERS the OOM is the one
     // that FAILS — it is never added to `current`. At the kill, usage sits below
-    // `memory.max` by up to the failing allocation, which for a THP fault is
-    // 2 MiB. A strict `>=` reports that genuine kill as a routine degrade.
+    // `memory.max` by up to the failing charge — the `MEMCG_CHARGE_BATCH` path
+    // (256 KiB) or order <= 3, NOT a THP fault, which cannot raise `oom` at all
+    // (`mem_cgroup_oom()` skips `order > PAGE_ALLOC_COSTLY_ORDER` before the
+    // event). The constant stays 2 MiB; this row pins the slack's EXISTENCE at
+    // the shipped value, not its derivation. A strict `>=` reports that genuine kill as a routine degrade.
     // Here the peak is exactly `BOUND - 2 MiB`.
     const v = await verdictFor("low 0\nhigh 8\nmax 12\noom 1\noom_kill 1\noom_group_kill 1\n", {
       signalDeath: true,

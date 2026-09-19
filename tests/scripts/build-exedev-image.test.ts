@@ -1360,7 +1360,7 @@ describe("buildIdFileInputs", () => {
       // branch tree only; the merge's publish + adoption ritual re-pins the
       // IMAGE pair, and this literal rides that same ritual.
       //
-      // 297f1580: moved from b3c30d0c by DF3.6b. FOUR walked
+      // 2d63fa93: moved from b3c30d0c by DF3.6b. FOUR walked
       // tracked inputs — `oci/exedev/systemd/qds-run@.service`
       // (+`Delegate=memory`), `src/fleet/resident.ts` (the whole cgroup
       // mechanism), `src/phase-engine/steering.ts` (the OOM writer) and
@@ -1388,7 +1388,7 @@ describe("buildIdFileInputs", () => {
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "297f1580dc04f3051c717d6316a026e85a8ca0f130c0d1437eeff6dbb27e65c1",
+      "2d63fa93360ea098c964bbf44cf575eafef895450cda5a733316370081a07312",
     );
   });
 });

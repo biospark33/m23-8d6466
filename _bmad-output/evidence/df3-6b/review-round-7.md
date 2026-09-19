@@ -42,7 +42,8 @@ oomKilled = oom > 0                                // this leaf's OWN limit fire
 path, never for a global or an ancestor's OOM. `oom_kill`/`oom_group_kill` says *something in it was
 killed*. Neither alone is the predicate; each alone shipped a false verdict here. **Nor are the two
 together sufficient** — they are independent counters, so a graceful `-ENOMEM` early paired with a
-global kill later sets both, which is what the peak floor exists to separate (finding 1 of the two
+global kill later sets both — **and the peak floor does NOT separate them, contrary to what this
+section originally claimed; round 9 below retracts it** (finding 1 of the two
 follow-up rounds below; the floor carries 2 MiB of slack because the charge that TRIGGERS the OOM is
 the one that FAILS and is never added to `memory.current`). The process's exit
 shape is **deliberately not consulted**: it is a proxy for *was it killed* that cannot say *by whom*,
@@ -77,7 +78,7 @@ reading — each reverted the predicate to a single counter and confirmed which 
 | 3 | MED | **The shared fixture's comment stated the opposite of the shipped rule** — "the verdict requires BOTH the counters AND an actual signal death" — sitting in the file every future OOM test reads, where it would talk a correction #5 straight back into the exit-shape conjunction. | Rewritten to say the knob does not affect the verdict, and why. |
 | 4 | LOW | Two poll loops could fall through without their staged file and pass vacuously; `readLeaf`'s jsdoc still named `oom_kill` as "the kill itself"; `stop()` carried a stale duplicated comment ending "so `killed` is true" for a parameter that no longer exists. | All fixed. |
 
-| 5 | MED | **The peak conjunct, as first written, introduced a MISSED kill.** It required `peak >= bound` exactly. `memory.peak` tracks `memory.current`, and the charge that triggers the OOM is the one that FAILS — never added to `current` — so at the kill usage sits below `memory.max` by up to the failing allocation: 256 KiB for an ordinary batched page charge, **2 MiB for a THP fault**, more for a large kmalloc. Against the 64 MiB fixture bound that is a ~3% shortfall read as `false`: a genuine kernel OOM kill of the resident's own bound reported as a routine degrade, which is the exact direction the missing-measurement escape exists to avoid, and the ratio worsens on smaller bounds. | The comparison carries 2 MiB of slack, sized to a THP fault and documented as part of the rule rather than as padding — the false positive being targeted is a peak sitting FAR below the bound, not one 2 MiB short. New test row at `peak = bound − 2 MiB` with a real kill's counters, expecting `true`, which fails against the strict comparison. Also noted in the code: `boundBytes` is what we WROTE and the kernel `PAGE_ALIGN`s `memory.max` upward, moving the real limit away from the peak — the safe direction, so no adjustment. |
+| 5 | MED | **The peak conjunct, as first written, introduced a MISSED kill.** It required `peak >= bound` exactly. `memory.peak` tracks `memory.current`, and the charge that triggers the OOM is the one that FAILS — never added to `current` — so at the kill usage sits below `memory.max` by up to the failing allocation: 256 KiB for an ordinary batched page charge, **2 MiB for a THP fault**, more for a large kmalloc. Against the 64 MiB fixture bound that is a ~3% shortfall read as `false`: a genuine kernel OOM kill of the resident's own bound reported as a routine degrade, which is the exact direction the missing-measurement escape exists to avoid, and the ratio worsens on smaller bounds. | The comparison carries 2 MiB of slack, documented as part of the rule rather than as padding (**the "sized to a THP fault" derivation given here was WRONG — see round 9: a failed THP charge cannot raise `oom` at all, so the real case is the 256 KiB batch path and the constant is ~8x more headroom than needed**) — the false positive being targeted is a peak sitting FAR below the bound, not one 2 MiB short. New test row at `peak = bound − 2 MiB` with a real kill's counters, expecting `true`, which fails against the strict comparison. Also noted in the code: `boundBytes` is what we WROTE and the kernel `PAGE_ALIGN`s `memory.max` upward, moving the real limit away from the peak — the safe direction, so no adjustment. |
 
 Both reviewers confirmed the conjunction misses no real own-limit kill: `oom` is raised on every
 own-limit path (the charge path, the page-fault deferred path, and `memory_max_write` when the limit
@@ -130,3 +131,71 @@ left standing in the files the next reader goes to for history.
 with the rejected form named and quarantined; rounds 1, 5 and 6 carry `**SUPERSEDED by round 7**`
 notes stating what actually ships; and ruling 8's door list is now enumerated so its "five times"
 count is self-evidencing rather than asserted.
+
+
+## Round 9 — CodeRabbit's Major on attribution, and the correction it forced
+
+**Date:** 2026-09-19 · One finding, accepted; its two proposed remedies verified unavailable; and it
+exposed a false claim this very report had made.
+
+**The finding.** "A graceful own-limit allocation failure can increment `oom` and leave
+`memory.peak` near the bound without killing pi. If a later global OOM kills pi, `oom_kill` also
+increments because it counts kills by any OOM killer. All three factors then pass, although
+`memory.max` did not kill the process. Classify this state as ambiguous, or add an attribution
+signal." **Correct, and it identifies a state the peak floor was claimed to close.**
+
+**What two independent kernel-source reviews established:**
+
+1. **The two states are byte-identical in every readable file.** Both terminate as `oom>=1,
+   `oom_kill>=1`, `oom_group_kill>=1`, `peak≈bound`, `current≈0`. `memory.events.local` equals
+   `memory.events` on a childless leaf (`memcg_memory_event()` propagates UPWARD only), and
+   `oom_group_kill` is credited by `mem_cgroup_get_oom_group()` to the highest ancestor setting
+   `oom.group` — which for a global OOM, with no ancestor setting it, is still this leaf. So
+   **"classify as ambiguous" is not implementable**: there is no field whose value differs, and the
+   classification would swallow every true kill and destroy AC1.
+2. **The peak floor never discriminated anything here.** `oom > 0` means the failing charge was
+   about to cross the limit; that charge is never added to `memory.current`; `memory.peak` is
+   monotonic and never reset (reset API is 6.11+). So `oom > 0` **implies** `peak >= bound - slack`.
+   The narrowing was always done by `oom`, which excludes the plain global victim. **This report's
+   round-7 follow-up finding 1 claimed the third fact "closes it"; that was wrong**, and the wrong
+   version reached the story, the code comment and a PR comment before it was caught.
+3. **The one true attribution signal exists and is not reachable.** `mem_cgroup_print_oom_context()`
+   logs `oom_memcg=<path>` for a memcg-limit kill versus `global_oom` for a global one. Unreachable
+   for `User=exedev`: `CAP_SYSLOG` is required under `kernel.dmesg_restrict=1` (Debian/Ubuntu
+   default — the node's permissive mode bits mislead; the capability check is what refuses), and
+   journald ACLs the kernel journal to groups a service user is not in. Buying it costs an ambient
+   capability plus a log-parsing and time-correlation path, to remove a residual whose cost is a
+   mislabel. A `poll()` watcher on `memory.events` was also rejected: kernfs notifications coalesce
+   when the reader has not drained, so on a thrashing box — the only condition where this arises —
+   it wakes with both counters already moved and reports a true kill, failing hardest in the case it
+   exists to catch.
+
+**Blast radius, traced through the code rather than assumed.** A false positive writes
+`status:"stopped"` / `exitStatus:"overflow"` / one `watchdog_kill` row and stops the spawn; a false
+negative writes `status:"degraded"`, no row, and the run-down refresh fills `exitStatus` from the
+process probe as `"transient"`. **Both are terminal for the resident** — the status gate is
+`telemetry.status !== "active"` and nothing after construction ever writes `"active"` back, so
+`"degraded"` ends participation exactly as `"stopped"` does. Neither moves a phase, a gate, a budget
+or the exit code. The difference is evidentiary, and the cost falls on D4's demotion count. A false
+negative is not evidence-free either: the fleet `resident_cgroup` line still carries `rssPeakBytes`,
+`residentRssBytes` and `oomKilled:false` on fd-2.
+
+**Two facts that make the residual acceptable rather than merely tolerated.** `oomKilled` is a
+LABEL, never a control — it gates no allocation and admits no unbounded call, so a mislabel costs
+reporting accuracy and not containment; and in the residual state `oom >= 1` is TRUE and
+unforgeable, so the row is over-specific rather than fabricated. Stopping the resident is the
+correct action for the fact that IS proven; only the identity of the final killer is not.
+
+**The remedy would also cost more than the residual.** To be worth anything an "ambiguous" state has
+to be journal-readable, which means widening two closed unions neither owned by this story —
+`ResidentStatus` (DF3.3's AC5 forbids a fourth value) and `ResidentTripwire["cause"]` (DF3.6a's) —
+and at the gate it still resolves to one of the two existing dispositions. It adds a name, not
+information.
+
+**Disposition: finding ACCEPTED, remedies DECLINED with reasons, residual recorded as ruling 9.**
+The peak conjunct is kept — it is free, it catches a self-contradictory reading, and it stops being
+implied the moment the leaf gains children with smaller limits. The comment and the story now call
+it a consistency check rather than the discriminator, and state the residual precisely: a global OOM
+that kills a resident whose leaf had **already registered its own `oom` event and survived it**. The
+precondition is narrower than "a resident near its bound", and that distinction is stated so the
+residual's reach is not overread.
