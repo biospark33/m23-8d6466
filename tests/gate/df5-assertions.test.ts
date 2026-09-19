@@ -373,11 +373,17 @@ describe("DF5.4-P1 preflight — run of record", () => {
     await expectSkip("DF5.4-P1", newScratch(), "not readable");
   });
 
-  test("mutant: unreadable record (mode 000) → skip naming the path", async () => {
-    const dir = scratchWithRecord(() => {});
-    fs.chmodSync(path.join(dir, `${RUN_ID}.json`), 0o000);
-    await expectSkip("DF5.4-P1", dir, `${RUN_ID}.json`);
-  });
+  // Root bypasses permission checks — mode 000 reads fine as UID 0, so the
+  // skip arm proves nothing there. Root lanes must still run this suite as a
+  // non-root user or this arm ships uncovered.
+  test.skipIf(process.getuid?.() === 0)(
+    "mutant: unreadable record (mode 000) → skip naming the path",
+    async () => {
+      const dir = scratchWithRecord(() => {});
+      fs.chmodSync(path.join(dir, `${RUN_ID}.json`), 0o000);
+      await expectSkip("DF5.4-P1", dir, `${RUN_ID}.json`);
+    },
+  );
 
   test("mutant: unparseable record → fail (present and readable, not JSON)", async () => {
     const dir = newScratch();
