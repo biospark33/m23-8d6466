@@ -43,6 +43,7 @@ import {
 } from "../../src/gate/assertions/df5-execution.ts";
 import {
   readJsonEvidence,
+  readJsonEvidenceDiagnosed,
   scanNdjson,
   selectBoundReport,
   strictBeforeMs,
@@ -253,6 +254,34 @@ describe("verdict lib — readJsonEvidence returns undefined on any failure", ()
   });
 });
 
+describe("readJsonEvidenceDiagnosed — the failure-MODE contract", () => {
+  const tmp2 = mkdtempSync(join(os.tmpdir(), "df5-verdict-diagnosed-"));
+  afterAll(() => rmSync(tmp2, { recursive: true, force: true }));
+
+  test("parse failure carries FIXED text, never the parser's message (which can echo file bytes)", () => {
+    // The bytes embed a token-shaped value; a raw JSON.parse message could
+    // quote fragments of it, so the parse arm must not forward the message.
+    const file = path.join(tmp2, "torn.json");
+    fs.writeFileSync(file, '{"runId": "run-1", "note": "ghp_0123456789abcdefghij",}', "utf8");
+    const read = readJsonEvidenceDiagnosed(file);
+    expect(read.ok).toBe(false);
+    if (!read.ok) {
+      expect(read.kind).toBe("parse");
+      expect(read.error).toBe("bytes are not a JSON document");
+      expect(read.error).not.toContain("ghp_");
+    }
+  });
+
+  test("read failure keeps the raw fs message (syscall + path — the path is deliberate provenance)", () => {
+    const read = readJsonEvidenceDiagnosed(path.join(tmp2, "does-not-exist.json"));
+    expect(read.ok).toBe(false);
+    if (!read.ok) {
+      expect(read.kind).toBe("read");
+      expect(read.error).toContain("does-not-exist.json");
+    }
+  });
+});
+
 // ===========================================================================
 // df5-execution (P1, C1-C4) - leaf-1.1.3
 // ===========================================================================
@@ -424,6 +453,15 @@ describe("DF5.4-P1 preflight — run of record", () => {
     const dir = newScratch();
     fs.writeFileSync(path.join(dir, `${RUN_ID}.json`), JSON.stringify({ runId: 42 }), "utf8");
     await expectFail("DF5.4-P1", dir, "runId=");
+  });
+
+  test("mutant: record names a DIFFERENT runId → fail naming both ids (identity, not mere presence)", async () => {
+    const dir = newScratch();
+    fs.writeFileSync(path.join(dir, `${RUN_ID}.json`), JSON.stringify({ runId: "qds-other-run" }), "utf8");
+    await expectFail("DF5.4-P1", dir, `not this gate's ${JSON.stringify(RUN_ID)}`);
+    const dir2 = newScratch();
+    fs.writeFileSync(path.join(dir2, `${RUN_ID}.json`), JSON.stringify({ runId: "qds-other-run" }), "utf8");
+    await expectFail("DF5.4-P1", dir2, "qds-other-run");
   });
 });
 
@@ -1492,6 +1530,27 @@ describe("boundStderrTail / scrubSecrets — INV-GATE-2 redaction", () => {
     expect(scrubbed).toContain("[redacted]");
   });
 
+  test("Authorization Basic credentials — including short ones — never survive the scrub", () => {
+    const scrubbed = scrubSecrets("fatal: Authentication failed for 'Authorization: Basic dXNlcjpwYXNz' — see log");
+    expect(scrubbed).not.toContain("dXNlcjpwYXNz");
+    expect(scrubbed).toContain("[redacted]");
+    // Short credential (6 chars) with the scheme: the no-floor Basic shape.
+    expect(scrubSecrets("Authorization: Basic abc123")).not.toContain("abc123");
+    // Case-insensitive scheme/header spelling.
+    expect(scrubSecrets("authorization: basic abc123")).toContain("[redacted]");
+  });
+
+  test("quoted token/authToken JSON field values redact; ordinary token-prefixed keys do not", () => {
+    const scrubbed = scrubSecrets('{"authToken":"hunter2-secret","token":"gh-credential-99"} tail');
+    expect(scrubbed).not.toContain("hunter2-secret");
+    expect(scrubbed).not.toContain("gh-credential-99");
+    // The whole field (key quotes included) collapses to one [redacted].
+    expect(scrubbed).toBe("{[redacted],[redacted]} tail");
+    // A field whose name merely STARTS with a keyed name is untouched.
+    const benign = '{"tokenCount": 12, "secretSauce": "not-a-secret"}';
+    expect(scrubSecrets(benign)).toBe(benign);
+  });
+
   test("ordinary diagnostics pass through untouched", () => {
     const text = "audit-store-absent: no audit store at /tmp/x/audit.db";
     expect(scrubSecrets(text)).toBe(text);
@@ -1696,6 +1755,26 @@ describe("DF5.4-C10 — read-only ledger + separate spend meter", () => {
     const outcome = await c10!.check();
     expect(outcome.pass).toBe(false);
     expect(outcome.detail).toContain("record lacks numeric spendMicroUsd");
+  }, 30_000);
+
+  test("non-finite spendMicroUsd / admittedCeilingMicroUsd: fail — typeof-number NaN/Infinity never ride the sign checks to green", async () => {
+    // JSON cannot spell NaN, and stringify(NaN) would coerce to null, so the
+    // mutant rides in as an overflow literal: 1e999 parses to Infinity.
+    const raw = (spend: string, ceiling: string): string =>
+      `{"runId": ${JSON.stringify(RUN_ID)}, "spendMicroUsd": ${spend}, "extensions": {"budget": {"admittedCeilingMicroUsd": ${ceiling}}}}`;
+    const arms: Array<[string, string, string]> = [
+      ["1e999", "50000", "Infinity"], // infinite spend
+      ["2184", "1e999", "Infinity"], // infinite ceiling — passes `ceiling <= 0`, must still fail
+    ];
+    for (const [spend, ceiling, shown] of arms) {
+      const deps = makeScratch();
+      fs.writeFileSync(join(deps.runsDir, `${RUN_ID}.json`), raw(spend, ceiling), "utf8");
+      const [c10] = df5AccountingAssertions(deps).filter((a) => a.id === "DF5.4-C10");
+      const outcome = await c10!.check();
+      expect(outcome.pass, `spend=${spend} ceiling=${ceiling}`).toBe(false);
+      expect(outcome.detail, `spend=${spend} ceiling=${ceiling}`).toContain("non-finite");
+      expect(outcome.detail, `spend=${spend} ceiling=${ceiling}`).toContain(shown);
+    }
   }, 30_000);
 });
 

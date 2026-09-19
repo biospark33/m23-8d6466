@@ -121,11 +121,13 @@ function statuses(report: GateReport): Record<string, string> {
   return Object.fromEntries(report.assertions.map((r) => [r.id, r.status]));
 }
 
-afterAll(() => {
+afterAll(async () => {
   // Kill stragglers BEFORE the scratch rmSync: a hung driver (bun:test
   // timeouts do not kill the child) survives cleanup and its mkdirSync
-  // recreates the deleted dir, littering /tmp. Residual window: a child the
-  // sweep's own awaits admit during afterAll escapes this sweep.
+  // recreates the deleted dir, littering /tmp. Then WAIT for each child to
+  // actually exit before the sweep — kill() returns before the process is
+  // reaped, so a still-unwinding child could race the rmSync. Bounded at 2 s
+  // per child so one that ignores SIGTERM cannot hang the suite.
   for (const child of children) {
     try {
       child.kill();
@@ -133,6 +135,9 @@ afterAll(() => {
       // already exited — nothing to kill
     }
   }
+  await Promise.allSettled(
+    children.map((child) => Promise.race([child.exited, new Promise((resolve) => setTimeout(resolve, 2_000))])),
+  );
   for (const s of scratches) fs.rmSync(s.root, { recursive: true, force: true });
 });
 
@@ -514,7 +519,9 @@ describe("fixture hygiene and the exit-2 fatal path", () => {
     expect(r.stderr).toContain("df5-lights-on-gate: error");
     expect(r.stderr).not.toContain("df5-lights-on-gate: usage");
     expect(r.stderr).not.toContain("try --help");
-    expect(r.stderr).toContain("no verdict was claimed and no report was left at the --report path");
+    expect(r.stderr).toContain("no verdict was claimed and no report was written for this request (request id df54-");
+    expect(r.stderr).toContain("remains and is STALE");
+    expect(r.stderr).not.toContain("no report was left at the --report path");
     expect(fs.existsSync(badReport)).toBe(false);
   }, 120_000);
 

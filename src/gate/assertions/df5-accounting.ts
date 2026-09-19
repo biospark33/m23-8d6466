@@ -144,6 +144,14 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /AKIA[0-9A-Z]{16}/g,
   /Bearer\s+[A-Za-z0-9._-]{16,}/gi,
   /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // HTTP Basic credentials: the base64 blob after the scheme, no 16-char
+  // floor — a short user:pass credential is real, and the scheme prefix in
+  // the match means the redaction reads as a redacted header, not noise.
+  /Authorization:\s*Basic\s+[A-Za-z0-9+/=]{6,}/gi,
+  // Quoted token-ish JSON field values (gh/git error text can echo a config
+  // line): the FIELD NAME is part of the match, so only quoted-string values
+  // of these keys redact — ordinary diagnostics never trip the shape.
+  /"(?:authToken|apiToken|accessToken|access_token|token|apiKey|api_key|secret|password)"\s*:\s*"[^"]{4,}"/gi,
 ];
 
 export function scrubSecrets(text: string): string {
@@ -279,6 +287,19 @@ async function checkAuditChain(deps: Df5AccountingDeps): Promise<GateCheckOutcom
   };
 }
 
+/** Renders a value that failed the finite-number check: numbers by value (so
+ * NaN / Infinity are visible in the detail), strings truncated and quoted,
+ * everything else by type — never a content dump. */
+function showNumberish(v: unknown): string {
+  if (typeof v === "number") return String(v);
+  if (typeof v === "string") return `"${v.slice(0, 40)}"`;
+  if (v === undefined) return "absent";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  if (typeof v === "object") return "object";
+  return typeof v;
+}
+
 // ---------------------------------------------------------------------------
 // DF5.4-C10
 // ---------------------------------------------------------------------------
@@ -331,8 +352,14 @@ async function checkCostLedger(deps: Df5AccountingDeps): Promise<GateCheckOutcom
   }
   const spend = record.spendMicroUsd;
   const ceiling = record.extensions?.budget?.admittedCeilingMicroUsd;
-  if (typeof spend !== "number" || typeof ceiling !== "number") {
-    failures.push("record lacks numeric spendMicroUsd / extensions.budget.admittedCeilingMicroUsd");
+  // typeof alone is not enough: NaN passes it, and every NaN comparison is
+  // false, so a NaN spend/ceiling would ride every sign check to green;
+  // ±Infinity does the same (Infinity > 0, Infinity never exceeded). Only
+  // finite numbers reach the spend-vs-ceiling comparison.
+  if (typeof spend !== "number" || !Number.isFinite(spend) || typeof ceiling !== "number" || !Number.isFinite(ceiling)) {
+    failures.push(
+      `record lacks numeric spendMicroUsd / extensions.budget.admittedCeilingMicroUsd (or a value is non-finite: got ${showNumberish(spend)} / ${showNumberish(ceiling)})`,
+    );
   } else if (spend < 0 || ceiling <= 0) {
     failures.push(
       `record spendMicroUsd ${spend} µ$ / admittedCeilingMicroUsd ${ceiling} µ$ (expected spend >= 0 and ceiling > 0 — INV-GATE-5 positive assertion)`,

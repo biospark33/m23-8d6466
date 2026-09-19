@@ -6,7 +6,9 @@
  * → team → gates → bundle → host-side re-verify → PR with audit chain and
  * cost ledger"):
  *
- *   P1  preflight  — the run of record exists, is readable, names a runId            [DF5.4]
+ *   P1  preflight  — the run of record exists, is readable, names THIS
+ *                    gate's runId (a record naming a different run is misfiled
+ *                    evidence, red at preflight)                              [DF5.4]
  *   C1  channel    — requestId + extensions.budget admission evidence                [DF3.1/DF2.8]
  *   C2  fleet      — created, filled at a pinned SHA, setup gate green (negated
  *                    extensions.gate + closedAt + commitSha), approved, spent        [DF3.1/DF2.2/DF2.5]
@@ -33,8 +35,10 @@
  * stderr; then the per-clause verdict table on stdout terminating
  * `DF_GATE: PASS|FAIL`. Exit 0 = PASS, 1 = FAIL, 2 = fatal — and exit 2 is
  * bidirectional: no verdict line ever precedes it (the report is on disk
- * before any PASS reaches stderr), and it always leaves nothing at --report
- * (the tmp+rename write cannot strand truncated JSON there).
+ * before any PASS reaches stderr), and it leaves nothing NEW at --report
+ * (the tmp+rename write cannot strand truncated JSON there); an earlier
+ * invocation's report, if one exists at the path, simply remains — stale,
+ * never this run's verdict.
  */
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -275,11 +279,17 @@ function writeReportAtomically(reportPath: string, body: string): void {
  *  the exit-2 label says so. */
 let flagsValidated = false;
 
+/** The correlation id minted for THIS invocation — hoisted so the exit-2 catch
+ *  can stamp it on the fatal remediation after the write failed. Undefined
+ *  only before main mints it (the usage phase, which uses the other message). */
+let currentRequestId: string | undefined;
+
 // dp:ok (main) — the import.meta.main caller wraps main in the exit-2 catch; a throw here is a fatal fault, never a silent crash.
 async function main(): Promise<number> {
   const args = parseArgs(Bun.argv.slice(2));
   flagsValidated = true;
   const requestId = mintRequestId();
+  currentRequestId = requestId;
   const assertions = buildAssertions(args);
 
   const startedAt = Date.now();
@@ -361,17 +371,23 @@ if (import.meta.main) {
   try {
     await main();
   } catch (e) {
-    // A fatal concludes nothing — exit 2, nothing left at --report, no verdict
-    // claimed. The phase decides the label: a bad flag is the caller's typo
-    // ("usage … try --help"); once the flags validate, the same fault is the
-    // environment (locked store, full disk, budget) and gets an honest
-    // remediation instead of a pointer back at --help.
+    // A fatal concludes nothing — exit 2, no report written FOR THIS REQUEST,
+    // no verdict claimed. The phase decides the label: a bad flag is the
+    // caller's typo ("usage … try --help"); once the flags validate, the same
+    // fault is the environment (locked store, full disk, budget) and gets an
+    // honest remediation instead of a pointer back at --help. The message
+    // names this request's id and warns that an EARLIER report at the path,
+    // if any, is stale — the tmp+rename write leaves nothing new, but it
+    // cannot reach back and remove a previous run's file.
     const message = e instanceof Error ? e.message : String(e);
     exitWithFailure(
       flagsValidated ? "df5-lights-on-gate: error" : "df5-lights-on-gate: usage",
       2,
       flagsValidated
-        ? [message, "no verdict was claimed and no report was left at the --report path; fix the named fault, then re-run"]
+        ? [
+            message,
+            `no verdict was claimed and no report was written for this request${currentRequestId ? ` (request id ${currentRequestId})` : ""}; an earlier report left at the --report path by a previous run, if any, remains and is STALE — fix the named fault, then re-run`,
+          ]
         : [message, "try --help"],
     );
   }

@@ -163,8 +163,13 @@ export function readJsonEvidence(file: string): unknown | undefined {
  * Same read+parse as `readJsonEvidence`, but callers that phrase their detail
  * from the failure MODE get it: a read failure (the file vanished, chmoded or
  * became unreadable between an existence check and the read) is a different
- * sentence than a parse failure (bytes arrived but are not JSON). Pure
- * additive sibling — `readJsonEvidence` and its callers are untouched.
+ * sentence than a parse failure (bytes arrived but are not JSON). The read
+ * arm keeps the raw fs message (syscall + path — the path is the operator's
+ * own evidence location, deliberately named in provenance); the parse arm is
+ * FIXED TEXT, because parser messages can echo fragments of the file's bytes
+ * and the evidence is untrusted disk data (INV-GATE-2: a detail must never
+ * become a channel for file content). Pure additive sibling —
+ * `readJsonEvidence` and its callers are untouched.
  */
 export type JsonEvidenceRead =
   | { ok: true; value: unknown }
@@ -179,7 +184,7 @@ export function readJsonEvidenceDiagnosed(file: string): JsonEvidenceRead {
   }
   try {
     return { ok: true, value: JSON.parse(text) };
-  } catch (error) {
-    return { ok: false, kind: "parse", error: error instanceof Error ? error.message : String(error) };
+  } catch {
+    return { ok: false, kind: "parse", error: "bytes are not a JSON document" };
   }
 }

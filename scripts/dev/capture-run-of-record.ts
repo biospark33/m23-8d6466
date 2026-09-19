@@ -9,7 +9,8 @@
  * sanctioned bridge between the two. It freezes: the run record, the reverify
  * jsonl (renamed `<runId>.reverify.jsonl`), `audit.db` (plain copy — the link
  * store journals on DELETE, so the live-writer guard is a non-empty `-journal`
- * sibling, re-checked after the copy), `cost-ledger.db` (only after a
+ * sibling, re-checked after the copy, and the COPY is quick_check'd so a writer
+ * that committed inside the copy window cannot ship a torn image), `cost-ledger.db` (only after a
  * TRUNCATE checkpoint on the REAL ledger; a still-non-empty `-wal` REFUSES —
  * DF2.11 would hot-WAL-refuse that shape forever; the COPY is then converted
  * to DELETE journal mode — see selfContainLedgerCopy), the harvest `<runId>.bundle`
@@ -489,10 +490,44 @@ function throwIfLedgerWriterResumed(ledgerPath: string): void {
 }
 
 function throwIfAuditWriterResumed(auditDbPath: string): void {
-  for (const [suffix, what] of [["-journal", "an audit transaction is mid-flight in the DELETE journal"], ["-wal", "a live writer holds the audit-links store"]] as const) {
+  // Each sidecar keeps the typed code its pre-copy sibling uses (audit-wal-live
+  // above for -wal), so a post-copy refusal names the same fault class the
+  // operator already learned to look for.
+  for (const [suffix, code, what] of [
+    ["-journal", "audit-journal-live", "an audit transaction is mid-flight in the DELETE journal"],
+    ["-wal", "audit-wal-live", "a live writer holds the audit-links store"],
+  ] as const) {
     const sidecar = `${auditDbPath}${suffix}`;
     if (existsSync(sidecar) && fileSize(sidecar) > 0) {
-      throw new FreezeRefusal("audit-journal-live", "quiesce the audit writer, remove the partial fixture, re-run", `${sidecar} is non-empty after the copy — ${what}; the plain copy may be torn`);
+      throw new FreezeRefusal(code, "quiesce the audit writer, remove the partial fixture, re-run", `${sidecar} is non-empty after the copy — ${what}; the plain copy may be torn`);
+    }
+  }
+}
+
+/** The fixture's audit.db copy must be a coherent SQLite image: the post-copy
+ * sidecar recheck only catches a transaction STILL mid-flight — a writer that
+ * begins and commits entirely inside the copyFileSync window can tear the page
+ * mix and drain its own -journal before the recheck looks. quick_check on the
+ * COPY (read-only — no sidecars, nothing written into the fixture) is the
+ * direct proof the snapshot is a readable, consistent db. */
+function assertAuditCopyConsistent(fixtureAuditDb: string): void {
+  let db: Database;
+  try {
+    db = new Database(fixtureAuditDb, { readonly: true });
+  } catch (e) {
+    throw new FreezeRefusal("audit-copy-unreadable", "remove the partial fixture dir and re-run", `cannot open the copied audit store at ${fixtureAuditDb} for quick_check (${(e as Error).message})`);
+  }
+  try {
+    const row = db.prepare("PRAGMA quick_check").get() as Record<string, unknown> | undefined;
+    const verdict = row === undefined ? "no result" : String(Object.values(row)[0] ?? "no result");
+    if (verdict !== "ok") {
+      throw new FreezeRefusal("audit-copy-torn", "quiesce the audit writer, remove the partial fixture dir, re-run", `quick_check on the copied audit store at ${fixtureAuditDb} reported ${JSON.stringify(verdict)} — the plain copy raced a writer and tore`);
+    }
+  } finally {
+    try {
+      db.close();
+    } catch {
+      // The refusal above is the diagnosis; a close failure must not mask it.
     }
   }
 }
@@ -640,11 +675,16 @@ function refuseOutOverlap(out: string, s: Sources): void {
   }
 }
 
-/** What stands at --out right now — the idempotence guard's whole question. */
-function outKind(path: string): "absent" | "file" | "empty" | "non-empty" {
+/** What stands at --out right now — the idempotence guard's whole question.
+ * A directory holding ONLY a capture-in-progress sentinel is its own kind: it
+ * is not a partial frozen fixture (nothing was written yet), so the refusal it
+ * earns is the stale-sentinel one, not the immutable-fixture one. */
+function outKind(path: string): "absent" | "file" | "empty" | "sentinel-only" | "non-empty" {
   if (!existsSync(path)) return "absent";
   if (!statSync(path).isDirectory()) return "file";
-  return readdirSync(path).length > 0 ? "non-empty" : "empty";
+  const entries = readdirSync(path);
+  if (entries.length === 0) return "empty";
+  return entries.length === 1 && entries[0] === "capture-in-progress" ? "sentinel-only" : "non-empty";
 }
 
 // dp:ok (main) — the import.meta.main caller wraps main in the exit-2 catch; a throw here is a fatal usage fault, never a silent crash.
@@ -656,6 +696,12 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
   // Idempotence: a frozen fixture is immutable. Existing-but-EMPTY is allowed (an interrupted earlier attempt may have left the shell behind).
   const out = outKind(args.out);
   if (out === "file") refuse("fixture-exists", `--out ${args.out} exists and is a file, not a directory`, "a frozen fixture is a directory — move the file aside and re-run");
+  if (out === "sentinel-only") {
+    // Before the non-empty check: a stale sentinel guards an EMPTY shell — it
+    // is not a partial fixture, so the honest refusal is the capture-in-progress
+    // one with the remove-the-one-file remediation (not "move the fixture").
+    refuse("capture-in-progress", `--out ${args.out} holds only a stale capture-in-progress sentinel — an earlier capture died before writing any fixture content`, `if no capture is running, remove that one file (${join(args.out, "capture-in-progress")}) and re-run`);
+  }
   if (out === "non-empty") refuse("fixture-exists", `--out ${args.out} already exists and is non-empty (possibly a partial from an earlier failed capture)`, "a frozen fixture is immutable — move or delete it by hand, then re-run");
 
   const wal = `${s.ledgerPath}-wal`;
@@ -755,6 +801,10 @@ async function main(): Promise<number> { // dp:ok — caller wraps main in the e
     // TOCTOU: a writer may have resumed between checkpoint/open and the copy (C9, C-edge#1).
     throwIfLedgerWriterResumed(s.ledgerPath);
     throwIfAuditWriterResumed(s.auditDbPath);
+    // And the audit copy itself must be a coherent SQLite image, not just
+    // sidecar-free at the source (a writer can commit and drain its journal
+    // inside the copy window): quick_check proves the snapshot tore nowhere.
+    assertAuditCopyConsistent(join(args.out, "audit.db"));
 
     writeFileSync(join(args.out, "pr-body.txt"), body.text, { mode: 0o600 });
     chmodFixturePrivate(args.out);

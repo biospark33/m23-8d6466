@@ -263,7 +263,8 @@ export function df5ExecutionAssertions(deps: Df5ExecutionDeps): GateAssertion[] 
       id: "DF5.4-P1",
       story: "DF5.4",
       prd_clause: "§8 step 5 — run of record",
-      description: "The run of record exists at <runsDir>/<runId>.json, parses, and names a runId",
+      description:
+        "The run of record exists at <runsDir>/<runId>.json, parses, and names a runId exactly equal to this gate's --run-id (a record naming a different run is misfiled evidence)",
       group: "preflight",
       check: async () => {
         // One atomic read, no accessSync pre-check: a record that exists at
@@ -287,9 +288,19 @@ export function df5ExecutionAssertions(deps: Df5ExecutionDeps): GateAssertion[] 
             detail: `record parses but names no usable runId (runId=${show(fieldOf(record, "runId"))}) — ${recordProvenance}`,
           };
         }
+        // Identity, not mere presence: every downstream clause threads
+        // deps.runId into its evidence paths, so a record at that path naming
+        // a DIFFERENT run is misfiled evidence — red here at preflight, where
+        // the operator can see both ids, not as a confusing downstream miss.
+        if (runId !== deps.runId) {
+          return {
+            pass: false,
+            detail: `record parses but names runId ${show(runId)}, not this gate's ${JSON.stringify(deps.runId)} — misfiled evidence — ${recordProvenance}`,
+          };
+        }
         return {
           pass: true,
-          detail: `run of record ${runId} exists, parses and names its runId — ${recordProvenance}`,
+          detail: `run of record ${runId} exists, parses and names this gate's runId — ${recordProvenance}`,
         };
       },
     },
