@@ -407,8 +407,14 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // tier-3 observe round died engine-start-refused on a 6.3 s run. This
 // build carries DF3.6a and DF3.8 both and pushed
 // sha256:8f5941e0… / buildId 438fe0b7d10a3923.
+// Thirteenth pin (2026-09-18): gate B pair from run 35407164563 at src_sha
+// 66709ef5 — the DF3.8 margin re-derivation (#267). Comment-only as a diff,
+// but observe.ts is a walked input, so the bytes moved the image; this build
+// pushed sha256:d03f58cb… / buildId 998db8aaab5e4fef. The walked-input
+// literal was already re-pinned on the branch (99af1da0…, DF1.10 pairing
+// debt) — this adoption is the image half that ritual deferred.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8f5941e04d714f0fa3abd5508cc74ab2915ff924517ee113c6284bc14cf13cf9";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:d03f58cbe61b389a457ed12b9adcd038ccdc4f8bcb6faa7d7d22adba13a0382b";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -472,7 +478,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "438fe0b7d10a3923";
+export const DEFAULT_IMAGE_BUILD_ID = "998db8aaab5e4fef";
 
 
 
