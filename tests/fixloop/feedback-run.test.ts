@@ -703,22 +703,14 @@ describe("probeBoxCredentials (INV-3)", () => {
   const VM = "qds-fix-run-box";
   const RUN = "qds-fix-run-1";
 
-  test("clean box ⇒ ok:true, probing as the unit's User= via sudo -n systemd-run", async () => {
+  test("clean box ⇒ ok:true, probing as the unit's User= via sudo -n -H -u (systemd-run's status lines poisoned stderr)", async () => {
     const driver = new FixProbeDriver();
     const result = await probeBoxCredentials(driver, VM, RUN);
     expect(result).toEqual({ ok: true });
     const gitCalls = driver.calls.filter((c) => c.includes("git"));
     expect(gitCalls.length).toEqual(2);
     for (const call of gitCalls) {
-      expect(call.slice(0, 7)).toEqual([
-        "sudo",
-        "-n",
-        "systemd-run",
-        "--wait",
-        "--pipe",
-        "--service-type=exec",
-        "--uid=exedev",
-      ]);
+      expect(call.slice(0, 5)).toEqual(["sudo", "-n", "-H", "-u", "exedev"]);
     }
     expect(driver.calls.some((c) => c[0] === "systemctl" && c[2] === `qds-run@${RUN}.service`)).toBe(true);
     expect(driver.calls.some((c) => c[0] === "cat" && c[1] === APPROVED_ENV_FILE)).toBe(true);

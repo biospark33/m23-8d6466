@@ -822,7 +822,17 @@ export async function probeBoxCredentials(
     { hit: "git-config:url.insteadOf", pattern: "^url\\..*\\.insteadof" },
   ];
   for (const check of gitConfigChecks) {
-    const res = await exec([...systemdRun, "git", "config", "--show-origin", "--get-regexp", check.pattern]);
+    // `sudo -n -H -u <user>` — NOT systemd-run --wait --pipe: the wrapper
+    // prints its own status lines ("Running as unit …", "Finished with
+    // result …") to STDERR on every invocation, so the clean arm's
+    // `stderr === ""` could never hold and the scan hit on EVERY box,
+    // including a freshly-booted empty one (measured live 2026-09-20:
+    // evidence 2026-09-20-231127, reproduced on a bare `qds-probe-fill1`).
+    // sudo -n propagates the command's exit code and adds no chatter; -H
+    // points HOME at the unit user's home so the global config is the same
+    // surface the unit's git would read. A sudo -n failure still exits 1
+    // with "a password is required" on STDERR — the arm stays fail-closed.
+    const res = await exec(["sudo", "-n", "-H", "-u", unitUser, "git", "config", "--show-origin", "--get-regexp", check.pattern]);
     // git config --get-regexp exits 1 with EMPTY stdout AND empty stderr when
     // nothing matches — that triple is the ONLY clean arm. Exit 0 is a match;
     // anything else (a non-empty stream, a sudo -n failure, which exits 1 with
