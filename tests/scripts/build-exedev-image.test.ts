@@ -1368,7 +1368,30 @@ describe("buildIdFileInputs", () => {
       // branch that happened to run the full suite next; no image republish
       // is owed by it (no walked bytes changed here) — the next publisher's
       // src_sha carries whatever dev hashes then.
-      "b3c30d0caa211e49ccb26f89b0e54ee4a3182fae7602aefa211246c0035f0e95",
+      //
+      // 8b670a3d: moved from b3c30d0c by DF6.1a (feature/df6-1a-fix-loop-append)
+      // — FOUR walked inputs, every one an adds-only edit, membership measured
+      // against the live `oci/exedev/Dockerfile` COPY enumeration (:277-321):
+      // `src/fleet/brief-schema.ts` (the allow-listed fixContext brief key,
+      // under `COPY src/fleet/` :279), `src/fleet/dispatch.ts` (the witness
+      // fixContext carry-through, same COPY), `src/phase-engine/phases/
+      // dispatch-task.ts` (the engine-owned fenced prompt appendix + witness
+      // read, under `COPY src/phase-engine/` :281), and
+      // `src/providers/run-record.ts` (the three fixLoop registrations, the
+      // explicit COPY :319). The branch's OTHER files are outside the walk:
+      // `src/fixloop/` and `scripts/fix-run.ts` are host-side only and
+      // CORRECTLY absent from the image (no COPY line owed — the in-box
+      // renderer is dispatch-task.ts, which is in), `src/pr/`, `src/reverify/`
+      // and `config/` name no COPY source. PAIRING DEBT, declared per the
+      // DF1.10 playbook: walked bytes changed, so the rebuild → publish →
+      // adopt ritual for `DEFAULT_IMAGE_BUILD_ID` (driver.ts:481) is OWED BY
+      // THIS BRANCH before any box runs the new engine — DF6.1a's own live
+      // e2e round (handoff `_bmad-output/plans/df6-1a-live-e2e-handoff.md`)
+      // is the first such box, and the handoff names the republish as a
+      // pre-round gate. Received from this test's own failing run on the
+      // branch tree (twice: the branch gate's full-suite run and the targeted
+      // re-run, byte-identical).
+      "8b670a3df1f0751f44ef3dd96d0c3e771aa97d454e78cdd7d8d7ef2fc9886215",
     );
   });
 });
