@@ -862,8 +862,13 @@ test.todoIf(liveTodoOff())(
       // entry for the slug — the operator's real scope file is never touched
       // (a crash mid-edit there would disarm AC6's enforcement host-wide).
       // The probe ordering in scripts/fix-run.ts runs readFixScope BEFORE the
-      // roster load and the dispatch, so this hostRoot needs nothing else;
-      // --repos-file points at the real allowlist for the join.
+      // roster load and the dispatch, so this hostRoot needs nothing else.
+      // The JOIN still needs a repos allowlist, and the CLI's containment
+      // guard refuses a --repos-file OUTSIDE the hostRoot ("a file the caller
+      // can point anywhere is one the caller writes") — measured live on the
+      // first round attempt (evidence 2026-09-20-223933: exit 5 with the
+      // `allowlist` envelope, never reaching the scope probe) — so the
+      // scratch host carries its own 0600 COPY of the real allowlist.
       const negHost = join(workspace, "neg-host");
       const negFactory = join(negHost, ".factory");
       mkdirSync(negFactory, { recursive: true, mode: 0o700 });
@@ -871,9 +876,12 @@ test.todoIf(liveTodoOff())(
       const negScopePath = join(negFactory, "fix-scope.json");
       writeFileSync(negScopePath, JSON.stringify({ schemaVersion: 1, scopes: {} }));
       chmodSync(negScopePath, 0o600);
+      const negReposPath = join(negFactory, "repos.json");
+      writeFileSync(negReposPath, readFileSync(join(REPO_ROOT, ".factory", "repos.json")));
+      chmodSync(negReposPath, 0o600);
       const boxesBeforeNeg = await awaitWithCeiling(ctx.driver.list(), T61A_LIST_CEILING_MS, "t6.1a-neg-pre-list");
       const neg = await runFixRun(
-        ["--pr", String(prNumber), "--dir", recordsDir, "--repos-file", join(REPO_ROOT, ".factory", "repos.json")],
+        ["--pr", String(prNumber), "--dir", recordsDir, "--repos-file", negReposPath],
         { cwd: negHost, timeoutMs: T61A_NEG_CONTROL_TIMEOUT_MS },
       );
       const boxesAfterNeg = await awaitWithCeiling(ctx.driver.list(), T61A_LIST_CEILING_MS, "t6.1a-neg-post-list");
