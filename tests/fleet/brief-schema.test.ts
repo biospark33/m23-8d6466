@@ -1007,6 +1007,99 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
   });
 });
 
+describe("brief fixContext (DF6.1a, C10)", () => {
+  const comment = (commentId: string, bodySnippet = "src/a.ts: the bound is off by one") => ({
+    commentId,
+    author: "qds-review-bot[bot]",
+    bodySnippet,
+  });
+
+  test("a brief carrying a valid fixContext validates, unchanged otherwise", () => {
+    const brief = validBrief({
+      fixContext: { schemaVersion: 1, botComments: [comment("1822334455"), comment("1822334456", "")] },
+    });
+    expect(BriefSchema.parse(brief)).toEqual(brief as Brief);
+    // Absent the key, nothing about the pre-DF6.1a brief changes.
+    expect(BriefSchema.parse(validBrief())).toEqual(validBrief() as Brief);
+  });
+
+  test("21 comments is refused (the count cap is 20)", () => {
+    const botComments = Array.from({ length: 21 }, (_, i) => comment(String(i + 1)));
+    expectRejected(validBrief({ fixContext: { schemaVersion: 1, botComments } }), {
+      field: "fixContext.botComments",
+      code: "too_big",
+    });
+  });
+
+  test("a bodySnippet of 4001 chars is refused (the per-comment cap is 4000)", () => {
+    // One over the cap, not a round over it: a cap silently at 4 000 ± drift
+    // passes a 4 001 fixture either way, so the AT-cap leg is asserted too.
+    expect(BriefSchema.parse(validBrief({ fixContext: { schemaVersion: 1, botComments: [comment("1", "x".repeat(4000))] } })));
+    expectRejected(
+      validBrief({ fixContext: { schemaVersion: 1, botComments: [comment("1", "x".repeat(4001))] } }),
+      { field: "fixContext.botComments.0.bodySnippet", code: "too_big" },
+    );
+  });
+
+  test("bodySnippets summing past 40 000 UTF-8 bytes are refused — bytes, not chars", () => {
+    // 10 × 4 000 ASCII chars = 40 000 bytes exactly: admitted.
+    const atBound = Array.from({ length: 10 }, (_, i) => comment(String(i + 1), "x".repeat(4000)));
+    expect(BriefSchema.parse(validBrief({ fixContext: { schemaVersion: 1, botComments: atBound } })));
+    // 40 001 bytes: the aggregate refine fires while every per-comment cap
+    // holds, so only the SUM rule can be doing the refusing.
+    const overBound = [...atBound, comment("11", "x")];
+    expectRejected(validBrief({ fixContext: { schemaVersion: 1, botComments: overBound } }), {
+      field: "fixContext.botComments",
+      code: "custom",
+      message: /40000-byte UTF-8 total/,
+    });
+    // "é" is 2 UTF-8 bytes per char: 6 comments × 4 000 chars = 48 000 bytes.
+    // A char-counted aggregate admits this; the byte-counted one must not.
+    const multibyte = Array.from({ length: 6 }, (_, i) => comment(String(i + 1), "é".repeat(4000)));
+    expectRejected(validBrief({ fixContext: { schemaVersion: 1, botComments: multibyte } }), {
+      field: "fixContext.botComments",
+      code: "custom",
+      message: /40000-byte UTF-8 total/,
+    });
+  });
+
+  test("a non-digit commentId is refused", () => {
+    // The id is the loop's dedupe key; a shaped id ("#12", "12.0", "abc") must
+    // not pass through to it.
+    for (const bad of ["abc", "12.0", "#12", ""]) {
+      expectRejected(validBrief({ fixContext: { schemaVersion: 1, botComments: [comment(bad)] } }), {
+        field: "fixContext.botComments.0.commentId",
+        code: "invalid_string",
+      });
+    }
+  });
+
+  test("a brief carrying any OTHER unregistered key still fails — fixContext does not loosen the strict object", () => {
+    // strictObject gives this for free; the leg exists so a future relaxation
+    // of the ROOT object (passthrough/catchall) fails here rather than passing
+    // because fixContext itself is now registered.
+    expectRejected(
+      validBrief({
+        fixContext: { schemaVersion: 1, botComments: [comment("1")] },
+        unknownField: "should-reject",
+      }),
+      { field: "unknownField", code: "unrecognized_keys" },
+    );
+    // …and the fixContext object itself is strict for the same reason.
+    // `expectRejected`'s unrecognized_keys arm assumes the ROOT (empty path);
+    // a nested strict refusal carries path ["fixContext"], so assert it
+    // directly: refused, code unrecognized_keys, key named.
+    const nested = BriefSchema.safeParse(
+      validBrief({ fixContext: { schemaVersion: 1, botComments: [], rawBodies: "nope" } }),
+    );
+    expect(nested.success).toBe(false);
+    const nestedIssue = (nested as { error: ZodError }).error.issues[0];
+    expect(nestedIssue?.code).toBe("unrecognized_keys" as never);
+    expect(nestedIssue?.path).toEqual(["fixContext"]);
+    expect(nestedIssue?.message).toMatch(/rawBodies/);
+  });
+});
+
 describe("manifest stamp helpers (DF3.1 AC9a)", () => {
   let manifestDir: string;
   let manifestPath: string;

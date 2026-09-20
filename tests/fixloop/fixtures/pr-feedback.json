@@ -1,0 +1,32 @@
+[
+  {
+    "id": 9001,
+    "body": "**qds-review** — changes requested\r\n\r\nThe new retry loop in `src/providers/timeout.ts` drops the deadline on the retry arm:\r\n\r\n```ts\nconst res = await attempt();\nreturn res;\n```\r\n\r\n* pass `budgetFree()` through, as `setup-gate.ts:413` does\r\n* keep the SIGKILL ordering\r\n\r\nPlease fix and push one commit.",
+    "authorLogin": "qds-review",
+    "authorType": "Bot"
+  },
+  {
+    "id": 9002,
+    "body": "Second look: the log line at `status.ts:106` interpolates the raw box name. Cap it with `sanitizeLabel(name, 63)` like the fleet verbs do.",
+    "authorLogin": "qds-review",
+    "authorType": "Bot"
+  },
+  {
+    "id": 9003,
+    "body": "LGTM on the harvest half — no change requested here.",
+    "authorLogin": "steve",
+    "authorType": "User"
+  },
+  {
+    "id": 9004,
+    "body": "nit (dependency-bot): bump the lockfile entry only; do not touch `package.json`.",
+    "authorLogin": "dependency-bot[bot]",
+    "authorType": "User"
+  },
+  {
+    "id": 9005,
+    "body": "Follow-up on 9001: also keep the `truncated` flag check before parsing the marker — a short read is not a verdict.",
+    "authorLogin": "qds-review",
+    "authorType": "Bot"
+  }
+]

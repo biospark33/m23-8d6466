@@ -1370,11 +1370,39 @@ describe("buildIdFileInputs", () => {
       // tests, story artifact and `.unlazy/` are all outside the COPY set).
       // The mover is upstream of that branch — the DF3.8 margin merge
       // (#267) landing after the 13th-pin adoption, the same
-      // landed-without-touching-this-literal shape #238 and DF5.3 hit.
-      // RESTORED here: DF3.6b's first re-pin wrote its own entry OVER this
-      // paragraph, which left `b3c30d0c` the one value in the chain a reader
+      // landed-without-touching-this-literal shape #238 and DF5.3 hit. That
+      // adoption WAS the same-commit re-pin the ritual names, taken on the
+      // branch that happened to run the full suite next; no image republish
+      // was owed BY IT (no walked bytes changed there) — a statement about
+      // b3c30d0c only, and NOT about the entries below it, every one of which
+      // DID move walked bytes. That does not make eight outstanding
+      // republishes: the publish is owed per TREE, not per pin — the re-pin
+      // happens once per landing tree (see "the re-pin happens LAST, after the
+      // final fixer lands, rather than once per round" below) and the debt is
+      // discharged once. DF3.6b's seven within-story pins share the single
+      // `THE PUBLISH IS STILL OWED` below; DF6.1a declares one `PAIRING DEBT`
+      // for 8b670a3d — and THAT ONE IS DISCHARGED. `dev`'s own tip (6ed796c9,
+      // the fourteenth pin adoption) is the rebuild -> publish -> adopt it owed:
+      // built at src_sha 1b653f04 with DF6.1a already merged in (#273,
+      // de5a7509, is an ancestor of it), pushed as sha256:9c8bfe9a… / buildId
+      // 52538541c5430cc5 — which is the DEFAULT_IMAGE_BUILD_ID this merge
+      // inherits. So exactly ONE debt survives into the merged tree: DF3.6b's
+      // four walked inputs are in no published image. A publisher rebuilds THE
+      // MERGED TREE; 1e1b54a4 is not the thing they build — it is a digest over
+      // walked-input BYTES, not a buildId and not an image digest, and it moves
+      // for reasons (comment-only edits) that need no republish at all. It is
+      // how you tell whether the tree moved, not what you publish.
+      // RESTORED here: DF3.6b's first re-pin (1938e34b) wrote its own entry OVER
+      // this paragraph, which left `b3c30d0c` the one value in the chain a reader
       // could not tie to a paragraph — exactly the invariant round 4 finding 3
       // established. The value itself is `origin/dev`'s and is unchanged.
+      // COMPLETED by the dev merge: aa66e927 restored the paragraph but not its
+      // closing sentences, which 1938e34b had taken with it. They survived on
+      // `dev`, so the merge brought them back. Recorded because the shape is
+      // ambiguous on inspection — text absent from this branch and present on
+      // dev reads as a deliberate deletion, and a reviewer said so. `git log -S`
+      // over 1c153883..HEAD says otherwise: the remover was the chain-break
+      // commit, not an editorial one, and the repair that followed was partial.
       //
       // 7d44bbda: moved from b3c30d0c by DF3.6b. FOUR walked
       // tracked inputs — `oci/exedev/systemd/qds-run@.service`
@@ -1484,7 +1512,43 @@ describe("buildIdFileInputs", () => {
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "660ae4091dbc78430a0c7f2251f5099218ec6a338c3419d6349d0a998e4406b5",
+      //
+      // 8b670a3d: moved from b3c30d0c by DF6.1a (feature/df6-1a-fix-loop-append)
+      // — FOUR walked inputs, every one an adds-only edit, membership measured
+      // against the live `oci/exedev/Dockerfile` COPY enumeration (:277-321):
+      // `src/fleet/brief-schema.ts` (the allow-listed fixContext brief key,
+      // under `COPY src/fleet/` :279), `src/fleet/dispatch.ts` (the witness
+      // fixContext carry-through, same COPY), `src/phase-engine/phases/
+      // dispatch-task.ts` (the engine-owned fenced prompt appendix + witness
+      // read, under `COPY src/phase-engine/` :281), and
+      // `src/providers/run-record.ts` (the three fixLoop registrations, the
+      // explicit COPY :319). The branch's OTHER files are outside the walk:
+      // `src/fixloop/` and `scripts/fix-run.ts` are host-side only and
+      // CORRECTLY absent from the image (no COPY line owed — the in-box
+      // renderer is dispatch-task.ts, which is in), `src/pr/`, `src/reverify/`
+      // and `config/` name no COPY source. PAIRING DEBT, declared per the
+      // DF1.10 playbook: walked bytes changed, so the rebuild → publish →
+      // adopt ritual for `DEFAULT_IMAGE_BUILD_ID` (driver.ts:481) is OWED BY
+      // THIS BRANCH before any box runs the new engine — DF6.1a's own live
+      // e2e round (handoff `_bmad-output/plans/df6-1a-live-e2e-handoff.md`)
+      // is the first such box, and the handoff names the republish as a
+      // pre-round gate. Received from this test's own failing run on the
+      // branch tree (twice: the branch gate's full-suite run and the targeted
+      // re-run, byte-identical).
+      //
+      // 1e1b54a4: MERGE of `dev` into this branch (2026-09-20). Two chains meet here, and
+      // NEITHER side's literal survives: both branched from b3c30d0c and both
+      // moved walked inputs, so the merged tree carries DF3.6b's four
+      // (`qds-run@.service`, `resident.ts`, `steering.ts`, `pipeline-run.ts`)
+      // AND DF6.1a's four (`brief-schema.ts`, `dispatch.ts`, `dispatch-task.ts`,
+      // `run-record.ts`) at once. That is eight distinct walked inputs relative
+      // to b3c30d0c, a tree neither 660ae409 nor 8b670a3d was ever computed
+      // over. The value below is RE-DERIVED from the merged tree by this test's
+      // own failing run, not carried across from either parent — carrying
+      // either one would pin a hash for a tree that does not exist.
+      // Both parent paragraphs are kept above so each digest still ties to the
+      // change that produced it; this entry is the join, not a replacement.
+      "1e1b54a43d1da428cd195f5d12c77a61e7ae58f0fab4455dd7ef2a15ff2f12ad",
     );
   });
 });

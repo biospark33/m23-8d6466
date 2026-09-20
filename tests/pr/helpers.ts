@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { appendReport, sealReport, type ReverifyEvidence, type ReverifyReport } from "../../src/reverify/report.ts";
 import { exec, type ExecResult } from "../../src/reverify/worktree.ts";
-import type { GitHubApi, PrRef } from "../../src/pr/github.ts";
+import type { GitHubApi, PrRef, PrReviewComment, PullRequestInfo } from "../../src/pr/github.ts";
 
 export const REPO_SLUG = "acme/widgets";
 export const REMOTE_URL = "https://github.com/acme/widgets.git";
@@ -206,6 +206,10 @@ export interface FakeGitHub extends GitHubApi {
   comments: { issueNumber: number; body: string }[];
   /** Head AND base ride along so `findOpenPr` can FILTER on both, not just return. */
   openPrs: (PrRef & { head: string; base?: string })[];
+  /** Review comments keyed by PR number; an absent key is an empty list. */
+  reviewComments: Record<number, PrReviewComment[]>;
+  /** PR state keyed by PR number; an absent key is a 404 (null). */
+  pullRequests: Record<number, PullRequestInfo>;
   loginValue: string;
   failCreate: Error | null;
 }
@@ -215,6 +219,8 @@ export function fakeGitHub(over: Partial<Pick<FakeGitHub, "loginValue" | "failCr
     created: [],
     comments: [],
     openPrs: [],
+    reviewComments: {},
+    pullRequests: {},
     loginValue: over.loginValue ?? AUTHOR_LOGIN,
     failCreate: over.failCreate ?? null,
     async authenticatedLogin() {
@@ -238,6 +244,12 @@ export function fakeGitHub(over: Partial<Pick<FakeGitHub, "loginValue" | "failCr
     },
     async commentIssue({ issueNumber, body }) {
       api.comments.push({ issueNumber, body });
+    },
+    async listPrReviewComments({ prNumber }) {
+      return api.reviewComments[prNumber] ?? [];
+    },
+    async getPullRequest({ prNumber }) {
+      return api.pullRequests[prNumber] ?? null;
     },
   };
   return api;

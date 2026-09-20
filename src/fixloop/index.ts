@@ -1,0 +1,42 @@
+/**
+ * DF6.1a fix-loop core — the public surface (PLAN I6, locked; leaf-6 consumes).
+ */
+export {
+  APPROVED_ENV_FILE,
+  ATTEMPT_SHA_PLACEHOLDER,
+  assertFixCeilingCovered,
+  assertSingleFixer,
+  buildFixBrief,
+  buildFixContextPayload,
+  classifyDiffScope,
+  commentsDigest,
+  countWriteCapable,
+  encodeFixContext,
+  fetchBotComments,
+  FIX_RUN_MANIFEST_PATH,
+  FIX_SCOPE_FILE,
+  globToRegExp,
+  matchGlob,
+  MAX_FIX_COMMENTS,
+  MAX_FIX_SNIPPET_BYTES_TOTAL,
+  MAX_FIX_SNIPPET_CHARS,
+  MAX_OMITTED_COMMENT_IDS,
+  normalizeBody,
+  parseFixContext,
+  POLL_WINDOW_OPENED_AT_PLACEHOLDER,
+  preflightFixContextWrite,
+  probeBoxCredentials,
+  readFixScope,
+} from "./feedback-run.ts";
+export type {
+  BotComment,
+  BotCommentSet,
+  CredentialProbeDriver,
+  CredentialProbeResult,
+  FixContextPayload,
+  FixScopeAction,
+  FixScopeDeny,
+  FixScopeEntry,
+  IssueBudgetSnapshotSource,
+  ScopeClassification,
+} from "./feedback-run.ts";
