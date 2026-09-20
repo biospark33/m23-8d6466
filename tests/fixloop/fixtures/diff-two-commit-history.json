@@ -1,0 +1,12 @@
+{
+  "note": "Two-commit history: the parent run's commit touched scripts/, the fix commit touches only src/. The scope check must diff against the PINNED commitSha (the PR head the attempt started from), seeing only the fix commit's paths. A default-branch-diffing mutant sees the parent run's scripts/ paths and refuses a healthy attempt.",
+  "pinnedBaseEntries": [
+    { "path": "src/providers/timeout.ts", "action": "modify" },
+    { "path": "tests/providers/timeout.test.ts", "action": "modify" }
+  ],
+  "wrongBaseEntries": [
+    { "path": "scripts/reverify.ts", "action": "modify" },
+    { "path": "src/providers/timeout.ts", "action": "modify" },
+    { "path": "tests/providers/timeout.test.ts", "action": "modify" }
+  ]
+}

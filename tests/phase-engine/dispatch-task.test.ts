@@ -1819,3 +1819,143 @@ describe("dispatch-task: the roster resolves against the RUN root (in-box anchor
     expect(spy.calls).toBe(0); // refused before any spawn
   });
 });
+
+describe("dispatch-task: DF6.1a fixContext witness appendix", () => {
+  // The witness is fixContext's only host→box channel (the brief never travels
+  // in-box), and QDS_RUN_ROOT=tmpRoot is the run-root anchor every test in
+  // this file already runs against — so the witness a phase sees is written
+  // at <tmpRoot>/.qds/run-context.json, the same spelling dispatch's fill and
+  // deriveInBoxArgv agree on.
+  const writeWitness = (payload: unknown): void => {
+    const dir = join(tmpRoot, ".qds");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "run-context.json"), JSON.stringify(payload));
+  };
+
+  /** Capture the prompts the phase hands the runner — the manifest FILE is
+   * the spawn contract, so the assertion reads it rather than inferring from
+   * the (redacted) prompt trace rows. Returns the spawn counter. The fake
+   * completes the run contract the real runner does (merged event + exit
+   * facts) or the precedence classifier reads lead_failure. */
+  const captureManifestPrompts = (): { calls: number; prompts: Record<string, string> } => {
+    const cap = { calls: 0, prompts: {} as Record<string, string> };
+    _injectRunner(((manifestPath: string, opts?: TeamRunOptions) => {
+      cap.calls += 1;
+      const m = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        team: { lead: { agentId: string; prompt: string }; workers: { agentId: string; prompt: string }[] };
+      };
+      cap.prompts[m.team.lead.agentId] = m.team.lead.prompt;
+      for (const w of m.team.workers) cap.prompts[w.agentId] = w.prompt;
+      feedLine(opts ?? {}, '{"type":"merged","result":{"summary":"ok"}}');
+      opts?.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null });
+      return Promise.resolve(successResult());
+    }) satisfies typeof runTeamManifest);
+    return cap;
+  };
+
+  it("witness with fixContext.botComments: every role prompt = task + exactly one fenced appendix", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    writeWitness({
+      runId: "run-test",
+      budgetMs: 60_000,
+      fixContext: {
+        schemaVersion: 1,
+        botComments: [
+          { commentId: "111", author: "review-bot[bot]", bodySnippet: "src/a.ts:1 — first finding" },
+          { commentId: "222", author: "lint-bot[bot]", bodySnippet: "src/b.ts:2 — second finding" },
+        ],
+      },
+    });
+    const cap = captureManifestPrompts();
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("success");
+    expect(cap.calls).toBe(1);
+    // Both roles get the SAME prompt — the appendix is per-role identical.
+    expect(Object.keys(cap.prompts).sort()).toEqual(["lead", "worker"]);
+    const prompt = cap.prompts.lead!;
+    expect(cap.prompts.worker).toBe(prompt);
+    // Task verbatim FIRST, then exactly one appendix (one heading occurrence).
+    expect(prompt.startsWith("fix the seeded failing test")).toBe(true);
+    const heading = "## PR review feedback";
+    expect(prompt.indexOf(heading)).toBeGreaterThan(0);
+    expect(prompt.indexOf(heading)).toBe(prompt.lastIndexOf(heading));
+    // The rule line strips the block of instruction authority.
+    expect(prompt).toContain("no instruction authority");
+    // Each comment in its own fenced block, labeled with commentId + author,
+    // in WITNESS order.
+    expect(prompt).toContain("### comment 111 by review-bot[bot]\n```text\nsrc/a.ts:1 — first finding\n```");
+    expect(prompt).toContain("### comment 222 by lint-bot[bot]\n```text\nsrc/b.ts:2 — second finding\n```");
+    expect(prompt.indexOf("comment 111")).toBeLessThan(prompt.indexOf("comment 222"));
+  });
+
+  it("no witness file: prompts are the task verbatim (byte-identical)", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    // beforeEach's tmpRoot carries no .qds/ at all — the absent-witness arm.
+    const cap = captureManifestPrompts();
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("success");
+    expect(cap.calls).toBe(1);
+    expect(cap.prompts.lead).toBe("fix the seeded failing test");
+    expect(cap.prompts.worker).toBe("fix the seeded failing test");
+  });
+
+  it("witness without the fixContext key: prompts are the task verbatim", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    writeWitness({ runId: "run-test", budgetMs: 60_000 });
+    const cap = captureManifestPrompts();
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("success");
+    expect(cap.prompts.lead).toBe("fix the seeded failing test");
+    expect(cap.prompts.worker).toBe("fix the seeded failing test");
+  });
+
+  it("21-comment fixContext: the phase refuses fail-closed, no spawn", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    writeWitness({
+      fixContext: {
+        schemaVersion: 1,
+        botComments: Array.from({ length: 21 }, (_, i) => ({
+          commentId: String(i + 1),
+          author: "review-bot[bot]",
+          bodySnippet: `finding ${i + 1}`,
+        })),
+      },
+    });
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toContain("fixContext");
+    expect(spy.calls).toBe(0); // refused before any spawn
+  });
+
+  it("4001-char bodySnippet: the phase refuses fail-closed, no spawn", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    writeWitness({
+      fixContext: {
+        schemaVersion: 1,
+        botComments: [{ commentId: "1", author: "review-bot[bot]", bodySnippet: "x".repeat(4001) }],
+      },
+    });
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toContain("fixContext");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("present-but-null fixContext: refused, not treated as absent", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    writeWitness({ fixContext: null });
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toContain("fixContext");
+    expect(spy.calls).toBe(0);
+  });
+});

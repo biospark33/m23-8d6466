@@ -47,7 +47,7 @@ After a PR is produced (P1.15), external bot reviewers (e.g., CodeRabbit, Gemini
 ## Security Invariants
 
 - INV-1: Webhook signature validation (HMAC-SHA256) is enforced on every comment webhook — no exceptions.
-- INV-2: Bot comment body is stored as a truncated snippet (max 4000 chars) to prevent injection of excessive data into protocol state while preserving sufficient context for downstream fix dispatch (P1.19).
+- INV-2: Bot comment body is stored as a truncated snippet (max 4000 chars) to prevent injection of excessive data into protocol state while preserving sufficient context for downstream fix dispatch (DF6.1a).
 - INV-3: Only comments on PRs correlated to active protocol runs are processed — comments on unrelated repos are silently dropped.
 
 ## Definition of Done

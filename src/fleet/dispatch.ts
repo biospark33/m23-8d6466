@@ -3475,6 +3475,19 @@ export async function dispatch(
           ...(correlation.issueUrl === null
             ? {}
             : { issueUrl: linkSafe(correlation.issueUrl) }),
+          // DF6.1a (operator-ruled 2026-09-19): the witness is the DESIGNED
+          // host→box channel, and it is `fixContext`'s only ride — the brief
+          // itself never travels in-box (dispatch writes the manifest pair and
+          // nothing else), so the allow-listed, already-validated/bounded/
+          // redacted PR-review feedback is copied through here for the in-box
+          // engine to render as a fixed fenced prompt appendix. A conditional
+          // spread, never a nullable field: a brief WITHOUT the key must
+          // serialize byte-identical to a pre-DF6.1a witness, and an explicit
+          // `fixContext: null` is not byte-identical. `valid` is the
+          // schema-validated brief, so the shape is already checked once — and
+          // the engine re-checks the bounds fail-closed before rendering,
+          // because what is trusted here is the channel, not the content.
+          ...(valid.fixContext === undefined ? {} : { fixContext: valid.fixContext }),
         }),
       },
     ];

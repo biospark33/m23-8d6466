@@ -219,6 +219,59 @@ describe("set (AC2)", () => {
     );
   });
 
+  test("DF6.1a: the three added fixLoop fields accept their kinds, existing fields unchanged", () => {
+    const rec = store.set("run-c", {
+      extensions: {
+        fixLoop: {
+          fixAttemptRunIds: ["run-fix-1", "run-fix-2"],
+          fixRun: "true",
+          fixOutcomeClass: "charged",
+        },
+      },
+    });
+    expect(rec.extensions?.fixLoop).toEqual({
+      schemaVersion: 1,
+      fixAttemptRunIds: ["run-fix-1", "run-fix-2"],
+      fixRun: "true",
+      fixOutcomeClass: "charged",
+    });
+    expect(store.get("run-c").extensions?.fixLoop?.fixAttemptRunIds).toEqual(["run-fix-1", "run-fix-2"]);
+
+    // The already-registered fields keep accepting their `"string"` kind, and
+    // the merge never drops them.
+    const withOutcome = store.set("run-c", {
+      extensions: { fixLoop: { fixContext: "{}", fixOutcome: "{}" } },
+    });
+    expect(withOutcome.extensions?.fixLoop?.fixContext).toBe("{}");
+    expect(withOutcome.extensions?.fixLoop?.fixRun).toBe("true");
+
+    // The namespace stays closed: an unregistered fixLoop key is still refused,
+    // and `fixAttemptRunIds` is the `strings` kind — a bare string is refused.
+    expect(() => store.set("run-c", { extensions: { fixLoop: { fixVerdict: "x" } } })).toThrow(
+      /unknown key: extensions\.fixLoop\.fixVerdict/,
+    );
+    expect(() =>
+      store.set("run-c", { extensions: { fixLoop: { fixAttemptRunIds: "run-fix-3" } } } as never),
+    ).toThrow(/extensions\.fixLoop\.fixAttemptRunIds must be an array of strings/);
+  });
+
+  test("DF6.1a: an OBJECT assigned to extensions.fixLoop.fixContext is schema-rejected (no object kind)", () => {
+    // DF6.1a registers no object FieldKind: both fixLoop payloads are
+    // JSON-encoded `"string"` values, so a raw object must keep failing the
+    // kind check with the schema-rejected code — not be absorbed.
+    let thrown: unknown;
+    try {
+      store.set("run-c", {
+        extensions: { fixLoop: { fixContext: { schemaVersion: 1, commentIds: [] } } },
+      } as never);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toMatch(/extensions\.fixLoop\.fixContext must be a string/);
+    expect((thrown as { code?: string }).code).toBe("schema-rejected");
+  });
+
   test("a top-level key other than the twelve plus extensions is rejected", () => {
     expect(() => store.set("run-c", { notes: "x" } as never)).toThrow(/unknown key: notes/);
   });

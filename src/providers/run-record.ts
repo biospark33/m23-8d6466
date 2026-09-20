@@ -215,8 +215,25 @@ export const EXTENSION_NAMESPACES: Readonly<
    * not a claim about when GitHub made the PR.
    */
   pr: { schemaVersion: 1, fields: { prUrl: "string", prNumber: "int", createdAt: "string" } },
-  /** DF6.1 */
-  fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } },
+  /**
+   * DF6.1's PR-feedback fix loop. `fixContext`/`fixOutcome` are JSON-encoded
+   * payloads (there is no object kind, and none is owed — see DF6.1a Contracts/
+   * Schema). DF6.1a adds three fields, adds-only: `fixAttemptRunIds` is the
+   * parent record's attempt-time ledger (one minted fix-run id appended per
+   * attempt), `fixRun` is the mint-time marker (`"true"`) on each fix run's own
+   * record, and `fixOutcomeClass` is the per-attempt terminal-outcome
+   * classification carrier DF6.1b writes under the parent lock.
+   */
+  fixLoop: {
+    schemaVersion: 1,
+    fields: {
+      fixContext: "string",
+      fixOutcome: "string",
+      fixAttemptRunIds: "strings",
+      fixRun: "string",
+      fixOutcomeClass: "string",
+    },
+  },
   /** DF3.2 */
   fanout: { schemaVersion: 1, fields: { fanoutId: "string", arm: "string" } },
   /**

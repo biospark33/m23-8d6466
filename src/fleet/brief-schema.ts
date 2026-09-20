@@ -271,6 +271,22 @@ export const MAX_REQUEST_ID = 128;
 const MAX_FIELD_LABEL = 128;
 
 /**
+ * DF6.1a's `fixContext` bounds. `bodySnippet` is untrusted quoted review data
+ * (CRLF-normalized and redacted BEFORE the brief is built — the schema sees the
+ * result), so the caps are the trust boundary that keeps a PR's comment count
+ * from growing the brief without limit: at most 20 comments, each snippet at
+ * most 4 000 chars (P1.18's own injection cap), and the snippets' UTF-8-encoded
+ * bytes summing to at most 40 000. The byte sum is measured on the ENCODED
+ * form, not the char count — a 4 000-char snippet of 4-byte code points is 16
+ * KB, and the bound exists to size the payload a box receives.
+ */
+const MAX_FIX_COMMENTS = 20;
+const MAX_FIX_COMMENT_ID_CHARS = 20;
+const MAX_FIX_AUTHOR_CHARS = 100;
+const MAX_FIX_SNIPPET_CHARS = 4000;
+const MAX_FIX_SNIPPET_BYTES_TOTAL = 40_000;
+
+/**
  * Non-blank, for the two fields whose `.min(1)` was doing the job blankness
  * defeats.
  *
@@ -379,6 +395,41 @@ export const BriefSchema = z.strictObject({
     .regex(/^https:\/\//i, "repoUrl must be an https:// URL")
     .refine(isWellFormed, "repoUrl may not contain unpaired surrogates")
     .refine(hasNoUserinfo, "repoUrl may not carry userinfo (user:pass@host)"),
+  // DF6.1a: the allow-listed PR-review-feedback carrier. Optional and strict —
+  // it is the validated host-side carrier only (dispatch copies it into the
+  // run-context.json witness adds-only; a brief without it is byte-identical to
+  // before). The comment payload itself is normalized, bounded and redacted by
+  // the brief-build path BEFORE this schema sees it; the schema's job is the
+  // closed shape and the ceilings named on the MAX_FIX_* constants above.
+  fixContext: z
+    .strictObject({
+      schemaVersion: z.literal(1),
+      botComments: z
+        .array(
+          z.strictObject({
+            // GitHub comment IDs arrive as numbers; carried as digit strings so
+            // no precision question ever reaches the dedupe key.
+            commentId: z.string().regex(/^\d+$/).max(MAX_FIX_COMMENT_ID_CHARS),
+            author: z.string().min(1).max(MAX_FIX_AUTHOR_CHARS),
+            bodySnippet: z.string().max(MAX_FIX_SNIPPET_CHARS),
+          }),
+        )
+        .max(MAX_FIX_COMMENTS),
+    })
+    .refine(
+      (fc) => {
+        const encoder = new TextEncoder();
+        return (
+          fc.botComments.reduce((sum, c) => sum + encoder.encode(c.bodySnippet).length, 0) <=
+          MAX_FIX_SNIPPET_BYTES_TOTAL
+        );
+      },
+      {
+        message: `fixContext bodySnippets exceed the ${MAX_FIX_SNIPPET_BYTES_TOTAL}-byte UTF-8 total`,
+        path: ["botComments"],
+      },
+    )
+    .optional(),
 })
   /**
    * `repoSlug` and `repoUrl` are two names for one repository, and validating

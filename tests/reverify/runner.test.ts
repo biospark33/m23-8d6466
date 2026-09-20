@@ -655,6 +655,57 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
   }, 120_000);
 });
 
+describe("DF6.1a AC2 — the fix-run proposal names the act being authorized", () => {
+  test("a record marked fixLoop.fixRun \"true\" proposes the fix-commit append, verbatim", async () => {
+    const h = await harness();
+    try {
+      // `scripts/fix-run.ts` mints the marker on the fix run's own record at
+      // dispatch time (I3/C21); extensions set() merges namespaces, so the
+      // harness's `budget` entry survives — as it must, since a real fix run
+      // carries both.
+      h.store.set(h.repo.runId, { extensions: { fixLoop: { fixRun: "true" } } });
+      const { report } = await reverify(h.repo.runId, deps(h));
+      expect(report.verdict).toBe("green");
+      expect(h.calls.length).toBe(1);
+      // Verbatim: the consent text IS the contract — a paraphrase that drifted
+      // from "append" back toward "open" would mis-describe the authorized act.
+      expect(h.calls[0]!.proposal).toBe(
+        `append a verified fix commit to the PR branch (fix run ${h.repo.runId} at ${report.headSha})`,
+      );
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+
+  test("an unmarked record keeps the legacy open-a-PR proposal", async () => {
+    const h = await harness();
+    try {
+      const { report } = await reverify(h.repo.runId, deps(h));
+      expect(report.verdict).toBe("green");
+      expect(h.calls.length).toBe(1);
+      expect(h.calls[0]!.proposal).toBe(`open a PR for run ${h.repo.runId} at ${report.headSha}`);
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+
+  test("a fixRun value other than exactly \"true\" keeps the legacy proposal", async () => {
+    const h = await harness();
+    try {
+      // The switch is a string equality, not a truthiness probe: a truthy
+      // non-"true" value (a future enum member, a mistyped marker) must not
+      // quietly relabel an ordinary run's consent.
+      h.store.set(h.repo.runId, { extensions: { fixLoop: { fixRun: "1" } } });
+      const { report } = await reverify(h.repo.runId, deps(h));
+      expect(report.verdict).toBe("green");
+      expect(h.calls.length).toBe(1);
+      expect(h.calls[0]!.proposal).toBe(`open a PR for run ${h.repo.runId} at ${report.headSha}`);
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+});
+
 describe("persistence and determinism", () => {
   test("re-running appends a new report; both are retained and the last is authoritative", async () => {
     const h = await harness();
