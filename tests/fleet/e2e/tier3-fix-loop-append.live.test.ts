@@ -1018,6 +1018,24 @@ test.todoIf(liveTodoOff())(
           }),
         );
         if (tick.read === undefined) {
+          // Provisioning-pending is NOT an unreadable streak: the record is
+          // created before the box exists (run-record INV-1), so there is a
+          // long window — measured ~70 s of driver.create — where vmName is
+          // still "" and every readBoxFile call rejects on the empty id.
+          // Counting those ticks toward T61A_POLL_UNREADABLE_LIMIT failed the
+          // leg mid-provisioning (evidence 2026-09-20-230327: 10 rejection
+          // ticks at ~45 s, all `invalid run id: ""`). The poll deadline
+          // (inv1Deadline / T61A_ENGINE_WINDOW_MS) still bounds this window.
+          if (fixVmName === "") {
+            kindCounts["(provisioning-pending)"] = (kindCounts["(provisioning-pending)"] ?? 0) + 1;
+            lastUnreadableWhy = `provisioning pending (no vmName yet): ${tick.rejection}`;
+            // `continue` skips this loop's tail deadline checks, so the
+            // provisioning window is bounded here — a wedged provision ends
+            // the poll by the same deadlines a settled poll would hit.
+            if (inv1Exit !== undefined || Date.now() > inv1Deadline || Date.now() - pollStartedAt > T61A_ENGINE_WINDOW_MS) break;
+            await new Promise((r) => setTimeout(r, T61A_POLL_INTERVAL_MS));
+            continue;
+          }
           kindCounts["(read-rejected)"] = (kindCounts["(read-rejected)"] ?? 0) + 1;
           unreadableStreak += 1;
           lastUnreadableWhy = `readBoxFile rejected: ${tick.rejection}`;
