@@ -1424,12 +1424,26 @@ describe("buildIdFileInputs", () => {
       // `dockerfile` field as the entry above explains. Walk set unchanged at
       // 89 entries. Same failing-run receive, same-commit re-pin.
       //
+      // 15effcd0: moved from bb3c3602 by DF3.6b, review round 14 — the first
+      // within-story move that is NOT comment-only. ONE walked input changed,
+      // `scripts/pipeline-run.ts`, and the edit is REAL: `inBoxFrontDoor` was a
+      // module-level `let` set `true` before the in-box re-entry and never
+      // reset; it is now a parameter of `main`. A covering review found it and
+      // a second reviewer reproduced the leak — two sequential in-process
+      // `main()` calls, where the second (host-side) call inherited the first's
+      // `true` and was degraded by cgroup machinery it should never have
+      // touched. Unreachable in the shipped CLI (one process per invocation),
+      // which is why no test moved: the suites pass identically both ways.
+      // NOT movers: `_bmad-output/evidence/df3-6b/review-round-14.md` and the
+      // story artifact are outside the walk. Walk set unchanged at 89 entries.
+      // Same failing-run receive, same-commit re-pin.
+      //
       // THE PUBLISH IS STILL OWED:
       // the unit is baked into a digest-pinned image, so a run against the
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "bb3c3602e1dc255c2171f77fe8766e81dec21a3e5dbed724a7b789cf154bfe90",
+      "15effcd0c2a31f26fbdd13ee340eaaa0243863db6f54e6495370e074b5dda1b2",
     );
   });
 });

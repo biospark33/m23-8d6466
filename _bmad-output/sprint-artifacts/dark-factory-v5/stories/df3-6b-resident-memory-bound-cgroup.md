@@ -673,8 +673,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..13}.md`** — thirteen adversarial
-rounds, **six before the first push and seven after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..14}.md`** — fourteen adversarial
+rounds, **six before the first push and eight after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
@@ -694,7 +694,7 @@ the current word; the evidence files are history.**
 |------|-------------|
 | `src/fleet/resident.ts` | The whole mechanism: `CgroupUnenforceableError`, the one-time delegated-subtree split (`supervisor/` + `+memory`, idempotent across engine restarts), per-solicitation leaf create with `memory.max` **and** `memory.oom.group=1`, the fail-closed `sh -c` self-placement wrapper (exit **97** on refusal, positional argv — keyed on membership read back from `cgroup.procs`, NOT on the write's exit status; the `\|\| exit 97` form was rejected, see the amendment), `memory.peak`/`memory.events` read before removal, leaf teardown on every exit path, `lastMemory()` on `ResidentSpawn`, optional `residentRssBytes` on `ResidentSpawnOpts`, and the arming check against a REAL probe leaf. |
 | `src/phase-engine/steering.ts` | Edit (1): the OOM writer in the call-failure catch — `status:"stopped"`, `exitStatus:"overflow"`, a `watchdog_kill` tripwire carrying the peak and the bound, then `onBoundBreach({bound:"rss", cause:"watchdog_kill"})`. Ordered BEFORE the degrade arm. The dep's return type gained `boundBytes?`. Edit (2), the `PlacementRefusedError` arm, **was already landed in DF3.6a's diff** and needed no change. |
-| `scripts/pipeline-run.ts` | (iii) `residentRssBytes` on `startResident`; (iv) `lastMemory: spawned.lastMemory` on `createSteering`; (vi) the `rss_unenforceable` arming-refusal arm beside the rate arm; (vii) the run-down refresh precedence; plus the `inBoxFrontDoor` enforcement-context latch (ruling **3b** below — ruling 3 is the tripwire contract and says nothing about this latch). |
+| `scripts/pipeline-run.ts` | (iii) `residentRssBytes` on `startResident`; (iv) `lastMemory: spawned.lastMemory` on `createSteering`; (vi) the `rss_unenforceable` arming-refusal arm beside the rate arm; (vii) the run-down refresh precedence; plus the `inBoxFrontDoor` enforcement-context latch (ruling **3b** below — ruling 3 is the tripwire contract and says nothing about this latch), which is a PARAMETER of `main`, not module state: review round 14 found it as a module-level `let` that was set before the in-box re-entry and never reset, and demonstrated the leak by driving two in-process `main()` calls, where the second (host-side) call inherited the first's `true` and was degraded by cgroup machinery it should never have touched. |
 | `oci/exedev/systemd/qds-run@.service` | `Delegate=memory`, scoped rather than `Delegate=yes`. |
 | `oci/exedev/Dockerfile` | The positive `grep -qE '^Delegate=memory$'` unit-scan assertion. |
 | `tests/fleet/fixtures/fake-pi-resident.ts` | DF3.3's SHARED fake pi gains FIVE test-only knob groups the cgroup suite drives (7 env vars): staging `memory.events`/`memory.peak` into the live leaf, copying the leaf's `cgroup.procs` out, recording the leaf's armed state, forcing an exit code, and dying by SIGKILL. Additive and env-gated — every existing caller that sets none of them is byte-for-byte unaffected. |

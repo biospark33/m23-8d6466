@@ -2917,10 +2917,20 @@ function deriveInBoxArgv(runId: string): string[] {
  * Why not an env var: INV-MEM-1 forbids any env var, directive or in-box file
  * from raising, disabling or resetting the bound. An argv shape the unit fixes
  * in `ExecStart=` is not reachable from the resident's tier; an env var is.
+ *
+ * Why a PARAMETER and not a module-level `let`: it was the latter until review
+ * round 14, set `true` before the re-entry and never reset. One process per
+ * invocation made that safe in the shipped CLI — and invisible, since every test
+ * reaches this file through `Bun.spawn`. But a latch that only unsets on process
+ * exit is a landmine for any in-process reuse of `main()` (a batch runner, a
+ * worker, a harness that imports it): the first in-box run would pin it `true`
+ * for the process's life, and a LATER host-side `--manifest` call would then
+ * pass a real bound, hit `ensureDelegatedSubtree()` on a box with no delegated
+ * cgroup, and refuse the resident on precisely the shape this flag exists to
+ * keep unarmed. A parameter cannot leak across calls, so the hazard is removed
+ * rather than documented.
  */
-let inBoxFrontDoor = false;
-
-async function main(argv: readonly string[]): Promise<number> {
+async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<number> {
   // The unit's front door. One level of re-entry, never more: the derived argv
   // is all flags, so it cannot come back through this branch.
   if (argv[0] === "run") {
@@ -2970,8 +2980,7 @@ async function main(argv: readonly string[]): Promise<number> {
     // DF3.6b: latch the enforcement context before the re-entry. The derived
     // argv is all flags, so the inner `main` cannot otherwise tell that it is
     // the in-box engine — and the memory bound is applied on exactly that shape.
-    inBoxFrontDoor = true;
-    return main(deriveInBoxArgv(inBoxRunId));
+    return main(deriveInBoxArgv(inBoxRunId), true);
   }
 
   let manifestPath: string | undefined;
