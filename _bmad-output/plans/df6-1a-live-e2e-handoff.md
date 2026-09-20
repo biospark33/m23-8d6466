@@ -96,6 +96,13 @@ process-table pi diff) → exit 0 `awaiting-approval` → in-harness `fleet appr
 `state:"appended"` → fast-forward + fixContext assertions → finally battery
 (teardown/destroy, `keyLeakProblems`, final-ls zero `qds-*` boxes).
 
+**Run it THROUGH the ledger so G3's evidence is automatic:** gate-check children inherit
+the checker's environment, so with `QDS_E2E_LIVE=1 QDS_E2E_TIER=2 QDS_E2E_FIX_PR=<n>`
+exported, `node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --timeout 3600
+--approve .unlazy/df6-1a/gates/node-2.md` re-approves G3's oracle at the longer timeout
+and executes the round for real (the same CHECK only todo-gates when the env is unset).
+Record G1/G2/G4 manual evidence lines in the ledger as you go.
+
 ## After green (node-2 G4 + closeout)
 
 1. External evidence review: the PR on GitHub shows the appended commit; the fix run's
