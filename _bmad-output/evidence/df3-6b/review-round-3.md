@@ -8,7 +8,7 @@ test fakes that have drifted from kernel behaviour.
 ## Verified correct (rounds 1–2 fixes)
 
 All ten confirmed at source: the OOM verdict keyed on `oom_group_kill`/`oom` with anchored patterns
-(so `oom_kill 1` cannot match `^oom `); the INV-MEM-1 amendment mirrored at the spawn site;
+(so `oom_kill 1` cannot match `^oom `) (**SUPERSEDED by rounds 7 and 9: that disjunction was itself wrong — `oom_group_kill` is not own-limit-only, and the shipped rule is the conjunction `oom > 0 && (oom_kill > 0 || oom_group_kill > 0)` plus a peak consistency check. The anchoring point stands; the verdict it verified does not**); the INV-MEM-1 amendment mirrored at the spawn site;
 `cgroup.kill` before a bounded EBUSY-only `rmdir` retry; the membership-verifying placement wrapper;
 the documented exit-97 collision; the probe leaf's own `finally`; M1 no longer vacuous and the AC3
 in-box test branch-selecting instead of skipping; AC2's root/`supervisor/` and one-pid assertions;

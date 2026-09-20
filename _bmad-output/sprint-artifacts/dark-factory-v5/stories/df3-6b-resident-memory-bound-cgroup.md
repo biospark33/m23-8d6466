@@ -642,6 +642,13 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..10}.md`** — ten adversarial
+rounds, three before the first push and seven after, plus CodeRabbit's rounds on PR #264. Read them in
+order if you need to know WHY a rule is shaped the way it is; several later rounds RETRACT earlier
+ones (most importantly round 9 retracts round 7's claim about the peak floor), and every retracted
+claim carries a `SUPERSEDED` note pointing at the round that replaced it. **The rulings below are
+the current word; the evidence files are history.**
+
 ### Shipped
 
 | File | What landed |
@@ -651,7 +658,7 @@ ruled, and what is NOT done.
 | `scripts/pipeline-run.ts` | (iii) `residentRssBytes` on `startResident`; (iv) `lastMemory: spawned.lastMemory` on `createSteering`; (vi) the `rss_unenforceable` arming-refusal arm beside the rate arm; (vii) the run-down refresh precedence; plus the `inBoxFrontDoor` enforcement-context latch (ruling 3 below). |
 | `oci/exedev/systemd/qds-run@.service` | `Delegate=memory`, scoped rather than `Delegate=yes`. |
 | `oci/exedev/Dockerfile` | The positive `grep -qE '^Delegate=memory$'` unit-scan assertion. |
-| `tests/fleet/fixtures/fake-pi-resident.ts` | DF3.3's SHARED fake pi gains four test-only knobs the cgroup suite drives: staging `memory.events`/`memory.peak` into the live leaf, copying the leaf's `cgroup.procs` out, recording the leaf's armed state, forcing an exit code, and dying by SIGKILL. Additive and env-gated — every existing caller that sets none of them is byte-for-byte unaffected. |
+| `tests/fleet/fixtures/fake-pi-resident.ts` | DF3.3's SHARED fake pi gains FIVE test-only knob groups the cgroup suite drives (7 env vars): staging `memory.events`/`memory.peak` into the live leaf, copying the leaf's `cgroup.procs` out, recording the leaf's armed state, forcing an exit code, and dying by SIGKILL. Additive and env-gated — every existing caller that sets none of them is byte-for-byte unaffected. |
 | `tests/scripts/build-exedev-image.test.ts` | The buildId pin re-derivation (the offline half of DF2.10's ritual): both asset digests and the whole-walk digest. FOUR walked inputs move the whole-walk literal — the unit, `src/fleet/resident.ts`, `src/phase-engine/steering.ts`, `scripts/pipeline-run.ts`. `oci/exedev/Dockerfile` also changed and is NOT one of them: it is `deriveBuildId`'s own separate `dockerfile` field, absent from all 89 entries `buildIdFileInputs` returns (verified by calling it directly). |
 | `tests/providers/exedev/image-assets.test.ts` | `Delegate` pinned in `directive-set` (key + position) and in `hardened` (VALUE — `Delegate=yes` passes the key check and must not pass this one), with two MUTATIONS negative controls. |
 | `tests/fleet/resident-cgroup.test.ts` (new) | Split + idempotence, the four AC3 refusals, the INV-MEM-2 Scope seam, the leaf lifecycle, the numeric contract (two distinct bounds through one path), AC2's no-unit-level-MemoryMax assertion, the wrapper's `\|\| exit 97` with a POSITIVE control and the `;` NEGATIVE control, INV-MEM-3's hostile-prompt argv test, the OOM-verdict discrimination (an own-limit kill vs a global OOM that merely picked pi), the exit-97 to `PlacementRefusedError` join with its unbounded-call negative control, and M1 (a staged-counter classification test — ruling 6). |
@@ -791,19 +798,20 @@ a name, not information.
 so if `dmesg` is readable there the round may read the OOM report once to confirm `oom_memcg=` names
 the solicitation leaf. That is a one-off verification of the mechanism, not a production dependency.
 
-### Ruling 8 — the OOM verdict is the kernel's own record: two counters PLUS a peak floor
+### Ruling 8 — the OOM verdict is the kernel's own record (amended by ruling 9: the peak floor is a consistency check, not a third independent fact)
 
 Recorded because this predicate was corrected five times from five different doors before it was
 specified rather than patched, and the next reader should find the specification, not the scar
 tissue. The claim the verdict makes is *"a process in THIS leaf was killed by the kernel BECAUSE
-THIS leaf hit THIS bound"* — three facts, all published by the kernel: two in `memory.events` and
-one in `memory.peak`.
+THIS leaf hit THIS bound"* — TWO facts the kernel publishes independently, both in `memory.events`,
+plus a `memory.peak` consistency check that ruling 9 shows is implied by the first of them rather
+than being a third independent fact.
 
 | fact | where the kernel publishes it |
 |------|-------------------------------|
 | this leaf hit **its own** `memory.max` and could not reclaim | `memory.events`' `oom` — raised only on the own-limit charge path, never for a global or an ancestor's OOM |
 | a process in this leaf was **killed** by an OOM killer | `memory.events`' `oom_kill` / `oom_group_kill` — **any** OOM killer, own or global |
-| the kill happened **at** the limit, not far below it | `memory.peak` — an own-limit kill cannot happen below the limit, so the high-water mark must have reached it, within one failing allocation (see the slack paragraph) |
+| the kill happened **at** the limit, not far below it | `memory.peak` — **CORRECTED by ruling 9: this row does NOT discriminate.** `oom > 0` already implies the peak reached the bound (within one failing charge), so the floor is a consistency check, not the third of three independent facts. It is kept for the reasons ruling 9 gives, and it is what `oom > 0` would rely on if this leaf ever gained children |
 
 **Neither alone is the predicate**, and each alone shipped a false `watchdog_kill` here: `oom_kill`
 alone counts a system-wide OOM that merely picked pi; `oom_group_kill` alone is **not**
@@ -811,11 +819,19 @@ own-limit-only either, because on a global OOM the kernel's `oom_domain` is the 
 from the victim, finds this leaf's `oom.group=1`, group-kills it and increments `oom_group_kill`
 *here*; and `oom` alone can be a graceful `-ENOMEM` the task survives.
 
-**RULED: `oomKilled = oom > 0 && (oom_kill > 0 || oom_group_kill > 0) && memory.peak reached the
-bound`, from the kernel's own record alone — with the peak conjunct SKIPPED when either figure is
-unavailable, and see **ruling 9**, which corrects this ruling's claim that the peak floor closes the
-global-OOM false positive (it does not; `oom` is what narrows it, and one residual is irreducible) (the escape is the last sentence of the "slack must not be grown" paragraph
-below; it is part of the rule, not an implementation detail).** The two counters are INDEPENDENT, so the conjunction
+**RULED — the complete rule, exactly as shipped, with nothing to assemble from elsewhere:**
+
+```ts
+const ownLimit     = oom > 0 && (oom_kill > 0 || oom_group_kill > 0);
+const reachedBound = peakBytes === 0 || boundBytes === undefined
+                  || peakBytes >= boundBytes - 2 * 1024 * 1024;   // OOM_PEAK_SLACK_BYTES
+const oomKilled    = ownLimit && reachedBound;
+```
+
+From the kernel's own record alone; the process's exit shape is consulted nowhere. **See ruling 9**,
+which corrects this ruling's claim that the peak floor closes the global-OOM false positive: it does
+not — `oom > 0` is what narrows it, the peak conjunct is a consistency check implied by `oom` on
+this topology, and one residual is irreducible. The two counters are INDEPENDENT, so the conjunction
 of them only NARROWS the global-OOM false positive: a solicitation that took a graceful `-ENOMEM`
 early (`oom` 1, survived) and was LATER picked by the system-wide OOM killer (`oom_kill` 1) sets
 both, and nothing in the counters says the two events are unrelated — a pairing that is not exotic,
@@ -825,9 +841,12 @@ what narrows it, and the peak floor is implied by `oom` rather than independent 
 original claim, kept so the correction is legible: an own-limit kill cannot happen BELOW the limit, so
 `memory.peak` must have reached the bound, while a global victim's sits under it. **The comparison
 carries 2 MiB of slack, and the slack is part of the rule rather than padding:** `memory.peak`
-tracks `memory.current`, and the charge that TRIGGERS the OOM is the one that FAILS, so it is never
-rolled back before it reaches the high-water mark — at the kill, usage sits below `memory.max` by up
-to that charge's size. **CORRECTED (ruling 9's review): sized to the `MEMCG_CHARGE_BATCH` path
+tracks `memory.current`, and the charge that TRIGGERS the OOM is the one that FAILS —
+`page_counter_try_charge()` rolls it back and `goto failed` BEFORE the
+`WRITE_ONCE(c->watermark, new)`, so **it never reaches the high-water mark**. At the kill, usage
+therefore sits below `memory.max` by up to that charge's size, which is why the slack exists at all:
+without it a strict comparison would reject a genuine kill. **Do not remove the slack on the
+strength of the peak being implied — implied is not equal.** **CORRECTED (ruling 9's review): sized to the `MEMCG_CHARGE_BATCH` path
 (256 KiB) and order <= 3, NOT to a THP fault.** `mem_cgroup_oom()` returns `OOM_SKIPPED` for
 `order > PAGE_ALLOC_COSTLY_ORDER` before raising `MEMCG_OOM`, so a failed THP charge never produces
 the `oom` event this predicate requires. 2 MiB is ~8x more headroom than the implication needs, kept
@@ -840,7 +859,7 @@ rejects the global-OOM victim, whose peak sits far below; at 16 MiB it would sta
 again and the false `watchdog_kill` rows return. Because it is a constant it loosens as a fraction
 as the bound shrinks — **a future story that lowers `residentRssBytes` below ~32 MiB, where 2 MiB
 exceeds 6% of it, must revisit this** (e.g. `min(2 MiB, bound / 16)`). Recorded here so it is not
-rediscovered from a fifth door. The peak conjunct is applied only when both figures are available — a pre-5.19 kernel has no `memory.peak` and reads
+rediscovered from a sixth door. The peak conjunct is applied only when both figures are available — a pre-5.19 kernel has no `memory.peak` and reads
 0, and suppressing a real kill on a missing measurement would trade this false positive for a false
 negative, which is the worse direction.
 
@@ -850,8 +869,9 @@ under AC2 — the bound this story enforces is the leaf's — but it means ances
 invisible to this verdict.
 The process's exit shape — `signalCode`, exit 137, "did we send the SIGKILL" — is deliberately NOT
 consulted: it is a proxy for *was it killed* that cannot say *by whom*, which is the entire
-discrimination, and it counted this layer's own `stop()` SIGKILL as the kernel's. The five doors it
-failed through, kept as the reason the rule is stated this strongly: (1) a global kill counted by
+discrimination, and it counted this layer's own `stop()` SIGKILL as the kernel's. The five doors the PREDICATE
+failed through — the first four of them exit-shape doors, the fifth not — kept as the reason the
+rule is stated this strongly: (1) a global kill counted by
 `oom_kill`; (2) a graceful `-ENOMEM` where `oom` fired and nothing died; (3) an assumed kill in
 `stop()`, which counted this layer's own SIGKILL as the kernel's; (4) a `QDS_PI_BIN` free to exit
 137 of its own accord; and (5) the two-counter residual — a graceful `-ENOMEM` early paired with a
@@ -950,8 +970,8 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   `overflow` survives the refresh" direction needs an engine-written `overflow`, which needs a
   kernel OOM-kill — it lands with AC1's live round.
 
-Verification, scoped rather than generalized: `bun test` over the whole repo is **6084 pass / 5
-fail**, and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
+Verification, scoped rather than generalized: `bun test` over the whole repo is **6336 pass / 7 skip / 5
+fail** (re-measured 2026-09-19 after the review rounds added tests; it was 6084/5 when first written), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
 with this branch stashed, and three (gitnexus ×2, `tests/fleet/cli.test.ts`'s TRANSIENT-errno test)
 pass in isolation on both trees under lower load. `bunx tsc --noEmit` and Biome are clean. The
 suites this story owns — `tests/fleet/resident-cgroup.test.ts`, `tests/fleet/resident.test.ts`,

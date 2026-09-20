@@ -1111,8 +1111,9 @@ describe("buildIdFileInputs", () => {
   });
 
   trackedSetDigest("a single digest over EVERY tracked walked input — the pin's whole offline reach", () => {
-    // The three entries above pin the named assets; the walk yields ~76
-    // inputs, and the other ~73 (src/**, cli-anything/**, scripts/lib/**,
+    // The three entries above pin the named assets; the walk yields 89
+    // inputs (measured 2026-09-19 by calling `buildIdFileInputs` directly; it
+    // was ~76 when this docblock was written), and the other 86 (src/**, cli-anything/**, scripts/lib/**,
     // package.json, bun.lock, …) are tracked files whose every edit moves the
     // real buildId — so a stale pin from editing any of them was caught only
     // at the paid publish gate, after a full QEMU build/push. One digest over
@@ -1360,7 +1361,22 @@ describe("buildIdFileInputs", () => {
       // branch tree only; the merge's publish + adoption ritual re-pins the
       // IMAGE pair, and this literal rides that same ritual.
       //
-      // 2d63fa93: moved from b3c30d0c by DF3.6b. FOUR walked
+      // b3c30d0c: moved from 99af1da0 — ALREADY STALE ON `dev` BEFORE DF5.4
+      // cut its branch, verified the DF5.3 way: the whole working tree
+      // stashed, the digest recomputed on the clean dev checkout (7f4854fb)
+      // — b3c30d0c, byte-identical to the branch tree's. DF5.4 itself moved
+      // NOTHING in the walk (intersection of the branch's 56 changed files
+      // with the live `buildIdFileInputs` set: empty; the gate code, fixture,
+      // tests, story artifact and `.unlazy/` are all outside the COPY set).
+      // The mover is upstream of that branch — the DF3.8 margin merge
+      // (#267) landing after the 13th-pin adoption, the same
+      // landed-without-touching-this-literal shape #238 and DF5.3 hit.
+      // RESTORED here: DF3.6b's first re-pin wrote its own entry OVER this
+      // paragraph, which left `b3c30d0c` the one value in the chain a reader
+      // could not tie to a paragraph — exactly the invariant round 4 finding 3
+      // established. The value itself is `origin/dev`'s and is unchanged.
+      //
+      // 7d44bbda: moved from b3c30d0c by DF3.6b. FOUR walked
       // tracked inputs — `oci/exedev/systemd/qds-run@.service`
       // (+`Delegate=memory`), `src/fleet/resident.ts` (the whole cgroup
       // mechanism), `src/phase-engine/steering.ts` (the OOM writer) and
@@ -1388,7 +1404,7 @@ describe("buildIdFileInputs", () => {
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "2d63fa93360ea098c964bbf44cf575eafef895450cda5a733316370081a07312",
+      "7d44bbdad543b63850ff3779e92a98637f33873da59cf4febeec9c8e5093bdbc",
     );
   });
 });

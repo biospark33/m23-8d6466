@@ -415,7 +415,7 @@ function removeLeaf(dir: string): void {
  * conjunct exists to catch (whose peak sits far below). At 16 MiB it would
  * start passing those again, and the false `watchdog_kill` rows come back.
  *
- * SCALE-DEPENDENT, and stated so a fifth door does not rediscover it: the slack
+ * SCALE-DEPENDENT, and stated so a sixth door does not rediscover it: the slack
  * is a constant, so it loosens as a fraction as the bound shrinks. A story that
  * lowers `residentRssBytes` below ~32 MiB — where 2 MiB exceeds 6% of it — must
  * revisit this, e.g. as `min(2 MiB, bound / 16)`. Not now, at 512 MiB.
