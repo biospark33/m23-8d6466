@@ -118,13 +118,7 @@ jobs:
       - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
-      # bun 1.3.13 panicked on the runner twice at the same point (run
-      # 35534314000, both attempts): `panic: us_create_timer: returned null: 24`
-      # — EMFILE at timer creation, after the suite's ~6.4k spawns had drained
-      # the fd budget. Raise the soft fd limit to the runner's hard limit for
-      # this step. Local whole-repo runs (8/8 green at the branch gate) never
-      # hit it — this is the runner's fd ceiling, not a test defect.
-      - run: ulimit -n "$(ulimit -Hn)"; bun test
+      - run: bun test
       # DF4.2 coverage gate. Two steps so the coverage run's own exit status
       # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
       # enforces per-file line+function floors and fails loudly on any
