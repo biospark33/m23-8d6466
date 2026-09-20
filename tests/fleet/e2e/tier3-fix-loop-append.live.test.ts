@@ -696,6 +696,32 @@ test.todoIf(liveTodoOff())(
         );
       }
 
+      // (ii½) the host repo must ALREADY contain the PR head object: the
+      // in-box harvest bundles the box branch against the FILL-pinned base
+      // (the PR head), and `git bundle verify` runs in the HOST repo — a
+      // factory checkout cannot verify a thin bundle whose prerequisite is
+      // another repository's commit (measured live 2026-09-20,
+      // evidence 2026-09-20-233107: `missing-prerequisite` aborted the chain
+      // after the box billed). A free `git fetch` closes it; verified
+      // PRE-spend so the round refuses loudly instead of failing paid.
+      {
+        const headCheck = Bun.spawnSync({
+          cmd: ["git", "-C", REPO_ROOT, "cat-file", "-e", `${pr.headSha}^{commit}`],
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        evidence.push({
+          phase: "env-base-object",
+          ok: headCheck.exitCode === 0,
+          headSha: pr.headSha,
+        });
+        if (headCheck.exitCode !== 0) {
+          throw new Error(
+            `the host repo (${REPO_ROOT}) does not contain the PR head commit ${pr.headSha} — the harvest bundle's prerequisite cannot verify here. Run: git fetch ${prUrl.replace(/\/pull\/\d+$/, ".git")} ${pr.headSha} — then re-run.`,
+          );
+        }
+      }
+
       // (ii) bot review capability, TWO readings: the RAW bot presence (any
       // Bot-type or [bot]-suffixed author — the capability the leg names) and
       // the KEPT set through the CLI's own fetchBotComments (what inv1 would
