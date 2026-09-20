@@ -906,8 +906,14 @@ test.todoIf(liveTodoOff())(
       expect(neg.exitCode).toBe(5);
       expect(negEnvelope).toBeDefined();
       // The refusal names the MISSING ENTRY arm, not a file-level guard — the
-      // file exists and parses; the slug's absence is what refused.
-      expect(String(negEnvelope?.message ?? "")).toContain(DISPOSABLE_REPO_SLUG);
+      // file exists and parses; the slug's absence is what refused. Asserted
+      // via the SCRATCH scope file's path in the message (redaction blanks
+      // the slug itself: the 41-char mixed-case owner/repo collides with the
+      // opaque-token heuristic — measured live, evidence 2026-09-20-224548),
+      // which is the stronger half anyway: it proves the probe consulted the
+      // scratch host, never the operator's real scope file.
+      const negScopeRealPath = realpathSync(negScopePath);
+      expect(String(negEnvelope?.message ?? "")).toContain(negScopeRealPath);
       // No dispatch ⇒ no fix-run record: the store still holds ONLY the parent.
       expect(recordsAfterNeg).toEqual([`${parentRunId}.json`]);
       // And no box: the delta over the round's own listing is empty.
