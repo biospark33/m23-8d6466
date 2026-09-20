@@ -890,7 +890,7 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
       ctx.printRefusal(
         "fix-run-unsettled",
         `the fix run ${ack.runId} did not settle inside the observation window`,
-        "re-run `bun scripts/fix-run.ts --pr " + pr.number + "` — the run keeps progressing between invocations",
+        `re-run \`bun scripts/fix-run.ts --pr ${pr.number}\` — the run keeps progressing between invocations`,
         { runId: ack.runId },
       );
       return 1;

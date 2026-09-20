@@ -136,6 +136,7 @@ function charCodeAtIsLowSurrogate(s: string, i: number): boolean {
 }
 
 /** C0 controls other than LF and TAB. A real review comment is Markdown and multiline; it never needs BEL or CR. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
 const FORBIDDEN_C0_RE = /[\x00-\x08\x0B\x0C\x0D\x0E-\x1F]/;
 
 /** A comment that cannot safely enter the brief is OMITTED, not fatal — one malformed comment must not sink twenty good ones. */

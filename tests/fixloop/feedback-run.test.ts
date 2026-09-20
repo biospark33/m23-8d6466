@@ -561,11 +561,38 @@ describe("fixContext codec + INV-7 preflight", () => {
       mutate(p);
       return JSON.stringify(p);
     };
-    expectRefusal(() => parseFixContext(tampered((p) => (p.schemaVersion = 2))), 5, "fix-context-invalid");
+    expectRefusal(
+      () =>
+        parseFixContext(
+          tampered((p) => {
+            p.schemaVersion = 2;
+          }),
+        ),
+      5,
+      "fix-context-invalid",
+    );
     expectRefusal(() => parseFixContext({ already: "an object" }), 5, "fix-context-invalid");
     expectRefusal(() => parseFixContext("not json"), 5, "fix-context-invalid");
-    expectRefusal(() => parseFixContext(tampered((p) => (p.unexpected = true))), 5, "fix-context-invalid");
-    expectRefusal(() => parseFixContext(tampered((p) => (p.commentIds = ["not-digits"]))), 5, "fix-context-invalid");
+    expectRefusal(
+      () =>
+        parseFixContext(
+          tampered((p) => {
+            p.unexpected = true;
+          }),
+        ),
+      5,
+      "fix-context-invalid",
+    );
+    expectRefusal(
+      () =>
+        parseFixContext(
+          tampered((p) => {
+            p.commentIds = ["not-digits"];
+          }),
+        ),
+      5,
+      "fix-context-invalid",
+    );
   });
 
   test("preflight accepts the valid encoding (scratch store, validate-only)", () => {

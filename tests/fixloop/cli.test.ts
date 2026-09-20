@@ -425,7 +425,16 @@ async function runCli(
   };
   let stdout = "";
   let stderr = "";
-  const code = await run(argv, (s) => (stdout += s), (s) => (stderr += s), deps);
+  const code = await run(
+    argv,
+    (s) => {
+      stdout += s;
+    },
+    (s) => {
+      stderr += s;
+    },
+    deps,
+  );
   try {
     costLedger.close();
   } catch {
@@ -878,8 +887,7 @@ describe("G3 push leg", () => {
           if (id === FIX) {
             fixGets += 1;
             if (fixGets >= 3) {
-              const extensions = { ...(rec.extensions ?? {}) };
-              delete extensions.approval;
+              const { approval: _approvalGone, ...extensions } = rec.extensions ?? {};
               return { ...rec, extensions };
             }
           }
