@@ -194,7 +194,8 @@ the harvested diff, the credential probe, and the `fixContext` write.
    the mint-time marker this story's dispatch writes on every fix attempt's record before the chain
    runs; `runner.ts` already holds that record (its `store.get(runId)` read precedes the
    `requestApproval` call), so the variation reads a value in hand — no new I/O, no new dependency,
-   and no reliance on the brief, which travels in-box and is never host-side — so the one human
+   and no reliance on the brief, which is host-side input only and never travels in-box
+   (corrected 2026-09-19 — see Technical Notes, "Where the prose goes instead") — so the one human
    consent in an otherwise autonomous loop is prompted with *"append a verified fix commit to the
    PR's branch"*, never with a description of a different act. An approval from a previous attempt never authorizes this
    one. When the host then pushes via `pushVerifiedSha(runId, { targetRef: <PR branch ref> })` —
@@ -506,11 +507,28 @@ the harvested diff, the credential probe, and the `fixContext` write.
   `"`, `,` and space — so it can never fire on a JSON-encoded payload at all.
 
   **Where the prose goes instead.** The comment bodies the fixer actually needs travel to the box on
-  the **dispatch input path** — DF3.1's brief, via the allow-listed `fixContext` brief key — which is
-  *not* the run record and is not `assertNoSecret`'s surface. On that path they are normalized,
-  length-bounded, and redacted before they enter the brief. Nothing prose-shaped is persisted
-  host-side; the durable artifact is the digest and the IDs, and the full bodies stay reachable on
-  GitHub through those IDs.
+  the **dispatch input path**, which is *not* the run record and is not `assertNoSecret`'s surface.
+  On that path they are normalized, length-bounded, and redacted before they enter the brief.
+  Nothing prose-shaped is persisted host-side; the durable artifact is the digest and the IDs, and
+  the full bodies stay reachable on GitHub through those IDs.
+
+  **CORRECTED 2026-09-19 (dev-time finding, operator-ruled): the brief never travels in-box.** The
+  original text here named the carrier as "DF3.1's brief, via the allow-listed `fixContext` brief
+  key". Verified against shipped code at dev time: dispatch writes exactly two files into the box —
+  the serialized manifest and a **fixed-field** `run-context.json` witness
+  (`src/fleet/dispatch.ts`, the `fillRun` files array) — and the in-box worker prompt is the
+  manifest's static `task` string verbatim (`src/phase-engine/phases/dispatch-task.ts`,
+  `prompts[role.name] = taskBrief`). A brief key would validate host-side and then be silently
+  dropped; the fixer would never see the comments. The corrected channel, operator-ruled as the
+  long-term architecture over a per-script manifest-rendering workaround: the brief's `fixContext`
+  key remains the **validated host-side carrier** (bounds, normalization and redaction enforced
+  before dispatch, per this story's rules), `src/fleet/dispatch.ts` copies it — adds-only, present
+  only when the brief carries it — into the `run-context.json` witness (the designed, versioned,
+  additively-read host→box channel), and `src/phase-engine/phases/dispatch-task.ts` appends the
+  bounded comment set to each role's prompt as a **fixed, engine-owned fenced quoted appendix**
+  after the task text — data, never instruction authority, with the fencing a label and AC6's
+  host-side scope check the enforced boundary, exactly as below. Non-fix dispatches carry no key and
+  see byte-identical behavior.
 
   **The redactor is `redactSecrets(text)` from `src/providers/step-log.ts:225` — named by path,
   because this tree has TWO exported functions of that name with opposite security properties, and
@@ -684,8 +702,8 @@ the harvested diff, the credential probe, and the `fixContext` write.
   registration and dispatch-time append of — see the Overview and AC3; DF6.1b's driver is the
   reader), and `fixRun: "string"` joins the same namespace as the **mint-time fix-run marker** —
   this story's dispatch writes `"true"` on every fix attempt's own record when it mints it, before
-  the chain runs, which is the host-side observable the AC2 proposal variation keys on (the brief
-  travels in-box and is never host-side, and `fixContext` is only written post-push — after
+  the chain runs, which is the host-side observable the AC2 proposal variation keys on (the brief is
+  host-side input only, and `fixContext` is only written post-push — after
   `requestApproval` has fired), and `fixOutcomeClass: "string"` joins the same namespace as the
   **per-attempt terminal-outcome classification carrier** — the field DF6.1b's terminal transition
   writes under the parent lock and its attempt ladder's terminal arm reads; without a registered
@@ -706,6 +724,22 @@ the harvested diff, the credential probe, and the `fixContext` write.
   content. The new members are **required** interface members, so DF5.2's object-literal fakes in
   `tests/pr/` gain them in this story — a DoD leg asserts DF5.2's `tests/pr` suite green with its
   assertions unchanged.
+- `src/fleet/dispatch.ts` — **adds only** (operator-ruled 2026-09-19, see Technical Notes "Where the
+  prose goes instead"): when the validated brief carries the allow-listed `fixContext` key, the
+  `run-context.json` witness write copies it through (normalized/bounded/redacted already, by this
+  story's own brief-build path). Absent the key, the witness is byte-identical to today. No existing
+  witness field, validation rule, or fill behavior changes.
+- `src/phase-engine/phases/dispatch-task.ts` — **adds only** (same ruling): when the run's witness
+  carries `fixContext.botComments`, each role's prompt gains a fixed, engine-owned fenced quoted
+  appendix after the task text rendering the bounded comment set as data with no instruction
+  authority. Witness absent or key absent → prompts byte-identical to today. The witness read uses
+  the same hardened reader discipline the engine's other witness reads use; if reaching it needs a
+  deps pass-through at the `dispatch_task` registration site, `scripts/pipeline-run.ts` gains an
+  **adds-only** deps entry and nothing else.
+- `config/rosters/fix-run.pipeline.json` — **new, checked-in fix-run manifest**: one `dispatch_task`
+  phase whose static `task` instructs the single-fixer team to read the appended review comments,
+  implement the fix, and commit its work (harvest counts commits on `sbx/<runId>`); roster field
+  points at `config/rosters/roster.yaml` as shipped. Static — no per-run rendering anywhere.
 - `src/reverify/runner.ts` — **adds only**: the `requestApproval` proposal string varies when the
   run's own record carries `extensions.fixLoop.fixRun` (the mint-time fix-run marker DF6.1a's
   dispatch writes before the chain runs — observable in the record the runner already fetched at
@@ -726,7 +760,10 @@ the harvested diff, the credential probe, and the `fixContext` write.
   non-predecessor for the reason given above.
 - `tests/fixloop/{feedback-run,cli}.test.ts`, `tests/fixloop/fixtures/pr-feedback.json`,
   `tests/fixloop/fixtures/pr-feedback-injection.json`,
-  `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts`
+  `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` — plus **adds-only** legs in
+  `tests/fleet/dispatch.test.ts` (witness carry-through), the `dispatch-task` suite
+  (prompt appendix), `tests/pr/` (the two new interface members on DF5.2's fake), and the
+  `src/reverify/runner.ts` suite (proposal variation)
 
 ## Security Invariants
 
@@ -1039,6 +1076,29 @@ the harvested diff, the credential probe, and the `fixContext` write.
       the wrong shape; this item is what makes it observable at runtime.
 
 ## Dev Agent Record
+
+### 2026-09-19 — Dev-time correction: the comment-delivery channel (operator-ruled)
+
+Found at dev-time firsthand verification, before any code was written: the story's carrier premise
+was inverted. It said comment bodies "travel to the box on the dispatch input path — DF3.1's brief"
+and described the brief as something that "travels in-box and is never host-side". Shipped reality:
+the brief is **host-side input only** — `src/fleet/dispatch.ts` delivers exactly the serialized
+manifest and a fixed-field `run-context.json` witness into the box, and the in-box worker prompt is
+the manifest's static `task` string verbatim (`dispatch-task.ts`). A `fixContext` brief key would
+have validated and been silently dropped; the fixer would never have seen a comment, and every
+review wave had missed it because no AC tested the delivery path end to end.
+
+**Operator ruling:** take the long-term platform route, not a per-script manifest-rendering
+workaround. The brief's `fixContext` key stays the validated host-side carrier (bounds /
+normalization / redaction enforced pre-dispatch per this story); `src/fleet/dispatch.ts` copies it
+adds-only into the witness (the designed host→box channel); `src/phase-engine/phases/
+dispatch-task.ts` renders it as a fixed engine-owned fenced appendix on each role's prompt. Files
+to Modify grows accordingly (plus `config/rosters/fix-run.pipeline.json`, the static checked-in fix
+manifest, and the named test files). Every security property is preserved or strengthened: the
+appendix format is engine-owned and uniform rather than caller-scripted, non-fix dispatches are
+byte-identical, and AC6's host-side scope check remains the enforced boundary. The two inverted
+phrases (AC2, Files-to-Modify `run-record.ts` entry) and the Technical Notes carrier paragraph were
+corrected in place.
 
 <!-- Empty placeholder — filled during development. -->
 

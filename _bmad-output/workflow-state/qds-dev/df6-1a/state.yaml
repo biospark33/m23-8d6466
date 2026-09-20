@@ -1,0 +1,51 @@
+story: df6-1a
+title: PR Feedback -> Bounded Fix Attempt -> Verified Append
+phase: "3-in-dev (unlazy orchestrated, pre-wave-1)"
+branch: feature/df6-1a-fix-loop-append
+base: dev
+target: dev
+started: 2026-09-19T00:00:00-04:00
+research:
+  status: complete
+  confidence: 0.95
+  method: >
+    Driver firsthand verification of every load-bearing seam (run-record registry,
+    brief-schema, pr/github.ts, push.ts PushOutcome, run-completion
+    observeAndDriveChain, reverify/runner.ts, roster schema, run-lock, allowlist-path,
+    step-log redactor, dispatch witness write, dispatch-task prompt build, manifest
+    loader) + three explore agents (src seams, test seams, reference repos). GitNexus
+    reindexed via canonical script (cli 1.6.9 == pinned). Reference repos scanned:
+    glob-translator concept lifted from inkwell permissions.py; no PR-comment code
+    exists there (net-new).
+  corrections:
+    - "Story premise inverted: the brief never travels in-box. Operator-ruled channel:
+      brief fixContext (validated host-side carrier) -> dispatch.ts witness
+      (adds-only) -> dispatch-task.ts fenced engine-owned prompt appendix. Story
+      amended in place (Dev Agent Record 2026-09-19); Files-to-Modify grew
+      dispatch.ts, dispatch-task.ts, conditional pipeline-run.ts deps pass-through,
+      config/rosters/fix-run.pipeline.json, and named test files."
+    - "push.ts line cites stale (resume arm :544-547/:510; no-repo-slug :397-403)."
+    - "ReverifyReport field is reverifyId, not reportId (reportId is approval-side)."
+    - "budget gate is src/providers/budget-gate.ts, not src/fleet/budget-gate.ts."
+    - "run-lock.ts only throws; exit-5 mapping is the CLI layer's job."
+    - "Proposal names fix run id, not PR number (closed 3-field registration; recorded
+      deviation in I9)."
+unlazy:
+  scope: df6-1a
+  plan: .unlazy/df6-1a/PLAN.md
+  waves:
+    - wave-1: leaf-1 registrations+artifacts, leaf-2 github api (READY)
+    - wave-2: leaf-3 witness channel, leaf-4 fixloop core, leaf-5 proposal (WAITING on leaf-1)
+    - wave-3: leaf-6 fix-run CLI (WAITING on 3+4)
+    - wave-4: leaf-7 live e2e authoring (WAITING on 6)
+    - wave-5: node-1 branch integration (driver)
+    - wave-6: node-2 mandatory live e2e demo (driver + operator go)
+guardrails:
+  branch: ok
+  scope: amended story Files-to-Modify closed list enforced via leaf OWNS + leases
+  tdd: leaf-4/leaf-6 test-first on own suites; wiring leaves against locked interfaces I1-I13
+  spend: node-2 only, operator go required, finally revoke/destroy + keyLeakProblems
+notes: >
+  Driver runs full suite ONCE at branch gate (node-1 N2) + targeted suites during
+  integration (operator directive). Subagents run only own-suite + tsc + own ledger.
+  Live e2e: operator ruled RUN IT (not deferred). Disposable repo retained for DF6.1b.

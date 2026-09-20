@@ -1,9 +1,9 @@
 /**
  * The GitHub surface DF5.2 touches, and nothing else.
  *
- * A narrow interface rather than a client library: this story makes four calls
+ * A narrow interface rather than a client library: this seam makes six calls
  * (who am I, is there already a PR for this branch, open one, comment on an
- * issue) and every one of them must carry a host-only token, a 30 s timeout and
+ * issue, list a PR's review comments, read a PR's state and head) and every one of them must carry a host-only token, a 30 s timeout and
  * at most one retry. `fetch` covers that in fewer lines than configuring a
  * dependency would, and the interface is the seam every test drives.
  *
@@ -29,7 +29,31 @@ export interface PrRef {
   number: number;
 }
 
+/** One PR REVIEW comment (`/pulls/{n}/comments`), not an issue comment. */
+export interface PrReviewComment {
+  id: number;
+  body: string;
+  authorLogin: string;
+  authorType: string;
+}
+
+export interface PullRequestInfo {
+  number: number;
+  state: string;
+  headRefName: string;
+  headSha: string;
+  merged: boolean;
+}
+
 export interface GitHubApi {
+  /**
+   * The PR's REVIEW comments — `/pulls/{n}/comments`, a different endpoint
+   * from issue comments (DF6.1a: bot-authored review feedback is what a fix
+   * run reads). A malformed element is a GitHubApiError, never a coercion.
+   */
+  listPrReviewComments(o: { owner: string; repo: string; prNumber: number; token: string }): Promise<PrReviewComment[]>;
+  /** The PR's state and head, or null on a 404 (DF6.1a's closed/merged no-op probe). */
+  getPullRequest(o: { owner: string; repo: string; prNumber: number; token: string }): Promise<PullRequestInfo | null>;
   /** The login the token authenticates as — compared against the entry's `authorLogin` (AC5). */
   authenticatedLogin(token: string): Promise<string>;
   /**
@@ -160,6 +184,58 @@ export function httpGitHubApi(apiBase = API_BASE): GitHubApi {
 
     async commentIssue({ owner, repo, issueNumber, body, token }) {
       await request(`/repos/${owner}/${repo}/issues/${issueNumber}/comments`, { method: "POST", token, body: { body } }, apiBase);
+    },
+
+    async listPrReviewComments({ owner, repo, prNumber, token }) {
+      // ONE page at per_page=100 — that truncation is the locked contract. A
+      // PR carrying more than a hundred review comments is cut at the first
+      // hundred here; the fix loop bounds its comment set to 20 downstream,
+      // so a second page would never change the outcome.
+      const path = `/repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=100`;
+      const rows = (await request(path, { method: "GET", token }, apiBase)) as {
+        id?: unknown;
+        body?: unknown;
+        user?: { login?: unknown; type?: unknown } | null;
+      }[];
+      if (!Array.isArray(rows)) {
+        // The wire status was 200; the refusal is about the shape it carried.
+        // The body is never echoed — it is authenticated-call content.
+        throw new GitHubApiError(200, `GET ${path} returned a non-array body`);
+      }
+      return rows.map((row, index) => {
+        if (
+          typeof row?.id !== "number" ||
+          typeof row.body !== "string" ||
+          typeof row.user?.login !== "string" ||
+          typeof row.user.type !== "string"
+        ) {
+          throw new GitHubApiError(200, `GET ${path} returned a malformed review comment at index ${index}`);
+        }
+        return { id: row.id, body: row.body, authorLogin: row.user.login, authorType: row.user.type };
+      });
+    },
+
+    async getPullRequest({ owner, repo, prNumber, token }) {
+      const path = `/repos/${owner}/${repo}/pulls/${prNumber}`;
+      let pr: { number?: unknown; state?: unknown; head?: { ref?: unknown; sha?: unknown } | null; merged?: unknown };
+      try {
+        pr = (await request(path, { method: "GET", token }, apiBase)) as typeof pr;
+      } catch (e) {
+        // A 404 is an answer ("no such PR"), not a failure — the fix-run CLI's
+        // closed/absent no-op keys off it.
+        if (e instanceof GitHubApiError && e.status === 404) return null;
+        throw e;
+      }
+      if (
+        typeof pr?.number !== "number" ||
+        typeof pr.state !== "string" ||
+        typeof pr.head?.ref !== "string" ||
+        typeof pr.head.sha !== "string" ||
+        typeof pr.merged !== "boolean"
+      ) {
+        throw new GitHubApiError(200, `GET ${path} returned a malformed pull request`);
+      }
+      return { number: pr.number, state: pr.state, headRefName: pr.head.ref, headSha: pr.head.sha, merged: pr.merged };
     },
   };
 }

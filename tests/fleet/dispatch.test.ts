@@ -2832,6 +2832,65 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(witness.issueId).toBe(record.extensions?.budget?.issueId);
   });
 
+  test("DF6.1a: a brief WITHOUT fixContext produces a witness with exactly today's key set", async () => {
+    // The byte-identical-when-absent contract, asserted at the strongest level
+    // a minted-value file allows: the exact serialized key set, in order.
+    // (runId/requestId/budgetMs are minted per dispatch, so full byte equality
+    // against a stored fixture cannot be the assertion; the key set is the
+    // shape the in-box readers' additive-tolerance promise is made against.)
+    const result = await dispatch(validBrief(), deps());
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as Record<string, unknown>;
+    expect(Object.keys(witness)).toEqual([
+      "runId",
+      "pipelineId",
+      "requestId",
+      "effectiveCeilingMicros",
+      "budgetMs",
+      "repoSlug",
+      "issueId",
+    ]);
+  });
+
+  test("DF6.1a: a brief carrying fixContext sees the SAME payload on the witness, as the one additive key", async () => {
+    // The witness is fixContext's only host→box ride (the brief never travels
+    // in-box), so the payload is asserted by deep equality against what the
+    // brief carried — a transform, reorder or re-keying here would be the
+    // engine rendering comments the host never validated.
+    const fixContext = {
+      schemaVersion: 1 as const,
+      botComments: [
+        {
+          commentId: "123456789",
+          author: "review-bot[bot]",
+          bodySnippet: "src/foo.ts:12 — this swallows the error code",
+        },
+        {
+          commentId: "987654321",
+          author: "lint-bot[bot]",
+          bodySnippet: "tests/foo.test.ts:40 — assertion is vacuous",
+        },
+      ],
+    };
+    const result = await dispatch({ ...validBrief(), fixContext }, deps());
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as Record<string, unknown>;
+    expect(witness.fixContext).toEqual(fixContext);
+    // Adds-only, and LAST: the base key set is exactly the no-fixContext leg's.
+    expect(Object.keys(witness)).toEqual([
+      "runId",
+      "pipelineId",
+      "requestId",
+      "effectiveCeilingMicros",
+      "budgetMs",
+      "repoSlug",
+      "issueId",
+      "fixContext",
+    ]);
+  });
+
   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
     // The create step STRADDLES the record: `provisionAdmittedRun` writes the
     // run record first (INV-1), then the box. An untyped throw escaping from

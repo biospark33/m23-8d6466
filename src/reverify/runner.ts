@@ -453,13 +453,28 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
     // `approval-request-failed`, with no request made at all. The fresh-id
     // fallback only serves a record that READ fine but carries no approval
     // extension (or a non-`pausing` one).
-    const bound = store.get(runId).extensions?.approval;
+    const record = store.get(runId);
+    const bound = record.extensions?.approval;
+    // DF6.1a AC2: the one human consent in the fix loop must name the act it
+    // actually authorizes. A fix run's green verdict authorizes APPENDING the
+    // verified fix commit to the existing PR branch — `scripts/fix-run.ts`
+    // invocation 2 pushes behind this approval — so a record minted with
+    // `fixLoop.fixRun = "true"` gets a proposal that says so; the legacy
+    // wording would describe an act (opening a PR) that never happens on that
+    // path. Only the exact string "true" switches the wording: the namespace
+    // or field absent, or any other value, keeps the legacy proposal. The PR
+    // number is not host-side available under the closed fixLoop registration,
+    // so the run id is the identifier (I9).
+    const proposal =
+      record.extensions?.fixLoop?.fixRun === "true"
+        ? `append a verified fix commit to the PR branch (fix run ${runId} at ${report.headSha})`
+        : `open a PR for run ${runId} at ${report.headSha}`;
     const reportId =
       String(bound?.state ?? "") === "pausing" && typeof bound?.reportId === "string" && bound.reportId !== ""
         ? bound.reportId
         : report.reverifyId;
     approval = await port.requestApproval(runId, {
-      proposal: `open a PR for run ${runId} at ${report.headSha}`,
+      proposal,
       reportId,
       headSha: report.headSha,
     });
