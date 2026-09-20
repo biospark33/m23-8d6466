@@ -1451,12 +1451,25 @@ describe("buildIdFileInputs", () => {
       // row fixed) and `review-round-15.md` are all outside the walk. Walk set
       // unchanged at 89 entries. Same failing-run receive, same-commit re-pin.
       //
+      // 99b541b3: moved from f3548fdc by DF3.6b, review round 16. ONE walked
+      // input changed, `src/phase-engine/steering.ts`, COMMENT-ONLY: the
+      // `PlacementRefusedError` docstring described the wrapper's failure as
+      // `|| exit 97` — the form REJECTED during development — rather than the
+      // shipped guard, which keys on membership read back from `cgroup.procs`.
+      // It mattered enough to move a pin because that docstring sits on the
+      // class a caller implements the contract against, and two prior rounds
+      // swept for this wording and missed it. NOT movers: the story artifact
+      // (several NOT-DONE consequence statements and a Shipped-table
+      // overclaim — "the four AC3 refusals", where one of the four asserts the
+      // OPPOSITE) and `review-round-16.md` are outside the walk. Walk set
+      // unchanged at 89 entries. Same failing-run receive, same-commit re-pin.
+      //
       // THE PUBLISH IS STILL OWED:
       // the unit is baked into a digest-pinned image, so a run against the
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "f3548fdcb214a50b5048154314b807fe6e65d874fde011647d9181130f43023c",
+      "99b541b357ccd53b661e93b1419ddfaf8c50148a7170316e70730647b91cd44f",
     );
   });
 });

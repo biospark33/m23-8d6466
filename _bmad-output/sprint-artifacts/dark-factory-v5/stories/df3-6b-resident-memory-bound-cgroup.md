@@ -681,8 +681,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..15}.md`** — fifteen adversarial
-rounds, **six before the first push and nine after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..16}.md`** — sixteen adversarial
+rounds, **six before the first push and ten after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
@@ -708,7 +708,7 @@ the current word; the evidence files are history.**
 | `tests/fleet/fixtures/fake-pi-resident.ts` | DF3.3's SHARED fake pi gains FIVE test-only knob groups the cgroup suite drives (7 env vars): staging `memory.events`/`memory.peak` into the live leaf, copying the leaf's `cgroup.procs` out, recording the leaf's armed state, forcing an exit code, and dying by SIGKILL. Additive and env-gated — every existing caller that sets none of them is byte-for-byte unaffected. |
 | `tests/scripts/build-exedev-image.test.ts` | The buildId pin re-derivation (the offline half of DF2.10's ritual): both asset digests and the whole-walk digest. FOUR walked inputs move the whole-walk literal — the unit, `src/fleet/resident.ts`, `src/phase-engine/steering.ts`, `scripts/pipeline-run.ts`. `oci/exedev/Dockerfile` also changed and is NOT one of them: it is `deriveBuildId`'s own separate `dockerfile` field, absent from all 89 entries `buildIdFileInputs` returns (verified by calling it directly). |
 | `tests/providers/exedev/image-assets.test.ts` | `Delegate` pinned in `directive-set` (key + position) and in `hardened` (VALUE — `Delegate=yes` passes the key check and must not pass this one), with two MUTATIONS negative controls. |
-| `tests/fleet/resident-cgroup.test.ts` (new) | Split + idempotence, the four AC3 refusals, the INV-MEM-2 Scope seam, the leaf lifecycle, the numeric contract (two distinct bounds through one path), AC2's no-unit-level-MemoryMax assertion, the wrapper's `\|\| exit 97` with a POSITIVE control and the `;` NEGATIVE control, INV-MEM-3's hostile-prompt argv test, the OOM-verdict discrimination (an own-limit kill vs a global OOM that merely picked pi), the exit-97 to `PlacementRefusedError` join with its unbounded-call negative control, and M1 (a staged-counter classification test — ruling 6). |
+| `tests/fleet/resident-cgroup.test.ts` (new) | Split + idempotence, the **three** AC3 refusals (`Delegate=memory` absent, no unified hierarchy, and the arming check against a real object — each asserting `CgroupUnenforceableError`) **plus the caller-fault control** that asserts the OPPOSITE: a garbage bound is `not.toBeInstanceOf(CgroupUnenforceableError)`, because it is the caller's fault and not an unenforceable box (this row said "the four AC3 refusals" until round 16, counting the control as a refusal and overclaiming in the dangerous direction), the INV-MEM-2 Scope seam, the leaf lifecycle, the numeric contract (two distinct bounds through one path), AC2's no-unit-level-MemoryMax assertion, the wrapper's refusal as SHIPPED — a failed placement exits 97 and never `exec`s pi, a POSITIVE control that the same script DOES exec pi when placement succeeds, and the row that pins the actual rule: a placement that silently did NOT take still exits 97, because the guard is keyed on MEMBERSHIP READ BACK from `cgroup.procs` and not on the write's exit status (the `\|\| exit 97` form this row used to name was rejected during development — see the amendment; corrected round 16), INV-MEM-3's hostile-prompt argv test, the OOM-verdict discrimination (an own-limit kill vs a global OOM that merely picked pi), the exit-97 to `PlacementRefusedError` join with its unbounded-call negative control, and M1 (a staged-counter classification test — ruling 6). |
 | `tests/phase-engine/steering.test.ts` | AC1/AC5 arms plus three negative controls (no kill ⇒ degrade; no dep ⇒ unchanged; throwing dep ⇒ sidecar) and the ordering assertion. |
 | `tests/phase-engine/in-box-engine.test.ts` | AC3 end-to-end through the unit's front door: no cgroup v2 ⇒ `resident_disabled`/`rss_unenforceable`, journal `disabled`, run settles ok, no tripwire, and explicitly NOT `rate_unresolved`. |
 
@@ -1016,6 +1016,14 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   `echo $$ >> …/cgroup.procs` idiom and is believed harmless, but the flag was adopted so the
   fs-level fake could model a multi-pid `cgroup.procs` at all, so the live leg must confirm the
   placement actually TOOK (read `cgroup.procs` back on a real leaf, not just observe the exit code);
+  **What is unproven if these never run, stated plainly (added round 16):** every mechanism claim in
+  this story's Shipped table has only ever executed against an **fs-level fake** cgroup tree. No real
+  kernel has yet accepted the placement write, enforced `memory.max`, fired `memory.oom.group=1`, or
+  produced a real `memory.peak`/`memory.events` pair for the verdict to classify. So this is not a
+  formality awaiting a confirmation run: **the load-bearing kernel behaviour the whole story exists
+  to invoke has never been observed once.** A reader should not conclude "implemented and
+  unit-tested, pending a live check" — the correct reading is that the enforcement path is
+  unconfirmed against reality, and both (a) and (c) below are ways it could be silently inert.
   (b) the synthetic allocator staged as Leg A's `QDS_PI_BIN` MUST NOT exit 97, or the leg proves
   a placement refusal instead of a crossing (see `_PLACEMENT_REFUSED_EXIT`'s docstring); and
   **(c) the box's KERNEL VERSION, read with `uname -r` before anything else** (added 2026-09-19,
@@ -1033,6 +1041,16 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   64 MiB E2E fixture bound proves attachment rather than crossing; a baseline ≥ 256 MiB means the
   512 MiB production default has under one doubling of headroom and must be re-set before this
   ships.
+  **The consequence, stated because the falsifiers above are phrased as TEST-VALIDITY problems and
+  the real risk is a PRODUCTION one (added round 16):** the 512 MiB default is a guess that has never
+  been checked against a measurement. If pi's real baseline is high — 300–400 MiB is not an absurd
+  figure for a model client holding a session — then shipping this default does not merely enforce
+  weakly, it **OOM-kills ordinary solicitations that were never runaway**. That converts a
+  runaway-memory safeguard into a source of false-positive kills and an availability regression, and
+  DF3.6b's own machinery makes the misfire look exactly like a genuine bound breach: `status:
+  "stopped"`, `exitStatus:"overflow"`, a `watchdog_kill` tripwire, and a resident that issues no
+  further calls for the rest of the run. The direction of the unknown is what matters here: an
+  unmeasured baseline means the shipped margin is **unknown**, not merely unoptimised.
 - **The DF2.10 image ritual — the OFFLINE half is DONE, the PUBLISH half is open.** `Delegate=memory`
   is in the unit file and fenced at build time, and `deriveBuildId`'s tracked inputs HAVE been
   re-derived in-commit (both asset digests and the whole-walk literal, per that file's same-commit
@@ -1040,10 +1058,30 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   moved. **A run against the currently pinned digest boots a unit with no `Delegate=`, so the
   resident refuses to start (AC3).** This is exactly the "green local gate against a stale pinned
   image" failure that DoD item exists to prevent, and that half is open.
+  **RELEASE-BLOCKING, stated plainly because every other sentence about it describes a mechanism
+  rather than a consequence: until the image is rebuilt, re-published and the digest pin moved,
+  DF3.6b DELIVERS NO ENFORCEMENT AT ALL.** Merging this PR does not arm the bound. Every in-box run
+  against the currently pinned digest takes the AC3 refusal path — `resident_disabled`,
+  `reason:"rss_unenforceable"` — which is the correct fail-closed behaviour and is also
+  indistinguishable, from the journal alone, from a box that simply lacks delegation. The publish is
+  an OPERATOR action (a registry push plus a pin move); it is deliberately not taken from inside this
+  branch, and **the story is not done when this PR merges.** Raised again by CodeRabbit in review
+  round 16 as a Major, correctly — it was already in the DoD, the prerequisites table, this section
+  and the pin ledger, so the gap was never in the tracking; it is in the doing.
 - **Refresh precedence (vii), the half that needs a kill:** the "probe fills when the engine wrote
   none" direction is covered host-side (the existing `exitStatus:"transient"` e2e). The "engine's
   `overflow` survives the refresh" direction needs an engine-written `overflow`, which needs a
   kernel OOM-kill — it lands with AC1's live round.
+  **Scoped correctly (round 16), because a reviewer characterised this as a risk that AC5's
+  `exitStatus` guarantee could be silently FALSE in production, and tracing the code says otherwise.**
+  The refresh is guarded `if (residentSpawn !== undefined && residentBlock.exitStatus === null)`
+  (`scripts/pipeline-run.ts:4738`), and `"overflow"` is assigned in exactly ONE place repo-wide — the
+  OOM arm at `src/phase-engine/steering.ts:1253`. A non-null `exitStatus` is therefore never
+  overwritten by the probe: the precedence direction is sound **by construction**, not merely
+  untested, and no live round is needed to establish it. What IS unproven is strictly UPSTREAM of the
+  precedence — that a real kernel kill reaches the OOM arm and writes `overflow` at all. That is the
+  same gap as AC1's live legs, not a second independent one, and this bullet should not be read as
+  doubling it.
 
 Verification, scoped rather than generalized: `bun test` over the whole repo is **6340 pass / 7 skip / 5
 fail** (re-measured 2026-09-19 after each round added tests; 6084/5 when first written, 6336 at round 10, 6338 at round 11), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
@@ -1150,7 +1188,9 @@ close — `lastMemory()` on `ResidentSpawn` is unreachable from an engine that r
 `spawned.caller`/`spawned.rate`; it is now a third `createSteering` dep landed in DF3.6a's diff, and
 DF3.6a's carve-out is explicitly opened for it rather than worked around), **B2** (the placement
 wrapper failed **open** — `;` let a failed `cgroup.procs` write fall through to `exec` and run pi
-unbounded; now `|| exit 97`, with AC4 and a negative control), **B3** (`residentRssBytes` is
+unbounded; it now exits **97** on refusal, keyed on membership read back from `cgroup.procs` rather
+than on the write's exit status, with AC4 and a negative control — this entry said `|| exit 97`,
+which is the form that was REJECTED during development, until round 16), **B3** (`residentRssBytes` is
 optional and INV-MEM-2 is scoped to the in-box context, so the invariant no longer disables the
 resident at all 42 host-side arming sites and DF3.3's INV-RES-3 exhibit stays armed), **H1** (the
 DF5.1 wording ADR Appendix B retracted — this story was the last artifact carrying it), **H2** (the

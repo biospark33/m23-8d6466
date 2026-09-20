@@ -167,8 +167,15 @@ export interface ResidentCaller {
 
 /** DF3.6b (landed with DF3.6a — the deps/seams this needs are this story's
  *  diff): fleet's caller throws this when the per-solicitation cgroup
- *  placement wrapper fails (`|| exit 97`) — the engine classifies it by
- *  type instead of the opaque degrade latch. Engine-owned (fleet→engine is
+ *  placement wrapper REFUSES — it exits 97, and the refusal is keyed on
+ *  MEMBERSHIP READ BACK from `cgroup.procs`, never on the exit status of the
+ *  write (the `… || exit 97` form was rejected during development;
+ *  `_PLACEMENT_SCRIPT` in `src/fleet/resident.ts` keeps it in a comment to say
+ *  so). The distinction belongs here because this class is the contract a
+ *  caller implements against: the wrapper refuses whenever pi is not VERIFIABLY
+ *  in the leaf, which includes a write that reported success and did not take.
+ *  The engine classifies the refusal by type instead of the opaque degrade
+ *  latch. Engine-owned (fleet→engine is
  *  the allowed import direction); the engine learns the placement failed,
  *  never how to place. */
 export class PlacementRefusedError extends Error {
