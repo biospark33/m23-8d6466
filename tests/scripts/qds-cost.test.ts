@@ -1165,19 +1165,14 @@ console.log("ALL_OK");
       // Cleanup, guarded: neither step may mask the in-flight `failure` above,
       // and the writer closes no matter which of them threw.
       let cleanup: unknown;
-      try {
-        // Restore a sane WAL shape before the clean close: any fresh db access
-        // recreates the -shm index (reader traffic, not ledger content) — the
-        // same restore the provider suite's WAL-ceiling test uses.
-        const healer = new Database(ledgerPath);
-        try {
-          healer.exec("SELECT 1");
-        } finally {
-          healer.close();
-        }
-      } catch (e) {
-        cleanup = e;
-      }
+      // NO HEALER HERE — it was removed for the same reason as the provider
+      // suite's WAL-ceiling test, which this block used to cite as precedent.
+      // The shared premise, "any fresh db access recreates the -shm index", is
+      // FALSE in exactly the state both tests construct: a non-empty WAL whose
+      // -shm has been unlinked cannot be recovered from any connection, so the
+      // healer threw `disk I/O error` and became the sole cause of the failure
+      // while the assertions above passed. Measured on clean `origin/dev`,
+      // 2026-09-20. `writer.close()` below is the only cleanup needed.
       try {
         writer.close();
       } catch (e) {
