@@ -387,7 +387,20 @@ function removeLeaf(dir: string): void {
       return;
     } catch (err) {
       if (attempt >= LEAF_RMDIR_ATTEMPTS - 1 || (err as NodeJS.ErrnoException)?.code !== "EBUSY") throw err;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LEAF_RMDIR_BACKOFF_MS);
+      // `Bun.sleepSync`, not `Atomics.wait` on a throwaway SharedArrayBuffer.
+      // The swap is READABILITY, and the reason it is worth a re-pin is that
+      // the clever form drew a review finding claiming `Atomics.wait` throws
+      // `TypeError` on Bun's main thread. It does not — probed on Bun 1.3.13,
+      // bare, inside a catch after a real synchronous `fs` throw, and inside a
+      // `Worker`: every call returns "timed-out". The finding was declined on
+      // that evidence. But the premise was only wrong, not unreasonable (it IS
+      // true in browsers), and a sleep spelled as an atomics primitive will
+      // draw the same wrong finding again. The consequence the finding
+      // described was accurate, which is the part worth keeping: this call is
+      // NOT inside its own try, so a throw here would escape `removeLeaf`
+      // entirely and abandon the bounded retry — worse than the last-attempt
+      // path, which rethrows the original EBUSY deliberately.
+      Bun.sleepSync(LEAF_RMDIR_BACKOFF_MS);
     }
   }
 }

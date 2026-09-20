@@ -1261,12 +1261,18 @@ describe("DF3.6b — the Dockerfile's Delegate=memory scan is itself fenced", ()
         "unit reassigned between the anchor and the scan",
         real.replace(
           /(unit=\/etc\/systemd\/system\/qds-run@\.service; \\\n)/,
-          () => `unit=/etc/systemd/system/qds-run@.service; \\\n    unit=/tmp/decoy.service; \\\n`,
+          () => "unit=/etc/systemd/system/qds-run@.service; \\\n    unit=/tmp/decoy.service; \\\n",
         ),
       ],
       [
         "commented out by a `#` on an EARLIER line of the same RUN",
-        sub(real, `; # \n    ${scan}`),
+        // The trailing `\` is LOAD-BEARING and was missing until round 15.
+        // Without it the injected line ENDS the RUN, `${scan}` falls outside
+        // the extracted slice, and `fencedFatally` returns at its
+        // missing-line guard — so the row passed without ever reaching
+        // `commentStartsAt`, and stayed green with that check deleted.
+        // Mutation-verified both ways.
+        sub(real, `; # \\\n    ${scan}`),
       ],
     ];
     for (const [what, mutated] of mutations) {

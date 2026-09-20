@@ -285,8 +285,12 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   A `ps` sampler at any interval reports a breach already paid for: the ADR's measured in-box
   solicitation is 2.17 s, and a process can balloon and OOM the box between two samples. F12 says
   *enforce*. cgroup v2 `memory.max` is kernel-enforced, fires deterministically, and is
-  un-bypassable from inside the box — the resident cannot raise its own bound because the bound is
-  not in its address space (INV-MEM-1, structurally). The determinism claim is exact for
+  un-bypassable from inside the box — **but NOT for the reason this sentence used to give.** It said
+  "the bound is not in its address space (INV-MEM-1, structurally)", which is false: under
+  `Delegate=memory` the leaf is created as `User=exedev` and pi is `exec`'d into it as the SAME uid,
+  so `memory.max` is a file pi's uid OWNS. What keeps it out of pi's reach is that pi is spawned
+  **`--no-tools`** — load-bearing security configuration, not a cost knob. INV-MEM-1 carries the full
+  amendment (review round 1); this copy was left unamended until round 15. The determinism claim is exact for
   **unreclaimable** (anonymous) growth, which is the leak this bound exists for. Reclaimable
   file-backed pressure at the limit — pi streaming a large session jsonl, a big response through the
   page cache — thrashes rather than OOMs; the backstop there is the existing per-call wall clock
@@ -535,8 +539,12 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 
 - **INV-MEM-1 (enforcement locus — F12, and structurally stronger than a convention):** the memory
   bound is enforced by the **kernel**, outside the resident's address space. No directive, prompt,
-  env var, in-box file, or roster entry the resident can influence may raise, disable, or reset it;
-  the bound is not a value pi's own process can read or write as data.
+  env var, in-box file, or roster entry the resident can influence may raise, disable, or reset it.
+  **Read the amendment directly below before relying on any of that** — the clause that used to end
+  this sentence, "the bound is not a value pi's own process can read or write as data", is exactly
+  what the amendment retracts, and stating it here unqualified put the retracted version upstream of
+  its own correction. (Removed in round 15. The same shape as ruling 9's setup paragraph, found the
+  same way: a reviewer reading the lead sentence alone.)
   **AMENDED 2026-09-18 during development (review round 1) — the original sentence claimed more
   than the mechanism delivers, and the difference is load-bearing.** Under `Delegate=memory` the
   engine creates the solicitation leaf as `User=exedev` and `exec`s pi into it *as the same uid*,
@@ -673,8 +681,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..14}.md`** — fourteen adversarial
-rounds, **six before the first push and eight after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..15}.md`** — fifteen adversarial
+rounds, **six before the first push and nine after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:

@@ -750,8 +750,14 @@ nothing), DF3.3.
   the phase engine, never by the agent. No directive, prompt, env var, in-box file, or roster
   entry the resident can influence may raise, disable, or reset a bound. A bound value read
   from a path the resident can write is a defect regardless of the value it holds. *(DF3.6b carries
-  the memory-specific corollary, INV-MEM-1, which is strictly stronger for that one bound: the
-  kernel enforces it outside the resident's address space.)*
+  the memory-specific corollary, INV-MEM-1, which is stronger for that one bound in that the KERNEL
+  enforces it — no sampler and no engine timer stands between the allocation and the kill.
+  **Corrected 2026-09-20 by DF3.6b's review round 15:** this parenthetical used to add "outside the
+  resident's address space", which INV-MEM-1 itself retracted during DF3.6b's review round 1. Under
+  `Delegate=memory` the leaf is created as `User=exedev` and pi is `exec`'d into it as the SAME uid,
+  so `memory.max` is a file pi's uid OWNS; what keeps it out of pi's reach is that pi is spawned
+  `--no-tools`, which is therefore load-bearing security configuration and not a cost knob. Read
+  INV-MEM-1 in `df3-6b-resident-memory-bound-cgroup.md` before relying on this line.)*
 - **INV-BND-2 (strict cap ordering over defaults, validated before the resident exists):**
   `residentSpendCeilingMicros ≤ capMicroUsd ≤ defaultKeyCapMicroUsd`, asserted at manifest
   load — inside the box, before the resident is spawned and before the first solicitation (AC2a).

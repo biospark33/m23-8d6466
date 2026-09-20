@@ -1438,12 +1438,25 @@ describe("buildIdFileInputs", () => {
       // story artifact are outside the walk. Walk set unchanged at 89 entries.
       // Same failing-run receive, same-commit re-pin.
       //
+      // f3548fdc: moved from 15effcd0 by DF3.6b, review round 15. ONE walked
+      // input changed, `scripts/pipeline-run.ts` untouched this time: the
+      // `removeLeaf` EBUSY backoff in `src/fleet/resident.ts` swapped
+      // `Atomics.wait` on a throwaway SharedArrayBuffer for `Bun.sleepSync`.
+      // BEHAVIOURALLY A NO-OP — the review finding that prompted it claimed
+      // `Atomics.wait` throws on Bun's main thread, which was probed false on
+      // Bun 1.3.13 and declined; the swap is readability, so the clever form
+      // stops drawing that same wrong finding. NOT movers: the story artifact,
+      // `df3-6a-resident-spend-iteration-bounds.md`,
+      // `tests/providers/exedev/image-assets.test.ts` (one negative-control
+      // row fixed) and `review-round-15.md` are all outside the walk. Walk set
+      // unchanged at 89 entries. Same failing-run receive, same-commit re-pin.
+      //
       // THE PUBLISH IS STILL OWED:
       // the unit is baked into a digest-pinned image, so a run against the
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "15effcd0c2a31f26fbdd13ee340eaaa0243863db6f54e6495370e074b5dda1b2",
+      "f3548fdcb214a50b5048154314b807fe6e65d874fde011647d9181130f43023c",
     );
   });
 });
