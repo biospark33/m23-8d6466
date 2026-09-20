@@ -37,8 +37,15 @@ so that a resident that leaks is killed the moment it crosses the line — not r
 
 ## Overview
 
-Every pi solicitation runs inside its own cgroup v2 leaf with `memory.max` set from the manifest's
-`residentRssBytes` **and `memory.oom.group` set to `1`**. The `oom.group` write is what makes
+Every **in-box** pi solicitation runs inside its own cgroup v2 leaf with `memory.max` set from the
+manifest's `residentRssBytes` **and `memory.oom.group` set to `1`**. **"In-box" is load-bearing and
+was missing from this sentence until round 20** (found by CodeRabbit; the same ruling-3b propagation
+the story has fixed at several other sites): `residentRssBytes` is OPTIONAL on `ResidentSpawnOpts`,
+and the host-side `pipeline-run --manifest …` shape withholds it, so those solicitations run with **no
+cgroup machinery at all and no memory enforcement**. That is deliberate — darwin has no cgroups, and
+arming there would disable DF3.3's and DF3.6a's whole host-side behavioural coverage — but a reader
+who takes this opening sentence literally will assume host-side runs are bounded. They are not. Only
+the `run <runId>` in-box front door supplies the bound; see INV-MEM-2's Scope clause and ruling 3b. The `oom.group` write is what makes
 "OOM-kills that cgroup" true rather than approximately true: at the kernel default (`0`) the OOM
 killer picks and kills a **single task**, leaving siblings running — which would leave the leaf
 un-`rmdir`-able (`EBUSY`) and produce exactly the orphaned child AC1 asserts cannot exist. Today pi
@@ -46,8 +53,23 @@ is spawned `--no-tools` (the pi spawn argv in `src/fleet/resident.ts`) and usual
 single-task kill happens to equal the cgroup kill and a test would pass for the wrong reason. The
 kernel enforces it: crossing the bound OOM-kills that cgroup and nothing else. The engine issues no signal, runs no timer, takes no sample, and never learns pi's pid. After
 the call the fleet layer reads `memory.peak` and `memory.events` from the leaf, reports them up as
-telemetry, and removes it. If the cgroup cannot be created or `memory.max` cannot be written, the
-resident is **not started** — the engine never runs an agent whose memory it cannot bound.
+telemetry, and removes it.
+
+**Everything above describes the DESIGN, and as of this PR the kernel half of it has never been
+observed** (qualified round 20, found by sweeping for universal claims a scope falsifies): every
+mechanism claim in this story has only ever executed against an **fs-level fake** cgroup tree. No real
+kernel has yet accepted the placement write, enforced `memory.max`, fired `memory.oom.group=1`, or
+produced a real `memory.peak`/`memory.events` pair. "The kernel enforces it" is how this is BUILT, not
+evidence that it works — AC1's live legs are what would establish it, and they have not been run. Read
+the NOT-DONE section before treating any of it as established.
+
+**When a bound is supplied** and the cgroup cannot be created or `memory.max` cannot be written, the
+resident is **not started** — the engine never runs an agent whose memory it cannot bound. The
+host-side shape never reaches that check, because no cgroup is attempted: **it starts normally and
+runs unbounded, it is not refused.** (Qualified round 20 — without it, a reader who has just absorbed
+the in-box scoping above reads this sentence as "no cgroup was created, so the resident refuses",
+which is exactly backwards. Verified in code: the whole arming block is gated on
+`boundBytes !== undefined`, so `CgroupUnenforceableError` is unreachable host-side.)
 
 ## E2E Slice
 
@@ -673,12 +695,20 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       `tests/phase-engine/fixtures/pi-catalog`, teardown in `finally` — a leaked box on an OOM path
       is a leaked box that bills. **A host-side unit test cannot substitute — darwin has no cgroups
       — and the story is not done without this round.**
-- [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's `PROVISIONAL_RESIDENT_RSS_BYTES` in `resident-bounds.ts` — that one constant is in this story's Files to Modify** (W6-C-H4 as re-homed by W14C-PAIR-1: the value lives in DF3.6a's bounds module, `manifest.ts` carries no default — the W6-C-H4 rationale stands, the file moved with the required-field design). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. Marginal spend: zero — it reads a file from a solicitation the round already makes.
-- [ ] **Test (cgroup scoping, AC2):** a `dispatch_task` phase running beside a small resident does **not** trip the bound — the workers are not in the resident's cgroup. An implementation setting `MemoryMax=` on `qds-run@<runId>.service` passes a synthetic-allocator "does it fire?" test and MUST fail this one.
-- [ ] **Test (fail-closed unenforceable, AC3/INV-MEM-2):** with `Delegate=memory` absent from the unit, the resident is **not started**, the journal records `resident.status:"disabled"`, the log line carries `reason:"rss_unenforceable"` (ruling 5 — this checkbox said `cause:"unenforceable"`, which is the AC4 breach line's vocabulary, not this one's; `resident_disabled` discriminates on `reason`, as the rate refusal already does, and an acceptance test written from the old wording asserts a key the line does not have), no tripwire row is emitted, and the run still completes deterministically — never an unbounded resident.
+- [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's `PROVISIONAL_RESIDENT_RSS_BYTES` in `resident-bounds.ts` — that one constant is in this story's Files to Modify** (W6-C-H4 as re-homed by W14C-PAIR-1: the value lives in DF3.6a's bounds module, `manifest.ts` carries no default — the W6-C-H4 rationale stands, the file moved with the required-field design). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. **KERNEL PREREQUISITE, and it is not optional (added round 20):** read `uname -r` on that box FIRST
+  and require **5.19+**. `memory.peak` landed in 5.19; below it the file does not exist and `readLeaf`
+  reads **0**. A baseline of 0 passes BOTH falsifiers above — it is neither ≥ 32 MiB nor ≥ 256 MiB — so
+  a round on an older kernel would silently conclude "the baseline is small", re-set
+  `PROVISIONAL_RESIDENT_RSS_BYTES` **off a measurement that was never taken**, and report success. The
+  live-leg item above already carries this prerequisite for the crossing verdict; it was never extended
+  to this item, which is the one that actually writes a production constant. Treat a 0 reading as
+  MEASUREMENT FAILED, never as a baseline. Marginal spend: zero — it reads a file from a solicitation
+  the round already makes.
+- [ ] **Test (cgroup scoping, AC2):** a `dispatch_task` phase running beside a small resident does **not** trip the bound — the workers are not in the resident's cgroup. An implementation setting `MemoryMax=` on `qds-run@<runId>.service` passes a synthetic-allocator "does it fire?" test and MUST fail this one. **HOST-SIDE, against the fs-level fake** (`tests/fleet/resident-cgroup.test.ts`) — labelled round 20, because 689/690/691 self-declare their environment and these four did not, and a test-writer building strictly from this checklist could reasonably have budgeted a live in-box leg that the E2E Slice does not fund. No real kernel is involved: what this proves is the code's own logic, not enforcement.
+- [ ] **Test (fail-closed unenforceable, AC3/INV-MEM-2):** with `Delegate=memory` absent from the unit, the resident is **not started**, the journal records `resident.status:"disabled"`, the log line carries `reason:"rss_unenforceable"` (ruling 5 — this checkbox said `cause:"unenforceable"`, which is the AC4 breach line's vocabulary, not this one's; `resident_disabled` discriminates on `reason`, as the rate refusal already does, and an acceptance test written from the old wording asserts a key the line does not have), no tripwire row is emitted, and the run still completes deterministically — never an unbounded resident. **HOST-SIDE, against the fs-level fake** (`tests/fleet/resident-cgroup.test.ts`) — labelled round 20, because 689/690/691 self-declare their environment and these four did not, and a test-writer building strictly from this checklist could reasonably have budgeted a live in-box leg that the E2E Slice does not fund. No real kernel is involved: what this proves is the code's own logic, not enforcement.
 - [ ] **Test (image contract):** the Dockerfile unit scan fails the build when `Delegate=memory` is removed from `qds-run@.service` — the assertion is the fence, the same shape as the Dockerfile's existing `RuntimeDirectoryPreserve=yes` check.
-- [ ] **Test (fail-closed placement, AC4):** with the leaf removed (or `+memory` disabled) between arming and the `cgroup.procs` write, the wrapper exits **97** and pi is never `exec`'d; the engine's catch classifies the failure through the typed `PlacementRefusedError` rejection — never the `"degraded"` latch; the `onBoundBreach` callback carries `{bound:"rss", allowed:false, cause:"unenforceable", exitCode: 97}`; the **engine-side `resident_bound_breach` fd-2 line** records that payload (ruling 7 — this checkbox said the fleet `warn` line, which carries the separate per-solicitation `resident_cgroup` event and holds neither join key; an acceptance test written from the old wording asserts against the wrong emitter); `residentSpawn.stop()` is awaited; and **no subsequent solicitation is issued** for that resident. A wrapper joining the commands with `;` execs pi unbounded and records a clean call, and MUST fail.
-- [ ] **Test (OOM stops the resident, AC5):** after a kernel OOM-kill the journal reads `status:"stopped"` **and** `exitStatus:"overflow"`, `stop()` has been called via `onBoundBreach`, and no further solicitation is issued. An implementation leaning on the `"degraded"` status gate leaves `stopped === false` and MUST fail; so MUST one that leaves `status:"degraded"` beside `exitStatus:"overflow"`.
+- [ ] **Test (fail-closed placement, AC4):** with the leaf removed (or `+memory` disabled) between arming and the `cgroup.procs` write, the wrapper exits **97** and pi is never `exec`'d; the engine's catch classifies the failure through the typed `PlacementRefusedError` rejection — never the `"degraded"` latch; the `onBoundBreach` callback carries `{bound:"rss", allowed:false, cause:"unenforceable", exitCode: 97}`; the **engine-side `resident_bound_breach` fd-2 line** records that payload (ruling 7 — this checkbox said the fleet `warn` line, which carries the separate per-solicitation `resident_cgroup` event and holds neither join key; an acceptance test written from the old wording asserts against the wrong emitter); `residentSpawn.stop()` is awaited; and **no subsequent solicitation is issued** for that resident. A wrapper joining the commands with `;` execs pi unbounded and records a clean call, and MUST fail. **HOST-SIDE, against the fs-level fake** (`tests/fleet/resident-cgroup.test.ts`) — labelled round 20, because 689/690/691 self-declare their environment and these four did not, and a test-writer building strictly from this checklist could reasonably have budgeted a live in-box leg that the E2E Slice does not fund. No real kernel is involved: what this proves is the code's own logic, not enforcement.
+- [ ] **Test (OOM stops the resident, AC5):** after a kernel OOM-kill the journal reads `status:"stopped"` **and** `exitStatus:"overflow"`, `stop()` has been called via `onBoundBreach`, and no further solicitation is issued. An implementation leaning on the `"degraded"` status gate leaves `stopped === false` and MUST fail; so MUST one that leaves `status:"degraded"` beside `exitStatus:"overflow"`. **HOST-SIDE, against the fs-level fake** (`tests/fleet/resident-cgroup.test.ts`) — labelled round 20, because 689/690/691 self-declare their environment and these four did not, and a test-writer building strictly from this checklist could reasonably have budgeted a live in-box leg that the E2E Slice does not fund. No real kernel is involved: what this proves is the code's own logic, not enforcement.
 - [ ] **Test (host-side seam, INV-MEM-2 Scope):** omitting `residentRssBytes` arms a resident with **no** cgroup calls (this is what keeps `tests/fleet/resident.test.ts`'s 42 arming sites and DF3.3's INV-RES-3 exhibit green on darwin); supplying it on a host without cgroup v2 refuses to start. Both asserted.
 - [ ] **Test (reclaimable pressure is not a silent miss, M1):** a solicitation driven to `memory.max` by **file-backed** (reclaimable) growth thrashes rather than OOMs, and the run records a **timeout** (`SOLICIT_TIMEOUT_MS = 60_000`, `src/phase-engine/steering.ts:30`) — not a `watchdog_kill`, and not a silent pass. Asserts the classification, so a missing `oom_kill` count on that path reads as "the other backstop fired", never as "the bound is absent". **Host-side, faked and unconditional** (amended 2026-09-18, Dev Agent Record ruling 6 — this clause originally read "host-side where cgroups exist; skipped, not faked, where they do not", which the shipped test does not satisfy and should not: a skip proves nothing in any environment). The test stages the leaf's counters with a limit that was HIT AND RECLAIMED and asserts the timeout classification; real page-cache reclaim is the live round's, and the test says so in its own header.
 - [ ] **Test (leaf lifecycle, host-side):** the subtree split is idempotent across engine restarts; a leaf is removed after every call including the OOM path; a second solicitation gets a fresh leaf and a fresh `memory.peak`. An implementation writing `memory.max` **without `memory.oom.group=1`** leaves a surviving sibling on a multi-process pi tree and MUST fail leaf removal (`EBUSY`).
@@ -688,7 +718,16 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       untested anywhere until this story. These DoD test items are therefore the field's FIRST
       behavioral coverage: at least one must assert the numeric contract itself (bound compared
       against the measured `rssPeakBytes` figure, breach classified `watchdog_kill` and nothing
-      else) — not only the cgroup mechanics around it. An implementation whose assertions pass with
+      else) — not only the cgroup mechanics around it.
+      **DO NOT PORT THE BYTE-FOR-BYTE READBACK TO A LIVE LEG (surfaced here round 20).** The
+      host-side row satisfying this item asserts `memory.max` reads back EXACTLY what was written,
+      including for a deliberately non-page-aligned bound (12,345,678). That is true of the fake only:
+      a real kernel `PAGE_ALIGN`s `memory.max` upward on ingestion, so the same assertion fails live
+      while the code is perfectly correct. It is inert in production because nothing reads `memory.max`
+      back — `readLeaf` reads only `memory.peak` and `memory.events` — and the rounding moves the real
+      limit AWAY from the peak, the safe direction. This caveat was written in the NOT-DONE section and
+      **nowhere near the checkbox that generates the test**, which is the same orphaned-caveat shape
+      that has already cost this story a round. An implementation whose assertions pass with
       any bound value (fixture-bound-agnostic) leaves the numeric contract still untested and MUST
       fail this item.
 
@@ -697,8 +736,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..19}.md`** — nineteen adversarial
-rounds, **six before the first push and thirteen after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..20}.md`** — twenty adversarial
+rounds, **six before the first push and fourteen after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
