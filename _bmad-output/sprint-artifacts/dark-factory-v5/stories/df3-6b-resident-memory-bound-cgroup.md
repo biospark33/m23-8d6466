@@ -188,14 +188,14 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
    records as a clean call. MUST fail this test.*
 5. **An OOM-kill stops the resident, and the resident's status says so.** Given the kernel OOM-kills
    a solicitation's cgroup, When the failed call returns to the engine, Then `stop()` is invoked on
-   the `ResidentSpawn` handle (`src/fleet/resident.ts:681-705`) so the latch is **real rather than
+   the `ResidentSpawn` handle (`src/fleet/resident.ts:689-708`) so the latch is **real rather than
    incidental**, `telemetry.status` is written `"stopped"` — this story's enforcement is the
    proximate cause, which is exactly the condition DF3.6a AC5 reserves `"stopped"` for —
    `telemetry.exitStatus` is written `"overflow"`, and no further solicitation is issued. The engine
    detects and records; it does **not** call `stop()` and cannot, because `stop()` is on
    `ResidentSpawn`, which the engine never receives. It fires `onBoundBreach`, and the runner —
    which holds the handle (`residentSpawn = spawned`, `scripts/pipeline-run.ts`) — calls `stop()`. Without
-   this, an OOM-killed pi is a signal death (`src/fleet/resident.ts:606-627`) that sets
+   this, an OOM-killed pi is a signal death (`src/fleet/resident.ts:1378-1404`) that sets
    `lastExit = "transient"` and throws, the engine's call-failure path writes `"degraded"`, nothing
    calls `stop()`, and the journal reads `status:"degraded"` beside `exitStatus:"overflow"` — a
    combination no story owns. *Negative controls: (a) an implementation relying on the `"degraded"`
@@ -221,15 +221,15 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 |-----------|-------------------------------|-------------------------|
 | cgroup delegation | `Delegate=memory` on `oci/exedev/systemd/qds-run@.service` (DF2.10's unit; systemd 255, cgroup v2 unified). Delegation is what chowns the unit's cgroup directory, `cgroup.procs` and `cgroup.subtree_control` to `User=exedev`, so the engine can create the resident's child cgroup **without root, without D-Bus and without polkit** | build-time: DF2.10's Dockerfile unit scan gains a positive `grep -qE '^Delegate=memory$'` assertion, the same shape as the existing `RuntimeDirectoryPreserve=yes` check (the unit scan in `oci/exedev/Dockerfile`), so the directive cannot be silently dropped. Run time: absent delegation ⇒ resident **not started** (AC3) |
 | resident memory bound | cgroup v2 `memory.max` on a per-solicitation child cgroup created by the fleet spawn path, valued from the manifest's `residentRssBytes` (validated by DF3.6a) | kernel-enforced. The engine passes the **value**; it never signals, never samples, and never learns a pid. The live round asserts an allocator past the bound is OOM-killed and the run still completes deterministically |
-| resident memory telemetry | `memory.peak` and `memory.events` read from that cgroup before it is removed. BOTH are verdict inputs, not just telemetry: ruling 8's rule is `oom > 0 && (oom_kill > 0 \|\| oom_group_kill > 0) && memory.peak >= bound - 2 MiB`, with the peak conjunct SKIPPED when either figure is unavailable, and see ruling 9: that conjunct is a consistency check implied by `oom`, not the discriminator ruling 8 called it. `oom_kill` alone counts a global OOM that merely picked pi — `oom > 0` is what rejects that — and the peak conjunct is implied by `oom` rather than being a second discriminator (ruling 9) | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the bounds-check log line and `detail` on the `watchdog_kill` row |
+| resident memory telemetry | `memory.peak` and `memory.events` read from that cgroup before it is removed. BOTH are verdict inputs, not just telemetry: ruling 8's rule is `oom > 0 && (oom_kill > 0 \|\| oom_group_kill > 0) && memory.peak >= bound - 2 MiB`, with the peak conjunct SKIPPED when either figure is unavailable, and see ruling 9: that conjunct is a consistency check implied by `oom`, not the discriminator ruling 8 called it. `oom_kill` alone counts a global OOM that merely picked pi — `oom > 0` is what rejects that — and the peak conjunct is implied by `oom` rather than being a second discriminator (ruling 9) | a kernel high-water mark per solicitation — strictly better than a poll, and the reason this story samples nothing. Feeds `rssPeakBytes` on the **fleet `resident_cgroup`** line — keyed `runId` + per-resident `seq`, carrying NO `requestId` and NO `phase` — and `detail` on the `watchdog_kill` row. **NOT the engine-side bounds-check/`resident_bound_breach` line, which does not carry the measurement pair at all** (this row said "the bounds-check log line" until round 19, the pre-amendment emitter; see the Observability Contract's two record shapes) |
 | image digest pin | DF2.10's pin ritual — the unit is **baked into the image**, so this story's one-directive change requires a rebuild, a re-publish and a moved digest pin, not just a file edit | see the DoD item; a green local gate against a stale pinned image is exactly the failure this prerequisite exists to prevent |
 
 ## Technical Notes
 
 - **No pid crosses the module boundary — the bound value does.** An engine-side watchdog would have
   needed the in-flight pi child's pid, which the engine cannot obtain: `ResidentSpawn` ships
-  `caller`, `rate`, `exitStatus()`, `stop()` and no pid (`src/fleet/resident.ts:116-127`), the
-  child handle is closure-local (`resident.ts:451`), and the engine is forbidden to import fleet
+  `caller`, `rate`, `exitStatus()`, `stop()`, `lastMemory()` and no pid (`src/fleet/resident.ts:689-708`), the
+  child handle is closure-local (`resident.ts:1095`, `let current`), and the engine is forbidden to import fleet
   code (`src/phase-engine/steering.ts:11-13`). Kernel enforcement dissolves that seam instead of
   widening it: **the engine never learns a pid, because it never has to signal anything.** But the
   seam is not closed by the fleet handle alone, and saying so was the earlier error: the engine
@@ -254,7 +254,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
    *  the run at manifest load on a missing or non-positive value.
    *  Present-but-unenforceable ⇒ resident not started (INV-MEM-2).
    *  Same division of labour as stop(): "DF3.6 decides when; this supplies
-   *  how" (resident.ts:125). */
+   *  how" (resident.ts:698). */
   residentRssBytes?: number;
 
   // src/fleet/resident.ts — on ResidentSpawn, beside exitStatus()
@@ -355,7 +355,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   no `memory.max` — the silent degradation to an unbounded agent INV-MEM-2 forbids — and AC3's check
   is at **arming, once**, so nothing re-checks per solicitation. Exit 97 is classified `unenforceable` by the caller: the
   solicitation fails, the resident is stopped, and no unbounded call is ever issued. The key remains
-  env-borne, never argv (`src/fleet/resident.ts:137-141`), unchanged by this wrapper.
+  env-borne, never argv (`src/fleet/resident.ts:719-722`), unchanged by this wrapper.
   `ponytail:` the `sh -c` wrapper exists only to close the placement race; if Bun ever exposes
   `CLONE_INTO_CGROUP`, delete the wrapper and pass the cgroup fd.
 - **This story samples nothing, and that is a deletion, not a gap (R5 §6 fact 5 restated).** Fact 5
@@ -388,8 +388,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   bound only — this was the outlier.) **D4's tripwire (c) — "any steering
   loop the watchdog kills twice for the same cause" — is a statement about a repeating *loop*, not
   about a fleet-wide count, and this story does not decide its key.** Within one run a second kill
-  is prevented by AC5's `stop()` latch (`src/fleet/resident.ts:681-705`; every later `call` throws
-  at `resident.ts:474`) — a latch **this story establishes**, not one it inherits: nothing else on
+  is prevented by AC5's `stop()` latch (`src/fleet/resident.ts:1493-1494`, which sets `stopped`; every later `call` throws
+  at `resident.ts:1201`) — a latch **this story establishes**, not one it inherits: nothing else on
   the OOM path calls `stop()`. Across runs, the rows emitted here carry `runId`, `phase` and
   `detail`, which is the evidence an evaluator needs. **Choosing the key that makes "the same
   steering loop" identifiable — `phase` plus the manifest's `pipelineId`, and *not* `runId`, which
@@ -401,7 +401,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   before the mechanism became kernel-enforced; it is kept because DF3.3 owns the union and renaming
   it would be a cross-story change for no behavioural gain.)
 - **The union widening lives in DF3.6a, deliberately.** `ResidentTripwire["cause"]` is one closed
-  literal type on one line (`src/phase-engine/steering.ts:199`); both new members land in DF3.6a's
+  literal type on one line (`src/phase-engine/steering.ts:244`); both new members land in DF3.6a's
   diff so two stories are not editing the same literal. This story writes `watchdog_kill` into a
   union that already admits it.
 
@@ -596,7 +596,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 - **INV-MEM-3 (no new argv surface):** the `sh -c` placement wrapper passes pi's argv
   **positionally** (`sh -c '…' _ <cgroupDir> <pi argv…>`), so no rendered prompt is ever
   interpolated into a shell string, and the per-run key stays env-borne and never appears on argv
-  (`src/fleet/resident.ts:137-141`, unchanged). A wrapper that string-builds the pi command line is
+  (`src/fleet/resident.ts:719-722`, unchanged). A wrapper that string-builds the pi command line is
   a defect regardless of whether a given prompt happens to be safe.
 
 ## Definition of Done
@@ -697,8 +697,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..18}.md`** — eighteen adversarial
-rounds, **six before the first push and twelve after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..19}.md`** — nineteen adversarial
+rounds, **six before the first push and thirteen after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
@@ -1222,6 +1222,16 @@ than crossing, and ≥ 256 MiB means the 512 MiB production default must be re-s
 DF3.6a's earlier, stronger gate), **L1/L2/L3** (three citation ranges corrected against source:
 `worktree.ts:293-311`→`:293-299` for the F064 block, `resident.ts:141-145`→`:137-141` for the
 key-delivery docstring, `resident.ts:115-127`→`:116-127` for `ResidentSpawn` — `:115` is blank).
+**Those corrected targets have since gone stale AGAIN, and round 19 re-corrected them.** This story's
+own implementation inserted ~600 lines of cgroup machinery near the TOP of `src/fleet/resident.ts`,
+which shifted every citation aimed at pre-existing code below the insertion point — while citations to
+code this story ADDED, written in the same pass, stayed correct. Eight were wrong: `ResidentSpawn`
+(→ `:689-708`), the closure-local child handle (→ `:1095`), the "DF3.6 decides when" quote (→ `:698`),
+key delivery ×2 (→ `:719-722`), the `stop()` latch and its throw (→ `:1493-1494` / `:1201`), the
+signal-death branch (→ `:1378-1404`), and `ResidentTripwire["cause"]` in steering (→ `:244`).
+**The class, so the next reader can re-run the check rather than re-derive it:** a file:line citation
+is evidence only while the file holds still. Extract every `\.ts:N` citation, `sed -n` the range, and
+confirm it matches the claim — mechanical, finite, and worth redoing after any large insertion.
 The live-e2e items now carry their gate (`QDS_E2E_LIVE` + **`QDS_E2E_TIER=2`**, because
 `liveGate("2")` accepts only `"1"`/`"2"` and "tier 4" is a roster label), their spend, their
 inherited setup and their falsifier.
