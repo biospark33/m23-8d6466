@@ -25,12 +25,47 @@ precondition — *"the fixture never staged memory.peak — the row below would 
 than on a downstream assertion, which is the difference between a diagnosable failure and a confusing
 red on a memory test.
 
-### The full-file sweep, which is the reassuring part
+### The full-file sweep — and its first answer was WRONG
 
-A reviewer neutered the fixture's entire staging block and ran the file. **Every one of the 15 rows
-that assert on `lastMemory()`/`memory.peak`/`memory.events`/`oomKilled` failed loudly. None is vacuous
-today.** The other 28 rows (wrapper, EBUSY retry, delegated subtree) do not touch staging and passed as
-expected.
+> **RETRACTED, same day, before anyone relied on it.** This section originally read: *"Every one of the
+> 15 rows … failed loudly. None is vacuous today."* **That claim was false, and it was published here
+> and in the PR comment.** The reviewer re-ran its own sweep with `--reporter=junit` to get the
+> PASSING rows BY NAME rather than by count, audited all 28, and corrected itself: **four were
+> unconditionally vacuous.** The count-only reading had let them hide among 24 rows that pass under
+> neutering for the legitimate reason that they never touch staging at all.
+>
+> The lesson is the method, not the rows: **a sweep that reports how many passed cannot tell a clean
+> row from a vacuous one.** It has to name them and audit each. The first pass here did exactly what
+> this story has criticised elsewhere — reasoned from an aggregate.
+
+A reviewer neutered the fixture's entire staging block and ran the file. Corrected result: **19 of the
+memory-asserting rows fail loudly; the remaining 24 pass because they genuinely do not depend on staged
+content** (the delegated-subtree split, the AC3 `CgroupUnenforceableError` rows, the omitted-bound
+null check, the leaf-removed-on-a-failing-call row, the unit-level `MemoryMax` static file read, and
+all nine AC4 wrapper-script rows).
+
+**The four that were vacuous**, all in the OOM-verdict block, all asserting `oomKilled === false` with
+no pinned peak:
+
+| row | staged |
+|---|---|
+| a GLOBAL OOM kill is NOT this bound firing | `oom_kill 1`, `oom 0` |
+| a GLOBAL OOM that GROUP-KILLS through this leaf | `oom_kill 1`, `oom_group_kill 1`, `oom 0` |
+| counters set but the process SURVIVED | `oom 1`, no kill counter |
+| a clean call reads false on every counter | all zero |
+
+Each is **indistinguishable from a stub that never opens the leaf**: `readLeaf`'s catch returns
+`{peakBytes: 0, oomKilled: false}`, which satisfies every one of them. And unlike the timeout rows,
+this is **not** a race — these rows involve no kill and stage deterministically before teardown, so
+they were vacuous on every run, on every machine, since they were written.
+
+Note what this means for the round-7 through round-20 claims that the OOM-verdict block was
+mutation-verified: those mutations flipped the PREDICATE, which these rows do catch (a predicate
+forced to `true` fails them). What they never caught is an implementation that does not read the files
+at all. **Mutation-testing the predicate cannot detect a test that is not reading the input.**
+
+Fixed: each now stages a distinctive `peakBase` and asserts it. Verified — under neutered staging the
+file goes from 15 failures to **19**, and the four are among them.
 
 It also established why most rows are structurally immune: the `verdictFor` rows stage
 **synchronously inside the child** before the child's own optional self-SIGKILL, so there is no

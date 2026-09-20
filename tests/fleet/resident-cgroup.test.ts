@@ -829,7 +829,16 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     // counts processes in this cgroup killed by ANY OOM killer, so keying the
     // verdict on it stops the resident for a bound it never crossed and files a
     // watchdog_kill row whose detail contradicts itself (peak far below bound).
-    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\noom_group_kill 0\n");
+    // `peakBase` staged and asserted (round 21, after a sweep found this row
+    // vacuous): the verdict here is `false`, which is ALSO what an
+    // implementation that never opens the leaf at all returns, since
+    // `readLeaf`'s catch yields `{peakBytes: 0, oomKilled: false}`. Reading a
+    // distinctive peak back is what proves the counters above were actually
+    // read rather than defaulted.
+    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\noom_group_kill 0\n", {
+      peakBase: "11111",
+    });
+    expect(v?.peakBytes).toBe(11111);
     expect(v?.oomKilled).toBe(false);
   });
 
@@ -871,9 +880,17 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     // finds THIS leaf's `oom.group=1`, group-kills it and increments
     // `oom_group_kill` HERE — on a leaf whose own limit never fired. `oom`
     // stays 0, which is what distinguishes it.
+    // `peakBase` staged and asserted (round 21, after a sweep found this row
+    // vacuous): the verdict here is `false`, which is ALSO what an
+    // implementation that never opens the leaf at all returns, since
+    // `readLeaf`'s catch yields `{peakBytes: 0, oomKilled: false}`. Reading a
+    // distinctive peak back is what proves the counters above were actually
+    // read rather than defaulted.
     const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\noom_group_kill 1\n", {
       signalDeath: true,
+      peakBase: "22222",
     });
+    expect(v?.peakBytes).toBe(22222);
     expect(v?.oomKilled).toBe(false);
   });
 
@@ -899,7 +916,16 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     // files a `watchdog_kill` row with `status:"stopped"` and
     // `exitStatus:"overflow"` for a host-side fault, and those rows are D4's
     // tier-2 demotion evidence.
-    const v = await verdictFor("low 0\nhigh 4\nmax 9\noom 1\noom_kill 0\noom_group_kill 0\n");
+    // `peakBase` staged and asserted (round 21, after a sweep found this row
+    // vacuous): the verdict here is `false`, which is ALSO what an
+    // implementation that never opens the leaf at all returns, since
+    // `readLeaf`'s catch yields `{peakBytes: 0, oomKilled: false}`. Reading a
+    // distinctive peak back is what proves the counters above were actually
+    // read rather than defaulted.
+    const v = await verdictFor("low 0\nhigh 4\nmax 9\noom 1\noom_kill 0\noom_group_kill 0\n", {
+      peakBase: "33333",
+    });
+    expect(v?.peakBytes).toBe(33333);
     expect(v).not.toBeNull();
     expect(v?.oomKilled).toBe(false);
   });
@@ -1149,7 +1175,16 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
   });
 
   test("a clean call reads false on every counter", async () => {
-    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n");
+    // `peakBase` staged and asserted (round 21, after a sweep found this row
+    // vacuous): the verdict here is `false`, which is ALSO what an
+    // implementation that never opens the leaf at all returns, since
+    // `readLeaf`'s catch yields `{peakBytes: 0, oomKilled: false}`. Reading a
+    // distinctive peak back is what proves the counters above were actually
+    // read rather than defaulted.
+    const v = await verdictFor("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n", {
+      peakBase: "44444",
+    });
+    expect(v?.peakBytes).toBe(44444);
     expect(v?.oomKilled).toBe(false);
   });
 });
