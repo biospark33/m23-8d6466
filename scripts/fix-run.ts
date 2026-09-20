@@ -59,6 +59,7 @@
  * resolveRunsDir); approval-gate.ts and approvers.ts are banned outright. The
  * fence gate greps this file.
  */
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
@@ -408,20 +409,30 @@ export async function run(
       deps?.store ??
       (() => {
         const dir = resolveRecordsDir(args.dir);
-        // create:false — a no-op invocation (closed PR, empty feedback, dedup)
-        // must not mkdir/chmod anything, and with no records directory there
-        // are no factory runs, so there is no factory PR to fix.
-        try {
-          return new RunRecordStore({ dir, create: false, requestId });
-        } catch (e) {
-          const x = (e ?? {}) as { message?: string };
-          throw new FleetError(
-            5,
-            "not-a-factory-pr",
-            `the records directory ${dir} is unusable (${redactSecrets(x.message ?? e)}) — no factory runs means no factory PR`,
-            "run fix-run from the checkout whose .sandbox/runs holds the PR's parent run, or pass --dir",
-          );
+        // A MISSING records directory stays create:false — a no-op invocation
+        // (closed PR, empty feedback, dedup) must not mkdir/chmod anything,
+        // and with no records directory there are no factory runs, so there
+        // is no factory PR to fix. An EXISTING directory (the normal case:
+        // the parent run's store) opens READ-WRITE, because the fix run
+        // writes — the attempt record, the parent's attempt-ledger append.
+        // With create:false unconditionally, the dispatch's record create
+        // refused `provision-failed` AFTER a run id had minted (measured
+        // live, 2026-09-20: "run record store … was opened read-only (create:
+        // false)"), invisible to the unit suite where the store is injected.
+        if (!existsSync(dir)) {
+          try {
+            return new RunRecordStore({ dir, create: false, requestId });
+          } catch (e) {
+            const x = (e ?? {}) as { message?: string };
+            throw new FleetError(
+              5,
+              "not-a-factory-pr",
+              `the records directory ${dir} is unusable (${redactSecrets(x.message ?? e)}) — no factory runs means no factory PR`,
+              "run fix-run from the checkout whose .sandbox/runs holds the PR's parent run, or pass --dir",
+            );
+          }
         }
+        return new RunRecordStore({ dir, requestId });
       })();
 
     const tokenFn = deps?.token ?? readHostToken;
