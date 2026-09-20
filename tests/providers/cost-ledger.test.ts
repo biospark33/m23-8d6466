@@ -2901,7 +2901,12 @@ describe("DF2.11 openReadOnly", () => {
       // test exists to assert.
       //
       // `healFailure` is kept declared and rethrown below so that a future
-      // cleanup step added here still cannot be swallowed.
+      // cleanup step added here still cannot be swallowed. **It is UNREACHABLE
+      // today** — the healer's catch was its only writer, so nothing assigns it
+      // and both the `console.error` branch and the trailing rethrow are dead
+      // as written. Kept deliberately as the guard rail for whatever replaces
+      // the healer, and labelled so the next reader does not spend time working
+      // out why a variable that is never set is being checked.
     }
     if (failed !== undefined) {
       if (healFailure !== undefined)
