@@ -53,6 +53,22 @@ export const MAX_OMITTED_COMMENT_IDS = 20;
 export const FIX_RUN_MANIFEST_PATH = "config/rosters/fix-run.pipeline.json";
 export const FIX_SCOPE_FILE = ".factory/fix-scope.json";
 
+/**
+ * The dispatch wall-clock ceiling invocation1 hands to `dispatch()` via
+ * `DispatchDeps.timeoutMs`. The default (600_000) can NEVER run the fix
+ * pipeline: the shipped manifest's `runBudgetMs` is the loader's pricing of
+ * the 600 s fix phase (×3 for parse-fix attempts + routing margins =
+ * 1 855 000, +2.4% headroom = 1 900 000), and `runBudgetMs > callerBudgetMs`
+ * refuses at the manifest load — measured live on the first paid round
+ * attempt (2026-09-20: `manifest runBudgetMs 1900000 exceeds callerBudgetMs
+ * 599999`). Sized above the manifest with the e2e plan's engine window: the
+ * in-box phases stay bounded by the manifest itself; this is only the
+ * host-side wall clock the whole dispatch must fit inside. PAIRED with the
+ * manifest by test (tests/fixloop/cli.test.ts) so a runBudgetMs raise that
+ * outgrows this ceiling fails a unit test, not a paid round.
+ */
+export const FIX_DISPATCH_CEILING_MS = 2_100_000;
+
 // ─── typed refusals ──────────────────────────────────────────────────────────
 
 /**

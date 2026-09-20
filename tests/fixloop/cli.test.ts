@@ -52,6 +52,7 @@ import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError } from "../../scripts/lib/run-lock.ts";
 import { fakeGitHub, type FakeGitHub } from "../pr/helpers.ts";
 import { run, type FixRunDeps, type FixRunPushOpts } from "../../scripts/fix-run.ts";
+import { FIX_DISPATCH_CEILING_MS } from "../../src/fixloop/index.ts";
 
 const SLUG = "acme/widgets";
 const REMOTE = "https://github.com/acme/widgets.git";
@@ -466,6 +467,20 @@ const eventLines = (event: string): LogEntry[] => logs.filter((l) => l.event ===
 // ─── G1: intake and routing ───────────────────────────────────────────────────
 
 describe("G1 intake/routing", () => {
+  test("the shipped fix manifest fits the CLI's dispatch ceiling", () => {
+    // invocation1 hands dispatch a wall-clock ceiling of
+    // FIX_DISPATCH_CEILING_MS; a manifest whose runBudgetMs exceeds the
+    // ceiling is refused at the manifest load — AFTER nothing billed only
+    // because dispatch checks pre-boot, but structurally every paid round
+    // would die there (measured live 2026-09-20: `runBudgetMs 1900000
+    // exceeds callerBudgetMs 599999` under the 600 s default). This pairing
+    // makes a runBudgetMs raise that outgrows the ceiling a unit failure.
+    const manifest = JSON.parse(
+      fs.readFileSync(new URL("../../config/rosters/fix-run.pipeline.json", import.meta.url), "utf8"),
+    ) as { runBudgetMs: number };
+    expect(manifest.runBudgetMs).toBeLessThanOrEqual(FIX_DISPATCH_CEILING_MS);
+  });
+
   test("closed PR ⇒ exit 0 no-op, no dispatch, no box", async () => {
     const host = makeHost();
     writeParent(host.store);

@@ -13,6 +13,7 @@ export {
   countWriteCapable,
   encodeFixContext,
   fetchBotComments,
+  FIX_DISPATCH_CEILING_MS,
   FIX_RUN_MANIFEST_PATH,
   FIX_SCOPE_FILE,
   globToRegExp,

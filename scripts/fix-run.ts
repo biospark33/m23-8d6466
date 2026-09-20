@@ -83,6 +83,7 @@ import {
   classifyDiffScope,
   encodeFixContext,
   fetchBotComments,
+  FIX_DISPATCH_CEILING_MS,
   parseFixContext,
   preflightFixContextWrite,
   probeBoxCredentials,
@@ -727,6 +728,10 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
     requestId,
     capMicroUsd,
     repoRoot: hostRoot,
+    // The shipped fix manifest prices the 600 s fix phase at runBudgetMs
+    // 1 900 000 — the 600 s dispatch default refuses it at the manifest load
+    // (measured live, 2026-09-20), so the fix loop names its own ceiling.
+    timeoutMs: FIX_DISPATCH_CEILING_MS,
   };
   const ack = await dispatchFn(brief, dispatchDeps);
   ctx.setFixRunId(ack.runId);
