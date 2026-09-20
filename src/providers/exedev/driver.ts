@@ -420,6 +420,21 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // comments). The walk literal had already moved on the branch (8b670a3d…,
 // pairing debt declared); this is the rebuild → publish → adopt that ritual
 // owed. Pushed sha256:9c8bfe9a… / buildId 52538541c5430cc5.
+//
+// TWO CONSEQUENCES THE ADOPTION ITSELF DOES NOT STATE.
+// The workflow PRUNES an ungated push (this run deleted package version
+// 1272119252), so between the adoption commit and the healing run the digest
+// above names bytes NO REGISTRY HOLDS and any `create()` in that window fails
+// to pull. Worth naming because the prune step is NEWER than the paragraphs
+// below that argue the commit-precedes-push ordering — that reasoning predates
+// the behaviour it now has to account for.
+// And the private mirror (qds-exedev-private) must be re-pushed from this
+// digest before tier1-registry-auth can pass again, per the standing obligation
+// above. The twelfth and thirteenth pins record their mirror tags; the
+// fourteenth records none, which reads as "not applicable" rather than "not
+// done". It is not done.
+// (2026-09-25: unchanged in kind — every pin since inherits the same
+// obligation; the current pin's re-push is roadmap R0.6.)
 // Fifteenth pin (2026-09-24): gate B pair from run 36048175927 at src_sha
 // 07db7e3e — the FIRST REAL PUBLISH of the S1 rig_swarm image stages (roadmap
 // R0.3). The measurement chain that produced it, all gate-refused dry runs on
@@ -461,6 +476,19 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // (DF6.1a's brief-schema/dispatch/dispatch-task/run-record). The resident arms
 // on this pin; DF3.6b's in-box behaviour is reachable; the silent-green window
 // this paragraph described closed with the substrate it described.
+//
+// TWO CONSEQUENCES THE ADOPTION ITSELF DOES NOT STATE.
+// The workflow PRUNES an ungated push (this run deleted package version
+// 1272119252), so between the adoption commit and the healing run the digest
+// above names bytes NO REGISTRY HOLDS and any `create()` in that window fails
+// to pull. Worth naming because the prune step is NEWER than the paragraphs
+// below that argue the commit-precedes-push ordering — that reasoning predates
+// the behaviour it now has to account for.
+// And the private mirror (qds-exedev-private) must be re-pushed from this
+// digest before tier1-registry-auth can pass again, per the standing obligation
+// above. The twelfth and thirteenth pins record their mirror tags; the
+// fourteenth records none, which reads as "not applicable" rather than "not
+// done". It is not done.
 export const DEFAULT_IMAGE_REF =
   "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81";
 
@@ -515,12 +543,31 @@ export const DEFAULT_IMAGE_REF =
  * one. The rule holds either way — this value tracks the substrate, and the
  * substrate is what changed.
  *
- * Paired with gitSha 4a77d7d253a370c612e7c67457b04fd95cfbf37b (the manifest
- * newline fix — the src_sha the workflow's SOURCE_PATHS resolution names for
- * THIS build). driver.ts is deliberately excluded from SOURCE_PATHS (the
+ * Paired with gitSha 1b653f043b287fd9fced8965fe2a7b840b44e905 (the DF6.1a
+ * bounded-fix-attempt commit — the src_sha the workflow's SOURCE_PATHS
+ * resolution names for THAT build, the fourteenth pin's; the line this
+ * paragraph replaced said 4a77d7d, which was the THIRTEENTH pin's pairing).
+ *
+ * RE-PIN THIS LINE TOO. It was last set by `4cc6dfcd` (the second adoption) and
+ * drifted through the fourteenth — twelve pins naming the wrong source
+ * revision: 1cc01c55, 838c7f3e, 1164d85d, ffe93cdd, 706366c5, 075eeb0a,
+ * f90c47ce, d63f603d, 1c0bbeb7, 3cb72485, a890dbff, 6ed796c9. Nothing fails
+ * when it drifts, which is why twelve went by. (FIXED SINCE: the adoptions
+ * from the fifteenth on re-pin the pairing in step — 07db7e3e, 55215f51,
+ * aa3d7d33, each named with its full sha in the CURRENT PAIRING block below.)
+ *
+ * The numbered ledger above DEFAULT_IMAGE_REF is not an intact fallback:
+ * it runs THIRD, FIFTH, FOURTH, SIXTH, SEVENTH and then jumps to Eleventh, so
+ * the eighth, ninth and tenth src_shas are recorded nowhere in this file
+ * (075eeb0a, f90c47ce, d63f603d — their commit subjects name the gate B runs).
+ * Of the two defects this paragraph was written against, the pairing-line
+ * drift is fixed since; the ledger gap REMAINS.
+ *
+ * driver.ts is deliberately excluded from SOURCE_PATHS (the
  * workflow's own documented asymmetry) so the pin-adoption commit does not
  * move the revision the pin was adopted for — the healing run rebuilds at
- * the same sha, byte identical, and gate B closes green on it. The pairing
+ * the same sha, and gate B is what says whether it is byte identical. The
+ * pairing
  * is load-bearing and was nearly got wrong once: an earlier build baked
  * HEAD while 40+ files were uncommitted, which would have stamped
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
