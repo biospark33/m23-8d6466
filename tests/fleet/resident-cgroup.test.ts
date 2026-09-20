@@ -971,10 +971,26 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
       }),
     );
     try {
-      const err = await spawn.caller.call(PROMPT).then(
+      const pending = spawn.caller.call(PROMPT).then(
         () => null,
         (e: unknown) => e,
       );
+      // DETERMINISTIC PRECONDITION, not a timing margin (round 21). The
+      // 3000 ms budget makes the fixture winning the staging race LIKELY; this
+      // poll makes it CHECKED. Without it the row's only protection against an
+      // empty leaf is wall-clock luck, and on a loaded CI box a lost race
+      // surfaces as a confusing red on a memory test rather than as what it is.
+      // Same pattern as the stop()-race rows, which already do this.
+      const staged = await (async () => {
+        for (let i = 0; i < 400; i += 1) {
+          const leaves = readdirSync(root).filter((e) => e.startsWith("resident."));
+          if (leaves.length === 1 && existsSync(join(root, leaves[0] as string, "memory.peak"))) return true;
+          await Bun.sleep(5);
+        }
+        return false;
+      })();
+      expect(staged, "the fixture never staged memory.peak — the row below would pass vacuously").toBe(true);
+      const err = await pending;
       expect((err as Error).message).toContain("timed out");
       // The staging LANDED — without this a future timing shift silently
       // re-empties the leaf and the assertion below holds for the wrong reason,
@@ -1175,25 +1191,66 @@ describe("DF3.6b M1 — reclaimable (file-backed) pressure classifies as a TIMEO
         bin: fakePi,
         env: piEnv({
           QDS_FAKE_PI_MODE: "hang",
-          QDS_RESIDENT_TIMEOUT_MS: "150",
+          // 3000 ms, NOT 150 — a RACE MARGIN, and the honest account of it:
+          // at 150 this row is not vacuous TODAY. Measured round 21: with the
+          // peak assertion below in place it still passes at 150, so the fixture
+          // does win the race on this machine. But it is the same race that DID
+          // make the sibling timeout row vacuous in round 7 — the SIGKILL landing
+          // during the fixture's own startup, before it stages `memory.events`,
+          // leaving an empty leaf whose `{peakBytes: 0, oomKilled: false}`
+          // default satisfies `expect(oomKilled).toBe(false)` for every
+          // implementation. 150 ms is a margin against Bun's process startup on
+          // a loaded machine, which is not a margin at all. The previous comment
+          // claimed non-vacuity because the events file EXISTS — which is
+          // precisely the thing the race takes away, so it was reasoning from
+          // the assumption in question.
+          QDS_RESIDENT_TIMEOUT_MS: "3000",
           // The limit was hit 17 times and reclaimed every time — the shape a
           // page-cache-thrashing solicitation leaves behind.
           QDS_FAKE_PI_EVENTS: "low 0\nhigh 9\nmax 17\noom 0\noom_kill 0\noom_group_kill 0\n",
           QDS_FAKE_PI_EVENTS_ROOT: root,
+          // A distinctive peak, asserted below: it is what PROVES the fixture
+          // staged the leaf before the kill, rather than the test reading a
+          // default off an empty directory.
+          QDS_FAKE_PI_PEAK_BASE: "424242",
         }),
         residentRssBytes: BOUND,
       }),
     );
     try {
-      const err = await spawn.caller.call(PROMPT).then(
+      const pending = spawn.caller.call(PROMPT).then(
         () => null,
         (e: unknown) => e,
       );
+      // DETERMINISTIC PRECONDITION, not a timing margin (round 21). The
+      // 3000 ms budget makes the fixture winning the staging race LIKELY; this
+      // poll makes it CHECKED. Without it the row's only protection against an
+      // empty leaf is wall-clock luck, and on a loaded CI box a lost race
+      // surfaces as a confusing red on a memory test rather than as what it is.
+      // Same pattern as the stop()-race rows, which already do this.
+      const staged = await (async () => {
+        for (let i = 0; i < 400; i += 1) {
+          const leaves = readdirSync(root).filter((e) => e.startsWith("resident."));
+          if (leaves.length === 1 && existsSync(join(root, leaves[0] as string, "memory.peak"))) return true;
+          await Bun.sleep(5);
+        }
+        return false;
+      })();
+      expect(staged, "the fixture never staged memory.peak — the row below would pass vacuously").toBe(true);
+      const err = await pending;
       // The wall clock is what fired, and it says so.
       expect((err as Error).message).toContain("timed out");
       const mem = spawn.lastMemory();
-      // Not vacuous: the events file EXISTS and records a limit that was hit.
       expect(mem).not.toBeNull();
+      // THE NON-VACUITY PROOF, and it is this line rather than the comment: a
+      // distinctive staged peak read back means the fixture reached the leaf
+      // and the counters below were actually read. Without it, every assertion
+      // here also passes against an empty leaf.
+      // 424242 = PEAK_BASE x seq, and `seq` is 1 because this row makes exactly
+      // ONE `call()`. If a future edit adds a second solicitation here, the
+      // fixture stages 848484 on that leaf and this line fails with a value
+      // that looks arbitrary — it is not, it is the base times the call count.
+      expect(mem?.peakBytes).toBe(424242);
       expect(mem?.oomKilled).toBe(false);
       // The assertion above is discriminating rather than always-false because
       // the SAME staged-counter machinery reads `true` when the counters say an

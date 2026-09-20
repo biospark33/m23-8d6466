@@ -736,8 +736,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..20}.md`** — twenty adversarial
-rounds, **six before the first push and fourteen after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..21}.md`** — twenty-one adversarial
+rounds, **six before the first push and fifteen after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
