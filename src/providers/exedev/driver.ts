@@ -413,8 +413,15 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // pushed sha256:d03f58cb… / buildId 998db8aaab5e4fef. The walked-input
 // literal was already re-pinned on the branch (99af1da0…, DF1.10 pairing
 // debt) — this adoption is the image half that ritual deferred.
+// Fourteenth pin (2026-09-20): gate B pair from run 35537650657 at src_sha
+// 1b653f04 — DF6.1a's four walked inputs (brief-schema, dispatch,
+// dispatch-task, run-record; the in-box appendix renderer is dispatch-task.ts,
+// so the fix-loop round's box MUST run this image or the fixer never sees the
+// comments). The walk literal had already moved on the branch (8b670a3d…,
+// pairing debt declared); this is the rebuild → publish → adopt that ritual
+// owed. Pushed sha256:9c8bfe9a… / buildId 52538541c5430cc5.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:d03f58cbe61b389a457ed12b9adcd038ccdc4f8bcb6faa7d7d22adba13a0382b";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -478,7 +485,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "998db8aaab5e4fef";
+export const DEFAULT_IMAGE_BUILD_ID = "52538541c5430cc5";
 
 
 
