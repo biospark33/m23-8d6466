@@ -4,7 +4,7 @@
 **Focus:** correctness and security of the cgroup mechanism in `src/fleet/resident.ts` and its
 engine-side classification in `src/phase-engine/steering.ts`.
 
-6 findings. All resolved in-round.
+6 findings. All actionable changes addressed in-round; **finding 2 retains a documented attribution limitation** — see round 9, which records the residual that remains after the plain global-OOM case was closed.
 
 | # | Finding | Resolution |
 |---|---------|------------|

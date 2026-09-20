@@ -642,8 +642,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..10}.md`** — ten adversarial
-rounds, three before the first push and seven after, plus CodeRabbit's rounds on PR #264. Read them in
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..11}.md`** — eleven adversarial
+rounds, three before the first push and eight after, plus CodeRabbit's rounds on PR #264. Read them in
 order if you need to know WHY a rule is shaped the way it is; several later rounds RETRACT earlier
 ones (most importantly round 9 retracts round 7's claim about the peak floor), and every retracted
 claim carries a `SUPERSEDED` note pointing at the round that replaced it. **The rulings below are
@@ -970,8 +970,8 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   `overflow` survives the refresh" direction needs an engine-written `overflow`, which needs a
   kernel OOM-kill — it lands with AC1's live round.
 
-Verification, scoped rather than generalized: `bun test` over the whole repo is **6336 pass / 7 skip / 5
-fail** (re-measured 2026-09-19 after the review rounds added tests; it was 6084/5 when first written), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
+Verification, scoped rather than generalized: `bun test` over the whole repo is **6338 pass / 7 skip / 5
+fail** (re-measured 2026-09-19 after each round added tests; 6084/5 when first written, 6336 at round 10), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
 with this branch stashed, and three (gitnexus ×2, `tests/fleet/cli.test.ts`'s TRANSIENT-errno test)
 pass in isolation on both trees under lower load. `bunx tsc --noEmit` and Biome are clean. The
 suites this story owns — `tests/fleet/resident-cgroup.test.ts`, `tests/fleet/resident.test.ts`,

@@ -1099,17 +1099,189 @@ describe("DF3.6b — the Dockerfile's Delegate=memory scan is itself fenced", ()
    * `RuntimeDirectoryPreserve` scan; it is pinned here too so the pair cannot
    * drift apart again.)
    */
-  const DOCKERFILE = readFileSync(join(import.meta.dir, "..", "..", "..", "oci", "exedev", "Dockerfile"), "utf8");
+  /**
+   * A build-time fence is not "these characters appear in the file" — it is "a
+   * FATAL grep of THE UNIT runs in the stage that installs it". Asserting the
+   * bare `grep -qE '^Delegate=memory$'` substring passes against every way of
+   * making those characters inert while leaving them present: appending
+   * `|| true`, repointing the target off `"${unit}"`, wrapping it in an `if`,
+   * prefixing `true; #`, or moving it into a different stage's RUN. (Measured
+   * against the real Dockerfile — each of those defeats a substring check.)
+   *
+   * So the check is: take the slice of the comment-stripped Dockerfile that
+   * belongs to the RUN which defines `unit=<the shipped unit path>`, and require
+   * the scan line to appear there COMPLETE — pattern, `"${unit}"` target, and
+   * the `|| { … exit 1; }` tail that makes it fatal.
+   */
+  // Distinct sentinels so a failure NAMES which way out was taken. All three
+  // reject, but "the marker vanished", "it is duplicated" and "it fell out of
+  // the final stage" are three different 3am problems, and an undifferentiated
+  // `expected true, received false` says none of them.
+  const NO_ANCHOR = "\u0000no-anchor";
+  const DUPLICATE_ANCHOR = "\u0000duplicate-anchor";
+  const ANCHOR_NOT_FINAL_STAGE = "\u0000anchor-not-final-stage";
 
-  test("the unit scan asserts Delegate=memory positively, anchored, in the shipped Dockerfile", () => {
-    expect(DOCKERFILE).toContain("grep -qE '^Delegate=memory$'");
-    // Anchored on BOTH ends: an unanchored pattern would accept
-    // `#Delegate=memory` in a comment, or `Delegate=memory-foo`.
-    expect(DOCKERFILE).not.toContain("grep -qE 'Delegate=memory'");
+  const UNIT_SCAN_RUN = (dockerfile: string): string => {
+    const marker = "unit=/etc/systemd/system/qds-run@.service;";
+    const anchor = dockerfile.indexOf(marker);
+    if (anchor === -1) return NO_ANCHOR;
+    // The anchor must be UNIQUE and in the FINAL stage. Without both, a decoy
+    // RUN that also assigns `unit` — inserted earlier in the file, e.g. in the
+    // builder stage — would capture the slice and the real fence could be
+    // dropped unnoticed. The stage check belongs here, as a guard on the
+    // anchor, rather than as the anchor itself: keying the slice on "after the
+    // last FROM" would accept the scan in any of that stage's RUNs, including
+    // one that never assigns `unit`, where `"${unit}"` expands empty and the
+    // grep scans nothing.
+    if (dockerfile.lastIndexOf(marker) !== anchor) return DUPLICATE_ANCHOR;
+    if (anchor < dockerfile.lastIndexOf("\nFROM ")) return ANCHOR_NOT_FINAL_STAGE;
+    const rest = dockerfile.slice(anchor);
+    // The RUN ends at the first line that starts a new instruction — i.e. the
+    // first line not continued from the previous one.
+    const lines = rest.split("\n");
+    const out: string[] = [];
+    for (const line of lines) {
+      out.push(line);
+      if (!line.trimEnd().endsWith("\\")) break;
+    }
+    return out.join("\n");
+  };
+
+  /**
+   * True when `directive` is fenced FATALLY against the unit in that RUN.
+   *
+   * The scan must be the FIRST thing on its line. That one requirement is what
+   * closes the whole family of "leave the text, make it inert" edits, each of
+   * which was measured against the real Dockerfile and passed an `includes`
+   * check: a mid-line shell comment (`true; # grep …`), a skip conditional
+   * (`if [ -z "${QDS_SKIP:-}" ]; then grep … fi`), and a guard prefix
+   * (`[ -n "${ENFORCE:-}" ] && grep …`). Checking only that the line does not
+   * START with `#` catches none of them.
+   */
+  /** `#` at a word start, outside single or double quotes — a real shell comment. */
+  const commentStartsAt = (text: string): number => {
+    let quote: string | null = null;
+    for (let i = 0; i < text.length; i += 1) {
+      const c = text[i] as string;
+      if (quote !== null) {
+        if (c === quote) quote = null;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        continue;
+      }
+      if (c === "#" && (i === 0 || /\s/.test(text[i - 1] as string))) return i;
+    }
+    return -1;
+  };
+
+  const fencedFatally = (dockerfile: string, directive: string): boolean => {
+    const scan = `grep -qE '^${directive}$' "\${unit}"`;
+    const run = UNIT_SCAN_RUN(dockerfile);
+    const line = run.split("\n").find((l) => l.includes(scan));
+    if (line === undefined) return false;
+    // Nothing may precede it on its own line — not a comment marker, not a
+    // conditional, not an `&&` guard. The trailing `\` is the line's own.
+    if (!line.trim().startsWith(scan)) return false;
+    // THE TAIL MUST BE THE SCAN'S OWN. Searching the line for any
+    // `|| { … exit 1; }` accepts `<scan> || true; true || { echo … exit 1; }`,
+    // where the fatal clause is real but unreachable — the `|| true` vector in
+    // one more line of disguise. Anchor the tail immediately after the scan.
+    const tail = line.trim().slice(scan.length);
+    if (!/^\s*\|\| \{ echo .* >&2; exit 1; \}\s*;?\s*\\?$/.test(tail)) return false;
+    // DOCKER JOINS THE WHOLE RUN into one shell command, so a `#` on ANY
+    // earlier line of the slice comments out everything after it — including a
+    // scan that is itself perfectly formed. Checking only the scan's own line
+    // misses that entirely.
+    const joined = run.replace(/\\\n/g, "");
+    const before = joined.slice(0, joined.indexOf(scan));
+    if (commentStartsAt(before) !== -1) return false;
+    // `"${unit}"` is a VARIABLE. Pinning the argument catches a literal
+    // repoint but not a reassignment of what `unit` IS, between the anchor and
+    // the scan.
+    if (/(^|\s)unit=(?!\/etc\/systemd\/system\/qds-run@\.service\b)/.test(before)) return false;
+    return true;
+  };
+
+  test("the scan RUN is anchored uniquely, in the final stage", () => {
+    const run = UNIT_SCAN_RUN(DOCKERFILE_DIRECTIVES);
+    expect(run, "the unit= assignment is gone from the Dockerfile").not.toBe(NO_ANCHOR);
+    expect(run, "unit= is assigned more than once — a decoy RUN could capture the fence").not.toBe(
+      DUPLICATE_ANCHOR,
+    );
+    expect(run, "the unit RUN is no longer in the final stage — a new FROM was appended below it").not.toBe(
+      ANCHOR_NOT_FINAL_STAGE,
+    );
   });
 
-  test("its sibling scan is still there too — the two are the unit's only build-time value fences", () => {
-    expect(DOCKERFILE).toContain("grep -qE '^RuntimeDirectoryPreserve=yes$'");
+  test("Delegate=memory is fenced FATALLY, against the unit, in the stage that installs it", () => {
+    expect(fencedFatally(DOCKERFILE_DIRECTIVES, "Delegate=memory")).toBe(true);
+  });
+
+  test("its sibling scan is fenced the same way — the two are the unit's only build-time value fences", () => {
+    expect(fencedFatally(DOCKERFILE_DIRECTIVES, "RuntimeDirectoryPreserve=yes")).toBe(true);
+  });
+
+  test("NEGATIVE CONTROLS — every way of making the scan inert while leaving its text in place", () => {
+    // These run the SAME predicate the two tests above run. An earlier version
+    // of this control re-implemented the comment filter inline and asserted
+    // over its own strings, which proved only that a `#`-prefixed line starts
+    // with `#` — it would have passed unchanged against the defective
+    // raw-text assertions it was written to guard.
+    const real = readFileSync(DOCKERFILE_PATH, "utf8");
+    const strip = (t: string): string =>
+      t.split("\n").filter((l) => !l.trimStart().startsWith("#")).join("\n");
+    const scan = `grep -qE '^Delegate=memory$' "\${unit}"`;
+    // REPLACER FUNCTIONS, never string replacements. `scan` contains `$'`
+    // twice (`'^Delegate=memory$'`), and a STRING replacement expands `$'` to
+    // "everything after the match" — which spliced 15 KB of the file into
+    // itself and truncated the mutant's scan text, so every row failed at the
+    // `includes(scan)` line instead of at the check it was written to exercise.
+    // The rows were vacuous and would have passed with the prefix requirement
+    // deleted. A function replacement disables all `$` expansion.
+    const sub = (text: string, replacement: string): string => text.replace(scan, () => replacement);
+    const mutations: Array<[string, string]> = [
+      ["commented out", sub(real, `# ${scan}`)],
+      ["mid-line shell comment", sub(real, `true; # ${scan}`)],
+      ["wrapped in a skip conditional", sub(real, `if [ -z "\${QDS_SKIP:-}" ]; then ${scan}`)],
+      ["guarded with an && prefix", sub(real, `[ -n "\${ENFORCE:-}" ] && ${scan}`)],
+      [
+        "made non-fatal with || true",
+        real.replace(/(grep -qE '\^Delegate=memory\$' "\$\{unit\}") \|\| \{ echo[^\n]*?exit 1; \}/, () => `${scan} || true`),
+      ],
+      ["target repointed off the unit", sub(real, `grep -qE '^Delegate=memory$' /tmp/decoy.service`)],
+      ["deleted outright", sub(real, "true")],
+      // Round 11's third reviewer: three the earlier predicate passed.
+      [
+        "fatal tail present but unreachable",
+        sub(real, `${scan} || true; true || { echo "never" >&2; exit 1; }`),
+      ],
+      [
+        "unit reassigned between the anchor and the scan",
+        real.replace(
+          /(unit=\/etc\/systemd\/system\/qds-run@\.service; \\\n)/,
+          () => `unit=/etc/systemd/system/qds-run@.service; \\\n    unit=/tmp/decoy.service; \\\n`,
+        ),
+      ],
+      [
+        "commented out by a `#` on an EARLIER line of the same RUN",
+        sub(real, `; # \n    ${scan}`),
+      ],
+    ];
+    for (const [what, mutated] of mutations) {
+      // A `replace` whose pattern does not match silently returns the input
+      // unchanged, and the row would then assert against the REAL file. NOTE
+      // the limit of this guard: it proves the text CHANGED, not that it
+      // changed into what the label says — every `$'`-corrupted row differed
+      // from `real` too. The rows are correct because they use replacer
+      // functions; this only catches a pattern that stopped matching.
+      expect(mutated, `${what}: mutation did not apply`).not.toBe(real);
+      expect(fencedFatally(strip(mutated), "Delegate=memory"), what).toBe(false);
+    }
+    // …and the real file passes the same predicate, so the controls are not
+    // vacuously false for some unrelated reason.
+    expect(fencedFatally(strip(real), "Delegate=memory")).toBe(true);
   });
 });
 
