@@ -43,6 +43,7 @@ import type { StartRunResult } from "../../src/fleet/run.ts";
 import { DEFAULT_COST_CONFIG, CostLedger } from "../../src/providers/cost-ledger.ts";
 import type { ExecResult } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { RunRecordStore, type RunRecord } from "../../src/providers/run-record.ts";
 import type { PrReviewComment, PullRequestInfo } from "../../src/pr/github.ts";
 import type { PushOutcome } from "../../src/pr/push.ts";
@@ -367,6 +368,13 @@ async function runCli(
   const deps: FixRunDeps = {
     github,
     token: async () => TOKEN,
+    // invocation1 builds `deps?.keyApi ?? openRouterKeyApi()` EAGERLY, before
+    // the faked dispatch seam ever runs — so without a stub the production
+    // constructor demands $OPENROUTER_PROVISIONING_KEY and every dispatch-path
+    // test exits 2 wherever that env var is absent (CI run 35530185305: green
+    // locally only because the operator's .env carries the key). The faked
+    // dispatch never calls it; the stub only has to construct.
+    keyApi: new FakeKeyApi(),
     driver,
     store: host.store,
     hostRoot: host.root,
