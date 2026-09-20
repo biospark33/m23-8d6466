@@ -426,7 +426,13 @@ const OOM_PEAK_SLACK_BYTES = 2 * 1024 * 1024;
  *  `memory.peak` is a high-water mark; the OOM verdict is the CONJUNCTION spelled
  *  out in the body — `oom` (this leaf's own limit fired) AND a kill counter AND
  *  the peak having reached the bound. `oom_kill` alone is exactly what that
- *  conjunction exists to reject. Both files are best-effort reads —
+ *  conjunction exists to reject, and `oom` is what rejects it. The peak conjunct
+ *  is NOT a co-equal third discriminator: per story ruling 9 it is IMPLIED by
+ *  `oom > 0` and kept as a consistency check. THAT IMPLICATION HOLDS ONLY WHILE
+ *  THIS LEAF IS CHILDLESS — `memory.events` aggregates UPWARD, so a child with a
+ *  smaller limit could fire `oom` far below THIS bound, and the floor becomes
+ *  load-bearing the moment that happens. It is not decorative.
+ *  Read the body before reasoning about the verdict from this line. Both files are best-effort reads —
  *  `memory.peak` needs kernel 5.19+, and a missing file must degrade the
  *  TELEMETRY, never the call. */
 function readLeaf(dir: string, boundBytes?: number): { peakBytes: number; oomKilled: boolean } {
@@ -476,12 +482,13 @@ function readLeaf(dir: string, boundBytes?: number): { peakBytes: number; oomKil
     // `stop()`, and a `QDS_PI_BIN` free to exit 137 of its own accord. The
     // KERNEL'S OWN RECORD answers every part — these two counters and, below,
     // the peak. The exit shape is consulted nowhere. (Read on: the two counters
-    // are not sufficient BY THEMSELVES either, which is what the third fact is
-    // for. Do not stop at this paragraph break.)
+    // are not sufficient BY THEMSELVES either. Do not stop at this paragraph
+    // break — and note that the NEXT paragraph is the setup, not the answer:
+    // the answer is the one after it.)
     //
-    // A THIRD FACT, because the two counters are INDEPENDENT and the
-    // conjunction alone only NARROWS the global-OOM false positive rather than
-    // removing it: pi takes a graceful `-ENOMEM` early in a solicitation
+    // THE CASE THE TWO COUNTERS DO NOT SETTLE, because they are INDEPENDENT and
+    // the conjunction alone only NARROWS the global-OOM false positive rather
+    // than removing it: pi takes a graceful `-ENOMEM` early in a solicitation
     // (`oom` 1, survives), and later a `dispatch_task` worker drives the box
     // into system-wide OOM and the kernel picks pi (`oom_kill` 1). Both
     // counters are then set on this leaf and nothing in them says the two
@@ -688,9 +695,12 @@ export interface ResidentSpawnOpts {
    * per-solicitation cgroup; fleet NEVER chooses or defaults it (INV-MEM-1).
    *
    * OPTIONAL, and the optionality IS the seam (INV-MEM-2 Scope): absent means
-   * no cgroup machinery runs at all — the host-side unit-test context, where
-   * there are no cgroups. In production it is never absent, because DF3.6a
-   * refuses the run at manifest load on a missing or non-positive value.
+   * no cgroup machinery runs at all — the host-side context, where there are
+   * no cgroups. That is NOT unit tests only: per story ruling 3b, the
+   * `pipeline-run --manifest …` host-side flag shape withholds the bound too,
+   * so a production invocation can reach here with the field absent. Only the
+   * `run <runId>` in-box FRONT DOOR always supplies it, because DF3.6a refuses
+   * the run at manifest load on a missing or non-positive value.
    * Present-but-unenforceable ⇒ the resident is not started (INV-MEM-2), which
    * is `CgroupUnenforceableError` out of `startResident`.
    *

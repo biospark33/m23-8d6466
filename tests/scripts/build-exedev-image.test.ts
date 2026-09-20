@@ -1394,6 +1394,20 @@ describe("buildIdFileInputs", () => {
       // correction this ledger already carries above). Same failing-run
       // receive, same-commit re-pin.
       //
+      // bb3c3602: moved from 7d44bbda by DF3.6b, review round 12 — another
+      // within-story move, COMMENT-ONLY again. ONE walked input changed:
+      // `src/fleet/resident.ts`, twice, both in `readLeaf()`'s documentation —
+      // its JSDoc (which presented the peak floor as a co-equal third
+      // discriminator, the framing story ruling 9 denies, and which sits ABOVE
+      // the body so none of the body's three self-corrections ever reached it)
+      // and the body's setup paragraph (which asserted "A THIRD FACT" twelve
+      // lines above its own ruling-9 correction). NOT movers, named so the next
+      // re-pinner does not bisect them: `tests/fleet/resident-cgroup.test.ts`
+      // (three rows fixed, one added) and the story artifact are outside the
+      // walk, and `oci/exedev/Dockerfile` is `deriveBuildId`'s separate
+      // `dockerfile` field as the entry above explains. Walk set unchanged at
+      // 89 entries. Same failing-run receive, same-commit re-pin.
+      //
       // MOVED WITHIN THE STORY, twice, by COMMENT-ONLY edits to walked inputs —
       // `src/fleet/resident.ts`, `src/phase-engine/steering.ts` and
       // `scripts/pipeline-run.ts` — made while resolving review rounds 7 and 8.
@@ -1404,7 +1418,7 @@ describe("buildIdFileInputs", () => {
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "7d44bbdad543b63850ff3779e92a98637f33873da59cf4febeec9c8e5093bdbc",
+      "bb3c3602e1dc255c2171f77fe8766e81dec21a3e5dbed724a7b789cf154bfe90",
     );
   });
 });

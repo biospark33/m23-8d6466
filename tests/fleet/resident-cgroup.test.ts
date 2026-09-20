@@ -833,9 +833,33 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
   });
 
   test("a GROUP kill on this leaf (oom_group_kill set) IS this bound firing", async () => {
+    // `peakBase` is staged DELIBERATELY. Without it `memory.peak` reads 0, which
+    // takes the `peakBytes === 0` escape in `reachedBound` — the row would then
+    // read `true` on `ownLimit` alone and pin nothing about the BOUND its own
+    // title names. Staging the peak AT the bound makes the floor decide for real.
     const v = await verdictFor("low 0\nhigh 2\nmax 5\noom 1\noom_kill 1\noom_group_kill 1\n", {
       signalDeath: true,
+      peakBase: String(BOUND),
     });
+    expect(v?.peakBytes).toBe(BOUND);
+    expect(v?.oomKilled).toBe(true);
+  });
+
+  test("a real kill on a pre-5.19 kernel — no `memory.peak` at all — still counts", async () => {
+    // The `peakBytes === 0` ESCAPE in `reachedBound`, pinned in its own right.
+    // `memory.peak` landed in 5.19; before that the file does not exist and
+    // `readLeaf` reads 0. The escape makes the floor fail OPEN there, because
+    // suppressing a REAL kill on a MISSING measurement trades a false positive
+    // for a false negative, and a resident silently blowing its bound every
+    // solicitation while the run records a routine degrade is the worse
+    // direction. Deliberate, so it gets a row: two other rows happened to
+    // depend on this branch, but nothing NAMED it, and an escape nobody pins is
+    // an escape a future tightening deletes without noticing.
+    const v = await verdictFor("low 0\nhigh 1\nmax 4\noom 1\noom_kill 1\noom_group_kill 1\n", {
+      signalDeath: true,
+      // no peakBase — the fixture stages no `memory.peak` file at all
+    });
+    expect(v?.peakBytes).toBe(0);
     expect(v?.oomKilled).toBe(true);
   });
 
@@ -853,7 +877,15 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
   });
 
   test("an own-limit OOM on a pre-5.17 kernel (no oom_group_kill line) still counts", async () => {
-    const v = await verdictFor("low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n", { signalDeath: true });
+    // Peak staged for the same reason as the row above: the missing
+    // `oom_group_kill` LINE is what this row exists to pin, but leaving
+    // `memory.peak` unstaged would let it pass on the `peakBytes === 0` escape
+    // and say nothing about the bound.
+    const v = await verdictFor("low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n", {
+      signalDeath: true,
+      peakBase: String(BOUND),
+    });
+    expect(v?.peakBytes).toBe(BOUND);
     expect(v?.oomKilled).toBe(true);
   });
 
@@ -1032,25 +1064,53 @@ describe("DF3.6b — `oomKilled` means THIS leaf hit ITS OWN limit, never 'somet
     expect(v?.oomKilled).toBe(true);
   });
 
-  test("a graceful `oom` EARLIER plus a global OOM kill LATER is still not this bound firing", async () => {
-    // The residual the two-counter conjunction only NARROWS: the counters are
-    // independent, so a solicitation that took a graceful `-ENOMEM` (`oom` 1,
-    // survived) and was LATER picked by the system-wide OOM killer (`oom_kill`
-    // 1) sets both, and nothing in them says the two events are unrelated. That
-    // pairing is not exotic — global OOM happens exactly when the box is
-    // thrashing, and the near-bound resident is the likeliest victim. The third
-    // fact NARROWS it — and, per ruling 9, is implied by `oom` rather than
-    // independent of it, so what this row actually pins is the `oom`-driven
-    // rejection with the floor as a consistency check on top: an own-limit kill
-    // cannot happen BELOW the limit, so
-    // `memory.peak` must have reached the bound, and a global victim's sits
-    // under it. Here the peak is 4096 against a 64 MiB bound.
+  test("a SELF-CONTRADICTORY reading — `oom` set with the peak nowhere near the bound — is rejected", async () => {
+    // This row pins the PEAK FLOOR, and nothing more. Per ruling 9 the floor is
+    // a CONSISTENCY CHECK, not a discriminator: `oom > 0` already implies the
+    // peak reached the bound (the failing charge is rolled back before the
+    // watermark, so `peak >= bound - <failing charge>`), which makes the staged
+    // combination below — `oom` 1 with a 4096-byte peak against a 64 MiB bound —
+    // one the kernel cannot produce on a childless leaf. The floor rejects it
+    // anyway, which is what this asserts, and it stops being merely implied the
+    // moment the leaf gains children (`memory.events` aggregates upward, so a
+    // child with a smaller limit could fire `oom` far below THIS bound).
+    //
+    // THIS ROW DOES NOT COVER the graceful-`-ENOMEM`-then-global-kill pairing.
+    // This test was ORIGINALLY NAMED for that pairing and asserted the claim
+    // ruling 9 retracted — that the floor separates it. It does not: in the real
+    // pairing the early own-limit `oom` drives the peak TO the bound, so the
+    // floor passes and the verdict is `true`. That case is the irreducible
+    // residual, and the row directly below pins it as such.
     const v = await verdictFor("low 0\nhigh 5\nmax 9\noom 1\noom_kill 1\noom_group_kill 0\n", {
       signalDeath: true,
       peakBase: "4096",
     });
     expect(v?.peakBytes).toBe(4096);
     expect(v?.oomKilled).toBe(false);
+  });
+
+  test("the IRREDUCIBLE RESIDUAL reads `true` — a global kill after a graceful own-limit `oom`", async () => {
+    // Ruling 9, stated as an executable fact rather than only as prose. pi takes
+    // a graceful `-ENOMEM` against its own bound early (`oom` 1, survives, peak
+    // driven to the bound), and later a `dispatch_task` worker puts the box into
+    // system-wide OOM and the kernel picks pi (`oom_kill` 1, and `oom_group_kill`
+    // 1 because the group kill is credited to whichever ancestor sets
+    // `oom.group`, which for a global OOM is still this leaf). Every conjunct
+    // holds, INCLUDING the floor, and the verdict is `true` — a MISLABEL.
+    //
+    // Asserting the wrong answer on purpose, because the alternative is a reader
+    // assuming the case is handled. No readable cgroup v2 file separates it from
+    // a genuine own-limit kill; the one true signal is `oom_memcg=` vs
+    // `global_oom` in the kernel's OOM report, unreachable for `User=exedev`
+    // without `CAP_SYSLOG`. If a future change makes this row go GREEN on
+    // `false`, the residual has been closed — update this test and the ruling,
+    // do not delete the row.
+    const v = await verdictFor("low 0\nhigh 9\nmax 14\noom 1\noom_kill 1\noom_group_kill 1\n", {
+      signalDeath: true,
+      peakBase: String(BOUND),
+    });
+    expect(v?.peakBytes).toBe(BOUND);
+    expect(v?.oomKilled).toBe(true);
   });
 
   test("a real kill whose peak stopped ONE ALLOCATION short of the bound still counts", async () => {

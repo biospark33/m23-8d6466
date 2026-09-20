@@ -64,7 +64,9 @@ default nobody has re-derived: it survives verbatim from the 2026-08-20 text whi
 default at this split was re-derived from first principles), When a run executes in-box and the resident's pi
 child allocates past the bound, Then **the kernel OOM-kills that solicitation's cgroup** — no signal
 is sent by the engine and no sample is taken — the journal records `resident.exitStatus: "overflow"`
-and a `residentTripwire` row `{runId, cause:"watchdog_kill", phase, detail}` whose `detail` carries
+and a `residentTripwire` row `{runId, requestId, cause:"watchdog_kill", phase, detail}` — DF3.3's
+closed FIVE-key shape, all five of which `src/phase-engine/steering.ts` builds; `requestId` is the
+per-solicitation join key and was missing from this line until 2026-09-19 — whose `detail` carries
 the `memory.peak` reading and the bound it crossed, the solicitation's cgroup is removed, and
 **every remaining phase and gate executes on the deterministic path**. Observable artifacts: the
 harvested journal, and the leaf's kernel record read before removal — `memory.events`' counters AND `memory.peak`. The verdict is the three-part rule of **Dev Agent Record ruling 8**: `oom > 0 && (oom_kill > 0 || oom_group_kill > 0) && memory.peak >= bound - 2 MiB` — where the third conjunct is SKIPPED when the measurement is unavailable (`memory.peak` reads 0 on a pre-5.19 kernel, or no bound was supplied), because suppressing a real kill on a missing measurement is the worse direction. Ruling 8 has the full statement and ruling 9 corrects it; do not implement from this line alone. Not `oom_kill` alone: that counts a global OOM which merely picked pi, and `oom > 0` is what rejects it. The peak conjunct is a CONSISTENCY CHECK implied by `oom`, not a second discriminator — ruling 9 corrects the earlier claim that it separated anything, and states the one residual that survives (amended 2026-09-19, re-corrected the same day).
@@ -74,8 +76,11 @@ against a real exe.dev box and real OpenRouter spend, per
 `.claude/skills/qds-live-e2e/SKILL.md` — **but the two AC1 legs are NOT sited on the host-side
 `tier4-resident.live.test.ts` file**: every leg in that file runs `bun scripts/pipeline-run.ts` on
 the operator host (its own header says so — it cannot express in-box execution, and darwin has no
-cgroups), so a fourth leg beside L1/L2/L3 would inherit a darwin spawn with `residentRssBytes`
-present and INV-MEM-2 would disable the resident before Leg A could fire. **The proof is a
+cgroups), so a fourth leg beside L1/L2/L3 could not prove the enforcement anyway, because
+darwin has no cgroups. **(The original reason given here — that the leg would inherit a darwin spawn
+with `residentRssBytes` PRESENT and INV-MEM-2 would disable the resident — is false under ruling 3b:
+the host-side flag shape WITHHOLDS the bound, so nothing is disabled. The conclusion stands on the
+independent ground above; only the stated reason was wrong. Corrected 2026-09-19.)** **The proof is a
 dedicated in-box dispatch** — `fleet run` under `qds-run@.service`, the tier2-in-box-engine pattern,
 the only shipped shape that executes the engine inside the box — **as its own second dispatch**:
 the AC6 replay guard refuses a second run on a settled box, so the in-box leg cannot share the
@@ -241,9 +246,12 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
    *  validated by DF3.6a. Fleet applies it as `memory.max` on the
    *  per-solicitation cgroup; fleet NEVER chooses or defaults it.
    *  OPTIONAL, and the optionality is the seam (INV-MEM-2 Scope): absent means
-   *  no cgroup machinery runs at all — the host-side unit-test context, where
-   *  there are no cgroups. In production it is never absent, because DF3.6a
-   *  refuses the run at manifest load on a missing or non-positive value.
+   *  no cgroup machinery runs at all — the host-side context, where there are
+   *  no cgroups. That is NOT unit tests only: per ruling 3b, the
+   *  `pipeline-run --manifest …` host-side flag shape withholds the bound too,
+   *  so a production invocation can reach here with the field absent. Only the
+   *  `run <runId>` in-box FRONT DOOR always supplies it, because DF3.6a refuses
+   *  the run at manifest load on a missing or non-positive value.
    *  Present-but-unenforceable ⇒ resident not started (INV-MEM-2).
    *  Same division of labour as stop(): "DF3.6 decides when; this supplies
    *  how" (resident.ts:125). */
@@ -368,7 +376,12 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   "nothing else" is a property of the kernel's scoping rather than a promise this story keeps.
 - **Tripwire causes are emitted, not evaluated.** The kill emits a DF3.3 `residentTripwire` row
   `{ runId, requestId, cause: "watchdog_kill", phase, detail }`, with `detail` carrying the measured
-  `memory.peak`, the bound it crossed, and the cgroup leaf name. **D4's tripwire (c) — "any steering
+  `memory.peak` and the bound it crossed — **those two and nothing else.** (Corrected 2026-09-19:
+  this clause used to add "and the cgroup leaf name", which does not ship and is not buildable here.
+  The engine's only channel is `deps.lastMemory?.()`, typed `{peakBytes, oomKilled, boundBytes?}`;
+  the leaf name exists solely fleet-side as `resident.${runId}.${seq}` and never crosses the seam
+  this story fixes at three facts on two objects. `story` E2E Slice and AC1 both already said peak +
+  bound only — this was the outlier.) **D4's tripwire (c) — "any steering
   loop the watchdog kills twice for the same cause" — is a statement about a repeating *loop*, not
   about a fleet-wide count, and this story does not decide its key.** Within one run a second kill
   is prevented by AC5's `stop()` latch (`src/fleet/resident.ts:681-705`; every later `call` throws
@@ -548,11 +561,14 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
   bound *does* fire, it stops the resident only — never a gate, a phase, or the run's determinism.
   **Scope.** INV-MEM-2 governs the **in-box enforcement context** — the path reached when the caller
   supplies a bound. `residentRssBytes` is therefore **optional** on `ResidentSpawnOpts`: *absent*
-  means no cgroup machinery runs at all, which is the host-side unit-test context (darwin has no
-  cgroups); *present-but-unenforceable* means the resident is not started, which is the in-box
+  means no cgroup machinery runs at all, which is the host-side context generally — **not only unit
+  tests**: under ruling 3b the `pipeline-run --manifest …` flag shape withholds the bound too, and
+  that includes the darwin tier-4 live legs (darwin has no cgroups); *present-but-unenforceable* means the resident is not started, which is the in-box
   context. The two are distinguished **by the caller, not by a platform probe** —
-  `scripts/pipeline-run.ts` passes the bound DF3.6a validated, so in production the field is always
-  present and INV-MEM-2 always applies. Without this scope the invariant would return
+  `scripts/pipeline-run.ts` passes the bound DF3.6a validated on the unit's FRONT-DOOR shape, so on
+  that shape the field is always present and INV-MEM-2 always applies. **Under ruling 3b it is
+  absent on the host-side flag shape — which is a production invocation with the field absent, and
+  this sentence originally claimed otherwise.** Without this scope the invariant would return
   `{ disabled: true }` from every host-side arming site: `tests/fleet/resident.test.ts` alone has
   **42** `startResident(` call sites, and DF3.3's INV-RES-3 second-mint exhibit
   (`df3-3…md:237`) — the credential-containment proof for the whole resident — is one of them. A
@@ -565,7 +581,10 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 
 ## Definition of Done
 
-- [ ] **Impl:** per-solicitation cgroup leaf with `memory.max` from `residentRssBytes` **and `memory.oom.group=1`**; one-time delegated-subtree split at engine start; **fail-closed** `sh -c` self-placement wrapper (`|| exit 97`); `memory.peak`/`memory.events` read and leaf removal after the call; `lastMemory()` on `ResidentSpawn` wired through the `lastMemory` dep DF3.6a lands.
+- [ ] **Impl:** per-solicitation cgroup leaf with `memory.max` from `residentRssBytes` **and `memory.oom.group=1`**; one-time delegated-subtree split at engine start; **fail-closed** `sh -c` self-placement wrapper exiting **97** on refusal — the guard keys on
+  MEMBERSHIP READ BACK from `cgroup.procs`, **not** on the write's exit status; the `... || exit 97`
+  form this checkbox used to name was rejected during development (see the 2026-09-19 amendment) and
+  must not be built from; `memory.peak`/`memory.events` read and leaf removal after the call; `lastMemory()` on `ResidentSpawn` wired through the `lastMemory` dep DF3.6a lands.
 - [ ] **Impl:** `telemetry.exitStatus = "overflow"` written through an internal writer only — no public setter (INV-MEM-1). `"overflow"` verified a real `EXIT_STATUSES` member (`cli-anything/src/types.ts:99-105`), so no cross-repo type change is needed.
 - [ ] **Contract:** the engine issues no signal and runs no timer for this bound; `grep` over the diff finds no `ps`, no `/proc` parser, no sample interval and no SIGTERM/SIGKILL sweep added by this story. `src/reverify/worktree.ts` is untouched.
 - [ ] **Image + pin (DF2.10 ritual — this story requires a rebuild, not just an edit):** `Delegate=memory` lands in `oci/exedev/systemd/qds-run@.service`; the image is **rebuilt, re-published and its digest pin moved** per DF2.10's pin ritual, and `deriveBuildId`'s inputs (which hash the systemd unit — `scripts/build-exedev-image.ts:614` for `deriveBuildId`, `:1544` for `buildIdFileInputs`; the `src/providers/exedev/driver.ts` line citation this story shipped with pointed at a pin comment and a prose paragraph, never at either function, at every base it has had — corrected 2026-09-19) are re-derived. **A run against the previously pinned digest boots a unit with no `Delegate=`, so the resident refuses to start (AC3) — a green local gate against a stale pin is the exact failure this item exists to prevent.**
@@ -620,9 +639,9 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       — and the story is not done without this round.**
 - [ ] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's `PROVISIONAL_RESIDENT_RSS_BYTES` in `resident-bounds.ts` — that one constant is in this story's Files to Modify** (W6-C-H4 as re-homed by W14C-PAIR-1: the value lives in DF3.6a's bounds module, `manifest.ts` carries no default — the W6-C-H4 rationale stands, the file moved with the required-field design). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. Marginal spend: zero — it reads a file from a solicitation the round already makes.
 - [ ] **Test (cgroup scoping, AC2):** a `dispatch_task` phase running beside a small resident does **not** trip the bound — the workers are not in the resident's cgroup. An implementation setting `MemoryMax=` on `qds-run@<runId>.service` passes a synthetic-allocator "does it fire?" test and MUST fail this one.
-- [ ] **Test (fail-closed unenforceable, AC3/INV-MEM-2):** with `Delegate=memory` absent from the unit, the resident is **not started**, the journal records `resident.status:"disabled"`, the log line carries `cause:"unenforceable"`, no tripwire row is emitted, and the run still completes deterministically — never an unbounded resident.
+- [ ] **Test (fail-closed unenforceable, AC3/INV-MEM-2):** with `Delegate=memory` absent from the unit, the resident is **not started**, the journal records `resident.status:"disabled"`, the log line carries `reason:"rss_unenforceable"` (ruling 5 — this checkbox said `cause:"unenforceable"`, which is the AC4 breach line's vocabulary, not this one's; `resident_disabled` discriminates on `reason`, as the rate refusal already does, and an acceptance test written from the old wording asserts a key the line does not have), no tripwire row is emitted, and the run still completes deterministically — never an unbounded resident.
 - [ ] **Test (image contract):** the Dockerfile unit scan fails the build when `Delegate=memory` is removed from `qds-run@.service` — the assertion is the fence, the same shape as the Dockerfile's existing `RuntimeDirectoryPreserve=yes` check.
-- [ ] **Test (fail-closed placement, AC4):** with the leaf removed (or `+memory` disabled) between arming and the `cgroup.procs` write, the wrapper exits **97** and pi is never `exec`'d; the engine's catch classifies the failure through the typed `PlacementRefusedError` rejection — never the `"degraded"` latch; the `onBoundBreach` callback carries `{bound:"rss", allowed:false, cause:"unenforceable", exitCode: 97}`; the fleet `warn` line records that payload; `residentSpawn.stop()` is awaited; and **no subsequent solicitation is issued** for that resident. A wrapper joining the commands with `;` execs pi unbounded and records a clean call, and MUST fail.
+- [ ] **Test (fail-closed placement, AC4):** with the leaf removed (or `+memory` disabled) between arming and the `cgroup.procs` write, the wrapper exits **97** and pi is never `exec`'d; the engine's catch classifies the failure through the typed `PlacementRefusedError` rejection — never the `"degraded"` latch; the `onBoundBreach` callback carries `{bound:"rss", allowed:false, cause:"unenforceable", exitCode: 97}`; the **engine-side `resident_bound_breach` fd-2 line** records that payload (ruling 7 — this checkbox said the fleet `warn` line, which carries the separate per-solicitation `resident_cgroup` event and holds neither join key; an acceptance test written from the old wording asserts against the wrong emitter); `residentSpawn.stop()` is awaited; and **no subsequent solicitation is issued** for that resident. A wrapper joining the commands with `;` execs pi unbounded and records a clean call, and MUST fail.
 - [ ] **Test (OOM stops the resident, AC5):** after a kernel OOM-kill the journal reads `status:"stopped"` **and** `exitStatus:"overflow"`, `stop()` has been called via `onBoundBreach`, and no further solicitation is issued. An implementation leaning on the `"degraded"` status gate leaves `stopped === false` and MUST fail; so MUST one that leaves `status:"degraded"` beside `exitStatus:"overflow"`.
 - [ ] **Test (host-side seam, INV-MEM-2 Scope):** omitting `residentRssBytes` arms a resident with **no** cgroup calls (this is what keeps `tests/fleet/resident.test.ts`'s 42 arming sites and DF3.3's INV-RES-3 exhibit green on darwin); supplying it on a host without cgroup v2 refuses to start. Both asserted.
 - [ ] **Test (reclaimable pressure is not a silent miss, M1):** a solicitation driven to `memory.max` by **file-backed** (reclaimable) growth thrashes rather than OOMs, and the run records a **timeout** (`SOLICIT_TIMEOUT_MS = 60_000`, `src/phase-engine/steering.ts:30`) — not a `watchdog_kill`, and not a silent pass. Asserts the classification, so a missing `oom_kill` count on that path reads as "the other backstop fired", never as "the bound is absent". **Host-side, faked and unconditional** (amended 2026-09-18, Dev Agent Record ruling 6 — this clause originally read "host-side where cgroups exist; skipped, not faked, where they do not", which the shipped test does not satisfy and should not: a skip proves nothing in any environment). The test stages the leaf's counters with a limit that was HIT AND RECLAIMED and asserts the timeout classification; real page-cache reclaim is the live round's, and the test says so in its own header.
@@ -642,8 +661,11 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..11}.md`** — eleven adversarial
-rounds, three before the first push and eight after, plus CodeRabbit's rounds on PR #264. Read them in
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..12}.md`** — twelve adversarial
+rounds, three before the first push and nine after, plus CodeRabbit's rounds on PR #264. Round 12 is
+the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
+it swept all nine rulings for propagation and found eleven sites still out of step, three of them
+carrying claims a ruling had already retracted. Read them in
 order if you need to know WHY a rule is shaped the way it is; several later rounds RETRACT earlier
 ones (most importantly round 9 retracts round 7's claim about the peak floor), and every retracted
 claim carries a `SUPERSEDED` note pointing at the round that replaced it. **The rulings below are
@@ -653,9 +675,9 @@ the current word; the evidence files are history.**
 
 | File | What landed |
 |------|-------------|
-| `src/fleet/resident.ts` | The whole mechanism: `CgroupUnenforceableError`, the one-time delegated-subtree split (`supervisor/` + `+memory`, idempotent across engine restarts), per-solicitation leaf create with `memory.max` **and** `memory.oom.group=1`, the fail-closed `sh -c` self-placement wrapper (`\|\| exit 97`, positional argv), `memory.peak`/`memory.events` read before removal, leaf teardown on every exit path, `lastMemory()` on `ResidentSpawn`, optional `residentRssBytes` on `ResidentSpawnOpts`, and the arming check against a REAL probe leaf. |
+| `src/fleet/resident.ts` | The whole mechanism: `CgroupUnenforceableError`, the one-time delegated-subtree split (`supervisor/` + `+memory`, idempotent across engine restarts), per-solicitation leaf create with `memory.max` **and** `memory.oom.group=1`, the fail-closed `sh -c` self-placement wrapper (exit **97** on refusal, positional argv — keyed on membership read back from `cgroup.procs`, NOT on the write's exit status; the `\|\| exit 97` form was rejected, see the amendment), `memory.peak`/`memory.events` read before removal, leaf teardown on every exit path, `lastMemory()` on `ResidentSpawn`, optional `residentRssBytes` on `ResidentSpawnOpts`, and the arming check against a REAL probe leaf. |
 | `src/phase-engine/steering.ts` | Edit (1): the OOM writer in the call-failure catch — `status:"stopped"`, `exitStatus:"overflow"`, a `watchdog_kill` tripwire carrying the peak and the bound, then `onBoundBreach({bound:"rss", cause:"watchdog_kill"})`. Ordered BEFORE the degrade arm. The dep's return type gained `boundBytes?`. Edit (2), the `PlacementRefusedError` arm, **was already landed in DF3.6a's diff** and needed no change. |
-| `scripts/pipeline-run.ts` | (iii) `residentRssBytes` on `startResident`; (iv) `lastMemory: spawned.lastMemory` on `createSteering`; (vi) the `rss_unenforceable` arming-refusal arm beside the rate arm; (vii) the run-down refresh precedence; plus the `inBoxFrontDoor` enforcement-context latch (ruling 3 below). |
+| `scripts/pipeline-run.ts` | (iii) `residentRssBytes` on `startResident`; (iv) `lastMemory: spawned.lastMemory` on `createSteering`; (vi) the `rss_unenforceable` arming-refusal arm beside the rate arm; (vii) the run-down refresh precedence; plus the `inBoxFrontDoor` enforcement-context latch (ruling **3b** below — ruling 3 is the tripwire contract and says nothing about this latch). |
 | `oci/exedev/systemd/qds-run@.service` | `Delegate=memory`, scoped rather than `Delegate=yes`. |
 | `oci/exedev/Dockerfile` | The positive `grep -qE '^Delegate=memory$'` unit-scan assertion. |
 | `tests/fleet/fixtures/fake-pi-resident.ts` | DF3.3's SHARED fake pi gains FIVE test-only knob groups the cgroup suite drives (7 env vars): staging `memory.events`/`memory.peak` into the live leaf, copying the leaf's `cgroup.procs` out, recording the leaf's armed state, forcing an exit code, and dying by SIGKILL. Additive and env-gated — every existing caller that sets none of them is byte-for-byte unaffected. |
@@ -743,6 +765,27 @@ and rejected: kernfs notifications coalesce when the reader has not drained, so 
 the only condition under which this scenario arises — it wakes once with both counters already moved
 and reports a true kill, failing hardest in the case it exists to catch, and it would cost a poller
 thread per solicitation against this story's "nothing here samples" property.
+
+**The downstream repetitions, ENUMERATED (2026-09-19).** This ruling originally said "the wrong
+version was repeated downstream before it was caught" and named no member, which left the members
+unfixed. They were three, all now closed: **(1)** the test row below; **(2)** `readLeaf()`'s own
+comment block in `src/fleet/resident.ts`, whose setup paragraph asserted "A THIRD FACT" twelve lines
+*above* its own ruling-9 correction — reworded so the retracted framing is not stated affirmatively
+anywhere; **(3)** `readLeaf()`'s JSDoc, which sits ABOVE the body and so was never reached by any of
+the body's corrections — it presented the peak conjunct as a co-equal third member of the
+conjunction, which is what a caller sees on hover. A ruling that names a class of stale sites without
+enumerating them does not propagate; that is the lesson, and it is why this list is explicit.
+
+**Pinned in the suite, not only here (added 2026-09-19).** Ruling 9 was written as prose and the
+test row that predated it was left asserting the retracted claim: a row titled *"a graceful `oom`
+EARLIER plus a global OOM kill LATER is still not this bound firing"* staged `oom 1, oom_kill 1`
+with a 4096-byte peak against the 64 MiB bound and read `false` — but it read `false` ONLY on the
+peak floor, i.e. on exactly the discrimination this ruling retracts, and the combination it staged
+is one the kernel cannot produce (`oom > 0` implies the peak reached the bound). It has been renamed
+to what it actually pins — *a SELF-CONTRADICTORY reading … is rejected* — and a second row now pins
+the residual itself: all three counters set with `peak = bound`, asserting `oomKilled === true`, the
+MISLABEL, with a note to update the row and this ruling rather than delete it if the residual is
+ever closed. Mutation-verified: deleting the peak conjunct turns the first row red.
 
 **The two verdicts are less asymmetric than they look, which is why the residual is acceptable.**
 Traced through the code rather than assumed: a FALSE POSITIVE writes `status:"stopped"`,
@@ -970,8 +1013,8 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   `overflow` survives the refresh" direction needs an engine-written `overflow`, which needs a
   kernel OOM-kill — it lands with AC1's live round.
 
-Verification, scoped rather than generalized: `bun test` over the whole repo is **6338 pass / 7 skip / 5
-fail** (re-measured 2026-09-19 after each round added tests; 6084/5 when first written, 6336 at round 10), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
+Verification, scoped rather than generalized: `bun test` over the whole repo is **6340 pass / 7 skip / 5
+fail** (re-measured 2026-09-19 after each round added tests; 6084/5 when first written, 6336 at round 10, 6338 at round 11), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
 with this branch stashed, and three (gitnexus ×2, `tests/fleet/cli.test.ts`'s TRANSIENT-errno test)
 pass in isolation on both trees under lower load. `bunx tsc --noEmit` and Biome are clean. The
 suites this story owns — `tests/fleet/resident-cgroup.test.ts`, `tests/fleet/resident.test.ts`,
