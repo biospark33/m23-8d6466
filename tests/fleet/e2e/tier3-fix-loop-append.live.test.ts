@@ -179,7 +179,7 @@
  * GitHub API through the shipped seam, real git object store.
  */
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The marker path and the classifier come from the shipped constants — never
@@ -879,9 +879,15 @@ test.todoIf(liveTodoOff())(
       const negReposPath = join(negFactory, "repos.json");
       writeFileSync(negReposPath, readFileSync(join(REPO_ROOT, ".factory", "repos.json")));
       chmodSync(negReposPath, 0o600);
+      // macOS: /var is a symlink to /private/var, and the CLI's containment
+      // guard compares the realpath'd hostRoot by string prefix — measured
+      // live (evidence 2026-09-20-224323: the /var/folders caller path
+      // refused against the /private/var/folders hostRoot). Pass the
+      // realpath'd form, the same normalization the guard does.
+      const negReposRealPath = realpathSync(negReposPath);
       const boxesBeforeNeg = await awaitWithCeiling(ctx.driver.list(), T61A_LIST_CEILING_MS, "t6.1a-neg-pre-list");
       const neg = await runFixRun(
-        ["--pr", String(prNumber), "--dir", recordsDir, "--repos-file", negReposPath],
+        ["--pr", String(prNumber), "--dir", recordsDir, "--repos-file", negReposRealPath],
         { cwd: negHost, timeoutMs: T61A_NEG_CONTROL_TIMEOUT_MS },
       );
       const boxesAfterNeg = await awaitWithCeiling(ctx.driver.list(), T61A_LIST_CEILING_MS, "t6.1a-neg-post-list");
