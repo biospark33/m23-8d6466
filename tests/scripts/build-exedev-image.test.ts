@@ -1394,26 +1394,37 @@ describe("buildIdFileInputs", () => {
       // correction this ledger already carries above). Same failing-run
       // receive, same-commit re-pin.
       //
+      // MOVED WITHIN THE STORY, twice, by COMMENT-ONLY edits to walked inputs —
+      // `src/fleet/resident.ts`, `src/phase-engine/steering.ts` and
+      // `scripts/pipeline-run.ts` — made while resolving review rounds 7 and 8.
+      // Comment-only still moves this literal (the `99af1da0` entry above is the
+      // same case), which is why the re-pin happens LAST, after the final fixer
+      // lands, rather than once per round.
+      //
       // bb3c3602: moved from 7d44bbda by DF3.6b, review round 12 — another
       // within-story move, COMMENT-ONLY again. ONE walked input changed:
-      // `src/fleet/resident.ts`, twice, both in `readLeaf()`'s documentation —
-      // its JSDoc (which presented the peak floor as a co-equal third
-      // discriminator, the framing story ruling 9 denies, and which sits ABOVE
-      // the body so none of the body's three self-corrections ever reached it)
-      // and the body's setup paragraph (which asserted "A THIRD FACT" twelve
-      // lines above its own ruling-9 correction). NOT movers, named so the next
+      // `src/fleet/resident.ts` — in THREE places, not two. Two are in
+      // `readLeaf()`'s documentation: its JSDoc (which presented the peak floor
+      // as a co-equal third discriminator, the framing story ruling 9 denies,
+      // and which sits ABOVE the body so none of the body's three
+      // self-corrections ever reached it) and the body's setup paragraph (which
+      // asserted "A THIRD FACT" twelve lines above its own ruling-9
+      // correction). The THIRD is elsewhere in the file entirely —
+      // `ResidentSpawnOpts`'s JSDoc for `residentRssBytes`, where "In
+      // production it is never absent" was corrected for ruling 3b. Counted
+      // exactly because this ledger exists to spare the next re-pinner a
+      // bisect, and an entry that says "twice, both in `readLeaf()`" sends them
+      // looking in one function for a hash three hunks moved. (Commit
+      // `2dfedf49`'s own message makes the same undercount; this entry is the
+      // correction, and `git show 2dfedf49 -- src/fleet/resident.ts` shows the
+      // three hunk headers.) NOT movers, named so the next
       // re-pinner does not bisect them: `tests/fleet/resident-cgroup.test.ts`
       // (three rows fixed, one added) and the story artifact are outside the
       // walk, and `oci/exedev/Dockerfile` is `deriveBuildId`'s separate
       // `dockerfile` field as the entry above explains. Walk set unchanged at
       // 89 entries. Same failing-run receive, same-commit re-pin.
       //
-      // MOVED WITHIN THE STORY, twice, by COMMENT-ONLY edits to walked inputs —
-      // `src/fleet/resident.ts`, `src/phase-engine/steering.ts` and
-      // `scripts/pipeline-run.ts` — made while resolving review rounds 7 and 8.
-      // Comment-only still moves this literal (the `99af1da0` entry above is the
-      // same case), which is why the re-pin happens LAST, after the final fixer
-      // lands, rather than once per round. THE PUBLISH IS STILL OWED:
+      // THE PUBLISH IS STILL OWED:
       // the unit is baked into a digest-pinned image, so a run against the
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that

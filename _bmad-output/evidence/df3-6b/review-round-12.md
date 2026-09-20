@@ -20,14 +20,26 @@ builds from** — a DoD checkbox, an AC body, a summary table, a JSDoc. A DoD ch
 commentary; it is what an acceptance test gets written from, so a stale one aims a future test at the
 wrong code path.
 
-A single auditor swept all nine rulings against every site in the story and the shipped code. Rulings
-1, 2, 4, 6, 7 and 8 had propagated fully. Three had not.
+A single auditor swept all nine rulings against every site in the story and the shipped code. Counted at the
+TOP LEVEL — 3b is a sub-ruling of 3, not a tenth ruling — rulings 1, 2, 4, 6 and 8 had propagated
+fully and **four had not: 3 (with its sub-ruling 3b), 5, 7 and 9.** The table below lists 3 and 3b on
+separate rows because they drifted at different sites and for different reasons; that is five rows
+on four top-level rulings, and every count in this file uses the top-level basis.
+
+**Ruling 7 belongs in the failed column, and an earlier version of this file put it in the
+propagated one** (corrected in review round 13, by an auditor that checked the split against `git
+show` rather than against this file's own prose). The error is self-refuting on inspection: the
+paragraph directly above describes CodeRabbit finding ruling 7's AC4 checkbox still pointing at the
+fleet `warn` line, and that checkbox was rewritten in this very commit. A round whose subject is
+"rulings that failed to propagate" miscounted its own opening example — which is the same failure
+mode the round documents, one level up.
 
 | Ruling | Subject | Sites found out of step |
 |--------|---------|-------------------------|
 | 3 | the tripwire contract — DF3.3's closed five-key shape, `bound`/`allowed`/`cause`/`exitCode` on the fd-2 line | 4 (below) |
 | 3b | `residentRssBytes` is ABSENT on the host-side `--manifest` flag shape | 4 |
 | 5 | the arming refusal discriminates on `reason:"rss_unenforceable"`, not `cause:"unenforceable"` | 1 |
+| 7 | the breach payload rides the engine-side `resident_bound_breach` fd-2 line, not the fleet `warn` line | 1 — the AC4 DoD checkbox, which is what CodeRabbit found and what opened this round |
 | 9 | the peak floor is a consistency check implied by `oom`, not a discriminator | 3 |
 
 ### Ruling 3 and the shape-drift class — four sites
@@ -135,7 +147,10 @@ escape nobody pins is an escape a future tightening deletes without noticing. A 
 directly — real kill counters, no `memory.peak` file at all, expecting `true` — and is
 mutation-verified red when the escape is deleted.
 
-Block total: 37 rows before this round, 39 after.
+Row counts, corrected in review round 13 after an auditor measured them: the OOM-verdict describe
+block holds **13 rows before this round and 15 after**. The figures 37 and 39 that stood here are the
+WHOLE FILE's `test(` count before and after, mislabelled as the block's — both numbers were real,
+attached to the wrong noun.
 
 ## Process note, recorded because it nearly cost a bad revert
 

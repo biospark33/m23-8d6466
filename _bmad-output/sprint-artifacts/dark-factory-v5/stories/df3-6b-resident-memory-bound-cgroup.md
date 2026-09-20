@@ -615,7 +615,19 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       *producible by construction*: its falsifier is the SHIPPED VERDICT reading false — ruling 8's
       full rule, not `oom_kill` alone, since `oom_kill > 0` can hold while the verdict is correctly
       false: a real crossing must leave `oom > 0`, a kill counter > 0 AND `memory.peak` at the
-      bound. The leaf surviving `rmdir` falsifies it too. A crossing that does not fire falsifies
+      bound — **the peak clause CONDITIONAL on the measurement existing.** The shipped rule SKIPS
+      the peak comparison when `memory.peak` reads 0 (pre-5.19 kernel) or no bound was supplied, so
+      on such a kernel a valid own-limit kill satisfies the verdict with no peak measurement at all
+      and the peak is NOT a falsifier there. The leg therefore carries a kernel prerequisite: assert
+      the peak clause only on **5.19+**, and **the leg must MEASURE that, not assume it** — read
+      `uname -r` on the box first, and where it is below 5.19, `oom` plus a kill counter is the whole
+      falsifier. **The exe.dev fleet's kernel version is NOT ESTABLISHED anywhere in this story**, and
+      it cannot be established from the image: a container shares the HOST kernel, so neither the
+      digest-pinned base nor systemd 255 in `oci/exedev/Dockerfile` bounds it. An earlier draft of
+      this clause inferred 5.19+ from systemd 255 — unsound on both counts, and recorded here rather
+      than silently deleted, because the same inference is the obvious one to make again. Stated because the
+      escape is deliberate — suppressing a real kill on a missing measurement is the worse direction
+      — and a leg that treats a skipped conjunct as a failed one would report a true kill as a miss. The leaf surviving `rmdir` falsifies it too. A crossing that does not fire falsifies
       the story. **Leg B — the
       attachment (proves the real-pi precondition: a normal solicitation runs inside a real leaf,
       under the bound, and the telemetry reads are live).** The round's real solicitation
@@ -661,11 +673,16 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..12}.md`** — twelve adversarial
-rounds, three before the first push and nine after, plus CodeRabbit's rounds on PR #264. Round 12 is
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..13}.md`** — thirteen adversarial
+rounds, **six before the first push and seven after**, plus CodeRabbit's rounds on PR #264. (Round 6
+is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
+this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
-it swept all nine rulings for propagation and found eleven sites still out of step, three of them
-carrying claims a ruling had already retracted. Read them in
+it swept all nine rulings for propagation and found **thirteen** sites still out of step across
+**four** top-level rulings (3 with 3b, 5, 7 and 9), three of them carrying claims a ruling had
+already retracted. (Round 12 first recorded "eleven sites" over "three" rulings, and its commit
+message says the same; round 13 re-counted from the enumeration — 4 + 4 + 1 + 1 + 3 — and corrected
+both. The commit message is immutable and wrong; this line supersedes it.) Read them in
 order if you need to know WHY a rule is shaped the way it is; several later rounds RETRACT earlier
 ones (most importantly round 9 retracts round 7's claim about the peak floor), and every retracted
 claim carries a `SUPERSEDED` note pointing at the round that replaced it. **The rulings below are
@@ -991,8 +1008,15 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   `echo $$ >> …/cgroup.procs` idiom and is believed harmless, but the flag was adopted so the
   fs-level fake could model a multi-pid `cgroup.procs` at all, so the live leg must confirm the
   placement actually TOOK (read `cgroup.procs` back on a real leaf, not just observe the exit code);
-  and (b) the synthetic allocator staged as Leg A's `QDS_PI_BIN` MUST NOT exit 97, or the leg proves
-  a placement refusal instead of a crossing (see `_PLACEMENT_REFUSED_EXIT`'s docstring).
+  (b) the synthetic allocator staged as Leg A's `QDS_PI_BIN` MUST NOT exit 97, or the leg proves
+  a placement refusal instead of a crossing (see `_PLACEMENT_REFUSED_EXIT`'s docstring); and
+  **(c) the box's KERNEL VERSION, read with `uname -r` before anything else** (added 2026-09-19,
+  review round 13). `memory.peak` landed in 5.19, and below that the shipped verdict SKIPS the peak
+  conjunct entirely — so on such a box the peak is not a falsifier and a leg asserting it would
+  report a true own-limit kill as a miss. This is a fact about the exe.dev HOST, not about the
+  image: a container shares the host kernel, so neither the digest-pinned base nor systemd 255 in
+  `oci/exedev/Dockerfile` settles it, and nothing in this story has measured it. Listed here because
+  it is exactly the class this section exists for and was missed when the section was written.
 - **The pi baseline-RSS measurement** — the `memory.peak` read from a control solicitation. NOT
   TAKEN, and it is the input to the next item.
 - **`PROVISIONAL_RESIDENT_RSS_BYTES` (512 MiB) is therefore UNCHANGED** in
