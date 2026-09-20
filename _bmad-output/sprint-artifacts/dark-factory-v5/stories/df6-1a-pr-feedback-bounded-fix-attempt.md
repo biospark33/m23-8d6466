@@ -863,60 +863,60 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
 ## Definition of Done
 
-- [ ] **Impl:** `feedback-run.ts` builds a fix brief from `botComments[]` pinned to the PR head and
+- [x] **Impl:** `feedback-run.ts` builds a fix brief from `botComments[]` pinned to the PR head and
       dispatches it through DF3.1 — no fix-specific dispatch path, and the team runs in-box through
       DF1.10's engine (AC1).
-- [ ] **Impl:** `scripts/fix-run.ts` drives one attempt as **two bounded invocations**: invocation 1
+- [x] **Impl:** `scripts/fix-run.ts` drives one attempt as **two bounded invocations**: invocation 1
       takes `<runsDir>/<runId>.lock`, calls DF3.7's `observeAndDriveChain(runId, deps)` for the
       completion→harvest→teardown→re-verify chain, and exits 0 at `awaiting-approval`; invocation 2
       re-takes the lock on an approved record and does the scope check → push → `fixContext` write.
       It implements no observer, no poller and no second chain; idempotent on a repeated `--pr`
       invocation for already-recorded comments.
-- [ ] **Test (no residency across the gate):** an invocation that reaches `awaiting-approval` exits
+- [x] **Test (no residency across the gate):** an invocation that reaches `awaiting-approval` exits
       within its own bounded pass, releases `<runsDir>/<runId>.lock`, and leaves no child process; a
       concurrent `fleet harvest`/`fleet teardown` against that run is **not** refused exit 5.
       *An implementation that polls for the approval inside the invocation MUST fail (AC3).*
-- [ ] **Security (host-owned scope artifact):** the allowed-path list is read from
+- [x] **Security (host-owned scope artifact):** the allowed-path list is read from
       `.factory/fix-scope.json` under `hostRoot`, resolved per repoSlug; a repoSlug with no entry
       refuses `fix-scope-missing` with nothing pushed. *An implementation that derives the scope from
       the brief, the roster, or any file inside the harvested bundle MUST fail — that is the box
       grading its own homework (fact 15), and it makes AC6 a tautology.*
-- [ ] **Security (the fixer cannot edit its own verifier):** a fixture whose harvested diff touches
+- [x] **Security (the fixer cannot edit its own verifier):** a fixture whose harvested diff touches
       `scripts/reverify.ts` refuses `scope-requires-privilege`, pushes nothing, charges **zero**
       attempts, and names the matched deny glob with its `reason`. Same for `scripts/fleet.ts`,
       `scripts/lsp-verify.ts` (via `scripts/*-verify.ts`) and the `scripts` block of `package.json`.
       *An implementation whose allow-list is `["src/**","tests/**","scripts/**"]` with no verification-
       surface deny lets all four through, trips no rule, and MUST fail this test.*
-- [ ] **Test (the two refusals are distinguishable):** a diff outside the allow-list refuses
+- [x] **Test (the two refusals are distinguishable):** a diff outside the allow-list refuses
       `out-of-scope-diff` and **charges zero** (bounded by DF6.1b's cap of 1); a diff matching a deny
       glob refuses `scope-requires-privilege`, charges **zero**, and escalates immediately. *An
       implementation reporting both as one state MUST fail.*
-- [ ] **Impl:** `src/fixloop/` imports neither `approval-gate.ts` nor `approvers.ts` at all; imports
+- [x] **Impl:** `src/fixloop/` imports neither `approval-gate.ts` nor `approvers.ts` at all; imports
       `src/pr/push.ts` **only for `pushVerifiedSha`/`PushOutcome`** and `src/providers/run-record.ts`
       **only for `RunRecordStore`/`RunRecord`** — asserted by a symbol-level import-specifier grep in
       DF3.7 AC1's idiom (a whole-module ban on `push.ts` would forbid this story's central call, and
       an "approval-extension block" of a file is not greppable).
-- [ ] **Impl:** the push goes through DF5.2's `pushVerifiedSha(runId, { targetRef })` with this
+- [x] **Impl:** the push goes through DF5.2's `pushVerifiedSha(runId, { targetRef })` with this
       attempt's own `ApprovalRecord` in place — no second push implementation, no INV-PR-5 bypass (AC2).
-- [ ] **Contract:** `fixContext` (incl. `attemptSha`, `attempt`, `pollWindowOpenedAt`, `commentIds`, `commentsDigest`) validated as the
+- [x] **Contract:** `fixContext` (incl. `attemptSha`, `attempt`, `pollWindowOpenedAt`, `commentIds`, `commentsDigest`) validated as the
       **already-registered** `fixLoop` sub-key on **this fix run's own** DF2.1 record, JSON-encoded
       into the `"string"` field (`schemaVersion: 1`) — **no DF2.1 core edit, no new `FieldKind`, no
       `SHAPE_EXEMPT_PATHS` entry**; `dispatch_task` output validated against the v5 §5.2 step-output
       schema. *An implementation that assigns an object to `extensions.fixLoop.fixContext` MUST fail
       with `schema-rejected: … must be a string`.*
-- [ ] **Security (INV-7 — refuse before the irreversible act):** the encoded `fixContext` is validated
+- [x] **Security (INV-7 — refuse before the irreversible act):** the encoded `fixContext` is validated
       in validate-only mode **before** `pushVerifiedSha` is called, and the post-push write writes that
       already-validated value. *A test that injects a would-be-refused payload MUST observe the
       refusal with **nothing pushed**; an implementation that validates only at `store.set` publishes
       the commit and then throws, and MUST fail.*
-- [ ] **Chore (inherited from DF5.5):** `p1-18-pr-comment-polling.md:50` reads `(DF6.1a)` in place of
+- [x] **Chore (inherited from DF5.5):** `p1-18-pr-comment-polling.md:50` reads `(DF6.1a)` in place of
       `(P1.19)`; no other line of that file is modified by this story, and no P1.18 dependency edge is
       added anywhere in either half.
-- [ ] **Contract:** `fixContext` registered as an allow-listed optional key on DF3.1's brief schema
+- [x] **Contract:** `fixContext` registered as an allow-listed optional key on DF3.1's brief schema
       (`src/fleet/brief-schema.ts`, adds only); a brief carrying any other unregistered key still
       fails validation, and DF3.1's existing brief fixtures validate unchanged.
-- [ ] **Security:** Append-only push enforced and branch-scoped (INV-1, INV-2).
-- [ ] **Security (credential-free box):** the dispatch preflight probe asserts every sink named in
+- [x] **Security:** Append-only push enforced and branch-scoped (INV-1, INV-2).
+- [x] **Security (credential-free box):** the dispatch preflight probe asserts every sink named in
       INV-3 — `credential.*`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh/hosts.yml`, `GH_TOKEN`,
       `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_API_TOKEN`, `SSH_AUTH_SOCK`, `url.*.insteadOf` —
       in the environment the run unit inherits, **plus the resolved unit's own directives: every
@@ -929,14 +929,14 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `fleet run <run-id>` starts the unit, with no agent work performed and the box torn down.
       *An implementation probing only `GH_TOKEN`/`GITHUB_TOKEN` and `credential.*` MUST fail all
       four* (INV-3).
-- [ ] **Test (push outcome arms):** a refused `pushVerifiedSha` **resolves** `{ ok: false }` and never
+- [x] **Test (push outcome arms):** a refused `pushVerifiedSha` **resolves** `{ ok: false }` and never
       rejects — the attempt records the `failedPrecondition` and writes **no** `fixContext`; an
       `{ ok: true, pushed: false }` resume records `fixContext` and is a success;
       `{ ok: true, pushed: true }` is the ordinary append. *An implementation that reads `sha` off the
       union without discriminating on `ok` records `attemptSha: undefined` and MUST fail; one that
       treats `pushed: false` as "nothing happened" strands a run whose fix is already on the PR branch
       and MUST fail.*
-- [ ] **Test (issue-ceiling declaration):** a fix dispatch whose parent issue ceiling is below
+- [x] **Test (issue-ceiling declaration):** a fix dispatch whose parent issue ceiling is below
       the worst-case union — `parentSpend + 2 × perAttemptCap + (unchargedCeiling + 3) ×
       perDispatchSpendCap` (Technical Notes; a charged-only `parentSpend + 2 × cap` threshold — or
       any formula whose constant or rate term diverges from Technical Notes' — is
@@ -945,7 +945,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
       primitive's `issue-ceiling-insufficient` (whose n-arms message cannot fire on a single
       dispatch) — naming the `perIssueOverrides` line, with nothing provisioned and no ledger row
       written; a sufficient ceiling admits attempt 1 and leaves headroom for attempt 2.
-- [ ] **Test (no prose in the record):** a fixture whose bot comment body quotes `sk-proj-…` and one
+- [x] **Test (no prose in the record):** a fixture whose bot comment body quotes `sk-proj-…` and one
       quoting `-----BEGIN RSA PRIVATE KEY-----` reach the **brief** with both literals redacted, and
       the `fixContext` write succeeds carrying only `commentIds` + `commentsDigest` — the record
       contains neither body, verified by asserting the encoded value matches no comment text.
@@ -953,36 +953,36 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `refusing to write key material into the run record` on these fixtures, and MUST fail this test
       on a third fixture whose body reads "don't hardcode `sk-`…" — a legitimate review comment the
       prefix scan cannot distinguish from a real key.*
-- [ ] **Test (the redactor is the pattern one):** the same two fixtures reach the brief with the
+- [x] **Test (the redactor is the pattern one):** the same two fixtures reach the brief with the
       literals replaced. *An implementation calling `cli-anything/src/redact.ts`'s
       `redactSecrets(text, parentEnv)` — with `process.env` or any host map — passes the literals
       through **unchanged** and MUST fail this test; only `src/providers/step-log.ts:225` matches a
       credential the host has never seen.*
-- [ ] **Test (digest stability):** `commentsDigest` is a lowercase-hex SHA-256 over the canonical JSON
+- [x] **Test (digest stability):** `commentsDigest` is a lowercase-hex SHA-256 over the canonical JSON
       of the ordered `[{ commentId, bodyHash }]` array, `bodyHash` taken over the **normalized,
       pre-redaction** body (CRLF→LF only) as GitHub returned it; the same comment set yields the same
       digest **on a host with a different environment and after a `SECRET_PREFIXES` entry is added**,
       and reordering or editing any body changes it. *An implementation digesting post-redaction text
       MUST fail the differing-environment leg.*
-- [ ] **Test (brief botComments bound):** a fixture with 25 bot comments totaling over 40 000 encoded
+- [x] **Test (brief botComments bound):** a fixture with 25 bot comments totaling over 40 000 encoded
       bytes → **the brief's** `fixContext.botComments` retains at most 20 entries within the
       40 000-byte sum, every excluded comment within the cap appears in **the record's**
       `fixContext.omittedCommentIds`, and the remainder is reflected in `omittedCount`; a fixture
       under both ceilings retains every comment in the brief
       and leaves `omittedCommentIds` empty. *The **record's** `fixContext` carries no `botComments`
       key at all — an implementation that writes one MUST fail (AC4, INV-7).*
-- [ ] **Test (the GitHubApi additions do not disturb DF5.2):** `tests/pr/` is green with its
+- [x] **Test (the GitHubApi additions do not disturb DF5.2):** `tests/pr/` is green with its
       assertions unchanged after `listPrReviewComments`/`getPullRequest` join `GitHubApi` — the two
       required members land on DF5.2's fakes **in this story**, never discovered by the next one.
       *An implementation that makes the members optional to avoid touching the fakes MUST fail —
       that quietly un-totals the seam every DF5.2 test drives.*
-- [ ] **Test (INV-3, the EnvironmentFile sink):** a fixture that appends a `GH_TOKEN=` line to
+- [x] **Test (INV-3, the EnvironmentFile sink):** a fixture that appends a `GH_TOKEN=` line to
       `/home/exedev/app/.env` aborts the run before `fleet run <run-id>` starts the unit, with no
       agent work performed and the box torn down — alongside the existing three plants
       (`~/.git-credentials`, a `gh` `hosts.yml`, `GH_ENTERPRISE_TOKEN` in the transient unit's env).
       *An implementation probing only what `systemd-run` can see MUST fail this leg — the file is the
       one env source the unit loads that a transient unit cannot inherit.*
-- [ ] **Test (single-fixer guard):** write capability is counted from DF1.5's per-role `writes` list
+- [x] **Test (single-fixer guard):** write capability is counted from DF1.5's per-role `writes` list
       in `feedback-run.ts` before dispatch, where **write-capable ⟺ `writes !== null ? writes.length > 0 : true` — i.e. `null` OR a
       non-empty array; `null` is UNRESTRICTED, not absent, so neither `writes.length > 0` nor
       `writes?.length > 0` — and not a bare `writes !== []`, which is a reference compare that
@@ -993,19 +993,19 @@ the harvested diff, the credential probe, and the `fixContext` write.
       implementation spelled `writes.length > 0` throws on the `writes: null` fixture and MUST fail;
       one spelled `(writes?.length ?? 0) > 0` admits the two-`null` roster and MUST fail (AC5, F6
       caveat).
-- [ ] **Test (empty feedback):** zero bot comments, and comments only on a closed/merged PR → no
+- [x] **Test (empty feedback):** zero bot comments, and comments only on a closed/merged PR → no
       dispatch, no box, exit `0`.
-- [ ] **Test (force-push rejection):** A push attempt that is not a fast-forward on the PR branch,
+- [x] **Test (force-push rejection):** A push attempt that is not a fast-forward on the PR branch,
       and one targeting the default branch → both rejected, PR unchanged.
-- [ ] **Test (fast-forward append via DF5.2):** the fix push calls `pushVerifiedSha` with the PR
+- [x] **Test (fast-forward append via DF5.2):** the fix push calls `pushVerifiedSha` with the PR
       branch ref and a matching per-attempt `ApprovalRecord`; a call with no approval for **this**
       attempt, or with a non-fast-forward sha, is refused with nothing pushed (AC2).
-- [ ] **Test (no `fixContext` without a published sha):** an attempt refused pre-dispatch, refused at
+- [x] **Test (no `fixContext` without a published sha):** an attempt refused pre-dispatch, refused at
       the scope check, refused by `pushVerifiedSha`'s preflight, or ended `approval-timed-out` leaves
       **no** `fixContext` on disk and exits non-zero naming the refusal; an approval that sits
       undecided does **not** abort on any timer of this story's — it ends only on DF3.4's own expiry
       (AC4).
-- [ ] **Test (instruction-injection boundary):** the `pr-feedback-injection.json` fixture (comment
+- [x] **Test (instruction-injection boundary):** the `pr-feedback-injection.json` fixture (comment
       body containing instruction-like text) is carried as quoted data in the brief — fenced, never
       part of the instruction channel — and a harvested diff that acts on it by touching a path
       outside the host-owned allowed-path list is caught **host-side at re-verify/push time**:
