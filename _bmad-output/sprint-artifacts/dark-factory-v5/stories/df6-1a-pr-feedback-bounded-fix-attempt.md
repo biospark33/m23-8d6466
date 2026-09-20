@@ -1077,6 +1077,41 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
 ## Dev Agent Record
 
+### 2026-09-20 — Implementation complete on `feature/df6-1a-fix-loop-append` (commit 1b653f04); live e2e deferred by operator
+
+Built orchestrated (unlazy scope `df6-1a`, 7 leaves / 4 sealed dispatch waves, every leaf
+parent-reverified; the driver's ONE full-suite run + lint + static sweep at the branch gate).
+Everything except the DoD's MANDATORY live e2e round is done and gate-evidenced:
+
+- `scripts/fix-run.ts` — the two-bounded-invocation CLI (intake join, dedup, guards, dispatch,
+  INV-3 probe, lock-held chain, invocation-2 binding check → host diff → scope verdict → INV-7
+  preflight → `pushVerifiedSha` union → single fixContext write), plus `--cap-micro-usd`
+  (tighten-only override the live round uses for the skill's 50 000 µ$ key cap).
+- `src/fixloop/` — comment intake (bot filter, normalization, pattern-redactor redaction,
+  20/4 000/40 000 bounds, pre-redaction digest), brief build, single-fixer guard
+  (`writes: null` = unrestricted), issue-ceiling preflight, `.factory/fix-scope.json` scope
+  classification (deny-wins, the two distinguishable refusals), fixContext codec + scratch-store
+  preflight, the INV-3 three-leg probe.
+- The operator-ruled witness channel (see 2026-09-19 entry): dispatch carry-through +
+  engine-owned fenced prompt appendix; `pipeline-run.ts` needed no edit.
+- Adds-only: three fixLoop registrations, brief-schema fixContext key, GitHubApi
+  `listPrReviewComments`/`getPullRequest` (+ DF5.2's fake), the runner proposal variation,
+  p1-18:50 repoint, `config/rosters/fix-run.pipeline.json` (a companion `verify-committed`
+  code phase is included because `MIN_PHASES = 2` — it also closes the harvest-NOCOMMITS
+  silent-drop hole).
+- `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` — the live round, authored and
+  todo-gated (never executed; zero spend this session).
+
+**Deferred by operator ruling (2026-09-20): the live e2e round itself** — to be executed in a
+fresh session per the handoff at `_bmad-output/plans/df6-1a-live-e2e-handoff.md`. The story is
+therefore NOT done: every other DoD item is met with current evidence. Notable environment
+recon for that round: `coderabbitai` is org-installed on ALL repos (so prerequisite (ii) needs
+no app install), `qds-audit-demo` currently has NO branch protection and NO bot review
+comments — the handoff runbook covers all four prerequisites. `.factory/fix-scope.json` is
+untracked (`.gitignore` ignores all of `.factory/`, same discipline as `repos.json`) — present
+on disk at 0600; the "ships" wording resolves as operator-local artifact, flagged for the
+operator rather than force-added against convention.
+
 ### 2026-09-19 — Dev-time correction: the comment-delivery channel (operator-ruled)
 
 Found at dev-time firsthand verification, before any code was written: the story's carrier premise

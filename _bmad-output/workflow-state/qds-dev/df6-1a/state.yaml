@@ -1,6 +1,6 @@
 story: df6-1a
 title: PR Feedback -> Bounded Fix Attempt -> Verified Append
-phase: "3-in-dev (unlazy orchestrated, pre-wave-1)"
+phase: "5-complete-pending-live-e2e (branch gate green; live round deferred by operator 2026-09-20)"
 branch: feature/df6-1a-fix-loop-append
 base: dev
 target: dev
