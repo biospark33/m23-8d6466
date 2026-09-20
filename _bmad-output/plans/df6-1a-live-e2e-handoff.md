@@ -36,6 +36,18 @@ read it FIRST: hard rules, spend protocol, gotchas). DF5.3's handoff
 
 ## Environment prep runbook (the story's four prerequisites + the repo's own needs)
 
+0. **IMAGE REPUBLISH FIRST (blocking).** DF6.1a moved walked buildId inputs
+   (`src/fleet/brief-schema.ts`, `src/fleet/dispatch.ts`,
+   `src/phase-engine/phases/dispatch-task.ts`, `src/providers/run-record.ts` — the
+   in-box appendix renderer is dispatch-task.ts, so the box MUST run the new image
+   or the fixer never sees the comments). The `DEFAULT_IMAGE_BUILD_ID`
+   (`src/providers/exedev/driver.ts:481`) rebuild → publish → adopt ritual per the
+   DF1.10 playbook (`bun scripts/build-exedev-image.ts` and the publish workflow;
+   the re-pin comment in `tests/scripts/build-exedev-image.test.ts` names the
+   debt) is a PRE-ROUND GATE. The digest literal is already re-pinned on the
+   branch (8b670a3d…); `verify-image-pin.yml` and the live setup gate compare the
+   booted image against it.
+
 Target repo: `Quantum-Digital-Solutions/qds-audit-demo` (private; `.factory/repos.json`
 registers both casings, `authorLogin: biospark33`). Do NOT target QDS-Factory itself.
 
@@ -111,6 +123,13 @@ feature/df6-1a-fix-loop-append (base dev; everything except this round is done �
 7 unlazy leaves VERIFIED, branch gate green). Your job is ONLY the deferred live
 round and its closeout, tracked by the unlazy ledger .unlazy/df6-1a/gates/node-2.md
 (G1 env prep, G2 spend go, G3 the round, G4 evidence review).
+
+BLOCKING PRE-ROUND GATE: the exedev image must be rebuilt+published+adopted first
+(DF6.1a changed walked buildId inputs incl. the in-box appendix renderer
+dispatch-task.ts; DEFAULT_IMAGE_BUILD_ID in src/providers/exedev/driver.ts:481 —
+ritual per the DF1.10 playbook / scripts/build-exedev-image.ts). The digest
+literal is already re-pinned on the branch. No box may boot for this round until
+the published image matches.
 
 Work the handoff runbook exactly: prep qds-audit-demo (branch protection with one
 fast required check, CodeRabbit review comment on a fresh OPEN DF5.2-produced PR
