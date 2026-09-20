@@ -681,8 +681,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..16}.md`** — sixteen adversarial
-rounds, **six before the first push and ten after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..17}.md`** — seventeen adversarial
+rounds, **six before the first push and eleven after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
@@ -1024,6 +1024,31 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   to invoke has never been observed once.** A reader should not conclude "implemented and
   unit-tested, pending a live check" — the correct reading is that the enforcement path is
   unconfirmed against reality, and both (a) and (c) below are ways it could be silently inert.
+  **(d) the EBUSY rmdir retry, under REAL reap latency — ranked the highest-risk gap by the round-17
+  fidelity audit.** `cgroup.kill` SIGKILLs the leaf's tasks and `rmdir` returns EBUSY until the kernel
+  finishes reaping them; the fake never produces EBUSY, so the loop was dead code until round 17 gave
+  it an injected-remover test. That test pins the CONTRACT — four attempts, EBUSY only, original error
+  rethrown — and cannot pin the BUDGET: whether 4 × 25 ms is enough for real reap latency on a loaded
+  box is a kernel fact. The leg must tear down a leaf holding a process that is genuinely slow to
+  reap, not an already-empty directory.
+  **(e) `cgroup.procs` REJECTION modes.** The placement wrapper's whole fail-closed design defends
+  against writes that fail or silently do not take, and on the fake a write to a plain file can only
+  be made to fail by `chmod`. Real kernfs rejects with EBUSY on a transitional leaf, ESRCH on a reaped
+  pid, EACCES under a uid mismatch, EINVAL on malformed content, and takes ONE pid per write. The leg
+  should attempt a placement into a leaf mid-transition — immediately after `+memory` is enabled,
+  before the kernel settles — and confirm exit 97 and `PlacementRefusedError` fire as the host-side
+  tests assume. Cheap to check in the same leg: `ensureDelegatedSubtree` moves the pids BEFORE
+  enabling `+memory`, the order a real kernel's no-internal-processes rule requires. That order is
+  real production code and the split test does exercise it — but the fake would accept the WRONG
+  order just as happily, since its `cgroup.subtree_control` is a plain writable file and the final
+  on-disk state is identical either way. A real kernel EBUSY-rejects `+memory` while the parent still
+  holds processes; nothing host-side can detect a regression in that ordering.
+  **(f) NOT a live-leg item but a fidelity caveat to carry with the numeric-contract test:** it
+  asserts `memory.max` reads back BYTE FOR BYTE, including for a deliberately non-page-aligned bound
+  (12,345,678). A real kernel `PAGE_ALIGN`s upward on ingestion, so that assertion is true of the fake
+  ONLY and **must not be ported to a live leg as written.** It is inert in production because nothing
+  reads `memory.max` back — `readLeaf` reads only `memory.peak` and `memory.events` — and the rounding
+  moves the real limit AWAY from the peak, the safe direction, which `readLeaf` already documents.
   (b) the synthetic allocator staged as Leg A's `QDS_PI_BIN` MUST NOT exit 97, or the leg proves
   a placement refusal instead of a crossing (see `_PLACEMENT_REFUSED_EXIT`'s docstring); and
   **(c) the box's KERNEL VERSION, read with `uname -r` before anything else** (added 2026-09-19,

@@ -44,6 +44,7 @@ import {
   _injectSelfCgroupDir,
   _PLACEMENT_REFUSED_EXIT,
   _PLACEMENT_SCRIPT,
+  _rmdirBoundedForTest,
   _resetCgroupSplit,
   CgroupUnenforceableError,
   DEFAULT_RESIDENT_SLUG,
@@ -1203,4 +1204,89 @@ describe("DF3.6b M1 — reclaimable (file-backed) pressure classifies as a TIMEO
       await spawn.stop();
     }
   }, 20_000);
+});
+
+// ─── the bounded EBUSY retry, which the fs-level fake cannot reach ──────────
+//
+// Found dead by a covering review (round 17): against the fake, `removeLeaf`
+// has already emptied the leaf, so `rmdirSync` succeeds on attempt 0 and the
+// retry's attempt cap, errno discrimination and backoff were never executed by
+// any host-side test. The loop exists for a race only a real kernel produces —
+// `cgroup.kill` SIGKILLs the leaf's tasks and `rmdir` returns EBUSY until the
+// kernel finishes reaping them — so a wrong cap, an inverted errno check or an
+// absent backoff would all have shipped green.
+//
+// These rows inject the remover. They pin the CONTRACT (how many attempts, on
+// which errno, and that the original error is what surfaces); they do NOT prove
+// the 4x25ms budget is enough for real reap latency under load, which is a
+// kernel fact and belongs to the live leg.
+describe("DF3.6b — removeLeaf's bounded EBUSY retry (injected remover)", () => {
+  const ebusy = (): never => {
+    const err = new Error("rmdir: EBUSY") as NodeJS.ErrnoException;
+    err.code = "EBUSY";
+    throw err;
+  };
+
+  test("a leaf that frees on the SECOND attempt is removed, not reported as a failure", () => {
+    let calls = 0;
+    _rmdirBoundedForTest("/fake/leaf", () => {
+      calls += 1;
+      if (calls === 1) ebusy();
+    });
+    expect(calls).toBe(2);
+  });
+
+  test("EBUSY to the end rethrows the ORIGINAL error after exactly four attempts, having WAITED", () => {
+    let calls = 0;
+    const started = Date.now();
+    expect(() =>
+      _rmdirBoundedForTest("/fake/leaf", () => {
+        calls += 1;
+        ebusy();
+      }),
+    ).toThrow("rmdir: EBUSY");
+    // A FLOOR on elapsed time, because the attempt count alone does not pin the
+    // BACKOFF: a reviewer checked, and deleting `Bun.sleepSync` from the loop
+    // turned none of these rows red. Without a wait this is four instant rmdir
+    // calls — a retry that cannot outlast the reap it exists to wait for, which
+    // is precisely the bug that would ship green. Three sleeps at 25 ms is a
+    // 75 ms floor; 60 ms leaves margin for a coarse clock without admitting a
+    // deleted sleep. Asserted as a floor only — an upper bound would be flaky
+    // under load and would pin nothing worth pinning.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(60);
+    // Four, not three and not five: `attempt >= LEAF_RMDIR_ATTEMPTS - 1` throws
+    // ON the last attempt rather than after an extra one. An off-by-one here is
+    // invisible in production — it only shortens or lengthens a window nobody
+    // observes — which is why the count is asserted by value.
+    expect(calls).toBe(4);
+  });
+
+  test("a NON-EBUSY errno is not retried — it surfaces on the first attempt", () => {
+    let calls = 0;
+    expect(() =>
+      _rmdirBoundedForTest("/fake/leaf", () => {
+        calls += 1;
+        const err = new Error("rmdir: ENOTEMPTY") as NodeJS.ErrnoException;
+        err.code = "ENOTEMPTY";
+        throw err;
+      }),
+    ).toThrow("rmdir: ENOTEMPTY");
+    // The discrimination matters in the fail-closed direction: retrying a
+    // genuinely non-transient error would burn the budget and then report the
+    // same failure later, while treating EBUSY as fatal would leak a cgroup on
+    // every kill. NEGATIVE CONTROL for the errno check specifically — deleting
+    // `code !== "EBUSY"` from the guard turns this row red.
+    expect(calls).toBe(1);
+  });
+
+  test("an errno-less throw is not retried either", () => {
+    let calls = 0;
+    expect(() =>
+      _rmdirBoundedForTest("/fake/leaf", () => {
+        calls += 1;
+        throw new Error("rmdir: no code at all");
+      }),
+    ).toThrow("no code at all");
+    expect(calls).toBe(1);
+  });
 });

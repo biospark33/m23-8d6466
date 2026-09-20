@@ -1464,12 +1464,27 @@ describe("buildIdFileInputs", () => {
       // OPPOSITE) and `review-round-16.md` are outside the walk. Walk set
       // unchanged at 89 entries. Same failing-run receive, same-commit re-pin.
       //
+      // 660ae409: moved from 99b541b3 by DF3.6b, review round 17. ONE walked
+      // input changed, `src/fleet/resident.ts`, and this one is STRUCTURAL, not
+      // comment-only: `removeLeaf`'s bounded EBUSY rmdir retry was extracted
+      // into `rmdirBounded(dir, rmdir = rmdirSync)` behind a
+      // `_rmdirBoundedForTest` seam. Behaviour is unchanged — the default
+      // remover is `rmdirSync` and the loop body is identical, verified by a
+      // reviewer against the replaced code. The reason for the change is that
+      // the loop was UNREACHABLE under the host-side suite: the fs-level fake
+      // empties the leaf before `rmdirSync` runs, so EBUSY never occurs and the
+      // attempt cap, errno check and backoff were dead code. Four rows now pin
+      // the contract, all mutation-verified. NOT movers: the story artifact,
+      // `tests/fleet/resident-cgroup.test.ts` and `review-round-17.md` are
+      // outside the walk. Walk set unchanged at 89 entries. Same failing-run
+      // receive, same-commit re-pin.
+      //
       // THE PUBLISH IS STILL OWED:
       // the unit is baked into a digest-pinned image, so a run against the
       // currently pinned digest boots a unit with NO `Delegate=`, and the
       // resident refuses to start (DF3.6b AC3). Recorded as open in that
       // story's Dev Agent Record.
-      "99b541b357ccd53b661e93b1419ddfaf8c50148a7170316e70730647b91cd44f",
+      "660ae4091dbc78430a0c7f2251f5099218ec6a338c3419d6349d0a998e4406b5",
     );
   });
 });

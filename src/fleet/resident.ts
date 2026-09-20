@@ -381,9 +381,32 @@ function removeLeaf(dir: string): void {
   // milliseconds of `cgroup.kill`, and a call is already off the hot path here.
   // Unbounded waiting would trade a leaked cgroup for a wedged run, which is the
   // worse failure — after the last attempt the throw reaches the caller's warn.
+  rmdirBounded(dir);
+}
+
+/**
+ * The bounded EBUSY retry, split out with an INJECTABLE remover for one reason:
+ * against the fs-level fake this loop is **unreachable**. The fake's leaf is an
+ * ordinary directory that `removeLeaf` has already emptied, so `rmdirSync`
+ * always succeeds on the first attempt and the retry — its attempt cap, its
+ * errno discrimination and its backoff — was 100% dead code under the whole
+ * host-side suite (found by a covering review, 2026-09-20, round 17). It exists
+ * for a race only a real kernel produces: `cgroup.kill` SIGKILLs the leaf's
+ * tasks and `rmdir` transiently returns EBUSY until the kernel finishes reaping
+ * them. A wrong attempt count, an inverted errno check or a backoff too short
+ * for real reap latency would all have shipped green.
+ *
+ * `rmdir` defaults to `rmdirSync`, so production behaviour is unchanged; tests
+ * inject a remover that throws the errnos a real cgroupfs would.
+ */
+export function _rmdirBoundedForTest(dir: string, rmdir: (d: string) => void): void {
+  rmdirBounded(dir, rmdir);
+}
+
+function rmdirBounded(dir: string, rmdir: (d: string) => void = rmdirSync): void {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      rmdirSync(dir);
+      rmdir(dir);
       return;
     } catch (err) {
       if (attempt >= LEAF_RMDIR_ATTEMPTS - 1 || (err as NodeJS.ErrnoException)?.code !== "EBUSY") throw err;
