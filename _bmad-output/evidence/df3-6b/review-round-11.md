@@ -145,9 +145,13 @@ block exists to prevent — a check that looks like it proves something and does
 
 A third reviewer lifted the shipped `fencedFatally` verbatim out of the test file — so the probe
 could not go stale against a snapshot — and ran it over mutated real-Dockerfile bytes with function
-replacers. **Zero misses**, across the three it had itself reported plus five it invented: `unit`
+replacers. **Zero misses**, across the three it had itself reported plus **four** it invented: `unit`
 reassigned with no space (`…service;unit=/tmp/decoy`), the quoted form `unit="/tmp/decoy.service"`,
-`exit 0` in place of `exit 1`, and `grep -E` losing its `-q`. It also confirmed there is no false
+`exit 0` in place of `exit 1`, and `grep -E` losing its `-q`. (This said "five" and listed four —
+a miscount corrected in round 18. Three reported plus four invented is seven probes; the "eight
+vectors" totals elsewhere in this file count the eighth separately, the planted-`unit=`-inside-the-
+echo false-positive check described in the next sentence, which is a probe but not a mutation that
+should evade.) It also confirmed there is no false
 positive when a `unit=` string is planted INSIDE the quoted echo message — correct today, and worth
 knowing that this holds *positionally* (the reassignment check runs on the slice before the scan)
 rather than because that check is quote-aware, so a future edit moving a `unit=` mention into an

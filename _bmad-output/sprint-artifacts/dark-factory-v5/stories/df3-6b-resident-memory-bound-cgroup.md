@@ -407,7 +407,19 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 
 ## Observability Contract
 
-- The bounds-check line for this bound logs `{ requestId, runId, phase, bound: "rss", rssPeakBytes, residentRssBytes, allowed }`
+- **TWO record shapes, on two emitters — do not read the wrong one.** This bullet originally gave a
+  single line `{ requestId, runId, phase, bound:"rss", rssPeakBytes, residentRssBytes, allowed }`,
+  which the round-1 amendment below then reassigned without amending here (found round 18). What
+  ships:
+  - **fleet `resident_cgroup`** (the per-solicitation measurement, `src/fleet/resident.ts`):
+    `{ event, bound:"rss", allowed, runId, seq, residentRssBytes, rssPeakBytes, oomKilled,
+    cgroup_setup_ms, cgroup_teardown_ms }`. **This is where `rssPeakBytes`/`residentRssBytes` live.**
+    It carries NO `requestId` and NO `phase` — both are engine-side facts that never cross into
+    fleet, so a consumer joining on them against this line will find nothing. Its correlation key is
+    `runId` plus `seq`.
+  - **engine `resident_bound_breach`** (the fd-2 warn line, DF3.6a's shape, join keys included):
+    carries `bound`/`allowed`/`cause`/`exitCode` and the engine-side keys — and does NOT carry the
+    peak/bound measurement pair.
 - `requestId` propagates unchanged from DF3.3's solicitation record; a kill additionally emits
   `{ runId, requestId, cause: "watchdog_kill", phase, detail }` on the tripwire row — DF3.3's
   closed five-key shape, with the measured `memory.peak` and the bound it crossed in `detail` —
@@ -622,8 +634,12 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       the production ones. This leg costs **≈zero spend** (it never calls the model) and is
       *producible by construction*: its falsifier is the SHIPPED VERDICT reading false — ruling 8's
       full rule, not `oom_kill` alone, since `oom_kill > 0` can hold while the verdict is correctly
-      false: a real crossing must leave `oom > 0`, a kill counter > 0 AND `memory.peak` at the
-      bound — **the peak clause CONDITIONAL on the measurement existing.** The shipped rule SKIPS
+      false: a real crossing must leave `oom > 0`, a kill counter > 0 AND `memory.peak` **at or above
+      `bound - OOM_PEAK_SLACK_BYTES` (2 MiB)** — NOT "at the bound", which is what this clause said
+      until round 18 and is STRICTER than what ships. The slack is not padding: the charge that
+      triggers the OOM is the one that FAILS and is rolled back before the watermark, so at the kill
+      usage sits below the limit by up to that charge. A leg asserting equality would reject a
+      genuine own-limit kill. **The peak clause is also CONDITIONAL on the measurement existing.** The shipped rule SKIPS
       the peak comparison when `memory.peak` reads 0 (pre-5.19 kernel) or no bound was supplied, so
       on such a kernel a valid own-limit kill satisfies the verdict with no peak measurement at all
       and the peak is NOT a falsifier there. The leg therefore carries a kernel prerequisite: assert
@@ -681,8 +697,8 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
 **Implemented 2026-09-18** on `feature/df3-6b-resident-memory-cgroup`. What shipped, what was
 ruled, and what is NOT done.
 
-**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..17}.md`** — seventeen adversarial
-rounds, **six before the first push and eleven after**, plus CodeRabbit's rounds on PR #264. (Round 6
+**Review provenance: `_bmad-output/evidence/df3-6b/review-round-{1..18}.md`** — eighteen adversarial
+rounds, **six before the first push and twelve after**, plus CodeRabbit's rounds on PR #264. (Round 6
 is titled "final gate before push"; round 7 is the first to respond to PR #264. An earlier version of
 this line said three and nine — the total was right, the split was not.) Round 12 is
 the one to read if you are wondering why a ruling below enumerates its own downstream repetitions:
@@ -1108,8 +1124,9 @@ The make-or-break AC1 cannot be proven anywhere but a real box, and this round d
   same gap as AC1's live legs, not a second independent one, and this bullet should not be read as
   doubling it.
 
-Verification, scoped rather than generalized: `bun test` over the whole repo is **6340 pass / 7 skip / 5
-fail** (re-measured 2026-09-19 after each round added tests; 6084/5 when first written, 6336 at round 10, 6338 at round 11), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
+Verification, scoped rather than generalized: `bun test` over the whole repo is **6344 pass / 7 skip / 5
+fail** (re-measured 2026-09-20 on head `3c05ec39`; 6084/5 when first written, 6336 at round 10, 6338 at
+round 11, 6340 at round 12, and +4 at round 17 for the EBUSY-retry rows), and none of the five is attributable to this branch — two (DF2.11 WAL) reproduce on `dev`
 with this branch stashed, and three (gitnexus ×2, `tests/fleet/cli.test.ts`'s TRANSIENT-errno test)
 pass in isolation on both trees under lower load. `bunx tsc --noEmit` and Biome are clean. The
 suites this story owns — `tests/fleet/resident-cgroup.test.ts`, `tests/fleet/resident.test.ts`,
@@ -1118,6 +1135,13 @@ suites this story owns — `tests/fleet/resident-cgroup.test.ts`, `tests/fleet/r
 green with zero failures.
 
 ### Handed off from DF3.6a's review round 1 (2026-09-18, PR #263) — read before scoping
+
+> **ALL FOUR ARE CLOSED.** They read below as open instructions because that is the form they arrived
+> in, and this section preserves the handoff verbatim rather than rewriting history. The resolutions
+> are in **"Rulings this story owed"**, EARLIER in this same Dev Agent Record — which a top-to-bottom
+> reader reaches first, but this header says *read before scoping* and so invites landing here cold.
+> Added round 18: the inverse of the lead-then-buried-amendment shape this story has hit three times,
+> found by sweeping for that shape as a class.
 
 Four items from DF3.6a's adversarial review round land here by ownership, recorded so
 they are not lost (full detail: `sprint-artifacts/deferred-work.md`, section dated
