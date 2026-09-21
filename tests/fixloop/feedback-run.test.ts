@@ -43,7 +43,6 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, "fixtures");
-const REPO_ROOT = path.join(HERE, "..", "..");
 const loadComments = (name: string): PrReviewComment[] =>
   JSON.parse(fs.readFileSync(path.join(FIXTURES, name), "utf8")) as PrReviewComment[];
 
