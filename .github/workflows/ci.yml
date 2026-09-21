@@ -133,27 +133,27 @@ jobs:
       - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
-      # issue #250: the full suite spawns ~6.4k subprocesses and exhausts the
-      # runner's fd budget before it finishes. Bun then dies in whatever fd
-      # call happens to be next — 1.3.13 in a timer (`us_create_timer:
-      # returned null: 24`, EMFILE, exit 132), 1.4.2 in the event loop
-      # (`eventfd() failed during loop init (out of file descriptors?)`, exit
-      # 134) — always at ~6.4k spawns, always with ZERO test failures. Two
-      # phrasings of one cause.
+      # issue #250: one `bun test` over all 196 files dies at ~6.4k subprocess
+      # spawns, every time, with zero test failures before the crash —
+      # `us_create_timer: returned null: 24` (EMFILE, exit 132) on bun 1.3.13,
+      # `eventfd() failed during loop init` (exit 134) on 1.4.2. Two phrasings
+      # of one exhaustion.
       #
-      # `ulimit -n "$(ulimit -Hn)"` was tried first (0d8b97db) and changed
-      # nothing (run 35536475252, crash again at spawn(6450)): on a GitHub
-      # runner the soft and hard nofile limits are already equal, so raising
-      # soft TO hard is a no-op. Only root can lift the hard limit, hence
-      # prlimit. The before/after line is printed so the next reader can see
-      # the limit that was actually in force instead of assuming one.
-      - name: bun test
-        run: |
-          echo "fd before: soft=$(ulimit -Sn) hard=$(ulimit -Hn) nr_open=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo unknown)"
-          sudo prlimit --pid $$ --nofile=1048576:1048576 || echo "prlimit: NOT applied"
-          ulimit -n 1048576 || echo "ulimit: NOT raised"
-          echo "fd after:  soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
-          bun test
+      # Two fd remedies were tried and are now ruled OUT by measurement, not by
+      # argument. `ulimit -n "$(ulimit -Hn)"` (0d8b97db) was a no-op: the runner
+      # reports soft=hard=65536, so raising soft TO hard changes nothing.
+      # `sudo prlimit --nofile=1048576` did take effect — run 35637724630 logged
+      # `fd after: soft=1048576 hard=1048576` — and the suite still died at
+      # spawn(6396), the same point as under 65536. A 16x budget that buys zero
+      # extra spawns is not a budget problem; it is per-process state that
+      # accumulates over the run and is never reclaimed.
+      #
+      # A fresh process reclaims it, so the suite runs as four sequential
+      # `bun test` processes instead of one. The shard script globs the file
+      # list (it does not carry a hand-written directory list, which is how a
+      # suite quietly stops running half of itself) and refuses to report
+      # success unless every discovered file was assigned to exactly one shard.
+      - run: bun scripts/ci/test-shards.ts
       # DF4.2 coverage gate. Two steps so the coverage run's own exit status
       # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
       # enforces per-file line+function floors and fails loudly on any
