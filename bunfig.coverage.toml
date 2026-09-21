@@ -62,18 +62,6 @@
 # Fixed by widening the RUN, never by widening the ignore list below -- the
 # distinction matters: ignoring the file would have hidden a real 0%, whereas
 # running its test measures what was always there.
-# WHY `tests/reverify` IS IN THE RUN — the same artifact, caught again. With
-# only scripts/providers/lib in the run, `src/reverify/report.ts` scored
-# 33.33 funcs / 44.20 lines and failed this gate, because `scripts/fix-run.ts`
-# and `scripts/qds-audit.ts` (both under tests/scripts) import it while its own
-# suite, `tests/reverify/report.test.ts`, sat unrun. With tests/reverify in the
-# run the same file reads 100.00 funcs / 98.56 lines, and every other
-# src/reverify/** file lands between 85% and 100%. Measured 2026-09-21 on the
-# issue #250 branch, where this gate ran for the first time in weeks — the
-# whole-repo `bun test` above it had been crashing, so the step never executed.
-# Widening the RUN, not the ignore list: the file was always covered; the
-# measurement was not looking at its tests.
-#
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 

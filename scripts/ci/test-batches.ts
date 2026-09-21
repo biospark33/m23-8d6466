@@ -20,12 +20,16 @@
  *      2 green, shard 4 SIGABRT again at 180s on a VM of its own — ~1.6k spawns
  *      into a fresh machine.
  *
- * (5) is what settles it: this is not a budget, not a ceiling, and not
- * accumulation across the whole run. Some files leak far more per spawn than
- * the rest, and 49 of them in one process is already too many. Small batches
- * bound the exposure without needing to know which file yet — and the batch
- * listing below is what will name it, since a crashing batch prints its
- * BATCH_SIZE candidates.
+ *   6. Batches of 8 (run 35644090068): 24 of 25 batches ran clean; batch 3
+ *      SIGABRT'd at 150s. Its eight files are tests/fleet/{approvers, attach,
+ *      brief-schema, cli, dispatch}.test.ts plus three tests/fleet/e2e/ files —
+ *      the spawn-heaviest corner of the suite.
+ *
+ * (5) rules out budget, ceiling and whole-run accumulation; (6) localises what
+ * is left to a handful of spawn-heavy files. So the default is now ONE file per
+ * process: the smallest bound available, and the batch listing means a file
+ * that still cannot survive alone names itself in the log. The extra process
+ * starts are cheap — the batches of 8 that held no heavy file finished in 0.1s.
  *
  * Batches run SEQUENTIALLY: the point is bounding per-process state, and this
  * repo's tests bind ports and write fixed temp paths, so parallel batches would
@@ -33,7 +37,7 @@
  */
 import { Glob } from "bun";
 
-const BATCH_SIZE = Number(process.env.TEST_BATCH_SIZE ?? 8);
+const BATCH_SIZE = Number(process.env.TEST_BATCH_SIZE ?? 1);
 const rootArgs = process.argv.slice(2);
 
 if (!Number.isInteger(BATCH_SIZE) || BATCH_SIZE < 1) {

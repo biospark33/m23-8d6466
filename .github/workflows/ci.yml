@@ -208,11 +208,14 @@ jobs:
   #      shard 4 SIGABRT.
   #   5. Four processes on four separate RUNNERS (run 35641333046): shards 1
   #      and 2 green, shard 4 SIGABRT again at 180s on a VM of its own.
-  # (5) settles it: not a budget, not a ceiling, not accumulation across the
-  # run. Some files leak far more per spawn than the rest, and 49 of them in one
-  # process is already too many. Batches of 8 bound the exposure, and each batch
-  # prints its files, so the batch that crashes names its 8 candidates — which
-  # is how the leaking file gets found without another bisect round.
+  #   6. Batches of 8 (run 35644090068): 24 of 25 batches clean, batch 3
+  #      SIGABRT at 150s — tests/fleet/{approvers,attach,brief-schema,cli,
+  #      dispatch}.test.ts plus three tests/fleet/e2e/ files.
+  # (5) rules out budget, ceiling and whole-run accumulation; (6) localises what
+  # is left to the spawn-heaviest corner of the suite. So the run is now one
+  # file per process — the smallest bound there is, and cheap: the batches of 8
+  # holding no heavy file finished in 0.1s. A file that still cannot survive
+  # alone will name itself, since every batch prints its files first.
   tests:
     runs-on: ubuntu-latest
     # The batched run is ~14 min of test time plus install; 30 caps a hang.
