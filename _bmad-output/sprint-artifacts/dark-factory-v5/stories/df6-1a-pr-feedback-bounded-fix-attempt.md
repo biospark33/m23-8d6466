@@ -1016,7 +1016,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
       exactly `fixContext` and `fixOutcome` (this story's adds-only edit adds
       `fixAttemptRunIds`/`fixRun`/`fixOutcomeClass` on top — W19-5), and AC4 forbids a record for an attempt that published no
       sha. Same for `scope-requires-privilege`.)*
-- [ ] **Test (e2e demo — MANDATORY):** `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` (new),
+- [x] **Test (e2e demo — MANDATORY):** `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` (new),
       calling **`liveGate("2")`** under `test.todoIf(!process.env.QDS_E2E_LIVE)` like every other live
       file. The gate takes only `"1" | "2"` (`tests/fleet/e2e/live-harness.ts:65`) and
       `QDS_E2E_TIER=2` covers everything above tier 1 — **the filename prefix is not the gate; read
@@ -1059,7 +1059,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `qds-df52-e2e` (#133), with DF6.1b named on that issue as the second and last consumer. (If
       DF6.1b's demo instead runs on a fresh repository, it provisions the same three prerequisites
       itself; DF6.1b must not assume an environment this story deletes.)
-- [ ] **Test (locality is proven, not asserted — same e2e round):** the demo asserts (a) the fix run's
+- [x] **Test (locality is proven, not asserted — same e2e round):** the demo asserts (a) the fix run's
       terminal marker was read from `/run/qds-run/<run-id>/journal/final.json` **through
       `readBoxFile`** — a path that exists only inside the box; (b)
       `systemctl show qds-run@<run-id>.service -p ExecMainStartTimestamp` on the box reports a start,
@@ -1076,6 +1076,53 @@ the harvested diff, the credential probe, and the `fixContext` write.
       the wrong shape; this item is what makes it observable at runtime.
 
 ## Dev Agent Record
+
+### 2026-09-21 — node-2: the MANDATORY live round GREEN (the story's last open item)
+
+Run by the driver session per `_bmad-output/plans/df6-1a-live-e2e-handoff.md`, gates at
+`.unlazy/df6-1a/gates/node-2.md` (G1-G4 all evidenced). **Green evidence:**
+`_bmad-output/evidence/df3-e2e/2026-09-21-003214-df6-1a-fix-loop-append-3foeot.json` — outcome
+pass, run `qds-20260921-cba2ee`, image stamp `isRepoPin:true` (the fourteenth pin,
+`9c8bfe9a…`/`52538541c5430cc5`), both invocations exit 0, PR head == attemptSha `3825f16…`,
+fixContext exactly two off-placeholder fields + no prose, all three locality legs green, free
+negative control refused pre-box, 0 µ$ model draw / 16 218 µ$ box-hours, zero leaked keys and
+zero boxes. PR qds-audit-demo#11 carries the appended commit on GitHub; the repo is RETAINED
+for DF6.1b (issue #275).
+
+What it took (the round earned its "mandatory"):
+
+- **Image ritual (blocking pre-round):** the fourteenth pin — merged PR #273 to dev to
+  trigger the publish (the workflow refuses feature-branch publishes and dry runs record no
+  digest, so the merge-first order REPLACES the handoff's closeout-order merge), gate B
+  printed the pair at src_sha 1b653f04, adoption c7e23b95 on the branch + 6ed796c9 on dev,
+  healing run green, private mirror re-pushed and verified.
+- **CI:** `tests/fixloop/cli.test.ts` injected no `keyApi` — the eager production constructor
+  demanded `OPENROUTER_PROVISIONING_KEY`, so CI failed wherever it is unset (bfda5c9f). The
+  residual CI red is issue #250 (bun 1.3.13 `us_create_timer` EMFILE crash, zero test
+  failures); the ulimit candidate was tried and reverted; merged past the red per the
+  #246/#249 precedent with triage on the PR.
+- **Three real defects the round caught that every offline gate missed** — the round's whole
+  point: (1) `fix-run` never set `DispatchDeps.timeoutMs`, so the 600 s default structurally
+  refused the 1 900 000 ms manifest pre-boot (FIX_DISPATCH_CEILING_MS, 2 100 000, + pairing
+  test); (2) the store opened `create:false` even when the records dir EXISTS — dispatch then
+  refused `provision-failed` after minting a run id (missing dir keeps the no-op guard);
+  (3) the INV-3 git scan ran under `systemd-run --wait --pipe`, whose own status lines
+  poisoned stderr, so the clean arm never held and EVERY box — even a bare boot — hit
+  `credential-probe-hit` (now `sudo -n -H -u`, verified on a live box).
+- **Test-authoring fixes, all live-measured:** the neg control's `--repos-file` needed a copy
+  under the scratch hostRoot (containment guard) and a realpath (macOS /var); its
+  slug-in-message assertion collided with the redactor's opaque-token heuristic (asserts the
+  scratch-file path instead); provisioning-pending ticks no longer count toward the marker
+  poll's unreadable streak; the remote PR-head read polls past GitHub's read-after-write
+  cache.
+- **Environment prep:** demo repo got ci.yml + required check `check` (protection) +
+  `config/rosters/roster.yaml` on main; PR #11 produced via the DF5.x path; the bot-review
+  fallback workflow posted the github-actions[bot] review comment (CodeRabbit answered with
+  an issue comment, which fetchBotComments does not read); the demo's fix-scope
+  `allowedPathGlobs` corrected from factory-shaped `src/tests/scripts` to the demo tree
+  (`DEMO.md`, `README.md`) after inv2's scope gate refused the fixer's (correct) work; a
+  CodeRabbit review comment steering the fixer into denied `.github/**` was deleted (env
+  noise from my own workflow commit).
 
 ### 2026-09-20 — Implementation complete on `feature/df6-1a-fix-loop-append` (commit 1b653f04); live e2e deferred by operator
 

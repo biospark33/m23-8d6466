@@ -1,0 +1,221 @@
+{
+  "test": "T6.1a",
+  "outcome": "fail",
+  "prNumber": 11,
+  "repoSlug": "Quantum-Digital-Solutions/qds-audit-demo",
+  "parentRunId": "qds-20260920-4415a5",
+  "runId": "qds-20260920-066b9e",
+  "capMicroUsd": 50000,
+  "boxHoursCeilingMicroUsd": 393556,
+  "engineWindowMs": 2100000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "orphan-recovery-file",
+      "path": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc/orphan-recovery.json",
+      "note": "{runId, vmName, keyHash} for an out-of-band reaper if this process dies owning a box or key — kept on failure, removed only on full green success"
+    },
+    {
+      "phase": "env-repos-entry",
+      "ok": true,
+      "slug": "Quantum-Digital-Solutions/qds-audit-demo",
+      "baseBranch": "main",
+      "authorLogin": "biospark33"
+    },
+    {
+      "phase": "env-fix-scope",
+      "ok": true,
+      "slug": "Quantum-Digital-Solutions/qds-audit-demo",
+      "allowedPathGlobs": [
+        "src/**",
+        "tests/**",
+        "scripts/**"
+      ],
+      "deniedGlobs": [
+        "scripts/reverify.ts",
+        "scripts/phase0-exit-gate.ts",
+        "scripts/*-verify.ts",
+        "scripts/roster-check.ts",
+        "scripts/fleet.ts",
+        "package.json",
+        ".github/**",
+        ".factory/**",
+        "config/rosters/**",
+        "**/*.yml",
+        "**/*.yaml"
+      ],
+      "permittedActions": [
+        "modify",
+        "add"
+      ]
+    },
+    {
+      "phase": "env-token-login",
+      "ok": true,
+      "tokenLogin": "biospark33",
+      "authorLogin": "biospark33"
+    },
+    {
+      "phase": "env-pr",
+      "ok": true,
+      "prNumber": 11,
+      "prUrl": "https://github.com/Quantum-Digital-Solutions/qds-audit-demo/pull/11",
+      "headRefName": "qds/qds-20260920-4415a5",
+      "prHeadBefore": "ee98a2923fb1b62875e923c4e9cb3bcbfa15f079",
+      "prAuthor": "biospark33",
+      "parentRunId": "qds-20260920-4415a5"
+    },
+    {
+      "phase": "env-bot-comments",
+      "ok": true,
+      "rawCount": 1,
+      "rawBotCount": 1,
+      "keptCount": 1,
+      "commentIds": [
+        "4058305742"
+      ],
+      "omittedCommentIds": [],
+      "omittedCount": 0,
+      "commentsDigest": "5e714ff8b94b55e7b6d33dd8ed9e1307f0e498f5731dea00b3bc21a908ad8537",
+      "authors": [
+        "github-actions[bot]"
+      ]
+    },
+    {
+      "phase": "env-branch-protection",
+      "ok": true,
+      "baseBranch": "main",
+      "requiredChecks": [
+        "check",
+        "check"
+      ]
+    },
+    {
+      "phase": "env-manifest",
+      "ok": true,
+      "manifestPath": "config/rosters/fix-run.pipeline.json",
+      "sha": "8fb5f5d02294f49eccdb1622dc74c96faa14cd88",
+      "manifestInSha": true
+    },
+    {
+      "phase": "env-box-roster",
+      "ok": true,
+      "path": "config/rosters/roster.yaml",
+      "ref": "ee98a2923fb1b62875e923c4e9cb3bcbfa15f079"
+    },
+    {
+      "phase": "env-verified",
+      "ok": true,
+      "note": "legs (i)-(iv) + roster guard + host plan + manifest + box-roster — all pre-spend, all free reads"
+    },
+    {
+      "phase": "cost-config",
+      "ok": true,
+      "issueKey": "quantum-digital-solutions/qds-audit-demo#11",
+      "overrideMicroUsd": 400000000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "parent-record",
+      "ok": true,
+      "parentRunId": "qds-20260920-4415a5",
+      "prNumber": 11,
+      "repoSlug": "Quantum-Digital-Solutions/qds-audit-demo",
+      "issueId": "11"
+    },
+    {
+      "phase": "host-ps-before",
+      "lines": 458
+    },
+    {
+      "phase": "neg-control",
+      "exitCode": 5,
+      "envelope": {
+        "code": "fix-scope-missing",
+        "message": "no fix scope entry for «redacted» in /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc/neg-host/.factory/fix-scope.json",
+        "remediation": "register «redacted» under \"scopes\" in /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc/neg-host/.factory/fix-scope.json — a repoSlug with no entry is a refusal, never a permissive default"
+      },
+      "boxDelta": [],
+      "recordsAfter": [
+        "qds-20260920-4415a5.json"
+      ],
+      "stdoutTail": "",
+      "stderrTail": "{\"code\":\"fix-scope-missing\",\"message\":\"no fix scope entry for «redacted» in /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc/neg-host/.factory/fix-scope.json\",\"remediation\":\"register «redacted» under \\\"scopes\\\" in /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc/neg-host/.factory/fix-scope.json — a repoSlug with no entry is a refusal, never a permissive default\"}"
+    },
+    {
+      "phase": "fix-record-poll",
+      "fixRunId": "qds-20260920-066b9e",
+      "fixVmName": "",
+      "waitedMs": 5003,
+      "inv1Exit": null
+    },
+    {
+      "phase": "locality-marker-poll",
+      "ok": false,
+      "kindCounts": {
+        "(read-rejected)": 10
+      },
+      "unreadableStreak": 10,
+      "lastUnreadableWhy": "readBoxFile rejected: invalid run id: \"\" (must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ and be <= 63 chars)",
+      "pollMs": 45025
+    },
+    {
+      "phase": "test-error",
+      "error": "locality leg (a): the marker was UNREADABLE for 10 consecutive ticks (readBoxFile rejected: invalid run id: \"\" (must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ and be <= 63 chars)) — NOT absent and not a slow engine: the reads rejected or the presence probe never answered, so the box is unreachable-or-wedged while it may still be billing. Failing now instead of burning the rest of the window."
+    },
+    {
+      "phase": "inv1-stranded-drain",
+      "stdoutTail": "",
+      "stderrTail": ""
+    },
+    {
+      "at": "t6.1a-cleanup",
+      "runId": "qds-20260920-066b9e",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":10}\n{\"requestId\":\"71cb94e8-c861-42d0-958e-4aeaba70de4f\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-20T23:03:25.373Z\",\"duration\":3293,\"durationMs\":3293,\"status\":\"ok\",\"runId\":\"qds-20260920-066b9e\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "repo-root-hygiene",
+      "ok": true,
+      "removed": [
+        "git ref refs/sandbox/qds-20260920-066b9e in /Users/steve/QDS-Factory",
+        "/Users/steve/QDS-Factory/.sandbox/reverify/qds-20260920-066b9e.jsonl"
+      ]
+    },
+    {
+      "phase": "orphan-recovery-tombstoned",
+      "ok": true,
+      "path": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc/orphan-recovery.json",
+      "runId": "qds-20260920-066b9e",
+      "vmName": ""
+    },
+    {
+      "phase": "workspace-kept",
+      "workspace": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t61a-3QUaKc",
+      "reason": "RED round — forensics kept (records + bundle under runs/)"
+    }
+  ],
+  "writtenAt": "2026-09-20T23:03:27.187Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
