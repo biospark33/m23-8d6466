@@ -1394,8 +1394,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // buildId inputs are the ones the current pin was derived from" — which
     // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
     // SAME COMMIT; that pairing is the whole ritual.
-    expect(marker.buildId).toBe("998db8aaab5e4fef"); // adopted by the thirteenth-pin ritual (gate B run 35407164563 at src_sha 66709ef5 — the DF3.8 margin re-derivation #267; observe.ts is a walked input, so the comment-only diff still moved the image); re-pinned here (the pairing the comment above demands)
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("998db8aaab5e4fef");
+    expect(marker.buildId).toBe("52538541c5430cc5"); // adopted by the fourteenth-pin ritual (gate B run 35537650657 at src_sha 1b653f04 — DF6.1a's four walked inputs: brief-schema, dispatch, dispatch-task (the in-box appendix renderer), run-record); re-pinned here (the pairing the comment above demands)
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("52538541c5430cc5");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 

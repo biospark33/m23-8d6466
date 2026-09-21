@@ -140,6 +140,163 @@ describe("findOpenPr query", () => {
   });
 });
 
+describe("listPrReviewComments", () => {
+  test("maps id/body/user.login/user.type from `/pulls/{n}/comments?per_page=100`", async () => {
+    let seen = "";
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        seen = `${url.pathname}${url.search}`;
+        return Response.json([
+          { id: 11, body: "first", user: { login: "review-bot[bot]", type: "Bot" } },
+          { id: 12, body: "second", user: { login: "steve", type: "User" } },
+        ]);
+      },
+    });
+    try {
+      const rows = await httpGitHubApi(`http://localhost:${server.port}`).listPrReviewComments({
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 7,
+        token: TOKEN,
+      });
+      expect(rows).toEqual([
+        { id: 11, body: "first", authorLogin: "review-bot[bot]", authorType: "Bot" },
+        { id: 12, body: "second", authorLogin: "steve", authorType: "User" },
+      ]);
+      // The REVIEW-comment surface, not the issue-comment one, on a single page.
+      expect(seen).toBe("/repos/acme/widgets/pulls/7/comments?per_page=100");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a malformed element refuses as GitHubApiError and never echoes the body", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json([{ id: 11, body: "ghp_secret comment body", user: { login: "bot", type: 42 } }]),
+    });
+    try {
+      const call = httpGitHubApi(`http://localhost:${server.port}`).listPrReviewComments({
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 7,
+        token: TOKEN,
+      });
+      const err: Error = await call.then(
+        () => new Error("expected a refusal, got a resolved list"),
+        (e: unknown) => e as Error,
+      );
+      expect(err.name).toBe("GitHubApiError");
+      expect(err.message).toContain("malformed");
+      expect(err.message).not.toContain("ghp_secret");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a non-array body refuses as GitHubApiError", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ message: "not an array" }) });
+    try {
+      await expect(
+        httpGitHubApi(`http://localhost:${server.port}`).listPrReviewComments({
+          owner: "acme",
+          repo: "widgets",
+          prNumber: 7,
+          token: TOKEN,
+        }),
+      ).rejects.toThrow(/non-array/);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("getPullRequest", () => {
+  test("maps number/state/head.ref/head.sha/merged from `/pulls/{n}`", async () => {
+    let seen = "";
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        seen = new URL(req.url).pathname;
+        return Response.json({
+          number: 7,
+          state: "open",
+          merged: false,
+          head: { ref: "qds/run-1", sha: "a".repeat(40) },
+        });
+      },
+    });
+    try {
+      const pr = await httpGitHubApi(`http://localhost:${server.port}`).getPullRequest({
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 7,
+        token: TOKEN,
+      });
+      expect(pr).toEqual({ number: 7, state: "open", headRefName: "qds/run-1", headSha: "a".repeat(40), merged: false });
+      expect(seen).toBe("/repos/acme/widgets/pulls/7");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a 404 is null, an answer rather than a failure", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ message: "Not Found" }, { status: 404 }) });
+    try {
+      const pr = await httpGitHubApi(`http://localhost:${server.port}`).getPullRequest({
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 999,
+        token: TOKEN,
+      });
+      expect(pr).toBeNull();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a malformed body refuses as GitHubApiError rather than coercing", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ number: 7, state: "open", merged: false, head: { ref: "qds/run-1" } }),
+    });
+    try {
+      const call = httpGitHubApi(`http://localhost:${server.port}`).getPullRequest({
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 7,
+        token: TOKEN,
+      });
+      const err: Error = await call.then(
+        () => new Error("expected a refusal, got a resolved PR"),
+        (e: unknown) => e as Error,
+      );
+      expect(err.name).toBe("GitHubApiError");
+      expect(err.message).toContain("malformed");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a non-404 error still throws", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response("upstream fell over", { status: 500 }) });
+    try {
+      await expect(
+        httpGitHubApi(`http://localhost:${server.port}`).getPullRequest({
+          owner: "acme",
+          repo: "widgets",
+          prNumber: 7,
+          token: TOKEN,
+        }),
+      ).rejects.toThrow(/500/);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 describe("readHostToken", () => {
   test("a host without `security` falls through to the piped stdin instead of throwing", async () => {
     // `Bun.spawn` THROWS ENOENT rather than exiting non-zero, so an unguarded
