@@ -27,7 +27,26 @@
 import { Glob } from "bun";
 
 const SHARDS = Number(process.env.TEST_SHARDS ?? 4);
-const roots = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ["."];
+const args = process.argv.slice(2);
+
+// `--shard i/N` runs ONLY shard i, for one-runner-per-shard in CI. Without it
+// every shard runs here, sequentially, which is the local/one-machine mode.
+const shardArg = args.find((a) => a.startsWith("--shard="))?.slice("--shard=".length)
+  ?? (args.includes("--shard") ? args[args.indexOf("--shard") + 1] : undefined);
+const rootArgs = args.filter((a) => !a.startsWith("--shard") && a !== shardArg);
+let only: { index: number; total: number } | undefined;
+if (shardArg !== undefined) {
+  const m = /^(\d+)\/(\d+)$/.exec(shardArg);
+  if (!m) {
+    console.error(`--shard wants i/N, got ${shardArg}`);
+    process.exit(2);
+  }
+  only = { index: Number(m[1]), total: Number(m[2]) };
+  if (only.index < 1 || only.index > only.total) {
+    console.error(`--shard ${shardArg} is out of range`);
+    process.exit(2);
+  }
+}
 
 if (!Number.isInteger(SHARDS) || SHARDS < 1) {
   console.error(`TEST_SHARDS must be a positive integer, got ${process.env.TEST_SHARDS}`);
@@ -39,6 +58,7 @@ const PATTERNS = ["**/*.test.{ts,tsx,js,jsx,mts,cts}", "**/*.spec.{ts,tsx,js,jsx
 const SKIP = /(^|\/)(node_modules|\.git|dist|\.sandbox|coverage)(\/|$)/;
 
 const found = new Set<string>();
+const roots = rootArgs.length > 0 ? rootArgs : ["."];
 for (const root of roots) {
   for (const pattern of PATTERNS) {
     for await (const hit of new Glob(pattern).scan({ cwd: root, onlyFiles: true })) {
@@ -56,7 +76,8 @@ if (files.length === 0) {
 
 // Deal round-robin: adjacent files in one directory land in different shards,
 // so no single shard inherits a whole heavy suite.
-const shards: string[][] = Array.from({ length: Math.min(SHARDS, files.length) }, () => []);
+const total = only ? only.total : Math.min(SHARDS, files.length);
+const shards: string[][] = Array.from({ length: total }, () => []);
 files.forEach((file, i) => shards[i % shards.length]!.push(file));
 
 const assigned = shards.reduce((n, s) => n + s.length, 0);
@@ -65,10 +86,19 @@ if (assigned !== files.length) {
   process.exit(2);
 }
 
-console.log(`[shards] ${files.length} test files across ${shards.length} sequential bun processes`);
+// The assignment above is deterministic and depends only on the sorted file
+// list and the shard count, so `--shard 3/4` here selects exactly the files
+// that shard 3 of a local 4-way run would take. Every shard in CI must be run
+// with the SAME total, or the union stops covering the suite.
+const toRun = only ? [[only.index - 1, shards[only.index - 1]!] as const] : [...shards.entries()];
+console.log(
+  only
+    ? `[shards] ${files.length} test files, ${total} shards, running shard ${only.index} only (${shards[only.index - 1]!.length} files)`
+    : `[shards] ${files.length} test files across ${shards.length} sequential bun processes`,
+);
 
 const failed: number[] = [];
-for (const [i, shard] of shards.entries()) {
+for (const [i, shard] of toRun) {
   console.log(`\n[shards] ===== shard ${i + 1}/${shards.length}: ${shard.length} files =====`);
   const t0 = Date.now();
   const proc = Bun.spawnSync(["bun", "test", ...shard], { stdio: ["inherit", "inherit", "inherit"] });
@@ -83,5 +113,9 @@ if (failed.length > 0) {
   console.log(`\n[shards] FAILED shards: ${failed.join(", ")}`);
   process.exit(1);
 }
-console.log(`\n[shards] all ${shards.length} shards green over ${files.length} files`);
+console.log(
+  only
+    ? `\n[shards] shard ${only.index}/${total} green over ${shards[only.index - 1]!.length} of ${files.length} files`
+    : `\n[shards] all ${shards.length} shards green over ${files.length} files`,
+);
 console.log("SHARDED-SUITE-OK");
