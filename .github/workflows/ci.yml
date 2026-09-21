@@ -192,38 +192,31 @@ jobs:
   # DF2.9: the enterprise image contract. The license sweep is the gate — a
   # denied package, a broken pin, or a package the build cannot attribute exits
   # nonzero from `build:image`, which fails this job before anything is tagged.
-  # issue #250: the suite cannot finish in one process, and it cannot finish in
-  # one RUNNER either. One `bun test` over all 196 files dies at ~6.4k spawns
-  # every time — `us_create_timer: returned null: 24` (EMFILE, exit 132) on bun
-  # 1.3.13, `eventfd() failed during loop init` (exit 134) on 1.4.2 — with zero
-  # test failures before the crash.
-  #
-  # Three remedies were tried and each one measured, not argued:
-  #   1. `ulimit -n "$(ulimit -Hn)"` (0d8b97db) — a no-op. The runner reports
+  # issue #250: the suite cannot finish in one `bun test` process. Five
+  # measurements, each ruling something out rather than arguing about it:
+  #   1. One process over all 196 files dies at ~6.4k spawns every time —
+  #      `us_create_timer: returned null: 24` (EMFILE, exit 132) on bun 1.3.13,
+  #      `eventfd() failed during loop init` (exit 134) on 1.4.2 — with ZERO
+  #      test failures before the crash.
+  #   2. `ulimit -n "$(ulimit -Hn)"` (0d8b97db): a no-op. The runner reports
   #      soft=hard=65536, so raising soft TO hard changes nothing.
-  #   2. bun 1.4.2 — crashed the same way (run 35604656841).
-  #   3. `sudo prlimit --nofile=1048576` — the raise took effect and the step
-  #      logged it (`fd after: soft=1048576 hard=1048576`), and run 35637724630
-  #      still died at spawn(6396), the same point as under 65536. A 16x budget
-  #      that buys zero extra spawns rules the fd CEILING out.
-  #   4. Four sequential `bun test` processes in ONE job (run 35639471439) —
-  #      shard 1 finished clean, and shard 4 still took SIGABRT at ~133s. Fresh
-  #      processes were not enough, so whatever accumulates outlives the process
-  #      that created it: leaked children holding fds against a system-wide,
-  #      not per-process, ceiling.
-  #
-  # A fresh RUNNER is the boundary that does reclaim it. Each shard gets its own
-  # VM and ~1.6k spawns, a quarter of the observed cliff, and the four run in
-  # parallel rather than adding their times together.
+  #   3. `sudo prlimit --nofile=1048576` (run 35637724630): the raise took
+  #      effect — the step logged `fd after: soft=1048576` — and the suite still
+  #      died at spawn(6396), the same point as under 65536. A 16x budget that
+  #      buys zero extra spawns rules the fd CEILING out.
+  #   4. Four sequential processes in one job (run 35639471439): shard 1 clean,
+  #      shard 4 SIGABRT.
+  #   5. Four processes on four separate RUNNERS (run 35641333046): shards 1
+  #      and 2 green, shard 4 SIGABRT again at 180s on a VM of its own.
+  # (5) settles it: not a budget, not a ceiling, not accumulation across the
+  # run. Some files leak far more per spawn than the rest, and 49 of them in one
+  # process is already too many. Batches of 8 bound the exposure, and each batch
+  # prints its files, so the batch that crashes names its 8 candidates — which
+  # is how the leaking file gets found without another bisect round.
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      # Every shard's result is wanted on every run: fail-fast would hide three
-      # shards' failures behind whichever one happened to break first.
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+    # The batched run is ~14 min of test time plus install; 30 caps a hang.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -233,10 +226,7 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
-      # The shard split is deterministic (sorted glob, round-robin), so 1/4
-      # through 4/4 cover every discovered file exactly once. The 4 here and the
-      # matrix above must stay equal or the union stops covering the suite.
-      - run: bun scripts/ci/test-shards.ts --shard ${{ matrix.shard }}/4
+      - run: bun scripts/ci/test-batches.ts
 
   image:
     runs-on: ubuntu-latest

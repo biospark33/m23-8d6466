@@ -210,9 +210,6 @@ describe("fetchBotComments", () => {
 });
 
 describe("buildFixBrief + record hygiene (G1: no prose in the record)", () => {
-  const scopeDoc = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, ".factory/fix-scope.json"), "utf8")) as {
-    scopes: Record<string, FixScopeEntry>;
-  };
   const SLUG = "Quantum-Digital-Solutions/qds-audit-demo";
 
   function host(): { root: string; cleanup(): void } {
@@ -283,7 +280,6 @@ describe("buildFixBrief + record hygiene (G1: no prose in the record)", () => {
     const parsed = parseFixContext(encoded);
     expect(parsed).not.toHaveProperty("botComments");
     expect(parsed.commentIds).toEqual(["8001", "8002", "8003"]);
-    void scopeDoc;
   });
 });
 
@@ -374,7 +370,12 @@ describe("assertFixCeilingCovered (the worst-case union, one uniform rate)", () 
 // ─── G3: the scope artifact and the diff classification ──────────────────────
 
 describe("readFixScope / classifyDiffScope (AC6)", () => {
-  const scopeDoc = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, ".factory/fix-scope.json"), "utf8")) as {
+  // The scope artifact is a FIXTURE, not the operator's own `.factory/fix-scope.json`:
+  // .gitignore:97 keeps `.factory/` operator-local and 0600, so reading the real
+  // one passed on one machine and raised ENOENT on every clean checkout — two
+  // unhandled errors that exited `bun test` 1 with zero failed tests (issue #250,
+  // run 35639471439 shard 3). The fixture pins the same shape these legs assert.
+  const scopeDoc = JSON.parse(fs.readFileSync(path.join(FIXTURES, "fix-scope.json"), "utf8")) as {
     schemaVersion: 1;
     scopes: Record<string, FixScopeEntry>;
   };
