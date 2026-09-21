@@ -1306,7 +1306,21 @@ test.todoIf(liveTodoOff())(
       expect(ancestry.exitCode).toBe(0);
       // The REMOTE reading through the same seam: the PR's head moved from the
       // pre-round sha to the appended sha, on the same branch, still open.
-      const prAfter = await github.getPullRequest({ owner, repo, prNumber, token: hostToken });
+      // POLLED, not read once: the append's own push precedes this read by
+      // seconds and GitHub's PR reads can serve the pre-push head through
+      // their cache (measured live 2026-09-21, evidence 2026-09-21-000025's
+      // successor: inv2 reported `pushed` + `appended` and the branch API
+      // already served the appended sha, while the PR GET still answered the
+      // old one). Up to a minute of re-reads; the branch sha is the
+      // tie-breaker the loop accepts on the first equality.
+      let prAfter: { headSha: string; headRefName: string; state: string } | null = null;
+      const prSettleDeadline = Date.now() + 60_000;
+      for (;;) {
+        prAfter = await github.getPullRequest({ owner, repo, prNumber, token: hostToken });
+        if (prAfter !== null && prAfter.headSha === attemptSha) break;
+        if (Date.now() > prSettleDeadline) break;
+        await new Promise((r) => setTimeout(r, 5_000));
+      }
       evidence.push({ phase: "pr-remote", headSha: prAfter?.headSha ?? null, headRefName: prAfter?.headRefName ?? null, state: prAfter?.state ?? null, expectedAttemptSha: attemptSha });
       expect(prAfter).not.toBeNull();
       expect(prAfter?.headRefName).toBe(pr.headRefName);
