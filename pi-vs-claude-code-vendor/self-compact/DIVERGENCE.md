@@ -16,6 +16,7 @@ Vendored from upstream `disler/self-compact-pi-agent` at commit
 
 ## Divergences
 
+| `.gitignore` | vendored from upstream root, paths re-based to subtree root (upstream assumes `apps/self-compact/` layout) | keep generated `tsconfig.tsc.json` / `verification/` out of git | 
 | File | Delta | Why |
 |---|---|---|
 | `.pi/self-compact/USER_PROMPT_SOFT_SELF_COMPACT.md` | QDS note-contract language (evidence paths, calibration constants belong in the note) | QDS factory work loses evidence refs through generic summaries |
