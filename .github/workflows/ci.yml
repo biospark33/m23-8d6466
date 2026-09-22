@@ -118,7 +118,12 @@ jobs:
       - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
-      - run: bun test
+      # Explicit dirs (tests visualizer cli-anything) = every bun test file in
+      # the repo. The --path-ignore-patterns carve-out is REQUIRED with them:
+      # bun's path args are substring filters, not roots, so the vendored
+      # pi-vs-claude-code-vendor/self-compact/tests/** still matches "tests" —
+      # those run under their own node:test runner (bun's shims fail on them).
+      - run: bun test tests visualizer cli-anything --path-ignore-patterns 'pi-vs-claude-code-vendor/**'
       # DF4.2 coverage gate. Two steps so the coverage run's own exit status
       # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
       # enforces per-file line+function floors and fails loudly on any

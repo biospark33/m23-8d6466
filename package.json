@@ -14,7 +14,7 @@
     "visualizer"
   ],
   "scripts": {
-    "test": "bun test",
+    "test": "bun test tests visualizer cli-anything --path-ignore-patterns 'pi-vs-claude-code-vendor/**'",
     "typecheck": "bunx tsc --noEmit",
     "typecheck:visualizer": "bun run --cwd visualizer typecheck",
     "typecheck:cli-anything": "bun run --cwd cli-anything typecheck",
