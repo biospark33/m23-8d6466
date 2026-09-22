@@ -99,9 +99,12 @@ roster wiring does not land against a broken host.
 
 1. **Upstream suite** — vendored tests run unmodified (`just verify` / Node
    strip-types), proving the vendored copy is faithful.
-2. **QDS harness test** — scripted model session asserting: notice at 30%, warning at
-   50%, tool block at 60% (non-`self_compact` calls rejected), and the handoff note
-   round-trips byte-for-byte.
+2. **QDS wiring tests** — unit tests asserting the roster's 30/50/60 values reach the worker argv as
+   `--compact-soft-at 30% --compact-at 50% --compact-buffer 10%` (driver argv test + adapter mapping test). Phase
+   *behavior* (notice → warning → forced block → note round-trips byte-for-byte) is upstream's e2e suite's job —
+   `lifecycle.test.ts` and `launch-variants.test.ts` run vendored against a scripted fake provider — and the live
+   round observes the same at our actual percentages. A bespoke QDS fake-model harness was considered and dropped:
+   it would re-prove what upstream's harness already proves, only with different numbers.
 3. **Load smoke test** — extension loads on pinned pi versions (see version gate).
 4. **Live e2e** — one `qds-live-e2e` round on a real exe.dev box with real spend
    before merge, per repo convention.
