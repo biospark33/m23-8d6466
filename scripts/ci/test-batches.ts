@@ -45,8 +45,13 @@ if (!Number.isInteger(BATCH_SIZE) || BATCH_SIZE < 1) {
   process.exit(2);
 }
 
-// Bun's own test discovery patterns, minus the trees it never scans.
-const PATTERNS = ["**/*.test.{ts,tsx,js,jsx,mts,cts}", "**/*.spec.{ts,tsx,js,jsx,mts,cts}", "**/*_test.{ts,tsx,js,jsx,mts,cts}"];
+// Bun's own four discovery patterns, over its full extension set, minus the
+// trees it never scans. Kept verbatim from the docs rather than trimmed to what
+// this repo happens to contain today: a narrower list silently stops running
+// the first `*_spec.ts` or `*.test.mjs` anyone adds, and a suite that quietly
+// skips files is worse than one that crashes. https://bun.com/docs/test/discovery
+const EXTS = "{js,jsx,ts,tsx,mjs,cjs,mts,cts}";
+const PATTERNS = [`**/*.test.${EXTS}`, `**/*_test.${EXTS}`, `**/*.spec.${EXTS}`, `**/*_spec.${EXTS}`];
 const SKIP = /(^|\/)(node_modules|\.git|dist|\.sandbox|coverage)(\/|$)/;
 
 const roots = rootArgs.length > 0 ? rootArgs : ["."];
@@ -84,7 +89,12 @@ for (const [i, batch] of batches.entries()) {
   console.log(`\n[batches] ===== batch ${i + 1}/${batches.length} =====`);
   for (const f of batch) console.log(`[batches]   ${f}`);
   const t0 = Date.now();
-  const proc = Bun.spawnSync(["bun", "test", ...batch], { stdio: ["inherit", "inherit", "inherit"] });
+  // `./`-prefixed, because a bare positional is a SUBSTRING FILTER to bun, not
+  // a path: `bun test tests/a/b.test.ts` runs every discovered file whose path
+  // CONTAINS that string. One file could then run in several batches, which
+  // defeats the point of bounding a batch. A leading `./` makes it an exact
+  // path. https://bun.com/docs/test/discovery
+  const proc = Bun.spawnSync(["bun", "test", ...batch.map((f) => `./${f}`)], { stdio: ["inherit", "inherit", "inherit"] });
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`[batches] batch ${i + 1} exit=${proc.exitCode} signal=${proc.signalCode ?? "none"} in ${secs}s`);
   // The #250 crash arrives as a signal (SIGILL/SIGABRT) with a null exit code,
