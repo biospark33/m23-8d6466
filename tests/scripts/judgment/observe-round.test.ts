@@ -279,7 +279,9 @@ describe("observeRound (mock, keyless)", () => {
   test("--live spend gate: refused without key+confirm, with a message naming both vars", () => {
     const saved = { key: process.env.TYPESAFE_API_KEY, confirm: process.env.QDS_LIVE_PROBE_CONFIRMED };
     try {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
       delete process.env.TYPESAFE_API_KEY;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
       delete process.env.QDS_LIVE_PROBE_CONFIRMED;
       expect(() => parseArgs(["--pr", "277", "--round", "4", "--live"])).toThrow(/TYPESAFE_API_KEY.*QDS_LIVE_PROBE_CONFIRMED=1/);
       process.env.TYPESAFE_API_KEY = "k";
@@ -289,10 +291,51 @@ describe("observeRound (mock, keyless)", () => {
       // gate unset ⇒ --live absent ⇒ mock default, gate irrelevant
       expect(parseArgs(["--pr", "277", "--round", "4"]).live).toBe(false);
     } finally {
-      if (saved.key === undefined) delete process.env.TYPESAFE_API_KEY;
-      else process.env.TYPESAFE_API_KEY = saved.key;
-      if (saved.confirm === undefined) delete process.env.QDS_LIVE_PROBE_CONFIRMED;
-      else process.env.QDS_LIVE_PROBE_CONFIRMED = saved.confirm;
+      if (saved.key === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.TYPESAFE_API_KEY;
+      } else {
+        process.env.TYPESAFE_API_KEY = saved.key;
+      }
+      if (saved.confirm === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.QDS_LIVE_PROBE_CONFIRMED;
+      } else {
+        process.env.QDS_LIVE_PROBE_CONFIRMED = saved.confirm;
+      }
+    }
+  });
+
+  test("--live spend gate holds for DIRECT observeRound calls too, not just parseArgs", async () => {
+    const saved = { key: process.env.TYPESAFE_API_KEY, confirm: process.env.QDS_LIVE_PROBE_CONFIRMED };
+    try {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.TYPESAFE_API_KEY;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_LIVE_PROBE_CONFIRMED;
+      // gate fully disabled → refused before any corpus read, lock, or client construction
+      await expect(observe({ live: true })).rejects.toThrow(/INV-J5 spend gate/);
+      // half-satisfied (key present, confirm var unset) still refused — the
+      // confirm var is observer-level; the client alone never checks it
+      process.env.TYPESAFE_API_KEY = "k";
+      await expect(observe({ live: true })).rejects.toThrow(/QDS_LIVE_PROBE_CONFIRMED=1/);
+      // live:false (default) unaffected by the disabled gate
+      const dir = seedCorpus(FIXTURE_LINES());
+      const result = await observe({ corpusDir: dir });
+      expect(result.judged).toBe(2);
+    } finally {
+      if (saved.key === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.TYPESAFE_API_KEY;
+      } else {
+        process.env.TYPESAFE_API_KEY = saved.key;
+      }
+      if (saved.confirm === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.QDS_LIVE_PROBE_CONFIRMED;
+      } else {
+        process.env.QDS_LIVE_PROBE_CONFIRMED = saved.confirm;
+      }
     }
   });
 

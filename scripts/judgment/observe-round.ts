@@ -96,6 +96,10 @@ export function liveGateSatisfied(env: NodeJS.ProcessEnv = process.env): boolean
   return !!env.TYPESAFE_API_KEY && env.TYPESAFE_API_KEY.length > 0 && env.QDS_LIVE_PROBE_CONFIRMED === "1";
 }
 
+/** The single INV-J5 refusal message — parseArgs and observeRound throw it verbatim. */
+const LIVE_GATE_ERROR =
+  "--live refused (INV-J5 spend gate): requires a non-empty TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1 in the environment";
+
 export function parseArgs(argv: string[]): ObserveArgs {
   let pr: number | undefined;
   let round: number | undefined;
@@ -139,9 +143,7 @@ export function parseArgs(argv: string[]): ObserveArgs {
     throw new Error(`--ceiling-tokens must be a positive integer, got ${ceilingTokens}`);
   }
   if (live && !liveGateSatisfied()) {
-    throw new Error(
-      "--live refused (INV-J5 spend gate): requires a non-empty TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1 in the environment",
-    );
+    throw new Error(LIVE_GATE_ERROR);
   }
   return { pr: pr as number, round: round as number, corpusDir, out, provenanceDir, ceilingTokens, live };
 }
@@ -230,9 +232,11 @@ export interface ObserveOptions {
   provenanceDir?: string;
   ceilingTokens?: number;
   /**
-   * Live wire. OFF by default (INV-J5); when true, the caller must already
-   * hold BOTH gates — a non-empty TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1
-   * — and parseArgs refuses the run otherwise. Mock stays the default everywhere.
+   * Live wire. OFF by default (INV-J5); when true, BOTH gates must hold — a
+   * non-empty TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1. Enforced in
+   * parseArgs AND re-checked here at the top of observeRound, so a direct
+   * caller that skips parseArgs is still refused. Mock stays the default
+   * everywhere.
    */
   live?: boolean;
 }
@@ -257,6 +261,11 @@ export interface ObserveResult {
  * judged prefix recorded — reported in the result, never silent.
  */
 export async function observeRound(opts: ObserveOptions): Promise<ObserveResult> {
+  // INV-J5 double gate, re-checked for DIRECT callers (parseArgs already
+  // refused the CLI path). Sits before any read, lock, or client construction.
+  if (opts.live && !liveGateSatisfied()) {
+    throw new Error(LIVE_GATE_ERROR);
+  }
   const corpusDir = opts.corpusDir ?? DEFAULT_CORPUS_DIR;
   const outDir = opts.outDir ?? corpusDir;
   const frontierFile = corpusFilePath(corpusDir, opts.pr, opts.round);
