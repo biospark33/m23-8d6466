@@ -263,6 +263,26 @@ describe("observeRound (mock, keyless)", () => {
     expect(second.judged).toBe(2); // judged again — the recording is what dedupes
   });
 
+  test("--live spend gate: refused without key+confirm, with a message naming both vars", () => {
+    const saved = { key: process.env.TYPESAFE_API_KEY, confirm: process.env.QDS_LIVE_PROBE_CONFIRMED };
+    try {
+      delete process.env.TYPESAFE_API_KEY;
+      delete process.env.QDS_LIVE_PROBE_CONFIRMED;
+      expect(() => parseArgs(["--pr", "277", "--round", "4", "--live"])).toThrow(/TYPESAFE_API_KEY.*QDS_LIVE_PROBE_CONFIRMED=1/);
+      process.env.TYPESAFE_API_KEY = "k";
+      expect(() => parseArgs(["--pr", "277", "--round", "4", "--live"])).toThrow(/QDS_LIVE_PROBE_CONFIRMED=1/);
+      process.env.QDS_LIVE_PROBE_CONFIRMED = "1";
+      expect(parseArgs(["--pr", "277", "--round", "4", "--live"]).live).toBe(true);
+      // gate unset ⇒ --live absent ⇒ mock default, gate irrelevant
+      expect(parseArgs(["--pr", "277", "--round", "4"]).live).toBe(false);
+    } finally {
+      if (saved.key === undefined) delete process.env.TYPESAFE_API_KEY;
+      else process.env.TYPESAFE_API_KEY = saved.key;
+      if (saved.confirm === undefined) delete process.env.QDS_LIVE_PROBE_CONFIRMED;
+      else process.env.QDS_LIVE_PROBE_CONFIRMED = saved.confirm;
+    }
+  });
+
   test("missing frontier corpus file → error naming the expected path, nothing written", async () => {
     await expect(observe({ corpusDir: join(tmp, "absent") })).rejects.toThrow(/277-r4\.jsonl/);
     expect(existsSync(join(tmp, "absent"))).toBe(false);
@@ -314,10 +334,11 @@ describe("parseArgs", () => {
       out: undefined,
       provenanceDir: undefined,
       ceilingTokens: undefined,
+      live: false,
     });
     expect(
       parseArgs(["--pr=9", "--round=1", "--corpus-dir=c", "--out=o", "--provenance-dir=p", "--ceiling-tokens", "42"]),
-    ).toEqual({ pr: 9, round: 1, corpusDir: "c", out: "o", provenanceDir: "p", ceilingTokens: 42 });
+    ).toEqual({ pr: 9, round: 1, corpusDir: "c", out: "o", provenanceDir: "p", ceilingTokens: 42, live: false });
     expect(() => parseArgs([])).toThrow(/--pr/);
     expect(() => parseArgs(["--pr", "277"])).toThrow(/--round/);
     expect(() => parseArgs(["--pr", "x", "--round", "1"])).toThrow(/--pr/);

@@ -18,10 +18,10 @@
  * barrel. Idempotent on (pr, round, finding_id, labeler): re-running a round
  * re-judges but appends nothing new.
  *
- * Modes: the client is constructed with NO mode option, so its normal
- * resolution applies — default mock; TYPESAFE_MOCK=1 forces mock. This CLI
- * has no path to live mode at all: reaching the wire requires a code change
- * (passing `mode: "live"`), a key, and steve's explicit go in chat (INV-J5).
+ * Modes: default mock (no mode option → client default; TYPESAFE_MOCK=1 forces
+ * mock). `--live` reaches the wire ONLY through the INV-J5 double gate — a
+ * non-empty TYPESAFE_API_KEY AND QDS_LIVE_PROBE_CONFIRMED=1 (the same confirm
+ * var the wire probe requires) — refused otherwise, before any request is built.
  *
  * Recording-only (§3.5): no threshold, no routing decision, no gate
  * authority. Nothing else in the repo reads this output until Wave 4's
@@ -84,6 +84,16 @@ export interface ObserveArgs {
   out?: string;
   provenanceDir?: string;
   ceilingTokens?: number;
+  live?: boolean;
+}
+
+/**
+ * The INV-J5 spend gate for `--live`: BOTH must hold — a non-empty
+ * TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1 (the same confirm var the
+ * wire probe requires). Exported for the gate tests.
+ */
+export function liveGateSatisfied(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !!env.TYPESAFE_API_KEY && env.TYPESAFE_API_KEY.length > 0 && env.QDS_LIVE_PROBE_CONFIRMED === "1";
 }
 
 export function parseArgs(argv: string[]): ObserveArgs {
@@ -93,8 +103,10 @@ export function parseArgs(argv: string[]): ObserveArgs {
   let out: string | undefined;
   let provenanceDir: string | undefined;
   let ceilingTokens: number | undefined;
+  let live = false;
   const flags = ["--pr", "--round", "--corpus-dir", "--out", "--provenance-dir", "--ceiling-tokens"] as const;
-  const { flagTokens } = tokenizeArgs(argv, { valueFlags: [...flags] });
+  const { flagTokens, bools } = tokenizeArgs(argv, { valueFlags: [...flags], boolFlags: ["--live"] });
+  live = bools.has("--live");
   parseValueFlags(flagTokens, {
     flags,
     onValue: (flag, v) => {
@@ -126,7 +138,12 @@ export function parseArgs(argv: string[]): ObserveArgs {
   if (ceilingTokens !== undefined && (!Number.isInteger(ceilingTokens) || ceilingTokens <= 0)) {
     throw new Error(`--ceiling-tokens must be a positive integer, got ${ceilingTokens}`);
   }
-  return { pr: pr as number, round: round as number, corpusDir, out, provenanceDir, ceilingTokens };
+  if (live && !liveGateSatisfied()) {
+    throw new Error(
+      "--live refused (INV-J5 spend gate): requires a non-empty TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1 in the environment",
+    );
+  }
+  return { pr: pr as number, round: round as number, corpusDir, out, provenanceDir, ceilingTokens, live };
 }
 
 /**
@@ -212,6 +229,12 @@ export interface ObserveOptions {
   /** Tests MUST override — the client's default is the real provenance dir. */
   provenanceDir?: string;
   ceilingTokens?: number;
+  /**
+   * Live wire. OFF by default (INV-J5); when true, the caller must already
+   * hold BOTH gates — a non-empty TYPESAFE_API_KEY and QDS_LIVE_PROBE_CONFIRMED=1
+   * — and parseArgs refuses the run otherwise. Mock stays the default everywhere.
+   */
+  live?: boolean;
 }
 
 export interface ObserveResult {
@@ -260,9 +283,9 @@ export async function observeRound(opts: ObserveOptions): Promise<ObserveResult>
 
   mkdirSync(outDir, { recursive: true });
   const ceiling = new JudgmentCeiling(opts.ceilingTokens ?? DEFAULT_STAGE_CEILING_INPUT_TOKENS);
-  // NO mode option: default mock; TYPESAFE_MOCK=1 forces mock. Live is
-  // unreachable from here without a code change + key + steve's go (INV-J5).
-  const client = new JudgmentClient({ provenanceDir: opts.provenanceDir });
+  // Default mock (INV-J5): no mode option → client default; TYPESAFE_MOCK=1 forces mock.
+  // Live requires opts.live AND the double gate in parseArgs (key + QDS_LIVE_PROBE_CONFIRMED=1).
+  const client = new JudgmentClient({ provenanceDir: opts.provenanceDir, mode: opts.live ? "live" : undefined });
   const result: ObserveResult = {
     recordsFile: corpusFilePath(outDir, opts.pr, opts.round),
     frontierFindings: frontier.length,
@@ -318,6 +341,9 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(
       "jev-observe: recording-only — no threshold, no routing, no gate authority (handoff §3.5); labeler jev-1.13.0-observer, arm jev\n",
     );
+    if (args.live) {
+      process.stdout.write("jev-observe: LIVE — requests hit api.typesafe.ai; cost_exact_usd on jev records is metered truth\n");
+    }
     if (result.refused) {
       exitWithFailure("jev-observe: stage ceiling exceeded mid-round", 2, [
         `refused finding ${result.refused.findingId}: ${result.refused.reason}`,
