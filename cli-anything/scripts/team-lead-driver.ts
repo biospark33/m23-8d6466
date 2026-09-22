@@ -553,48 +553,45 @@ function runWorkerPi(w: WorkerConfig, timeoutMs: number): Promise<PiRunOutcome> 
   return new Promise((resolve) => {
     const started = Date.now();
     // INV-2: an extensions entry escaping the repo root is refused BEFORE the
-    // spawn, with the path echoed but never executed. Fail closed — a lean
-    // worker that cannot load its declared extensions must not silently run
-    // without them (INV-3).
+    // spawn, with the path echoed but never executed. Fail closed — a worker
+    // that cannot load its declared extensions must not silently run without
+    // them (INV-3).
     //
-    // Checked only when the paths will actually be passed to pi, i.e. under
-    // lean: `buildWorkerArgv` emits `-e` nowhere else, and killing a worker
-    // over a field that was never going to be used is a denial of service,
-    // not a protection. A non-lean worker carrying extensions gets a warning.
+    // Containment is checked whenever the paths will be passed to pi — which,
+    // since `buildWorkerArgv` emits `-e` for declared extensions under BOTH
+    // profiles, is now every declared case. Killing a worker over a field
+    // that was never used is no longer possible: there is no
+    // declared-extensions case where `-e` is not emitted.
     const declared = Array.isArray(w.extensions) ? w.extensions : [];
     let spawnConfig = w;
     if (declared.length > 0) {
-      if (w.lean !== true) {
-        log(`worker ${w.agentId}: extensions ignored (lean is not set)`);
-      } else {
-        let check: ReturnType<typeof resolveExtensionPaths>;
-        try {
-          check = resolveExtensionPaths(declared, REPO_ROOT);
-        } catch (err) {
-          // Never let a malformed allowlist take down the whole team run —
-          // one broken worker degrades to partial (the same contract the
-          // child `error` handler below maintains).
-          check = {
-            ok: false,
-            rejected: err instanceof Error ? err.message : String(err),
-          };
-        }
-        if (!check.ok) {
-          log(
-            `worker ${w.agentId} refused: extensions path escapes the repo root: ${check.rejected}`,
-          );
-          resolve({
-            text: "",
-            ...ZERO_USAGE,
-            durationMs: Date.now() - started,
-            exitCode: null,
-          });
-          return;
-        }
-        // Pass the RESOLVED paths to pi, so the argv carries exactly what
-        // containment approved.
-        spawnConfig = { ...w, extensions: check.paths };
+      let check: ReturnType<typeof resolveExtensionPaths>;
+      try {
+        check = resolveExtensionPaths(declared, REPO_ROOT);
+      } catch (err) {
+        // Never let a malformed allowlist take down the whole team run —
+        // one broken worker degrades to partial (the same contract the
+        // child `error` handler below maintains).
+        check = {
+          ok: false,
+          rejected: err instanceof Error ? err.message : String(err),
+        };
       }
+      if (!check.ok) {
+        log(
+          `worker ${w.agentId} refused: extensions path escapes the repo root: ${check.rejected}`,
+        );
+        resolve({
+          text: "",
+          ...ZERO_USAGE,
+          durationMs: Date.now() - started,
+          exitCode: null,
+        });
+        return;
+      }
+      // Pass the RESOLVED paths to pi, so the argv carries exactly what
+      // containment approved.
+      spawnConfig = { ...w, extensions: check.paths };
     }
     const child = spawn("pi", buildWorkerArgv(spawnConfig), {
       stdio: ["ignore", "pipe", "pipe"],

@@ -294,6 +294,30 @@ describe("driver wiring — refusal happens BEFORE spawn (DoD Security, INV-2/IN
     expect(argv[argv.indexOf("-e") + 1]).toBe(join(REPO_ROOT, "cli-anything/src"));
   }, 30_000);
 
+  // INV-2 after 3f459de1 (`-e` under both profiles): extensions are no longer
+  // a lean-only field, so containment must not be either — a non-lean worker's
+  // `-e` pairs reach pi exactly the same way.
+  it("never execs pi for a NON-lean worker whose extension escapes the root", () => {
+    const r = runDriver([worker({ extensions: ["../outside-root/evil.ts"] })]);
+    expect(r.stderr).toContain("escapes the repo root");
+    expect(r.stderr).toContain("../outside-root/evil.ts");
+    expect(r.spawns).toHaveLength(0);
+    // …and the refusal resolved with empty text + exit null, which the driver
+    // reports downstream instead of spawning a half-configured worker.
+    expect(r.stderr).toContain("worker worker-a failed (exit null)");
+  }, 30_000);
+
+  it("execs pi with the RESOLVED extension path for a NON-lean worker", () => {
+    const r = runDriver([worker({ extensions: ["cli-anything/src"] })]);
+    expect(r.spawns).toHaveLength(1);
+    const argv = r.spawns[0] as string[];
+    // Discovery-on profile: no --no-extensions/--no-skills, but the -e pair
+    // is present and carries the containment-resolved absolute path — not the
+    // raw relative string pi would re-resolve against its own cwd.
+    expect(argv).not.toContain("--no-extensions");
+    expect(argv[argv.indexOf("-e") + 1]).toBe(join(REPO_ROOT, "cli-anything/src"));
+  }, 30_000);
+
   it("writes no capture anywhere when QDS_TEAM_RAW_WORKER_DIR is unset (AC5, run level)", () => {
     const probe = mkdtempSync(join(tmpdir(), "df19-nocapture-"));
     try {
