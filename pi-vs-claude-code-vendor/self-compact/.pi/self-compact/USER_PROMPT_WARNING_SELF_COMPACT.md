@@ -1,4 +1,4 @@
-[self-compact · WARNING] Context usage is {{used_tokens}} tokens ({{used_percent}}), past the warning threshold of {{warning_tokens}}. Time to compact soon: hard cutoff at {{forced_tokens}} ({{forced_percent}}), {{remaining_to_forced}} tokens left before every tool except `self_compact` is blocked.
+[self-compact · WARNING] Context usage is {{used_tokens}} tokens ({{used_percent}}), past the warning threshold of {{warning_tokens}}. Time to compact soon. Hard cutoff at {{forced_tokens}} ({{forced_percent}}): {{remaining_to_forced}} tokens left before every tool except `self_compact` is blocked.
 
 Finish only the current atomic step. Then write your `note_to_self` (max {{note_max_chars}} chars) and call `self_compact` as your only tool call.
 
