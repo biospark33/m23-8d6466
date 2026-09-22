@@ -332,7 +332,10 @@ export async function observeRound(opts: ObserveOptions): Promise<ObserveResult>
 export async function main(argv: string[]): Promise<number> {
   try {
     const args = parseArgs(argv);
-    const result = await observeRound(args);
+    // parseArgs exposes the flag as `out`; observeRound's option is `outDir` —
+    // map it here or --out silently no-ops and the jev records land in the
+    // corpus dir instead.
+    const result = await observeRound({ ...args, outDir: args.out });
     process.stdout.write(
       `jev-observe: ${result.recordsFile}: ${result.frontierFindings} frontier findings, ${result.judged} judged, ` +
         `${result.written} written, ${result.duplicateSkipped} duplicate-skipped, ` +

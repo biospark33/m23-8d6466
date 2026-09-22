@@ -141,6 +141,18 @@ describe("parseArgs", () => {
   test("--all with --pr is refused (mutually exclusive scopes)", () => {
     expect(() => parseArgs(["--all", "--pr", "601", "--round", "1"])).toThrow(/--all/);
   });
+  test("no scope flags at all is refused — --all or --pr+--round required", () => {
+    expect(() => parseArgs([])).toThrow(/--all/);
+    expect(() => parseArgs(["--json"])).toThrow(/--all/);
+    expect(() => parseArgs(["--corpus-dir", "/x"])).toThrow(/--all/);
+  });
+  test("--pr/--round must be positive integers — NaN/Infinity/fraction/zero refused by name", () => {
+    expect(() => parseArgs(["--pr", "abc", "--round", "1"])).toThrow(/--pr/);
+    expect(() => parseArgs(["--pr", "Infinity", "--round", "1"])).toThrow(/--pr/);
+    expect(() => parseArgs(["--pr", "1.5", "--round", "1"])).toThrow(/--pr/);
+    expect(() => parseArgs(["--pr", "0", "--round", "1"])).toThrow(/--pr/);
+    expect(() => parseArgs(["--pr", "601", "--round", "NaN"])).toThrow(/--round/);
+  });
   test("--all and --json parse as boolean flags (no value consumed)", () => {
     expect(parseArgs(["--all", "--json", "--corpus-dir", "/x"])).toMatchObject({ all: true, json: true, corpusDir: "/x" });
   });

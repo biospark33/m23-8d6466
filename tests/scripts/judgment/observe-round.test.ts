@@ -263,6 +263,19 @@ describe("observeRound (mock, keyless)", () => {
     expect(second.judged).toBe(2); // judged again — the recording is what dedupes
   });
 
+  test("outDir ≠ corpusDir: jev records land ONLY in the out dir, corpus file untouched", async () => {
+    const corpus = seedCorpus(FIXTURE_LINES());
+    const outDir = join(tmp, "out-separate");
+    const result = await observe({ outDir });
+    expect(result.recordsFile).toBe(corpusFilePath(outDir, PR, ROUND));
+    const outRecords = readJsonl(result.recordsFile).map((r) => TriageRecordSchema.parse(r));
+    expect(outRecords.filter((r) => r.arm === "jev")).toHaveLength(2);
+    // the corpus file keeps exactly its seeded frontier rows — nothing appended there
+    const corpusRecords = readJsonl(corpusFilePath(corpus, PR, ROUND)).map((r) => TriageRecordSchema.parse(r));
+    expect(corpusRecords).toHaveLength(2);
+    expect(corpusRecords.every((r) => r.arm === "frontier")).toBe(true);
+  });
+
   test("--live spend gate: refused without key+confirm, with a message naming both vars", () => {
     const saved = { key: process.env.TYPESAFE_API_KEY, confirm: process.env.QDS_LIVE_PROBE_CONFIRMED };
     try {
@@ -366,6 +379,26 @@ describe("CLI (subprocess, mock, temp dirs)", () => {
     expect(out).toContain("2 written");
     expect(out).toContain("ceiling 20/");
     expect(readJsonl(corpusFilePath(dir, PR, ROUND))).toHaveLength(4);
+  });
+
+  test("--out routes the jev records to the out dir; the corpus dir keeps only frontier rows", () => {
+    // Regression pin: parseArgs exposes `out` while observeRound reads
+    // `outDir` — unmapped, --out silently no-opped into the corpus dir.
+    const dir = seedCorpus(FIXTURE_LINES());
+    const outDir = join(tmp, "cli-out");
+    const proc = runCli([
+      "--pr", String(PR),
+      "--round", String(ROUND),
+      "--corpus-dir", dir,
+      "--out", outDir,
+      "--provenance-dir", join(tmp, "provenance"),
+    ]);
+    expect(proc.exitCode).toBe(0);
+    expect(proc.stdout.toString()).toContain(corpusFilePath(outDir, PR, ROUND));
+    const outRecords = readJsonl(corpusFilePath(outDir, PR, ROUND)).map((r) => TriageRecordSchema.parse(r));
+    expect(outRecords.every((r) => r.arm === "jev")).toBe(true);
+    const corpusRecords = readJsonl(corpusFilePath(dir, PR, ROUND)).map((r) => TriageRecordSchema.parse(r));
+    expect(corpusRecords.every((r) => r.arm === "frontier")).toBe(true);
   });
 
   test("missing round exits 2 naming the expected file, with no writes", () => {

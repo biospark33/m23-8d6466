@@ -12,8 +12,15 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { EXCLUDED_LEDGER_FILES, main, normalizeDispositionCell, parseLedgerText } from "../../../scripts/corpus/backfill.ts";
-import { TriageRecordSchema } from "../../../scripts/corpus/schema.ts";
+import {
+  EXCLUDED_LEDGER_DIRS,
+  EXCLUDED_LEDGER_FILES,
+  ledgerDate,
+  main,
+  normalizeDispositionCell,
+  parseLedgerText,
+} from "../../../scripts/corpus/backfill.ts";
+import { TriageRecordSchema, type TriageRecord } from "../../../scripts/corpus/schema.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 const FIXTURE_LEDGER = join(import.meta.dir, "fixtures", "ledger");
@@ -63,6 +70,23 @@ describe("normalizeDispositionCell", () => {
 
 describe("parseLedgerText", () => {
   const meta = { pr: 184, round: 4, sourceRef: "pr184/round4-triage.md", createdAt: null };
+
+  test("an escaped pipe stays inside its cell — no column shift or truncation", () => {
+    const text = [
+      "| id | sev | finding | class |",
+      "|----|-----|---------|-------|",
+      '| EP1 | HIGH | run `[ "a" \\| "b" ]` gate | PATCH |',
+      "| EP2 | LOW | plain finding | X |",
+    ].join("\n");
+    const { records, skipped } = parseLedgerText(text, meta);
+    expect(skipped).toHaveLength(0);
+    expect(records).toHaveLength(2);
+    const ep1 = records.find((r) => r.finding_id === "EP1")!;
+    expect(ep1.finding_text).toBe('run `[ "a" | "b" ]` gate'); // escape consumed, cell intact
+    expect(ep1.disposition).toBe("PATCH");
+    expect(ep1.label).toBe("HIGH");
+    expect(records.find((r) => r.finding_id === "EP2")!.disposition).toBe("DISMISS");
+  });
 
   test("every pr184-style row yields a record; compound maps to the final state", () => {
     const text = readFileSync(join(FIXTURE_LEDGER, "pr184", "round4-triage.md"), "utf8");
@@ -115,6 +139,19 @@ describe("parseLedgerText", () => {
   });
 });
 
+describe("ledgerDate", () => {
+  test("reads ONLY a recognized metadata Date: line — never the first date anywhere", () => {
+    expect(ledgerDate("Date: 2026-08-24. Reviewers: 9 spawned.")).toBe("2026-08-24");
+    expect(ledgerDate("**Date:** 2025-01-25")).toBe("2025-01-25");
+    // pr184 round 4, live: finding A1's shell snippet carries 2026-09-02 — a
+    // date-in-a-finding must NOT stamp the ledger.
+    const poisoned = '# ledger\n\n| A1 | BLOCKER | `[ "2026-09-02" \\> "null" ]` bypass |\n';
+    expect(ledgerDate(poisoned)).toBeNull();
+    expect(ledgerDate("# no date anywhere\nnothing states one")).toBeNull();
+    expect(ledgerDate("Date: not-a-date")).toBeNull();
+  });
+});
+
 describe("main on the fixture ledger root", () => {
   // The yield report is captured through a subprocess, not console.log
   // monkeypatching: in-process interception races with other test files that
@@ -150,6 +187,12 @@ describe("main on the fixture ledger root", () => {
       expect(report.toLowerCase()).toContain("excluded");
       expect(report.toLowerCase()).toContain("non-directory");
       expect(report.toLowerCase()).toContain("unbackable");
+      // Story AC4b: the raw pre-triage dir is skipped BY NAME, before any file
+      // of its is read — even though the fixture's e2e-audit table is
+      // backfill-compatible on purpose.
+      expect(EXCLUDED_LEDGER_DIRS).toContain("e2e-audit");
+      expect(report).toContain("dir e2e-audit: EXCLUDED");
+      expect(records.some((r) => r.finding_id === "EA1" || r.finding_id === "EA2")).toBe(false);
       // INV-C2 content fence: the excluded prose never landed as a record.
       expect(JSON.stringify(records)).not.toContain("BOT COMMENT TRANSCRIPT");
       // pr135 triage row landed, sourced from the ledger — not the excluded comment.
@@ -174,21 +217,43 @@ describe("main on the fixture ledger root", () => {
 });
 
 describe("main — MANDATORY e2e against the real repo ledgers", () => {
-  test("pr184/round4 and pr123 yield their full row counts; every record schema-valid", async () => {
+  test("pr184/round4 and pr123 yield their EXACT row counts, no cross-file padding; every record schema-valid", async () => {
     expect(existsSync(REAL_LEDGER)).toBe(true);
     const out = tmpOut();
     try {
       expect(await main(["--dir", REAL_LEDGER, "--out", out])).toBe(0);
-      const round4 = readFileSync(join(out, "184-r4.jsonl"), "utf8").split("\n").filter((l) => l !== "");
-      // pr184/round4-triage.md carries 108 verdict rows (clusters A–H); all must yield.
-      expect(round4.length).toBeGreaterThanOrEqual(108);
-      const pr123 = readFileSync(join(out, "123-rx.jsonl"), "utf8").split("\n").filter((l) => l !== "");
-      // pr123/triage.md carries 91 verdict rows in clusters W1a–W1g.
-      expect(pr123.length).toBeGreaterThanOrEqual(91);
-      for (const line of [...round4, ...pr123]) expect(TriageRecordSchema.safeParse(JSON.parse(line)).success).toBe(true);
+      const parse = (file: string) =>
+        readFileSync(join(out, file), "utf8")
+          .split("\n")
+          .filter((l) => l !== "")
+          .map((l) => JSON.parse(l) as TriageRecord);
+      // pr184/round4-triage.md carries 108 verdict rows (clusters A–H) and is
+      // the ONLY source of pr=184/round=4 — exact equality, so rows missing
+      // from the target ledger can never hide behind records from elsewhere.
+      const round4 = parse("184-r4.jsonl");
+      expect(round4).toHaveLength(108);
+      expect(round4.every((r) => r.pr === 184 && r.round === 4)).toBe(true);
+      expect(new Set(round4.map((r) => r.finding_id)).size).toBe(108);
+      // INV-C4 regression pin: the ledger states NO metadata Date:, so every
+      // created_at must be null — the old first-date-anywhere extractor stamped
+      // all 108 with 2026-09-02 out of finding A1's shell snippet.
+      expect(round4.every((r) => r.created_at === null)).toBe(true);
+      // pr123/triage.md carries 91 verdict rows in clusters W1a–W1g — exactly.
+      const pr123 = parse("123-rx.jsonl");
+      expect(pr123).toHaveLength(91);
+      expect(pr123.every((r) => r.pr === 123 && r.round === null)).toBe(true);
+      // Positive control for metadata extraction: pr128-r5/triage.md states
+      // `Date: 2026-08-24` on its header line — all 24 records carry it.
+      const r128 = parse("128-r5.jsonl");
+      expect(r128).toHaveLength(24);
+      expect(r128.every((r) => r.created_at === "2026-08-24")).toBe(true);
+      for (const record of [...round4, ...pr123, ...r128]) {
+        expect(TriageRecordSchema.safeParse(record).success).toBe(true);
+      }
       const all = readAll(out).map((r) => JSON.stringify(r)).join("\n");
       // Raw pre-triage dirs produce no records of their own encoding class.
       expect(all).not.toContain("e2e-coverage");
+      expect(all).not.toContain("EA1"); // the fixture's raw-dir canary, in case REAL_LEDGER ever mirrors it
     } finally {
       rmSync(out, { recursive: true, force: true });
     }

@@ -12,9 +12,10 @@
  * LLM-lead-generated agreements).
  *
  * Honesty rules (INV-C4, the one backfill timestamp rule):
- *  - `created_at` is a day-granular date read from INSIDE the ledger file when
- *    it states one, else null — never the directory name, never an invented
- *    intraday time.
+ *  - `created_at` is a day-granular date read from a recognized ledger
+ *    metadata `Date:` line when the ledger states one, else null — never the
+ *    first date anywhere in the file (a finding cell can carry an unrelated
+ *    date), never the directory name, never an invented intraday time.
  *  - latency/cost/outcome fields are always null — never reconstructed.
  *  - A ledger cell that does not match a known disposition alias (including
  *    bare `N`, as seen in pr128-r5) is skipped-WITH-REASON in the yield report,
@@ -22,7 +23,9 @@
  *    full compound preserved verbatim in `rationale`.
  *
  * Exclusions are data, not a regex guess: the three bot-prose transcripts are
- * skipped by name (INV-C2/INV-7); `--include-excluded` exists for forensics.
+ * skipped by name (INV-C2/INV-7), and the three raw pre-triage directories are
+ * skipped by directory name (story AC4b); `--include-excluded` lifts both
+ * fences for forensics.
  * The read-test-append runs under `scripts/lib/run-lock.ts`. Exit: 0 backfilled
  * (skips are reported, not fatal), 2 fatal (bad root / unwritable out).
  */
@@ -49,6 +52,14 @@ export const EXCLUDED_LEDGER_FILES: readonly string[] = [
   "pr135/pr-comment-round7.md",
   "pr184/HANDOFF-round2.md",
 ];
+
+/**
+ * Raw pre-triage directories (story jev-1 AC4b): never ledgers, never parsed.
+ * Data, not a regex guess — `e2e-audit` tables are one `id`-column away from
+ * emitting false agreement-with-claude records. `--include-excluded` lifts the
+ * fence for forensics, same as the file fence.
+ */
+export const EXCLUDED_LEDGER_DIRS: readonly string[] = ["df1-10-r6", "e2e-audit", "pr185"];
 
 /** The alias table from the story: P/PATCH, D/DEFER, X/DISMISS, DN/DECISION_NEEDED, POST_MERGE_CHANGED. Everything else — bare `N` included — is skipped-with-reason. */
 const ALIASES: Record<string, Disposition> = {
@@ -148,9 +159,17 @@ function sectionDisposition(section: string): Disposition | null {
   return null;
 }
 
-/** First plausible `YYYY-MM-DD` stated inside the file — the day-granular honesty rule. */
+/**
+ * A recognized ledger metadata `Date:` line (bold tolerated, blockquote
+ * tolerated). NEVER the first date anywhere in the file — a finding cell can
+ * legitimately carry an unrelated date, and pr184 round 4 proved it live:
+ * finding A1's `[ "2026-09-02" \> "null" ]` shell snippet stamped all 108
+ * records. No metadata date → null (INV-C4: never guessed).
+ */
+const LEDGER_DATE_RE = /^\s*>?\s*\**\s*date\b\**?\s*:\s*\**\s*(20\d{2}-\d{2}-\d{2})\b/im;
+
 export function ledgerDate(text: string): string | null {
-  const m = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  const m = text.match(LEDGER_DATE_RE);
   if (!m || Number.isNaN(Date.parse(m[1]!))) return null;
   return m[1]!;
 }
@@ -183,7 +202,24 @@ export interface LedgerParse {
 }
 
 function cells(line: string): string[] {
-  const parts = line.split("|");
+  // Markdown-aware: `\|` is a literal pipe INSIDE a cell, not a column break —
+  // a plain split("|") shifts/truncates finding_text when a cell quotes shell
+  // (`[ "a" \| "b" ]`). The escape is consumed, matching how the row renders.
+  const parts: string[] = [];
+  let cur = "";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (ch === "\\" && line[i + 1] === "|") {
+      cur += "|";
+      i++;
+    } else if (ch === "|") {
+      parts.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  parts.push(cur);
   return parts.slice(1, -1).map((c) => c.trim());
 }
 
@@ -317,6 +353,11 @@ export async function main(argv: string[]): Promise<number> {
         continue;
       }
       const dirName = entry.name;
+      if (!args.includeExcluded && EXCLUDED_LEDGER_DIRS.includes(dirName)) {
+        excluded++;
+        report.push(`dir ${dirName}: EXCLUDED (raw pre-triage — story AC4b); pass --include-excluded for forensics`);
+        continue;
+      }
       const files = readdirSync(join(root, dirName), { withFileTypes: true })
         .filter((f) => f.isFile() && f.name.endsWith(".md"))
         .map((f) => f.name)

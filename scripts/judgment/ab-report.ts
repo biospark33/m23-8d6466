@@ -49,14 +49,21 @@ export function parseArgs(argv: string[]): AbArgs {
   let all = false;
   let json = false;
   const valueFlags = ["--pr", "--round", "--corpus-dir"] as const;
+  const parsePositiveInt = (flag: string, raw: string): number => {
+    const n = Number(raw);
+    if (!Number.isSafeInteger(n) || n <= 0) {
+      throw new Error(`${flag} must be a positive integer, got "${raw}"`);
+    }
+    return n;
+  };
   const { flagTokens, bools } = tokenizeArgs(argv, { valueFlags: [...valueFlags], boolFlags: ["--all", "--json"] });
   all = bools.has("--all");
   json = bools.has("--json");
   parseValueFlags(flagTokens, {
     flags: [...valueFlags],
     onValue: (flag, v) => {
-      if (flag === "--pr") pr = Number(v);
-      else if (flag === "--round") round = Number(v);
+      if (flag === "--pr") pr = parsePositiveInt(flag, v);
+      else if (flag === "--round") round = parsePositiveInt(flag, v);
       else corpusDir = v;
     },
     help: [
@@ -64,8 +71,9 @@ export function parseArgs(argv: string[]): AbArgs {
       "       ab-report --all [--corpus-dir <dir>] [--json]",
       "",
       "Renders the §3.12 A/B speed/performance/cost table from corpus JSONL",
-      "files. --all iterates every *.jsonl in the corpus dir (join key",
-      "(pr, round, finding_id)). Data only — no threshold, no gate.",
+      "files. One scope is required: --all iterates every *.jsonl in the",
+      "corpus dir (join key (pr, round, finding_id)), or name one round with",
+      "--pr + --round. Data only — no threshold, no gate.",
       "",
       "Exit: 0 readable input · 2 malformed corpus files",
       "",
@@ -76,6 +84,9 @@ export function parseArgs(argv: string[]): AbArgs {
   }
   if (all && pr !== undefined) {
     throw new Error("--all is mutually exclusive with --pr/--round");
+  }
+  if (!all && pr === undefined) {
+    throw new Error("no report scope: specify --all, or both --pr and --round");
   }
   return { pr, round, corpusDir, all, json };
 }

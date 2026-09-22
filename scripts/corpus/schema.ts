@@ -27,9 +27,28 @@ export type Disposition = (typeof DISPOSITIONS)[number];
  */
 const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
+/**
+ * `Date.parse` normalizes overflow components — `2026-02-30` parses (as Mar 2)
+ * and so does `2025-02-29` (a non-leap year). Round-trip the DATE components
+ * through UTC: any rollover means the calendar day never existed. The
+ * time/offset parts stay out of the check so a legal offset-shifted instant
+ * (e.g. `2026-03-01T00:30:00+05:00`, whose UTC instant lands in February) is
+ * not falsely rejected.
+ */
+function isRealCalendarDay(s: string): boolean {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]!), Number(m[2]!), Number(m[3]!)];
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === mo - 1 && probe.getUTCDate() === d;
+}
+
 const isoTimestamp = z
   .string()
-  .refine((s) => ISO_8601_RE.test(s) && !Number.isNaN(Date.parse(s)), "must be an ISO-8601 date or timestamp");
+  .refine(
+    (s) => ISO_8601_RE.test(s) && !Number.isNaN(Date.parse(s)) && isRealCalendarDay(s),
+    "must be an ISO-8601 date or timestamp",
+  );
 
 /**
  * The six reserved A/B measurement fields (§3.12). Written `null` unless real

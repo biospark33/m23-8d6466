@@ -18,10 +18,25 @@ const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
 const ALLOWED_REPO_IMPORTS = new Set(["../lib/http.ts", "../swarmclaw/log.ts"]);
 
 function importSpecifiers(source: string): string[] {
-  return [...source.matchAll(/(?:^|\n)\s*import[^"']*["']([^"']+)["']/g)].map((m) => m[1] ?? "");
+  // Both module edges: import-from AND export-from — a re-export is an import
+  // edge, and index.ts's entire public surface is export-from, which an
+  // import-only regex never scanned. Bare side-effect imports (`import "./x"`)
+  // are kept.
+  return [
+    ...source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^"']*?\bfrom\s*["']([^"']+)["']/g),
+    ...source.matchAll(/(?:^|\n)\s*import\s*["']([^"']+)["']/g),
+  ].map((m) => m[1] ?? "");
 }
 
 describe("src/judgment import fence", () => {
+  test("importSpecifiers covers import-from, export-from, and bare side-effect edges", () => {
+    // Pins the scanner: export-from is the edge index.ts uses exclusively.
+    expect(importSpecifiers('export * from "../providers/x.ts";')).toContain("../providers/x.ts");
+    expect(importSpecifiers('export { y } from "./y.ts";')).toContain("./y.ts");
+    expect(importSpecifiers('import { z } from "zod";')).toContain("zod");
+    expect(importSpecifiers('import "./side-effect.ts";')).toContain("./side-effect.ts");
+  });
+
   test("every module imports only http.ts, swarmclaw/log.ts, zod, or its own siblings", () => {
     const violations: string[] = [];
     for (const file of readdirSync(JUDGMENT_SRC)) {
