@@ -8,7 +8,7 @@
  * non-zero and writes nothing (AC3/DoD guard).
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendRecord, main, parseArgs, sidecarToRecords } from "../../../scripts/corpus/merge.ts";
@@ -92,6 +92,23 @@ describe("sidecarToRecords", () => {
 });
 
 describe("main — e2e on the skill-shaped fixture", () => {
+  // Env hygiene: main() reads QDS_FRONTIER_USD_PER_MS from the real env; a
+  // developer's calibrated rate would otherwise flip the null assertion below.
+  // Tests set it explicitly where the rate matters; afterEach restores.
+  const SAVED_RATE = process.env.QDS_FRONTIER_USD_PER_MS;
+  beforeEach(() => {
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.QDS_FRONTIER_USD_PER_MS;
+  });
+  afterEach(() => {
+    if (SAVED_RATE === undefined) {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_FRONTIER_USD_PER_MS;
+    } else {
+      process.env.QDS_FRONTIER_USD_PER_MS = SAVED_RATE;
+    }
+  });
+
   test("writes one schema-valid record per finding, stamped, into <pr>-r<round>.jsonl", async () => {
     const out = tmpOut();
     try {
@@ -108,7 +125,20 @@ describe("main — e2e on the skill-shaped fixture", () => {
       expect(f004.labeler).toBe("frontier-lead");
       expect(f004.arm).toBe("frontier");
       expect(typeof f004.created_at).toBe("string");
-      expect(f004.cost_estimate_usd).toBeNull();
+      expect(f004.cost_estimate_usd).toBeNull(); // no rate in env → honestly null
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test("with QDS_FRONTIER_USD_PER_MS set, cost_estimate_usd = duration_ms × rate (541000 × 0.000003 = 1.623)", async () => {
+    process.env.QDS_FRONTIER_USD_PER_MS = "0.000003";
+    const out = tmpOut();
+    try {
+      expect(await main(["--workdir", FIXTURE_WORKDIR, "--out", out])).toBe(0);
+      const records = readRecords(join(out, "277-r4.jsonl"));
+      const f003 = records.find((r) => (r as { finding_id: string }).finding_id === "F-003") as Record<string, unknown>;
+      expect(f003.cost_estimate_usd).toBeCloseTo(1.623, 10);
     } finally {
       rmSync(out, { recursive: true, force: true });
     }
