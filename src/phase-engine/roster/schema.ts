@@ -57,6 +57,8 @@ export interface ResolvedRole {
   writes: string[] | null;
   /** `-e` extension paths handed to pi. */
   harness_engineering: string[];
+  /** Optional self-compact thresholds, e.g. `{ soft_at: "30%", at: "50%", buffer: "10%" }`. */
+  compaction?: { soft_at: string; at: string; buffer: string };
   /** `${provider}/${model}` — the key both gates and `resolveRate` look up. */
   slug: string;
   /** Non-fatal advisories for this role. */
@@ -111,6 +113,22 @@ const ToolsField = z.array(z.string().min(1)).nullable();
 const WritesField = z.array(z.string().min(1)).nullable();
 
 /**
+ * A percent string like "30%" or "12.5%". The failure message echoes the
+ * offending VALUE, not just "Invalid" — the CLI surfaces these problems to the
+ * operator, who needs to see which of their numbers was wrong. (`superRefine`,
+ * not `.regex(msg)`: this zod build ignores a params-level `errorMap` for
+ * `.regex`, and a static `message` cannot include the value.)
+ */
+const PercentField = z.string().superRefine((v, ctx) => {
+  if (!/^\d+(\.\d+)?%$/.test(v)) {
+    ctx.addIssue({
+      code: "custom",
+      message: `must be a percent like "30%" (got ${JSON.stringify(v)})`,
+    });
+  }
+});
+
+/**
  * Every key is optional at parse time because `defaults` may supply it. What
  * is REQUIRED is checked after the merge, so the error names the role rather
  * than the layer.
@@ -122,6 +140,13 @@ const RoleShape = {
   tools: ToolsField.optional(),
   writes: WritesField.optional(),
   harness_engineering: z.array(z.string().min(1)).optional(),
+  compaction: z
+    .object({
+      soft_at: PercentField,
+      at: PercentField,
+      buffer: PercentField,
+    })
+    .optional(),
 } as const;
 
 const RoleSchema = z.object({ name: z.string().min(1), ...RoleShape }).strict();
@@ -283,6 +308,7 @@ export function parseRoster(text: string, path = "<inline>"): ResolvedRoster {
 
     const tools = pick(role, defaults, "tools") ?? null;
     const harness = pick(role, defaults, "harness_engineering") ?? [];
+    const compaction = pick(role, defaults, "compaction");
     const warnings: string[] = [];
     if (harness.length > 0 && tools !== null) {
       // `--tools` filters extension tools too (R4 §1.5, sssf.config.yaml:9-11):
@@ -305,6 +331,7 @@ export function parseRoster(text: string, path = "<inline>"): ResolvedRoster {
       tools,
       writes,
       harness_engineering: harness,
+      ...(compaction !== undefined ? { compaction } : {}),
       slug: `${pair.provider}/${pair.model}`,
       warnings,
     });

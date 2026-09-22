@@ -468,3 +468,50 @@ describe("loadRoster — INV-2 path confinement and size ceiling", () => {
     expect(() => loadRoster(join(dir, "nope.yaml"), { repoRoot: dir })).toThrow(RosterError);
   });
 });
+
+describe("parseRoster — compaction block (self-compact rollout)", () => {
+  test("a role without compaction resolves with compaction undefined", () => {
+    const r = parseRoster(MINIMAL);
+    expect(r.roles[0]!.compaction).toBeUndefined();
+  });
+
+  test("compaction 30/50/60 resolves verbatim into the role", () => {
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    compaction:
+      soft_at: "30%"
+      at: "50%"
+      buffer: "10%"
+`;
+    const r = parseRoster(src);
+    expect(r.roles[0]!.compaction).toEqual({ soft_at: "30%", at: "50%", buffer: "10%" });
+  });
+
+  test("a non-percent compaction value is a schema problem naming the role", () => {
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    writes: []
+    compaction:
+      soft_at: "30%"
+      at: "30000"
+      buffer: "10%"
+`;
+    try {
+      parseRoster(src);
+      throw new Error("expected RosterError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RosterError);
+      expect((e as RosterError).problems.join("\n")).toContain("30000");
+    }
+  });
+});
