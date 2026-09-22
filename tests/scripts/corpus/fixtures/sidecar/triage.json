@@ -1,0 +1,24 @@
+{
+  "pr": 277,
+  "round": 4,
+  "duration_ms": 541000,
+  "findings": [
+    {
+      "finding_id": "F-003",
+      "finding_text": "Token refresh can race a concurrent dispatch: two runs mint a key against the same issue and one is orphaned at revoke.",
+      "diff_context_ref": "src/providers/credentials.ts@6f6bff39",
+      "label": "BLOCKER",
+      "disposition": "PATCH",
+      "rationale": "Real defect; fixed in this wave (commit 2ce6e046).",
+      "created_at": "2026-09-22T14:03:00Z",
+      "latency_ms": 41000
+    },
+    {
+      "finding_id": "F-004",
+      "finding_text": "Retry loop re-reads the ledger without re-taking the lock, so a torn write surfaces as a phantom missing row.",
+      "diff_context_ref": "scripts/lib/run-lock.ts@6f6bff39",
+      "label": "HIGH",
+      "disposition": "DEFER"
+    }
+  ]
+}

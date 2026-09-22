@@ -1,0 +1,202 @@
+/**
+ * JEV-1 — `scripts/corpus/backfill.ts`.
+ *
+ * Historical ledgers become honestly-labeled records: per-encoding
+ * normalization (pr123 word forms, pr184 letter+bold+compound, pr128-r5 bare N
+ * and section-implied), the bot-prose exclusion fence (INV-C2), non-directory
+ * and unbackable reporting, one created_at rule, nulls never guessed (INV-C4),
+ * idempotence for this writer (AC2), and the MANDATORY e2e round against the
+ * real repo ledgers (`_bmad-output/workflow-state/code-review/`).
+ */
+
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { EXCLUDED_LEDGER_FILES, main, normalizeDispositionCell, parseLedgerText } from "../../../scripts/corpus/backfill.ts";
+import { TriageRecordSchema } from "../../../scripts/corpus/schema.ts";
+
+const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
+const FIXTURE_LEDGER = join(import.meta.dir, "fixtures", "ledger");
+const REAL_LEDGER = join(REPO_ROOT, "_bmad-output", "workflow-state", "code-review");
+
+function tmpOut(): string {
+  return mkdtempSync(join("/tmp", "corpus-backfill-"));
+}
+
+function readAll(out: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const f of readdirSync(out)) {
+    if (!f.endsWith(".jsonl")) continue;
+    for (const line of readFileSync(join(out, f), "utf8").split("\n")) {
+      if (line.trim() !== "") records.push(JSON.parse(line));
+    }
+  }
+  return records;
+}
+
+describe("normalizeDispositionCell", () => {
+  test("pr123 word forms", () => {
+    expect(normalizeDispositionCell("PATCH")?.disposition).toBe("PATCH");
+    expect(normalizeDispositionCell("PATCH(story)")).toEqual({ disposition: "PATCH", rationale: "story" });
+    expect(normalizeDispositionCell("DEFER")?.disposition).toBe("DEFER");
+    expect(normalizeDispositionCell("DISMISS")?.disposition).toBe("DISMISS");
+  });
+
+  test("pr184 letter + bold + annotation + trailing rationale + compound", () => {
+    expect(normalizeDispositionCell("**P**")?.disposition).toBe("PATCH");
+    expect(normalizeDispositionCell("**P** (comment)")).toEqual({ disposition: "PATCH", rationale: "comment" });
+    const d = normalizeDispositionCell("**D** — acknowledged in-file; out of scope");
+    expect(d?.disposition).toBe("DEFER");
+    expect(d?.rationale).toContain("acknowledged in-file");
+    const dn = normalizeDispositionCell("**DN→P** (assert + fail closed)");
+    expect(dn?.disposition).toBe("PATCH");
+    expect(dn?.rationale).toContain("DN→P");
+    expect(normalizeDispositionCell("**X** — verified against source")?.disposition).toBe("DISMISS");
+  });
+
+  test("bare N and any unknown code are never guessed", () => {
+    expect(normalizeDispositionCell("N")).toBeNull();
+    expect(normalizeDispositionCell("**N**")).toBeNull();
+    expect(normalizeDispositionCell("MAYBE")).toBeNull();
+  });
+});
+
+describe("parseLedgerText", () => {
+  const meta = { pr: 184, round: 4, sourceRef: "pr184/round4-triage.md", createdAt: null };
+
+  test("every pr184-style row yields a record; compound maps to the final state", () => {
+    const text = readFileSync(join(FIXTURE_LEDGER, "pr184", "round4-triage.md"), "utf8");
+    const { records, skipped } = parseLedgerText(text, meta);
+    expect(records).toHaveLength(6);
+    expect(skipped).toHaveLength(0);
+    const a3 = records.find((r) => r.finding_id === "A3")!;
+    expect(a3.disposition).toBe("PATCH");
+    expect(a3.rationale).toContain("DN→P");
+    expect(a3.rationale).toContain("assert + fail closed");
+    const a4 = records.find((r) => r.finding_id === "A4")!;
+    expect(a4.rationale).toBe("comment");
+    expect(records.every((r) => r.labeler === "agreement-with-claude")).toBe(true);
+    expect(records.every((r) => r.arm === "frontier")).toBe(true);
+    expect(records.every((r) => r.created_at === null)).toBe(true);
+    expect(records.every((r) => r.latency_ms === null && r.cost_exact_usd === null)).toBe(true);
+  });
+
+  test("pr123 word forms yield records with the file-stated day-granular date", () => {
+    const text = readFileSync(join(FIXTURE_LEDGER, "pr123", "triage.md"), "utf8");
+    const { records } = parseLedgerText(text, { pr: 123, round: 10, sourceRef: "pr123/triage.md", createdAt: "2026-08-24" });
+    expect(records).toHaveLength(4);
+    expect(records.every((r) => r.created_at === "2026-08-24")).toBe(true);
+    expect(records.find((r) => r.finding_id === "DF2")!.rationale).toBe("story");
+    expect(records.find((r) => r.finding_id === "DF4")!.disposition).toBe("DISMISS");
+  });
+
+  test("pr128-r5: section-implied dispositions, stated location as diff_context_ref, bare N skipped-with-reason", () => {
+    const text = readFileSync(join(FIXTURE_LEDGER, "pr128-r5", "triage.md"), "utf8");
+    const { records, skipped } = parseLedgerText(text, { pr: 128, round: 5, sourceRef: "pr128-r5/triage.md", createdAt: "2026-08-24" });
+    expect(records).toHaveLength(3);
+    const p1 = records.find((r) => r.finding_id === "P1")!;
+    expect(p1.disposition).toBe("PATCH");
+    expect(p1.diff_context_ref).toBe("src/fleet/fleet-lock.ts:561-564");
+    const x1 = records.find((r) => r.finding_id === "X1")!;
+    expect(x1.disposition).toBe("DISMISS");
+    expect(x1.label).toBe("HIGH");
+    expect(x1.created_at).toBe("2026-08-24");
+    expect(skipped.some((s) => s.reason.includes('"N"'))).toBe(true);
+    expect(records.some((r) => r.finding_id === "N1")).toBe(false);
+  });
+
+  test("rows without a finding/title column are skipped-with-reason, never guessed", () => {
+    const { records, skipped } = parseLedgerText(
+      "| id | sev | source | owner | work |\n|----|-----|--------|-------|------|\n| WT1 | HIGH | blind | W2a | Add assertions. |\n",
+      meta,
+    );
+    expect(records).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+  });
+});
+
+describe("main on the fixture ledger root", () => {
+  function captureStdout<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.join(" "));
+    return fn().then(
+      (result) => {
+        console.log = orig;
+        return { result, lines };
+      },
+      (e) => {
+        console.log = orig;
+        throw e;
+      },
+    );
+  }
+
+  test("exclusions, non-directory skip, unbackable report, honesty fields", async () => {
+    const out = tmpOut();
+    try {
+      const { result, lines } = await captureStdout(() => main(["--dir", FIXTURE_LEDGER, "--out", out]));
+      expect(result).toBe(0);
+      const report = lines.join("\n");
+      const records = readAll(out);
+      expect(records.length).toBeGreaterThanOrEqual(13);
+      for (const r of records) {
+        expect(TriageRecordSchema.safeParse(r).success).toBe(true);
+        expect(r.labeler).toBe("agreement-with-claude");
+        expect(r.arm).toBe("frontier");
+        expect(r.latency_ms).toBeNull();
+        expect(r.cost_exact_usd).toBeNull();
+        expect(r.cost_estimate_usd).toBeNull();
+        expect(r.outcome_confirmed).toBeNull();
+        expect(r.outcome_source).toBeNull();
+      }
+      // INV-C2: the bot-prose file is skipped by data, and the report says so.
+      expect(EXCLUDED_LEDGER_FILES).toContain("pr135/pr-comment.md");
+      expect(report).toContain("pr135/pr-comment.md");
+      expect(report.toLowerCase()).toContain("excluded");
+      expect(report.toLowerCase()).toContain("non-directory");
+      expect(report.toLowerCase()).toContain("unbackable");
+      // INV-C2 content fence: the excluded prose never landed as a record.
+      expect(JSON.stringify(records)).not.toContain("BOT COMMENT TRANSCRIPT");
+      // pr135 triage row landed, sourced from the ledger — not the excluded comment.
+      expect(records.some((r) => r.finding_id === "T1" && r.pr === 135)).toBe(true);
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test("idempotent: the second backfill leaves every corpus file byte-identical", async () => {
+    const out = tmpOut();
+    try {
+      expect(await main(["--dir", FIXTURE_LEDGER, "--out", out])).toBe(0);
+      const snapshot = Object.fromEntries(readdirSync(out).map((f) => [f, readFileSync(join(out, f), "utf8")]));
+      expect(await main(["--dir", FIXTURE_LEDGER, "--out", out])).toBe(0);
+      for (const [f, body] of Object.entries(snapshot)) expect(readFileSync(join(out, f), "utf8")).toBe(body);
+      expect(Object.keys(snapshot).length).toBeGreaterThan(0);
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("main — MANDATORY e2e against the real repo ledgers", () => {
+  test("pr184/round4 and pr123 yield their full row counts; every record schema-valid", async () => {
+    expect(existsSync(REAL_LEDGER)).toBe(true);
+    const out = tmpOut();
+    try {
+      expect(await main(["--dir", REAL_LEDGER, "--out", out])).toBe(0);
+      const round4 = readFileSync(join(out, "184-r4.jsonl"), "utf8").split("\n").filter((l) => l !== "");
+      // pr184/round4-triage.md carries 108 verdict rows (clusters A–H); all must yield.
+      expect(round4.length).toBeGreaterThanOrEqual(108);
+      const pr123 = readFileSync(join(out, "123-rx.jsonl"), "utf8").split("\n").filter((l) => l !== "");
+      // pr123/triage.md carries 91 verdict rows in clusters W1a–W1g.
+      expect(pr123.length).toBeGreaterThanOrEqual(91);
+      for (const line of [...round4, ...pr123]) expect(TriageRecordSchema.safeParse(JSON.parse(line)).success).toBe(true);
+      const all = readAll(out).map((r) => JSON.stringify(r)).join("\n");
+      // Raw pre-triage dirs produce no records of their own encoding class.
+      expect(all).not.toContain("e2e-coverage");
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+});
