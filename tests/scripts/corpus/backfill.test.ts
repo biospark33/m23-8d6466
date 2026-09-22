@@ -116,28 +116,22 @@ describe("parseLedgerText", () => {
 });
 
 describe("main on the fixture ledger root", () => {
-  function captureStdout<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
-    const lines: string[] = [];
-    const orig = console.log;
-    console.log = (...args: unknown[]) => lines.push(args.join(" "));
-    return fn().then(
-      (result) => {
-        console.log = orig;
-        return { result, lines };
-      },
-      (e) => {
-        console.log = orig;
-        throw e;
-      },
-    );
+  // The yield report is captured through a subprocess, not console.log
+  // monkeypatching: in-process interception races with other test files that
+  // also touch console (bun runs files in parallel), truncating the capture.
+  function runBackfillCli(out: string): { exitCode: number; report: string } {
+    const proc = Bun.spawnSync({
+      cmd: ["bun", join("scripts", "corpus", "backfill.ts"), "--dir", FIXTURE_LEDGER, "--out", out],
+      cwd: REPO_ROOT,
+    });
+    return { exitCode: proc.exitCode, report: proc.stdout.toString() };
   }
 
   test("exclusions, non-directory skip, unbackable report, honesty fields", async () => {
     const out = tmpOut();
     try {
-      const { result, lines } = await captureStdout(() => main(["--dir", FIXTURE_LEDGER, "--out", out]));
-      expect(result).toBe(0);
-      const report = lines.join("\n");
+      const { exitCode, report } = runBackfillCli(out);
+      expect(exitCode).toBe(0);
       const records = readAll(out);
       expect(records.length).toBeGreaterThanOrEqual(13);
       for (const r of records) {
