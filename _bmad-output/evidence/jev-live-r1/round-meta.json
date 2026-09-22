@@ -1,0 +1,40 @@
+{
+  "round": "jev-live-r1",
+  "date": "2026-09-22",
+  "what": "First live (no-fakes) end-to-end round of the Jev pipeline: real historical ledger → backfill → corpus → S1 observer LIVE against api.typesafe.ai → paired jev-arm records → §3.12 A/B report",
+  "substrate": {
+    "vendor": "TypeSafe api.typesafe.ai/v1/systemone",
+    "model": "jev-1.13.0 (pinned)",
+    "source_round": "pr184 round 4 triage (108 human-confirmed verdict rows, backfilled from _bmad-output/workflow-state/code-review/pr184/round4-triage.md)",
+    "fake_check": "no fakes — real HTTP, real ledger file, real metered spend"
+  },
+  "spend": {
+    "requests": 108,
+    "input_tokens": 53114,
+    "usd_exact": 0.00223079,
+    "errors": 0,
+    "retries": 0,
+    "ceiling": "53114/1000000 stage tokens"
+  },
+  "gates_exercised": [
+    "INV-J5 --live refused without QDS_LIVE_PROBE_CONFIRMED=1 (observed live, exit 2)",
+    "--live accepted with key + confirm (observed live)",
+    "egress class finding-text accepted at stage 1 (108/108)",
+    "stage ceiling tracked (53114 of 1M default)"
+  ],
+  "results": {
+    "judged": "108/108",
+    "written": 108,
+    "duplicate_skipped": 0,
+    "wall_clock_s": 24.2,
+    "latency_ms": { "mean": 219.8, "median": 198.5, "min": 139, "max": 526 },
+    "disposition_agreement_with_lead": "95/108 (88.0%)",
+    "is_real_defect_majority_read": { "yes": 85, "no": 23, "rule": "noul p > 0.5 = yes (stated in report; no gating use)" }
+  },
+  "provenance_entries": 109,
+  "notes": [
+    "noul probability-number contract drift was caught by this same pipeline's probe earlier the same day (commit c82ede44)",
+    "frontier arm latency/cost not-recorded: historical ledger predates the sidecar contract (duration_ms/latency_ms are forward-capture only)",
+    "outcome-validated precision awaits outcome_confirmed population by later fix/review rounds"
+  ]
+}

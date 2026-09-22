@@ -1,0 +1,6 @@
+diff --git a/src/example.ts b/src/example.ts
+--- a/src/example.ts
++++ b/src/example.ts
+@@ -1,1 +1,1 @@
+-not a triage ledger
++raw pre-triage artifact — reported skipped, never read

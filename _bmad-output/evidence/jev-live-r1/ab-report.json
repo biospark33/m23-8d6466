@@ -1,0 +1,61 @@
+{
+  "files": [
+    "_bmad-output/judgment/corpus/184-r4.jsonl"
+  ],
+  "paired": {
+    "paired": 108,
+    "agreed": 95,
+    "rate": 0.8796296296296297
+  },
+  "crosstab": [
+    {
+      "is_real_defect": "true",
+      "total": 85,
+      "PATCH": 83,
+      "GATE_ACTION": 2
+    },
+    {
+      "is_real_defect": "false",
+      "total": 23,
+      "PATCH": 19,
+      "DISMISS": 1,
+      "GATE_ACTION": 3
+    }
+  ],
+  "speed": {
+    "jev": {
+      "n": 108,
+      "nulls": 0,
+      "mean": 219.82407407407408,
+      "median": 198.5,
+      "min": 139,
+      "max": 526
+    },
+    "frontier": {
+      "n": 0,
+      "nulls": 108,
+      "mean": null,
+      "median": null,
+      "min": null,
+      "max": null
+    }
+  },
+  "cost": {
+    "jev": {
+      "basis": "exact",
+      "n": 108,
+      "nulls": 0,
+      "totalUsd": 0.002230788000000001
+    },
+    "frontier": {
+      "basis": "estimate",
+      "n": 0,
+      "nulls": 108,
+      "totalUsd": null
+    }
+  },
+  "outcome": {
+    "available": false,
+    "perArm": []
+  }
+}

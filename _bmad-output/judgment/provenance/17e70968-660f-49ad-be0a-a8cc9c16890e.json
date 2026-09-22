@@ -1,0 +1,24 @@
+{
+  "requestId": "17e70968-660f-49ad-be0a-a8cc9c16890e",
+  "digest": "4d3c9dc2a21b6bf8e2d49d284d8f92914147c9395a115b8f17bd1b4feadc8515",
+  "detail": {
+    "requestId": "17e70968-660f-49ad-be0a-a8cc9c16890e",
+    "model": "jev-1.13.0",
+    "egressClass": "finding-text",
+    "questions": [
+      {
+        "id": "is_real_defect",
+        "type": "noul"
+      },
+      {
+        "id": "disposition",
+        "type": "choice"
+      }
+    ],
+    "usage": {
+      "input_tokens": 472,
+      "output_tokens": 61
+    },
+    "createdAt": "2026-09-22T19:13:28.506Z"
+  }
+}

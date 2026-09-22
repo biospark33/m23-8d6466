@@ -1,0 +1,36 @@
+{
+  "notes": "TypeSafe Jev vendor contract pin — the single source of truth for the model id and the strict request/response shapes. tests/judgment/contract.test.ts is the drift alarm: it asserts src/judgment constants AND zod schemas match this file exactly. Honest limitation: this pin never touches the wire; the wire check is scripts/judgment/live-probe.ts (one canonical machine-state request, run only when TYPESAFE_API_KEY is set AND QDS_LIVE_PROBE_CONFIRMED=1). Re-calibration ritual on drift: re-verify against docs.typesafe.ai/models.md (append .md for raw markdown), then update THIS file + src/judgment/schemas.ts + the client constants in one commit, then re-run the probe.",
+  "model": "jev-1.13.0",
+  "endpoint": {
+    "method": "POST",
+    "url": "https://api.typesafe.ai/v1/systemone",
+    "auth": "Authorization: Bearer $TYPESAFE_API_KEY (env-only, read once at client construction)"
+  },
+  "http": {
+    "maxAttempts": 2,
+    "retryOnStatuses": [429, 529],
+    "fatalFirstAttemptStatuses": [401, 422],
+    "retryDelay": "retry-after header, capped at MAX_RETRY_AFTER_MS",
+    "postReplaySafety": "POST replay is safe: judgments are read-only — the same questions replayed yield the same answers, no server-side state, no charge beyond input tokens already reported in usage."
+  },
+  "request": {
+    "topLevelKeys": ["model", "state", "questions"],
+    "stateTypes": ["string", "object", "array"],
+    "questionTypes": {
+      "choice": { "criteria": { "required": true, "kind": "map", "maxOptions": 255 } },
+      "score": { "criteria": { "required": true, "kind": "orderedArray", "minLevels": 2, "maxLevels": 10 } },
+      "noul": { "criteria": { "required": false, "kind": "object", "keys": ["true", "false"] } }
+    }
+  },
+  "response": {
+    "topLevelKeys": ["model", "answers", "usage"],
+    "modelLiteral": true,
+    "answersSubsetOfQuestions": true,
+    "usageKeys": ["input_tokens", "output_tokens"],
+    "answerShapes": {
+      "noul": { "keys": ["type", "noul"], "valueType": "number 0..1 (probability yes; live-verified 2026-09-22)" },
+      "choice": { "keys": ["type", "choice", "probabilities", "confidence"] },
+      "score": { "keys": ["type", "score", "legend", "probabilities", "confidence"] }
+    }
+  }
+}
