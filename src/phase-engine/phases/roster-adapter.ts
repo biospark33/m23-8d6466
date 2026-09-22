@@ -25,8 +25,9 @@ import type { ResolvedRole, ResolvedRoster } from "../roster/schema.ts";
  * Options provide caller-supplied context: agentId becomes the coms cname
  * and artifact filename; prompt is the task brief (roster has no prompt field).
  *
- * DF1.9 fields (lean, extensions) are left undefined — those are manifest-
- * level concerns, not roster-level.
+ * lean is left undefined — a manifest-level concern, not roster-level.
+ * extensions/extensionArgs ARE roster-level: harness_engineering paths and
+ * compaction thresholds flow through to the worker's pi argv.
  */
 export function rosterRoleToTeamRole(
   role: ResolvedRole,
@@ -39,14 +40,24 @@ export function rosterRoleToTeamRole(
   if (!role.model || typeof role.model !== "string" || role.model.trim().length === 0) {
     throw new Error(`role model must be a non-empty string (got ${JSON.stringify(role.model)})`);
   }
+  const extensions = role.harness_engineering?.length ? role.harness_engineering : undefined;
+  const extensionArgs = role.compaction
+    ? [
+        "--compact-soft-at", role.compaction.soft_at,
+        "--compact-at", role.compaction.at,
+        "--compact-buffer", role.compaction.buffer,
+      ]
+    : undefined;
   return {
     agentId: opts.agentId,
     // Join: never split here. splitRoleModel decomposes.
     model: `${role.provider}/${role.model}`,
     prompt: opts.prompt,
-    // DF1.9 fields — omitted here, added by manifest construction if needed
+    // lean stays manifest-level; extensions/extensionArgs come from the
+    // roster's harness_engineering / compaction fields (self-compact wiring).
     lean: undefined,
-    extensions: undefined,
+    ...(extensions !== undefined && { extensions }),
+    ...(extensionArgs !== undefined && { extensionArgs }),
   };
 }
 

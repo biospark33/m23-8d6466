@@ -40,6 +40,54 @@ describe("rosterRoleToTeamRole", () => {
     expect(teamRole.extensions).toBeUndefined();
   });
 
+  test("worker role harness_engineering + compaction become extensions + extensionArgs", () => {
+    const role: ResolvedRole = {
+      name: "worker",
+      model: "deepseek/deepseek-v3.2",
+      provider: "openrouter",
+      thinking: "medium",
+      tools: null,
+      writes: ["src/"],
+      harness_engineering: [
+        "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+      ],
+      compaction: { soft_at: "30%", at: "50%", buffer: "10%" },
+      slug: "openrouter/deepseek/deepseek-v3.2",
+      warnings: [],
+    };
+
+    const t = rosterRoleToTeamRole(role, { agentId: "worker", prompt: "p" });
+    expect(t.extensions).toEqual([
+      "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+    ]);
+    expect(t.extensionArgs).toEqual([
+      "--compact-soft-at",
+      "30%",
+      "--compact-at",
+      "50%",
+      "--compact-buffer",
+      "10%",
+    ]);
+  });
+
+  test("role without harness_engineering or compaction leaves both undefined", () => {
+    const role: ResolvedRole = {
+      name: "planner",
+      model: "m",
+      provider: "openrouter",
+      thinking: "medium",
+      tools: null,
+      writes: [],
+      harness_engineering: [],
+      slug: "openrouter/m",
+      warnings: [],
+    };
+
+    const t = rosterRoleToTeamRole(role, { agentId: "planner", prompt: "p" });
+    expect(t.extensions).toBeUndefined();
+    expect(t.extensionArgs).toBeUndefined();
+  });
+
   test("handles model id containing slash — openrouter/deepseek/deepseek-v4-flash-0731", () => {
     const role: ResolvedRole = {
       name: "fixer",

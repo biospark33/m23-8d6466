@@ -59,6 +59,14 @@ export const TeamRoleSchema = z
      * a truthy coercion (INV-2).
      */
     extensions: z.array(z.string().trim().min(1)).optional(),
+    /**
+     * Flag/value pairs passed through to the worker's pi argv (self-compact
+     * thresholds). Structure (known flag, non-empty value) is enforced at
+     * argv build in the driver (validateExtensionArgs, INV-EXT-ARGS), not
+     * here — the allowlist is a driver concern. A non-array or non-string
+     * entry is a validation error, same contract as `extensions` (INV-2).
+     */
+    extensionArgs: z.array(z.string().trim().min(1)).optional(),
   })
   // Still .strict(): widening with two named optional keys must not make any
   // OTHER unknown key acceptable as a side effect (INV-2).

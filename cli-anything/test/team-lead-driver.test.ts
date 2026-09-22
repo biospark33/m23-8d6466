@@ -20,6 +20,7 @@ import {
   REPO_ROOT,
   resolveExtensionPaths,
   SCHEMA_INSTRUCTION,
+  validateExtensionArgs,
   writeRawWorkerCapture,
 } from "../scripts/team-lead-driver.ts";
 
@@ -117,6 +118,21 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
       prompt: "p",
     });
     expect(plain).not.toContain("-e");
+  });
+
+  // INV-EXT-ARGS: extensionArgs ride the argv before -p; an unknown flag or a
+  // missing value is rejected fail-closed, never silently dropped.
+  it("extensionArgs land on the argv before -p and reject unknown flags", () => {
+    const argv = buildWorkerArgv({
+      ...base,
+      extensionArgs: ["--compact-soft-at", "30%", "--compact-at", "50%", "--compact-buffer", "10%"],
+    });
+    expect(argv.indexOf("-p")).toBeGreaterThan(argv.indexOf("--compact-buffer"));
+
+    const bad = validateExtensionArgs(["--evil", "x"]);
+    expect(bad.ok).toBe(false);
+    const odd = validateExtensionArgs(["--compact-at"]);
+    expect(odd.ok).toBe(false);
   });
 });
 

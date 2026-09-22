@@ -55,6 +55,13 @@ interface WorkerConfig {
    * so nothing survives it — out of scope here.
    */
   extensions?: string[];
+  /**
+   * Validated flag/value pairs appended to the pi argv before `-p`. Only
+   * self-compact's registered flags pass (validateExtensionArgs) — anything
+   * else throws at argv build, so the worker never spawns with attacker
+   * flags (INV-EXT-ARGS).
+   */
+  extensionArgs?: string[];
 }
 
 const say = (o: unknown): void => {
@@ -401,8 +408,40 @@ export function buildWorkerArgv(w: WorkerConfig): string[] {
   // vendored path pi would never discover (it is not in any `.pi/` dir). A
   // worker with no extensions key still gets byte-identical argv (AC3).
   for (const ext of w.extensions ?? []) argv.push("-e", ext);
+  if (w.extensionArgs !== undefined) {
+    const checked = validateExtensionArgs(w.extensionArgs);
+    if (!checked.ok) throw new Error(`extensionArgs rejected: ${checked.rejected}`);
+    argv.push(...checked.argv);
+  }
   argv.push("-p", `${w.prompt}\n\n${SCHEMA_INSTRUCTION}`);
   return argv;
+}
+
+/** INV-EXT-ARGS: only self-compact's registered flags may ride the argv, and each needs a value. */
+const EXTENSION_FLAG_ALLOWLIST = new Set([
+  "--compact-soft-at",
+  "--compact-at",
+  "--compact-buffer",
+  "--compact-prompt",
+]);
+
+export function validateExtensionArgs(
+  args: unknown[],
+): { ok: true; argv: string[] } | { ok: false; rejected: string } {
+  const argv: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (typeof flag !== "string" || !EXTENSION_FLAG_ALLOWLIST.has(flag)) {
+      return { ok: false, rejected: typeof flag === "string" ? flag : String(flag) };
+    }
+    const value = args[i + 1];
+    if (typeof value !== "string" || value.trim() === "" || EXTENSION_FLAG_ALLOWLIST.has(value)) {
+      return { ok: false, rejected: `${flag} (missing value)` };
+    }
+    argv.push(flag, value);
+    i++;
+  }
+  return { ok: true, argv };
 }
 
 /**
