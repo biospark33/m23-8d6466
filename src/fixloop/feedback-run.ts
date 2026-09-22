@@ -53,6 +53,22 @@ export const MAX_OMITTED_COMMENT_IDS = 20;
 export const FIX_RUN_MANIFEST_PATH = "config/rosters/fix-run.pipeline.json";
 export const FIX_SCOPE_FILE = ".factory/fix-scope.json";
 
+/**
+ * The dispatch wall-clock ceiling invocation1 hands to `dispatch()` via
+ * `DispatchDeps.timeoutMs`. The default (600_000) can NEVER run the fix
+ * pipeline: the shipped manifest's `runBudgetMs` is the loader's pricing of
+ * the 600 s fix phase (×3 for parse-fix attempts + routing margins =
+ * 1 855 000, +2.4% headroom = 1 900 000), and `runBudgetMs > callerBudgetMs`
+ * refuses at the manifest load — measured live on the first paid round
+ * attempt (2026-09-20: `manifest runBudgetMs 1900000 exceeds callerBudgetMs
+ * 599999`). Sized above the manifest with the e2e plan's engine window: the
+ * in-box phases stay bounded by the manifest itself; this is only the
+ * host-side wall clock the whole dispatch must fit inside. PAIRED with the
+ * manifest by test (tests/fixloop/cli.test.ts) so a runBudgetMs raise that
+ * outgrows this ceiling fails a unit test, not a paid round.
+ */
+export const FIX_DISPATCH_CEILING_MS = 2_100_000;
+
 // ─── typed refusals ──────────────────────────────────────────────────────────
 
 /**
@@ -703,6 +719,16 @@ const PROBE_EXEC_TIMEOUT_MS = 30_000;
 /** Env var names the transient-unit leg asserts are unset. */
 const PROBE_ENV_VARS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_API_TOKEN", "SSH_AUTH_SOCK"] as const;
 
+/**
+ * Git-config indirection names, probed in the transient unit ONLY for their
+ * presence. A manager-env `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_COUNT` is an
+ * UNRESOLVED credential surface — its target file may carry
+ * `credential.helper` — and sudo's env_reset scrubs both names, so the
+ * git-config legs (a1/a2) cannot see the file they point at. Nothing here
+ * resolves-and-scans the target: PRESENCE is the hit (fail closed).
+ */
+const PROBE_CONFIG_INDIRECTION_VARS = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT"] as const;
+
 /** Credential-file sinks, checked readable-or-not in the unit user's home. */
 const CREDENTIAL_FILES = [".git-credentials", ".netrc", ".config/gh/hosts.yml"] as const;
 
@@ -734,6 +760,8 @@ const ENV_PROBE_SCRIPT = [
   'H="${HOME:-/home/$(id -un)}"',
   ...CREDENTIAL_FILES.map((f) => `[ -r "$H/${f}" ] && echo "PROBE-HIT file:$H/${f}"`),
   ...PROBE_ENV_VARS.map((v) => `printenv ${v} >/dev/null 2>&1 && echo "PROBE-HIT env:${v}"`),
+  // Config indirection — see PROBE_CONFIG_INDIRECTION_VARS: presence is the hit.
+  ...PROBE_CONFIG_INDIRECTION_VARS.map((v) => `printenv ${v} >/dev/null 2>&1 && echo "PROBE-HIT env:${v}"`),
   "exit 0",
 ].join("\n");
 
@@ -745,14 +773,26 @@ const ENV_PROBE_SCRIPT = [
  *      drop-ins: every `Environment=` value free of credential-bearing keys
  *      (any `*TOKEN=`, GIT_ASKPASS, SSH_AUTH_SOCK), every `EnvironmentFile=`
  *      naming only the approved path. Read first because the unit's `User=`
- *      is what leg (a)'s `--uid` takes.
- *  (a) `sudo -n systemd-run --wait --pipe --service-type=exec --uid=<User>` —
- *      the probe inherits the system-manager environment the run unit starts
- *      from. `git config --get-regexp` counts exit 1 with empty stdout AND
- *      empty stderr as CLEAN and everything else as a hit (it exits non-zero
- *      when nothing matches, so "must return empty" is an outcome, not a
- *      stream — and a `sudo -n` failure exits 1 with its complaint on stderr,
- *      which must not read as clean).
+ *      is what the legs below run as.
+ *  (a1/a2) `sudo -n -H -u <User> git config --show-origin --get-regexp` — the
+ *      unit user's HOME-scoped config surface. NOT the manager environment:
+ *      sudo's env_reset scrubs it, and that is also why the indirection names
+ *      (GIT_CONFIG_GLOBAL / GIT_CONFIG_COUNT) are probed in (a3) instead of
+ *      resolved here. This is not the `systemd-run --wait --pipe` wrapper the
+ *      first cut used — the wrapper prints its own status lines ("Running as
+ *      unit …", "Finished with result …") to STDERR on every invocation, so
+ *      the clean arm could never hold and the scan hit on EVERY box including
+ *      a freshly-booted empty one (measured live 2026-09-20, evidence
+ *      2026-09-20-231127). Clean is proven by the `sudo … true` preflight
+ *      below, then `git config`'s OWN three-way outcome decides: exit 1 with
+ *      empty stdout (any stderr) is CLEAN, exit 0 is a match, everything else
+ *      is a hit.
+ *  (a3) `sudo -n systemd-run --wait --pipe --service-type=exec --uid=<User>`
+ *      — kept on systemd-run deliberately, because THIS leg is the one that
+ *      must see the system-manager environment the run unit starts from
+ *      (env-var sinks and the GIT_CONFIG_* indirection names), which plain
+ *      sudo cannot deliver. The script reports file readability and the
+ *      env-var set, one PROBE-HIT line per sink.
  *  (b) `cat /home/exedev/app/.env` directly — the one env source the unit
  *      loads that a transient unit cannot inherit; no credential-keyed line.
  *
@@ -799,21 +839,45 @@ export async function probeBoxCredentials(
     }
   }
 
-  // Leg (a1/a2) — git config surfaces, in the system-manager environment.
+  // Leg (a3)'s wrapper — kept on systemd-run deliberately (docstring): the
+  // env-var and file sinks must be observed in the MANAGER environment the
+  // run unit starts from, which plain sudo cannot deliver.
   const systemdRun = ["sudo", "-n", "systemd-run", "--wait", "--pipe", "--service-type=exec", `--uid=${unitUser}`];
-  const gitConfigChecks: { hit: string; pattern: string }[] = [
-    { hit: "git-config:credential.*", pattern: "^credential\\." },
-    { hit: "git-config:url.insteadOf", pattern: "^url\\..*\\.insteadof" },
-  ];
-  for (const check of gitConfigChecks) {
-    const res = await exec([...systemdRun, "git", "config", "--show-origin", "--get-regexp", check.pattern]);
-    // git config --get-regexp exits 1 with EMPTY stdout AND empty stderr when
-    // nothing matches — that triple is the ONLY clean arm. Exit 0 is a match;
-    // anything else (a non-empty stream, a sudo -n failure, which exits 1 with
-    // "a password is required" on STDERR) is unaccounted for and refuses —
-    // the probe fails closed, never open.
-    if (!(res.exitCode === 1 && res.stdout === "" && res.stderr === "") || res.truncated === true) {
-      hits.push(check.hit);
+  // Leg (a) preflight — prove the `sudo -n -H -u` invocation works AT ALL
+  // before any git-config leg is allowed to speak for it. A sudo refusal
+  // (exit 1, "a password is required") used to be told apart from git's
+  // no-match arm only by requiring stderr empty on the clean arm — which also
+  // refused every box whose PAM stack prints a benign warning there. With
+  // sudo's functionality proven first, the git legs no longer need stderr to
+  // be silent; a refusal can no longer masquerade as clean because the legs
+  // that could confuse it never run.
+  {
+    const pre = await exec(["sudo", "-n", "-H", "-u", unitUser, "true"]);
+    if (pre.exitCode !== 0 || pre.truncated === true) {
+      hits.push("sudo-preflight-failed");
+    } else {
+      // Leg (a1/a2) — git config surfaces, in the unit user's HOME-scoped
+      // config (see the docstring for why this is NOT systemd-run).
+      const gitConfigChecks: { hit: string; pattern: string }[] = [
+        { hit: "git-config:credential.*", pattern: "^credential\\." },
+        { hit: "git-config:url.insteadOf", pattern: "^url\\..*\\.insteadof" },
+      ];
+      for (const check of gitConfigChecks) {
+        const res = await exec(["sudo", "-n", "-H", "-u", unitUser, "git", "config", "--show-origin", "--get-regexp", check.pattern]);
+        // Three-way, now that the preflight owns sudo's verdict:
+        //  - exit 1 with EMPTY stdout is CLEAN — git's no-match arm — and
+        //    stderr is NOT required empty: sudo's functionality is proven and
+        //    PAM chatter ("unable to resolve host") is not a credential.
+        //  - exit 0 is a MATCH (config emitted on stdout) — a hit, which is
+        //    why a config error that writes to stderr alongside a match never
+        //    slips through: that case exits 0.
+        //  - anything else — non-empty stdout at exit 1, any other exit code,
+        //    a truncated capture — is unaccounted for and refuses. The probe
+        //    fails closed, never open.
+        if (!(res.exitCode === 1 && res.stdout === "") || res.truncated === true) {
+          hits.push(check.hit);
+        }
+      }
     }
   }
 
