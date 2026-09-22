@@ -123,7 +123,7 @@ describe("contract pin: response schemas match the contract's shape rules", () =
 
   test("answers ⊆ asked question ids is enforced by the schema itself", () => {
     const schema = makeJudgmentResponseSchema(["asked"]);
-    const body = { model: TYPESAFE_MODEL, answers: { unasked: { type: "noul", noul: true } }, usage: USAGE };
+    const body = { model: TYPESAFE_MODEL, answers: { unasked: { type: "noul", noul: 1 } }, usage: USAGE };
     expect(schema.safeParse(body).success).toBe(false);
   });
 
@@ -148,8 +148,8 @@ describe("contract pin: response schemas match the contract's shape rules", () =
     const score = makeJudgmentResponseSchema(["s"]);
     const wrap = (answers: Record<string, unknown>) => ({ model: TYPESAFE_MODEL, answers, usage: USAGE });
 
-    expect(noul.safeParse(wrap({ n: { type: "noul", noul: true } })).success).toBe(true);
-    expect(noul.safeParse(wrap({ n: { type: "noul", noul: true, confidence: 1 } })).success).toBe(false);
+    expect(noul.safeParse(wrap({ n: { type: "noul", noul: 1 } })).success).toBe(true);
+    expect(noul.safeParse(wrap({ n: { type: "noul", noul: 1, confidence: 1 } })).success).toBe(false);
     const c = { type: "choice", choice: "patch", probabilities: { patch: 0.9 }, confidence: 0.5 };
     expect(choice.safeParse(wrap({ c })).success).toBe(true);
     expect(choice.safeParse(wrap({ c: { ...c, confidence: undefined } })).success).toBe(false);

@@ -119,7 +119,7 @@ const USAGE = { input_tokens: 321, output_tokens: 5 };
 function liveBody(overrides: Record<string, unknown> = {}): unknown {
   return {
     model: TYPESAFE_MODEL,
-    answers: { is_defect: { type: "noul", noul: false } },
+    answers: { is_defect: { type: "noul", noul: 0 } },
     usage: USAGE,
     ...overrides,
   };
@@ -347,7 +347,7 @@ describe("live-mode retry arms (fetch stub)", () => {
     for (const bad of [
       liveBody({ usage: undefined }),
       liveBody({ extra: true }),
-      liveBody({ answers: { never_asked: { type: "noul", noul: true } } }),
+      liveBody({ answers: { never_asked: { type: "noul", noul: 1 } } }),
     ]) {
       install([{ status: 200, body: bad }]);
       let caught: JudgmentHttpError | undefined;

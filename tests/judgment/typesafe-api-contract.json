@@ -28,7 +28,7 @@
     "answersSubsetOfQuestions": true,
     "usageKeys": ["input_tokens", "output_tokens"],
     "answerShapes": {
-      "noul": { "keys": ["type", "noul"] },
+      "noul": { "keys": ["type", "noul"], "valueType": "number 0..1 (probability yes; live-verified 2026-09-22)" },
       "choice": { "keys": ["type", "choice", "probabilities", "confidence"] },
       "score": { "keys": ["type", "score", "legend", "probabilities", "confidence"] }
     }

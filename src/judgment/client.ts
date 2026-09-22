@@ -287,7 +287,7 @@ function mockResponse(request: JudgmentRequest): unknown {
   const answers: Record<string, unknown> = {};
   for (const [qid, q] of Object.entries(request.questions)) {
     if (q.type === "noul") {
-      answers[qid] = { type: "noul", noul: true };
+      answers[qid] = { type: "noul", noul: 0.9 };
     } else if (q.type === "choice") {
       const keys = Object.keys(q.criteria);
       answers[qid] = {

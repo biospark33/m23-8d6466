@@ -110,7 +110,7 @@ function cannedEnvelope(over: Partial<JudgmentEnvelope> = {}): JudgmentEnvelope 
     model: "jev-1.13.0",
     questions: OBSERVER_QUESTIONS,
     answers: {
-      is_real_defect: { type: "noul", noul: false },
+      is_real_defect: { type: "noul", noul: 0 },
       disposition: {
         type: "choice",
         choice: "dismiss",
@@ -191,17 +191,17 @@ describe("answer mapping", () => {
   });
 
   test("rationale records the noul answer; the probability rides as computed text", () => {
-    expect(rationaleFrom(cannedEnvelope())).toBe("jev: is_real_defect=false; disposition=dismiss p=0.82");
+    expect(rationaleFrom(cannedEnvelope())).toBe("jev: is_real_defect=0; disposition=dismiss p=0.82");
     expect(
       rationaleFrom(
         cannedEnvelope({
           answers: {
-            is_real_defect: { type: "noul", noul: true },
+            is_real_defect: { type: "noul", noul: 1 },
             disposition: { type: "choice", choice: "patch", probabilities: { patch: 1, dismiss: 0, "gate-action": 0 }, confidence: 1 },
           },
         }),
       ),
-    ).toBe("jev: is_real_defect=true; disposition=patch p=1");
+    ).toBe("jev: is_real_defect=1; disposition=patch p=1");
   });
 
   test("record fields from a canned envelope: latency/cost derived in code, frontier label copied, arm jev", () => {
@@ -211,7 +211,7 @@ describe("answer mapping", () => {
     expect(record.labeler).toBe(JEV_LABELER);
     expect(record.arm).toBe("jev");
     expect(record.disposition).toBe("DISMISS");
-    expect(record.rationale).toBe("jev: is_real_defect=false; disposition=dismiss p=0.82");
+    expect(record.rationale).toBe("jev: is_real_defect=0; disposition=dismiss p=0.82");
     expect(record.latency_ms).toBe(123);
     expect(record.cost_exact_usd).toBeCloseTo((500 * 0.042) / 1_000_000, 12); // input-token-only billing
     expect(record.cost_estimate_usd).toBeNull();
@@ -244,7 +244,7 @@ describe("observeRound (mock, keyless)", () => {
     for (const r of jev) {
       expect(r.labeler).toBe("jev-1.13.0-observer");
       expect(r.disposition).toBe("PATCH"); // mock answers the first criterion
-      expect(r.rationale).toContain("jev: is_real_defect=true");
+      expect(r.rationale).toContain("jev: is_real_defect=0.9");
       expect(typeof r.latency_ms).toBe("number");
       expect(r.cost_exact_usd).toBeGreaterThan(0);
     }

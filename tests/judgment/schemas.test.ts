@@ -83,13 +83,13 @@ describe("makeJudgmentResponseSchema — strict + answers ⊆ asked", () => {
   const usage = { input_tokens: 10, output_tokens: 1 };
 
   test("valid noul answer parses; model literal is pinned", () => {
-    const body = { model: TYPESAFE_MODEL, answers: { probe: { type: "noul", noul: true } }, usage };
+    const body = { model: TYPESAFE_MODEL, answers: { probe: { type: "noul", noul: 1 } }, usage };
     expect(schema.safeParse(body).success).toBe(true);
     expect(schema.safeParse({ ...body, model: "jev-latest" }).success).toBe(false);
   });
 
   test("missing usage field fails", () => {
-    const body = { model: TYPESAFE_MODEL, answers: { probe: { type: "noul", noul: true } } };
+    const body = { model: TYPESAFE_MODEL, answers: { probe: { type: "noul", noul: 1 } } };
     expect(schema.safeParse(body).success).toBe(false);
   });
 
@@ -99,7 +99,7 @@ describe("makeJudgmentResponseSchema — strict + answers ⊆ asked", () => {
   });
 
   test("answering a question that was not asked fails (answers ⊆ questions)", () => {
-    const body = { model: TYPESAFE_MODEL, answers: { never_asked: { type: "noul", noul: true } }, usage };
+    const body = { model: TYPESAFE_MODEL, answers: { never_asked: { type: "noul", noul: 1 } }, usage };
     const parsed = schema.safeParse(body);
     expect(parsed.success).toBe(false);
     if (!parsed.success) expect(JSON.stringify(parsed.error.issues)).toContain("never_asked");

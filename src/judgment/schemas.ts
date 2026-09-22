@@ -77,7 +77,7 @@ export const JudgmentRequestSchema = z
 
 const ProbabilitiesSchema = z.record(z.number().min(0).max(1));
 
-export const NoulAnswerSchema = z.object({ type: z.literal("noul"), noul: z.boolean() }).strict();
+export const NoulAnswerSchema = z.object({ type: z.literal("noul"), noul: z.number().min(0).max(1) }).strict();
 
 export const ChoiceAnswerSchema = z
   .object({
