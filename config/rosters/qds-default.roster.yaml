@@ -42,7 +42,17 @@ roles:
 
   - name: worker
     model: deepseek/deepseek-v3.2
+    # self-compact registers `self_compact` / `view_context`; `tools` must stay
+    # null (the default) or name those tools, or pi's --tools filter silently
+    # drops them (roster/schema.ts warns when harness_engineering meets a
+    # non-null allowlist).
     writes: ["src/", "tests/", "scripts/"]
+    harness_engineering:
+      - pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts
+    compaction:
+      soft_at: "30%"
+      at: "50%"
+      buffer: "10%"
 
   - name: reviewer
     model: qwen/qwen3-30b-a3b-instruct-2507
