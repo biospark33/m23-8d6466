@@ -44,9 +44,14 @@ pi-vs-claude-code-vendor/self-compact/
   DIVERGENCE.md                              # documents every delta from upstream
 ```
 
-Upstream source files remain pristine. All QDS-specific behavior is expressed through
-the prompt files (upstream's designed fork point) and `DIVERGENCE.md`. Upstream's own
-test suite (`just verify`) continues to run against the vendored copy unmodified.
+Upstream source files remain pristine except minimal type-level fixes needed by the
+repo's strict tsc gate (owner decision 2026-09-22 — the repo typechecks clean on `dev`
+and the vendored subtree must not regress that). Every patched file is logged in
+`DIVERGENCE.md`; upstream syncs 3-way merge against the pin AND re-apply those rows.
+All QDS-specific behavior is expressed through the prompt files (upstream's designed
+fork point) and `DIVERGENCE.md`. Upstream's own test suite (`just verify`) continues
+to run against the vendored copy unmodified — type-level patches must never change
+runtime behavior, and the vendored suites prove it after every patch.
 
 ## Wiring (existing chain, no new seams)
 

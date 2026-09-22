@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Upstream pin: commit `576fe4abda021849f5cde5b6f5796467ffa4bcbd` (2026-09-20). Record in DIVERGENCE.md provenance.
-- Upstream source files stay **byte-verbatim**. The ONLY fork points: `pi-vs-claude-code-vendor/self-compact/.pi/self-compact/*.md` (QDS prompts) and `pi-vs-claude-code-vendor/self-compact/DIVERGENCE.md` (new file).
+- Upstream source files stay **byte-verbatim except minimal type-level fixes required by the repo's strict tsc gate** (owner decision 2026-09-22, supersedes pure-verbatim; dev typecheck baseline is exit 0 and must stay there). Every patched file gets a DIVERGENCE.md row; upstream syncs 3-way merge AND re-apply those rows. Other fork points: `pi-vs-claude-code-vendor/self-compact/.pi/self-compact/*.md` (QDS prompts) and `DIVERGENCE.md` (new file).
 - Thresholds are exactly `--compact-soft-at 30% --compact-at 50% --compact-buffer 10%` (hard = 60%, upstream caps at 90%). Values appear ONLY in `config/rosters/qds-default.roster.yaml` and the tests that assert them.
 - pi host versions: local (whatever `pi --version` reports) and exedev image pin **0.84.4** (`scripts/build-exedev-image.ts:184-185`). Upstream targets 0.85.1 — the smoke test (Task 7) and live round (Task 9) are the version gates. If 0.84.4 rejects the extension, bump the image pin; do NOT wire the roster against a broken host.
 - Repo rules (CLAUDE.md): run `impact({target, direction: "upstream"})` before editing any existing symbol; run `detect_changes()` before every commit; never bare `bun test` — always `bun test > /tmp/qds-test.log 2>&1`.
