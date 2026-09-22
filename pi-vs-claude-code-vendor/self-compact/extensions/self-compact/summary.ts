@@ -69,12 +69,12 @@ function summaryInstructions(event: SessionBeforeCompactEvent, prompt: LoadedPro
 /** Match complete known inputs, so tag-like text inside history cannot cut the conversation short. */
 function replaceInstructions(context: Context, inputs: string[], instructions: string, budgetChars: number) {
 	let truncated = false;
-	const messages = context.messages.map(message => {
+	const messages = context.messages.map((message: any) => {
 		if (message.role !== "user") return message;
 		const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
 		return {
 			...message,
-			content: content.map(block => {
+			content: content.map((block: any) => {
 				if (block.type !== "text") return block;
 				let input = inputs.find(candidate => block.text.startsWith(candidate));
 				if (input === undefined) throw new Error("Unrecognized Pi summary input; cannot replace instructions safely.");
@@ -97,7 +97,7 @@ export async function generateSummary(event: SessionBeforeCompactEvent, ctx: Ext
 	let truncatedInput = false;
 	const result = await compact(
 		event.preparation, ctx.model, undefined, undefined, event.customInstructions, event.signal, ctx.thinkingLevel,
-		async (model, context, options) => {
+		async (model: any, context: any, options: any) => {
 			const maxTokens = Math.min(options?.maxTokens ?? 8192, model.maxTokens || 8192, 8192);
 			const budgetChars = Math.max(8000, (model.contextWindow - maxTokens - 2000) * 4 - system.text.length - userInstructions.length);
 			const { messages, truncated } = replaceInstructions(context, inputs, userInstructions, budgetChars);
@@ -107,7 +107,7 @@ export async function generateSummary(event: SessionBeforeCompactEvent, ctx: Ext
 				...(model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
 			});
 			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
-			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");
+			if (response.stopReason !== "error" && !response.content.some((block: any) => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");
 			const stream = createAssistantMessageEventStream();
 			stream.end(response);
 			return stream;

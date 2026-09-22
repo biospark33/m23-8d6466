@@ -99,12 +99,12 @@ function handoffPlan(note: string, usageTotal: number): Plan {
 function decide(context: Context): Plan {
 	const messages = context.messages;
 	// Model a fresh context after each returned note, including resumed sessions with retained history.
-	const lastHandoff = messages.reduce((found, message, index) => {
+	const lastHandoff = messages.reduce((found: any, message: any, index: any) => {
 		if (message.role !== "user") return found;
 		const text = textOf(message.content).trim();
 		return text === (lastSentNote || NOTE).trim() || text === NOTE.trim() || /^Continue from your saved note_to_self above/.test(text) ? index : found;
 	}, -1);
-	const assistantCount = messages.slice(lastHandoff + 1).filter((m) => m.role === "assistant").length;
+	const assistantCount = messages.slice(lastHandoff + 1).filter((m: any) => m.role === "assistant").length;
 	const usageTotal = BASE + STEP * assistantCount;
 	// Transient guidance arrives as a trailing user-role message; look past it for the real last message.
 	let lastIndex = messages.length - 1;

@@ -29,7 +29,7 @@ import { generateSummary, hasCompactionMaterial, keepRecentTokens } from "./summ
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatPct, formatTokens, renderContextBar } from "./context-bar.ts";
+import { formatPct, renderContextBar } from "./context-bar.ts";
 import {
 	FORCED_PROMPT,
 	BUILTIN_PROMPTS,
@@ -490,15 +490,15 @@ export default function selfCompact(pi: ExtensionAPI) {
 			`${VIEW_TOOL_NAME} takes no arguments and never changes anything; use it when you need your current context numbers, not on every turn.`,
 		],
 		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId: any, _params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const view = contextView(ctx);
 			refreshUi(ctx);
 			return { content: [{ type: "text", text: JSON.stringify(view, null, 2) }], details: view };
 		},
-		renderCall(_args, theme) {
+		renderCall(_args: any, theme: any) {
 			return new Text(theme.fg("toolTitle", theme.bold(VIEW_TOOL_NAME)), 0, 0);
 		},
-		renderResult(result, _options, theme) {
+		renderResult(result: any, _options: any, theme: any) {
 			const first = result.content[0];
 			const text = first && first.type === "text" ? first.text : "";
 			return new Text(theme.fg("text", text), 0, 0);
@@ -518,7 +518,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			note_to_self: Type.String({ description: `Your handoff note (1-${NOTE_MAX_CHARS} chars). Ends with the exact NEXT ACTION.` }),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId: any, params: any, signal: any, _onUpdate: any, ctx: any) {
 			if (signal?.aborted) throw new Error("Self-compaction cancelled before saving the note.");
 			const problem = inert();
 			if (problem) throw new Error(`self-compact is inert because its settings were rejected: ${problem}`);
@@ -551,11 +551,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 				terminate: true,
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args: any, theme: any) {
 			const note = typeof args?.note_to_self === "string" ? args.note_to_self : "";
 			return new Text(`${theme.fg("toolTitle", theme.bold(TOOL_NAME))} ${theme.fg("muted", `note ${note.length.toLocaleString("en-US")} chars`)}`, 0, 0);
 		},
-		renderResult(result, { expanded }, theme) {
+		renderResult(result: any, { expanded }: any, theme: any) {
 			const first = result.content[0];
 			const text = first && first.type === "text" ? first.text : "";
 			const details = result.details as { noteChars?: number; cycle?: number; note?: string; usedTokens?: number | null; usedPercent?: number | null; level?: string } | undefined;
@@ -572,7 +572,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.registerCommand("self-compact-info", {
 		description: "Show self-compact settings, resolved thresholds, usage, state, cycle count, prompt sources, and pending notes (no LLM turn)",
-		handler: async (_args, ctx: ExtensionCommandContext) => {
+		handler: async (_args: any, ctx: ExtensionCommandContext) => {
 			const info = infoLines(ctx);
 			pi.appendEntry(INFO_ENTRY_TYPE, { ...info.data, lines: info.lines, at: Date.now() });
 			if (ctx.hasUI && ctx.mode !== "tui") ctx.ui.notify(info.lines.join("\n"), "info");
@@ -582,7 +582,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.registerCommand("self-compact-now", {
 		description: "Ask the agent to write its note_to_self and call self_compact now (reuses a saved note on retry)",
-		handler: async (_args, ctx: ExtensionCommandContext) => {
+		handler: async (_args: any, ctx: ExtensionCommandContext) => {
 			const problem = inert();
 			if (problem) {
 				notify(ctx, `self-compact: cannot compact, settings were rejected: ${problem}`, "error");
@@ -607,7 +607,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------- renderers
 
-	pi.registerMessageRenderer(HANDOFF_TYPE, (message, options, theme) => {
+	pi.registerMessageRenderer(HANDOFF_TYPE, (message: any, options: any, theme: any) => {
 		const details = message.details as { cycle?: number; note?: string } | undefined;
 		const note = details?.note ?? (typeof message.content === "string" ? message.content : "");
 		// Always show the full note: this is exactly what was fed back into the agent after compaction.
@@ -615,7 +615,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return new Text(`${header}\n${theme.fg("text", note)}`, options.outputPad ?? 1, 0);
 	});
 
-	pi.registerEntryRenderer(PHASE_ENTRY_TYPE, (entry, _options, theme) => {
+	pi.registerEntryRenderer(PHASE_ENTRY_TYPE, (entry: any, _options: any, theme: any) => {
 		const data = entry.data as { level?: UsageLevel; percent?: number | null; text?: string } | undefined;
 		const level = data?.level ?? "notice";
 		// Show the full guidance message the model receives, once per crossing (older entries fall back to the one-liner).
@@ -623,7 +623,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return new Text(theme.fg(levelColor(level), text), 0, 0);
 	});
 
-	pi.registerEntryRenderer(INFO_ENTRY_TYPE, (entry, _options, theme) => {
+	pi.registerEntryRenderer(INFO_ENTRY_TYPE, (entry: any, _options: any, theme: any) => {
 		const lines = (entry.data as { lines?: string[] } | undefined)?.lines ?? [];
 		const [title, ...rest] = lines;
 		return new Text([theme.fg("accent", theme.bold(title ?? "self-compact info")), ...rest.map((l) => theme.fg("text", l))].join("\n"), 0, 0);
@@ -631,7 +631,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	function installFooter(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui") return;
-		ctx.ui.setFooter((tui, theme) => {
+		ctx.ui.setFooter((tui: any, theme: any) => {
 			R.requestRender = () => tui.requestRender();
 			return {
 				dispose: () => {
@@ -731,7 +731,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", recover);
-	pi.on("session_tree", async (_event, ctx) => recover({ reason: "tree" }, ctx));
+	pi.on("session_tree", async (_event: any, ctx: any) => recover({ reason: "tree" }, ctx));
 
 	pi.on("session_shutdown", async () => {
 		R.alive = false;
@@ -739,19 +739,19 @@ export default function selfCompact(pi: ExtensionAPI) {
 		clearTimers();
 	});
 
-	pi.on("model_select", async (_event, ctx) => {
+	pi.on("model_select", async (_event: any, ctx: any) => {
 		resolve(ctx);
 		trackLevel(ctx);
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		trackLevel(ctx);
 		return { systemPrompt: event.systemPrompt + SYSTEM_PROMPT_LINE };
 	});
 
-	pi.on("context", async (event, ctx) => {
+	pi.on("context", async (event: any, ctx: any) => {
 		trackLevel(ctx);
-		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === GUIDANCE_TYPE));
+		const messages = event.messages.filter((message: any) => !(message.role === "custom" && message.customType === GUIDANCE_TYPE));
 		try {
 			const text = guidanceText(ctx);
 			if (text) messages.push(guidanceMessage(text));
@@ -766,7 +766,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return { messages };
 	});
 
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("message_end", async (event: any, ctx: any) => {
 		if (event.message.role === "assistant") {
 			trackLevel(ctx);
 			return;
@@ -784,7 +784,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("tool_call", async (event, ctx) => {
+	pi.on("tool_call", async (event: any, ctx: any) => {
 		trackLevel(ctx);
 		const problem = inert();
 		if (problem) return { block: true, reason: `self-compact rejected its settings, so this session is not protected: ${problem}. Fix the --compact-* flags and restart.` };
@@ -797,9 +797,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i]!;
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const calls = (entry.message as AssistantMessage).content.filter((c) => c.type === "toolCall");
-			const hasHandoff = calls.some((c) => c.type === "toolCall" && c.name === TOOL_NAME && typeof c.arguments?.note_to_self === "string" && c.arguments.note_to_self.trim().length > 0 && c.arguments.note_to_self.length <= NOTE_MAX_CHARS);
-			if (hasHandoff && calls.some((c) => c.type === "toolCall" && c.id === event.toolCallId)) {
+			const calls = (entry.message as AssistantMessage).content.filter((c: any) => c.type === "toolCall");
+			const hasHandoff = calls.some((c: any) => c.type === "toolCall" && c.name === TOOL_NAME && typeof c.arguments?.note_to_self === "string" && c.arguments.note_to_self.trim().length > 0 && c.arguments.note_to_self.length <= NOTE_MAX_CHARS);
+			if (hasHandoff && calls.some((c: any) => c.type === "toolCall" && c.id === event.toolCallId)) {
 				return { block: true, terminate: true, reason: `Tool "${event.toolName}" is blocked by self-compact: ${TOOL_NAME} is in this tool batch, so the run must end here. Wait for the handoff.` };
 			}
 			break;
@@ -821,11 +821,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (_event: any, ctx: any) => {
 		trackLevel(ctx);
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (_event: any, ctx: any) => {
 		trackLevel(ctx);
 		if (inert() || activeHandoff() || R.idleRequestEpoch === R.epoch) return;
 		if (!locked() && R.level !== "warning" && R.level !== "forced") return;
@@ -833,7 +833,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
 	});
 
-	pi.on("agent_settled", async (_event, ctx) => {
+	pi.on("agent_settled", async (_event: any, ctx: any) => {
 		if (!R.alive) return; // shutdown during compaction: the ctx is already stale
 		refreshUi(ctx);
 		if (inert()) return;
@@ -843,7 +843,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		else if (h.status === "pending" || (h.status === "failed" && h.attempts < MAX_AUTO_RETRIES && R.lastCompactionError)) startCompaction(ctx, h.status === "pending" ? "agent idle" : "retry after failure");
 	});
 
-	pi.on("session_before_compact", async (event, ctx) => {
+	pi.on("session_before_compact", async (event: any, ctx: any) => {
 		if (event.reason !== "manual") {
 			setLocked(true);
 			save();
@@ -889,7 +889,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return { cancel: true };
 	});
 
-	pi.on("session_compact", async (event, ctx) => {
+	pi.on("session_compact", async (event: any, ctx: any) => {
 		R.epoch += 1;
 		R.announcedLevel = "idle";
 		R.compactionInFlight = false;
@@ -909,7 +909,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		refreshUi(ctx);
 	});
 
-	pi.on("session_compact_failed", async (event, ctx) => {
+	pi.on("session_compact_failed", async (event: any, ctx: any) => {
 		// We intentionally defer native auto-compaction until our idle handoff transaction.
 		if (event.reason !== "manual" && event.aborted) return;
 		R.compactionInFlight = false;
