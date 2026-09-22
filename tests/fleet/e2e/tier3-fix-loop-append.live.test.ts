@@ -1343,26 +1343,34 @@ test.todoIf(liveTodoOff())(
       let prAfter: { headSha: string; headRefName: string; state: string } | null = null;
       let prReadErrors = 0;
       let prReadLastError = "";
+      let prReadSucceeded = false;
       const prSettleDeadline = Date.now() + T61A_PR_SETTLE_WINDOW_MS;
       for (;;) {
         try {
           prAfter = await github.getPullRequest({ owner, repo, prNumber, token: hostToken });
+          prReadSucceeded = true;
         } catch (e) {
           // keep the previous reading (null until the first success) and let
           // the deadline — not the exception — decide whether the round ends
           prReadErrors += 1;
           prReadLastError = e instanceof Error ? e.message : String(e);
         }
-        if (prAfter === null) break; // a clean 404 — no throw recorded it; terminal below
-        if (prAfter.headSha === attemptSha) break;
+        // Only a SUCCESSFUL read that answered null is the terminal 404 (the
+        // client returns null for a clean 404 and throws everything else). A
+        // null still held from before the first successful read is "not yet
+        // read" — a thrown poll must keep polling, not break as if 404'd.
+        if (prReadSucceeded && prAfter === null) break;
+        if (prAfter?.headSha === attemptSha) break;
         if (Date.now() > prSettleDeadline) break;
         await new Promise((r) => setTimeout(r, T61A_PR_SETTLE_INTERVAL_MS));
       }
       evidence.push({ phase: "pr-remote", headSha: prAfter?.headSha ?? null, headRefName: prAfter?.headRefName ?? null, state: prAfter?.state ?? null, expectedAttemptSha: attemptSha });
-      // Null with recorded THROWS — never one successful read and never a
-      // clean 404 — is a read failure, not evidence about the PR: name it
-      // before the settles below would misattribute the null to a 404.
-      if (prAfter === null && prReadErrors > 0) {
+      // Null with NO successful read ever completing — the null is a leftover
+      // placeholder, not a 404 answer and not evidence about the PR — is a
+      // read failure: name it before the settles below would misattribute it.
+      // (Reaching here null with prReadSucceeded IS the clean-404 arm; the
+      // settles assert not-null below and fail the round on it.)
+      if (prAfter === null && !prReadSucceeded) {
         throw new Error(
           `the PR-settle poll absorbed ${prReadErrors} read error(s) and never completed one successful read (last: ${redactSecrets(prReadLastError)}) — ${DISPOSABLE_REPO_SLUG}#${prNumber} could not be read post-append, so the round cannot distinguish a transient API failure from the 404 the terminal arm names.`,
         );
