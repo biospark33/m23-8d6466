@@ -301,6 +301,18 @@ const T61A_APPROVE_TIMEOUT_MS = 120_000;
 /** The inv2 ceiling: binding + lock + local git diff + scope + a fresh comment read + preflight + a real push + one record write. */
 const T61A_INV2_TIMEOUT_MS = 420_000;
 
+/**
+ * The PR-settle window: the append's own push precedes the remote read by
+ * seconds and GitHub's PR GET can still serve the pre-push head through its
+ * cache (measured live 2026-09-21, evidence 2026-09-21-000025's successor), so
+ * a minute of re-reads closes the cache. Transient read errors are absorbed to
+ * this deadline; a 404 is terminal inside it.
+ */
+const T61A_PR_SETTLE_WINDOW_MS = 60_000;
+
+/** The PR-settle tick — one cheap GitHub PR GET per cycle. */
+const T61A_PR_SETTLE_INTERVAL_MS = 5_000;
+
 /** The post-dispatch positive-control `driver.list()` ceiling (T3.8's T26 shape — a raw driver await gets a named bound). */
 const T61A_LIST_CEILING_MS = 120_000;
 
@@ -716,8 +728,14 @@ test.todoIf(liveTodoOff())(
           headSha: pr.headSha,
         });
         if (headCheck.exitCode !== 0) {
+          // The fetch URL anchors the RIGHT object store — paste-and-run from
+          // any cwd lands in the repo the -C names. pr.html_url when it came
+          // back a string; otherwise the slug's https form from the owner/repo
+          // already in scope (a non-string html_url must not render a blank
+          // URL into the command).
+          const fetchUrl = prUrl !== "" ? prUrl.replace(/\/pull\/\d+$/, ".git") : `https://github.com/${owner}/${repo}.git`;
           throw new Error(
-            `the host repo (${REPO_ROOT}) does not contain the PR head commit ${pr.headSha} — the harvest bundle's prerequisite cannot verify here. Run: git fetch ${prUrl.replace(/\/pull\/\d+$/, ".git")} ${pr.headSha} — then re-run.`,
+            `the host repo (${REPO_ROOT}) does not contain the PR head commit ${pr.headSha} — the harvest bundle's prerequisite cannot verify here. Run: git -C ${REPO_ROOT} fetch ${fetchUrl} ${pr.headSha} — then re-run.`,
           );
         }
       }
@@ -932,13 +950,18 @@ test.todoIf(liveTodoOff())(
       expect(neg.exitCode).toBe(5);
       expect(negEnvelope).toBeDefined();
       // The refusal names the MISSING ENTRY arm, not a file-level guard — the
-      // file exists and parses; the slug's absence is what refused. Asserted
-      // via the SCRATCH scope file's path in the message (redaction blanks
-      // the slug itself: the 41-char mixed-case owner/repo collides with the
-      // opaque-token heuristic — measured live, evidence 2026-09-20-224548),
-      // which is the stronger half anyway: it proves the probe consulted the
+      // file exists and parses; the slug's absence is what refused. The arm's
+      // constant phrase (`no fix scope entry for`, feedback-run.ts's
+      // missing-entry arm) is the discriminator: a guard-forwarding refusal —
+      // an unreadable or mis-moded scratch file — embeds the same path under
+      // the same `fix-scope-missing` code but NOT this phrase. The phrase
+      // survives redaction (only the slug is blanked: the 41-char mixed-case
+      // owner/repo collides with the opaque-token heuristic — measured live,
+      // evidence 2026-09-20-224548). The SCRATCH path is kept as the secondary
+      // assert, the scratch-host proof: it pins that the probe consulted the
       // scratch host, never the operator's real scope file.
       const negScopeRealPath = realpathSync(negScopePath);
+      expect(String(negEnvelope?.message ?? "")).toContain("no fix scope entry for");
       expect(String(negEnvelope?.message ?? "")).toContain(negScopeRealPath);
       // No dispatch ⇒ no fix-run record: the store still holds ONLY the parent.
       expect(recordsAfterNeg).toEqual([`${parentRunId}.json`]);
@@ -1052,7 +1075,9 @@ test.todoIf(liveTodoOff())(
           // leg mid-provisioning (evidence 2026-09-20-230327: 10 rejection
           // ticks at ~45 s, all `invalid run id: ""`). The poll deadline
           // (inv1Deadline / T61A_ENGINE_WINDOW_MS) still bounds this window.
-          if (fixVmName === "") {
+          // falsy, not `=== ""`: an absent vmName FIELD and the empty-string
+          // sentinel are the same provisioning-pending signal here.
+          if (!fixVmName) {
             kindCounts["(provisioning-pending)"] = (kindCounts["(provisioning-pending)"] ?? 0) + 1;
             lastUnreadableWhy = `provisioning pending (no vmName yet): ${tick.rejection}`;
             // `continue` skips this loop's tail deadline checks, so the
@@ -1306,22 +1331,42 @@ test.todoIf(liveTodoOff())(
       expect(ancestry.exitCode).toBe(0);
       // The REMOTE reading through the same seam: the PR's head moved from the
       // pre-round sha to the appended sha, on the same branch, still open.
-      // POLLED, not read once: the append's own push precedes this read by
-      // seconds and GitHub's PR reads can serve the pre-push head through
-      // their cache (measured live 2026-09-21, evidence 2026-09-21-000025's
-      // successor: inv2 reported `pushed` + `appended` and the branch API
-      // already served the appended sha, while the PR GET still answered the
-      // old one). Up to a minute of re-reads; the branch sha is the
-      // tie-breaker the loop accepts on the first equality.
+      // POLLED, not read once: the loop runs past GitHub's read-after-write
+      // cache — the append's own push precedes this read by seconds and the
+      // PR GET can still serve the pre-push head (measured live 2026-09-21,
+      // evidence 2026-09-21-000025's successor: inv2 reported `pushed` +
+      // `appended` and the branch API already served the appended sha, while
+      // the PR GET still answered the old one). Transient read errors are
+      // absorbed to the deadline — a 5xx/rate-limit must not abort the round
+      // POST-spend; a 404 is TERMINAL (the disposable repo gone mid-round
+      // cannot settle) and breaks immediately.
       let prAfter: { headSha: string; headRefName: string; state: string } | null = null;
-      const prSettleDeadline = Date.now() + 60_000;
+      let prReadErrors = 0;
+      let prReadLastError = "";
+      const prSettleDeadline = Date.now() + T61A_PR_SETTLE_WINDOW_MS;
       for (;;) {
-        prAfter = await github.getPullRequest({ owner, repo, prNumber, token: hostToken });
-        if (prAfter !== null && prAfter.headSha === attemptSha) break;
+        try {
+          prAfter = await github.getPullRequest({ owner, repo, prNumber, token: hostToken });
+        } catch (e) {
+          // keep the previous reading (null until the first success) and let
+          // the deadline — not the exception — decide whether the round ends
+          prReadErrors += 1;
+          prReadLastError = e instanceof Error ? e.message : String(e);
+        }
+        if (prAfter === null) break; // a clean 404 — no throw recorded it; terminal below
+        if (prAfter.headSha === attemptSha) break;
         if (Date.now() > prSettleDeadline) break;
-        await new Promise((r) => setTimeout(r, 5_000));
+        await new Promise((r) => setTimeout(r, T61A_PR_SETTLE_INTERVAL_MS));
       }
       evidence.push({ phase: "pr-remote", headSha: prAfter?.headSha ?? null, headRefName: prAfter?.headRefName ?? null, state: prAfter?.state ?? null, expectedAttemptSha: attemptSha });
+      // Null with recorded THROWS — never one successful read and never a
+      // clean 404 — is a read failure, not evidence about the PR: name it
+      // before the settles below would misattribute the null to a 404.
+      if (prAfter === null && prReadErrors > 0) {
+        throw new Error(
+          `the PR-settle poll absorbed ${prReadErrors} read error(s) and never completed one successful read (last: ${redactSecrets(prReadLastError)}) — ${DISPOSABLE_REPO_SLUG}#${prNumber} could not be read post-append, so the round cannot distinguish a transient API failure from the 404 the terminal arm names.`,
+        );
+      }
       expect(prAfter).not.toBeNull();
       expect(prAfter?.headRefName).toBe(pr.headRefName);
       expect(prAfter?.headSha).toBe(attemptSha);

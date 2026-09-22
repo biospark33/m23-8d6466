@@ -59,7 +59,6 @@
  * resolveRunsDir); approval-gate.ts and approvers.ts are banned outright. The
  * fence gate greps this file.
  */
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
@@ -124,6 +123,33 @@ function resolveRecordsDir(dir: string | undefined): string {
   if (dir !== undefined) return dir;
   const env = process.env.QDS_RUNS_DIR?.trim();
   return env !== undefined && env !== "" ? env : ".sandbox/runs";
+}
+
+/**
+ * The write-posture store for an invocation that is about to write: close the
+ * read-only intake store (it holds no handles — the constructor's checks and
+ * sweeps are all synchronous, so "closing" is abandoning the object) and
+ * reopen WITHOUT `create: false`, re-running every posture proof the writable
+ * constructor owns (0700, O_EXCL, link(2), the stale-temp sweep).
+ *
+ * A caller-injected store is the test's own store — taken as-is, never
+ * reopened under it. The failure mapping is the intake guard's, for the same
+ * reason F2 names: a chmod EPERM or an EROFS escaping as a raw errno would
+ * cost the automation its typed exit 5.
+ */
+function writableStoreFor(deps: FixRunDeps | undefined, store: RunRecordStore, requestId: string): RunRecordStore {
+  if (deps?.store !== undefined) return store;
+  try {
+    return new RunRecordStore({ dir: store.dir, requestId });
+  } catch (e) {
+    const x = (e ?? {}) as { message?: string };
+    throw new FleetError(
+      5,
+      "not-a-factory-pr",
+      `the records directory ${store.dir} cannot be opened read-write (${redactSecrets(x.message ?? e)})`,
+      "fix the directory's permissions/ownership, or pass --dir",
+    );
+  }
 }
 
 /** Everything injectable, so the suite drives run() in-process with fakes at every seam. */
@@ -322,6 +348,8 @@ export async function run(
   let code = 1;
   let prNumber = 0;
   let fixRunId: string | undefined;
+  /** F3: the PARENT run's invocation lock — see the acquire below. Undefined until the join resolves the parent. */
+  let parentLock: RunLockHandle | undefined;
   let phase = "resolve";
   /** I11: sub-timings are ABSENT, never 0, on legs that did not run. */
   const timings: Record<string, number> = {};
@@ -409,30 +437,29 @@ export async function run(
       deps?.store ??
       (() => {
         const dir = resolveRecordsDir(args.dir);
-        // A MISSING records directory stays create:false — a no-op invocation
-        // (closed PR, empty feedback, dedup) must not mkdir/chmod anything,
-        // and with no records directory there are no factory runs, so there
-        // is no factory PR to fix. An EXISTING directory (the normal case:
-        // the parent run's store) opens READ-WRITE, because the fix run
-        // writes — the attempt record, the parent's attempt-ledger append.
-        // With create:false unconditionally, the dispatch's record create
-        // refused `provision-failed` AFTER a run id had minted (measured
-        // live, 2026-09-20: "run record store … was opened read-only (create:
-        // false)"), invisible to the unit suite where the store is injected.
-        if (!existsSync(dir)) {
-          try {
-            return new RunRecordStore({ dir, create: false, requestId });
-          } catch (e) {
-            const x = (e ?? {}) as { message?: string };
-            throw new FleetError(
-              5,
-              "not-a-factory-pr",
-              `the records directory ${dir} is unusable (${redactSecrets(x.message ?? e)}) — no factory runs means no factory PR`,
-              "run fix-run from the checkout whose .sandbox/runs holds the PR's parent run, or pass --dir",
-            );
-          }
+        // READ-ONLY, always. A no-op invocation (closed PR, empty feedback,
+        // dedup, approval-pending) must not mkdir/chmod anything — and that
+        // guarantee now holds for an EXISTING directory too, not just a
+        // missing one: the writable open (mkdir 0700 + probe files + the
+        // stale-temp sweep) previously ran BEFORE any no-op arm could exit,
+        // mutating a directory the invocation was about to leave untouched.
+        // The write posture is taken lazily — top of invocation1 and
+        // invocation2, via writableStoreFor — because only an invocation that
+        // will actually dispatch or push writes (the attempt record, the
+        // parent's attempt-ledger append, the post-push fixContext). With no
+        // records directory there are no factory runs, so there is no factory
+        // PR to fix, and that guard stays here at intake.
+        try {
+          return new RunRecordStore({ dir, create: false, requestId });
+        } catch (e) {
+          const x = (e ?? {}) as { message?: string };
+          throw new FleetError(
+            5,
+            "not-a-factory-pr",
+            `the records directory ${dir} is unusable (${redactSecrets(x.message ?? e)}) — no factory runs means no factory PR`,
+            "run fix-run from the checkout whose .sandbox/runs holds the PR's parent run, or pass --dir",
+          );
         }
-        return new RunRecordStore({ dir, requestId });
       })();
 
     const tokenFn = deps?.token ?? readHostToken;
@@ -499,6 +526,22 @@ export async function run(
     }
     // The freshness re-read I8 names: the scan's copy is stale the moment it lands.
     const parent = store.get(parentSummary.runId);
+
+    // The PARENT run's invocation lock, taken the moment the join resolves the
+    // parent and held to invocation exit (released in run()'s finally — never
+    // across the approval gate, which is a separate process's human time).
+    // The parent is the contention point, not the fix run: the dedup key IS
+    // the parent's `fixAttemptRunIds` ledger, and invocation 1's append to it
+    // (the fresh re-read + `store.set` below the dispatch) is a check-then-act
+    // whose window a concurrent second invocation otherwise narrows to
+    // microseconds but never closes — the loser's ledger id vanishes and the
+    // lost dedup key re-dispatches (spend). Serializing on the parent's lock
+    // refuses the second invocation `lock-refused` exit 5 at report() BEFORE
+    // it mints anything. The fix run's own lock (acquired inside each
+    // invocation, keyed on the freshly minted attempt id) is a different key
+    // and never collides with this one — acquireRunLock keys on
+    // `<runsDir>/<runId>.lock` and parent ≠ attempt.
+    parentLock = acquireRunLock(store.dir, parent.runId, "fix-run");
 
     // ── the bot-comment read and the comment-ID dedup ──
     const commentSet = await fetchBotComments(github, { owner: repoEntry.owner, repo: repoEntry.repo, prNumber, token });
@@ -592,6 +635,23 @@ export async function run(
     code = report(e);
     return code;
   } finally {
+    // F3's release posture: the parent lock comes off on EVERY path — success,
+    // refusal, throw — because the story's contract is that fix-run locks are
+    // never held across the approval gate. A failing release keeps its
+    // registration, so the module's exit handler retries and reports it; the
+    // diagnostic here just names it at the invocation's own exit too.
+    if (parentLock !== undefined) {
+      try {
+        releaseRunLock(parentLock);
+      } catch (e) {
+        const x = (e ?? {}) as { message?: string };
+        printRefusal(
+          "parent-lock-release-failed",
+          `could not release the parent run's lock: ${redactSecrets(x.message ?? e)}`,
+          "the next fix-run invocation for this parent refuses lock-refused until the lock is cleared — rm it only once no invocation is running",
+        );
+      }
+    }
     attemptLog();
   }
 
@@ -676,6 +736,11 @@ interface Inv1Ctx {
 }
 
 async function invocation1(ctx: Inv1Ctx): Promise<number> {
+  // The write posture is taken HERE, not at intake (F1): from this point the
+  // invocation WILL dispatch and write — the attempt record, the parent's
+  // attempt-ledger append, the chain's writes — so every store read below
+  // (dispatch, startFn, the chain) goes through the writable handle.
+  ctx.store = writableStoreFor(ctx.deps, ctx.store, ctx.requestId);
   const { deps, store, hostRoot, repoSlug, parent, pr, requestId } = ctx;
   ctx.setPhase("dispatch");
 
@@ -966,6 +1031,11 @@ interface Inv2Ctx {
 }
 
 async function invocation2(ctx: Inv2Ctx): Promise<number> {
+  // Same write posture as invocation 1 (F1): the push seam and the post-push
+  // fixContext write on the fix run's own record both mutate records, so the
+  // store is reopened writable before the binding read below — a binding
+  // check is a read, but everything after the scope gate is a write.
+  ctx.store = writableStoreFor(ctx.deps, ctx.store, ctx.requestId);
   const { deps, store, hostRoot, fixRunId } = ctx;
   ctx.setPhase("bind");
 

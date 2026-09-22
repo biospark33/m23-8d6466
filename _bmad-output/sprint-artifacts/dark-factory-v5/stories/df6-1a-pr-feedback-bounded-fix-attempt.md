@@ -822,15 +822,25 @@ the harvested diff, the credential probe, and the `fixContext` write.
   file whose content the leg above checks — with any additional `EnvironmentFile=` a refusal. A hit on
   any of them aborts the run and tears the box down, exactly like the legs above.
 
-  **Mechanism, not just requirement (M3).** The probe runs as
-  `sudo -n systemd-run --wait --pipe --service-type=exec --uid=<the unit's User=> …` — `sudo -n`
+  **Mechanism, not just requirement (M3).** The probe is a deliberate hybrid. The git-config legs
+  (`credential.*`, the home-tree files) run as plain `sudo -n -H -u <the unit's User=> …` — `sudo -n`
   because passwordless sudo is an established substrate property (`fleet run`'s precedent in
-  `src/fleet/run.ts`) and an unprivileged `systemd-run` against the **system** manager hits the polkit
-  wall — so it inherits the system-manager environment `qds-run@<runId>.service` starts from; an
-  ordinary exec sees a different environment and would prove nothing about the unit. Each
+  `src/fleet/run.ts`), and `-H` so the check sees the HOME-scoped config surface the unit's user
+  would actually resolve. They do NOT run under `systemd-run`: measured live on 2026-09-20
+  (evidence `_bmad-output/evidence/df3-e2e/2026-09-20-231127-*.json`), `systemd-run --wait --pipe`
+  prints its own "Running as unit: …" / "Finished with result: …" status lines on stderr, so the
+  clean arm — exit 1 ∧ empty stdout ∧ empty stderr — could never hold and every box, even a bare
+  boot, hit `credential-probe-hit`. The environment/credential-file leg (env vars, `.env`, unit
+  directives, and the `GIT_CONFIG_*` refusal) RETAINS
+  `sudo -n systemd-run --wait --pipe --service-type=exec --uid=<the unit's User=> …`, because it
+  must inherit the system-manager environment `qds-run@<runId>.service` starts from; an ordinary
+  exec sees a different environment and would prove nothing about the unit. Each
   `git config --get-regexp` check counts **exit 1 with empty stdout** as clean and **exit 0** as a
   hit: `git config --get-regexp` exits non-zero when nothing matches, so "must return empty" has to
-  be spelled as an outcome, not as a stream.
+  be spelled as an outcome, not as a stream. `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_COUNT` set in the unit
+  environment is itself a hit: a config indirection is an unresolved credential surface — its
+  target may carry `credential.helper` — so the probe refuses fail-closed and never
+  resolves-and-scans it.
 
   **What the probe is and is not.** It is defence in depth on top of the structural containment above,
   which is what actually holds the invariant. The two-check version this story shipped with proved
@@ -918,7 +928,9 @@ the harvested diff, the credential probe, and the `fixContext` write.
 - [x] **Security:** Append-only push enforced and branch-scoped (INV-1, INV-2).
 - [x] **Security (credential-free box):** the dispatch preflight probe asserts every sink named in
       INV-3 — `credential.*`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh/hosts.yml`, `GH_TOKEN`,
-      `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_API_TOKEN`, `SSH_AUTH_SOCK`, `url.*.insteadOf` —
+      `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_API_TOKEN`, `SSH_AUTH_SOCK`, `url.*.insteadOf`,
+      `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_COUNT` (a config indirection is a hit fail-closed, never
+      resolved-and-scanned) —
       in the environment the run unit inherits, **plus the resolved unit's own directives: every
       `Environment=` value on `qds-run@<runId>.service` and its drop-ins free of credential-bearing
       keys, and every `EnvironmentFile=` naming only the approved `/home/exedev/app/.env`**
@@ -1076,6 +1088,41 @@ the harvested diff, the credential probe, and the `fixContext` write.
       the wrong shape; this item is what makes it observable at runtime.
 
 ## Dev Agent Record
+
+### 2026-09-22 — review round 1 (bmad-code-review)
+
+Seven-agent wave (3 blind / 3 edge / 1 auditor) over the fix-round branch: 25 raw findings →
+11 patched / 7 dismissed / 1 gate action. Patched: store no-op posture (read-only open, lazy
+writable upgrade), typed unwritable-envelope, parent-lock ledger serialization, probe sudo
+preflight + `GIT_CONFIG_*` sink, ceiling pairing margin, e2e hardening.
+
+Dismissed (each verified against source): stale pin comment — re-stale risk; ceiling headroom —
+documented; `systemdRun` orphan — false positive, leg (a3) uses it; digest↔buildId offline
+enforcement — pre-existing, documented; deadline-predicate duplication — verified mirror;
+settle-loop stale-sha premise — assertion exists at :1327; rejection-text re-keying —
+over-engineering.
+
+Gate action: `tests/scripts/build-exedev-image.test.ts` re-run on the final tree at close — walk
+digest stands (360 tests / 0 fail across fixloop + image-contract + build-exedev-image at close).
+
+Final gate (2026-09-22, driver session): focal suites 360 pass / 0 fail; `bunx biome check` clean
+on all 11 touched files; `bunx tsc --noEmit` clean repo-wide; `detect_changes` blast radius = 25
+symbols, every one inside the PR's own modules (`scripts/fix-run.ts`, `src/fixloop/`,
+`tests/fixloop/`, the tier3 live test) with all affected processes fix-run-internal — no
+out-of-scope symbol.
+
+Residuals stated, not hidden:
+
+- `RunRecordStore` has no close/dispose — the read-only intake store is abandoned, not closed, at
+  the writable upgrade (holds no fds; constructor checks are synchronous).
+- If the sudo preflight passes but a git-config leg's own sudo then fails (mid-probe sudoers
+  race), that leg reads clean — sudo functionality was just proven; accepted residual, commented
+  at the clean-arm site.
+- The live round must re-prove two changed assertion semantics (green-round behavior unchanged):
+  the neg control now FAILS on a guard-forwarding refusal (the `no fix scope entry for` phrase
+  pins the missing-ENTRY arm), and the PR-settle loop breaks on a first clean 404 (terminal) and
+  absorbs transient read errors to the deadline, failing with a named error count when no read
+  ever succeeded.
 
 ### 2026-09-21 — node-2: the MANDATORY live round GREEN (the story's last open item)
 

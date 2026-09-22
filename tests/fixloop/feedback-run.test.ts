@@ -650,6 +650,7 @@ const CLEAN_ENV = "QDS_API_KEY=minted-capped-key-hash\nQDS_RUN_BUDGET_MS=900000\
 interface ProbeCans {
   unitText: string;
   unitExit: number;
+  preflight: ExecResult;
   gitCredential: ExecResult;
   gitInsteadOf: ExecResult;
   envScript: ExecResult;
@@ -660,6 +661,7 @@ function cleanCans(): ProbeCans {
   return {
     unitText: CLEAN_UNIT,
     unitExit: 0,
+    preflight: { stdout: "", stderr: "", exitCode: 0 },
     gitCredential: { stdout: "", stderr: "", exitCode: 1 },
     gitInsteadOf: { stdout: "", stderr: "", exitCode: 1 },
     envScript: { stdout: "", stderr: "", exitCode: 0 },
@@ -688,6 +690,11 @@ class FixProbeDriver extends FakeDriver {
     if (argv[0] === "cat" && argv[1] === APPROVED_ENV_FILE) {
       return this.cans.envFile;
     }
+    // The `sudo … true` preflight: no "git" token, so it must be told apart
+    // from the envScript's systemd-run wrapper by its bare `true` command.
+    if (argv[0] === "sudo" && argv[argv.length - 1] === "true") {
+      return this.cans.preflight;
+    }
     if (argv.includes("git") && argv.includes("config")) {
       const pattern = argv[argv.length - 1]!;
       return pattern.includes("credential") ? this.cans.gitCredential : this.cans.gitInsteadOf;
@@ -707,6 +714,12 @@ describe("probeBoxCredentials (INV-3)", () => {
     const driver = new FixProbeDriver();
     const result = await probeBoxCredentials(driver, VM, RUN);
     expect(result).toEqual({ ok: true });
+    // The preflight (`sudo … true`, no "git" token) runs FIRST and the git
+    // legs follow it — the clean arm's shape depends on that order.
+    const preflightIdx = driver.calls.findIndex((c) => c[0] === "sudo" && c[c.length - 1] === "true");
+    expect(preflightIdx).toBeGreaterThanOrEqual(0);
+    const firstGitIdx = driver.calls.findIndex((c) => c.includes("git"));
+    expect(firstGitIdx).toBeGreaterThan(preflightIdx);
     const gitCalls = driver.calls.filter((c) => c.includes("git"));
     expect(gitCalls.length).toEqual(2);
     for (const call of gitCalls) {
@@ -727,13 +740,23 @@ describe("probeBoxCredentials (INV-3)", () => {
     const r2 = await probeBoxCredentials(insteadOf, VM, RUN);
     expect(r2.ok).toBe(false);
     if (!r2.ok) expect(r2.hits).toContain("git-config:url.insteadOf");
-    // A `sudo -n` failure exits 1 with EMPTY stdout — indistinguishable from
-    // git's no-match arm unless stderr is read; it must NOT pass as clean.
-    const sudoFailed = new FixProbeDriver();
-    sudoFailed.cans.gitCredential = { stdout: "", stderr: "sudo: a password is required\n", exitCode: 1 };
-    const r3 = await probeBoxCredentials(sudoFailed, VM, RUN);
-    expect(r3.ok).toBe(false);
-    if (!r3.ok) expect(r3.hits).toContain("git-config:credential.*");
+  });
+
+  test("a clean box whose PAM chatter lands on the git legs' stderr is still CLEAN (sudo proven by the preflight)", async () => {
+    const driver = new FixProbeDriver();
+    const chatter = { stdout: "", stderr: "sudo: unable to resolve host qds-fix-run-box\n", exitCode: 1 };
+    driver.cans.gitCredential = { ...chatter };
+    driver.cans.gitInsteadOf = { ...chatter };
+    expect(await probeBoxCredentials(driver, VM, RUN)).toEqual({ ok: true });
+  });
+
+  test("sudo preflight failing ⇒ fail closed: sudo-preflight-failed and NO git-config leg executes", async () => {
+    const refused = new FixProbeDriver();
+    refused.cans.preflight = { stdout: "", stderr: "sudo: a password is required\n", exitCode: 1 };
+    const result = await probeBoxCredentials(refused, VM, RUN);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.hits).toContain("sudo-preflight-failed");
+    expect(refused.calls.some((c) => c.includes("git"))).toBe(false);
   });
 
   test("a readable ~/.git-credentials is a hit", async () => {
@@ -758,6 +781,14 @@ describe("probeBoxCredentials (INV-3)", () => {
     const result = await probeBoxCredentials(driver, VM, RUN);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.hits).toContain("env:GH_ENTERPRISE_TOKEN");
+  });
+
+  test("GIT_CONFIG_GLOBAL set in the manager environment is a hit — unresolved surface, fail closed (F5)", async () => {
+    const driver = new FixProbeDriver();
+    driver.cans.envScript = { stdout: "PROBE-HIT env:GIT_CONFIG_GLOBAL\n", stderr: "", exitCode: 0 };
+    const result = await probeBoxCredentials(driver, VM, RUN);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.hits).toContain("env:GIT_CONFIG_GLOBAL");
   });
 
   test("a unit drop-in carrying Environment=GH_TOKEN=… is a hit", async () => {
