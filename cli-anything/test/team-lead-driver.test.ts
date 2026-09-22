@@ -52,12 +52,7 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
 
   it("reproduces it for lean:false and for an empty extensions list too", () => {
     expect(buildWorkerArgv({ ...base, lean: false })).toEqual(TODAYS_ARGV);
-    expect(buildWorkerArgv({ ...base, lean: false, extensions: ["src"] })).toEqual(
-      TODAYS_ARGV,
-    );
-    // extensions without lean changes nothing: -e is emitted only under lean,
-    // because that is the only mode in which discovery is off.
-    expect(buildWorkerArgv({ ...base, extensions: ["src"] })).toEqual(TODAYS_ARGV);
+    expect(buildWorkerArgv({ ...base, lean: false, extensions: [] })).toEqual(TODAYS_ARGV);
   });
 
   it("adds exactly --no-extensions --no-skills under lean, before -p (AC2)", () => {
@@ -98,6 +93,30 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
     // Explicit -e paths survive --no-extensions: it disables DISCOVERY only.
     expect(argv.filter((a) => a === "-e")).toHaveLength(2);
     expect(pIndex).toBe(argv.length - 2);
+  });
+
+  // INV-EXT-LOAD: `-e` pairs must load under discovery-on too. The lean gate
+  // made extensions unreachable for non-lean workers, so a roster role asking
+  // for an extension without opting into lean silently got nothing.
+  it("emits -e pairs for extensions without lean", () => {
+    const argv = buildWorkerArgv({
+      agentId: "worker",
+      provider: "openrouter",
+      model: "deepseek/deepseek-v3.2",
+      prompt: "p",
+      extensions: ["pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts"],
+    });
+    expect(argv).toContain("-e");
+    expect(argv.filter((a) => a === "-e")).toHaveLength(1);
+    expect(argv.join(" ")).toContain("self-compact.ts");
+    // byte-identical default path preserved: no extensions key at all
+    const plain = buildWorkerArgv({
+      agentId: "worker",
+      provider: "openrouter",
+      model: "deepseek/deepseek-v3.2",
+      prompt: "p",
+    });
+    expect(plain).not.toContain("-e");
   });
 });
 

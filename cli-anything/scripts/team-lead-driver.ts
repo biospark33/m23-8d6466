@@ -47,9 +47,10 @@ interface WorkerConfig {
    */
   lean?: boolean;
   /**
-   * Explicit extension paths to keep under lean. `--no-extensions` disables
-   * DISCOVERY only, so these still load. Repo-root-relative; an entry that
-   * escapes the root is rejected before spawn, never sanitized (INV-2).
+   * Explicit extension paths to load, under BOTH the lean and discovery-on
+   * profiles. `--no-extensions` disables DISCOVERY only, so these still load.
+   * Repo-root-relative; an entry that escapes the root is rejected before
+   * spawn, never sanitized (INV-2).
    * Not symmetric for skills: `--no-skills` disables discovery AND loading,
    * so nothing survives it — out of scope here.
    */
@@ -377,9 +378,10 @@ export const SCHEMA_INSTRUCTION =
  *
  * Lean is OPT-IN: with no `lean` key the argv is byte-identical to the one
  * that shipped before this story, so the default path is unchanged. Under
- * lean, `--no-extensions --no-skills` and any explicit `-e <path>` pairs are
- * inserted BEFORE `-p`, which stays last and still carries the prompt plus
- * the schema instruction.
+ * lean, `--no-extensions --no-skills` are inserted; `-e <path>` pairs are
+ * emitted whenever `extensions` is non-empty, under BOTH profiles, always
+ * BEFORE `-p`, which stays last and still carries the prompt plus the schema
+ * instruction.
  */
 export function buildWorkerArgv(w: WorkerConfig): string[] {
   const argv = [
@@ -393,10 +395,12 @@ export function buildWorkerArgv(w: WorkerConfig): string[] {
   ];
   if (w.lean === true) {
     argv.push("--no-extensions", "--no-skills");
-    // `-e` only under lean: with discovery on, re-listing a path pi would
-    // already find changes nothing and would silently diverge from AC3.
-    for (const ext of w.extensions ?? []) argv.push("-e", ext);
   }
+  // `-e` pairs load under BOTH profiles: under lean, discovery is off so the
+  // pair is the only way in; under discovery-on, an explicit pair loads a
+  // vendored path pi would never discover (it is not in any `.pi/` dir). A
+  // worker with no extensions key still gets byte-identical argv (AC3).
+  for (const ext of w.extensions ?? []) argv.push("-e", ext);
   argv.push("-p", `${w.prompt}\n\n${SCHEMA_INSTRUCTION}`);
   return argv;
 }
