@@ -159,10 +159,18 @@ export function latencyStats(records: TriageRecord[]): LatencyStats {
   };
 }
 
-/** The is_real_defect clause of a jev rationale; absent clause = not-recorded (never guessed). */
+/**
+ * The is_real_defect clause of a jev rationale; absent clause = not-recorded
+ * (never guessed). noul is a probability (0=no … 1=yes, live-verified
+ * 2026-09-22); the cross-tab renders the MAJORITY READ (p > 0.5 = yes) — the
+ * mathematically canonical binary read, stated in the report, with no gating
+ * use anywhere. Legacy boolean-era rationales still parse.
+ */
 export function parseIsRealDefect(rationale: string | undefined): "true" | "false" | "not-recorded" {
-  const m = rationale?.match(/jev: is_real_defect=(true|false)/);
-  return m ? (m[1] as "true" | "false") : "not-recorded";
+  const n = rationale?.match(/jev: is_real_defect=([0-9]+(?:\.[0-9]+)?)/);
+  if (n) return Number.parseFloat(n[1]!) > 0.5 ? "true" : "false";
+  const b = rationale?.match(/jev: is_real_defect=(true|false)/);
+  return b ? (b[1] as "true" | "false") : "not-recorded";
 }
 
 const IS_REAL_DEFECT_ROWS = ["true", "false", "not-recorded"] as const;
@@ -317,6 +325,7 @@ export function renderText(report: AbReport, scope: string): string {
     const cols = DISPOSITIONS.filter((d) => report.crosstab.some((r) => r[d] !== undefined));
     const rowW = Math.max("is_real_defect".length, ...IS_REAL_DEFECT_ROWS.map((r) => r.length));
     lines.push("  is_real_defect x disposition (jev rationale clause; absent = not-recorded, never guessed):");
+    lines.push("    verdict rule: noul p > 0.5 = yes (majority read, stated; no gating use)");
     lines.push(`    ${pad("is_real_defect", rowW)}  ${cols.map((c) => padL(c, c.length + 1)).join("")}${padL("total", 8)}`);
     for (const r of report.crosstab) {
       const cells = cols.map((c) => padL(r[c] === undefined ? "0" : String(r[c]), c.length + 1)).join("");

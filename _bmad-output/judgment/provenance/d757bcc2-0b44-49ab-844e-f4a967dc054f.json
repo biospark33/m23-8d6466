@@ -1,0 +1,20 @@
+{
+  "requestId": "d757bcc2-0b44-49ab-844e-f4a967dc054f",
+  "digest": "479e9f4523091c292bd262736db51438b3890b8025650358fb9f93ee69a251b5",
+  "detail": {
+    "requestId": "d757bcc2-0b44-49ab-844e-f4a967dc054f",
+    "model": "jev-1.13.0",
+    "egressClass": "machine-state",
+    "questions": [
+      {
+        "id": "probe_ok",
+        "type": "noul"
+      }
+    ],
+    "usage": {
+      "input_tokens": 291,
+      "output_tokens": 21
+    },
+    "createdAt": "2026-09-22T18:36:36.290Z"
+  }
+}
