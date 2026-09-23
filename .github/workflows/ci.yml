@@ -133,7 +133,6 @@ jobs:
       - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
->>>>>>> origin/dev
       # DF4.2 coverage gate. Two steps so the coverage run's own exit status
       # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
       # enforces per-file line+function floors and fails loudly on any

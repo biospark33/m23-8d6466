@@ -1536,7 +1536,6 @@ describe("buildIdFileInputs", () => {
       // branch tree (twice: the branch gate's full-suite run and the targeted
       // re-run, byte-identical).
       //
-<<<<<<< HEAD
       // 9d788c04: moved from 8b670a3d by feature/self-compact-pi-agent (the
       // self-compact vendoring + roster/extensionArgs wiring). FOUR walked
       // inputs, membership measured against the live `oci/exedev/Dockerfile`
@@ -1566,7 +1565,6 @@ describe("buildIdFileInputs", () => {
       // walked inputs the pass edits. Received from this test's own failing
       // run on the final tree (re-pin LAST; the reviewer's mid-branch
       // 653fa603 was superseded by the pass's own edits and never adopted).
-      "9bc74b21151da856b4d63cd5eec45424642cbffdb887fdfec4eb1c7876b9bc4f",
       //
       // 1e1b54a4: MERGE of `dev` into this branch (2026-09-20). Two chains meet here, and
       // NEITHER side's literal survives: both branched from b3c30d0c and both
@@ -1580,19 +1578,20 @@ describe("buildIdFileInputs", () => {
       // either one would pin a hash for a tree that does not exist.
       // Both parent paragraphs are kept above so each digest still ties to the
       // change that produced it; this entry is the join, not a replacement.
-      "1e1b54a43d1da428cd195f5d12c77a61e7ae58f0fab4455dd7ef2a15ff2f12ad",
       //
-      // MERGE of `dev` into feature/self-compact-pi-agent (2026-09-23): the
-      // join of the 9bc74b21 chain (self-compact vendoring, roster/extensionArgs
-      // wiring, driver argv hardening) and the 1e1b54a4 chain (DF3.6b +
-      // DF6.1a walked inputs), PLUS this merge's own walked-input edits —
-      // cli-anything/scripts/team-lead-driver.ts (the launch-boundary
-      // lifecycle fix) and .github/workflows/ci.yml-adjacent batch-root
-      // invocation (names no COPY source). Neither parent literal survives;
-      // the value is RE-DERIVED from the joined tree by this test's own
-      // failing run. KEPT: every parent paragraph above, per the join, not a
-      // replacement.
-      "PENDING-MERGE-DERIVE",
+      // MERGE of `dev` into feature/self-compact-pi-agent (2026-09-23). Two
+      // chains meet here and NEITHER parent's literal survives: this branch
+      // carries the self-compact chain's walked inputs (`roster-adapter.ts`,
+      // `roster/schema.ts`, `team-lead-driver.ts`, `package.json`) while dev
+      // carries DF3.6b's four and DF6.1a's four (`qds-run@.service`,
+      // `resident.ts`, `steering.ts`, `pipeline-run.ts`, `brief-schema.ts`,
+      // `dispatch.ts`, `dispatch-task.ts`, `run-record.ts`) — the joined tree
+      // is one neither parent pin was ever computed over. The merge's own
+      // edits (`ci.yml` batch-root invocation, this test file) name no COPY
+      // source and contribute nothing walked. The value is RE-DERIVED from
+      // the joined tree by this test's own failing run. KEPT: every parent
+      // paragraph above, per the join, not a replacement.
+      "3aa2eadb07bd6c788940d74927edf7864cb0facb0660a398f07386fc57f08824",
     );
   });
 });
