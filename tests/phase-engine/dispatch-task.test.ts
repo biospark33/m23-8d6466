@@ -1959,3 +1959,26 @@ describe("dispatch-task: DF6.1a fixContext witness appendix", () => {
     expect(spy.calls).toBe(0);
   });
 });
+
+describe("dispatch-task: team caps derive from the phase budget (#279)", () => {
+  it("wallClockCapMs and comsAwaitTimeoutMs derive from maxDurationMs, not the schema defaults", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    let caps: { wallClock: unknown; comsAwait: unknown } | null = null;
+    _injectRunner(((manifestPath: string, _opts?: TeamRunOptions) => {
+      const manifest = JSON.parse(nodeFs.readFileSync(manifestPath, "utf8")) as {
+        team: { wallClockCapMs?: number; comsAwaitTimeoutMs?: number };
+      };
+      caps = { wallClock: manifest.team.wallClockCapMs, comsAwait: manifest.team.comsAwaitTimeoutMs };
+      return Promise.resolve(successResult());
+    }) satisfies typeof runTeamManifest);
+    await runDispatch({ maxDurationMs: 90_000 });
+    // The phase is ALLOWED 90s; the team caps must follow it (+30s await
+    // grace), not the schema defaults (300k / 240k) that awaited-out any
+    // worker outliving 240s regardless of the declared budget.
+    const expected = 90_000 + 30_000;
+    expect(caps).not.toBeNull();
+    expect(caps!.wallClock).toBe(expected);
+    expect(caps!.comsAwait).toBe(expected);
+  });
+});

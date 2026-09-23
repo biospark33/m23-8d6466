@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "pipelineId": "t2-self-compact-worker",
-  "runBudgetMs": 825000,
+  "runBudgetMs": 2200000,
   "phases": [
     {
       "name": "self-compact-worker",
@@ -9,7 +9,7 @@
       "description": "T2 self-compact live round: one deepseek-v4-flash worker (1M-token window) whose pi argv carries the vendored self-compact extension (-e + 30%/50%/10% thresholds via the roster's harness_engineering/compaction fields), driven across the notice and warning thresholds until it writes a note_to_self, compacts, and receives the note back verbatim.",
       "roster": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
       "task": "You are a context-compaction test worker inside a software repository. Work strictly alone, never ask questions, and do not create or modify any repository files (writing scratch files under /tmp is allowed and required). A self-compact extension watches your context window and sends you [self-compact · ...] messages; you cannot see your usage otherwise. Goal: grow your own context usage in controlled steps until the warning threshold engages, compact, and then report. Procedure: 0. With the bash tool run exactly: for i in $(seq 1 20); do cat pi-vs-claude-code-vendor/coms-net.ts; done > /tmp/sc-fill.txt — then call view_context (no arguments) once and remember used_percent and level as your baseline. 1. Read byte slices of the fill file with bash. IMPORTANT: the bash tool truncates any output larger than ~50KB, so every slice MUST be exactly 48000 bytes — a bigger slice reads as truncated and wastes the turn. Slice n (n = 1, 2, 3, ...): tail -c +N /tmp/sc-fill.txt | head -c 48000, with N = 48000 times (n-1) plus 1. Each full 48000-byte slice adds roughly 14000 tokens of context. You may read at most two slices per turn (two bash calls in one batch). Expect to need roughly 35-40 slices total before the warning tier engages — do NOT stop early, do NOT conclude the file is too small before slice 40 (it holds over 60), and do not spend turns on view_context or ls during the loop: the extension's own [self-compact · ...] messages are your level signal. 2. Keep slicing until a [self-compact · WARNING] (or stronger) message appears. Do not stop before that. 3. The moment you are at warning or stronger: stop reading, write a concise note_to_self (goal; how many slices you read; key observations; exact NEXT ACTION last: report the summary) and call self_compact as your ONLY tool call in that batch. 4. If every tool except self_compact is blocked, write the note and call self_compact immediately. 5. After your note_to_self is returned to you verbatim, read nothing more; finish with the required JSON reply whose result.summary states the highest self-compact level you observed (notice, warning or forced), that compaction ran, and the highest used_percent you saw.",
-      "maxDurationMs": 270000,
+      "maxDurationMs": 720000,
       "retries": 0
     },
     {
