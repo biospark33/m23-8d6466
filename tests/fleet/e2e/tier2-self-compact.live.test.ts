@@ -135,6 +135,7 @@ import {
   shellQuote,
   teardownQuietly,
   tmpWorkspace,
+  writeIsolatedPiHome,
   writeEvidenceQuietly,
 } from "./live-harness.ts";
 
@@ -744,11 +745,15 @@ test.todoIf(liveTodoOff())(
       copyFileSync(join(hostClone, SC_ROSTER_REL), legRosterPath);
       // HOST-PI ISOLATION (gotcha #2, proven by tier4's live A/B): the host's
       // pi resolves auth.json OVER the env key and that stored key is dead, so
-      // the leg runs pi under an isolated HOME carrying models.json and NO
-      // auth.json — model resolution intact, auth strictly from the run's key.
+      // the leg runs pi under an isolated HOME — model resolution intact, auth
+      // strictly from the run's key. The models.json copy STRIPS provider
+      // apiKeys (writeIsolatedPiHome): round-5 proof that a verbatim copy
+      // re-imports the host's `!`-command apiKey (dead auth.json key) even
+      // with auth.json absent — pi prefers the explicit provider apiKey over
+      // OPENROUTER_API_KEY, and the worker 401'd "User not found" while the
+      // SAME run key pinged green in-box minutes earlier.
       const piHome = join(workspace, "pi-home");
-      mkdirSync(join(piHome, ".pi", "agent"), { recursive: true });
-      copyFileSync(hostModelsJson, join(piHome, ".pi", "agent", "models.json"));
+      writeIsolatedPiHome(piHome, hostModelsJson);
       const legRunId = runIdFor("t2sc-leg");
 
       // ── 7. THE ENGINE LEG — the PRODUCTION dispatch_task path on the host:

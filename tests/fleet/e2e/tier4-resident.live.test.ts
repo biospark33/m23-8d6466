@@ -102,7 +102,7 @@
  * NO FAKES anywhere in this file.
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -127,6 +127,7 @@ import {
   settleRun,
   teardownQuietly,
   tmpWorkspace,
+  writeIsolatedPiHome,
   writeEvidenceQuietly,
   runIdFor,
   boxHome,
@@ -783,9 +784,12 @@ test.todoIf(liveTodoOff())(
       // BEFORE the custom registry is consulted — the fixture catalog's rates
       // are the host models.json integers (config parity). Usage and spend
       // substrate stay 100% real.
+      // The models.json copy STRIPS provider apiKeys (writeIsolatedPiHome): a
+      // verbatim copy re-imports the host's `!`-command apiKey (dead auth.json
+      // key) even with auth.json absent — pi prefers the explicit provider
+      // apiKey over env (SC.2 round-5 proof, 2026-09-23-125430).
       const piHome = join(workspace, "pi-home");
-      mkdirSync(join(piHome, ".pi", "agent"), { recursive: true });
-      copyFileSync(hostModelsJson, join(piHome, ".pi", "agent", "models.json"));
+      writeIsolatedPiHome(piHome, hostModelsJson);
       const l2 = await runLeg("l2-steered", deliveredDir, witness.requestId as string, {
         [KEY_ENV_VAR]: runKey,
         QDS_PI_CATALOG_DIR: piCatalogDir,
