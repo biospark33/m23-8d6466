@@ -1,0 +1,140 @@
+{
+  "test": "T2-SC.2",
+  "outcome": "fail",
+  "runId": "qds-20260923-60cfb2",
+  "vmName": "qds-20260923-60cfb2",
+  "capMicroUsd": 200000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 200000,
+      "manifestPath": "tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json",
+      "rosterPath": "tests/fleet/e2e/fixtures/self-compact/roster.yaml"
+    },
+    {
+      "phase": "tree-parity",
+      "ok": true,
+      "files": [
+        {
+          "rel": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
+          "workingTree": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239",
+          "atSha": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+          "workingTree": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+          "atSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/coms-net.ts",
+          "workingTree": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7",
+          "atSha": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7"
+        }
+      ]
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260923-60cfb2\",\"requestId\":\"56af1f24-8472-4ea6-832e-52353387ff87\",\"state\":\"ready\",\"vmName\":\"qds-20260923-60cfb2\",\"httpsUrl\":\"https://qds-20260923-60cfb2.exe.xyz\"}",
+      "stderrTail": "9-23T12:54:08.049Z\",\"duration\":56562,\"durationMs\":56562,\"status\":\"ok\",\"runId\":\"qds-20260923-60cfb2\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":5019,\"mint_ms\":1825,\"fill_ms\":31784,\"setup_gate_ms\":16754}}\n{\"requestId\":\"56af1f24-8472-4ea6-832e-52353387ff87\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-23T12:54:08.053Z\",\"duration\":56572,\"durationMs\":56572,\"status\":\"ok\",\"runId\":\"qds-20260923-60cfb2\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260923-60cfb2",
+      "vmName": "qds-20260923-60cfb2"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "122b8ec764c884d269a96644c9c55e1f95cdd3eaa7b3c0a807b3e9a275d37d7d",
+      "limitMicroUsd": 200000,
+      "requestId": "56af1f24-8472-4ea6-832e-52353387ff87"
+    },
+    {
+      "phase": "box-clone-head",
+      "exitCode": 0,
+      "head": "c902adb40356af767ebaf312a72df578fcba9894"
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "witnessRequestId": "56af1f24-8472-4ea6-832e-52353387ff87",
+      "witnessCeiling": 200000,
+      "deliveredLimit": 200000
+    },
+    {
+      "phase": "run-key",
+      "source": "/home/exedev/app/.env",
+      "envVar": "OPENROUTER_API_KEY",
+      "ok": true,
+      "keyChars": 73,
+      "provenance": "delivered by dispatch — this test mints no key of its own"
+    },
+    {
+      "phase": "engine-leg",
+      "exitCode": 1,
+      "stdoutHead": "RUN e2e-t2sc-leg-mue3u7bg6bxf pipeline=t2-self-compact-worker ok=false accepted=true phases=1 completedAt=2026-09-23T12:54:16.215Z",
+      "stderrTail": "ient\",\"error\":{\"code\":\"Error\",\"message\":\"worker(s) missed the coms_await deadline: compactor\",\"stack\":\"Error: worker(s) missed the coms_await deadline: compactor\\n    at phase (/Users/steve/QDS-Factory/src/phase-engine/phase.ts:360:19)\\n    at async walkPhases (/Users/steve/QDS-Factory/src/phase-engine/phase.ts:517:31)\\n    at async main (/Users/steve/QDS-Factory/scripts/pipeline-run.ts:4444:15)\\n    at processTicksAndRejections (native:7:39)\"},\"subTimings\":{\"team_execution_ms\":769,\"manifest_load_ms\":2,\"phase_body_ms\":1426,\"journal_write_ms\":1}}\n{\"ok\":false,\"exitCode\":1,\"terminated\":false,\"phasesSettled\":1,\"engine_start_ms\":115,\"phase_walk_ms\":1428,\"level\":\"error\",\"event\":\"engine_settled\",\"runId\":\"e2e-t2sc-leg-mue3u7bg6bxf\",\"requestId\":\"56af1f24-8472-4ea6-832e-52353387ff87\",\"phaseId\":null}"
+    },
+    {
+      "phase": "raw-capture",
+      "ok": true,
+      "bytes": 8416,
+      "events": 10,
+      "truncated": false
+    },
+    {
+      "phase": "threshold-crossings",
+      "crossings": []
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "at": "t2-sc.2-cleanup",
+      "runId": "qds-20260923-60cfb2",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":18}\n{\"requestId\":\"8e52a158-c82b-4949-a1e8-9b5c1d6d5867\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-23T12:54:25.659Z\",\"duration\":9384,\"durationMs\":9384,\"status\":\"ok\",\"runId\":\"qds-20260923-60cfb2\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260923-60cfb2",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260923-60cfb2",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-23T12:54:30.173Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -25,8 +25,9 @@ import type { ResolvedRole, ResolvedRoster } from "../roster/schema.ts";
  * Options provide caller-supplied context: agentId becomes the coms cname
  * and artifact filename; prompt is the task brief (roster has no prompt field).
  *
- * DF1.9 fields (lean, extensions) are left undefined — those are manifest-
- * level concerns, not roster-level.
+ * lean is left undefined — a manifest-level concern, not roster-level.
+ * extensions/extensionArgs ARE roster-level: harness_engineering paths and
+ * compaction thresholds flow through to the worker's pi argv.
  */
 export function rosterRoleToTeamRole(
   role: ResolvedRole,
@@ -39,14 +40,24 @@ export function rosterRoleToTeamRole(
   if (!role.model || typeof role.model !== "string" || role.model.trim().length === 0) {
     throw new Error(`role model must be a non-empty string (got ${JSON.stringify(role.model)})`);
   }
+  const extensions = role.harness_engineering?.length ? role.harness_engineering : undefined;
+  const extensionArgs = role.compaction
+    ? [
+        "--compact-soft-at", role.compaction.soft_at,
+        "--compact-at", role.compaction.at,
+        "--compact-buffer", role.compaction.buffer,
+      ]
+    : undefined;
   return {
     agentId: opts.agentId,
     // Join: never split here. splitRoleModel decomposes.
     model: `${role.provider}/${role.model}`,
     prompt: opts.prompt,
-    // DF1.9 fields — omitted here, added by manifest construction if needed
+    // lean stays manifest-level; extensions/extensionArgs come from the
+    // roster's harness_engineering / compaction fields (self-compact wiring).
     lean: undefined,
-    extensions: undefined,
+    ...(extensions !== undefined && { extensions }),
+    ...(extensionArgs !== undefined && { extensionArgs }),
   };
 }
 
@@ -92,6 +103,28 @@ export function rosterToTeamManifest(
   const leadRole = roleByName.get(opts.leadRoleName);
   if (!leadRole) {
     throw new Error(`Lead role "${opts.leadRoleName}" not found in roster`);
+  }
+
+  // RA4: the runner forwards extensions/extensionArgs for WORKERS only —
+  // QDS_AGENT_TEAM_CONFIG_JSON's lead object carries agentId/model/prompt
+  // alone (cli-anything/src/runner.ts), so a lead declaring self-compact
+  // wiring would pass TeamManifestSchema and then silently run WITHOUT the
+  // extension. INV-3: a declared extension must not be skipped without
+  // warning — refuse here, at the one conversion point. Workers keep full
+  // support; compaction alone still trips this because the DF1.5 schema gate
+  // only admits compaction alongside harness_engineering, and the adapter is
+  // deliberately defensive about what schema already validated (RA1).
+  const leadDeclared: string[] = [];
+  if (leadRole.harness_engineering?.length) {
+    leadDeclared.push("harness_engineering");
+  }
+  if (leadRole.compaction !== undefined) {
+    leadDeclared.push("compaction");
+  }
+  if (leadDeclared.length > 0) {
+    throw new Error(
+      `lead role "${opts.leadRoleName}" declares ${leadDeclared.join(" + ")} but the runner drops extensions/extensionArgs on the lead — move self-compact wiring to a worker role`,
+    );
   }
 
   const workers = opts.workerRoleNames.map((name) => {

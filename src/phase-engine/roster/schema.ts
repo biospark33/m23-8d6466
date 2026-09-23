@@ -40,6 +40,17 @@ import { z } from "zod";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+/**
+ * The vendored self-compact extension path, exactly as it must appear in a
+ * role's `harness_engineering`. `compaction` is admitted only alongside it:
+ * the roster-adapter maps a compaction block to `--compact-*` argv flags,
+ * which pi only parses when the extension is loaded (`-e`) — a compaction
+ * block without the extension would fail at spawn with a confusing
+ * unknown-flag error instead of a roster rejection here.
+ */
+export const SELF_COMPACT_EXTENSION =
+  "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts";
+
 /** Roster file size ceiling (Technical Notes: guards/limits). */
 export const ROSTER_MAX_BYTES = 256 * 1024;
 
@@ -57,6 +68,8 @@ export interface ResolvedRole {
   writes: string[] | null;
   /** `-e` extension paths handed to pi. */
   harness_engineering: string[];
+  /** Optional self-compact thresholds, e.g. `{ soft_at: "30%", at: "50%", buffer: "10%" }`. */
+  compaction?: { soft_at: string; at: string; buffer: string };
   /** `${provider}/${model}` — the key both gates and `resolveRate` look up. */
   slug: string;
   /** Non-fatal advisories for this role. */
@@ -111,6 +124,56 @@ const ToolsField = z.array(z.string().min(1)).nullable();
 const WritesField = z.array(z.string().min(1)).nullable();
 
 /**
+ * A percent string like "30%" or "12.5%". The failure message echoes the
+ * offending VALUE, not just "Invalid" — the CLI surfaces these problems to the
+ * operator, who needs to see which of their numbers was wrong. (`superRefine`,
+ * not `.regex(msg)`: this zod build ignores a params-level `errorMap` for
+ * `.regex`, and a static `message` cannot include the value.)
+ */
+const PercentField = z.string().superRefine((v, ctx) => {
+  if (!/^\d+(\.\d+)?%$/.test(v)) {
+    ctx.addIssue({
+      code: "custom",
+      message: `must be a percent like "30%" (got ${JSON.stringify(v)})`,
+    });
+    return;
+  }
+  // Upstream hard cap (self-compact thresholds.ts, HARD_CAP_FRACTION = 0.9):
+  // a percent above 90 throws at pi's flag parsing. Refuse at the schema
+  // instead of at spawn — the same fail-early rule as `thinking: max`.
+  if (Number.parseFloat(v) > 90) {
+    ctx.addIssue({
+      code: "custom",
+      message: `must be ≤ 90% (upstream cap) (got ${JSON.stringify(v)})`,
+    });
+  }
+});
+
+/** Percent strings compare numerically — PercentField already vetted the format. */
+const percentOf = (v: string): number => Number.parseFloat(v);
+
+const CompactionField = z
+  .object({
+    soft_at: PercentField,
+    at: PercentField,
+    buffer: PercentField,
+  })
+  .superRefine((c, ctx) => {
+    // soft_at must STRICTLY precede the warning line: at soft_at == at the
+    // soft tier is a no-op duplicate of warning, and past it the soft tier
+    // can never fire first. Upstream rejects soft > warn outright; the
+    // stricter == is refused here so a roster never ships a threshold pair
+    // that does no work.
+    if (percentOf(c.soft_at) >= percentOf(c.at)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["soft_at"],
+        message: `soft_at must be < at (got soft_at ${JSON.stringify(c.soft_at)}, at ${JSON.stringify(c.at)})`,
+      });
+    }
+  });
+
+/**
  * Every key is optional at parse time because `defaults` may supply it. What
  * is REQUIRED is checked after the merge, so the error names the role rather
  * than the layer.
@@ -122,6 +185,7 @@ const RoleShape = {
   tools: ToolsField.optional(),
   writes: WritesField.optional(),
   harness_engineering: z.array(z.string().min(1)).optional(),
+  compaction: CompactionField.optional(),
 } as const;
 
 const RoleSchema = z.object({ name: z.string().min(1), ...RoleShape }).strict();
@@ -283,6 +347,7 @@ export function parseRoster(text: string, path = "<inline>"): ResolvedRoster {
 
     const tools = pick(role, defaults, "tools") ?? null;
     const harness = pick(role, defaults, "harness_engineering") ?? [];
+    const compaction = pick(role, defaults, "compaction");
     const warnings: string[] = [];
     if (harness.length > 0 && tools !== null) {
       // `--tools` filters extension tools too (R4 §1.5, sssf.config.yaml:9-11):
@@ -296,6 +361,20 @@ export function parseRoster(text: string, path = "<inline>"): ResolvedRoster {
         ].join(" "),
       );
     }
+    // Checked AFTER the merge on purpose: `defaults` may supply either side of
+    // the pair, so a RoleSchema-level refine would miss `defaults` carrying the
+    // extension for a role-level compaction (or the reverse). Collected, not a
+    // `continue` — fail-fast collect-all reports this alongside every other
+    // problem in the one raise.
+    if (compaction !== undefined && !harness.includes(SELF_COMPACT_EXTENSION)) {
+      problems.push(
+        [
+          `roles[${label}]: compaction requires ${SELF_COMPACT_EXTENSION} in`,
+          "harness_engineering — --compact-* flags without the -e load fail pi at",
+          "spawn (add the extension path or drop compaction)",
+        ].join(" "),
+      );
+    }
 
     roles.push({
       name: label,
@@ -305,6 +384,7 @@ export function parseRoster(text: string, path = "<inline>"): ResolvedRoster {
       tools,
       writes,
       harness_engineering: harness,
+      ...(compaction !== undefined ? { compaction } : {}),
       slug: `${pair.provider}/${pair.model}`,
       warnings,
     });

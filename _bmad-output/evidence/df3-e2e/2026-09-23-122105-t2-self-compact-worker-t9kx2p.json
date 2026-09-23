@@ -1,0 +1,81 @@
+{
+  "test": "T2-SC.2",
+  "outcome": "fail",
+  "runId": "",
+  "vmName": "",
+  "capMicroUsd": 200000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 200000,
+      "manifestPath": "tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json",
+      "rosterPath": "tests/fleet/e2e/fixtures/self-compact/roster.yaml"
+    },
+    {
+      "phase": "tree-parity",
+      "ok": true,
+      "files": [
+        {
+          "rel": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
+          "workingTree": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239",
+          "atSha": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+          "workingTree": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+          "atSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/coms-net.ts",
+          "workingTree": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7",
+          "atSha": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7"
+        }
+      ]
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdoutTail": "",
+      "stderrTail": "te_ms\":0}}\n{\"manifestPath\":\"/Users/steve/QDS-Factory/tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json\",\"runId\":null,\"code\":\"manifest-rejected\",\"message\":\"manifest rejected: runBudgetMs 825000 exceeds callerBudgetMs 599999\",\"remediation\":\"fix the manifest, or point manifestPath at one beneath /Users/steve/QDS-Factory\"}\n{\"requestId\":\"8c617c04-b7fa-42bd-b6b2-a29fa8ff136f\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-23T12:21:02.840Z\",\"duration\":8,\"durationMs\":8,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "",
+      "vmName": ""
+    },
+    {
+      "phase": "finally-unrecovered-dispatch",
+      "ok": true,
+      "freshBoxes": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-23T12:21:05.659Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

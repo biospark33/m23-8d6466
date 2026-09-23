@@ -21,7 +21,7 @@
  * runIds and costs are identifiers, not secrets, and are kept.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -1706,4 +1706,28 @@ export function settleRun(failure: unknown, problems: readonly string[]): void {
 /** Fresh tmp workspace; `rmSync` it in the test's outer finally. */
 export function tmpWorkspace(label: string): string {
   return mkdtempSync(join(tmpdir(), `qds-e2e-${label}-`));
+}
+
+/**
+ * Isolated pi HOME (gotcha #2): create `<piHome>/.pi/agent/` carrying a copy of
+ * the host models.json with every provider `apiKey` STRIPPED, and no auth.json.
+ * Rationale (round-5 evidence `_bmad-output/evidence/df3-e2e/2026-09-23-125430-*`
+ * + its `compactor.ndjson`): the host models.json embeds
+ * `apiKey: "!python3 -c … ~/.pi/agent/auth.json …"` (mtime 2026-08-27 20:49) and
+ * pi resolves the explicit provider apiKey OVER `OPENROUTER_API_KEY` — so a
+ * verbatim `copyFileSync` re-imports the dead host key even under an isolated
+ * HOME (worker 401 "User not found" while the SAME run key pinged green in-box
+ * minutes earlier). Model resolution stays intact; auth comes strictly from the
+ * run key via env.
+ */
+export function writeIsolatedPiHome(piHome: string, hostModelsJson: string): void {
+  mkdirSync(join(piHome, ".pi", "agent"), { recursive: true });
+  const models = JSON.parse(readFileSync(hostModelsJson, "utf8")) as {
+    providers?: Record<string, Record<string, unknown>>;
+  };
+  for (const provider of Object.values(models.providers ?? {})) {
+    // biome-ignore lint/performance/noDelete: strip only the auth field; the registry entries stay otherwise byte-faithful
+    delete provider.apiKey;
+  }
+  writeFileSync(join(piHome, ".pi", "agent", "models.json"), JSON.stringify(models));
 }

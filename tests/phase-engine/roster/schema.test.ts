@@ -15,6 +15,7 @@ import {
   parseRoster,
   ROSTER_MAX_BYTES,
   RosterError,
+  SELF_COMPACT_EXTENSION,
   THINKING_LEVELS,
 } from "../../../src/phase-engine/roster/schema.ts";
 
@@ -466,5 +467,157 @@ describe("loadRoster — INV-2 path confinement and size ceiling", () => {
   test("a missing roster file raises RosterError, not a raw ENOENT", () => {
     const dir = mkdtempSync(join(tmpdir(), "roster-missing-"));
     expect(() => loadRoster(join(dir, "nope.yaml"), { repoRoot: dir })).toThrow(RosterError);
+  });
+});
+
+describe("parseRoster — compaction block (self-compact rollout)", () => {
+  test("a role without compaction resolves with compaction undefined", () => {
+    const r = parseRoster(MINIMAL);
+    expect(r.roles[0]!.compaction).toBeUndefined();
+  });
+
+  test("compaction 30/50/60 resolves verbatim into the role", () => {
+    // The extension list is now REQUIRED alongside compaction (the --compact-*
+    // flags only parse when the extension is loaded via -e), so this fixture
+    // carries it explicitly.
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    harness_engineering: ["${SELF_COMPACT_EXTENSION}"]
+    compaction:
+      soft_at: "30%"
+      at: "50%"
+      buffer: "10%"
+`;
+    const r = parseRoster(src);
+    expect(r.roles[0]!.compaction).toEqual({ soft_at: "30%", at: "50%", buffer: "10%" });
+    expect(r.roles[0]!.harness_engineering).toEqual([SELF_COMPACT_EXTENSION]);
+  });
+
+  test("a non-percent compaction value is a schema problem naming the role", () => {
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    writes: []
+    compaction:
+      soft_at: "30%"
+      at: "30000"
+      buffer: "10%"
+`;
+    try {
+      parseRoster(src);
+      throw new Error("expected RosterError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RosterError);
+      expect((e as RosterError).problems.join("\n")).toContain("30000");
+    }
+  });
+
+  test("compaction without the self-compact extension in harness_engineering is an error", () => {
+    // The roster-adapter maps compaction to `--compact-*` argv flags, which pi
+    // only parses when the extension rides `-e`. Caught here, at parse, not at
+    // spawn with an unknown-flag error.
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    writes: []
+    compaction:
+      soft_at: "30%"
+      at: "50%"
+      buffer: "10%"
+`;
+    try {
+      parseRoster(src);
+      throw new Error("expected RosterError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RosterError);
+      const joined = (e as RosterError).problems.join("\n");
+      expect(joined).toContain("roles[worker]");
+      expect(joined).toContain(SELF_COMPACT_EXTENSION);
+    }
+  });
+
+  test("defaults can supply the extension for a role-level compaction (post-merge check)", () => {
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+  harness_engineering: ["${SELF_COMPACT_EXTENSION}"]
+roles:
+  - name: worker
+    model: m
+    compaction:
+      soft_at: "30%"
+      at: "50%"
+      buffer: "10%"
+`;
+    // No error and no warning: tools stays null, so nothing is filtered.
+    const r = parseRoster(src);
+    expect(r.roles[0]!.harness_engineering).toEqual([SELF_COMPACT_EXTENSION]);
+    expect(r.roles[0]!.warnings).toEqual([]);
+  });
+
+  test("a compaction percent above the 90% upstream cap is rejected, value echoed", () => {
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    writes: []
+    harness_engineering: ["${SELF_COMPACT_EXTENSION}"]
+    compaction:
+      soft_at: "30%"
+      at: "95%"
+      buffer: "10%"
+`;
+    try {
+      parseRoster(src);
+      throw new Error("expected RosterError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RosterError);
+      const joined = (e as RosterError).problems.join("\n");
+      expect(joined).toContain("≤ 90% (upstream cap)");
+      expect(joined).toContain('"95%"');
+    }
+  });
+
+  test("soft_at at or past at is rejected", () => {
+    const src = y`
+defaults:
+  provider: openrouter
+  writes: []
+roles:
+  - name: worker
+    model: m
+    writes: []
+    harness_engineering: ["${SELF_COMPACT_EXTENSION}"]
+    compaction:
+      soft_at: "50%"
+      at: "50%"
+      buffer: "10%"
+`;
+    try {
+      parseRoster(src);
+      throw new Error("expected RosterError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RosterError);
+      const joined = (e as RosterError).problems.join("\n");
+      expect(joined).toContain("soft_at must be < at");
+      expect(joined).toContain('"50%"');
+    }
   });
 });

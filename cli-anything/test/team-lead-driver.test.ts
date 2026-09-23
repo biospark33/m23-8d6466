@@ -20,6 +20,7 @@ import {
   REPO_ROOT,
   resolveExtensionPaths,
   SCHEMA_INSTRUCTION,
+  validateExtensionArgs,
   writeRawWorkerCapture,
 } from "../scripts/team-lead-driver.ts";
 
@@ -52,12 +53,7 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
 
   it("reproduces it for lean:false and for an empty extensions list too", () => {
     expect(buildWorkerArgv({ ...base, lean: false })).toEqual(TODAYS_ARGV);
-    expect(buildWorkerArgv({ ...base, lean: false, extensions: ["src"] })).toEqual(
-      TODAYS_ARGV,
-    );
-    // extensions without lean changes nothing: -e is emitted only under lean,
-    // because that is the only mode in which discovery is off.
-    expect(buildWorkerArgv({ ...base, extensions: ["src"] })).toEqual(TODAYS_ARGV);
+    expect(buildWorkerArgv({ ...base, lean: false, extensions: [] })).toEqual(TODAYS_ARGV);
   });
 
   it("adds exactly --no-extensions --no-skills under lean, before -p (AC2)", () => {
@@ -98,6 +94,57 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
     // Explicit -e paths survive --no-extensions: it disables DISCOVERY only.
     expect(argv.filter((a) => a === "-e")).toHaveLength(2);
     expect(pIndex).toBe(argv.length - 2);
+  });
+
+  // INV-EXT-LOAD: `-e` pairs must load under discovery-on too. The lean gate
+  // made extensions unreachable for non-lean workers, so a roster role asking
+  // for an extension without opting into lean silently got nothing.
+  it("emits -e pairs for extensions without lean", () => {
+    const argv = buildWorkerArgv({
+      agentId: "worker",
+      provider: "openrouter",
+      model: "deepseek/deepseek-v3.2",
+      prompt: "p",
+      extensions: ["pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts"],
+    });
+    expect(argv).toContain("-e");
+    expect(argv.filter((a) => a === "-e")).toHaveLength(1);
+    expect(argv.join(" ")).toContain("self-compact.ts");
+    // byte-identical default path preserved: no extensions key at all
+    const plain = buildWorkerArgv({
+      agentId: "worker",
+      provider: "openrouter",
+      model: "deepseek/deepseek-v3.2",
+      prompt: "p",
+    });
+    expect(plain).not.toContain("-e");
+  });
+
+  // INV-EXT-ARGS: extensionArgs ride the argv before -p; an unknown flag or a
+  // missing value is rejected fail-closed, never silently dropped.
+  it("extensionArgs land on the argv before -p and reject unknown flags", () => {
+    const argv = buildWorkerArgv({
+      ...base,
+      extensionArgs: ["--compact-soft-at", "30%", "--compact-at", "50%", "--compact-buffer", "10%"],
+    });
+    expect(argv.indexOf("-p")).toBeGreaterThan(argv.indexOf("--compact-buffer"));
+
+    const bad = validateExtensionArgs(["--evil", "x"]);
+    expect(bad.ok).toBe(false);
+    const odd = validateExtensionArgs(["--compact-at"]);
+    expect(odd.ok).toBe(false);
+  });
+
+  // The REJECTION is a throw at argv build, and it must stay there: the driver
+  // builds the argv synchronously BEFORE its Promise executor, so this throw
+  // degrades the one worker to partial — never a rejected team-run promise.
+  it("throws at argv build on an unknown flag or a missing value (INV-EXT-ARGS)", () => {
+    expect(() => buildWorkerArgv({ ...base, extensionArgs: ["--evil", "x"] })).toThrow(
+      "extensionArgs rejected: --evil",
+    );
+    expect(() => buildWorkerArgv({ ...base, extensionArgs: ["--compact-at"] })).toThrow(
+      "extensionArgs rejected: --compact-at (missing value)",
+    );
   });
 });
 
@@ -275,6 +322,40 @@ describe("driver wiring — refusal happens BEFORE spawn (DoD Security, INV-2/IN
     expect(argv[argv.indexOf("-e") + 1]).toBe(join(REPO_ROOT, "cli-anything/src"));
   }, 30_000);
 
+  // INV-2 after 3f459de1 (`-e` under both profiles): extensions are no longer
+  // a lean-only field, so containment must not be either — a non-lean worker's
+  // `-e` pairs reach pi exactly the same way.
+  it("never execs pi for a NON-lean worker whose extension escapes the root", () => {
+    const r = runDriver([worker({ extensions: ["../outside-root/evil.ts"] })]);
+    expect(r.stderr).toContain("escapes the repo root");
+    expect(r.stderr).toContain("../outside-root/evil.ts");
+    expect(r.spawns).toHaveLength(0);
+    // …and the refusal resolved with empty text + exit null, which the driver
+    // reports downstream instead of spawning a half-configured worker.
+    expect(r.stderr).toContain("worker worker-a failed (exit null)");
+  }, 30_000);
+
+  it("execs pi with the RESOLVED extension path for a NON-lean worker", () => {
+    const r = runDriver([worker({ extensions: ["cli-anything/src"] })]);
+    expect(r.spawns).toHaveLength(1);
+    const argv = r.spawns[0] as string[];
+    // Discovery-on profile: no --no-extensions/--no-skills, but the -e pair
+    // is present and carries the containment-resolved absolute path — not the
+    // raw relative string pi would re-resolve against its own cwd.
+    expect(argv).not.toContain("--no-extensions");
+    expect(argv[argv.indexOf("-e") + 1]).toBe(join(REPO_ROOT, "cli-anything/src"));
+  }, 30_000);
+
+  // The extensionArgs twin of the extensions-refusal tests above: a rejected
+  // entry is refused at argv build (before the executor), so pi is never
+  // exec'd and the driver still degrades + merges instead of dying.
+  it("never execs pi for a worker with a rejected extensionArgs entry", () => {
+    const r = runDriver([worker({ extensionArgs: ["--evil", "x"] })]);
+    expect(r.stderr).toContain("extensionArgs rejected: --evil");
+    expect(r.spawns).toHaveLength(0);
+    expect(r.stderr).toContain("worker worker-a failed (exit null)");
+  }, 30_000);
+
   it("writes no capture anywhere when QDS_TEAM_RAW_WORKER_DIR is unset (AC5, run level)", () => {
     const probe = mkdtempSync(join(tmpdir(), "df19-nocapture-"));
     try {
@@ -390,6 +471,22 @@ describe("writeRawWorkerCapture — opt-in redacted capture (INV-1, AC5)", () =>
       const written = readFileSync(path as string, "utf8");
       expect(written).toContain(RAW_CAPTURE_TRUNCATION_MARKER);
       expect(Buffer.byteLength(written, "utf8")).toBeLessThan(9 * 1024 * 1024);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the TAIL past the cap — a vanished worker's last events are the evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "df19-raw-tail-"));
+    try {
+      const headSentinel = "HEAD_CHATTER_NEVER_SEEN";
+      const tailSentinel = '{"type":"message_end","stopReason":"error"}';
+      const raw = `${headSentinel}${"x".repeat(9 * 1024 * 1024)}\n${tailSentinel}`;
+      const path = writeRawWorkerCapture(dir, "worker-a", raw, {});
+      const written = readFileSync(path as string, "utf8");
+      expect(written).toContain(RAW_CAPTURE_TRUNCATION_MARKER);
+      expect(written).toContain(tailSentinel);
+      expect(written).not.toContain(headSentinel);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

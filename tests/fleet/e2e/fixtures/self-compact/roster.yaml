@@ -1,0 +1,46 @@
+# T2 self-compact live e2e roster — the file serves BOTH roster roles in the
+# dispatch path (and that is deliberate, not a coincidence to factor away):
+#
+#  1. the ACTIVE roster BESIDE the manifest: `fleet dispatch` derives it as
+#     dirname(manifestPath)/roster.yaml host-side (src/fleet/dispatch.ts
+#     loadManifestAndRoster), pre-checks it before a box is billed, and the
+#     setup gate pings every model in it (gates C/D) — so it must carry only
+#     real, proven-live OpenRouter slugs.
+#  2. the roster the manifest's dispatch_task phase names (spec.roster): the
+#     phase body loads it (phase-engine/roster/schema.ts loadRoster) and the
+#     roster-adapter maps roles[0] to the lead and the rest to workers.
+#
+# Proven-live models (lead claude-haiku-4.5, worker
+# deepseek/deepseek-v4-flash-0731 — v4-flash is ALSO tier4's proven slug, and
+# its 1M-token window is what the live sweep needs: 50% warning = 524k tokens
+# of real fill that a 128k-window slug could never reach); the worker
+# additionally carries the self-compact wiring under test:
+#   harness_engineering -> TeamRole.extensions  -> `-e <path>` in the worker's
+#     pi argv (team-lead-driver.ts buildWorkerArgv)
+#   compaction          -> TeamRole.extensionArgs -> `--compact-soft-at 30%
+#     --compact-at 50% --compact-buffer 10%` (roster-adapter.ts — the only
+#     mapping; validateExtensionArgs' allowlist admits exactly these flags)
+#
+# `tools` stays null (defaults): a non-null allowlist silently filters
+# extension-registered tools (roster/schema.ts's own warning), which would drop
+# self_compact/view_context and hollow the round.
+defaults:
+  provider: openrouter
+  thinking: medium
+  tools: null
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: lead
+    model: anthropic/claude-haiku-4.5
+    thinking: high
+
+  - name: compactor
+    model: deepseek/deepseek-v4-flash-0731
+    harness_engineering:
+      - pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts
+    compaction:
+      soft_at: "30%"
+      at: "50%"
+      buffer: "10%"

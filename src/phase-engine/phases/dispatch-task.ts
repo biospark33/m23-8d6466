@@ -642,6 +642,15 @@ export function dispatchTask(
         leadRoleName: leadRole.name,
         workerRoleNames: workerRoles.map((r) => r.name),
         prompts,
+        // #279: the team caps must derive from the phase's OWN declared
+        // budget. The schema defaults (wallClock 300k / comsAwait 240k) let
+        // the driver await-out any worker outliving 240s — "missed the
+        // coms_await deadline" — even when the phase allowed far longer, and
+        // the record blamed the worker. +30s so a worker that uses the full
+        // phase budget is still awaited; the phase timeout stays the binding
+        // ceiling.
+        wallClockCapMs: spec.maxDurationMs + 30_000,
+        comsAwaitTimeoutMs: spec.maxDurationMs + 30_000,
       });
     } catch (err) {
       return refuse(err instanceof Error ? err.message : String(err), redact);

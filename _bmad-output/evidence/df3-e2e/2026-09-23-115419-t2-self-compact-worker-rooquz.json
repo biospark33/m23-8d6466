@@ -1,0 +1,134 @@
+{
+  "test": "T2-SC.2",
+  "outcome": "fail",
+  "runId": "qds-20260923-f868b5",
+  "vmName": "qds-20260923-f868b5",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json",
+      "rosterPath": "tests/fleet/e2e/fixtures/self-compact/roster.yaml"
+    },
+    {
+      "phase": "tree-parity",
+      "ok": true,
+      "files": [
+        {
+          "rel": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
+          "workingTree": "10259403acd58cd229d8b042568d25ab31d91f2858e503269957197863078973",
+          "atSha": "10259403acd58cd229d8b042568d25ab31d91f2858e503269957197863078973"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+          "workingTree": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+          "atSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/coms-net.ts",
+          "workingTree": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7",
+          "atSha": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7"
+        }
+      ]
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260923-f868b5\",\"requestId\":\"fdb5619c-b6ed-4510-a249-515b1fadd783\",\"state\":\"ready\",\"vmName\":\"qds-20260923-f868b5\",\"httpsUrl\":\"https://qds-20260923-f868b5.exe.xyz\"}",
+      "stderrTail": "9-23T11:53:58.453Z\",\"duration\":55812,\"durationMs\":55812,\"status\":\"ok\",\"runId\":\"qds-20260923-f868b5\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":5111,\"mint_ms\":1720,\"fill_ms\":29623,\"setup_gate_ms\":18172}}\n{\"requestId\":\"fdb5619c-b6ed-4510-a249-515b1fadd783\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-23T11:53:58.455Z\",\"duration\":55818,\"durationMs\":55818,\"status\":\"ok\",\"runId\":\"qds-20260923-f868b5\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260923-f868b5",
+      "vmName": "qds-20260923-f868b5"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "6c8ffef802e2f79c11c7667dfc9e5b00a4849028da9ad110fe5941e499e0e89e",
+      "limitMicroUsd": 50000,
+      "requestId": "fdb5619c-b6ed-4510-a249-515b1fadd783"
+    },
+    {
+      "phase": "box-clone-head",
+      "exitCode": 0,
+      "head": "f8861ceec756878fd25a2584f88be9171c6e0b06"
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "witnessRequestId": "fdb5619c-b6ed-4510-a249-515b1fadd783",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000
+    },
+    {
+      "phase": "run-key",
+      "source": "/home/exedev/app/.env",
+      "envVar": "OPENROUTER_API_KEY",
+      "ok": true,
+      "keyChars": 73,
+      "provenance": "delivered by dispatch — this test mints no key of its own"
+    },
+    {
+      "phase": "engine-leg",
+      "exitCode": 1,
+      "stdoutHead": "RUN e2e-t2sc-leg-mue1oujzc3r0 pipeline=t2-self-compact-worker ok=false accepted=true phases=1 completedAt=2026-09-23T11:54:06.975Z",
+      "stderrTail": "-worker\",\"kind\":\"dispatch_task\",\"timestamp\":\"2026-09-23T11:54:06.973Z\",\"durationMs\":1213,\"status\":\"fail\",\"exitStatus\":\"logic\",\"error\":{\"code\":\"Error\",\"message\":\"roster gate failed (exit 1)\",\"stack\":\"Error: roster gate failed (exit 1)\\n    at phase (/Users/steve/QDS-Factory/src/phase-engine/phase.ts:360:19)\\n    at async walkPhases (/Users/steve/QDS-Factory/src/phase-engine/phase.ts:517:31)\\n    at async main (/Users/steve/QDS-Factory/scripts/pipeline-run.ts:4444:15)\"},\"subTimings\":{\"manifest_load_ms\":3,\"phase_body_ms\":1213,\"journal_write_ms\":3}}\n{\"ok\":false,\"exitCode\":1,\"terminated\":false,\"phasesSettled\":1,\"engine_start_ms\":133,\"phase_walk_ms\":1217,\"level\":\"error\",\"event\":\"engine_settled\",\"runId\":\"e2e-t2sc-leg-mue1oujzc3r0\",\"requestId\":\"fdb5619c-b6ed-4510-a249-515b1fadd783\",\"phaseId\":null}"
+    },
+    {
+      "phase": "raw-capture",
+      "ok": false,
+      "error": "no raw worker capture at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t2sc2-Mt9OCI/leg/raw-workers/compactor.ndjson — the worker pi never ran; see engine-leg stderrTail above"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "at": "t2-sc.2-cleanup",
+      "runId": "qds-20260923-f868b5",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":14}\n{\"requestId\":\"2b6eef57-3860-452e-9126-7de1f40d85ec\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-23T11:54:15.311Z\",\"duration\":8267,\"durationMs\":8267,\"status\":\"ok\",\"runId\":\"qds-20260923-f868b5\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260923-f868b5",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260923-f868b5",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-23T11:54:19.768Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

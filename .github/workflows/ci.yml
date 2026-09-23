@@ -229,7 +229,12 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
-      - run: bun scripts/ci/test-batches.ts
+      # Explicit roots (tests visualizer cli-anything) = every bun test file in
+      # the repo. The roots are REAL roots here — test-batches.ts globs each
+      # root — not bun's substring path args, so the vendored
+      # pi-vs-claude-code-vendor/self-compact/tests/** stays OUT: those run
+      # under their own node:test runner (bun's shims fail on them).
+      - run: bun scripts/ci/test-batches.ts tests visualizer cli-anything
 
   image:
     runs-on: ubuntu-latest

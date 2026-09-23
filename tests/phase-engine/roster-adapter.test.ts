@@ -40,6 +40,54 @@ describe("rosterRoleToTeamRole", () => {
     expect(teamRole.extensions).toBeUndefined();
   });
 
+  test("worker role harness_engineering + compaction become extensions + extensionArgs", () => {
+    const role: ResolvedRole = {
+      name: "worker",
+      model: "deepseek/deepseek-v3.2",
+      provider: "openrouter",
+      thinking: "medium",
+      tools: null,
+      writes: ["src/"],
+      harness_engineering: [
+        "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+      ],
+      compaction: { soft_at: "30%", at: "50%", buffer: "10%" },
+      slug: "openrouter/deepseek/deepseek-v3.2",
+      warnings: [],
+    };
+
+    const t = rosterRoleToTeamRole(role, { agentId: "worker", prompt: "p" });
+    expect(t.extensions).toEqual([
+      "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+    ]);
+    expect(t.extensionArgs).toEqual([
+      "--compact-soft-at",
+      "30%",
+      "--compact-at",
+      "50%",
+      "--compact-buffer",
+      "10%",
+    ]);
+  });
+
+  test("role without harness_engineering or compaction leaves both undefined", () => {
+    const role: ResolvedRole = {
+      name: "planner",
+      model: "m",
+      provider: "openrouter",
+      thinking: "medium",
+      tools: null,
+      writes: [],
+      harness_engineering: [],
+      slug: "openrouter/m",
+      warnings: [],
+    };
+
+    const t = rosterRoleToTeamRole(role, { agentId: "planner", prompt: "p" });
+    expect(t.extensions).toBeUndefined();
+    expect(t.extensionArgs).toBeUndefined();
+  });
+
   test("handles model id containing slash — openrouter/deepseek/deepseek-v4-flash-0731", () => {
     const role: ResolvedRole = {
       name: "fixer",
@@ -721,5 +769,113 @@ describe("rosterToTeamManifest: review-round hardening (A19, A20)", () => {
     const split = splitRoleModel(teamRole.model);
     expect(split.provider).toBe("anthropic");
     expect(split.model).toBe("claude-sonnet-4-5");
+  });
+});
+
+describe("rosterToTeamManifest — RA4 lead self-compact refusal", () => {
+  const baseLead: Omit<ResolvedRole, "name"> = {
+    model: "claude-sonnet-4-5",
+    provider: "anthropic",
+    thinking: "off",
+    tools: null,
+    writes: [],
+    harness_engineering: [],
+    slug: "anthropic/claude-sonnet-4-5",
+    warnings: [],
+  };
+
+  const baseWorker: Omit<ResolvedRole, "name"> = {
+    model: "claude-haiku-4-5",
+    provider: "anthropic",
+    thinking: "off",
+    tools: null,
+    writes: [],
+    harness_engineering: [],
+    slug: "anthropic/claude-haiku-4-5",
+    warnings: [],
+  };
+
+  const buildRoster = (leadOverrides: Partial<ResolvedRole>): ResolvedRoster => ({
+    path: "/fake/roster.yaml",
+    // TeamManifestSchema requires >=1 worker, so every fixture carries one
+    roles: [
+      { ...baseLead, name: "lead", ...leadOverrides },
+      { ...baseWorker, name: "w1" },
+    ],
+    warnings: [],
+  });
+
+  const toManifest = (roster: ResolvedRoster) =>
+    rosterToTeamManifest(roster, {
+      name: "test-team",
+      project: "qds-factory",
+      leadRoleName: "lead",
+      workerRoleNames: ["w1"],
+      prompts: { lead: "Lead the team", w1: "Do the work" },
+    });
+
+  test("refuses a lead that declares harness_engineering", () => {
+    let thrown: Error | undefined;
+    try {
+      toManifest(buildRoster({ harness_engineering: ["self-compact"] }));
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown?.message).toContain("lead");
+    expect(thrown?.message).toContain("harness_engineering");
+  });
+
+  test("refuses a lead that declares compaction", () => {
+    let thrown: Error | undefined;
+    try {
+      toManifest(
+        buildRoster({ compaction: { soft_at: "30%", at: "50%", buffer: "10%" } }),
+      );
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown?.message).toContain("compaction");
+  });
+
+  test("refuses a lead declaring both fields, naming each", () => {
+    let thrown: Error | undefined;
+    try {
+      toManifest(
+        buildRoster({
+          harness_engineering: ["self-compact"],
+          compaction: { soft_at: "30%", at: "50%", buffer: "10%" },
+        }),
+      );
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown?.message).toContain("harness_engineering");
+    expect(thrown?.message).toContain("compaction");
+  });
+
+  test("accepts a lead with empty harness_engineering (the schema default)", () => {
+    const manifest = toManifest(buildRoster({}));
+    expect(manifest.team.lead.extensions).toBeUndefined();
+    expect(manifest.team.lead.extensionArgs).toBeUndefined();
+  });
+
+  test("worker self-compact wiring still maps through at the manifest level", () => {
+    const roster = buildRoster({});
+    roster.roles[1] = {
+      ...baseWorker,
+      name: "w1",
+      harness_engineering: ["self-compact"],
+      compaction: { soft_at: "30%", at: "50%", buffer: "10%" },
+    };
+
+    const manifest = toManifest(roster);
+    expect(manifest.team.lead.extensions).toBeUndefined();
+    expect(manifest.team.workers[0]?.extensions).toEqual(["self-compact"]);
+    expect(manifest.team.workers[0]?.extensionArgs).toContain("--compact-at");
+    // And the derived manifest still validates through TeamManifestSchema
+    expect(TeamManifestSchema.safeParse(manifest).success).toBe(true);
   });
 });

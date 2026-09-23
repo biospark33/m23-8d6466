@@ -47,13 +47,21 @@ interface WorkerConfig {
    */
   lean?: boolean;
   /**
-   * Explicit extension paths to keep under lean. `--no-extensions` disables
-   * DISCOVERY only, so these still load. Repo-root-relative; an entry that
-   * escapes the root is rejected before spawn, never sanitized (INV-2).
+   * Explicit extension paths to load, under BOTH the lean and discovery-on
+   * profiles. `--no-extensions` disables DISCOVERY only, so these still load.
+   * Repo-root-relative; an entry that escapes the root is rejected before
+   * spawn, never sanitized (INV-2).
    * Not symmetric for skills: `--no-skills` disables discovery AND loading,
    * so nothing survives it — out of scope here.
    */
   extensions?: string[];
+  /**
+   * Validated flag/value pairs appended to the pi argv before `-p`. Only
+   * self-compact's registered flags pass (validateExtensionArgs) — anything
+   * else throws at argv build, so the worker never spawns with attacker
+   * flags (INV-EXT-ARGS).
+   */
+  extensionArgs?: string[];
 }
 
 const say = (o: unknown): void => {
@@ -377,9 +385,10 @@ export const SCHEMA_INSTRUCTION =
  *
  * Lean is OPT-IN: with no `lean` key the argv is byte-identical to the one
  * that shipped before this story, so the default path is unchanged. Under
- * lean, `--no-extensions --no-skills` and any explicit `-e <path>` pairs are
- * inserted BEFORE `-p`, which stays last and still carries the prompt plus
- * the schema instruction.
+ * lean, `--no-extensions --no-skills` are inserted; `-e <path>` pairs are
+ * emitted whenever `extensions` is non-empty, under BOTH profiles, always
+ * BEFORE `-p`, which stays last and still carries the prompt plus the schema
+ * instruction.
  */
 export function buildWorkerArgv(w: WorkerConfig): string[] {
   const argv = [
@@ -393,12 +402,46 @@ export function buildWorkerArgv(w: WorkerConfig): string[] {
   ];
   if (w.lean === true) {
     argv.push("--no-extensions", "--no-skills");
-    // `-e` only under lean: with discovery on, re-listing a path pi would
-    // already find changes nothing and would silently diverge from AC3.
-    for (const ext of w.extensions ?? []) argv.push("-e", ext);
+  }
+  // `-e` pairs load under BOTH profiles: under lean, discovery is off so the
+  // pair is the only way in; under discovery-on, an explicit pair loads a
+  // vendored path pi would never discover (it is not in any `.pi/` dir). A
+  // worker with no extensions key still gets byte-identical argv (AC3).
+  for (const ext of w.extensions ?? []) argv.push("-e", ext);
+  if (w.extensionArgs !== undefined) {
+    const checked = validateExtensionArgs(w.extensionArgs);
+    if (!checked.ok) throw new Error(`extensionArgs rejected: ${checked.rejected}`);
+    argv.push(...checked.argv);
   }
   argv.push("-p", `${w.prompt}\n\n${SCHEMA_INSTRUCTION}`);
   return argv;
+}
+
+/** INV-EXT-ARGS: only self-compact's registered flags may ride the argv, and each needs a value. */
+const EXTENSION_FLAG_ALLOWLIST = new Set([
+  "--compact-soft-at",
+  "--compact-at",
+  "--compact-buffer",
+  "--compact-prompt",
+]);
+
+export function validateExtensionArgs(
+  args: unknown[],
+): { ok: true; argv: string[] } | { ok: false; rejected: string } {
+  const argv: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (typeof flag !== "string" || !EXTENSION_FLAG_ALLOWLIST.has(flag)) {
+      return { ok: false, rejected: typeof flag === "string" ? flag : String(flag) };
+    }
+    const value = args[i + 1];
+    if (typeof value !== "string" || value.trim() === "" || EXTENSION_FLAG_ALLOWLIST.has(value)) {
+      return { ok: false, rejected: `${flag} (missing value)` };
+    }
+    argv.push(flag, value);
+    i++;
+  }
+  return { ok: true, argv };
 }
 
 /**
@@ -515,13 +558,22 @@ export function writeRawWorkerCapture(
   // tail of it in the clear.
   let body = redactSecrets(raw, parentEnv);
   if (Buffer.byteLength(body, "utf8") > MAX_RAW_CAPTURE_BYTES) {
-    // Decode with fatal=false would leave a U+FFFD at a split codepoint; trim
-    // back to the last whole character instead.
-    const kept = Buffer.from(body, "utf8")
-      .subarray(0, MAX_RAW_CAPTURE_BYTES)
-      .toString("utf8")
-      .replace(/�$/, "");
-    body = `${kept}\n${RAW_CAPTURE_TRUNCATION_MARKER}\n`;
+    // Keep the TAIL past the cap, not the head: the head of a worker stream
+    // is mid-loop chatter, the END is where the diagnostic evidence lives —
+    // the final events before a worker vanished mid-stream are exactly what
+    // a forensics pass needs, and head-keeping discarded them (#SC.2 rounds
+    // 9/10: the worker's dying message_end landed past byte 8 MiB and was
+    // cut). Redaction already ran above, so the cut cannot split a secret
+    // either way; the only seam hazard is the codepoint at the new cut.
+    const buf = Buffer.from(body, "utf8");
+    let kept = buf.subarray(buf.length - MAX_RAW_CAPTURE_BYTES).toString("utf8");
+    // A byte-cut mid-codepoint surfaces as one U+FFFD at the seam; drop it.
+    if (kept.startsWith("�")) kept = kept.slice(1);
+    // The first line after a byte-cut is a partial line — drop it whole so
+    // the marker is followed by a clean NDJSON line.
+    const nl = kept.indexOf("\n");
+    if (nl !== -1) kept = kept.slice(nl + 1);
+    body = `${RAW_CAPTURE_TRUNCATION_MARKER}\n${kept}`;
   }
   const path = join(dir, `${agentId}.ndjson`);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -546,53 +598,71 @@ export function writeRawWorkerCapture(
 
 /** Run one worker pi subprocess in --mode json and harvest text + usage. */
 function runWorkerPi(w: WorkerConfig, timeoutMs: number): Promise<PiRunOutcome> {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    // INV-2: an extensions entry escaping the repo root is refused BEFORE the
-    // spawn, with the path echoed but never executed. Fail closed — a lean
-    // worker that cannot load its declared extensions must not silently run
-    // without them (INV-3).
-    //
-    // Checked only when the paths will actually be passed to pi, i.e. under
-    // lean: `buildWorkerArgv` emits `-e` nowhere else, and killing a worker
-    // over a field that was never going to be used is a denial of service,
-    // not a protection. A non-lean worker carrying extensions gets a warning.
-    const declared = Array.isArray(w.extensions) ? w.extensions : [];
-    let spawnConfig = w;
-    if (declared.length > 0) {
-      if (w.lean !== true) {
-        log(`worker ${w.agentId}: extensions ignored (lean is not set)`);
-      } else {
-        let check: ReturnType<typeof resolveExtensionPaths>;
-        try {
-          check = resolveExtensionPaths(declared, REPO_ROOT);
-        } catch (err) {
-          // Never let a malformed allowlist take down the whole team run —
-          // one broken worker degrades to partial (the same contract the
-          // child `error` handler below maintains).
-          check = {
-            ok: false,
-            rejected: err instanceof Error ? err.message : String(err),
-          };
-        }
-        if (!check.ok) {
-          log(
-            `worker ${w.agentId} refused: extensions path escapes the repo root: ${check.rejected}`,
-          );
-          resolve({
-            text: "",
-            ...ZERO_USAGE,
-            durationMs: Date.now() - started,
-            exitCode: null,
-          });
-          return;
-        }
-        // Pass the RESOLVED paths to pi, so the argv carries exactly what
-        // containment approved.
-        spawnConfig = { ...w, extensions: check.paths };
-      }
+  const started = Date.now();
+  // INV-2: an extensions entry escaping the repo root is refused BEFORE the
+  // spawn, with the path echoed but never executed. Fail closed — a worker
+  // that cannot load its declared extensions must not silently run without
+  // them (INV-3).
+  //
+  // Containment is checked whenever the paths will be passed to pi — which,
+  // since `buildWorkerArgv` emits `-e` for declared extensions under BOTH
+  // profiles, is now every declared case. Killing a worker over a field
+  // that was never used is no longer possible: there is no
+  // declared-extensions case where `-e` is not emitted.
+  //
+  // All of this validation lives ABOVE the Promise executor on purpose: a
+  // throw inside an executor rejects this worker's promise and, through
+  // Promise.all, the whole team run. A refused config degrades THIS worker
+  // to partial instead — the same contract the child `error` handler below
+  // maintains.
+  const declared = Array.isArray(w.extensions) ? w.extensions : [];
+  let spawnConfig = w;
+  if (declared.length > 0) {
+    let check: ReturnType<typeof resolveExtensionPaths>;
+    try {
+      check = resolveExtensionPaths(declared, REPO_ROOT);
+    } catch (err) {
+      // Never let a malformed allowlist take down the whole team run —
+      // one broken worker degrades to partial (the same contract the
+      // child `error` handler below maintains).
+      check = {
+        ok: false,
+        rejected: err instanceof Error ? err.message : String(err),
+      };
     }
-    const child = spawn("pi", buildWorkerArgv(spawnConfig), {
+    if (!check.ok) {
+      log(
+        `worker ${w.agentId} refused: extensions path escapes the repo root: ${check.rejected}`,
+      );
+      return Promise.resolve({
+        text: "",
+        ...ZERO_USAGE,
+        durationMs: Date.now() - started,
+        exitCode: null,
+      });
+    }
+    // Pass the RESOLVED paths to pi, so the argv carries exactly what
+    // containment approved.
+    spawnConfig = { ...w, extensions: check.paths };
+  }
+  // INV-EXT-ARGS: `buildWorkerArgv` THROWS on a rejected extensionArgs entry,
+  // and that throw must land here — synchronously, before the executor — so
+  // an invalid entry degrades one worker to partial rather than rejecting the
+  // team run's Promise.all.
+  let argv: string[];
+  try {
+    argv = buildWorkerArgv(spawnConfig);
+  } catch (err) {
+    log(`worker ${w.agentId} refused: ${err instanceof Error ? err.message : String(err)}`);
+    return Promise.resolve({
+      text: "",
+      ...ZERO_USAGE,
+      durationMs: Date.now() - started,
+      exitCode: null,
+    });
+  }
+  return new Promise((resolve) => {
+    const child = spawn("pi", argv, {
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
     });

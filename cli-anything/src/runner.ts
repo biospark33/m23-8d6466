@@ -1074,6 +1074,7 @@ export async function runTeamManifest(
       // story — the driver's default argv path stays byte-identical (AC3).
       ...(w.lean !== undefined ? { lean: w.lean } : {}),
       ...(w.extensions !== undefined ? { extensions: w.extensions } : {}),
+      ...(w.extensionArgs !== undefined ? { extensionArgs: w.extensionArgs } : {}),
     })),
     turnCap: manifest.team.turnCap,
   });
