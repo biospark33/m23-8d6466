@@ -149,7 +149,12 @@ import {
 } from "../src/phase-engine/resident-bounds.ts";
 import { loadRoster } from "../src/phase-engine/roster/schema.ts";
 import { ACKS_READ_CAP_BYTES, acksPath, localSteeringInbox } from "../src/fleet/attach.ts";
-import { DEFAULT_RESIDENT_SLUG, startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
+import {
+  CgroupUnenforceableError,
+  DEFAULT_RESIDENT_SLUG,
+  startResident,
+  type ResidentSpawn,
+} from "../src/fleet/resident.ts";
 import { RateError } from "../src/phase-engine/roster/validate.ts";
 // INV-RUN-5: the redactor every witness echo runs through — see `witnessEcho`.
 // `sanitizeForMessage` (phase-engine) escapes control characters; it does NOT
@@ -2876,7 +2881,56 @@ function deriveInBoxArgv(runId: string): string[] {
   ];
 }
 
-async function main(argv: readonly string[]): Promise<number> {
+/**
+ * DF3.6b — the ENFORCEMENT CONTEXT latch, and it is the story's INV-MEM-2 Scope
+ * made structural rather than probed.
+ *
+ * INV-MEM-2 governs the in-box enforcement context: the path reached when the
+ * caller supplies a bound. `residentRssBytes` is OPTIONAL on `ResidentSpawnOpts`
+ * exactly so the two contexts can be told apart BY THE CALLER — absent means no
+ * cgroup machinery runs at all, present-but-unenforceable means the resident is
+ * not started. This flag is how THIS caller tells them apart, and it is set by
+ * the invocation SHAPE, never by a platform probe and never by an env var:
+ *
+ *   `qds-engine run <runId>`  — the unit's front door, the one shape
+ *                               `ExecStart=` ever uses, so this is the in-box
+ *                               engine under `qds-run@.service` with
+ *                               `Delegate=memory`. Bound supplied; INV-MEM-2
+ *                               applies in full, and an unenforceable box
+ *                               refuses to start the resident (AC3).
+ *   `pipeline-run --manifest …` — the host-side shape (the unit-test context and
+ *                               the darwin operator host). No cgroups exist to
+ *                               root a bound in, so the bound is ABSENT and no
+ *                               cgroup machinery runs. That is the pre-DF3.6b
+ *                               posture, unchanged: host-side RSS is DF5.1's
+ *                               open, ps-sampled ceiling, which ADR Appendix B's
+ *                               same-day correction explicitly leaves untouched
+ *                               because this mechanism does not generalise to a
+ *                               possibly-darwin host.
+ *
+ * Why not simply pass the bound on every shape: on darwin the arming check then
+ * refuses EVERY host-side run's resident, which silently disarms DF3.3's and
+ * DF3.6a's entire host-side behavioural coverage — the same "a memory story must
+ * not silently disarm a shipped control" hazard INV-MEM-2's Scope paragraph
+ * exists to prevent one layer down, arriving one layer up.
+ *
+ * Why not an env var: INV-MEM-1 forbids any env var, directive or in-box file
+ * from raising, disabling or resetting the bound. An argv shape the unit fixes
+ * in `ExecStart=` is not reachable from the resident's tier; an env var is.
+ *
+ * Why a PARAMETER and not a module-level `let`: it was the latter until review
+ * round 14, set `true` before the re-entry and never reset. One process per
+ * invocation made that safe in the shipped CLI — and invisible, since every test
+ * reaches this file through `Bun.spawn`. But a latch that only unsets on process
+ * exit is a landmine for any in-process reuse of `main()` (a batch runner, a
+ * worker, a harness that imports it): the first in-box run would pin it `true`
+ * for the process's life, and a LATER host-side `--manifest` call would then
+ * pass a real bound, hit `ensureDelegatedSubtree()` on a box with no delegated
+ * cgroup, and refuse the resident on precisely the shape this flag exists to
+ * keep unarmed. A parameter cannot leak across calls, so the hazard is removed
+ * rather than documented.
+ */
+async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<number> {
   // The unit's front door. One level of re-entry, never more: the derived argv
   // is all flags, so it cannot come back through this branch.
   if (argv[0] === "run") {
@@ -2923,7 +2977,10 @@ async function main(argv: readonly string[]): Promise<number> {
       );
       if (replayExit !== null) return replayExit;
     }
-    return main(deriveInBoxArgv(inBoxRunId));
+    // DF3.6b: latch the enforcement context before the re-entry. The derived
+    // argv is all flags, so the inner `main` cannot otherwise tell that it is
+    // the in-box engine — and the memory bound is applied on exactly that shape.
+    return main(deriveInBoxArgv(inBoxRunId), true);
   }
 
   let manifestPath: string | undefined;
@@ -4000,9 +4057,38 @@ async function main(argv: readonly string[]): Promise<number> {
         // §5.2 / DOD-Security: every prompt and raw reply persists
         // PRE-EXECUTION, redacted, beside the journal.
         persistDir: path.dirname(path.resolve(journalPath)),
+        // DF3.6b edit (iii): the engine-owned bound, validated by DF3.6a,
+        // handed to the layer that applies it as `memory.max` on the
+        // per-solicitation cgroup. Read from `loadedBounds` and NEVER
+        // defaulted here — fleet is mechanism, this is the one place the
+        // policy value crosses (INV-MEM-1). `loadedBounds` is never undefined
+        // here — the AC2a catch above returns before this line on every path
+        // that leaves the bound set unloaded — so on the in-box shape an armed
+        // resident can never spawn without its bound (INV-MEM-2). On the
+        // host-side shape the bound is deliberately ABSENT: see the
+        // `inBoxFrontDoor` header for why that is INV-MEM-2's own Scope clause
+        // and not a bypass of it.
+        residentRssBytes: inBoxFrontDoor ? loadedBounds.residentRssBytes : undefined,
       });
     } catch (err) {
-      if (!(err instanceof RateError)) {
+      // DF3.6b edit (vi) / AC3: the memory bound is UNENFORCEABLE on this box
+      // — no `Delegate=memory`, no `memory` controller, not cgroup v2, an
+      // unwritable `memory.max`. Classified HERE, beside the rate refusal, and
+      // deliberately NOT inside the `onBoundBreach` handler: that region lives
+      // inside `createSteering`, which on this path is never constructed (the
+      // guard two statements down gates it on `!("disabled" in spawned)`), so
+      // an unclassified rethrow would close the tracer and leave a
+      // marker-absent box — `fleet status: engine-failed` — exactly the
+      // outcome DF3.6a's AC2b negative control forbids. Also deliberately NOT
+      // a bounds-check line: `checkBounds` lives inside `createSteering` too,
+      // so on this path it is structurally unavailable.
+      const reason =
+        err instanceof RateError
+          ? "rate_unresolved"
+          : err instanceof CgroupUnenforceableError
+            ? "rss_unenforceable"
+            : null;
+      if (reason === null) {
         try {
           tracer.close();
         } catch {
@@ -4010,11 +4096,14 @@ async function main(argv: readonly string[]): Promise<number> {
         }
         throw err;
       }
-      // Spec (Infra Prerequisites): a slug with no resolvable rate refuses
-      // the RESIDENT, never the run — INV-RES-5 degrades toward
+      // Spec (Infra Prerequisites): a slug with no resolvable rate — or, for
+      // DF3.6b, a bound the kernel cannot enforce — refuses the RESIDENT,
+      // never the run: INV-RES-5 and INV-MEM-2 both degrade toward
       // determinism. steering is never constructed, so the journal's
       // resident block stays the explicit "disabled" shape, and the run
-      // proceeds deterministically with the cause on stderr.
+      // proceeds deterministically with the cause on stderr. No tripwire row
+      // is emitted: DF3.3's cause union has no member for an arming refusal,
+      // and the run never ran an unbounded agent.
       // startResident's own throw contract is unchanged; this is the
       // runner's arming policy.
       writeAll(
@@ -4025,8 +4114,8 @@ async function main(argv: readonly string[]): Promise<number> {
           runId,
           requestId,
           model: residentModel,
-          reason: "rate_unresolved",
-          detail: err.message,
+          reason,
+          detail: err instanceof Error ? err.message : String(err),
         })}\n`,
       );
     }
@@ -4173,6 +4262,14 @@ async function main(argv: readonly string[]): Promise<number> {
         // only when the load refused-and-returned above — which never reaches
         // this line — so on every path that constructs steering, bounds exist.
         bounds: boundsGuard,
+        // DF3.6b edit (iv): the kernel's account of the last solicitation —
+        // `memory.peak`, the bound it was taken against, and whether the leaf
+        // was OOM-killed by ITS OWN limit (fleet applies ruling 8's full rule;
+        // this side just carries the verdict). A structural
+        // callback, never a fleet import: the engine learns WHETHER the kernel
+        // killed, never how to. It is what discriminates an OOM (a signal
+        // death at the process level) from a timeout or an external kill.
+        lastMemory: spawned.lastMemory,
         // DF3.6a: fired when the engine's bounds enforcement stops the resident
         // (the spend breach; DF3.6b adds the rss arms). The engine has already
         // latched telemetry.status="stopped"; the runner — which holds the
@@ -4631,7 +4728,14 @@ async function main(argv: readonly string[]): Promise<number> {
       }
     }
     const residentBlock = residentTelemetryOf();
-    if (residentSpawn !== undefined) {
+    // DF3.6b edit (vii) — REFRESH PRECEDENCE. The engine's word outranks the
+    // process probe's whenever the engine wrote one. On a kernel OOM-kill the
+    // engine has already written `exitStatus:"overflow"` (AC1's make-or-break
+    // journal observable), while the probe can only ever report a signal death
+    // as "transient": an unconditional refresh here would overwrite the one
+    // field AC1 is proven by. The probe still fills the field on every path
+    // where the engine wrote none, which is every pre-DF3.6b path.
+    if (residentSpawn !== undefined && residentBlock.exitStatus === null) {
       try {
         residentBlock.exitStatus = await residentSpawn.exitStatus();
       } catch {
