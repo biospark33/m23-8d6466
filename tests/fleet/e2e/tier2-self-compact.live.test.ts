@@ -621,7 +621,10 @@ test.todoIf(liveTodoOff())(
       boxesBeforeDispatch = new Set((await ctx.driver.list()).map((b) => b.name));
       evidence.push({ phase: "pre-dispatch-ls", boxes: [...boxesBeforeDispatch] });
       const dispatch = await runFleet(
-        ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
+        // --budget-ms ≥ runBudgetMs (825k): the caller budget defaults to
+        // 600k and a manifest above it is manifest-rejected before a box
+        // exists (gotcha #7).
+        ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir, "--budget-ms", "900000"],
         // 900 s, the T2.2-measured class for this verb.
         { cwd: REPO_ROOT, timeoutMs: SC2_DISPATCH_TIMEOUT_MS },
       ).catch((e: unknown) => {
