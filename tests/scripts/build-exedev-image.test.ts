@@ -1413,7 +1413,15 @@ describe("buildIdFileInputs", () => {
       // Walked bytes changed, so the DEFAULT_IMAGE_BUILD_ID republish ritual
       // is owed by this branch before a box runs the new roster wiring —
       // same shape as the DF1.10/DF6.1a pairing-debt entries above.
-      "31f81dda4109c90a777572a788045b1070c4252ae2e9f75c67b515f8f67396e2",
+      //
+      // 9bc74b21: moved from 31f81dda by the final-review hardening pass on
+      // the same branch — cli-anything/scripts/team-lead-driver.ts
+      // (runWorkerPi argv-build hoist) and src/phase-engine/roster/schema.ts
+      // (percent bounds + compaction-requires-extension gate), the only two
+      // walked inputs the pass edits. Received from this test's own failing
+      // run on the final tree (re-pin LAST; the reviewer's mid-branch
+      // 653fa603 was superseded by the pass's own edits and never adopted).
+      "9bc74b21151da856b4d63cd5eec45424642cbffdb887fdfec4eb1c7876b9bc4f",
     );
   });
 });

@@ -168,19 +168,23 @@ const SC_SUBTREE_REL = "pi-vs-claude-code-vendor/self-compact";
 /**
  * The FILL SOURCE (148,281 B / 3,389 lines) — the worker's brief has bash
  * build /tmp/sc-fill.txt from 20 concatenated copies (20 × 148,281 =
- * 2,965,620 B ≈ 2.97 MB), then read it in 600,000-BYTE slices via
- * `tail -c +N | head -c 600000`. Slice-budget arithmetic (the 1M window):
+ * 2,965,620 B ≈ 2.97 MB), then read it in 48,000-BYTE slices via
+ * `tail -c +N | head -c 48000`. 48 KB is the slice size because the bash
+ * tool truncates output past ~50 KB — a bigger read would burn its turn on
+ * a truncated chunk — and at ~3.4 chars/tok one slice is ~14k tokens.
+ * Slice-budget arithmetic (the 1M window):
  *   v4-flash window W = 1,048,576 tok (host models.json, verified)
  *   notice 30% = 314,573 tok · warning 50% = 524,288 tok · forced 60% = 629,146 tok
- *   ~4 chars/tok for text ⇒ one 600,000-B read ≈ 150k tok ≈ 14.3% of W
- *   cumulative: R1 150k/14% · R2 300k/29% · R3 450k/43% · R4 600k/57% (past
- *   warning — expected stop) · R5 741k/71% (contingency only). Total budget
- *   2.97 MB ≥ the 2.8-MB floor covers a tokenizer as conservative as
- *   ~4.7 chars/tok (2.97 MB / 629k tok) still crossing forced. Turn shape:
- *   1 generate + 1 baseline view_context + ≤5 × (read + view_context) + 1
- *   note/self_compact + 1 final reply ≈ 14 model calls — sized for the
- *   per-worker 240-s SIGKILL (few big reads, not many small ones; the
- *   view_context turns are cache-hit-cheap).
+ *   ~35-40 slices ≈ 490-560k tok to cross the warning line, ≤2 slices per
+ *   read turn. Turn shape: 1 generate + 1 baseline view_context + ~20 read
+ *   turns + 1 note/self_compact + 1 final reply ≈ 24 model calls — many
+ *   small reads, and the read turns carry NO view_context: the extension's
+ *   own [self-compact · …] messages are the level signal. That many-small-
+ *   turns shape is why round 8 raised the run ceilings — per-worker
+ *   maxDurationMs 720,000 and manifest runBudgetMs 2,200,000 — and sized
+ *   the $0.50 cap (SC_CAP_MICRO_USD above): round 8 measured that only ~⅔
+ *   of the growing context bills at the cached rate, ~$0.29 by the 524k
+ *   warning line, with the $0.45 kill line above the measured curve.
  */
 const SC_BIG_FILE_REL = "pi-vs-claude-code-vendor/coms-net.ts";
 /** The four flags a healthy load registers (self-compact.ts registerFlag ×4). */

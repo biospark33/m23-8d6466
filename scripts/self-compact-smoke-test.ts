@@ -12,7 +12,7 @@
  */
 
 const EXT = "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts";
-const FLAG_RE = /--compact-(soft-at|at|buffer|prompt)/g;
+const FLAG_RE = /--compact-(soft-at|at|buffer|prompt)\b/g;
 
 // Driver runs ONLY as a script — importing this file must not spawn pi.
 if (import.meta.main) {

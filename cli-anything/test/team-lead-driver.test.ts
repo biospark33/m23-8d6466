@@ -134,6 +134,18 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
     const odd = validateExtensionArgs(["--compact-at"]);
     expect(odd.ok).toBe(false);
   });
+
+  // The REJECTION is a throw at argv build, and it must stay there: the driver
+  // builds the argv synchronously BEFORE its Promise executor, so this throw
+  // degrades the one worker to partial — never a rejected team-run promise.
+  it("throws at argv build on an unknown flag or a missing value (INV-EXT-ARGS)", () => {
+    expect(() => buildWorkerArgv({ ...base, extensionArgs: ["--evil", "x"] })).toThrow(
+      "extensionArgs rejected: --evil",
+    );
+    expect(() => buildWorkerArgv({ ...base, extensionArgs: ["--compact-at"] })).toThrow(
+      "extensionArgs rejected: --compact-at (missing value)",
+    );
+  });
 });
 
 describe("resolveExtensionPaths — repo-root containment (INV-2)", () => {
@@ -332,6 +344,16 @@ describe("driver wiring — refusal happens BEFORE spawn (DoD Security, INV-2/IN
     // raw relative string pi would re-resolve against its own cwd.
     expect(argv).not.toContain("--no-extensions");
     expect(argv[argv.indexOf("-e") + 1]).toBe(join(REPO_ROOT, "cli-anything/src"));
+  }, 30_000);
+
+  // The extensionArgs twin of the extensions-refusal tests above: a rejected
+  // entry is refused at argv build (before the executor), so pi is never
+  // exec'd and the driver still degrades + merges instead of dying.
+  it("never execs pi for a worker with a rejected extensionArgs entry", () => {
+    const r = runDriver([worker({ extensionArgs: ["--evil", "x"] })]);
+    expect(r.stderr).toContain("extensionArgs rejected: --evil");
+    expect(r.spawns).toHaveLength(0);
+    expect(r.stderr).toContain("worker worker-a failed (exit null)");
   }, 30_000);
 
   it("writes no capture anywhere when QDS_TEAM_RAW_WORKER_DIR is unset (AC5, run level)", () => {
