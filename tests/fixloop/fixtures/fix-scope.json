@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "scopes": {
+    "Quantum-Digital-Solutions/qds-audit-demo": {
+      "allowedPathGlobs": [
+        "src/**",
+        "tests/**"
+      ],
+      "deniedPathGlobs": [
+        {
+          "glob": "scripts/reverify.ts",
+          "reason": "the re-verification entrypoint decides whether a run is trusted; a fix run may not edit its own judge"
+        },
+        {
+          "glob": "scripts/fleet.ts",
+          "reason": "the fleet CLI spends money and destroys boxes"
+        },
+        {
+          "glob": "scripts/*-verify.ts",
+          "reason": "every verifier is a judge of the fix run's own work"
+        },
+        {
+          "glob": "package.json",
+          "reason": "dependencies and the bun pin are a supply-chain surface, not a fix surface"
+        },
+        {
+          "glob": ".github/**",
+          "reason": "CI configuration decides what a PR must pass; a fix run may not lower its own bar"
+        },
+        {
+          "glob": "**/*.yml",
+          "reason": "workflow and config YAML anywhere carries the same privilege as .github/"
+        }
+      ],
+      "permittedActions": [
+        "modify",
+        "add"
+      ]
+    },
+    "quantum-digital-solutions/qds-audit-demo": {
+      "allowedPathGlobs": [
+        "src/**",
+        "tests/**"
+      ],
+      "deniedPathGlobs": [
+        {
+          "glob": "scripts/reverify.ts",
+          "reason": "the re-verification entrypoint decides whether a run is trusted; a fix run may not edit its own judge"
+        },
+        {
+          "glob": "scripts/fleet.ts",
+          "reason": "the fleet CLI spends money and destroys boxes"
+        },
+        {
+          "glob": "scripts/*-verify.ts",
+          "reason": "every verifier is a judge of the fix run's own work"
+        },
+        {
+          "glob": "package.json",
+          "reason": "dependencies and the bun pin are a supply-chain surface, not a fix surface"
+        },
+        {
+          "glob": ".github/**",
+          "reason": "CI configuration decides what a PR must pass; a fix run may not lower its own bar"
+        },
+        {
+          "glob": "**/*.yml",
+          "reason": "workflow and config YAML anywhere carries the same privilege as .github/"
+        }
+      ],
+      "permittedActions": [
+        "modify",
+        "add"
+      ]
+    }
+  }
+}
