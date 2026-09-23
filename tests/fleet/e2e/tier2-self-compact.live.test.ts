@@ -7,10 +7,17 @@
  * round, exactly like tier2-reboot-arm's zero-model-spend arm):
  *
  *  SC.1  in-box extension load — the IMAGE's pi (0.84.4) loads the vendored
- *        extension bytes out of a real box-side clone at QDS_EXEDEV_SHA and
- *        registers all four `--compact-*` flags. ZERO model spend: no dispatch,
- *        no key, no record — the box is created bare (`driver.create`, the
- *        reboot-arm shape), the repo is cloned IN THE BOX by the test, and
+ *        extension bytes delivered box-side AT QDS_EXEDEV_SHA and registers
+ *        all four `--compact-*` flags. Delivery mirrors the production fill
+ *        seam for PRIVATE repos (fill.ts F4 bundle-push), MINI: the HOST's
+ *        own git credentials fetch the SHA (scratchClone), `git archive`
+ *        packs JUST the self-compact subtree (~50 KB gzipped, not a
+ *        whole-repo bundle), and the bytes ride ONE exec stdin (base64) into
+ *        an in-box untar. An anonymous in-box `git clone` — round 1's defect
+ *        (evidence df3-e2e 2026-09-23-114202: `fatal: could not read
+ *        Username`) — is remote-clone mode, public repos only. ZERO model
+ *        spend: no dispatch, no key, no record — the box is created bare
+ *        (`driver.create`, the reboot-arm shape), and
  *        `pi --no-extensions -e <vendored path> --help` (the smoke-test argv,
  *        scripts/self-compact-smoke-test.ts) must exit 0 naming every flag.
  *
@@ -38,7 +45,8 @@
  *     extension path would dangle and the worker would run extensionless — a
  *     hollow green. The host's driver resolves it against THIS checkout, where
  *     the vendored tree lives. SC.1 is the in-box half's proof: the image's
- *     own pi loads the extension bytes from the box clone.
+ *     own pi loads the extension bytes from the box-side tree delivered at
+ *     QDS_EXEDEV_SHA (the fill bundle-push seam, mirrored).
  *  2. OBSERVABILITY IS A HOST-ONLY SEAM. The worker pi runs `--no-session`
  *     (ephemeral — no session jsonl exists), and the raw NDJSON capture is
  *     written only when QDS_TEAM_RAW_WORKER_DIR is set — an opt-in production
@@ -141,6 +149,8 @@ const SC_MANIFEST_REL = `${FIXTURE_DIR_REL}/self-compact.pipeline.json`;
 const SC_ROSTER_REL = `${FIXTURE_DIR_REL}/roster.yaml`;
 /** The vendored extension, as it must appear in the worker's pi argv (`-e <repo-relative path>`). */
 const SC_EXT_REL = "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts";
+/** The subtree SC.1 archives host-side and ships in-box — the bundle-push seam's MINI payload (~50 KB gzipped). */
+const SC_SUBTREE_REL = "pi-vs-claude-code-vendor/self-compact";
 /** The big repo file the worker reads in slices (~148 KB / 3389 lines) to drive context past the thresholds. */
 const SC_BIG_FILE_REL = "pi-vs-claude-code-vendor/coms-net.ts";
 /** The four flags a healthy load registers (self-compact.ts registerFlag ×4). */
@@ -230,7 +240,7 @@ function collectStream(stream: ReadableStream<Uint8Array>): { text: Promise<stri
 // ─── SC.1 — in-box extension load (boxes only, ZERO model spend) ────────────
 
 test.todoIf(liveTodoOff())(
-  "T2-SC.1 tier1-class: in-box extension load — the image's pi loads the vendored self-compact from the box clone at QDS_EXEDEV_SHA (boxes only, ZERO model spend — mint nothing)",
+  "T2-SC.1 tier1-class: in-box extension load — the image's pi loads the vendored self-compact from a fill-style stdin-pushed tree at QDS_EXEDEV_SHA (boxes only, ZERO model spend — mint nothing)",
   async () => {
     // Tier 2 per the spend protocol: this FILE is a paid round (SC.2 spends),
     // so the gate is the file's tier even though THIS test mints no key and
@@ -242,6 +252,8 @@ test.todoIf(liveTodoOff())(
     /** P28: `preflight` can throw — inside the try, and every finally leg guards on it. */
     let ctx: LiveCtx | undefined;
     let vm = "";
+    /** The host workspace holding the scratch clone at the SHA ("" = never made). */
+    let workspace = "";
     let outcome = "pass";
     /** The body's own error, held so the post-finally verdicts run on the failing path too. */
     let failure: unknown;
@@ -266,42 +278,77 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "create", ok: true, vm });
 
       const home = await boxHome(ctx.driver, vm);
-      const cloneDir = `${home}/t2sc-clone`;
-      // ── 2. the repo AT THE PINNED SHA, cloned IN THE BOX — the same
-      //    init/remote/fetch --depth=1/checkout FETCH_HEAD sequence the
-      //    harness's host-side scratchClone runs, mirrored on the substrate
-      //    that matters here: the image's own git and network. The rev-parse
-      //    tail asserts the checkout IS the SHA (a clone at any other tree
-      //    would prove the wrong bytes).
-      // live-mirror: scratchClone (live-harness.ts) — the same clone step sequence, run box-side
-      const gitFetchAtSha = `git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=180 fetch --quiet --depth=1 origin ${shellQuote(ctx.sha)}`;
-      const cloneCmd = [
-        `mkdir -p ${shellQuote(cloneDir)} && cd ${shellQuote(cloneDir)} && git init --quiet`,
-        `git remote add origin ${shellQuote(ctx.repoUrl)}`,
-        gitFetchAtSha,
-        "git checkout --quiet --detach FETCH_HEAD && git rev-parse HEAD",
-      ].join(" && ");
-      const clone = await boxExec(ctx.driver, vm, ["sh", "-c", cloneCmd]);
-      evidence.push({
-        phase: "box-clone",
-        exitCode: clone.exitCode,
-        head: clone.stdout.trim(),
-        stderrTail: clone.stderr.trim().slice(-300),
+      // NOT a box-side git clone. The repo is PRIVATE: an anonymous in-box
+      // `git clone` is fill's remote-clone mode (public repos only) and died
+      // `fatal: could not read Username` in round 1 (evidence
+      // df3-e2e/2026-09-23-114202). Private repos reach the box the
+      // bundle-push way (fill.ts F4): the HOST's own git credentials fetch
+      // the SHA, the bytes cross the wire over exec stdin, and the box never
+      // holds credentials at all (INV-CRED-1). SC.1 mirrors that seam at MINI
+      // scale — one ~50 KB subtree, not a whole-repo bundle.
+      const treeDir = `${home}/t2sc-tree`;
+      // ── 2. the vendored subtree AT THE PINNED SHA, pushed box-side: host
+      //    scratch-clone at the SHA (scratchClone — the same clone fill's
+      //    hostBundle legs run host-side), `git archive` of JUST the
+      //    self-compact subtree, gzip+base64, then ONE exec stdin into an
+      //    in-box untar — the fill pushBundle channel, tier1-driver-lifecycle's
+      //    stdin write is the sibling driver.exec precedent.
+      workspace = tmpWorkspace("t2sc1");
+      const hostClone = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
+      const archive = Bun.spawnSync({
+        cmd: ["git", "-C", hostClone, "archive", "--format=tar.gz", ctx.sha, SC_SUBTREE_REL],
+        stdout: "pipe",
+        stderr: "pipe",
       });
-      expect(clone.exitCode).toBe(0);
-      expect(clone.stdout.trim()).toBe(ctx.sha);
+      if (archive.exitCode !== 0) {
+        throw new Error(
+          `host git archive of ${SC_SUBTREE_REL} at ${ctx.sha} exited ${archive.exitCode}: ${archive.stderr.toString().trim().slice(0, 300)}`,
+        );
+      }
+      const payload = archive.stdout.toString("base64");
+      // live-mirror: fill.ts pushBundle — base64 payload over exec stdin (`base64 -d` in-box), the host→box content channel
+      const push = await ctx.driver.exec(
+        vm,
+        [
+          "sh",
+          "-c",
+          `umask 077 && rm -rf ${shellQuote(treeDir)} && mkdir -p ${shellQuote(treeDir)} && base64 -d | tar -xzf - -C ${shellQuote(treeDir)}`,
+        ],
+        payload,
+      );
+      evidence.push({
+        phase: "subtree-push",
+        exitCode: push.exitCode,
+        base64Bytes: payload.length,
+        stderrTail: push.stderr.trim().slice(-300),
+      });
+      expect(push.exitCode).toBe(0);
 
-      // ── 3. the extension bytes exist AT THAT SHA before anything loads them.
-      //    A dangling `-e` could exit 0 with nothing registered and this test
-      //    would otherwise prove a hole — presence is asserted FIRST.
-      const extPresent = await boxExec(ctx.driver, vm, [
+      // ── 3. TREE PARITY — there is no box-side clone HEAD to compare
+      //    anymore, so the proof is the digest: the UNTARRed extension file's
+      //    sha256 IN THE BOX must equal the HOST-side file's sha256 AT THE
+      //    SAME SHA (the scratch clone's copy). Same digest on both ends of
+      //    the stdin channel proves the bytes that will load ARE the bytes at
+      //    QDS_EXEDEV_SHA. It also proves presence — sha256sum of a missing
+      //    file exits non-zero — so the dangling-`-e` guard rides the same
+      //    exec (a dangling `-e` could otherwise exit 0 registering nothing).
+      const extShaAtPin = sha256File(join(hostClone, SC_EXT_REL));
+      // live-mirror: fill.ts pushBundle's post-push size probe — in-box read-back after a stdin push
+      const parity = await boxExec(ctx.driver, vm, [
         "sh",
         "-c",
-        `test -f ${shellQuote(`${cloneDir}/${SC_EXT_REL}`)} && echo PRESENT`,
+        `sha256sum ${shellQuote(`${treeDir}/${SC_EXT_REL}`)}`,
       ]);
-      evidence.push({ phase: "ext-present", exitCode: extPresent.exitCode, stdout: extPresent.stdout.trim() });
-      expect(extPresent.exitCode).toBe(0);
-      expect(extPresent.stdout).toContain("PRESENT");
+      const boxExtSha = parity.stdout.trim().split(/\s+/)[0] ?? "";
+      evidence.push({
+        phase: "tree-parity",
+        exitCode: parity.exitCode,
+        extFile: SC_EXT_REL,
+        shaAtPin: extShaAtPin,
+        boxSha: boxExtSha,
+      });
+      expect(parity.exitCode).toBe(0);
+      expect(boxExtSha).toBe(extShaAtPin);
 
       // ── 4. the image's pi VERSION, recorded so the evidence says WHICH pi
       //    loaded the extension (the coordinator verified 0.84.4 locally; this
@@ -312,13 +359,13 @@ test.todoIf(liveTodoOff())(
       // ── 5. THE PROBE — the smoke-test argv on the box: `--no-extensions`
       //    kills discovery so the ONLY thing that can register the four
       //    `--compact-*` flags is the vendored extension on `-e`, loaded from
-      //    the clone at the SHA. Exit 0 + all four flags in the combined
-      //    streams is the load proof.
+      //    the stdin-pushed tree at the SHA. Exit 0 + all four flags in the
+      //    combined streams is the load proof.
       // live-mirror: scripts/self-compact-smoke-test.ts — the same probe argv (pi --no-extensions -e <vendored path> --help)
       const probe = await boxExec(ctx.driver, vm, [
         "sh",
         "-c",
-        `cd ${shellQuote(cloneDir)} && PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e ${shellQuote(SC_EXT_REL)} --help`,
+        `cd ${shellQuote(treeDir)} && PI_SKIP_VERSION_CHECK=1 pi --no-extensions -e ${shellQuote(SC_EXT_REL)} --help`,
       ]);
       const combined = `${probe.stdout}\n${probe.stderr}`;
       const distinct = SC_FLAGS.filter((f) => combined.includes(f));
@@ -382,8 +429,15 @@ test.todoIf(liveTodoOff())(
         }
       }
       writeEvidenceQuietly("T2-SC.1", "t2-self-compact-load", { test: "T2-SC.1", outcome, vm, phases: evidence }, writeProblems);
-      // No workspace was created by this test — nothing to rmSync, and the
-      // write above is the last statement of the finally by design.
+      // GUARDED (P27, the SC.2 shape): the workspace holds only the
+      // disposable host scratch clone — kept on the red path for forensics,
+      // removed on the green one; never a bare rmSync over a held failure.
+      try {
+        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+        else if (workspace !== "") process.stderr.write(`[T2-SC.1] workspace kept for forensics: ${workspace}\n`);
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // The box this run owned must be GENUINELY gone, checked on EVERY path.
@@ -395,23 +449,25 @@ test.todoIf(liveTodoOff())(
   //   create              control-plane new + steering provision            240 s
   //   create-confirm ls   1 control ls at 120                               120 s
   //   boxHome             1 driver.exec at 120                              120 s
-  //   box clone           1 driver.exec at 120 (depth-1 fetch)              120 s
-  //   ext-present         1 driver.exec at 120                               60 s
+  //   scratchClone        host depth-1 fetch (its own stall switch)         180 s
+  //   host git archive    local spawnSync (~50 KB subtree)                  10 s
+  //   subtree push+untar  1 driver.exec at 120 (base64 over stdin)          120 s
+  //   tree-parity         1 driver.exec at 120 (sha256sum read-back)         60 s
   //   pi version          1 driver.exec at 120                               60 s
   //   load probe          1 driver.exec at 120                               60 s
   //   delta key list      listedKeyHashes                                   240 s
   //                                                            body ────────
-  //                                                                  1 380 s
+  //                                                                  1 570 s
   //   destroyQuietly      rm + confirming list at 120                      240 s
   //   fleetLeftovers      5 × (control ls 120 + 8 s wait) + destroy pass    880 s
   //   delta list (fail)   a second listing on the appeared-key arm          240 s
-  //   evidence            local                                               10 s
+  //   evidence + rmSync   local                                               10 s
   //                                                           finally ────────
   //                                                                  1 370 s
-  //                                                           total ≈ 2 750 s
-  // Hence 3_000_000. A bun test-timeout abort is the ONE path where the
+  //                                                           total ≈ 2 940 s
+  // Hence 3_600_000. A bun test-timeout abort is the ONE path where the
   // `finally` does not execute — the fail-safe direction for this number is UP.
-  3_000_000,
+  3_600_000,
 );
 
 // ─── SC.2 — real worker self-compacts at roster thresholds (spend) ──────────
