@@ -177,7 +177,7 @@ const ROSTER_PATH_CHARSET = /^[A-Za-z0-9._/-]+$/;
  * first step times out immediately. A request to lengthen the budget must not
  * invert into the opposite.
  */
-const MAX_TIMEOUT_MS = 2_147_483_647;
+export const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /**
  * How many times a self-minted run id is re-minted past a record collision.

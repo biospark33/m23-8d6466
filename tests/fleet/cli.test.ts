@@ -456,7 +456,7 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
  */
 const MANIFEST_REL = join("manifests", "pipeline.json");
 
-function validBriefJson(dir: string): string {
+function validBriefJson(dir: string, runBudgetMs = 200_000): string {
   const manifestDir = join(dir, "manifests");
   mkdirSync(manifestDir, { recursive: true });
   const manifestPath = join(manifestDir, "pipeline.json");
@@ -465,7 +465,7 @@ function validBriefJson(dir: string): string {
     JSON.stringify({
       version: "1.0.0",
       pipelineId: "e2e-pipeline",
-      runBudgetMs: 200_000,
+      runBudgetMs,
       // BOTH phases `code` — see the twin fixture in verbs.test.ts for the full
       // argument. `plan` was `kind: "engineer"` until C19 narrowed `PhaseKind`
       // to `"code" | "dispatch_task"` and taught the schema to refuse the
@@ -1681,6 +1681,63 @@ process.stdout.write(t);
     const record = (shared.store as RunRecordStore).get(ack.runId);
     expect(record.httpsUrl).toBe(ack.httpsUrl);
     expect(record.ports).toEqual([8080]);
+  });
+
+  // ─── --timeout-ms: the wall clock AS argv, and the manifest ceiling it lifts ─
+
+  test("--timeout-ms raises the manifest loader's callerBudgetMs ceiling", async () => {
+    // The tier2 self-compact gotcha (#7): dispatch's internal timeoutMs (default
+    // 600_000) doubles as loadManifest's callerBudgetMs, so a manifest whose
+    // runBudgetMs is 825_000 is manifest-rejected BEFORE any box exists — and
+    // until this flag there was no legal argv that raised the ceiling. Same
+    // brief, same deps, only the flag differs: the 825_000 manifest refuses at
+    // the default and dispatches clean under `--timeout-ms 1200000`, which is
+    // the behavioural proof the parsed flag value reached
+    // DispatchDeps.timeoutMs (it is the loader's callerBudgetMs).
+    //
+    // The callerBudgetMs the refusal names is `ctx.remaining()` — the ceiling
+    // MINUS the milliseconds validation already spent — so the assertion pins
+    // the sentence's fixed half, not the 59999x figure that would flake.
+    reset();
+    expect(await runCli(["dispatch", "--driver", "fake"], deps(validBriefJson(dir, 825_000)))).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+    expect(envelope.code).toBe("manifest-rejected");
+    expect(envelope.message).toContain("runBudgetMs 825000 exceeds callerBudgetMs");
+    expect(readdirSync(runsDir)).toHaveLength(0);
+    expectNoBoxes();
+
+    reset();
+    expect(await runCli(["dispatch", "--driver", "fake", "--timeout-ms", "1200000"], deps(validBriefJson(dir, 825_000)))).toBe(0);
+    const ack = JSON.parse(outOnly.find((l) => l.includes("runId")) as string) as { state?: string };
+    expect(ack.state).toBe("ready");
+  });
+
+  test("--timeout-ms must be a positive integer ≤ MAX_TIMEOUT_MS → exit 2, nothing provisioned", async () => {
+    // `99999999999` exceeds MAX_TIMEOUT_MS (2_147_483_647) — the ceiling
+    // setTimeout would clamp to 1 ms, inverting a lengthened budget into the
+    // shortest one possible. The remediation is dispatch.ts's own
+    // timeout-invalid text VERBATIM: the CLI's refusal and the module's must
+    // not drift into paraphrases of one constraint.
+    for (const bad of ["abc", "0", "-1", "1200000.5", "99999999999"]) {
+      reset();
+      const code = await runCli(["dispatch", "--driver", "fake", "--timeout-ms", bad], deps(validBriefJson(dir)));
+      expect({ bad, code }).toEqual({ bad, code: 2 });
+      // The message's fixed half plus the echoed value, not the raw
+      // `--timeout-ms "abc"` spelling: the envelope is a JSON line, so the
+      // echoed quotes arrive escaped and pinning the quote shape couples the
+      // test to JSON.stringify's escaping rather than the refusal.
+      expect(text()).toContain("--timeout-ms");
+      expect(text()).toContain(bad);
+      expect(text()).toContain("is not a positive integer of milliseconds");
+      expect(text()).toContain("omit timeoutMs for the 600_000 ms default, or pass a positive integer up to 2147483647");
+      expect(readdirSync(runsDir)).toHaveLength(0);
+      expectNoBoxes();
+    }
+    // An empty value is refused by the flag parser, one step earlier — same
+    // exit, different (and more accurate) message. Same shape as --port.
+    reset();
+    expect(await runCli(["dispatch", "--driver", "fake", "--timeout-ms", ""], deps(validBriefJson(dir)))).toBe(2);
+    expect(text()).toContain("--timeout-ms requires a non-empty value");
   });
 
   // ─── the exit-code table (F3): 3 gate, 4 not-found, 5 refused ──────────────

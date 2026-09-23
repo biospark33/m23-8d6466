@@ -523,6 +523,17 @@ describe("verbs.ts (registry)", () => {
       { name: "--driver", required: true, valueType: "string" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--port", required: false, valueType: "string" },
+      // The wall-clock ceiling as argv (self-compact): the note is the whole
+      // operator surface for the value-behaviour surprise — this one number is
+      // BOTH the verb's own wall clock and the manifest loader's callerBudgetMs
+      // ceiling, so a manifest whose runBudgetMs exceeds it is manifest-rejected
+      // before any box exists.
+      {
+        name: "--timeout-ms",
+        required: false,
+        valueType: "string",
+        note: "dispatch wall-clock ceiling in ms, default 600000, positive integer up to 2147483647 — also the manifest loader's callerBudgetMs ceiling: a manifest whose runBudgetMs exceeds it is manifest-rejected before any box exists",
+      },
     ],
     status: [
       { name: "--dir", required: false, valueType: "path" },

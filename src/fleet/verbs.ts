@@ -33,6 +33,11 @@
 // stays data-first, and nothing in run-completion.ts's graph imports this
 // file back (no cycle).
 import { DEFAULT_OBSERVATION_WINDOW_MS } from "./run-completion.ts";
+// Self-compact: the dispatch wall-clock ceiling's upper bound, imported so the
+// `--timeout-ms` note prints the real bound rather than a string copy of it
+// that drifts if the setTimeout-clamp figure is ever repriced. Third import,
+// additive: dispatch.ts does not import this file back (no cycle).
+import { MAX_TIMEOUT_MS } from "./dispatch.ts";
 // DF3.8: the sweep interval's derivation, imported for the same reason as the
 // DF3.7 constant above — `--help` prints the real number, not a string copy
 // that drifts when the heuristic is repriced. Second import, additive: nothing
@@ -91,6 +96,20 @@ export function listVerbs(): VerbEntry[] {
         // The only route to DispatchDeps.port, hence the only way the ack can
         // carry an httpsUrl. "string": the CLI range-checks it as 1-65535.
         { name: "--port", required: false, valueType: "string" },
+        // Self-compact: the wall-clock ceiling as argv. "string", like --port:
+        // the CLI range-checks it as a positive integer ≤ MAX_TIMEOUT_MS. The
+        // note is the operator surface for the value-behaviour surprise — this
+        // one number is BOTH the verb's own wall clock AND the manifest
+        // loader's callerBudgetMs ceiling (dispatch.ts's loadManifestAndRoster
+        // passes what is LEFT of it to loadManifest), so a long manifest is
+        // refused here, not mid-run, and until this flag the 600_000 default
+        // was unraisable from argv.
+        {
+          name: "--timeout-ms",
+          required: false,
+          valueType: "string",
+          note: `dispatch wall-clock ceiling in ms, default 600000, positive integer up to ${MAX_TIMEOUT_MS} — also the manifest loader's callerBudgetMs ceiling: a manifest whose runBudgetMs exceeds it is manifest-rejected before any box exists`,
+        },
         { name: "--help", required: false, valueType: "boolean" },
       ],
       // 6 = the box is LIVE and the ack could not be written to stdout

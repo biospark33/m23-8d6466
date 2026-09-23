@@ -143,6 +143,7 @@ import {
   assertFleetRunId,
   dispatch,
   FleetError,
+  MAX_TIMEOUT_MS,
   resolveBriefRequestId,
   type DispatchDeps,
   type LedgerLike,
@@ -2669,6 +2670,23 @@ async function runDispatch(ctx: VerbCtx): Promise<number> {
       portRaw === undefined
         ? undefined
         : parseDecimalFlag("--port", portRaw, 1, 65_535, "a TCP port", "--port takes an integer 1-65535");
+    // Validated beside --port, before the brief is read: a usage refusal must
+    // not make the operator pipe a brief in first. The remediation is
+    // dispatch.ts's own timeout-invalid text VERBATIM — the CLI and the module
+    // must not paraphrase one constraint two ways (dispatch re-validates and
+    // owns the refusal envelope for INJECTED deps either way).
+    const timeoutRaw = flags.get("--timeout-ms");
+    const timeoutMs =
+      timeoutRaw === undefined
+        ? undefined
+        : parseDecimalFlag(
+            "--timeout-ms",
+            timeoutRaw,
+            1,
+            MAX_TIMEOUT_MS,
+            "a positive integer of milliseconds",
+            `omit timeoutMs for the 600_000 ms default, or pass a positive integer up to ${MAX_TIMEOUT_MS}`,
+          );
 
     // INV-2: the brief is read and parsed — both side-effect free — before
     // anything is constructed. `new RunRecordStore` mkdirs and chmods the
@@ -2760,6 +2778,11 @@ async function runDispatch(ctx: VerbCtx): Promise<number> {
       ledgerFactory,
       requestId,
       ...(port === undefined ? {} : { port }),
+      // LAST, like port: the explicit key wins over the `...seams` spread, so
+      // argv is the authority whenever the flag is given — an injected
+      // `deps.timeoutMs` (FleetDeps inherits the seam) fills the ABSENT-flag
+      // case only.
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     };
 
     // Everything an interrupt could NOT have orphaned is now behind us; from

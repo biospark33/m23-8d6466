@@ -499,7 +499,14 @@ test.todoIf(liveTodoOff())(
 
 // ─── SC.2 — real worker self-compacts at roster thresholds (spend) ──────────
 
-/** The dispatch verb's ceiling: the tier2 siblings' measured figure for the same verb (provision + fill + A–E gate). */
+/**
+ * The dispatch verb's SPAWN-WAIT: how long THIS test waits for the verb
+ * subprocess — the tier2 siblings' measured figure for the same verb (provision
+ * + fill + A–E gate). NOT the verb's INTERNAL budget ceiling: that is dispatch's
+ * own timeoutMs, raised above the 600k default via `--timeout-ms 1200000` in
+ * the argv below so the 825k manifest fits under its callerBudgetMs. The two
+ * ceilings are independent; only the internal one refuses a long manifest.
+ */
 const SC2_DISPATCH_TIMEOUT_MS = 900_000;
 /**
  * The host engine leg's ceiling. Must sit ABOVE the --budget-ms the leg runs
@@ -621,10 +628,13 @@ test.todoIf(liveTodoOff())(
       boxesBeforeDispatch = new Set((await ctx.driver.list()).map((b) => b.name));
       evidence.push({ phase: "pre-dispatch-ls", boxes: [...boxesBeforeDispatch] });
       const dispatch = await runFleet(
-        // --budget-ms ≥ runBudgetMs (825k): the caller budget defaults to
-        // 600k and a manifest above it is manifest-rejected before a box
-        // exists (gotcha #7).
-        ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir, "--budget-ms", "900000"],
+        // --timeout-ms ≥ runBudgetMs (825k): the manifest must fit under the
+        // verb's INTERNAL caller ceiling (dispatch timeoutMs doubles as the
+        // manifest loader's callerBudgetMs — gotcha #7); 1.2M leaves the verb
+        // headroom over the 825k manifest, and MAX_TIMEOUT_MS (2_147_483_647)
+        // permits it. NOT the spawn-wait below, which stays at the measured
+        // verb class.
+        ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir, "--timeout-ms", "1200000"],
         // 900 s, the T2.2-measured class for this verb.
         { cwd: REPO_ROOT, timeoutMs: SC2_DISPATCH_TIMEOUT_MS },
       ).catch((e: unknown) => {
