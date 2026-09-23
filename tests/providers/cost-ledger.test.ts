@@ -2881,24 +2881,32 @@ describe("DF2.11 openReadOnly", () => {
     } catch (e) {
       failed = e; // rethrown after the finally — the healer must not swallow it
     } finally {
-      // Restore a sane WAL state for afterEach's clean close EVEN when an
-      // assertion above failed — a skipped healer leaves the live writer with a
-      // deleted -shm and turns this test's failure into afterEach's secondary
-      // throw. Any fresh db access recreates the -shm index (reader traffic,
-      // not ledger content). The healer is GUARDED against the assertion: if it
-      // throws too (this test's whole world is a -shm-less stuck WAL, so its
-      // own rawDb probe is the least trustworthy call in the file), the
-      // assertion failure is the one that matters and must surface.
-      try {
-        const healer = rawDb();
-        try {
-          healer.exec("SELECT 1");
-        } finally {
-          healer.close();
-        }
-      } catch (e) {
-        healFailure = e;
-      }
+      // NO HEALER HERE, and the reason is the whole point of this block.
+      //
+      // It used to open a fresh `rawDb()` and `SELECT 1`, on the stated premise
+      // that "any fresh db access recreates the -shm index". **That premise is
+      // false**, and this test is precisely the world in which it is false: with
+      // a non-empty WAL and its -shm unlinked, SQLite cannot recover the WAL
+      // from ANY connection — every open fails `disk I/O error`. So the healer
+      // did not restore anything; it threw, and since `healFailure` is rethrown
+      // when the assertions pass, the healer WAS THE ONLY REASON THIS TEST
+      // FAILED. Its assertions have always passed.
+      //
+      // Measured on clean `origin/dev`, 2026-09-20 (Bun 1.3.13): removing the
+      // healer turns this file green at 151 pass / 0 fail, and `afterEach`'s
+      // `ledger.close()` + `rmSync` cope with the -shm-less handle without a
+      // secondary throw — the failure mode the healer was written to prevent
+      // does not occur. Closing the stale writer first was also tried, and also
+      // failed: nothing recovers this WAL, which is the product behaviour the
+      // test exists to assert.
+      //
+      // `healFailure` is kept declared and rethrown below so that a future
+      // cleanup step added here still cannot be swallowed. **It is UNREACHABLE
+      // today** — the healer's catch was its only writer, so nothing assigns it
+      // and both the `console.error` branch and the trailing rethrow are dead
+      // as written. Kept deliberately as the guard rail for whatever replaces
+      // the healer, and labelled so the next reader does not spend time working
+      // out why a variable that is never set is being checked.
     }
     if (failed !== undefined) {
       if (healFailure !== undefined)
