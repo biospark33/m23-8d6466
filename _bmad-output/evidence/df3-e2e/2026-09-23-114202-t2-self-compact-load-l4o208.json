@@ -1,0 +1,47 @@
+{
+  "test": "T2-SC.1",
+  "outcome": "fail",
+  "vm": "e2e-t2sc1-mue181vqgx4n",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t2sc1-mue181vqgx4n"
+    },
+    {
+      "phase": "box-clone",
+      "exitCode": 128,
+      "head": "",
+      "stderrTail": "fatal: could not read Username for 'https://github.com': No such device or address"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 128\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t2sc1-mue181vqgx4n",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "appeared": []
+    }
+  ],
+  "writtenAt": "2026-09-23T11:42:02.477Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

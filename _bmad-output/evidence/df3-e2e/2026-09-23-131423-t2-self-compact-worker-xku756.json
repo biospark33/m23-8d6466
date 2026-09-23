@@ -1,0 +1,140 @@
+{
+  "test": "T2-SC.2",
+  "outcome": "fail",
+  "runId": "qds-20260923-5ef637",
+  "vmName": "qds-20260923-5ef637",
+  "capMicroUsd": 200000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 200000,
+      "manifestPath": "tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json",
+      "rosterPath": "tests/fleet/e2e/fixtures/self-compact/roster.yaml"
+    },
+    {
+      "phase": "tree-parity",
+      "ok": true,
+      "files": [
+        {
+          "rel": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
+          "workingTree": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239",
+          "atSha": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+          "workingTree": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+          "atSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/coms-net.ts",
+          "workingTree": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7",
+          "atSha": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7"
+        }
+      ]
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260923-5ef637\",\"requestId\":\"fa9be712-473d-4ea3-b365-d1f317d9a037\",\"state\":\"ready\",\"vmName\":\"qds-20260923-5ef637\",\"httpsUrl\":\"https://qds-20260923-5ef637.exe.xyz\"}",
+      "stderrTail": "9-23T13:12:57.505Z\",\"duration\":54118,\"durationMs\":54118,\"status\":\"ok\",\"runId\":\"qds-20260923-5ef637\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3848,\"mint_ms\":1731,\"fill_ms\":29319,\"setup_gate_ms\":17681}}\n{\"requestId\":\"fa9be712-473d-4ea3-b365-d1f317d9a037\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-23T13:12:57.509Z\",\"duration\":54129,\"durationMs\":54129,\"status\":\"ok\",\"runId\":\"qds-20260923-5ef637\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260923-5ef637",
+      "vmName": "qds-20260923-5ef637"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "0a424123bc667b16fa84442ee8b3c108846230347bfe3a26d94bcc2ee62fbf23",
+      "limitMicroUsd": 200000,
+      "requestId": "fa9be712-473d-4ea3-b365-d1f317d9a037"
+    },
+    {
+      "phase": "box-clone-head",
+      "exitCode": 0,
+      "head": "33480dd2afd61f2686c8c4010a42f764d4da96b2"
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "witnessRequestId": "fa9be712-473d-4ea3-b365-d1f317d9a037",
+      "witnessCeiling": 200000,
+      "deliveredLimit": 200000
+    },
+    {
+      "phase": "run-key",
+      "source": "/home/exedev/app/.env",
+      "envVar": "OPENROUTER_API_KEY",
+      "ok": true,
+      "keyChars": 73,
+      "provenance": "delivered by dispatch — this test mints no key of its own"
+    },
+    {
+      "phase": "engine-leg",
+      "exitCode": 1,
+      "stdoutHead": "RUN e2e-t2sc-leg-mue4ifr2inzu pipeline=t2-self-compact-worker ok=false accepted=true phases=1 completedAt=2026-09-23T13:14:09.546Z",
+      "stderrTail": "\",\"timestamp\":\"2026-09-23T13:14:09.544Z\",\"durationMs\":64001,\"status\":\"fail\",\"exitStatus\":\"transient\",\"error\":{\"code\":\"Error\",\"message\":\"worker(s) missed the coms_await deadline: compactor\",\"stack\":\"Error: worker(s) missed the coms_await deadline: compactor\\n    at phase (/Users/steve/QDS-Factory/src/phase-engine/phase.ts:360:19)\\n    at async walkPhases (unknown)\\n    at async main (unknown)\\n    at processTicksAndRejections (native:7:39)\"},\"subTimings\":{\"team_execution_ms\":63014,\"manifest_load_ms\":2,\"phase_body_ms\":64001,\"journal_write_ms\":2}}\n{\"ok\":false,\"exitCode\":1,\"terminated\":false,\"phasesSettled\":1,\"engine_start_ms\":181,\"phase_walk_ms\":64004,\"level\":\"error\",\"event\":\"engine_settled\",\"runId\":\"e2e-t2sc-leg-mue4ifr2inzu\",\"requestId\":\"fa9be712-473d-4ea3-b365-d1f317d9a037\",\"phaseId\":null}"
+    },
+    {
+      "phase": "raw-capture",
+      "ok": true,
+      "bytes": 4403356,
+      "events": 1431,
+      "truncated": false
+    },
+    {
+      "phase": "threshold-crossings",
+      "crossings": []
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "at": "t2-sc.2-cleanup",
+      "runId": "qds-20260923-5ef637",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": "spend-divergence",
+      "stderrTail": "close_ms\":13}\n{\"requestId\":\"6e819b8e-2283-4b9b-a8da-aefdba7c5b9e\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-23T13:14:17.762Z\",\"duration\":8084,\"durationMs\":8084,\"status\":\"ok\",\"runId\":\"qds-20260923-5ef637\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260923-5ef637",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260923-5ef637",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-23T13:14:23.450Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

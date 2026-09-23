@@ -1,0 +1,81 @@
+{
+  "test": "T2-SC.2",
+  "outcome": "fail",
+  "runId": "",
+  "vmName": "",
+  "capMicroUsd": 200000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 200000,
+      "manifestPath": "tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json",
+      "rosterPath": "tests/fleet/e2e/fixtures/self-compact/roster.yaml"
+    },
+    {
+      "phase": "tree-parity",
+      "ok": true,
+      "files": [
+        {
+          "rel": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
+          "workingTree": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239",
+          "atSha": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+          "workingTree": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+          "atSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/coms-net.ts",
+          "workingTree": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7",
+          "atSha": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7"
+        }
+      ]
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdoutTail": "",
+      "stderrTail": "SWEEP_INTERVAL_MINUTES in src/fleet/observe.ts)\\n        --window-ms (string, optional) — observation window in ms; the default is 7200000 — both exit-1 outcomes (run-completion-unobserved, box-unreachable) are transient, so re-invoke and the poll starts over\\n        --help (boolean, optional)\\n        Exit codes: 0, 1, 2, 4, 5, 6\"}\n{\"requestId\":\"965feb3b-25f3-4835-b841-c4e6d2d58cf8\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-23T12:22:28.216Z\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "",
+      "vmName": ""
+    },
+    {
+      "phase": "finally-unrecovered-dispatch",
+      "ok": true,
+      "freshBoxes": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-23T12:22:31.374Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

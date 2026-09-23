@@ -1,0 +1,72 @@
+{
+  "test": "T2-SC.1",
+  "outcome": "pass",
+  "vm": "e2e-t2sc1-mue1kd3a2d7s",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t2sc1-mue1kd3a2d7s"
+    },
+    {
+      "phase": "subtree-push",
+      "exitCode": 0,
+      "base64Bytes": 68344,
+      "stderrTail": ""
+    },
+    {
+      "phase": "tree-parity",
+      "exitCode": 0,
+      "extFile": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+      "shaAtPin": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+      "boxSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+    },
+    {
+      "phase": "pi-version",
+      "exitCode": 0,
+      "stdout": "0.84.4"
+    },
+    {
+      "phase": "extension-load-probe",
+      "exitCode": 0,
+      "distinctFlags": [
+        "--compact-soft-at",
+        "--compact-at",
+        "--compact-buffer",
+        "--compact-prompt"
+      ],
+      "stdoutTail": "ad file contents\n  bash       - Execute bash commands\n  powershell - Execute PowerShell commands on Windows\n  edit       - Edit files with find/replace\n  write      - Write files (creates/overwrites)\n  grep       - Search file contents (read-only, off by default)\n  find       - Find files by glob pattern (read-only, off by default)\n  ls         - List directory contents (read-only, off by default)",
+      "stderrTail": ""
+    },
+    {
+      "phase": "verdict",
+      "ok": true,
+      "note": "image pi (0.84.4) registers all 4 self-compact flags from the box clone at f8861ceec756878fd25a2584f88be9171c6e0b06"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t2sc1-mue1kd3a2d7s",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "appeared": []
+    }
+  ],
+  "writtenAt": "2026-09-23T11:50:58.104Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

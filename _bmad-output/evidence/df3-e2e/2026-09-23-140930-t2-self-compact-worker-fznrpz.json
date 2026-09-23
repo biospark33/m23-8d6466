@@ -1,0 +1,146 @@
+{
+  "test": "T2-SC.2",
+  "outcome": "fail",
+  "runId": "qds-20260923-978848",
+  "vmName": "qds-20260923-978848",
+  "capMicroUsd": 200000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 200000,
+      "manifestPath": "tests/fleet/e2e/fixtures/self-compact/self-compact.pipeline.json",
+      "rosterPath": "tests/fleet/e2e/fixtures/self-compact/roster.yaml"
+    },
+    {
+      "phase": "tree-parity",
+      "ok": true,
+      "files": [
+        {
+          "rel": "tests/fleet/e2e/fixtures/self-compact/roster.yaml",
+          "workingTree": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239",
+          "atSha": "2e6324b7ea8c32d092b327a1dd0592fc1b35cc320106041269ea78d4866af239"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts",
+          "workingTree": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef",
+          "atSha": "66866ce994b9154eba6d193387d06be1c79928f97e9f9cd81ff473a5d90474ef"
+        },
+        {
+          "rel": "pi-vs-claude-code-vendor/coms-net.ts",
+          "workingTree": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7",
+          "atSha": "c32614c8927e5ab95d5c7b8d3dd31ebc52fbbe0f498b85c24f18a4d6cfac41b7"
+        }
+      ]
+    },
+    {
+      "phase": "pre-dispatch-ls",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260923-978848\",\"requestId\":\"7dfdde5c-fd19-49d4-9453-2fd09663a899\",\"state\":\"ready\",\"vmName\":\"qds-20260923-978848\",\"httpsUrl\":\"https://qds-20260923-978848.exe.xyz\"}",
+      "stderrTail": "9-23T14:02:20.115Z\",\"duration\":63510,\"durationMs\":63510,\"status\":\"ok\",\"runId\":\"qds-20260923-978848\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3941,\"mint_ms\":2142,\"fill_ms\":37829,\"setup_gate_ms\":18354}}\n{\"requestId\":\"7dfdde5c-fd19-49d4-9453-2fd09663a899\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-23T14:02:20.118Z\",\"duration\":63517,\"durationMs\":63517,\"status\":\"ok\",\"runId\":\"qds-20260923-978848\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260923-978848",
+      "vmName": "qds-20260923-978848"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "bc85072abd3ad876f400540239b4ddfaa2e17a36f63db6a73ab7972b77045c0a",
+      "limitMicroUsd": 200000,
+      "requestId": "7dfdde5c-fd19-49d4-9453-2fd09663a899"
+    },
+    {
+      "phase": "box-clone-head",
+      "exitCode": 0,
+      "head": "b964b1063ef1a41cb00b1f12253eaa2895e05028"
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "witnessRequestId": "7dfdde5c-fd19-49d4-9453-2fd09663a899",
+      "witnessCeiling": 200000,
+      "deliveredLimit": 200000
+    },
+    {
+      "phase": "run-key",
+      "source": "/home/exedev/app/.env",
+      "envVar": "OPENROUTER_API_KEY",
+      "ok": true,
+      "keyChars": 73,
+      "provenance": "delivered by dispatch — this test mints no key of its own"
+    },
+    {
+      "phase": "engine-leg",
+      "exitCode": 1,
+      "stdoutHead": "RUN e2e-t2sc-leg-mue69xvo254m pipeline=t2-self-compact-worker ok=false accepted=true phases=1 completedAt=2026-09-23T14:09:15.477Z",
+      "stderrTail": "k\",\"timestamp\":\"2026-09-23T14:09:15.476Z\",\"durationMs\":407170,\"status\":\"fail\",\"exitStatus\":\"overflow\",\"error\":{\"code\":\"Error\",\"message\":\"budget kill threshold $0.1800 reached (cap $0.20)\",\"stack\":\"Error: budget kill threshold $0.1800 reached (cap $0.20)\\n    at phase (/Users/steve/QDS-Factory/src/phase-engine/phase.ts:360:19)\\n    at async walkPhases (unknown)\\n    at async main (unknown)\\n    at processTicksAndRejections (native:7:39)\"},\"subTimings\":{\"team_execution_ms\":406351,\"manifest_load_ms\":2,\"phase_body_ms\":407170,\"journal_write_ms\":1}}\n{\"ok\":false,\"exitCode\":1,\"terminated\":false,\"phasesSettled\":1,\"engine_start_ms\":124,\"phase_walk_ms\":407172,\"level\":\"error\",\"event\":\"engine_settled\",\"runId\":\"e2e-t2sc-leg-mue69xvo254m\",\"requestId\":\"7dfdde5c-fd19-49d4-9453-2fd09663a899\",\"phaseId\":null}"
+    },
+    {
+      "phase": "raw-capture",
+      "ok": true,
+      "bytes": 8266495,
+      "events": 1025,
+      "truncated": true
+    },
+    {
+      "phase": "threshold-crossings",
+      "crossings": [
+        {
+          "level": "notice",
+          "percent": 30.7861328125,
+          "text": "[self-compact · notice] Heads-up only. Context usage is 322,816 tokens (30.8%) of a 1,048,576-token window, past the soft line of 314,572 (30.0%). Nothing is blocked, nothing is required, and this message asks for no action. Keep working.\n\nFor awareness: the warning line is at 524,288 tokens (50.0%) and the hard cutoff at 629,145 (60.0%), 306,329 tokens away. You will be told when you reach the warning line. Call `view_context` for current numbers.\n\nYou are in control of when to compact. `self_compact` takes a `note_to_self` (up to 24000 chars). Your note is the contract: after compaction it is handed back to you as is, so anything you will need later (evidence paths under `_bmad-output/`, calibration constants, exact commands, branch/PR state) must be IN the note, not trusted to the summary. Compaction cycles completed so far: 0.\n"
+        }
+      ]
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "at": "t2-sc.2-cleanup",
+      "runId": "qds-20260923-978848",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": "spend-divergence",
+      "stderrTail": "close_ms\":24}\n{\"requestId\":\"8530b06f-c9ef-409a-a354-da26dc9940c8\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-23T14:09:25.380Z\",\"duration\":9733,\"durationMs\":9733,\"status\":\"ok\",\"runId\":\"qds-20260923-978848\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260923-978848",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260923-978848",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-23T14:09:30.509Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038",
+    "buildId": "52538541c5430cc5",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
