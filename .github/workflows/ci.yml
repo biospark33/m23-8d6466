@@ -74,11 +74,26 @@ jobs:
           fetch-depth: 0
       # F096: no bun-version means `latest`. This repo is Bun-API-load-bearing
       # (Bun.spawn, bun:sqlite, bun:test, todoIf), so a Bun point release can
-      # turn a green main red with no repo change. Keep in lockstep with
-      # `packageManager` in package.json.
+      # turn a green main red with no repo change.
+      #
+      # 1.3.13 -> 1.4.2 (issue #250). Under 1.3.13 the runner's full `bun test`
+      # dies mid-suite with `panic: us_create_timer: returned null: 24` (EMFILE
+      # at timer creation) and SIGILL exit 132, after ~6.4k spawns, with ZERO
+      # test failures — six runs since 2026-09-10. Raising the step's soft fd
+      # limit to the runner's hard limit was tried and did NOT help (0d8b97db,
+      # run 35536475252, crash again at spawn(6450)); it was reverted in
+      # 8576497c. That rules the process fd ceiling out and leaves the runtime,
+      # which is what this bump replaces.
+      #
+      # This pin is DELIBERATELY ahead of `packageManager` in package.json,
+      # which stays at 1.3.13: `readBunPin` feeds that field to the exedev
+      # image's `ARG BUN_VERSION`, so moving it re-derives the image build id
+      # and owes the whole pin-adoption ritual. This bump is the CI runner
+      # only — no substrate change. Re-align the two when the image is next
+      # re-pinned.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.13
+          bun-version: 1.4.2
       # Actions-minutes policy: the `image` job is a cold npm install plus two
       # image stages plus a layer scan. Nothing in it can change unless one of
       # these paths does, so gate it on a diff rather than paying for it on
@@ -118,12 +133,7 @@ jobs:
       - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
-      # Explicit dirs (tests visualizer cli-anything) = every bun test file in
-      # the repo. The --path-ignore-patterns carve-out is REQUIRED with them:
-      # bun's path args are substring filters, not roots, so the vendored
-      # pi-vs-claude-code-vendor/self-compact/tests/** still matches "tests" —
-      # those run under their own node:test runner (bun's shims fail on them).
-      - run: bun test tests visualizer cli-anything --path-ignore-patterns 'pi-vs-claude-code-vendor/**'
+>>>>>>> origin/dev
       # DF4.2 coverage gate. Two steps so the coverage run's own exit status
       # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
       # enforces per-file line+function floors and fails loudly on any
@@ -183,6 +193,50 @@ jobs:
   # DF2.9: the enterprise image contract. The license sweep is the gate — a
   # denied package, a broken pin, or a package the build cannot attribute exits
   # nonzero from `build:image`, which fails this job before anything is tagged.
+  # issue #250: the suite cannot finish in one `bun test` process. Five
+  # measurements, each ruling something out rather than arguing about it:
+  #   1. One process over all 196 files dies at ~6.4k spawns every time —
+  #      `us_create_timer: returned null: 24` (EMFILE, exit 132) on bun 1.3.13,
+  #      `eventfd() failed during loop init` (exit 134) on 1.4.2 — with ZERO
+  #      test failures before the crash.
+  #   2. `ulimit -n "$(ulimit -Hn)"` (0d8b97db): a no-op. The runner reports
+  #      soft=hard=65536, so raising soft TO hard changes nothing.
+  #   3. `sudo prlimit --nofile=1048576` (run 35637724630): the raise took
+  #      effect — the step logged `fd after: soft=1048576` — and the suite still
+  #      died at spawn(6396), the same point as under 65536. A 16x budget that
+  #      buys zero extra spawns rules the fd CEILING out.
+  #   4. Four sequential processes in one job (run 35639471439): shard 1 clean,
+  #      shard 4 SIGABRT.
+  #   5. Four processes on four separate RUNNERS (run 35641333046): shards 1
+  #      and 2 green, shard 4 SIGABRT again at 180s on a VM of its own.
+  #   6. Batches of 8 (run 35644090068): 24 of 25 batches clean, batch 3
+  #      SIGABRT at 150s — tests/fleet/{approvers,attach,brief-schema,cli,
+  #      dispatch}.test.ts plus three tests/fleet/e2e/ files.
+  # (5) rules out budget, ceiling and whole-run accumulation; (6) localises what
+  # is left to the spawn-heaviest corner of the suite. So the run is now one
+  # file per process — the smallest bound there is, and cheap: the batches of 8
+  # holding no heavy file finished in 0.1s. A file that still cannot survive
+  # alone will name itself, since every batch prints its files first.
+  tests:
+    runs-on: ubuntu-latest
+    # The batched run is ~14 min of test time plus install; 30 caps a hang.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # F096: same pin as `check` — see the comment there.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      # Explicit roots (tests visualizer cli-anything) = every bun test file in
+      # the repo. The roots are REAL roots here — test-batches.ts globs each
+      # root — not bun's substring path args, so the vendored
+      # pi-vs-claude-code-vendor/self-compact/tests/** stays OUT: those run
+      # under their own node:test runner (bun's shims fail on them).
+      - run: bun scripts/ci/test-batches.ts tests visualizer cli-anything
+
   image:
     runs-on: ubuntu-latest
     needs: check
@@ -194,10 +248,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # F096: same pin as the `check` job — see the comment there.
+      # F096: this is the RUNNER's bun, same pin as the `check` job (1.4.2,
+      # issue #250). It is deliberately NOT `packageManager`'s 1.3.13: the bun
+      # that ends up INSIDE the image comes from `readBunPin(package.json)` via
+      # `ARG BUN_VERSION`, and this step cannot change it. The image's own pin
+      # stays in lockstep with `packageManager`.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.13
+          bun-version: 1.4.2
       # Deliberately NOT docker/setup-buildx-action: it selects a
       # docker-container-driver builder, whose output stays in the build cache
       # unless --load/--push is given. `build:image` then extracts the tree with

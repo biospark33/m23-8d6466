@@ -1083,10 +1083,16 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      // 23edf4b9: the 2026-09-18 COPY-set convergence (five new COPYs for the
-      // engine's provider/swarmclaw reach — see the walk-digest note below).
-      "oci/exedev/Dockerfile": "23edf4b9838e9802c30f18f1c5b3aa148ae2214f77cc1e2485e712b77c4cc9c2",
-      "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
+      // 47e9b084 / 24958f40: DF3.6b. The unit gains `Delegate=memory` (the
+      // engine cannot create the resident's cgroup or write its `memory.max`
+      // as User=exedev without it) and the Dockerfile gains the positive
+      // `^Delegate=memory$` scan that fences it. Both are image inputs, so the
+      // published digest and DEFAULT_IMAGE_BUILD_ID are stale until the image
+      // is rebuilt and re-published — recorded as OPEN in the story's Dev Agent
+      // Record, because this re-pin is the OFFLINE half of DF2.10's ritual and
+      // the publish is the other.
+      "oci/exedev/Dockerfile": "47e9b084a1b8a47ee1ec9e74a32cceade2b57f47814966b80017575e3ed14761",
+      "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
     const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
@@ -1105,8 +1111,9 @@ describe("buildIdFileInputs", () => {
   });
 
   trackedSetDigest("a single digest over EVERY tracked walked input — the pin's whole offline reach", () => {
-    // The three entries above pin the named assets; the walk yields ~76
-    // inputs, and the other ~73 (src/**, cli-anything/**, scripts/lib/**,
+    // The three entries above pin the named assets; the walk yields 89
+    // inputs (measured 2026-09-19 by calling `buildIdFileInputs` directly; it
+    // was ~76 when this docblock was written), and the other 86 (src/**, cli-anything/**, scripts/lib/**,
     // package.json, bun.lock, …) are tracked files whose every edit moves the
     // real buildId — so a stale pin from editing any of them was caught only
     // at the paid publish gate, after a full QEMU build/push. One digest over
@@ -1361,13 +1368,150 @@ describe("buildIdFileInputs", () => {
       // NOTHING in the walk (intersection of the branch's 56 changed files
       // with the live `buildIdFileInputs` set: empty; the gate code, fixture,
       // tests, story artifact and `.unlazy/` are all outside the COPY set).
-      // The mover is upstream of this branch — the DF3.8 margin merge
+      // The mover is upstream of that branch — the DF3.8 margin merge
       // (#267) landing after the 13th-pin adoption, the same
-      // landed-without-touching-this-literal shape #238 and DF5.3 hit. This
-      // adoption is the same-commit re-pin the ritual names, taken on the
+      // landed-without-touching-this-literal shape #238 and DF5.3 hit. That
+      // adoption WAS the same-commit re-pin the ritual names, taken on the
       // branch that happened to run the full suite next; no image republish
-      // is owed by it (no walked bytes changed here) — the next publisher's
-      // src_sha carries whatever dev hashes then.
+      // was owed BY IT (no walked bytes changed there) — a statement about
+      // b3c30d0c only, and NOT about the entries below it, every one of which
+      // DID move walked bytes. That does not make eight outstanding
+      // republishes: the publish is owed per TREE, not per pin — the re-pin
+      // happens once per landing tree (see "the re-pin happens LAST, after the
+      // final fixer lands, rather than once per round" below) and the debt is
+      // discharged once. DF3.6b's seven within-story pins share the single
+      // `THE PUBLISH IS STILL OWED` below; DF6.1a declares one `PAIRING DEBT`
+      // for 8b670a3d — and THAT ONE IS DISCHARGED. `dev`'s own tip (6ed796c9,
+      // the fourteenth pin adoption) is the rebuild -> publish -> adopt it owed:
+      // built at src_sha 1b653f04 with DF6.1a already merged in (#273,
+      // de5a7509, is an ancestor of it), pushed as sha256:9c8bfe9a… / buildId
+      // 52538541c5430cc5 — which is the DEFAULT_IMAGE_BUILD_ID this merge
+      // inherits. So exactly ONE debt survives into the merged tree: DF3.6b's
+      // four walked inputs are in no published image. A publisher rebuilds THE
+      // MERGED TREE; 1e1b54a4 is not the thing they build — it is a digest over
+      // walked-input BYTES, not a buildId and not an image digest, and it moves
+      // for reasons (comment-only edits) that need no republish at all. It is
+      // how you tell whether the tree moved, not what you publish.
+      // RESTORED here: DF3.6b's first re-pin (1938e34b) wrote its own entry OVER
+      // this paragraph, which left `b3c30d0c` the one value in the chain a reader
+      // could not tie to a paragraph — exactly the invariant round 4 finding 3
+      // established. The value itself is `origin/dev`'s and is unchanged.
+      // COMPLETED by the dev merge: aa66e927 restored the paragraph but not its
+      // closing sentences, which 1938e34b had taken with it. They survived on
+      // `dev`, so the merge brought them back. Recorded because the shape is
+      // ambiguous on inspection — text absent from this branch and present on
+      // dev reads as a deliberate deletion, and a reviewer said so. `git log -S`
+      // over 1c153883..HEAD says otherwise: the remover was the chain-break
+      // commit, not an editorial one, and the repair that followed was partial.
+      //
+      // 7d44bbda: moved from b3c30d0c by DF3.6b. FOUR walked
+      // tracked inputs — `oci/exedev/systemd/qds-run@.service`
+      // (+`Delegate=memory`), `src/fleet/resident.ts` (the whole cgroup
+      // mechanism), `src/phase-engine/steering.ts` (the OOM writer) and
+      // `scripts/pipeline-run.ts` (the bound hand-off and the arming refusal).
+      // `oci/exedev/Dockerfile` also changed in this story (the
+      // `^Delegate=memory$` unit-scan fence) and is NOT one of them: it is
+      // `deriveBuildId`'s own `field("dockerfile", …)`
+      // (`scripts/build-exedev-image.ts:652`), while THIS literal is computed
+      // strictly over `files()` — `buildIdFileInputs` (`:1544`) returns 89
+      // entries and the Dockerfile is absent from all of them. Verified by
+      // calling it directly rather than assumed; the grep-line edit added no
+      // COPY, so the walk set is unchanged at 89. Named precisely because a
+      // provenance note that blames a file which cannot move this hash sends
+      // the next re-pinner to bisect files that cannot move it (the same
+      // correction this ledger already carries above). Same failing-run
+      // receive, same-commit re-pin.
+      //
+      // MOVED WITHIN THE STORY, twice, by COMMENT-ONLY edits to walked inputs —
+      // `src/fleet/resident.ts`, `src/phase-engine/steering.ts` and
+      // `scripts/pipeline-run.ts` — made while resolving review rounds 7 and 8.
+      // Comment-only still moves this literal (the `99af1da0` entry above is the
+      // same case), which is why the re-pin happens LAST, after the final fixer
+      // lands, rather than once per round.
+      //
+      // bb3c3602: moved from 7d44bbda by DF3.6b, review round 12 — another
+      // within-story move, COMMENT-ONLY again. ONE walked input changed:
+      // `src/fleet/resident.ts` — in THREE places, not two. Two are in
+      // `readLeaf()`'s documentation: its JSDoc (which presented the peak floor
+      // as a co-equal third discriminator, the framing story ruling 9 denies,
+      // and which sits ABOVE the body so none of the body's three
+      // self-corrections ever reached it) and the body's setup paragraph (which
+      // asserted "A THIRD FACT" twelve lines above its own ruling-9
+      // correction). The THIRD is elsewhere in the file entirely —
+      // `ResidentSpawnOpts`'s JSDoc for `residentRssBytes`, where "In
+      // production it is never absent" was corrected for ruling 3b. Counted
+      // exactly because this ledger exists to spare the next re-pinner a
+      // bisect, and an entry that says "twice, both in `readLeaf()`" sends them
+      // looking in one function for a hash three hunks moved. (Commit
+      // `2dfedf49`'s own message makes the same undercount; this entry is the
+      // correction, and `git show 2dfedf49 -- src/fleet/resident.ts` shows the
+      // three hunk headers.) NOT movers, named so the next
+      // re-pinner does not bisect them: `tests/fleet/resident-cgroup.test.ts`
+      // (three rows fixed, one added) and the story artifact are outside the
+      // walk, and `oci/exedev/Dockerfile` is `deriveBuildId`'s separate
+      // `dockerfile` field as the entry above explains. Walk set unchanged at
+      // 89 entries. Same failing-run receive, same-commit re-pin.
+      //
+      // 15effcd0: moved from bb3c3602 by DF3.6b, review round 14 — the first
+      // within-story move that is NOT comment-only. ONE walked input changed,
+      // `scripts/pipeline-run.ts`, and the edit is REAL: `inBoxFrontDoor` was a
+      // module-level `let` set `true` before the in-box re-entry and never
+      // reset; it is now a parameter of `main`. A covering review found it and
+      // a second reviewer reproduced the leak — two sequential in-process
+      // `main()` calls, where the second (host-side) call inherited the first's
+      // `true` and was degraded by cgroup machinery it should never have
+      // touched. Unreachable in the shipped CLI (one process per invocation),
+      // which is why no test moved: the suites pass identically both ways.
+      // NOT movers: `_bmad-output/evidence/df3-6b/review-round-14.md` and the
+      // story artifact are outside the walk. Walk set unchanged at 89 entries.
+      // Same failing-run receive, same-commit re-pin.
+      //
+      // f3548fdc: moved from 15effcd0 by DF3.6b, review round 15. ONE walked
+      // input changed, `scripts/pipeline-run.ts` untouched this time: the
+      // `removeLeaf` EBUSY backoff in `src/fleet/resident.ts` swapped
+      // `Atomics.wait` on a throwaway SharedArrayBuffer for `Bun.sleepSync`.
+      // BEHAVIOURALLY A NO-OP — the review finding that prompted it claimed
+      // `Atomics.wait` throws on Bun's main thread, which was probed false on
+      // Bun 1.3.13 and declined; the swap is readability, so the clever form
+      // stops drawing that same wrong finding. NOT movers: the story artifact,
+      // `df3-6a-resident-spend-iteration-bounds.md`,
+      // `tests/providers/exedev/image-assets.test.ts` (one negative-control
+      // row fixed) and `review-round-15.md` are all outside the walk. Walk set
+      // unchanged at 89 entries. Same failing-run receive, same-commit re-pin.
+      //
+      // 99b541b3: moved from f3548fdc by DF3.6b, review round 16. ONE walked
+      // input changed, `src/phase-engine/steering.ts`, COMMENT-ONLY: the
+      // `PlacementRefusedError` docstring described the wrapper's failure as
+      // `|| exit 97` — the form REJECTED during development — rather than the
+      // shipped guard, which keys on membership read back from `cgroup.procs`.
+      // It mattered enough to move a pin because that docstring sits on the
+      // class a caller implements the contract against, and two prior rounds
+      // swept for this wording and missed it. NOT movers: the story artifact
+      // (several NOT-DONE consequence statements and a Shipped-table
+      // overclaim — "the four AC3 refusals", where one of the four asserts the
+      // OPPOSITE) and `review-round-16.md` are outside the walk. Walk set
+      // unchanged at 89 entries. Same failing-run receive, same-commit re-pin.
+      //
+      // 660ae409: moved from 99b541b3 by DF3.6b, review round 17. ONE walked
+      // input changed, `src/fleet/resident.ts`, and this one is STRUCTURAL, not
+      // comment-only: `removeLeaf`'s bounded EBUSY rmdir retry was extracted
+      // into `rmdirBounded(dir, rmdir = rmdirSync)` behind a
+      // `_rmdirBoundedForTest` seam. Behaviour is unchanged — the default
+      // remover is `rmdirSync` and the loop body is identical, verified by a
+      // reviewer against the replaced code. The reason for the change is that
+      // the loop was UNREACHABLE under the host-side suite: the fs-level fake
+      // empties the leaf before `rmdirSync` runs, so EBUSY never occurs and the
+      // attempt cap, errno check and backoff were dead code. Four rows now pin
+      // the contract, all mutation-verified. NOT movers: the story artifact,
+      // `tests/fleet/resident-cgroup.test.ts` and `review-round-17.md` are
+      // outside the walk. Walk set unchanged at 89 entries. Same failing-run
+      // receive, same-commit re-pin.
+      //
+      // THE PUBLISH IS STILL OWED:
+      // the unit is baked into a digest-pinned image, so a run against the
+      // currently pinned digest boots a unit with NO `Delegate=`, and the
+      // resident refuses to start (DF3.6b AC3). Recorded as open in that
+      // story's Dev Agent Record.
       //
       // 8b670a3d: moved from b3c30d0c by DF6.1a (feature/df6-1a-fix-loop-append)
       // — FOUR walked inputs, every one an adds-only edit, membership measured
@@ -1392,6 +1536,7 @@ describe("buildIdFileInputs", () => {
       // branch tree (twice: the branch gate's full-suite run and the targeted
       // re-run, byte-identical).
       //
+<<<<<<< HEAD
       // 9d788c04: moved from 8b670a3d by feature/self-compact-pi-agent (the
       // self-compact vendoring + roster/extensionArgs wiring). FOUR walked
       // inputs, membership measured against the live `oci/exedev/Dockerfile`
@@ -1422,6 +1567,32 @@ describe("buildIdFileInputs", () => {
       // run on the final tree (re-pin LAST; the reviewer's mid-branch
       // 653fa603 was superseded by the pass's own edits and never adopted).
       "9bc74b21151da856b4d63cd5eec45424642cbffdb887fdfec4eb1c7876b9bc4f",
+      //
+      // 1e1b54a4: MERGE of `dev` into this branch (2026-09-20). Two chains meet here, and
+      // NEITHER side's literal survives: both branched from b3c30d0c and both
+      // moved walked inputs, so the merged tree carries DF3.6b's four
+      // (`qds-run@.service`, `resident.ts`, `steering.ts`, `pipeline-run.ts`)
+      // AND DF6.1a's four (`brief-schema.ts`, `dispatch.ts`, `dispatch-task.ts`,
+      // `run-record.ts`) at once. That is eight distinct walked inputs relative
+      // to b3c30d0c, a tree neither 660ae409 nor 8b670a3d was ever computed
+      // over. The value below is RE-DERIVED from the merged tree by this test's
+      // own failing run, not carried across from either parent — carrying
+      // either one would pin a hash for a tree that does not exist.
+      // Both parent paragraphs are kept above so each digest still ties to the
+      // change that produced it; this entry is the join, not a replacement.
+      "1e1b54a43d1da428cd195f5d12c77a61e7ae58f0fab4455dd7ef2a15ff2f12ad",
+      //
+      // MERGE of `dev` into feature/self-compact-pi-agent (2026-09-23): the
+      // join of the 9bc74b21 chain (self-compact vendoring, roster/extensionArgs
+      // wiring, driver argv hardening) and the 1e1b54a4 chain (DF3.6b +
+      // DF6.1a walked inputs), PLUS this merge's own walked-input edits —
+      // cli-anything/scripts/team-lead-driver.ts (the launch-boundary
+      // lifecycle fix) and .github/workflows/ci.yml-adjacent batch-root
+      // invocation (names no COPY source). Neither parent literal survives;
+      // the value is RE-DERIVED from the joined tree by this test's own
+      // failing run. KEPT: every parent paragraph above, per the join, not a
+      // replacement.
+      "PENDING-MERGE-DERIVE",
     );
   });
 });

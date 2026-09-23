@@ -167,8 +167,15 @@ export interface ResidentCaller {
 
 /** DF3.6b (landed with DF3.6a — the deps/seams this needs are this story's
  *  diff): fleet's caller throws this when the per-solicitation cgroup
- *  placement wrapper fails (`|| exit 97`) — the engine classifies it by
- *  type instead of the opaque degrade latch. Engine-owned (fleet→engine is
+ *  placement wrapper REFUSES — it exits 97, and the refusal is keyed on
+ *  MEMBERSHIP READ BACK from `cgroup.procs`, never on the exit status of the
+ *  write (the `… || exit 97` form was rejected during development;
+ *  `_PLACEMENT_SCRIPT` in `src/fleet/resident.ts` keeps it in a comment to say
+ *  so). The distinction belongs here because this class is the contract a
+ *  caller implements against: the wrapper refuses whenever pi is not VERIFIABLY
+ *  in the leaf, which includes a write that reported success and did not take.
+ *  The engine classifies the refusal by type instead of the opaque degrade
+ *  latch. Engine-owned (fleet→engine is
  *  the allowed import direction); the engine learns the placement failed,
  *  never how to place. */
 export class PlacementRefusedError extends Error {
@@ -498,7 +505,7 @@ export function createSteering(deps: {
    *  diff) because the deps object is one literal and two stories must not
    *  edit it; DF3.6b wires `lastMemory: spawned.lastMemory`. A structural
    *  callback, NOT a fleet import. Unused by DF3.6a. */
-  lastMemory?: () => { peakBytes: number; oomKilled: boolean } | null;
+  lastMemory?: () => { peakBytes: number; oomKilled: boolean; boundBytes?: number } | null;
 }): SteeringController {
   const telemetry: ResidentTelemetry = {
     status: "active",
@@ -1209,6 +1216,62 @@ export function createSteering(deps: {
             allowed: false,
             cause: "unenforceable",
             exitCode: err.exitCode,
+            runId: ctx.runId,
+            requestId: ctx.requestId,
+            phase: ctx.phase,
+          });
+          acksBeforeCall += ackedThisPass;
+          return PROCEED;
+        }
+        // DF3.6b AC1/AC5: the kernel OOM-killed this solicitation's cgroup.
+        // The call arrives here as a SIGNAL DEATH — indistinguishable at the
+        // process level from a timeout or an external kill — so the kernel's
+        // own account is what discriminates it — the leaf's `memory.events`
+        // counters AND its `memory.peak`, read before it was removed. NOT
+        // `oom_kill` alone, which counts a global OOM that merely picked pi:
+        // fleet's `readLeaf` applies the full rule (story ruling 8) and this
+        // arm consumes its boolean. Ordered BEFORE the
+        // degrade write below, because a resident whose bound fired is
+        // "stopped" (this pair's enforcement is the proximate cause, AC5) and
+        // never "degraded", and the journal must not read `status:"degraded"`
+        // beside `exitStatus:"overflow"` — a combination no story owns.
+        //
+        // The observer is a sidecar like every other: a throwing `lastMemory`
+        // must not convert an OOM into an unclassified degrade, so a throw
+        // reads as "no kill this layer can attest to" and falls through.
+        let mem: { peakBytes: number; oomKilled: boolean; boundBytes?: number } | null = null;
+        try {
+          mem = deps.lastMemory?.() ?? null;
+        } catch {
+          /* sidecar — an unreadable accounting degrades to the arm below */
+        }
+        if (mem !== null && mem.oomKilled === true) {
+          telemetry.status = "stopped";
+          // DF3.3 owns `exitStatus` and its closed CC-1 value set; this story
+          // writes a member ("overflow"), never a new field — through the
+          // internal writer only, no public setter (INV-MEM-1).
+          telemetry.exitStatus = "overflow";
+          const row: ResidentTripwire = {
+            runId: ctx.runId,
+            requestId: ctx.requestId,
+            cause: "watchdog_kill",
+            phase: ctx.phase,
+            // The bound and the peak it crossed, in `detail` — the shape
+            // `ResidentTripwire` actually has. `bound`/`code` ride the fd-2
+            // breach line instead (this story's ruling on the DF3.6a contract
+            // contradiction; see its Dev Agent Record).
+            detail: `resident cgroup OOM-killed: memory.peak ${mem.peakBytes} B crossed residentRssBytes ${mem.boundBytes ?? "<unreported>"} B`,
+          };
+          telemetry.tripwires.push(row);
+          try {
+            deps.onTripwire?.(row);
+          } catch {
+            /* observability is a sidecar; the row above is the record */
+          }
+          await fireOnBoundBreach({
+            bound: "rss",
+            allowed: false,
+            cause: "watchdog_kill",
             runId: ctx.runId,
             requestId: ctx.requestId,
             phase: ctx.phase,

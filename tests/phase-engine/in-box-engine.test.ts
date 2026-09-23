@@ -1680,3 +1680,73 @@ describe("engine log redirect and the observability event set", () => {
     expect(fs.existsSync(ws.journal)).toBe(false);
   }, 60_000);
 });
+
+// ─── DF3.6b AC3 — the in-box front door is the enforcement context ───────────
+
+describe("DF3.6b AC3/INV-MEM-2 — `run <runId>` supplies the memory bound; an unenforceable box refuses the RESIDENT, never the run", () => {
+  const FIXTURES = path.join(REPO_ROOT, "tests", "phase-engine", "fixtures");
+  // Not a skip gate (review round 2, finding 3): the earlier version skipped on
+  // Linux, which is where CI runs, so the only end-to-end coverage of edits
+  // (iii) and (vi) ran nowhere in CI. The branch is selected by what the RUN
+  // actually reported — `rss_unenforceable` on stderr — not by a host probe,
+  // and both sides assert something the wiring can fail.
+
+  test(
+    "the front door applies the bound: unenforceable ⇒ resident_disabled/rss_unenforceable and the run still settles ok",
+    async () => {
+      const ws = workspace();
+      writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+      writeWitness(ws, {
+        runId: "qds-20260918-rssgate",
+        requestId: "req-rssgate",
+        budgetMs: 200_000,
+        effectiveCeilingMicros: 250_000,
+      });
+      // The rate MUST resolve, or `rate_unresolved` preempts the gate this test
+      // is about and it would pass for the wrong reason. The fixture catalog
+      // resolves the resident slug; the key is present and fake. No model is
+      // ever reached: the cgroup arming check runs BEFORE the first
+      // solicitation, and `QDS_PI_BIN` is the fake resident either way.
+      const { exitCode, stderr } = await run(ws, ["run", "qds-20260918-rssgate"], {
+        HOME: ws.dir,
+        QDS_PI_CATALOG_DIR: path.join(FIXTURES, "pi-catalog"),
+        QDS_PI_BIN: path.join(FIXTURES, "fake-resident.ts"),
+        OPENROUTER_API_KEY: "sk-or-v1-df36b-inbox-fixture-key-00000011111",
+      });
+
+      // INV-MEM-2 degrades toward DETERMINISM on BOTH branches: whatever the
+      // box can enforce, the RUN settles. A refusal that failed the run would be
+      // the opposite of the invariant.
+      expect(exitCode).toBe(0);
+      // NOT the rate arm, on either branch — that would mean the fixture catalog
+      // failed to resolve and this test proved nothing about the memory gate.
+      expect(stderr).not.toContain("rate_unresolved");
+      const journal = readJournal(path.join(ws.dir, "qds-20260918-rssgate.journal.jsonl"));
+
+      if (stderr.includes("rss_unenforceable")) {
+        // The unenforceable branch — the darwin operator host, and any Linux box
+        // whose engine cgroup carries no `Delegate=memory`. This is the AC3
+        // shape end to end: DF3.3's closed status set, no fourth value, and no
+        // tripwire row (the cause union has no member for an arming refusal and
+        // no agent ran).
+        expect(stderr).toContain("resident_disabled");
+        expect(journal.resident?.status).toBe("disabled");
+        expect(journal.resident?.tripwires).toEqual([]);
+        expect(journal.resident?.spendMicros).toBe(0);
+      } else {
+        // The enforceable branch: the bound was applied and the resident armed.
+        // "Not disabled" alone is NOT enough — it also holds when edit (iii) is
+        // deleted and the resident runs with no cgroup at all, which is the one
+        // regression this branch exists to catch. Assert the BOUND-SPECIFIC side
+        // effect instead: the per-solicitation `resident_cgroup` line, which is
+        // emitted only when the cgroup machinery ran, carrying the manifest's
+        // own `residentRssBytes` value.
+        expect(journal.resident?.status).not.toBe("disabled");
+        expect(stderr).not.toContain("resident_disabled");
+        expect(stderr).toContain("resident_cgroup");
+        expect(stderr).toContain('"residentRssBytes":536870912');
+      }
+    },
+    60_000,
+  );
+});

@@ -28,7 +28,8 @@
  * fixture appends one line per invocation, so a test can watch the file grow
  * across calls on one resident.
  */
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const recordPath = process.env.QDS_FAKE_PI_RECORD;
 if (recordPath) {
@@ -49,9 +50,74 @@ if (recordPath) {
   );
 }
 
+// DF3.6b: write a `memory.events` body into the live solicitation leaf. The
+// leaf exists only for the duration of this call — the resident reads it and
+// removes it in the call's `finally` — so the only place that can stage one is
+// inside the child. Lets the host-side suite drive the OOM VERDICT (own-limit
+// kill vs a global OOM that merely happened to pick pi) without a kernel.
+const eventsRoot = process.env.QDS_FAKE_PI_EVENTS_ROOT;
+if (eventsRoot !== undefined) {
+  const events = process.env.QDS_FAKE_PI_EVENTS;
+  // `memory.peak` staged as base × the leaf's own seq, so two solicitations
+  // produce DIFFERENT readings and "a fresh memory.peak per solicitation" can be
+  // asserted by VALUE. Object identity cannot assert it: the resident rebuilds
+  // the reading as a fresh literal every call, so `.not.toBe` holds even for an
+  // implementation that re-read the previous leaf.
+  const peakBase = process.env.QDS_FAKE_PI_PEAK_BASE;
+  // Where to copy the live leaf's `cgroup.procs` so the test can assert that
+  // EXACTLY ONE pid — pi's — was ever placed in it (AC2: the bound is rooted at
+  // the resident, never at an ancestor that also holds the engine and every
+  // in-box dispatch_task worker).
+  const procsOut = process.env.QDS_FAKE_PI_PROCS_OUT;
+  for (const entry of readdirSync(eventsRoot)) {
+    if (!entry.startsWith("resident.")) continue;
+    const leaf = join(eventsRoot, entry);
+    if (events !== undefined) writeFileSync(join(leaf, "memory.events"), events);
+    if (peakBase !== undefined) {
+      const seq = Number(entry.slice(entry.lastIndexOf(".") + 1));
+      writeFileSync(join(leaf, "memory.peak"), String(Number(peakBase) * (Number.isFinite(seq) ? seq : 1)));
+    }
+    // The leaf's ARMED STATE, captured from inside the call — the only moment
+    // the leaf exists. Lets the numeric-contract test read `memory.max` back
+    // deterministically instead of racing the parent's teardown with a poll.
+    const leafOut = process.env.QDS_FAKE_PI_LEAF_OUT;
+    if (leafOut !== undefined) {
+      const readOr = (name: string): string | null =>
+        existsSync(join(leaf, name)) ? readFileSync(join(leaf, name), "utf8") : null;
+      writeFileSync(
+        leafOut,
+        JSON.stringify({ leaf: entry, max: readOr("memory.max"), oomGroup: readOr("memory.oom.group") }),
+      );
+    }
+    if (procsOut !== undefined) {
+      writeFileSync(procsOut, existsSync(join(leaf, "cgroup.procs")) ? readFileSync(join(leaf, "cgroup.procs"), "utf8") : "");
+    }
+  }
+}
+
 const sessionFlag = Bun.argv.slice(2).indexOf("--session");
 if (sessionFlag !== -1) {
   appendFileSync(Bun.argv.slice(2)[sessionFlag + 1]!, "called\n");
+}
+
+// DF3.6b: exit with an arbitrary code, so the resident's exit-code
+// classification (notably the placement wrapper's 97) can be exercised through
+// a real spawned child rather than only through the shell script standalone.
+const forcedExit = process.env.QDS_FAKE_PI_EXIT;
+if (forcedExit !== undefined) process.exit(Number(forcedExit));
+
+// DF3.6b: die by SIGNAL, the way a cgroup OOM kill ends a process.
+//
+// THIS DOES NOT AFFECT THE VERDICT, and the note is here because an earlier
+// version of it said the opposite and would have talked the next reader
+// straight back into the bug: the resident's own-limit verdict is the kernel's
+// counters plus the peak, and it does NOT consult the process end at all
+// (story ruling 8). A test may stage counters on a cleanly-exiting child and
+// still be asserting a KILL. This knob exists so the kill rows exercise a
+// realistic process end alongside realistic counters, not because the end is
+// what decides.
+if (process.env.QDS_FAKE_PI_SIGKILL !== undefined) {
+  process.kill(process.pid, "SIGKILL");
 }
 
 const mode = process.env.QDS_FAKE_PI_MODE ?? "ok";
