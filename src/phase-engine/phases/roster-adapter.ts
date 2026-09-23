@@ -105,6 +105,28 @@ export function rosterToTeamManifest(
     throw new Error(`Lead role "${opts.leadRoleName}" not found in roster`);
   }
 
+  // RA4: the runner forwards extensions/extensionArgs for WORKERS only —
+  // QDS_AGENT_TEAM_CONFIG_JSON's lead object carries agentId/model/prompt
+  // alone (cli-anything/src/runner.ts), so a lead declaring self-compact
+  // wiring would pass TeamManifestSchema and then silently run WITHOUT the
+  // extension. INV-3: a declared extension must not be skipped without
+  // warning — refuse here, at the one conversion point. Workers keep full
+  // support; compaction alone still trips this because the DF1.5 schema gate
+  // only admits compaction alongside harness_engineering, and the adapter is
+  // deliberately defensive about what schema already validated (RA1).
+  const leadDeclared: string[] = [];
+  if (leadRole.harness_engineering?.length) {
+    leadDeclared.push("harness_engineering");
+  }
+  if (leadRole.compaction !== undefined) {
+    leadDeclared.push("compaction");
+  }
+  if (leadDeclared.length > 0) {
+    throw new Error(
+      `lead role "${opts.leadRoleName}" declares ${leadDeclared.join(" + ")} but the runner drops extensions/extensionArgs on the lead — move self-compact wiring to a worker role`,
+    );
+  }
+
   const workers = opts.workerRoleNames.map((name) => {
     const role = roleByName.get(name);
     if (!role) {
