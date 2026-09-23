@@ -10,9 +10,11 @@
 #     phase body loads it (phase-engine/roster/schema.ts loadRoster) and the
 #     roster-adapter maps roles[0] to the lead and the rest to workers.
 #
-# Same proven-live model pair as config/rosters/roster.yaml (lead
-# claude-haiku-4.5, worker deepseek-v3.2 — the T2 pair the skill names); the
-# worker additionally carries the self-compact wiring under test:
+# Proven-live models (lead claude-haiku-4.5, worker
+# deepseek/deepseek-v4-flash-0731 — v4-flash is ALSO tier4's proven slug, and
+# its 1M-token window is what the live sweep needs: 50% warning = 524k tokens
+# of real fill that a 128k-window slug could never reach); the worker
+# additionally carries the self-compact wiring under test:
 #   harness_engineering -> TeamRole.extensions  -> `-e <path>` in the worker's
 #     pi argv (team-lead-driver.ts buildWorkerArgv)
 #   compaction          -> TeamRole.extensionArgs -> `--compact-soft-at 30%
@@ -35,7 +37,7 @@ roles:
     thinking: high
 
   - name: compactor
-    model: deepseek/deepseek-v3.2
+    model: deepseek/deepseek-v4-flash-0731
     harness_engineering:
       - pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts
     compaction:

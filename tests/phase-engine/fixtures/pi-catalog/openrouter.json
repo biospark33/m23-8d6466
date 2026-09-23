@@ -7,6 +7,32 @@
         "cacheRead": 0.016,
         "cacheWrite": 0.018
       }
+    },
+    "anthropic/claude-haiku-4.5": {
+      "id": "anthropic/claude-haiku-4.5",
+      "name": "Anthropic: Claude Haiku 4.5 (via OpenRouter)",
+      "reasoning": true,
+      "cost": {
+        "input": 1.0,
+        "output": 5.0,
+        "cacheRead": 0.1,
+        "cacheWrite": 1.25
+      },
+      "contextWindow": 200000,
+      "maxTokens": 65536
+    },
+    "deepseek/deepseek-v3.2": {
+      "id": "deepseek/deepseek-v3.2",
+      "name": "DeepSeek: DeepSeek V3.2 (via OpenRouter)",
+      "reasoning": true,
+      "cost": {
+        "input": 0.269,
+        "output": 0.4,
+        "cacheRead": 0.1345,
+        "cacheWrite": 0
+      },
+      "contextWindow": 128000,
+      "maxTokens": 65536
     }
   }
 }

@@ -23,7 +23,7 @@
  *
  *  SC.2  real worker self-compaction at roster thresholds — a real dispatched
  *        run whose manifest+roster ride the PRODUCTION dispatch path, and a
- *        real deepseek worker whose pi argv carries
+ *        real deepseek-v4-flash worker whose pi argv carries
  *        `-e pi-vs-claude-code-vendor/self-compact/.../self-compact.ts
  *        --compact-soft-at 30% --compact-at 50% --compact-buffer 10%` because
  *        the ROSTER said so (harness_engineering + compaction → roster-adapter
@@ -66,22 +66,25 @@
  *  `mintCappedKey` DISCARDS the plaintext by contract, and this test must hand
  *  a live key to the worker's environment — so a helper-minted key could never
  *  reach the worker. The key that actually carries the round is the run's OWN
- *  dispatch-minted key (cap 50 000 µ$, named by the workspace cost-config),
+ *  dispatch-minted key (cap 200 000 µ$, named by the workspace cost-config),
  *  read off the box's `app/.env` exactly as tier4 does: one secret, one box
  *  (INV-RES-3 / the tier-2 placement ADR's own remedy). A second, test-minted
  *  key would double the round's real exposure while every assertion still read
- *  "capped at 50 000" — the exact defect tier4's C16 change deleted. One key
+ *  "capped at 200 000" — the exact defect tier4's C16 change deleted. One key
  *  is minted by dispatch, revoked by `fleet teardown`, and verified gone by
  *  the body's listing plus the finally's population delta.
  *
  * ── SPEND (operator approved out of band) ───────────────────────────────────
  *
  *  SC.1: one box for minutes; two real GETs on /keys ($0).
- *  SC.2: one box for minutes + ONE run key at 50 000 µ$ cap. On that key: the
- *        dispatch setup gate's C/D chat pings (two roster models), the deepseek
- *        worker's compaction run (a handful of turns against a growing cached
- *        context plus one compaction summary call), and one lead merge turn.
- *        Worst case bounded by the key cap and the budget audits at the foot.
+ *  SC.2: one box for minutes + ONE run key at 200 000 µ$ cap. On that key: the
+ *        dispatch setup gate's C/D chat pings (two roster models), the
+ *        deepseek-v4-flash worker's compaction run (see SC_BIG_FILE_REL's fill
+ *        arithmetic below), and one lead merge turn. Expected spend is
+ *        input-dominated ~$0.08–0.12 (v4-flash $0.08/M in, $0.016/M cached —
+ *        the sweep bills ~1.5M cumulative input tokens across turns plus the
+ *        compaction summary call); worst case bounded by the key cap and the
+ *        budget audits at the foot.
  *
  * MODEL OUTPUT IS NONDETERMINISTIC (the tier4 principle): the hard assertions
  * are STRUCTURAL events from the worker's own captured NDJSON stream — the
@@ -137,8 +140,16 @@ import {
 
 // ─── shared constants ────────────────────────────────────────────────────────
 
-/** Plan default (the siblings' figure): 50,000 µ$ = $0.05 worst-case on the run key. */
-const SC_CAP_MICRO_USD = 50_000;
+/**
+ * 200,000 µ$ = $0.20 worst-case on the run key. Raised from the siblings'
+ * 50,000 µ$ figure because the worker is deepseek-v4-flash with a 1M-token
+ * window (models.json contextWindow 1,048,576): the thresholds under test sit
+ * at 30% notice = 315k, 50% warning = 524k, 60% forced (50%+10% buffer, under
+ * the 90% cap) = 629k tokens, so the sweep must ingest ~630k+ real tokens —
+ * input-dominated spend ~$0.08–0.12 expected ($0.08/M in, $0.016/M cached),
+ * $0.20 covers a no-cache worst case. v4-flash is tier4's proven slug.
+ */
+const SC_CAP_MICRO_USD = 200_000;
 /** Box-hour rate from the operator's TIER-1 cost config — the tier2 siblings' figure. */
 const SC_BOX_HOUR_RATE_MICRO_USD = 230_000;
 /** The fixture dir this test ships (committed at QDS_EXEDEV_SHA — dispatch and the host leg read it from there). */
@@ -151,7 +162,23 @@ const SC_ROSTER_REL = `${FIXTURE_DIR_REL}/roster.yaml`;
 const SC_EXT_REL = "pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts";
 /** The subtree SC.1 archives host-side and ships in-box — the bundle-push seam's MINI payload (~50 KB gzipped). */
 const SC_SUBTREE_REL = "pi-vs-claude-code-vendor/self-compact";
-/** The big repo file the worker reads in slices (~148 KB / 3389 lines) to drive context past the thresholds. */
+/**
+ * The FILL SOURCE (148,281 B / 3,389 lines) — the worker's brief has bash
+ * build /tmp/sc-fill.txt from 20 concatenated copies (20 × 148,281 =
+ * 2,965,620 B ≈ 2.97 MB), then read it in 600,000-BYTE slices via
+ * `tail -c +N | head -c 600000`. Slice-budget arithmetic (the 1M window):
+ *   v4-flash window W = 1,048,576 tok (host models.json, verified)
+ *   notice 30% = 314,573 tok · warning 50% = 524,288 tok · forced 60% = 629,146 tok
+ *   ~4 chars/tok for text ⇒ one 600,000-B read ≈ 150k tok ≈ 14.3% of W
+ *   cumulative: R1 150k/14% · R2 300k/29% · R3 450k/43% · R4 600k/57% (past
+ *   warning — expected stop) · R5 741k/71% (contingency only). Total budget
+ *   2.97 MB ≥ the 2.8-MB floor covers a tokenizer as conservative as
+ *   ~4.7 chars/tok (2.97 MB / 629k tok) still crossing forced. Turn shape:
+ *   1 generate + 1 baseline view_context + ≤5 × (read + view_context) + 1
+ *   note/self_compact + 1 final reply ≈ 14 model calls — sized for the
+ *   per-worker 240-s SIGKILL (few big reads, not many small ones; the
+ *   view_context turns are cache-hit-cheap).
+ */
 const SC_BIG_FILE_REL = "pi-vs-claude-code-vendor/coms-net.ts";
 /** The four flags a healthy load registers (self-compact.ts registerFlag ×4). */
 const SC_FLAGS = ["--compact-soft-at", "--compact-at", "--compact-buffer", "--compact-prompt"] as const;
@@ -476,20 +503,21 @@ test.todoIf(liveTodoOff())(
 const SC2_DISPATCH_TIMEOUT_MS = 900_000;
 /**
  * The host engine leg's ceiling. Must sit ABOVE the --budget-ms the leg runs
- * (600_000 ≥ the manifest's 585_000 runBudgetMs) with spawn margin, and a
+ * (840_000 ≥ the manifest's 825_000 runBudgetMs) with spawn margin, and a
  * firing ceiling kills the child and rejects into the catch → finally — the
- * safe direction. The team's own inner caps (comsAwaitTimeoutMs 240 s per
- * worker subprocess, wallClockCapMs 300 s — TeamManifestSchema defaults the
- * roster path cannot raise) bind long before this does.
+ * safe direction. The team's own inner caps bind first: the fill phase's
+ * maxDurationMs 270_000 (worker's 240-s per-subprocess SIGKILL + 30 s of lead
+ * merge room) and wallClockCapMs 300 s — TeamManifestSchema defaults the
+ * roster path cannot raise.
  */
-const SC2_LEG_CEILING_MS = 660_000;
+const SC2_LEG_CEILING_MS = 900_000;
 /** The body teardown verb's ceiling (artifacts + revoke + destroy on a never-started run). */
 const SC2_TEARDOWN_TIMEOUT_MS = 300_000;
 /** The worker's roster agentId — the raw capture file is named after it. */
 const SC2_WORKER_AGENT = "compactor";
 
 test.todoIf(liveTodoOff())(
-  "T2-SC.2 tier2-class: real deepseek worker self-compacts at roster thresholds — dispatch (production path, roster beside the manifest) → delivered pair at QDS_EXEDEV_SHA → HOST-side engine leg whose worker pi argv carries -e <vendored self-compact> 30%/50%/10% → notice, warning, self_compact call, note VERBATIM (spend)",
+  "T2-SC.2 tier2-class: real deepseek-v4-flash worker self-compacts at roster thresholds — dispatch (production path, roster beside the manifest) → delivered pair at QDS_EXEDEV_SHA → HOST-side engine leg whose worker pi argv carries -e <vendored self-compact> 30%/50%/10% → notice, warning, self_compact call, note VERBATIM (spend)",
   async () => {
     liveGate("2");
     // HOST-PI PREREQUISITES, refused BEFORE ANY SPEND (tier4's LT5/L19b shape):
@@ -731,9 +759,9 @@ test.todoIf(liveTodoOff())(
           legRunId,
           "--request-id",
           witnessRequestId,
-          // must be ≥ the manifest's runBudgetMs (585_000 — see the fixture's budget note)
+          // must be ≥ the manifest's runBudgetMs (825_000 — see the fixture's budget note)
           "--budget-ms",
-          "600000",
+          "840000",
           "--run-root",
           legDir,
           "--no-resident",
@@ -1064,13 +1092,13 @@ test.todoIf(liveTodoOff())(
   //   pre-dispatch ls     1 control ls at 120 (F14 baseline)                 120 s
   //   dispatch verb       runFleet 900_000 (provision + fill + A–E gate)     900 s
   //   box reads           boxHome + head + pair + key env — 5 × 120          600 s
-  //   engine leg          awaitWithCeiling 660_000 (≥ --budget-ms 600_000)   660 s
+  //   engine leg          awaitWithCeiling 900_000 (≥ --budget-ms 840_000)   900 s
   //   capture + asserts   local                                               10 s
   //   teardown verb       runFleet 300_000                                   300 s
   //   post-teardown list  listedKeyHashes                                    240 s
   //   box-absent poll     4 × (read + 10 s wait)                              80 s
   //                                                            body ────────
-  //                                                                  3 450 s
+  //                                                                  3 690 s
   //   id recovery ls      1 control ls at 120 (F14 — timeout path only)      120 s
   //   teardownQuietly     fleet teardown at 180                              180 s
   //   destroyQuietly      1 rm + confirming list at 120                     240 s
@@ -1080,12 +1108,12 @@ test.todoIf(liveTodoOff())(
   //   evidence + rmSync   local                                               10 s
   //                                                           finally ────────
   //                                                                  1 910 s
-  //                                                           total ≈ 5 360 s
+  //                                                           total ≈ 5 600 s
   //
-  // Hence 5_600_000 (margin over the 5 360 s serial worst case). The task's
+  // Hence 5_700_000 (margin over the 5 600 s serial worst case). The task's
   // ~20 min wall-clock bound is the BODY's healthy-round expectation (dispatch
-  // ~5 min + leg ~2-10 min + teardown ~1 min); every inner ceiling FIRING
+  // ~5 min + leg ~2-15 min + teardown ~1 min); every inner ceiling FIRING
   // rejects into the catch → finally, so the fail-safe direction for this
   // number is UP.
-  5_600_000,
+  5_700_000,
 );
