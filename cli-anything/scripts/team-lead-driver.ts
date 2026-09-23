@@ -558,13 +558,22 @@ export function writeRawWorkerCapture(
   // tail of it in the clear.
   let body = redactSecrets(raw, parentEnv);
   if (Buffer.byteLength(body, "utf8") > MAX_RAW_CAPTURE_BYTES) {
-    // Decode with fatal=false would leave a U+FFFD at a split codepoint; trim
-    // back to the last whole character instead.
-    const kept = Buffer.from(body, "utf8")
-      .subarray(0, MAX_RAW_CAPTURE_BYTES)
-      .toString("utf8")
-      .replace(/�$/, "");
-    body = `${kept}\n${RAW_CAPTURE_TRUNCATION_MARKER}\n`;
+    // Keep the TAIL past the cap, not the head: the head of a worker stream
+    // is mid-loop chatter, the END is where the diagnostic evidence lives —
+    // the final events before a worker vanished mid-stream are exactly what
+    // a forensics pass needs, and head-keeping discarded them (#SC.2 rounds
+    // 9/10: the worker's dying message_end landed past byte 8 MiB and was
+    // cut). Redaction already ran above, so the cut cannot split a secret
+    // either way; the only seam hazard is the codepoint at the new cut.
+    const buf = Buffer.from(body, "utf8");
+    let kept = buf.subarray(buf.length - MAX_RAW_CAPTURE_BYTES).toString("utf8");
+    // A byte-cut mid-codepoint surfaces as one U+FFFD at the seam; drop it.
+    if (kept.startsWith("�")) kept = kept.slice(1);
+    // The first line after a byte-cut is a partial line — drop it whole so
+    // the marker is followed by a clean NDJSON line.
+    const nl = kept.indexOf("\n");
+    if (nl !== -1) kept = kept.slice(nl + 1);
+    body = `${RAW_CAPTURE_TRUNCATION_MARKER}\n${kept}`;
   }
   const path = join(dir, `${agentId}.ndjson`);
   mkdirSync(dir, { recursive: true, mode: 0o700 });

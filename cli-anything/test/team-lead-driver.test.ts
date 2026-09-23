@@ -454,6 +454,22 @@ describe("writeRawWorkerCapture — opt-in redacted capture (INV-1, AC5)", () =>
     }
   });
 
+  it("keeps the TAIL past the cap — a vanished worker's last events are the evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "df19-raw-tail-"));
+    try {
+      const headSentinel = "HEAD_CHATTER_NEVER_SEEN";
+      const tailSentinel = '{"type":"message_end","stopReason":"error"}';
+      const raw = `${headSentinel}${"x".repeat(9 * 1024 * 1024)}\n${tailSentinel}`;
+      const path = writeRawWorkerCapture(dir, "worker-a", raw, {});
+      const written = readFileSync(path as string, "utf8");
+      expect(written).toContain(RAW_CAPTURE_TRUNCATION_MARKER);
+      expect(written).toContain(tailSentinel);
+      expect(written).not.toContain(headSentinel);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not leave a replacement character when truncating mid-codepoint", () => {
     const dir = mkdtempSync(join(tmpdir(), "df19-raw-utf8-"));
     try {

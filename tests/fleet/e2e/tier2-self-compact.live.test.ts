@@ -837,6 +837,11 @@ test.todoIf(liveTodoOff())(
         exitCode: legExit,
         stdoutHead: legOut.trim().slice(0, 300),
         stderrTail: legErr.trim().slice(-800),
+        // The tail-800 alone buried the driver's per-worker failure lines
+        // (exit code, stderr tail of the vanished pi) under the final phase
+        // JSON — rounds 9/10 red'd with no death evidence at all. Keep the
+        // last 20k verbatim; evidence files already carry multi-MB payloads.
+        stderrFull: legErr.trim().slice(-20_000),
       });
 
       // ── 8. THE WORKER'S OWN STREAM — the raw NDJSON capture. Its EXISTENCE
