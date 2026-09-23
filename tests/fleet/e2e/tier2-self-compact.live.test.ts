@@ -142,15 +142,17 @@ import {
 // ─── shared constants ────────────────────────────────────────────────────────
 
 /**
- * 200,000 µ$ = $0.20 worst-case on the run key. Raised from the siblings'
- * 50,000 µ$ figure because the worker is deepseek-v4-flash with a 1M-token
- * window (models.json contextWindow 1,048,576): the thresholds under test sit
- * at 30% notice = 315k, 50% warning = 524k, 60% forced (50%+10% buffer, under
- * the 90% cap) = 629k tokens, so the sweep must ingest ~630k+ real tokens —
- * input-dominated spend ~$0.08–0.12 expected ($0.08/M in, $0.016/M cached),
- * $0.20 covers a no-cache worst case. v4-flash is tier4's proven slug.
+ * 500,000 µ$ = $0.50 worst-case on the run key (owner-approved 2026-09-23,
+ * round 8). Raised twice: the authoring estimate ($0.08–0.12 expected, $0.20
+ * no-cache worst) assumed near-full prompt-cache hits, and round 8 MEASURED
+ * the real v4-flash cache behavior — only ~⅔ of the growing context bills at
+ * the cached rate, so the loop-fill to the 50% warning threshold (524k
+ * tokens) cost ~$0.18 per 330k tokens ≈ $0.29 at warning, plus the
+ * compaction call. $0.20 killed the run at $0.18 with the notice crossing
+ * already proven. $0.50 covers warning + compaction + report with the kill
+ * line ($0.45) above the measured curve. v4-flash is tier4's proven slug.
  */
-const SC_CAP_MICRO_USD = 200_000;
+const SC_CAP_MICRO_USD = 500_000;
 /** Box-hour rate from the operator's TIER-1 cost config — the tier2 siblings' figure. */
 const SC_BOX_HOUR_RATE_MICRO_USD = 230_000;
 /** The fixture dir this test ships (committed at QDS_EXEDEV_SHA — dispatch and the host leg read it from there). */
