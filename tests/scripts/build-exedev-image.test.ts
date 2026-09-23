@@ -1391,7 +1391,29 @@ describe("buildIdFileInputs", () => {
       // pre-round gate. Received from this test's own failing run on the
       // branch tree (twice: the branch gate's full-suite run and the targeted
       // re-run, byte-identical).
-      "8b670a3df1f0751f44ef3dd96d0c3e771aa97d454e78cdd7d8d7ef2fc9886215",
+      //
+      // 9d788c04: moved from 8b670a3d by feature/self-compact-pi-agent (the
+      // self-compact vendoring + roster/extensionArgs wiring). FOUR walked
+      // inputs, membership measured against the live `oci/exedev/Dockerfile`
+      // COPY enumeration: `src/phase-engine/phases/roster-adapter.ts` and
+      // `src/phase-engine/roster/schema.ts` (both under `COPY src/phase-engine/`
+      // :281), `cli-anything/scripts/team-lead-driver.ts` (under `COPY
+      // cli-anything/scripts/` :323), and `package.json` itself (:228 — the
+      // bun-test explicit-dirs script edit, landed in two steps: the dirs
+      // alone moved it ddd69531…→9d788c04…, then the required
+      // --path-ignore-patterns carve-out — bun's path args are substring
+      // filters, so the vendored tests/ dir still matched — moved it once
+      // more before adoption). Measured, not inferred: the vendored prompt
+      // and tests under `pi-vs-claude-code-vendor/self-compact/` are NOT
+      // walked — that subtree contributes only `coms-core.ts` (:324) and
+      // `pi-vs-claude-code-vendor/package.json` (:230) — and
+      // `.github/workflows/ci.yml` and this test file name no COPY source.
+      // Received from this test's own failing run on the final tree, after
+      // the last walked-input edit landed (re-pin LAST, per the discipline).
+      // Walked bytes changed, so the DEFAULT_IMAGE_BUILD_ID republish ritual
+      // is owed by this branch before a box runs the new roster wiring —
+      // same shape as the DF1.10/DF6.1a pairing-debt entries above.
+      "31f81dda4109c90a777572a788045b1070c4252ae2e9f75c67b515f8f67396e2",
     );
   });
 });
