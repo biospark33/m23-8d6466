@@ -1281,7 +1281,17 @@ describe("buildIdFileInputs", () => {
       // own failing run. The trackedSetDigest below did not move: the
       // Dockerfile is not a files() entry and no walked COPY source
       // changed.
-      "oci/exedev/Dockerfile": "eca4a06f3ab094faf5884812089e938d6d04e3b4b62628d7beed80a8bb2a0da7",
+      //
+      // ef691e7f: the repro fix (2026-09-24) — the openrig install RUN now
+      // redirects npm's cache and logs to /tmp and ASSERTS /root/.npm absent:
+      // cacache's wall-clock index bytes (time, resHeaders.date, etag) moved
+      // the digest of every build — publish runs 36048175927 vs 36056831164
+      // built the same source revision (identical buildId/builtAt/gitSha/
+      // piSha256, license sweep and NOTICE byte-identical) yet landed 12
+      // compressed bytes apart, so the pin-adoption healing run could never
+      // converge. Dockerfile bytes only, re-pinned from this test's own
+      // failing run; trackedSetDigest did not move (not a files() entry).
+      "oci/exedev/Dockerfile": "ef691e7f5bf811d5a920ba362d5c30ab59211787adb158ac46fc1cccd3a34f6b",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };

@@ -967,7 +967,20 @@ ARG OPENRIG_TREE_SHA256=543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f
 # after: a CLI that initialises first-run state under /opt/openrig on first
 # execution would otherwise mutate the tree AFTER the pin was taken, and the
 # gate would pin a tree that is not the one that ships.
+#
+# THE CACHE IS REDIRECTED, AND ITS ABSENCE IS ASSERTED, BECAUSE DIGEST
+# REPRODUCIBILITY DEPENDS ON IT. npm's default cache (/root/.npm/_cacache)
+# carries wall-clock bytes in every index entry (`time`, `metadata.time`,
+# `resHeaders.date`, etags), and its _logs are a build's whole diary — publish
+# runs 36048175927 and 36056831164 built the SAME source revision (identical
+# buildId, builtAt, gitSha, piSha256; the license sweep and the NOTICE
+# byte-identical) yet produced digests 12 compressed bytes apart. Nothing
+# content-gated covers /root/.npm: the tree gate scopes /opt/openrig, the
+# sweep counts packages and executables, the buildId hashes SOURCES. So the
+# redirect sends cache and logs to /tmp, deleted in the same layer, and the
+# assertions below fail the build if npm ever writes them at $HOME again.
 RUN set -e; \
+    export npm_config_cache=/tmp/npm-cache npm_config_logs=/tmp/npm-logs; \
     npm i -g --prefix /opt/openrig "@openrig/cli@${OPENRIG_VERSION}"; \
     [ -e /opt/openrig/bin/rig ] \
       || { echo "npm's --prefix install put no bin at /opt/openrig/bin/rig; both the /usr/local/bin/rig symlink below and the phase body's bare 'rig' assume it — re-derive the layout from the actual install, do not guess" >&2; exit 1; }; \
@@ -975,6 +988,11 @@ RUN set -e; \
     rig --version; \
     [ "$(command -v rig)" = "/usr/local/bin/rig" ] \
       || { echo "command -v rig resolved to '$(command -v rig || true)', not /usr/local/bin/rig — the symlink below or npm's bin layout differs from what the phase body's bare 'rig' lookup assumes" >&2; exit 1; }; \
+    rm -rf /tmp/npm-cache /tmp/npm-logs; \
+    [ ! -e /root/.npm ] \
+      || { echo "REPRO R3-a: npm's cache shipped at /root/.npm despite npm_config_cache — cacache index entries carry wall-clock bytes (time, resHeaders.date, etag), so every build of this file would produce a DIFFERENT digest and the pin-adoption healing run could never converge. Reproduce: publish runs 36048175927 vs 36056831164 — identical buildId/builtAt/gitSha/piSha256, 12-byte compressed delta. Find where this cache came from and redirect or delete it; do not delete the assertion." >&2; exit 1; }; \
+    [ ! -e /root/.npmrc ] \
+      || { echo "REPRO R3-a: /root/.npmrc shipped — npm never needs one here, and INV-IBOX-1 refuses build-time credential files on principle" >&2; exit 1; }; \
     tree="$(cd /opt/openrig && set -o pipefail && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" \
       || { echo "R3-a TOFU PRECONDITION: hashing /opt/openrig failed (sha256sum/xargs error mid-pipeline) — a partial pipeline must never read as a tree hash" >&2; exit 1; }; \
     [ "${tree}" = "${OPENRIG_TREE_SHA256}" ] \
