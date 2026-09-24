@@ -26,6 +26,14 @@ import { SWARM_SEAT_KEYS_ENV } from "../../providers/credentials.ts";
 
 export const SWARM_POLL_INTERVAL_MS = 15_000;
 export const SWARM_GATE_MARGIN_MS = 60_000;
+/**
+ * Bound on every poll-loop CLI call (`rig queue show`) and each healthz probe:
+ * a daemon that accepts a connection but never responds would otherwise hang
+ * one call forever — no abort observation, no finally, billed box strands.
+ */
+export const SWARM_CLI_TIMEOUT_MS = 30_000;
+/** Consecutive failed/null-state polls tolerated before the phase throws (so the finally tears down). */
+export const SWARM_MAX_STALE_POLLS = 4;
 export const DEFAULT_OPENRIG_HOME = ".openrig";
 
 export interface CmdResult { exitCode: number; stdout: string; stderr: string; }
@@ -198,7 +206,7 @@ export function openrigSwarmPhase(
       let healthy = false;
       for (let i = 0; i < 30; i++) {
         throwIfAborted(bodyCtx.signal);
-        if ((await run(["curl", "-fsS", "127.0.0.1:7433/healthz"])).exitCode === 0) {
+        if ((await run(["curl", "-fsS", "127.0.0.1:7433/healthz"], { timeoutMs: SWARM_CLI_TIMEOUT_MS })).exitCode === 0) {
           healthy = true;
           break;
         }
@@ -256,8 +264,17 @@ export function openrigSwarmPhase(
       }
 
       // ── 6. Queue the objective (identity preamble per seat finding 2) ──
-      const firstPodId = rig.pods[0]!.id;
-      const leadSession = `${firstPodId}-${spec.leadSeat}@${rig.name}`;
+      // The lead seat may live in ANY pod (the schema only guarantees it is a
+      // member SOMEWHERE): resolve its session from the seeded seats, never
+      // pods[0] — with a pod-2 lead, the pods[0]-prefixed session was never
+      // seeded and the objective queued into the void.
+      const leadSeat = seats.find((s) => s.member.id === spec.leadSeat);
+      if (leadSeat === undefined) {
+        // Defensive: the closed manifest schema refuses a non-member leadSeat;
+        // this is the type-level backstop for direct constructors.
+        throw new Error(`leadSeat '${spec.leadSeat}' is not a rigSpec member — refusing to queue the objective`);
+      }
+      const leadSession = leadSeat.session;
       const objectiveBody =
         `OBJECTIVE: ${spec.objective}\n\n` +
         `IDENTITY: before running any rig command, run \`export OPENRIG_SESSION_NAME=${leadSession}\` ` +
@@ -283,13 +300,27 @@ export function openrigSwarmPhase(
       if (qid === "") throw new Error(`queue create returned neither id nor qid (exit ${q.exitCode})`);
 
       // ── 7. Poll loop: settle on done, on abort throw, on deadline fall
-      // back — the body settles so the composed gate still renders a verdict. ──
+      // back — the body settles so the composed gate still renders a verdict.
+      // Each poll is bounded (SWARM_CLI_TIMEOUT_MS) and SWARM_MAX_STALE_POLLS
+      // consecutive unreadable polls (non-zero exit or null state) throw, so a
+      // daemon that accepts but never answers still reaches the finally. ──
       const deadline = Date.now() + spec.maxDurationMs - SWARM_GATE_MARGIN_MS;
       let prevState: string | null = null;
+      let stalePolls = 0;
       for (;;) {
         throwIfAborted(bodyCtx.signal);
-        const res = await run(["rig", "queue", "show", qid]);
+        const res = await run(["rig", "queue", "show", qid], { timeoutMs: SWARM_CLI_TIMEOUT_MS });
         const { state, closureReason } = parseQueueShow(res.stdout);
+        if (res.exitCode !== 0 || state === null) {
+          stalePolls += 1;
+          if (stalePolls >= SWARM_MAX_STALE_POLLS) {
+            throw new Error(
+              `rig queue show ${qid} unreadable ${stalePolls} polls in a row (last exit ${res.exitCode}) — aborting so teardown runs`,
+            );
+          }
+        } else {
+          stalePolls = 0; // a readable state resets the streak
+        }
         if (state !== prevState) {
           trace("swarm_qitem_transition", { qid, from: prevState, to: state, closureReason });
           prevState = state;

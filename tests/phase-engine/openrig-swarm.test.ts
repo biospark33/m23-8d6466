@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  SWARM_CLI_TIMEOUT_MS,
+  SWARM_MAX_STALE_POLLS,
   openrigSwarmPhase,
   parseQueueShow,
   type CmdResult,
@@ -106,10 +108,17 @@ function makeTempHome(opts: { withKeys?: boolean; sessionJsonl?: boolean } = {})
   return { home, traces, money };
 }
 
-async function runPhase(spec: PhaseSpec, run: CmdRunner, home: string, signal = new AbortController().signal) {
+async function runPhase(
+  spec: PhaseSpec,
+  run: CmdRunner,
+  home: string,
+  signal = new AbortController().signal,
+  extra: { pollIntervalMs?: number } = {},
+) {
   return openrigSwarmPhase(spec, {
     run,
     home,
+    ...extra,
     ...(live === null
       ? {}
       : {
@@ -257,4 +266,53 @@ test("parseQueueShow reads the human output shape", () => {
   expect(parseQueueShow('{"id":"q-1","state":"done","closureReason":"no-follow-on"}'))
     .toEqual({ state: "done", closureReason: "no-follow-on" });
   expect(parseQueueShow("")).toEqual({ state: null, closureReason: null });
+});
+
+test("lead seat in a SECOND pod: the objective queues to that pod's session, not pods[0]'s", async () => {
+  const spec: PhaseSpec = {
+    ...SPEC,
+    rigSpec: {
+      name: "devrig",
+      pods: [
+        { id: "dev", members: [{ id: "worker", model: "openrouter/deepseek/deepseek-v3.2" }] },
+        { id: "probe", members: [{ id: "lead", model: "openrouter/anthropic/claude-haiku-4.5" }] },
+      ],
+    },
+  };
+  const { run, calls } = fakeRunner(baseHandlers());
+  const { home } = makeTempHome();
+  await runPhase(spec, run, home);
+  const create = calls.find((c) => c.join(" ").includes("/api/queue/create"));
+  expect(create).toBeDefined();
+  const payload = JSON.parse(create![create!.indexOf("-d") + 1]!) as { destinationSession: string };
+  expect(payload.destinationSession).toBe("probe-lead@devrig");
+});
+
+test("a permanently failing `rig queue show` throws after SWARM_MAX_STALE_POLLS and the finally still tears down", async () => {
+  const handlers = baseHandlers();
+  handlers["queue show q-1"] = () => ({ exitCode: 1, stdout: "", stderr: "daemon hung" });
+  const { run, calls } = fakeRunner(handlers);
+  const { home } = makeTempHome();
+  await expect(runPhase(SPEC, run, home, new AbortController().signal, { pollIntervalMs: 1 }))
+    .rejects.toThrow(/unreadable .* polls in a row/);
+  const joined = calls.map((c) => c.join(" "));
+  expect(joined.filter((c) => c.includes("queue show"))).toHaveLength(SWARM_MAX_STALE_POLLS);
+  expect(joined.some((c) => c.includes("rig down devrig --delete --force"))).toBe(true);
+});
+
+test("poll-loop queue show and healthz calls carry the bounded SWARM_CLI_TIMEOUT_MS", async () => {
+  const { run } = fakeRunner(baseHandlers());
+  const seen: { argv: string[]; timeoutMs?: number }[] = [];
+  const wrapped: CmdRunner = async (argv, opts) => {
+    seen.push({ argv: [...argv], timeoutMs: opts?.timeoutMs });
+    return run(argv, opts);
+  };
+  const { home } = makeTempHome();
+  await runPhase(SPEC, wrapped, home);
+  const queueShows = seen.filter((c) => c.argv.join(" ").includes("queue show"));
+  expect(queueShows.length).toBeGreaterThanOrEqual(1);
+  for (const c of queueShows) expect(c.timeoutMs).toBe(SWARM_CLI_TIMEOUT_MS);
+  for (const c of seen.filter((x) => x.argv.join(" ").includes("healthz"))) {
+    expect(c.timeoutMs).toBe(SWARM_CLI_TIMEOUT_MS);
+  }
 });

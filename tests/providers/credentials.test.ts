@@ -1798,6 +1798,25 @@ describe("S1 rig_swarm per-seat keys", () => {
     expect(total).toBe(250_000);
   });
 
+  test("captureSeatSpend refuses a PRESENT seat with non-numeric usage (fail-closed like captureSpend)", async () => {
+    // Absent → 0 is correct (the test above); PRESENT with NaN usage must throw
+    // with the single-key path's typed refusal — silently contributing 0 would
+    // be the same authoritative-looking lie F035 exists to prevent.
+    store.create("run-9");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-9", PLAN);
+    api.setUsage(hashes.lead!, Number.NaN);
+    let err: unknown;
+    try {
+      await captureSeatSpend(seatDeps(), "run-9");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("invalid-provider-usage");
+    expect((err as CredentialLifecycleError).message).toContain("run-9");
+    expect(store.get("run-9").spendMicroUsd).toBeUndefined(); // no authoritative-looking spend written
+  });
+
   test("revokeSeatKeys revokes every recorded hash", async () => {
     store.create("run-8");
     const { hashes } = await mintSeatKeys(seatDeps(), "run-8", PLAN);

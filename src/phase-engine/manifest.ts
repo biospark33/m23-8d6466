@@ -224,9 +224,10 @@ export const PhaseSpecSchema = z
       .default(DEFAULT_MAX_DURATION_MS),
     retries: z.number().int().min(MIN_RETRIES).max(MAX_RETRIES).default(MIN_RETRIES),
     command: argv.optional(),
-    /** Optional gate argv — valid only when kind is "code": superRefine
-     *  refuses it on every other kind, because only a code phase composes a
-     *  commandGate over it (elsewhere it would be silently dead). */
+    /** Optional gate argv — valid when kind is "code" (the commandGate
+     *  composition) or "rig_swarm" (the settled-swarm gate — same gate, same
+     *  authority): superRefine refuses it on every other kind, because
+     *  elsewhere it would be silently dead. */
     testCommand: argv.optional(),
     // DF1.6 dispatch_task fields
     roster: nonBlankString.optional(),

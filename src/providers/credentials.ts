@@ -1360,7 +1360,18 @@ export async function captureSeatSpend(deps: CredentialDeps, runId: string): Pro
           `re-list by hand with paging: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
         );
       }
-      if (entry === null || !Number.isFinite(entry.usageUsd)) continue; // absent/refunded-out seat contributes 0
+      if (entry === null) continue; // absent (out-of-band revoked) seat contributes 0
+      // F035 per seat, mirroring captureSpend: a PRESENT key whose usage is
+      // non-numeric is refused typed — recording 0 for it would be the same
+      // authoritative-looking lie the single-key path refuses. (Negatives stay
+      // valid: refunds.)
+      if (!Number.isFinite(entry.usageUsd)) {
+        throw new CredentialLifecycleError(
+          "invalid-provider-usage",
+          `provider reported a non-numeric usage (${entry.usageUsd}) for run ${runId}'s seat key — refusing to record it as spend`,
+          `read the usage by hand and record it, then tear down: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+        );
+      }
       total += usdToMicros(entry.usageUsd);
     }
     return total;

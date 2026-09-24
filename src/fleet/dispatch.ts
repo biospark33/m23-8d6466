@@ -1673,7 +1673,9 @@ function loadManifestAndRoster(
  * above the backstop AFTER box creation, and proportional scaling alone can
  * leave one there when authored budgets are large but fit the ceiling
  * (Σ authored ≤ ceiling, single seat 250M µ$). The clamp only lowers, so
- * Σ ≤ ceiling still holds by construction.
+ * Σ ≤ ceiling holds whenever ceiling ≥ seat count; below that the 1 µ$ floor
+ * can push Σ above the ceiling, and the mint's Σ-guard refuses (after box
+ * creation) — a regime the schema's positive-int budgets make negligible.
  */
 export function seatKeyPlan(budgets: Record<string, number>, ceilingMicroUsd: number): SeatKeyPlan[] {
   const entries = Object.entries(budgets);
