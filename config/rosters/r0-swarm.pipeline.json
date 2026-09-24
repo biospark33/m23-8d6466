@@ -1,0 +1,38 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "r0-swarm-live",
+  "runBudgetMs": 1840000,
+  "phases": [
+    {
+      "name": "r0-swarm-probe",
+      "kind": "code",
+      "description": "R0.7 live e2e probe phase that exits cleanly; filler so the manifest clears phaseCount >= 2.",
+      "command": ["true"],
+      "maxDurationMs": 10000,
+      "retries": 0
+    },
+    {
+      "name": "r0-swarm",
+      "kind": "rig_swarm",
+      "description": "R0.7 live e2e: two Pi seats settle one trivial committed change, closed by the lead.",
+      "maxDurationMs": 600000,
+      "retries": 0,
+      "testCommand": ["python3", "r0_swarm_e2e_marker_test.py"],
+      "rigSpec": {
+        "name": "r0-e2e",
+        "pods": [
+          {
+            "id": "pod-1",
+            "members": [
+              { "id": "lead", "runtime": "pi", "model": "openrouter/anthropic/claude-haiku-4.5" },
+              { "id": "worker", "runtime": "pi", "model": "openrouter/deepseek/deepseek-v3.2" }
+            ]
+          }
+        ]
+      },
+      "objective": "You are the lead seat of rig r0-e2e, working in the current directory (a git repo). 1. Create r0_swarm_e2e_marker.py containing exactly one function: def marker() -> int: return 42. 2. Delegate to the worker seat named 'worker' (message it with rig send): the worker must create r0_swarm_e2e_marker_test.py that imports marker from r0_swarm_e2e_marker, asserts marker() == 42, and prints marker-test-passed. 3. When the worker's file exists, run: python3 r0_swarm_e2e_marker_test.py — it must print marker-test-passed and exit 0. 4. git add r0_swarm_e2e_marker.py r0_swarm_e2e_marker_test.py and commit BOTH on the CURRENT branch (do not create a new branch). 5. Then close your queue item as done with no follow-on. Do not start any new work after closing.",
+      "leadSeat": "lead",
+      "seatBudgets": { "lead": 500000, "worker": 500000 }
+    }
+  ]
+}
