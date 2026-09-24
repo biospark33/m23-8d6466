@@ -123,7 +123,7 @@ export const MAX_VERIFY_PAGES = 20;
  * both carry the same finite guard. Upgrade trigger: whichever of the two files is
  * next in scope to touch exports the guard and the other imports it.
  */
-function usdToMicros(usd: number): number {
+export function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) {
     throw new CredentialLifecycleError(
       "invalid-provider-usage",
