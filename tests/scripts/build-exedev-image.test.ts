@@ -3512,30 +3512,25 @@ describe("checksumArgProblems", () => {
     // but generality is exactly what a per-name regression hides in: a typo in
     // one array literal drops that gate from every loop silently. Named, so
     // each new gate is asserted on ITS OWN declared default, empty-override,
-    // equal-override and missing-declaration arms. Declared defaults are
-    // pinned per gate: NODE_SHA256 carried the MEASURE-AT-FIRST-BUILD
-    // sentinel until the first build measured it (run 36031582204,
-    // cross-checked against nodejs.org's SHASUMS256.txt line, pinned
-    // 2026-09-24); OPENRIG_TREE_SHA256 is STILL the sentinel — the node gate
-    // dies first by Dockerfile order, so the tree measurement is a later
-    // refusal's output, and the sentinel stays what makes an unmeasured gate
-    // refuse any real override instead of silently accepting one.
-    const expectedDefaults: Record<(typeof CHECKSUM_ARGS)[number], string | undefined> = {};
-    const measured: Partial<Record<(typeof CHECKSUM_ARGS)[number], string>> = {
-      NODE_SHA256: "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29",
-      // Measured by the NEXT refusal (run 36032367862) once the node gate
-      // stopped dying first. No external cross-check exists for an
-      // npm-resolved tree — the refusal output is the measurement, which is
-      // the TOFU doctrine for this gate: the hash freezes ^-range resolution.
-      OPENRIG_TREE_SHA256: "543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200",
+    // equal-override and missing-declaration arms. Both declared defaults are
+    // now MEASURED PINS, and the map below records which refusal measured
+    // each: NODE_SHA256 from run 36031582204, cross-checked against
+    // nodejs.org's SHASUMS256.txt line; OPENRIG_TREE_SHA256 from run
+    // 36032367862 once the node gate stopped dying first — no external
+    // cross-check exists for an npm-resolved tree, so the refusal output IS
+    // the measurement, and the hash is what freezes ^-range resolution.
+    const measuredDefault = (name: "NODE_SHA256" | "OPENRIG_TREE_SHA256"): string => {
+      switch (name) {
+        case "NODE_SHA256":
+          return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
+        case "OPENRIG_TREE_SHA256":
+          return "543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200";
+      }
     };
-    for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
-      expectedDefaults[name] = measured[name] ?? "MEASURE-AT-FIRST-BUILD";
-    }
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
       expect(CHECKSUM_ARGS, `${name} left CHECKSUM_ARGS`).toContain(name);
       const [declared] = dockerfileArgDefaults(realDockerfile(), name);
-      expect(declared, name).toBe(expectedDefaults[name]);
+      expect(declared, name).toBe(measuredDefault(name));
       // An override that is not the declared default is refused, as a CONTENT
       // GATE — the same message shape the bun gate dies with in main().
       const overridden = checksumArgProblems(realDockerfile(), { [name]: "f".repeat(64) });
