@@ -1,0 +1,32 @@
+{
+  "spike": "S0 openrig-in-exedev-box",
+  "date": "2026-09-23",
+  "plan": "docs/planning/2026-09-23-openrig-swarm-integration-research.md#9",
+  "box": { "name": "spike-or-probe-190816", "image": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038", "os": "Ubuntu 24.04.5 LTS x86_64", "cpus": 2, "memMB": 7935, "destroyed": true, "finalLs": {"vms": []} },
+  "versions": { "tmux": "3.4 (preinstalled)", "node": "v22.23.3 (installed, NodeSource)", "pi": "0.84.4 (image)", "bun": "1.3.13", "openrig": "0.5.14 (cc75efdd)" },
+  "timings": { "nodeInstallS": 20, "openrigInstallS": 9, "betterSqlite3": "prebuilt, no compile", "daemonHealthzMs": 2695, "rigImportAndLaunchS": 3, "seatsReady": "both ready:true within ~15s of import" },
+  "keys": [
+    { "seat": "lead", "model": "openrouter/anthropic/claude-haiku-4.5", "hash": "eeffbf83d8654ce208cc827d490b60927a8495e13eb796baa7a2dcacf32878a4", "limitUsd": 0.5, "finalUsageUsd": 0.1291991, "revoked": "200 then GET 404" },
+    { "seat": "worker", "model": "openrouter/deepseek/deepseek-v3.2", "hash": "e17ea3685462399e4cdddfe8bbae31d1db99b9fdb7d959004106416e1cf09f6e", "limitUsd": 0.5, "finalUsageUsd": 0.284054352, "revoked": "200 then GET 404" }
+  ],
+  "totalSpendUsd": 0.413253451,
+  "memory": { "usedMBWithRig": 528, "top8RssMB": 578, "note": "daemon + 2 pi + 2 pi-runner node" },
+  "exitCriteria": {
+    "E1_headless_boot": "PASS — zero prompts; per-seat pi dirs pre-seeded; daemon loopback 127.0.0.1:7433",
+    "E2_per_seat_keys": "PASS — distinct per-key usage on OpenRouter",
+    "E3_self_compact_loads": "PASS — get_commands lists self-compact-info/self-compact-now from /opt/qds/pi-ext (scope user); setStatus context bar emitted",
+    "E4_queue_objective_and_delegation": "PASS — lead got qitem via /api/queue/create+nudge, rig send to worker, worker wrote test, lead committed and closed qitem done/no-follow-on",
+    "E5_harvestable_commits": "PASS — git bundle of sbx/spike cloned locally: d1ac153 spike: hello + test; node --test pass 1 fail 0",
+    "E6_cockpit_via_tunnel_mcp": "PASS — ssh -L 17433 + npx -p @openrig/cli rig mcp serve --port 17433: tools/list 18 tools, rig_ps, rig_send steer, rig_capture read COCKPIT-ACK d1ac153",
+    "E7_teardown": "PASS — rig down --delete, daemon stop, box deleted, keys revoked, ls empty",
+    "E8_recorded": "PASS — see versions/timings/memory"
+  },
+  "findings": [
+    "OpenRig sends each seat a startup identity prompt ('run rig whoami') — seats spend tokens on orientation before any task.",
+    "Pi seats lack OPENRIG_* env: rig whoami fails; the lead self-recovered with export OPENRIG_SESSION_NAME=dev-lead@spike (works). Worker messages arrived as 'From: <unknown sender>'.",
+    "No natural stop: after the task the worker kept polling (git status, rig queue list, rig capture) — >50% of worker spend was post-completion idle. rig_swarm must tear down on lead qitem closure.",
+    "MCP rig_send from the cockpit carries no sender identity; replies route to '<unknown sender>' — read via rig_capture.",
+    "Pinned image lacks the self-compact extension (image predates it) — copied in for the spike; S1 image must bake it.",
+    "npx needs explicit bin: npx -y -p @openrig/cli@0.5.14 rig mcp serve."
+  ]
+}
