@@ -420,8 +420,22 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // comments). The walk literal had already moved on the branch (8b670a3d…,
 // pairing debt declared); this is the rebuild → publish → adopt that ritual
 // owed. Pushed sha256:9c8bfe9a… / buildId 52538541c5430cc5.
+// Fifteenth pin (2026-09-24): gate B pair from run 36048175927 at src_sha
+// 07db7e3e — the FIRST REAL PUBLISH of the S1 rig_swarm image stages (roadmap
+// R0.3). The measurement chain that produced it, all gate-refused dry runs on
+// feature/r0-image-convergence: the engine COPY set converged with S1's
+// provider closure (7 files, e2660618), NODE_SHA256 measured by run
+// 36031582204's refusal and cross-checked against nodejs.org's SHASUMS256.txt,
+// OPENRIG_TREE_SHA256 measured by run 36032367862's refusal, and the DF2.9
+// license sweep reconciled (10 nested @openrig/cli dep executables, b825949c +
+// cbc4563b). This build ALSO discharges the DF3.6b debt the fourteenth pin
+// carried — the merged tree's unit (+`Delegate=memory`), the Dockerfile scan,
+// `resident.ts` and `steering.ts` are all baked into sha256:9d1822c6…, so the
+// resident arms on this pin and DF3.6b's in-box behaviour is reachable.
+// Pushed sha256:9d1822c6… / buildId 68fca032d53c0de6; gate B printed the pair
+// itself (the ritual's only source — never hand-computed).
 //
-// AMENDED ON THIS BRANCH BY THE dev MERGE (2026-09-20) — the list above is no
+// ~~AMENDED ON THIS BRANCH BY THE dev MERGE (2026-09-20) — the list above is no
 // longer the whole move set, and the difference decides whether the resident
 // arms at all. DF3.6b moved two more walked inputs that this pin's substrate
 // PREDATES: `oci/exedev/systemd/qds-run@.service` (+`Delegate=memory`) and
@@ -431,25 +445,24 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // with the resident DISABLED. That is AC3 behaving correctly, not a bug — but
 // it means DF3.6b's in-box behaviour (AC1/AC5 kernel-OOM classification,
 // `exitStatus:"overflow"`) is UNREACHABLE on this pin, and DF6.1a's fix-loop
-// rounds run residentless too.
+// rounds run residentless too.~~
 //
-// IT IS SILENT, which is why it is written here rather than left to a gate.
+// ~~IT IS SILENT, which is why it is written here rather than left to a gate.
 // Gate B compares the box's baked marker against DEFAULT_IMAGE_BUILD_ID; the
 // image bakes 52538541c5430cc5 and this constant says 52538541c5430cc5, so
 // gate B goes GREEN on a substrate the repo no longer describes. The Dockerfile
 // probe DF3.6b added to catch exactly this regression runs at BUILD time, and
-// no build happens. Nothing else re-derives the id from the real tree.
+// no build happens. Nothing else re-derives the id from the real tree.~~
 //
-// ONE DEBT SURVIVES, and it is DF3.6b's alone. DF6.1a's `PAIRING DEBT` is
-// already DISCHARGED by this very pin: 6ed796c9 built at src_sha 1b653f04 with
-// #273 merged in, so brief-schema/dispatch/dispatch-task/run-record ARE baked
-// into sha256:9c8bfe9a…. What is not baked in is DF3.6b's four — the unit, the
-// Dockerfile scan, `resident.ts` and `steering.ts`. A publisher rebuilds the
-// MERGED tree and discharges that; rebuilding for DF6.1a's inputs would be
-// redoing work already in this image. The merge did not CREATE the debt — the
-// pin this replaced (d03f58cb…) predated `Delegate=memory` too.
+// ~~ONE DEBT SURVIVES, and it is DF3.6b's alone.~~ DEBT SETTLED 2026-09-24 by
+// the fifteenth pin: the publish rebuilds the MERGED tree, so sha256:9d1822c6…
+// bakes the `Delegate=memory` unit, the Dockerfile scan, `resident.ts` and
+// `steering.ts` alongside everything the fourteenth pin already carried
+// (DF6.1a's brief-schema/dispatch/dispatch-task/run-record). The resident arms
+// on this pin; DF3.6b's in-box behaviour is reachable; the silent-green window
+// this paragraph described closed with the substrate it described.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9c8bfe9a7f85436c1b84f53a5a10a1328a44ffab406fe8b42a03dddc4269c038";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9d1822c60e4e89b58458ba4e4767cffae32f70dca29d66b00f13cacd1925a2e2";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -512,8 +525,14 @@ export const DEFAULT_IMAGE_REF =
  * HEAD while 40+ files were uncommitted, which would have stamped
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
+ *
+ * CURRENT PAIRING (fifteenth pin, 2026-09-24): buildId 68fca032d53c0de6,
+ * adopted from gate B's own paste-ready output on publish run 36048175927,
+ * baked at gitSha 07db7e3e8b4f3899459038af16a913d67e385097 (the S1 TOFU-pin
+ * record commit — the SOURCE_PATHS resolution for the first real publish of
+ * the rig_swarm image stages).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "52538541c5430cc5";
+export const DEFAULT_IMAGE_BUILD_ID = "68fca032d53c0de6";
 
 
 
