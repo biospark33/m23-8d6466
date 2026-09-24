@@ -947,7 +947,12 @@ RUN set -e; \
 # passes this gate. That is the same named ceiling listExecutables carries;
 # the gate's claim is byte identity of the regular files, nothing more.
 ARG OPENRIG_VERSION=0.5.14
-ARG OPENRIG_TREE_SHA256=MEASURE-AT-FIRST-BUILD
+# PINNED 2026-09-24 from the first build's own refusal (run 36032367862:
+# "the /opt/openrig tree hashes to 543e846b…"). Unlike NODE_SHA256 there is
+# no external cross-check for an npm-resolved tree — the refusal output IS
+# the measurement, which is the TOFU doctrine for this gate: the hash is
+# what freezes npm's ^-range resolution inside the pin.
+ARG OPENRIG_TREE_SHA256=543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
 # (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
 # that layout assumption fail LOUDLY at the first real build rather than

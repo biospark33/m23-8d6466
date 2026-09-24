@@ -1266,7 +1266,13 @@ describe("buildIdFileInputs", () => {
       // OPENRIG_TREE_SHA256 still sentinel — the node gate dies first by
       // Dockerfile order, so the tree measurement is the NEXT refusal.
       // Dockerfile bytes only; same-commit re-pin.
-      "oci/exedev/Dockerfile": "919341b4d69dce57676e08395198fc16dc4a70b8ae47fc14ea6f0b0d95a23b33",
+      //
+      // a8805e0c: OPENRIG_TREE_SHA256 sentinel → pin (run 36032367862's
+      // refusal; no external cross-check exists for an npm-resolved tree —
+      // the refusal output IS the measurement). Both sentinels now carry
+      // measured values; the un-measured state they guarded is gone.
+      // Dockerfile bytes only; same-commit re-pin.
+      "oci/exedev/Dockerfile": "a8805e0c9f5a54c45f3218153fb2dc7e0e0cc017fafc714ada438361ee12f791",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -3517,6 +3523,11 @@ describe("checksumArgProblems", () => {
     const expectedDefaults: Record<(typeof CHECKSUM_ARGS)[number], string | undefined> = {};
     const measured: Partial<Record<(typeof CHECKSUM_ARGS)[number], string>> = {
       NODE_SHA256: "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29",
+      // Measured by the NEXT refusal (run 36032367862) once the node gate
+      // stopped dying first. No external cross-check exists for an
+      // npm-resolved tree — the refusal output is the measurement, which is
+      // the TOFU doctrine for this gate: the hash freezes ^-range resolution.
+      OPENRIG_TREE_SHA256: "543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200",
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
       expectedDefaults[name] = measured[name] ?? "MEASURE-AT-FIRST-BUILD";
