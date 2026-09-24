@@ -161,19 +161,104 @@
       "licenseUrl": "https://github.com/mvschwarz/openrig/blob/v0.5.14/LICENSE",
       "verifiedAt": "2026-09-23",
       "verifiedHow": "PROVENANCE: 0.5.14 is oci/exedev/Dockerfile's ARG OPENRIG_VERSION default, installed by `npm i -g --prefix /opt/openrig` (the S1 rig_swarm phase kind's swarm runtime; the seats invoke it through the /usr/local/bin/rig symlink). The ARG is overridable with --build-arg; an override that moves it must move this entry in the same change. The installed tree's byte identity is gated by OPENRIG_TREE_SHA256, which ships as the TOFU sentinel MEASURE-AT-FIRST-BUILD — the first real build measures and pins it, in the same adoption commit that pins NODE_SHA256 and the image pin. LICENCE: the npm registry metadata for @openrig/cli@0.5.14 declares license Apache-2.0 (fetched 2026-09-23); the published tarball's own LICENSE file, read the same day from the downloaded artifact, is the Apache-2.0 text ending 'Copyright 2026 Mike Schwarz'; the same text resolves at the tag https://raw.githubusercontent.com/mvschwarz/openrig/v0.5.14/LICENSE (200 — a nonexistent tag 404s there, so the 200 is the tag).",
-      "notes": "`names` enumerates EVERY owner-executable file in the published 0.5.14 tarball — MEASURED from the downloaded artifact (find -type f -perm -u+x), not guessed — because the added-binary diff flags exactly those and coverage is by path. The bin links npm creates (/opt/openrig/bin/rig, /opt/openrig/bin/openrig-tui) are symlinks, never -type f, so they are not names (same reasoning as bun's bunx note, inverted: there the symlink was absent, here it is present but not a file). TWO sets this table has NOT yet measured and the first real build reconciles, stated rather than implied: (1) @openrig/cli's dependencies are ^-RANGED and resolved by npm at build time, so their tarballs (ajv, commander, tar, zod, hono, ...) may contribute additional +x paths the diff names — add them to this entry's names in the same adoption commit that pins OPENRIG_TREE_SHA256; (2) better_sqlite3.node arrives via prebuild-install at build time and carries its own entry below. The vendored node_modules/@openrig/* scope inside the cli tarball (daemon 0.5.14, Apache-2.0) contributes no +x files (measured).",
+      "notes": "`names` enumerates EVERY owner-executable file in the published 0.5.14 tarball — MEASURED from the downloaded artifact (find -type f -perm -u+x), not guessed — because the added-binary diff flags exactly those and coverage is by path. The bin links npm creates (/opt/openrig/bin/rig, /opt/openrig/bin/openrig-tui) are symlinks, never -type f, so they are not names (same reasoning as bun's bunx note, inverted: there the symlink was absent, here it is present but not a file). The vendored node_modules/@openrig/* scope inside the cli tarball (daemon 0.5.14, Apache-2.0) contributes no +x files (measured). FIRST-BUILD RECONCILIATION, run 36033368044 (2026-09-24): the note below anticipated that @openrig/cli's ^-ranged dependencies resolved by npm at build time could contribute additional +x paths the diff names; the diff named TEN, across SEVEN nested dependency projects (better-sqlite3 ×3, prebuild-install, rc ×2, semver, ulid, which, yaml — all under @openrig/cli/node_modules/, npm nesting them inside the package rather than hoisting). They are recorded as their OWN per-project entries rather than added to this entry's `names` as the note originally instructed: this entry's spdxId is Apache-2.0, and folding MIT/ISC/BSD projects under it would misattribute them in the one artifact whose purpose is true attribution. Their version resolution is frozen by OPENRIG_TREE_SHA256 (543e846b…, pinned the same day); a resolution change moves that hash and refuses the build, and the re-pin ritual moves their entries in the same change.",
       "bundled": []
     },
     {
-      "names": ["opt/openrig/lib/node_modules/better-sqlite3/build/Release/better_sqlite3.node"],
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/prebuild-install/bin.js"
+      ],
+      "project": "prebuild/prebuild-install",
+      "version": "7.1.3",
+      "spdxId": "MIT",
+      "copyright": "Copyright (c) 2015 Mathias Buus",
+      "licenseUrl": "https://github.com/prebuild/prebuild-install/blob/v7.1.3/LICENSE",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: prebuild-install is a dependency of @openrig/cli, resolved by npm at build time and installed NESTED at @openrig/cli/node_modules/ (path measured from run 36033368044's added-binary diff; the resolved version is read from the registry resolution of the same day and frozen by OPENRIG_TREE_SHA256 543e846b…). LICENCE: the v7.1.3 tag's LICENSE fetched 2026-09-24 from https://raw.githubusercontent.com/prebuild/prebuild-install/v7.1.3/LICENSE — 'The MIT License (MIT)' / 'Copyright (c) 2015 Mathias Buus'; the resolved tarball's own package.json declares MIT.",
+      "notes": "npm's bin link for this package resolves through this file; npm preserves the +x bit from the tarball, which is why the diff flags it. This is the tool that fetched better_sqlite3.node (see the better-sqlite3 entry) from GitHub releases at build time.",
+      "bundled": []
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/rc/cli.js",
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/rc/index.js"
+      ],
+      "project": "dominictarr/rc",
+      "version": "1.2.8",
+      "spdxId": "BSD-2-Clause",
+      "copyright": "Copyright (c) 2013, Dominic Tarr",
+      "licenseUrl": "https://github.com/dominictarr/rc/blob/a97f6adcc37ee1cad06ab7dc9b0bd842bbc5c664/LICENSE.BSD",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: rc is a dependency of @openrig/cli, resolved by npm at build time and installed NESTED (paths measured from run 36033368044's added-binary diff; version frozen by OPENRIG_TREE_SHA256 543e846b…). LICENCE: the package.json declares the SPDX EXPRESSION '(BSD-2-Clause OR MIT OR Apache-2.0)', but the published tarball ships exactly TWO license texts — LICENSE.BSD and LICENSE.APACHE2, no MIT text — so the shipped grant is BSD-2-Clause or Apache-2.0; BSD-2-Clause is recorded because it is the first-listed text in the tarball and one canonical identifier must resolve (the table's top-level spdxId rule). The BSD-2-Clause text at the repo's gitHead a97f6adc (1.2.8 has no git tag — npm view gitHead, fetched 2026-09-24) reads 'Copyright (c) 2013, Dominic Tarr' / 'All rights reserved.'.",
+      "notes": "The licenseUrl pins a COMMIT, not a tag — the only entry in this table that must, because upstream published 1.2.8 without a git tag and the $comment's pinned-reference rule prefers the commit the npm tarball was built from over an invented one.",
+      "bundled": []
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/semver/bin/semver.js"
+      ],
+      "project": "npm/node-semver",
+      "version": "7.8.5",
+      "spdxId": "ISC",
+      "copyright": "Copyright (c) Isaac Z. Schlueter and Contributors",
+      "licenseUrl": "https://github.com/npm/node-semver/blob/v7.8.5/LICENSE",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: semver is a dependency of @openrig/cli, resolved by npm at build time and installed NESTED (path measured from run 36033368044's added-binary diff; version frozen by OPENRIG_TREE_SHA256 543e846b…). LICENCE: the v7.8.5 tag's LICENSE fetched 2026-09-24 from https://raw.githubusercontent.com/npm/node-semver/v7.8.5/LICENSE — 'The ISC License' / 'Copyright (c) Isaac Z. Schlueter and Contributors'; the resolved tarball's own package.json declares ISC.",
+      "notes": "The bin/semver.js CLI shim is the +x file the diff flags; the library files the package's bin also loads are not executables and are attributed by this entry's NOTICE coverage of the project.",
+      "bundled": []
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/ulid/bin/cli.js"
+      ],
+      "project": "ulid/javascript",
+      "version": "2.4.0",
+      "spdxId": "MIT",
+      "copyright": "Copyright (c) 2017 Alizain Feerasta",
+      "licenseUrl": "https://github.com/ulid/javascript/blob/v2.4.0/LICENSE",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: ulid is a dependency of @openrig/cli, resolved by npm at build time and installed NESTED (path measured from run 36033368044's added-binary diff; version frozen by OPENRIG_TREE_SHA256 543e846b…). LICENCE: the v2.4.0 tag's LICENSE fetched 2026-09-24 from https://raw.githubusercontent.com/ulid/javascript/v2.4.0/LICENSE — 'The MIT License (MIT)' / 'Copyright (c) 2017 Alizain Feerasta'; the resolved tarball's own package.json declares MIT.",
+      "notes": "",
+      "bundled": []
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/which/bin/node-which"
+      ],
+      "project": "isaacs/node-which",
+      "version": "2.0.2",
+      "spdxId": "ISC",
+      "copyright": "Copyright (c) Isaac Z. Schlueter and Contributors",
+      "licenseUrl": "https://github.com/isaacs/node-which/blob/v2.0.2/LICENSE",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: which is a dependency of @openrig/cli, resolved by npm at build time and installed NESTED (path measured from run 36033368044's added-binary diff; version frozen by OPENRIG_TREE_SHA256 543e846b…). LICENCE: the v2.0.2 tag's LICENSE fetched 2026-09-24 from https://raw.githubusercontent.com/isaacs/node-which/v2.0.2/LICENSE — 'The ISC License' / 'Copyright (c) Isaac Z. Schlueter and Contributors'; the resolved tarball's own package.json declares ISC. The repository moved to npm/node-which after 2.x; the isaacs/ URL is the one the v2.0.2 tag resolves at.",
+      "notes": "The 2.x line's bin is bin/node-whether — bin/node-which, the layout the diff measured; a future resolution bump that moves this path moves this entry with the tree-gate re-pin.",
+      "bundled": []
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/yaml/bin.mjs"
+      ],
+      "project": "eemeli/yaml",
+      "version": "2.9.1",
+      "spdxId": "ISC",
+      "copyright": "Copyright Eemeli Aro <eemeli@gmail.com>",
+      "licenseUrl": "https://github.com/eemeli/yaml/blob/v2.9.1/LICENSE",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: yaml is a dependency of @openrig/cli, resolved by npm at build time and installed NESTED (path measured from run 36033368044's added-binary diff; version frozen by OPENRIG_TREE_SHA256 543e846b…). LICENCE: the resolved tarball's own package.json declares ISC, and the v2.9.1 tag's LICENSE fetched 2026-09-24 from https://raw.githubusercontent.com/eemeli/yaml/v2.9.1/LICENSE is the ISC text ('Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee…') opening 'Copyright Eemeli Aro <eemeli@gmail.com>'.",
+      "notes": "This is @openrig/cli's own nested yaml, distinct from the root node_modules/yaml the engine stage copies and gates by QDS_ENGINE_TREE_SHA256 — different path, different version line, different gate; a change to one says nothing about the other.",
+      "bundled": []
+    },
+    {
+      "names": ["opt/openrig/lib/node_modules/@openrig/cli/node_modules/better-sqlite3/build/Release/better_sqlite3.node"],
       "project": "WiseLibs/better-sqlite3",
-      "version": "11.8.0-or-later (^11.8.0 resolved at build from @openrig/cli; frozen by the OpenRig tree gate)",
+      "version": "11.10.0",
       "spdxId": "MIT",
       "copyright": "Copyright (c) 2017 Joshua Wise",
       "licenseUrl": "https://github.com/WiseLibs/better-sqlite3/blob/v11.10.0/LICENSE",
-      "verifiedAt": "2026-09-23",
-      "verifiedHow": "PROVENANCE: better-sqlite3 is a dependency of @openrig/cli (^11.8.0, from the registry metadata fetched 2026-09-23). The npm package carries NO prebuilt binary — verified by reading the 11.10.0 tarball (src/, deps/, lib/, no *.node) — so the shipped better_sqlite3.node is fetched by prebuild-install FROM GITHUB RELEASES at Docker-build time and lands at the standard node-gyp release path named above. The exact resolved version floats inside ^11.8.0 until the OpenRig tree gate's pin freezes the installed tree; the licenseUrl's tag is the version the float resolved to when this entry was written (11.10.0, the latest 11.x on 2026-09-23) and must move with a resolved-version change. LICENCE: the 11.10.0 tarball's own LICENSE, read 2026-09-23 from the downloaded artifact — 'The MIT License (MIT)' / 'Copyright (c) 2017 Joshua Wise'; same text at https://raw.githubusercontent.com/WiseLibs/better-sqlite3/v11.10.0/LICENSE (200).",
-      "notes": "Named whether or not the added-binary diff flags it: the diff filters on the owner-executable bit and a prebuild's mode for a dlopen'd .node is unmeasured from here (no build has run), but the artifact is a redistributed COMPILED BINARY either way and this table is the legal record, not the diff's mirror. If the first real build's diff does NOT list the path, the name is inert coverage (the bun entry's own reasoning about inert names); if it lists it under a different mode/path spelling, reconcile in the same adoption commit that pins the hashes. FIRST-BUILD RECONCILIATION, part of that same adoption commit: record the RESOLVED version (read /opt/openrig/lib/node_modules/better-sqlite3/package.json in the image) and RE-CHECK the LICENSE tag — the licenseUrl's v11.10.0 tag is where the ^11.8.0 float stood when this entry was written, so a resolution that landed elsewhere moves the tag and re-verifies its LICENSE text (and this version field's floor) rather than shipping a tag that names different bytes than the prebuild came from. SQLite itself is compiled INTO this binary from the public-domain amalgamation — disclosed under 'bundled', not folded into spdxId.",
+      "verifiedAt": "2026-09-24",
+      "verifiedHow": "PROVENANCE: better-sqlite3 is a dependency of @openrig/cli (^11.8.0, from the registry metadata fetched 2026-09-23). The npm package carries NO prebuilt binary — verified by reading the 11.10.0 tarball (src/, deps/, lib/, no *.node) — so the shipped better_sqlite3.node is fetched by prebuild-install (its own entry above) FROM GITHUB RELEASES at Docker-build time and lands at the standard node-gyp release path named above. RESOLUTION NOW MEASURED: the first real build resolved 11.10.0 (run 36033368044, 2026-09-24), frozen by OPENRIG_TREE_SHA256 543e846b…; the original entry's path guessed the HOISTED location (opt/openrig/lib/node_modules/better-sqlite3/...) and the diff corrected it — npm NESTED the package at @openrig/cli/node_modules/, and that measured path is the one covered here. LICENCE: the 11.10.0 tarball's own LICENSE, read 2026-09-23 and re-verified 2026-09-24 at the tag — 'The MIT License (MIT)' / 'Copyright (c) 2017 Joshua Wise'; same text at https://raw.githubusercontent.com/WiseLibs/better-sqlite3/v11.10.0/LICENSE (200). A resolution change moves OPENRIG_TREE_SHA256 and refuses the build; the re-pin ritual re-reads the version and re-verifies this tag in the same change.",
+      "notes": "Named because the added-binary diff DID flag it (run 36033368044), under the nested path above. SQLite itself is compiled INTO this binary from the public-domain amalgamation — disclosed under 'bundled', not folded into spdxId.",
       "bundled": [
         {
           "component": "SQLite (compiled into better_sqlite3.node from the amalgamation)",
