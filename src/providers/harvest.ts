@@ -177,6 +177,15 @@ const BOX_HOME_SOURCES = [
   '"$home/$runId".engine.log',
   '"$home/$runId"-solicit-*-prompt.txt',
   '"$home/$runId"-solicit-*-reply.txt',
+  // S1 rig_swarm: per-seat pi session JSONLs (cost + forensics evidence).
+  // The OpenRig paths cannot collide with the runId-prefixed entries above
+  // (`.openrig/` is a distinct top-level prefix), preserving the
+  // no-collision invariant. The glob is shell-active by design — the list is
+  // shell words (see the loop) — and the `for f in` loop already skips
+  // absent sources silently. Unlike every other entry this one is NESTED, so
+  // the loop strips only the `$home/` prefix, keeping the member name
+  // `.openrig/state/…`-relative instead of flattening to a basename.
+  '"$home/.openrig"/state/pi/*/sessions/*.jsonl',
 ];
 
 /**
@@ -243,10 +252,13 @@ const BOX_RUN_SOURCES = [
  *    neither is a checkout FILE name, so the directories they imply cannot hit
  *    the file-vs-directory conflict either (`trace.db` is not `trace`).
  *  - home → `<runId>` + one of {.resident.jsonl, .journal.jsonl, .engine.log,
- *    -solicit-<n>-prompt.txt, -solicit-<n>-reply.txt}. Every one carries a
- *    suffix, so none can equal a bare `specs`/`app_docs`/`adws`/`journal`/
- *    `trace`; no other list member ends in `.jsonl` or `.txt`; and the only
- *    `.log` elsewhere is `run.log`, which `<runId>.engine.log` cannot equal.
+ *    -solicit-<n>-prompt.txt, -solicit-<n>-reply.txt}, plus the NESTED S1
+ *    `.openrig/state/pi/<pi>/sessions/<file>.jsonl` glob. Every flat entry
+ *    carries a suffix, so none can equal a bare `specs`/`app_docs`/`adws`/
+ *    `journal`/`trace`; the `.openrig/` members are multi-component under a
+ *    top-level prefix no other list uses, so they can equal no single-
+ *    component name in any set; and the only `.log` elsewhere is `run.log`,
+ *    which `<runId>.engine.log` cannot equal.
  *
  * Adding a source means re-checking those three sets, not just the neighbours.
  */
@@ -662,7 +674,7 @@ if [ \${#names[@]} -gt 0 ]; then args+=(-C "$runRoot" "\${names[@]}"); fi
 
 names=()
 for f in ${BOX_HOME_SOURCES.join(" ")}; do
-  if [ -f "$f" ] && [ ! -L "$f" ]; then names+=("\${f##*/}"); fi
+  if [ -f "$f" ] && [ ! -L "$f" ]; then names+=("\${f#\"$home\"/}"); fi
 done
 if [ \${#names[@]} -gt 0 ]; then args+=(-C "$home" "\${names[@]}"); fi
 

@@ -1606,7 +1606,9 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
 
     // The tar invocation itself takes NO literal member: every source arrives
     // through the `args` array, and every entry pushed into it is either the
-    // `-C` flag, a directory operand, or a BASENAME-relative member. Kept as a
+    // `-C` flag, a directory operand, or a member RELATIVE to its -C root (a
+    // basename for the flat sources, `.openrig/state/…` for the nested S1
+    // OpenRig glob). Kept as a
     // pin on the SHAPE the assertion above depends on — an `args+=(...)` line
     // carrying its own literal member would put a name outside `names`.
     // (Round 4, P33: the stderr redirect + `|| rc=$?` is the changed-as-we-read
@@ -1627,6 +1629,41 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     }
     expect(script).toContain('args+=(-C "$runRoot" "${names[@]}")');
     expect(script).toContain('args+=(-C "$home" "${names[@]}")');
+  }, 30_000);
+
+  test("rig_swarm S1: the per-seat OpenRig session JSONLs ride along under .openrig/", async () => {
+    const runId = "hvst-openrig-state";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId);
+    // Two seats' worth of pi session JSONLs at the OpenRig home layout — the
+    // per-seat cost + forensics evidence that must survive box destruction.
+    const home = boxHomeOf(runId);
+    for (const pi of ["pi-seat-1", "pi-seat-2"]) {
+      mkdirSync(join(home, ".openrig", "state", "pi", pi, "sessions"), { recursive: true });
+      writeFileSync(join(home, ".openrig", "state", "pi", pi, "sessions", `${pi}.jsonl`), `{"pi":"${pi}"}\n`);
+    }
+    let script = "";
+    const spy = new SpyDriver(driver, (stdin, r) => {
+      if (stdin.includes("harvest-artifacts.tgz")) script = stdin;
+      return r;
+    });
+
+    const res = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
+    expect(res.artifacts).toBe("pulled");
+
+    // The glob word reaches the script VERBATIM, spelled exactly like the
+    // -solicit-* entries: $home quoted (no glob chars VIA the variable), the
+    // /state/pi/*/sessions/*.jsonl segments unquoted so they stay glob-active.
+    expect(script).toContain('"$home/.openrig"/state/pi/*/sessions/*.jsonl');
+    // The members land as $home-RELATIVE paths — the directory structure is
+    // preserved, not flattened to basenames (a basename re-rooted by
+    // -C "$home" names a file that does not exist there and fails the whole
+    // pull) — under a top-level prefix disjoint from every other source list.
+    const names = extractedNames(runId);
+    expect(names).toContain(".openrig/state/pi/pi-seat-1/sessions/pi-seat-1.jsonl");
+    expect(names).toContain(".openrig/state/pi/pi-seat-2/sessions/pi-seat-2.jsonl");
+    // Absent OpenRig state is a silent skip, not a failure — pinned by every
+    // sibling test's exact-set toEqual, whose fixtures lay down no .openrig/.
   }, 30_000);
 
   test("the wal fold is BOUNDED and best-effort: .timeout 3000 precedes the pragma, || true stays", async () => {
