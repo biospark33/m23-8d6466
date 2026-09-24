@@ -1135,13 +1135,27 @@ describe("loadManifest — rig_swarm (S1)", () => {
   });
 
   // ── F-026: the objective is one queue-create argv element — past 65,536
-  // chars the spawn dies E2BIG on the box, after seeding. Exactly-at-max
-  // loads; one char more refuses.
-  test("objective over 65536 characters is refused at load; exactly 65536 loads", () => {
+  // UTF-8 bytes of JSON-escaped text the spawn dies E2BIG on the box, after
+  // seeding. Exactly-at-max loads; one byte more refuses. The bound is BYTES
+  // of the ESCAPED form: a multi-byte objective counts its encoded width, not
+  // its JavaScript character count.
+  test("objective over 65536 escaped UTF-8 bytes is refused at load; exactly 65536 loads", () => {
     const atMax = { ...RIG_SWARM_PHASE, objective: "o".repeat(65_536) };
     expect(() => loadManifestForTest(baseManifest({ phases: [atMax, CODE_PHASE] }))).not.toThrow();
     const over = { ...RIG_SWARM_PHASE, objective: "o".repeat(65_537) };
     expect(() => loadManifestForTest(baseManifest({ phases: [over, CODE_PHASE] })))
-      .toThrow(/objective must be at most 65536 characters/);
+      .toThrow(/objective must be at most 65536 UTF-8 bytes/);
+  });
+
+  test("a multi-byte objective is measured in encoded bytes, not characters", () => {
+    // '🐙' is one JavaScript character (two UTF-16 units) but 4 UTF-8 bytes:
+    // 16_384 of them sit at exactly the byte limit while their character
+    // count (32_768) is only half the old bound — only a byte measure can
+    // catch the 16_385th crossing it.
+    const atMax = { ...RIG_SWARM_PHASE, objective: "🐙".repeat(16_384) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [atMax, CODE_PHASE] }))).not.toThrow();
+    const over = { ...RIG_SWARM_PHASE, objective: "🐙".repeat(16_385) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [over, CODE_PHASE] })))
+      .toThrow(/objective must be at most 65536 UTF-8 bytes/);
   });
 });

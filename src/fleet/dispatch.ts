@@ -1672,10 +1672,13 @@ function loadManifestAndRoster(
  * is ALSO clamped to `defaultKeyCapMicroUsd`: `mintSeatKeys` refuses a seat
  * above the backstop AFTER box creation, and proportional scaling alone can
  * leave one there when authored budgets are large but fit the ceiling
- * (Σ authored ≤ ceiling, single seat 250M µ$). The clamp only lowers, so
- * Σ ≤ ceiling holds whenever ceiling ≥ seat count; below that the 1 µ$ floor
- * can push Σ above the ceiling, and the mint's Σ-guard refuses (after box
- * creation) — a regime the schema's positive-int budgets make negligible.
+ * (Σ authored ≤ ceiling, single seat 250M µ$).
+ *
+ * The clamp only lowers, so Σ ≤ ceiling EXCEPT where the 1 µ$ floor raises a
+ * sub-1 share back up — which any tiny authored budget (or a ceiling below the
+ * seat count) can produce. The completed plan is therefore verified here and
+ * an inflated one REFUSED at dispatch: the alternative is deferring to the
+ * mint's Σ-guard, which runs after box creation and strands the spend.
  */
 export function seatKeyPlan(budgets: Record<string, number>, ceilingMicroUsd: number): SeatKeyPlan[] {
   const entries = Object.entries(budgets);
@@ -1705,7 +1708,7 @@ export function seatKeyPlan(budgets: Record<string, number>, ceilingMicroUsd: nu
       );
     }
   }
-  return entries.map(([seat, authored]) => ({
+  const plan = entries.map(([seat, authored]) => ({
     seat,
     // Exact where `Math.floor((authored * ceilingMicroUsd) / total)` lost the
     // integer product at magnitudes the tests themselves use (>2^53): BigInt
@@ -1716,6 +1719,20 @@ export function seatKeyPlan(budgets: Record<string, number>, ceilingMicroUsd: nu
       Math.min(defaultKeyCapMicroUsd, Number((BigInt(authored) * BigInt(ceilingMicroUsd)) / BigInt(total))),
     ),
   }));
+  // Verify the COMPLETED plan, not a regime argument about when the floor can
+  // fire: every clamped share sums to at most the ceiling, but a seat whose
+  // share rounds below 1 is raised to 1 µ$, and enough of those (or a ceiling
+  // below the seat count) push Σ over. Refuse here — `mintSeatKeys`' Σ-guard
+  // only fires after box creation, and a plan that mints more than the
+  // admitted ceiling must never reach it. (Limits are ≤ the backstop cap, so
+  // this sum cannot overflow a double at any seat count the schema admits.)
+  const planSum = plan.reduce((acc, p) => acc + p.limitMicroUsd, 0);
+  if (planSum > ceilingMicroUsd) {
+    throw new Error(
+      `seatKeyPlan: the computed plan sums to ${planSum} µ$ against a ${ceilingMicroUsd} µ$ ceiling — the 1 µ$ floor raised seats whose proportional share rounded below it; raise the ceiling (at least one µ$ per seat, more alongside tiny authored budgets) or rebalance seatBudgets`,
+    );
+  }
+  return plan;
 }
 
 /**

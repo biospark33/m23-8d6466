@@ -8,8 +8,11 @@
  *    natural stop (§9a finding 1) — and is RIG-SCOPED: the daemon is stopped
  *    only if THIS run started it, only this rig's tmux sessions are killed,
  *    and the seeded per-seat state (plaintext seat keys) is removed;
- *  - every CLI spawn is bounded (SWARM_CLI_TIMEOUT_MS) and observes the phase
- *    abort, so a daemon that accepts but never answers cannot strand the run;
+ *  - every CLI spawn is bounded (SWARM_CLI_TIMEOUT_MS); setup and poll spawns
+ *    observe the phase abort, while teardown spawns deliberately do NOT (an
+ *    aborted signal would kill every teardown child before it starts, when
+ *    teardown is exactly what must survive an abort) — either bound alone
+ *    cannot strand the run;
  *  - an unverified swarm never reads as success: timeout fallback settles
  *    `fail` (the gate still renders a verdict on the journal).
  */
@@ -210,6 +213,14 @@ export function openrigSwarmPhase(
     // combines both into the spawned process.
     const cli = (argv: readonly string[]): Promise<CmdResult> =>
       run(argv, { timeoutMs: SWARM_CLI_TIMEOUT_MS, signal: bodyCtx.signal });
+    // Teardown's own runner: the timeout WITHOUT the phase abort. The finally
+    // must clean up AFTER the phase has been aborted, and an aborted signal
+    // reaches defaultRun's AbortSignal.any to kill every child before it
+    // starts — teardown through `cli` would silently no-op exactly when it
+    // matters (the seeded state holds plaintext seat keys). Still bounded:
+    // SWARM_CLI_TIMEOUT_MS alone cannot strand the finally.
+    const cliTeardown = (argv: readonly string[]): Promise<CmdResult> =>
+      run(argv, { timeoutMs: SWARM_CLI_TIMEOUT_MS });
 
     let settled: Settled | undefined;
     let qid = "";
@@ -420,19 +431,19 @@ export function openrigSwarmPhase(
       // daemon only if THIS run started it — kill-server/daemon-stop are
       // box-global and would destroy a concurrent run. ──
       try {
-        await cli(["rig", "down", rig.name, "--delete", "--force"]);
+        await cliTeardown(["rig", "down", rig.name, "--delete", "--force"]);
       } catch (e) {
         logLine({ step: "teardown", argv: `rig down ${rig.name} --delete --force`, error: errText(e) });
       }
       // Kill only this rig's tmux sessions (`...@<rig.name>`); no tmux server
       // running is not a failure.
       try {
-        const ls = await cli(["tmux", "list-sessions", "-F", "#{session_name}"]);
+        const ls = await cliTeardown(["tmux", "list-sessions", "-F", "#{session_name}"]);
         if (ls.exitCode === 0) {
           const suffix = `@${rig.name}`;
           for (const name of ls.stdout.split("\n").map((s) => s.trim()).filter((n) => n.endsWith(suffix))) {
             try {
-              await cli(["tmux", "kill-session", "-t", name]);
+              await cliTeardown(["tmux", "kill-session", "-t", name]);
             } catch (e) {
               logLine({ step: "teardown", argv: `tmux kill-session -t ${name}`, error: errText(e) });
             }
@@ -452,7 +463,7 @@ export function openrigSwarmPhase(
       }
       if (daemonStarted) {
         try {
-          await cli(["rig", "daemon", "stop"]);
+          await cliTeardown(["rig", "daemon", "stop"]);
         } catch (e) {
           logLine({ step: "teardown", argv: "rig daemon stop", error: errText(e) });
         }

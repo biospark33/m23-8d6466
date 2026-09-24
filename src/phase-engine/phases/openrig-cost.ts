@@ -130,6 +130,11 @@ export function emitSeatCosts(
   if (result.usages.length === 0 && result.unpricedTurns > 0) {
     // The seat spoke but priced nothing — a zero-µ$ row keeps the unpriced
     // count on the ledger (INV-COST-8: evidence, never silently dropped).
+    // The per-agent ordinal advances here too: the caller emits per rotated
+    // JSONL file, so a seat whose second file is also usage-less must not
+    // emit a second row claiming the same invocationSeq as the first.
+    const invocationSeq = seq.get(result.sessionName) ?? 0;
+    seq.set(result.sessionName, invocationSeq + 1);
     deps.emitMoneyLine({
       type: "cost_attribution",
       requestId: deps.requestId,
@@ -137,7 +142,7 @@ export function emitSeatCosts(
       phaseId: deps.phaseId,
       agentId: result.sessionName,
       role: deps.role,
-      invocationSeq: seq.get(result.sessionName) ?? 0,
+      invocationSeq,
       model: null,
       costMicroUsd: 0,
       inputTokens: 0,

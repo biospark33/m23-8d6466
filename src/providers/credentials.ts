@@ -449,12 +449,15 @@ const DELIVER_AUDIT_LINK_FAILED = "deliver-audit-link-write-failed";
  * mint/revoke bracketing runs and a live, spend-capable key survives with
  * nothing holding it but DF2.6's next orphan sweep.
  *
- * Best-effort by construction: the caller rethrows its ORIGINAL cause either
- * way, and a failed compensation is the line that matters most here (a live,
- * unreachable, spendable key), so it is logged with the same fields as the
- * success arm rather than replacing the reported failure.
+ * Best-effort by construction: a failed compensation is the line that matters
+ * most here (a live, unreachable, spendable key), so it is logged with the
+ * same fields as the success arm rather than thrown. The OUTCOME is returned
+ * for the caller to aggregate: `null` when the revoke landed, otherwise the
+ * REDACTED failure message — so `afterMintFailure` can append every failed
+ * compensating revoke to the error it propagates without this function ever
+ * displacing a caller's original cause with a revoke error.
  */
-async function compensateMint(deps: CredentialDeps, ctx: StepContext, runId: string, hash: string): Promise<void> {
+async function compensateMint(deps: CredentialDeps, ctx: StepContext, runId: string, hash: string): Promise<string | null> {
   const compStarted = Date.now();
   try {
     await revokeAndVerify(deps, hash);
@@ -477,6 +480,7 @@ async function compensateMint(deps: CredentialDeps, ctx: StepContext, runId: str
       compensated: 1,
       mint_compensation_ms: compDurationMs,
     });
+    return null;
   } catch (revErr) {
     const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
     // Same FIELDS as the ok arm above, not just the same operation name: a
@@ -502,6 +506,7 @@ async function compensateMint(deps: CredentialDeps, ctx: StepContext, runId: str
       compensated: 0,
       mint_compensation_ms: compDurationMs,
     });
+    return redactSecrets(revErrCred.message ?? String(revErr), hash);
   }
 }
 
@@ -523,13 +528,11 @@ async function afterMintFailure(
 ): Promise<never> {
   const failures: string[] = [];
   for (const h of hashes) {
-    try {
-      await compensateMint(deps, ctx, runId, h);
-    } catch (compErr) {
-      failures.push(
-        `${h.slice(0, 8)}… ${redactSecrets(compErr instanceof Error ? compErr.message : String(compErr))}`,
-      );
-    }
+    // compensateMint never throws — it returns the outcome — so a failed
+    // compensating revoke lands HERE, in the aggregated context, instead of
+    // vanishing into a catch that could never fire.
+    const failure = await compensateMint(deps, ctx, runId, h);
+    if (failure !== null) failures.push(`${h.slice(0, 8)}… ${failure}`);
   }
   if (failures.length > 0) {
     const orig = original as CredentialLifecycleError;

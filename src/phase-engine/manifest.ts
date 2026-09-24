@@ -138,13 +138,17 @@ const SEAT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const RIG_COMPONENT_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
- * `objective` is delivered to the box as a single `rig queue create -d`
- * argument; past ~128KB that spawn dies E2BIG — after the seats are seeded and
- * the daemon already exists, i.e. the late post-state-change death the manifest
- * boundary exists to front-run. 65_536 is conservative headroom over any honest
- * objective.
+ * `objective` is delivered to the box inside one JSON queue-create payload —
+ * a single argv element; past ~128KB of ARGV bytes that spawn dies E2BIG —
+ * after the seats are seeded and the daemon already exists, i.e. the late
+ * post-state-change death the manifest boundary exists to front-run. The
+ * bound is therefore the UTF-8 BYTE length of the JSON-ESCAPED objective
+ * (`JSON.stringify` applies the escaping the payload will wrap it in), not
+ * the JavaScript string length a multi-byte or control-character-heavy
+ * objective would silently understate. 65_536 bytes keeps headroom for the
+ * identity preamble and the payload's other fields.
  */
-const MAX_OBJECTIVE_CHARS = 65_536;
+const MAX_OBJECTIVE_BYTES = 65_536;
 
 /**
  * The kinds `makeBodyFactory` has an executor for — the schema's copy of
@@ -357,10 +361,17 @@ export const PhaseSpecSchema = z
       // headroom over any honest objective. (A `.max` on the field's zod chain
       // is not available: `nonBlankString` is a ZodEffects, and chain checks on
       // it lose the `.max` method.)
-      if (spec.objective !== undefined && spec.objective.length > MAX_OBJECTIVE_CHARS) {
+      if (
+        spec.objective !== undefined &&
+        // `JSON.stringify` applies the escaping the queue payload wraps the
+        // objective in; the wrapping quotes are trimmed so the measure is the
+        // escaped objective's own byte width.
+        new TextEncoder().encode(JSON.stringify(spec.objective).slice(1, -1)).length > MAX_OBJECTIVE_BYTES
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `objective must be at most ${MAX_OBJECTIVE_CHARS} characters; it is one queue-create argv element and a longer one dies E2BIG on the box after seeding`,
+          message:
+            `objective must be at most ${MAX_OBJECTIVE_BYTES} UTF-8 bytes once JSON-escaped; it is one queue-create argv element and a longer one dies E2BIG on the box after seeding`,
         });
       }
       // Identifier grammar, checked at parse because everything downstream of

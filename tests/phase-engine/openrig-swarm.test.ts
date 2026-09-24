@@ -339,6 +339,49 @@ test("abort mid-poll still emits seat costs BEFORE teardown", async () => {
   );
 });
 
+test("teardown survives an ALREADY-ABORTED phase signal (teardown runner drops the abort)", async () => {
+  // A spawn double faithful to defaultRun's real bound: like Bun.spawn under
+  // AbortSignal.any with an aborted signal, it cannot start a child once the
+  // supplied signal is aborted — and it records whether each call saw one.
+  const calls: { argv: string[]; sawAbortedSignal: boolean }[] = [];
+  const handlers = baseHandlers();
+  const run: CmdRunner = async (argv, opts) => {
+    if (opts?.signal?.aborted) {
+      calls.push({ argv: [...argv], sawAbortedSignal: true });
+      throw new Error("spawn with aborted signal");
+    }
+    calls.push({ argv: [...argv], sawAbortedSignal: false });
+    const key = argv.join(" ");
+    for (const [pattern, handler] of Object.entries(handlers)) {
+      if (key.includes(pattern)) return handler([...argv]);
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  // Sanity: the double really refuses an aborted signal — the premise the
+  // teardown assertion below relies on.
+  const dead = new AbortController();
+  dead.abort();
+  await expect(run(["rig", "down", "x"], { signal: dead.signal })).rejects.toThrow("spawn with aborted signal");
+  calls.length = 0; // drop the sanity row so the teardown assertions read clean
+  const ac = new AbortController();
+  handlers["queue show q-1"] = () => {
+    ac.abort(); // abort mid-poll
+    return { exitCode: 0, stdout: "", stderr: "" }; // unreadable → stale poll
+  };
+  const { home } = makeTempHome();
+  await expect(runPhase(SPEC, run, home, ac.signal)).rejects.toThrow();
+  // The teardown commands ran anyway, and NONE of them saw the aborted
+  // signal: teardown spawns must carry the timeout without the phase abort.
+  const teardown = calls.filter((c) => {
+    const j = c.argv.join(" ");
+    return j.includes("rig down") || j.includes("tmux") || j.includes("daemon stop");
+  });
+  expect(teardown.length).toBeGreaterThanOrEqual(3); // rig down + tmux list + kills
+  expect(teardown.every((c) => !c.sawAbortedSignal)).toBe(true);
+  // The seeded state (plaintext seat keys) is still removed despite the abort.
+  expect(fs.existsSync(`${home}/.openrig/state/pi/dev-lead@devrig`)).toBe(false);
+});
+
 test("timeout fallback settles fail — an unverified swarm is never journaled success", async () => {
   const handlers = baseHandlers();
   handlers["queue show q-1"] = () => ({ exitCode: 0, stdout: "state: open\n", stderr: "" });

@@ -91,15 +91,24 @@ describe("seatKeyPlan (S1 dispatch clamp)", () => {
   });
 
   // The brief's named floor ("never a 0-limit key"), pinned directly: shares
-  // that floor to 0 still mint 1 µ$. The Σ ≤ ceiling property and this floor
-  // are in honest tension at sub-seat-count ceilings (2 seats cannot share
-  // 1 µ$ without a 0-limit key) — this is the arm the equal-budget loop above
-  // cannot reach, and without Math.max a 0-limit key reaches mintSeatKeys,
-  // which refuses it as a non-positive integer.
+  // that floor to 0 still mint 1 µ$. At ceiling 2 both shares floor to 1 and
+  // the plan still FITS (Σ = 2 = ceiling); the sub-seat-count ceiling that
+  // used to return an over-sum plan is now the refusal below.
   test("floors a zero-share seat at 1 µ$ — never a 0-limit key", () => {
-    expect(seatKeyPlan({ a: 1, b: 99 }, 1)).toEqual([
+    expect(seatKeyPlan({ a: 1, b: 99 }, 2)).toEqual([
       { seat: "a", limitMicroUsd: 1 },
       { seat: "b", limitMicroUsd: 1 },
     ]);
+  });
+
+  // The floor's honest tension, resolved at plan time: with a sub-seat-count
+  // ceiling the floored plan sums OVER the ceiling (2 seats, 1 µ$). That plan
+  // used to be returned and left for mintSeatKeys' Σ-guard — a refusal that
+  // only fires AFTER box creation, stranding the provisioned spend. The
+  // completed plan is now verified here, before any key is minted.
+  test("refuses a plan whose 1 µ$ floor pushes the sum over the ceiling", () => {
+    expect(() => seatKeyPlan({ a: 1, b: 99 }, 1)).toThrow(
+      /plan sums to 2 µ\$ against a 1 µ\$ ceiling/,
+    );
   });
 });

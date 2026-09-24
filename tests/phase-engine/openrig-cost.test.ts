@@ -144,3 +144,23 @@ test("the seat's unpricedTurns ride the FIRST emitted row only", () => {
   expect(emitted[0]).toMatchObject({ unpricedTurns: 1 });
   expect(emitted[1]).toMatchObject({ unpricedTurns: 0 });
 });
+
+test("consecutive usage-less emissions advance the per-agent ordinal (rotated JSONLs cannot collide on seq 0)", () => {
+  // The caller emits per rotated JSONL file: two usage-less files for one
+  // seat must produce two rows with DISTINCT invocationSeq values, not two
+  // rows both claiming the seat's first ordinal.
+  const seq = new Map<string, number>();
+  const emitted: Record<string, unknown>[] = [];
+  const deps = {
+    emitMoneyLine: (l: Record<string, unknown>) => emitted.push(l),
+    invocationSeqByAgent: seq,
+    requestId: "r", runId: "run", phaseId: "p", role: "worker",
+  };
+  const seat = { seat: "worker", sessionName: "dev-worker@spike", usages: [], unpricedTurns: 2 };
+  emitSeatCosts(seat, deps);
+  emitSeatCosts(seat, deps);
+  expect(emitted).toHaveLength(2);
+  expect(emitted[0]).toMatchObject({ agentId: "dev-worker@spike", invocationSeq: 0 });
+  expect(emitted[1]).toMatchObject({ agentId: "dev-worker@spike", invocationSeq: 1 });
+  expect(seq.get("dev-worker@spike")).toBe(2);
+});

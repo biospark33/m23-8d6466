@@ -1762,6 +1762,37 @@ describe("S1 rig_swarm per-seat keys", () => {
     expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
   });
 
+  test("a compensating revoke that fails during mintSeatKeys is REPORTED, not swallowed", async () => {
+    // Seat 1 mints fine; seat 2 over-grants (F004) so the mint catch
+    // compensates BOTH live hashes — and every revoke fails too.
+    // afterMintFailure must append the revoke failures to the propagated
+    // error: compensateMint logs them but never throws, so a catch-based
+    // collector never fires (the aggregation used to be dead code).
+    store.create("run-agg");
+    const flaky = Object.create(api) as FakeKeyApi;
+    let minted = 0;
+    flaky.createKey = async (name: string, limitUsd: number) => {
+      minted += 1;
+      if (minted < 2) return api.createKey(name, limitUsd);
+      api.requests.push({ method: "POST", path: "/keys", name, limitUsd });
+      return { key: `sk-or-fake-over-${name}`, hash: "b".repeat(64), limitUsd: limitUsd + 5, usageUsd: 0 };
+    };
+    flaky.deleteKey = (): Promise<number> =>
+      Promise.reject(new CredentialLifecycleError("revoke-failed", "DELETE /keys/… returned 500", "revoke by hand"));
+    let err: unknown;
+    try {
+      await mintSeatKeys(deps({ capMicroUsd: defaultKeyCapMicroUsd, keyApi: flaky }), "run-agg", PLAN);
+    } catch (e) {
+      err = e;
+    }
+    // The ORIGINAL mint failure is still the reported cause…
+    expect((err as CredentialLifecycleError).code).toBe("mint-ceiling-mismatch");
+    expect((err as Error).message).toContain("provider granted");
+    // …but the failed compensating revokes ride the message now, both of them.
+    expect((err as Error).message).toMatch(/2 of 2 compensating revokes also failed/);
+    expect((err as Error).message).toContain("DELETE /keys/… returned 500");
+  });
+
   test("mintSeatKeys refuses an already-minted run (single key OR swarm)", async () => {
     store.create("run-4");
     store.set("run-4", { keyHash: "aaaaaaaa" }); // single-key mint already happened
