@@ -462,7 +462,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // on this pin; DF3.6b's in-box behaviour is reachable; the silent-green window
 // this paragraph described closed with the substrate it described.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:9d1822c60e4e89b58458ba4e4767cffae32f70dca29d66b00f13cacd1925a2e2";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:02d7a0f4b2a2b1e65f75e1baf1e97854f7f3935924e2f2318a8a311bff9eca8b";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -526,13 +526,26 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (fifteenth pin, 2026-09-24): buildId 68fca032d53c0de6,
- * adopted from gate B's own paste-ready output on publish run 36048175927,
- * baked at gitSha 07db7e3e8b4f3899459038af16a913d67e385097 (the S1 TOFU-pin
- * record commit — the SOURCE_PATHS resolution for the first real publish of
- * the rig_swarm image stages).
+ * CURRENT PAIRING (sixteenth pin, 2026-09-24): buildId 7fc93c21509a6d2a,
+ * adopted from gate B's own paste-ready output on publish run 36063335634,
+ * baked at gitSha 55215f5141c1d86fb09e88aa26d4cb14f42f78d4 (the npm-cache
+ * repro fix — 55215f51 is the src_sha the workflow's SOURCE_PATHS resolution
+ * names for THAT build; driver.ts is excluded from SOURCE_PATHS, so this
+ * adoption commit rebuilds at the same sha, byte identical, and gate B must
+ * close GREEN on it — a third digest at an unchanged buildId would be the
+ * wall-clock alarm again, not a re-pin).
+ *
+ * Why BOTH values moved from the fifteenth pin (9d1822c6… / 68fca032d53c0de6):
+ * PR #288 changed `oci/exedev/Dockerfile` bytes (npm cache + logs → /tmp,
+ * deleted same-layer, fail-closed assertions on /root/.npm + /root/.npmrc) —
+ * a genuine substrate change, so the buildId moved; the digest moved with it
+ * (both Dockerfile bytes and layer contents changed). This is the ordinary
+ * both-move case, the INVERSE of the 36056831164 alarm where the digest moved
+ * at an UNCHANGED buildId (the /root/.npm cacache wall-clock bug #288 fixed).
+ * The fifteenth pin's healing run proved the gate works; this pin's healing
+ * run is the reproducibility proof.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "68fca032d53c0de6";
+export const DEFAULT_IMAGE_BUILD_ID = "7fc93c21509a6d2a";
 
 
 
