@@ -841,6 +841,144 @@ RUN set -e; \
     grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete the per-run tree at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }; \
     grep -qE '^Delegate=memory$' "${unit}" || { echo "the unit does not set Delegate=memory; the engine runs as User=exedev and could not create the resident's per-solicitation cgroup or write its memory.max, so DF3.6b's kernel-enforced memory bound is unenforceable and every run would start with the resident DISABLED (INV-MEM-2) instead of failing loudly" >&2; exit 1; }
 
+# ── S1 rig_swarm: node, OpenRig, the self-compact extension ─────────────────
+# The rig_swarm phase kind runs an OpenRig swarm inside this box, and needs
+# three baked facts the pinned image does not carry: `node` (the image ships
+# NONE — the seat gate runs `node --test` and OpenRig's runner is a
+# `#!/usr/bin/env node` script), the OpenRig CLI at /opt/openrig, and the
+# self-compact extension every seat's settings.json loads by absolute path
+# (src/phase-engine/phases/openrig-swarm.ts bakes
+# "/opt/qds/pi-ext/self-compact/self-compact.ts" into the settings it writes).
+# Three properties this section must not break:
+#   (1) /opt/qds-factory/node_modules stays EXACTLY yaml+zod. OpenRig and its
+#       dependency tree live at /opt/openrig, never inside the engine's tree;
+#       the site gate in scripts/build-exedev-image.ts admits exactly two npm
+#       trees by literal path (the engine's and /opt/openrig/lib/node_modules)
+#       and sweeps both.
+#   (2) npm and corepack are BUILD-TIME TOOLING ONLY. The node tarball ships
+#       them at /usr/local/lib/node_modules; they are deleted in the cleanup
+#       RUN below rather than shipped.
+#   (3) Both content-gate ARGs carry the literal sentinel MEASURE-AT-FIRST-
+#       BUILD because no build of this file has EVER run (Docker unavailable
+#       on the authoring machine, 2026-09-23): an unpinned tree builds
+#       NOTHING, it refuses, and the refusal message carries the measured
+#       value to pin. Same TOFU doctrine as BUN_SHA256 and
+#       QDS_ENGINE_TREE_SHA256 above; the pins land in the post-merge
+#       adoption commit together with DEFAULT_IMAGE_REF/BUILD_ID.
+ARG NODE_VERSION=22.20.0
+# SENTINEL, NOT A PIN. When the first build refuses, nodejs.org publishes the
+# corroborating value in SHASUMS256.txt beside the tarball (the
+# `node-v${NODE_VERSION}-linux-x64.tar.gz` line) — pin the ARG from the
+# build's own measured output and cross-check it against that line.
+ARG NODE_SHA256=MEASURE-AT-FIRST-BUILD
+# .tar.gz, NOT the sketch's .tar.xz: gzip is present wherever tar is, while
+# xz-utils presence in the base is unmeasurable from here (no local build) and
+# a missing `xz` breaks `tar -xJf` before any gate runs. One fewer unmeasured
+# assumption riding the first build.
+RUN set -e; \
+    cd /tmp; \
+    curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o node.tar.gz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"; \
+    sum="$(sha256sum node.tar.gz | cut -d' ' -f1)"; \
+    [ "${sum}" = "${NODE_SHA256}" ] \
+      || { echo "R3-a TOFU: node-v${NODE_VERSION}-linux-x64.tar.gz hashes to ${sum}, not NODE_SHA256='${NODE_SHA256}' — pin the measured value into the ARG above (cross-check: the SHASUMS256.txt line at https://nodejs.org/dist/v${NODE_VERSION}/) and rebuild" >&2; exit 1; }; \
+    tar -xzf node.tar.gz -C /usr/local --strip-components=1; \
+    rm node.tar.gz; \
+    [ "$(node --version)" = "v${NODE_VERSION}" ]; \
+    [ "$(command -v node)" = "/usr/local/bin/node" ]; \
+    suout="$(su -s /bin/sh exedev -c 'command -v node')"; \
+    [ "${suout}" = "/usr/local/bin/node" ] \
+      || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs — the PAM-session proxy for a bare ssh command) resolved node to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }
+# The extraction above also lands bin/npm, bin/npx, bin/corepack (SYMLINKS into
+# /usr/local/lib/node_modules) — required by the OpenRig RUN next, removed by
+# the cleanup RUN after it.
+
+# OpenRig 0.5.14 (Apache-2.0; engines node >= 20, satisfied above). Installed
+# under --prefix /opt/openrig so its dependency tree sits at
+# /opt/openrig/lib/node_modules — a second npm tree the site gate admits BY
+# LITERAL PATH and DF2.9's sweep attributes like the engine's own.
+#
+# The tree hash gates the WHOLE /opt/openrig tree, not just @openrig/cli: npm
+# resolved @openrig/cli's ^-ranged dependencies inside this RUN, and this hash
+# is the only thing freezing that resolution — an upstream republish inside
+# the range moves the measured value and the build refuses, which is the
+# point. SENTINEL, NOT A PIN (no build has run); pin from the first build's
+# own refusal message.
+ARG OPENRIG_VERSION=0.5.14
+ARG OPENRIG_TREE_SHA256=MEASURE-AT-FIRST-BUILD
+# `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
+# (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
+# that layout assumption fail LOUDLY at the first real build rather than
+# shipping a dangling symlink — the same fail-closed spirit as the sentinel
+# ARGs. `rig --version` is EXECUTED, not string-compared: its output format is
+# unmeasured from here, and executing it still proves the symlink chain and
+# the node shebang resolve.
+RUN set -e; \
+    npm i -g --prefix /opt/openrig "@openrig/cli@${OPENRIG_VERSION}"; \
+    [ -e /opt/openrig/bin/rig ] \
+      || { echo "npm's --prefix install put no bin at /opt/openrig/bin/rig; both the /usr/local/bin/rig symlink below and the phase body's bare 'rig' assume it — re-derive the layout from the actual install, do not guess" >&2; exit 1; }; \
+    ln -s /opt/openrig/bin/rig /usr/local/bin/rig; \
+    tree="$(cd /opt/openrig && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"; \
+    [ "${tree}" = "${OPENRIG_TREE_SHA256}" ] \
+      || { echo "R3-a TOFU: the /opt/openrig tree hashes to ${tree}, not OPENRIG_TREE_SHA256='${OPENRIG_TREE_SHA256}' — pin the measured value into the ARG above and rebuild" >&2; exit 1; }; \
+    rig --version; \
+    [ "$(command -v rig)" = "/usr/local/bin/rig" ]; \
+    suout="$(su -s /bin/sh exedev -c 'command -v rig')"; \
+    [ "${suout}" = "/usr/local/bin/rig" ] \
+      || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs) resolved rig to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }
+
+# npm and corepack were BUILD-TIME TOOLING for the OpenRig install above; the
+# node tarball ships them at /usr/local/lib/node_modules with ~75
+# owner-executable files (MEASURED from the v22.20.0 tarball: npm's vendored
+# dependency tree carries its bins and node-gyp's python +x). Shipping them
+# would (a) add a THIRD npm tree the site gate does not admit, and (b) put
+# npm (Artistic-2.0) and its ~70 vendored packages into a customer-facing box
+# that never invokes them — the seats run `rig` (shebang node), never npm.
+# Deleted, not swept. BRACKETED because `rm -rf` exits 0 on a path that is
+# not there (this file's own doctrine). NOT same-layer deletions: npm must
+# survive the OpenRig RUN above, so the bytes persist in those two layers —
+# every gate here reads the FLATTENED filesystem (docker export / docker run
+# find), which is what a booted box sees; `docker save` layer forensics would
+# still find them, the same honest limit the INV-IBOX-1 base-fixture removal
+# records.
+RUN set -e; \
+    [ -d /usr/local/lib/node_modules/npm ]; \
+    [ -d /usr/local/lib/node_modules/corepack ]; \
+    [ -L /usr/local/bin/npm ]; \
+    [ -L /usr/local/bin/npx ]; \
+    [ -L /usr/local/bin/corepack ]; \
+    rm -rf /usr/local/lib/node_modules; \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack; \
+    [ ! -e /usr/local/lib/node_modules ]; \
+    ! find /usr/local -type d -name node_modules | grep -q .; \
+    node --version >/dev/null
+
+# The self-compact extension (vendored) every seat's settings.json loads, and
+# the /opt/qds root it lives under. Files 0644 root:root like the engine
+# tree: pi reads this as source, and exedev — the user that runs agent-authored
+# code — must not be able to rewrite what a seat's settings AUTOLOADS.
+#
+# /opt/qds/swarm-keys is pre-created EXEDEV-OWNED 0700, and the ownership is
+# load-bearing rather than tidy: deliverSeatKeys
+# (src/providers/credentials.ts, SWARM_KEYS_DIR) runs
+# `install -d -m 700 /opt/qds/swarm-keys` over a bare ssh session AS EXEDEV
+# and then writes the seat keys into it — against a root-owned /opt/qds the
+# delivery would fail EACCES on every live box after every mock-level test
+# passed. /opt/qds itself stays root:root 0755 (exedev cannot plant a
+# sibling); only the keys dir is exedev's. The runtime `install -d -m 700`
+# re-asserts the mode on the existing dir as its owner.
+COPY pi-vs-claude-code-vendor/self-compact/extensions/self-compact /opt/qds/pi-ext/self-compact
+RUN set -e; \
+    [ -f /opt/qds/pi-ext/self-compact/self-compact.ts ]; \
+    chown root:root /opt/qds; \
+    chmod 0755 /opt/qds; \
+    install -d -o exedev -g exedev -m 0700 /opt/qds/swarm-keys; \
+    chown -R root:root /opt/qds/pi-ext; \
+    find /opt/qds/pi-ext -type d -exec chmod 0755 {} +; \
+    find /opt/qds/pi-ext -type f -exec chmod 0644 {} +; \
+    [ "$(stat -c '%U %G %a' /opt/qds)" = "root root 755" ]; \
+    [ "$(stat -c '%U %G %a' /opt/qds/swarm-keys)" = "exedev exedev 700" ]
+
 # DoD (a): a malformed unit would otherwise surface first in DF1.10, on a real
 # box, mid-run. Verify it here, at build time, as a hard failure.
 #

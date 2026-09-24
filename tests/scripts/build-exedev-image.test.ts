@@ -48,6 +48,7 @@ import {
   tarUnescape,
   uncoveredBinaries,
   validateBinaryLicenses,
+  mergeSweeps,
 } from "../../scripts/build-exedev-image.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../..");
@@ -617,6 +618,68 @@ describe("fromInstructions heredoc/continuation refusal", () => {
 
 // ─────────────────────────────── ARG defaults ───────────────────────────────
 
+// mergeSweeps exists because S1 rig_swarm admitted a SECOND permitted npm
+// tree (/opt/openrig/lib/node_modules) whose packages collide BY NAME with
+// the engine's (yaml, zod) at different versions — so the sites are swept
+// into separate scratch dirs and combined HERE, after the walk. What must
+// hold: pure concatenation/summation, no dedup, no reconciliation — the
+// NOTICE renders everything it is handed and the fail-closed lists are only
+// ever checked for emptiness.
+describe("mergeSweeps", () => {
+  const mkSweep = (over: Partial<Parameters<typeof mergeSweeps>[0][number]>) =>
+    ({
+      treePackageCount: 0,
+      entries: [],
+      denied: [],
+      covered: [],
+      uncovered: [],
+      unresolved: [],
+      missingTexts: [],
+      upstreamNotices: [],
+      unreadable: [],
+      pinViolations: [],
+      piVersions: {},
+      uncommonIds: [],
+      licenseTexts: {},
+      ...over,
+    }) as Parameters<typeof mergeSweeps>[0][number];
+
+  test("concatenates every list field and sums treePackageCount, without dedup", () => {
+    const a = mkSweep({
+      treePackageCount: 2,
+      entries: [{ name: "yaml", version: "2.3.0", depPath: "yaml" }, { name: "zod", version: "3.0.0", depPath: "zod" }] as never,
+      unreadable: ["tree-a-unreadable"],
+      piVersions: { pi: "0.84.4" },
+    });
+    // The SAME package name at a DIFFERENT version — the openrig collision
+    // mergeSweeps exists to preserve rather than overwrite.
+    const b = mkSweep({
+      treePackageCount: 15,
+      entries: [{ name: "yaml", version: "2.8.3", depPath: "yaml" }] as never,
+      unreadable: ["tree-b-unreadable"],
+      piVersions: { "another-pkg": "1.0.0" },
+    });
+    const merged = mergeSweeps([a, b]);
+    expect(merged.treePackageCount).toBe(17);
+    expect(merged.entries.map((e) => `${e.name}@${e.version}`)).toEqual([
+      "yaml@2.3.0",
+      "zod@3.0.0",
+      "yaml@2.8.3",
+    ]);
+    expect(merged.unreadable).toEqual(["tree-a-unreadable", "tree-b-unreadable"]);
+    expect(merged.piVersions).toEqual({ pi: "0.84.4", "another-pkg": "1.0.0" });
+  });
+
+  test("an empty input list is the healthy empty sweep, and single-part is identity", () => {
+    const empty = mergeSweeps([]);
+    expect(empty.treePackageCount).toBe(0);
+    expect(empty.entries).toEqual([]);
+    expect(empty.unreadable).toEqual([]);
+    const one = mkSweep({ treePackageCount: 3, unreadable: ["x"] });
+    expect(mergeSweeps([one])).toEqual(one);
+  });
+});
+
 describe("dockerfileArgDefaults", () => {
   test("reads a default, with or without surrounding whitespace", () => {
     expect(dockerfileArgDefaults("ARG FOO=bar\n", "FOO")).toEqual(["bar"]);
@@ -1091,7 +1154,15 @@ describe("buildIdFileInputs", () => {
       // is rebuilt and re-published — recorded as OPEN in the story's Dev Agent
       // Record, because this re-pin is the OFFLINE half of DF2.10's ritual and
       // the publish is the other.
-      "oci/exedev/Dockerfile": "47e9b084a1b8a47ee1ec9e74a32cceade2b57f47814966b80017575e3ed14761",
+      // 9ebe455f: S1 rig_swarm (feature/rig-swarm-phase, 2026-09-23). The
+      // Dockerfile gains the node + OpenRig + self-compact runtime-stage
+      // section after the engine-assertion RUN — a buildId input like every
+      // byte of this file. The image itself is UN-PINNED on this branch by
+      // design (NODE_SHA256/OPENRIG_TREE_SHA256 ship as MEASURE-AT-FIRST-
+      // BUILD sentinels; no build has run), so this offline half of the pin
+      // moves now while the publish/adoption half is the recorded post-merge
+      // ritual — same shape as the DF2.10 open pairing the map above documents.
+      "oci/exedev/Dockerfile": "9ebe455fc57c3f73181ddbe7ee68d23b8a9fd6da055c91fa10281b29881eab38",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1591,7 +1662,17 @@ describe("buildIdFileInputs", () => {
       // source and contribute nothing walked. The value is RE-DERIVED from
       // the joined tree by this test's own failing run. KEPT: every parent
       // paragraph above, per the join, not a replacement.
-      "3aa2eadb07bd6c788940d74927edf7864cb0facb0660a398f07386fc57f08824",
+      //
+      // aaa26243: S1 rig_swarm (feature/rig-swarm-phase, 2026-09-23). Moved
+      // by the runtime stage's node/OpenRig/self-compact section — the
+      // Dockerfile itself (already pinned in the map above) and ONE new
+      // walked COPY source (pi-vs-claude-code-vendor/self-compact/extensions/
+      // self-compact, added to both publish-workflow lists in the same
+      // change). RE-DERIVED from this test's own failing run on the final
+      // tree. The image this tree describes is deliberately UN-PINNED until
+      // the first real build measures the sentinel ARGs — see the Dockerfile's
+      // S1 section and the PR's pairing-debt note.
+      "aaa26243f081834d4ed3f7c02adb1be7820a5a8f5bb7635db5fba66e223ff4a7",
     );
   });
 });

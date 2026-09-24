@@ -2305,6 +2305,15 @@ function scanImage(imageId: string): ImageScan {
  * makes `sweep.unreadable` a `die(1)`. Deleting it on the belief that `-L`
  * covers this reopens the one failure the AC5 gate exists to catch, as a clean
  * build.
+ *
+ * Every caller since S1 passes exactly ONE site: the engine's tree and the
+ * OpenRig tree are swept into SEPARATE scratch dirs and combined by
+ * `mergeSweeps`, because they share package names (yaml, zod) at different
+ * versions and the `/.`-merge branch below would overwrite the earlier site's
+ * bytes in the scratch copy. The merge branch is retained for a future site
+ * that genuinely wants it — with the warning that "name collisions across
+ * sites do not matter" stopped being true the day the second permitted site
+ * arrived.
  */
 function extractNodeModules(imageId: string, sites: readonly string[], dest: string): void {
   const cid = assertCid(run("docker", ["create", imageId], "docker create (tree)"), "docker create (tree)");
@@ -2339,6 +2348,40 @@ function emptySweep(): SweepResult {
     uncommonIds: [],
     licenseTexts: {},
   };
+}
+
+/**
+ * Combine the per-site sweep results into the one result the NOTICE and the
+ * fail-closed gates read. S1 rig_swarm admitted a SECOND npm tree
+ * (/opt/openrig/lib/node_modules), and the trees are swept SEPARATELY rather
+ * than merged into one scratch directory because `@openrig/cli` depends on
+ * `yaml` and `zod` at versions the engine tree does not ship: an
+ * `extractNodeModules` merge would overwrite the engine's copies in the
+ * scratch dir and the sweep would attribute bytes the engine never runs.
+ * Every field is concatenated or summed — nothing is deduplicated or
+ * reconciled, because no downstream consumer reads a package twice for harm:
+ * the NOTICE renders every entry it is handed and the fail-closed lists are
+ * only ever checked for emptiness.
+ */
+export function mergeSweeps(parts: readonly SweepResult[]): SweepResult {
+  if (parts.length === 0) return emptySweep();
+  const first = parts[0];
+  if (first === undefined) return emptySweep(); // unreachable past the length guard; keeps noUncheckedIndexedAccess honest
+  return parts.slice(1).reduce<SweepResult>((acc, p) => ({
+    treePackageCount: acc.treePackageCount + p.treePackageCount,
+    entries: [...acc.entries, ...p.entries],
+    denied: [...acc.denied, ...p.denied],
+    covered: [...acc.covered, ...p.covered],
+    uncovered: [...acc.uncovered, ...p.uncovered],
+    unresolved: [...acc.unresolved, ...p.unresolved],
+    missingTexts: [...acc.missingTexts, ...p.missingTexts],
+    upstreamNotices: [...acc.upstreamNotices, ...p.upstreamNotices],
+    unreadable: [...acc.unreadable, ...p.unreadable],
+    pinViolations: [...acc.pinViolations, ...p.pinViolations],
+    piVersions: { ...acc.piVersions, ...p.piVersions },
+    uncommonIds: [...acc.uncommonIds, ...p.uncommonIds],
+    licenseTexts: { ...acc.licenseTexts, ...p.licenseTexts },
+  }), first);
 }
 
 /**
@@ -3413,13 +3456,39 @@ function main(): void {
   // Heartbeated from here on: the phases after extraction write nothing into
   // it, and a concurrently starting run sweeps anything over an hour old.
   liveDirs.push(treeDir);
+  // The SECOND scratch dir — the OpenRig tree's own sweep destination (S1
+  // rig_swarm; see mergeSweeps for why the sites are NOT merged into treeDir).
+  // Same prefix family as treeDir so the stale sweep reaps a crashed run's
+  // leftover, same keepTree escape hatch, same leak registration.
+  const openrigDir = makeTempDir(path.join(os.tmpdir(), opts.keepTree ? "qds-exedev-keep-" : "qds-exedev-tree-"));
+  if (!opts.keepTree) leaked.paths.add(openrigDir);
+  liveDirs.push(openrigDir);
   let sweep: SweepResult;
+  let engineSweep: SweepResult = emptySweep();
   try {
     stillRunning();
     const scan = scanImage(imageId);
     stillRunning();
-    sweep = sweepImageTree(imageId, scan.nodeModulesSites, treeDir);
+    // The ONLY npm trees this image may ship, by literal path: the engine's
+    // runtime closure (yaml+zod, asserted below against the swept tree) and —
+    // since S1 rig_swarm — the OpenRig CLI's dependency tree. Declared here
+    // because the sweep below filters the observed sites against them before
+    // the AC5 narrowing re-derives the same literals for its own gate.
+    const enginePath = "opt/qds-factory/node_modules";
+    const openrigPath = "opt/openrig/lib/node_modules";
+    engineSweep = sweepImageTree(
+      imageId,
+      scan.nodeModulesSites.filter((s) => s === enginePath),
+      treeDir,
+    );
     stillRunning();
+    const openrigSweep = sweepImageTree(
+      imageId,
+      scan.nodeModulesSites.filter((s) => s === openrigPath),
+      openrigDir,
+    );
+    stillRunning();
+    sweep = mergeSweeps([engineSweep, openrigSweep]);
 
     // AC5's finding, NARROWED at DF1.10's route change rather than removed.
     //
@@ -3440,12 +3509,21 @@ function main(): void {
     // to), and still has to be covered by the rendered NOTICE. What changed is
     // WHERE a tree may be, not whether it must be explained.
     //
-    // A tree ANYWHERE ELSE is the original finding, unchanged. Adding a second
-    // permitted site means adding it here deliberately, in the same change that
-    // ships whatever needs it — which is the point of a literal set rather than
-    // a prefix match or a "starts with /opt" rule that would admit the next tree
-    // for free.
-    const enginePath = "opt/qds-factory/node_modules";
+    // A tree ANYWHERE ELSE is the original finding, unchanged. Adding a
+    // permitted site means adding it here deliberately, in the same change
+    // that ships whatever needs it — which is the point of a literal set
+    // rather than a prefix match or a "starts with /opt" rule that would
+    // admit the next tree for free. S1 rig_swarm added the second one: the
+    // OpenRig CLI's dependency tree at /opt/openrig/lib/node_modules, swept
+    // and NOTICE-attributed like the engine's own, but with NO closure
+    // enumeration here — its byte identity is frozen by the Dockerfile's own
+    // OPENRIG_TREE_SHA256 content gate (a TOFU ARG pinned at the first real
+    // build; see that file's S1 section), and re-enumerating its
+    // npm-^resolved package list in this script would be a second, driftier
+    // copy of the same pin. Every OTHER property the gate enforces applies
+    // to it in full, through the merged sweep: complete sweep, zero
+    // denied/unresolved/missing-text findings, NOTICE coverage.
+    //
     // PRESENCE, not just placement. An image whose swept `node_modules` site
     // list is EMPTY used to pass this whole block vacuously — no unexpected
     // sites, no closure to check, a clean NOTICE describing no tree — with
@@ -3468,7 +3546,20 @@ function main(): void {
         "restore the COPY that lands the engine's runtime closure at that exact path — the Dockerfile's own builder asserts cannot see a dropped final COPY",
       ]);
     }
-    const unexpected = scan.nodeModulesSites.filter((s) => s !== enginePath);
+    // The openrig site's absence gets its own refusal for the same reason:
+    // a dropped S1 Dockerfile stage is an image without `rig`, which every
+    // in-Dockerfile assertion would have caught only if the stage survived
+    // far enough to run them. This is the host-side half of that tripwire.
+    if (!scan.nodeModulesSites.includes(openrigPath)) {
+      die(1, [
+        `the built image carries no npm tree at /${openrigPath}`,
+        "the S1 rig_swarm stages install the OpenRig CLI there; an absent tree is a dropped Dockerfile stage, not a smaller image",
+        ...(scan.nodeModulesSites.length > 0
+          ? [`the scan did find npm tree(s) at: ${scan.nodeModulesSites.map((s) => `/${s}`).join(", ")}`]
+          : []),
+      ]);
+    }
+    const unexpected = scan.nodeModulesSites.filter((s) => s !== enginePath && s !== openrigPath);
     if (unexpected.length > 0) {
       const named = sweep.entries.slice(0, 20).map((e) => `${e.name}@${e.version} at /${e.depPath}`);
       // Coverage gaps enrich the finding when the NOTICE machinery can render
@@ -3482,7 +3573,7 @@ function main(): void {
       }
       die(1, [
         `the built image carries an npm tree at an unexpected site: ${unexpected.map((s) => `/${s}`).join(", ")}`,
-        `the only tree this image ships is the engine's own runtime closure at /${enginePath}; anything else is an unswept surface that crept in`,
+        `the only trees this image ships are the engine's runtime closure at /${enginePath} and the OpenRig CLI's dependency tree at /${openrigPath}; anything else is an unswept surface that crept in`,
         "if a new tree is legitimate, add its path to the permitted set in this function, in the same change that ships it",
         `for context, the sweep found ${sweep.treePackageCount} installed copies across every site:`,
         ...named,
@@ -3514,22 +3605,23 @@ function main(): void {
     //
     // TOP-LEVEL only, and `depPath` is a DEPENDENCY CHAIN rather than a
     // filesystem path (`license-sweep.ts` builds it as `[...chain,
-    // name].join(" > ")`), so a root entry is one with no `>` in it. That is
-    // also why this reads `sweep.entries` and not a per-site listing:
-    // `extractNodeModules` merges every permitted site into ONE scratch
-    // directory before the walk, and by this line the only site that survived
-    // the check above is the engine's — so every entry here came from it.
+    // name].join(" > ")`), so a root entry is one with no `>` in it.
     //
     // Transitive dependencies are a different, already-swept and
     // already-attributed fact and are deliberately not counted: `yaml` and
     // `zod` have none today, which is why the builder's count is 2, and if
     // that changes the deeper entries must not trip this while the top-level
     // set stays honest.
+    //
+    // Read from `engineSweep` — the ENGINE site's own sweep — never the
+    // merged `sweep`: /opt/openrig's tree legitimately holds `yaml` and `zod`
+    // (and a dozen more) as its own top-level roots, and before the per-site
+    // split this check would have counted them as the engine's closure.
     const EXPECTED_ENGINE_CLOSURE = ["yaml", "zod"];
     {
       // The presence gate above already refused an absent tree, so this reads
       // unconditionally — a tree at the engine's path is a fact by this line.
-      const closure = [...new Set(sweep.entries.filter((e) => !e.depPath.includes(" > ")).map((e) => e.name))].sort();
+      const closure = [...new Set(engineSweep.entries.filter((e) => !e.depPath.includes(" > ")).map((e) => e.name))].sort();
       if (JSON.stringify(closure) !== JSON.stringify(EXPECTED_ENGINE_CLOSURE)) {
         die(1, [
           `/${enginePath} holds ${closure.length} top-level package(s): ${closure.join(", ") || "<none the sweep could read>"}`,
@@ -3876,8 +3968,12 @@ function main(): void {
       }
     };
     drop(runDir);
-    if (!opts.keepTree) drop(treeDir);
-    else say(`kept extracted tree at ${treeDir}\n`);
+    if (!opts.keepTree) {
+      drop(treeDir);
+      drop(openrigDir);
+    } else {
+      say(`kept extracted trees at ${treeDir} and ${openrigDir}\n`);
+    }
   }
 }
 
