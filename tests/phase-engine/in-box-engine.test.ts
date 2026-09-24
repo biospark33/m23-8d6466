@@ -893,8 +893,8 @@ describe("C19 — PhaseKind is exactly the kinds the closed schema admits", () =
     // on the assignment below — the gate for that half is the `bunx tsc` /
     // typecheck job in CI, and this test's job is to keep the file honest for
     // that job while pinning the SET at runtime below. S1 note: `rig_swarm`
-    // is that decision in progress — schema-side here (Task 1), executor in
-    // Task 4, which also resolves the never-residue in makeBodyFactory.
+    // is that decision — schema-side here (Task 1), executor in
+    // makeBodyFactory (Task 4), which also resolved the never-residue.
     const executing = ["code", "dispatch_task", "rig_swarm"] as const;
     type Executing = (typeof executing)[number];
     // The annotation IS the check, for tsc. Deliberately no runtime `expect`

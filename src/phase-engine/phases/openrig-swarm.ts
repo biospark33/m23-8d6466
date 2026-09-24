@@ -14,6 +14,11 @@ import * as path from "node:path";
 import { stringify } from "yaml";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
 import type { PhaseSpec, RigMemberSpec, RigSpec } from "../types.ts";
+// The exact trace-event shape (`Parameters<…>[0]`, never re-spelled): the
+// pipeline runner passes its real `Tracer`, whose `trace` parameter is
+// narrower than a bare `Record<string, unknown>` — a wide param here made
+// the real Tracer structurally UNassignable to the dep.
+import type { Tracer } from "../trace/tracer.ts";
 import { emitSeatCosts, parseSeatSessionJsonl } from "./openrig-cost.ts";
 
 export const SWARM_POLL_INTERVAL_MS = 15_000;
@@ -34,7 +39,7 @@ export interface OpenrigSwarmDeps {
   home?: string;
   /** Injectable command runner. Default: Bun.spawn with captured stdio. */
   run?: CmdRunner;
-  tracer?: { trace: (row: Record<string, unknown>) => void };
+  tracer?: { trace: (event: Parameters<Tracer["trace"]>[0]) => void };
   emitMoneyLine?: (line: Record<string, unknown>) => void;
   invocationSeqByAgent?: Map<string, number>;
   log?: (line: Record<string, unknown>) => void;

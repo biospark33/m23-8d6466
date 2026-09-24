@@ -13,11 +13,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { readJournal } from "./journal-test-util.ts";
-import { runContextFrom } from "../../scripts/pipeline-run.ts";
+import { makeBodyFactory, runContextFrom } from "../../scripts/pipeline-run.ts";
 // DF5.3: the re-point test seeds a prior session row through the same store
 // the engine will open — the tracer's own initiateSession, never hand-written
 // SQL, so the seed cannot drift from the schema the refusal reads.
-import { Tracer } from "../../src/phase-engine/index.ts";
+// FileJournal + PhaseSpec: the rig_swarm factory-shape tests below compose a
+// real journal port and a real spec the way `main` hands them to the factory.
+import { FileJournal, Tracer, type PhaseSpec } from "../../src/phase-engine/index.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
@@ -3002,4 +3004,62 @@ describe("pipeline-run DF5.3: a dispatched run records the issue its witness nam
     expect(stderr2).toContain("carries no positive integer effectiveCeilingMicros");
     expect(stderr2).not.toContain("JSON but not an object");
   }, 90_000);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// S1 — the rig_swarm executor branch of makeBodyFactory
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("makeBodyFactory rig_swarm branch (S1)", () => {
+  // The two factory SHAPES, pinned at construction time. The bodies are never
+  // INVOKED here: invoking the swarm's base body spawns the real OpenRig CLI
+  // (the in-box tier-2 engine), which is live-spend territory the qds-live-e2e
+  // skill owns. What these tests pin is the seam the factory owes every kind —
+  // a COMPOSED body (gated over testCommand, or bare without one), never the
+  // S1 interim arm's throwing residue — and that seam is fully decided by the
+  // time `factory(spec)` returns.
+  const swarmSpec = (extra: Partial<PhaseSpec> = {}): PhaseSpec => ({
+    name: "swarm_build",
+    kind: "rig_swarm",
+    description: "swarm",
+    maxDurationMs: 600_000,
+    retries: 0,
+    rigSpec: { name: "r", pods: [{ id: "p", members: [{ id: "lead", model: "m" }] }] },
+    objective: "o",
+    leadSeat: "lead",
+    seatBudgets: { lead: 1000 },
+    ...extra,
+  });
+
+  test("rig_swarm spec with testCommand yields a gated body", () => {
+    const ws = workspace();
+    const tracer = new Tracer({
+      dataDir: path.join(ws.dir, "trace"),
+      boundaryRoot: ws.dir,
+      requestId: "req-swarm-shape",
+      pipelineName: "rig-swarm-shape",
+    });
+    // A journal present + a declared testCommand is the gated composition's
+    // precondition — the same `journal === undefined` escape the code branch
+    // honours (DF3.3: no journal = no composition).
+    const journal = new FileJournal(ws.journal, "run-swarm-shape");
+    const factory = makeBodyFactory(ws.dir, tracer, "req-swarm-shape", undefined, journal);
+    const body = factory(swarmSpec({ testCommand: ["true"] }));
+    expect(typeof body).toBe("function"); // a composed body, NOT the interim throw
+    tracer.close();
+  });
+
+  test("rig_swarm spec without testCommand yields the bare body", () => {
+    const ws = workspace();
+    const tracer = new Tracer({
+      dataDir: path.join(ws.dir, "trace"),
+      boundaryRoot: ws.dir,
+      requestId: "req-swarm-shape",
+      pipelineName: "rig-swarm-shape",
+    });
+    const factory = makeBodyFactory(ws.dir, tracer, "req-swarm-shape");
+    const body = factory(swarmSpec());
+    expect(typeof body).toBe("function");
+    tracer.close();
+  });
 });

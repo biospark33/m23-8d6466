@@ -126,6 +126,10 @@ import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
+// S1: the rig_swarm phase body — the tier-2 engine INSIDE the box. The runner
+// stays the composition root: it injects the run's tracer, the money-line tee
+// and the run-scoped invocation counter, exactly as it does for dispatch_task.
+import { openrigSwarmPhase } from "../src/phase-engine/phases/openrig-swarm.ts";
 // DF3.3: the steering port (engine) and the resident agent (fleet). The runner
 // is the composition root — the one place the two meet (INV-RES-1's module
 // boundary is engine-must-not-import-fleet, and steering.ts honours it).
@@ -2401,7 +2405,147 @@ function acquireEngineClaim(
   }
 }
 
-function makeBodyFactory(
+/**
+ * DF3.3's gate-retry composition, extracted verbatim from the `code` branch
+ * (S1) so `rig_swarm` composes the identical loop — the engine keeps gate
+ * authority via testCommand, the same commandGate discipline code phases
+ * ride. The CALLER owns the gate's construction (its cwd/env/label come from
+ * the run's own seams); this function owns only the retry loop around
+ * `gatedBody`. `requestId` rides the seam for parity with the factory's
+ * inputs; the loop itself traces under `resident.requestId`, as it always
+ * has.
+ */
+function composeGatedBody(args: {
+  journal: PhaseJournal;
+  gate: ReturnType<typeof commandGate>;
+  base: PhaseBody<unknown>;
+  spec: PhaseSpec;
+  cwd: string;
+  resident?: ResidentHooks;
+  tracer: Tracer;
+  requestId: string;
+}): PhaseBody<unknown> {
+  const { journal, gate, base, spec, cwd, resident, tracer } = args;
+  // The loop body's try/catch IS the retry contract — GateFailureError
+  // within the retries bound continues, everything else propagates; the only
+  // awaits outside it are solicitResident (never throws, see its dp:ok).
+  const gated: PhaseBody<unknown> = async (bodyCtx) => { // dp:ok loop-level try/catch is the DF1.3 retry contract; other awaits never throw
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await gatedBody(
+          journal,
+          { runRoot: cwd, signal: bodyCtx.signal },
+          [gate],
+          { attempt },
+        )(base)(bodyCtx);
+      } catch (err) {
+        // An aborted body belongs to a TERMINATED run: run.terminate has
+        // flipped the engine's halted state and aborted this signal (the
+        // terminal marker itself is written only by Run.finish, at the end
+        // of the unwind this throw feeds), so no post-termination zombie
+        // may re-run the command, re-solicit the resident, or write
+        // journal rows past the abort.
+        if (bodyCtx.signal.aborted) throw err;
+        if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
+        // DF1.3 authorized attempt N+1 (that dual-loop discipline lived in
+        // src/phase-engine/agents/retry.ts, deleted with the unreachable
+        // `agent` kind — #211; the branch is re-spelled here for code
+        // phases). HISTORICAL DRIFT NOTE, kept for the budget semantics:
+        // retry.ts's loop armed a FRESH per-attempt maxDurationMs timer,
+        // while every attempt of this loop — command + gate + each
+        // solicitation — shares the ONE phase timer. A slow attempt can
+        // therefore overflow a retry DF1.3 would have granted its own
+        // budget; the run can never exceed the manifest's per-phase
+        // ceiling, and the admitted budget reservation ((retries+1) × … ×
+        // maxDurationMs, manifest.ts:606) is the looser outer bound.
+        // DF3.3 solicitation point 2 of 3: AFTER the verdict AND after
+        // the authorization.
+        if (resident?.steering === undefined) continue;
+        const directive = await solicitResident(resident.steering, "post_gate_failure", {
+          runId: resident.runId,
+          requestId: resident.requestId,
+          phase: spec.name,
+          // The engine's phaseId domain, matching the phase_started /
+          // phase_settled pair this solicitation sits between.
+          phaseId: bodyCtx.phaseId,
+          // rosterIds deliberately ABSENT: select_roster is run_start-only,
+          // so a roster pick here hits steering.ts's fail-closed empty-set
+          // rejection (tripwire-recorded) instead of being silently dropped.
+          phaseIds: resident.phaseIds,
+          promptContext: resident.promptContext,
+        }, resident.model);
+        // The solicitation is an await: a signal landing mid-solicit
+        // aborts bodyCtx.signal UNDER us (run.terminate), the stopped
+        // resident degrades the reply to a resolved PROCEED, and
+        // runCommand's exit path RESOLVES on a kill ({exitCode: 128}) —
+        // without this re-check the loop would respawn the command on an
+        // already-terminated run and the gate would write a phantom
+        // gate_fail row for attempt N+1. Unwind through the same path as
+        // the catch-entry guard above; nothing is journaled on it.
+        if (bodyCtx.signal.aborted) throw err;
+        if (directive.action === "abort") {
+          // The engine's own fail transition: the authorized retry is
+          // declined and the caught GateFailureError settles the phase.
+          // The agent's reason is a run fact — a trace row records it
+          // before the rethrow (DF1.4's closed event union is untouched;
+          // residentTripwire's precedent).
+          try {
+            tracer.trace({
+              type: "log",
+              name: "resident_directive",
+              requestId: resident.requestId,
+              phaseId: bodyCtx.phaseId,
+              payloadJson: JSON.stringify({
+                runId: resident.runId,
+                phase: spec.name,
+                action: "abort",
+                reason: directive.reason,
+                attempt: attempt + 1,
+              }),
+            });
+          } catch {
+            /* the trace store is a sidecar; the phase verdict owns the run */
+          }
+          throw err;
+        }
+        if (directive.action === "retry") {
+          resident.promptContext.push(
+            `resident guidance for ${spec.name} (attempt ${attempt + 1}): ${sanitizeForMessage(directive.guidance)}`,
+          );
+          // Directive rows ride type:"log" + a name, NOT writeGateEvent:
+          // the bridge maps every gate event to a gate_results row, so a
+          // directive there fabricated a passed=0 verdict and an event
+          // type outside DF1.4's closed TraceEventType union.
+          try {
+            tracer.trace({
+              type: "log",
+              name: "resident_directive",
+              requestId: resident.requestId,
+              phaseId: bodyCtx.phaseId,
+              payloadJson: JSON.stringify({
+                runId: resident.runId,
+                phase: spec.name,
+                action: "retry",
+                guidance: directive.guidance,
+                attempt: attempt + 1,
+              }),
+            });
+          } catch {
+            /* the trace store is a sidecar; the retry itself is the effect */
+          }
+        }
+        // proceed (the deterministic default): the engine-authorized
+        // retry runs unguided.
+      }
+    }
+  };
+  return gated;
+}
+
+// Exported for the factory-shape tests (tests/phase-engine/pipeline-run.test.ts)
+// the same way `moneyLineTee` is for the money-line suite: the runner's `main`
+// remains the only production caller.
+export function makeBodyFactory(
   cwd: string,
   tracer: Tracer,
   requestId: string,
@@ -2448,120 +2592,7 @@ function makeBodyFactory(
         return base;
       }
       const gate = commandGate([...test], { cwd, env: childEnv(), label: `testCommand:${spec.name}` });
-      // The loop body's try/catch IS the retry contract — GateFailureError
-      // within the retries bound continues, everything else propagates; the only
-      // awaits outside it are solicitResident (never throws, see its dp:ok).
-      const gated: PhaseBody<unknown> = async (bodyCtx) => { // dp:ok loop-level try/catch is the DF1.3 retry contract; other awaits never throw
-        for (let attempt = 1; ; attempt += 1) {
-          try {
-            return await gatedBody(
-              journal,
-              { runRoot: cwd, signal: bodyCtx.signal },
-              [gate],
-              { attempt },
-            )(base)(bodyCtx);
-          } catch (err) {
-            // An aborted body belongs to a TERMINATED run: run.terminate has
-            // flipped the engine's halted state and aborted this signal (the
-            // terminal marker itself is written only by Run.finish, at the end
-            // of the unwind this throw feeds), so no post-termination zombie
-            // may re-run the command, re-solicit the resident, or write
-            // journal rows past the abort.
-            if (bodyCtx.signal.aborted) throw err;
-            if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
-            // DF1.3 authorized attempt N+1 (that dual-loop discipline lived in
-            // src/phase-engine/agents/retry.ts, deleted with the unreachable
-            // `agent` kind — #211; the branch is re-spelled here for code
-            // phases). HISTORICAL DRIFT NOTE, kept for the budget semantics:
-            // retry.ts's loop armed a FRESH per-attempt maxDurationMs timer,
-            // while every attempt of this loop — command + gate + each
-            // solicitation — shares the ONE phase timer. A slow attempt can
-            // therefore overflow a retry DF1.3 would have granted its own
-            // budget; the run can never exceed the manifest's per-phase
-            // ceiling, and the admitted budget reservation ((retries+1) × … ×
-            // maxDurationMs, manifest.ts:606) is the looser outer bound.
-            // DF3.3 solicitation point 2 of 3: AFTER the verdict AND after
-            // the authorization.
-            if (resident?.steering === undefined) continue;
-            const directive = await solicitResident(resident.steering, "post_gate_failure", {
-              runId: resident.runId,
-              requestId: resident.requestId,
-              phase: spec.name,
-              // The engine's phaseId domain, matching the phase_started /
-              // phase_settled pair this solicitation sits between.
-              phaseId: bodyCtx.phaseId,
-              // rosterIds deliberately ABSENT: select_roster is run_start-only,
-              // so a roster pick here hits steering.ts's fail-closed empty-set
-              // rejection (tripwire-recorded) instead of being silently dropped.
-              phaseIds: resident.phaseIds,
-              promptContext: resident.promptContext,
-            }, resident.model);
-            // The solicitation is an await: a signal landing mid-solicit
-            // aborts bodyCtx.signal UNDER us (run.terminate), the stopped
-            // resident degrades the reply to a resolved PROCEED, and
-            // runCommand's exit path RESOLVES on a kill ({exitCode: 128}) —
-            // without this re-check the loop would respawn the command on an
-            // already-terminated run and the gate would write a phantom
-            // gate_fail row for attempt N+1. Unwind through the same path as
-            // the catch-entry guard above; nothing is journaled on it.
-            if (bodyCtx.signal.aborted) throw err;
-            if (directive.action === "abort") {
-              // The engine's own fail transition: the authorized retry is
-              // declined and the caught GateFailureError settles the phase.
-              // The agent's reason is a run fact — a trace row records it
-              // before the rethrow (DF1.4's closed event union is untouched;
-              // residentTripwire's precedent).
-              try {
-                tracer.trace({
-                  type: "log",
-                  name: "resident_directive",
-                  requestId: resident.requestId,
-                  phaseId: bodyCtx.phaseId,
-                  payloadJson: JSON.stringify({
-                    runId: resident.runId,
-                    phase: spec.name,
-                    action: "abort",
-                    reason: directive.reason,
-                    attempt: attempt + 1,
-                  }),
-                });
-              } catch {
-                /* the trace store is a sidecar; the phase verdict owns the run */
-              }
-              throw err;
-            }
-            if (directive.action === "retry") {
-              resident.promptContext.push(
-                `resident guidance for ${spec.name} (attempt ${attempt + 1}): ${sanitizeForMessage(directive.guidance)}`,
-              );
-              // Directive rows ride type:"log" + a name, NOT writeGateEvent:
-              // the bridge maps every gate event to a gate_results row, so a
-              // directive there fabricated a passed=0 verdict and an event
-              // type outside DF1.4's closed TraceEventType union.
-              try {
-                tracer.trace({
-                  type: "log",
-                  name: "resident_directive",
-                  requestId: resident.requestId,
-                  phaseId: bodyCtx.phaseId,
-                  payloadJson: JSON.stringify({
-                    runId: resident.runId,
-                    phase: spec.name,
-                    action: "retry",
-                    guidance: directive.guidance,
-                    attempt: attempt + 1,
-                  }),
-                });
-              } catch {
-                /* the trace store is a sidecar; the retry itself is the effect */
-              }
-            }
-            // proceed (the deterministic default): the engine-authorized
-            // retry runs unguided.
-          }
-        }
-      };
-      return gated;
+      return composeGatedBody({ journal, gate, base, spec, cwd, resident, tracer, requestId });
     }
     // DF1.6 T7: dispatch_task registration — the factory closes over the
     // run's tracer + requestId so prompt events (pre-spawn) and adapted team
@@ -2632,16 +2663,22 @@ function makeBodyFactory(
         return body(bodyCtx);
       };
     }
-    // S1 interim: the rig_swarm executor lands in the factory branch (next
-    // task). Until then a declared swarm phase fails LOUDLY at walk time —
-    // the same residue contract as the never arm below — instead of breaking
-    // the compile-time exhaustiveness check every kind owes (DF1.10 AC1).
+    // S1 rig_swarm: the OpenRig swarm is the tier-2 engine INSIDE the box
+    // (research doc §4.1 rule 2). The engine keeps gate authority via
+    // testCommand — the same commandGate loop code phases compose.
     if (spec.kind === "rig_swarm") {
-      return () => {
-        throw new Error(
-          `phase '${sanitizeForMessage(spec.name)}': kind 'rig_swarm' has no executor yet (S1 task 4 lands it)`,
-        );
-      };
+      const body = openrigSwarmPhase(spec, {
+        requestId,
+        tracer,
+        emitMoneyLine: moneyLineTee(),
+        invocationSeqByAgent,
+      });
+      const test = spec.testCommand ?? [];
+      if (test.length === 0 || journal === undefined) {
+        return body;
+      }
+      const gate = commandGate([...test], { cwd, env: childEnv(), label: `testCommand:${spec.name}` });
+      return composeGatedBody({ journal, gate, base: body, spec, cwd, resident, tracer, requestId });
     }
     // DF1.10 AC1/C19: the COMPILER owns the completeness of this dispatch.
     //
