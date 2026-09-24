@@ -35,7 +35,9 @@ EOF
 for seat in lead worker; do
   d=$OPENRIG_HOME/state/pi/dev-$seat@$RIG/agent
   mkdir -p "$d" && chmod 700 "$d"
-  key=$(printf '%s' "$KEYS_JSON" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const k=JSON.parse(s).find(x=>x.seat===process.argv[1]);if(!k)process.exit(3);process.stdout.write(k.key)})' "$seat")
+  # keys.ts mints are append-only: pick the NEWEST record per seat (older ones
+  # may be revoked and must stay in the state file for revocation).
+  key=$(printf '%s' "$KEYS_JSON" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const m=JSON.parse(s).filter(x=>x.seat===process.argv[1]);const k=m[m.length-1];if(!k)process.exit(3);process.stdout.write(k.key)})' "$seat")
   umask 077; printf '{"openrouter":{"type":"api_key","key":"%s"}}' "$key" > "$d/auth.json"; unset key
   printf '{"extensions":["/opt/qds/pi-ext/self-compact/self-compact.ts"]}' > "$d/settings.json"
 done
@@ -44,5 +46,5 @@ done
 rig daemon status >/dev/null 2>&1 || rig daemon start --no-kernel
 for i in $(seq 1 30); do curl -fsS 127.0.0.1:7433/healthz >/dev/null 2>&1 && break; sleep 1; done
 T0=$(date +%s)
-curl -sS -X POST 127.0.0.1:7433/api/rigs/import -H "X-Rig-Root: /work/rig" -H 'Content-Type: text/yaml' --data-binary @/work/rig/rig.yaml
+curl --fail-with-body -sS -X POST 127.0.0.1:7433/api/rigs/import -H "X-Rig-Root: /work/rig" -H 'Content-Type: text/yaml' --data-binary @/work/rig/rig.yaml
 echo; echo "import returned after $(( $(date +%s)-T0 ))s"

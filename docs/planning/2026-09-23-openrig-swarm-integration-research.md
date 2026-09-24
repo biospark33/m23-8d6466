@@ -331,7 +331,7 @@ Claude Code cockpit (human tier 1): watch and steer any box
 | Claude Code (API) | `ANTHROPIC_BASE_URL=https://openrouter.ai/api` + `ANTHROPIC_AUTH_TOKEN=<seat key>` + `ANTHROPIC_API_KEY=""` | Hard | `[1m]` model slugs; no Fast mode; prompt-cache pass-through unverified; no Anthropic login in images |
 | Codex | `model_providers.openrouter` in a per-seat `CODEX_HOME` | Hard | Must be user-level config; Responses API only |
 | OpenCode | Built-in `openrouter` provider | Hard | Keep keys out of the shared `auth.json` |
-| Claude Max / ChatGPT Pro | Wall-clock, turn caps, rate-window % only | **None in USD** | Anthropic ToS bans subscription OAuth in third-party tools (from 2026-04). **Not allowed in capped runs.** |
+| Claude Max / ChatGPT Pro | Wall-clock, turn caps, rate-window % only | **None in USD** | Third-party use of subscription auth depends on the authentication method and each vendor's current terms (Anthropic and OpenAI differ — verify before relying on it). Independently: no hard USD cap, so **excluded from capped runs** on cap grounds alone. |
 | LiteLLM / Portkey / CF AI Gateway | Virtual-key budgets | Partly hard | Extra infrastructure, open enforcement bugs. Not needed. |
 
 The caps are layered. The run cap (budget gate) must be at least the sum of the
@@ -466,7 +466,7 @@ Box destroyed and keys revoked (confirmed 404).
 | # | Result |
 |---|---|
 | E1 | **PASS.** The pinned image is Ubuntu 24.04.5 with **tmux 3.4 already installed** (so #12 doesn't apply). Node 22 installed in 20 s and OpenRig in 9 s; better-sqlite3 came **prebuilt**. The daemon was healthy in 2.7 s on `127.0.0.1` only. Import plus launch of 2 Pi seats took 3 s. Zero prompts. |
-| E2 | **PASS.** Each seat's `auth.json` key was used separately, confirmed by distinct per-key usage on OpenRouter. |
+| E2 | **PASS.** Each seat's `auth.json` key was used separately, confirmed by distinct per-key usage on OpenRouter. **Cost attribution remains unverified for S1:** the spike did not harvest the seats' session JSONLs, so the `usage.cost` records that `openrig-cost.ts` (§5.6) will read were never checked; OpenRouter per-key `finalUsageUsd` is a proxy only. |
 | E3 | **PASS.** Self-compact loads from the seat's `settings.json`: pi RPC `get_commands` lists `self-compact-info` and `self-compact-now`, and the context bar status is emitted. pi 0.84.4 supports every runner flag, so no pi bump is needed. |
 | E4 | **PASS.** The objective went through `/api/queue/create` with a nudge. The lead wrote `hello.js`, `rig send`-ed the test task to the worker, the worker wrote `hello.test.js` and replied, and the lead ran `node --test`, committed, and closed its item `done/no-follow-on`. |
 | E5 | **PASS.** A git bundle of `sbx/spike` cloned on the host with `d1ac153 spike: hello + test`. Tests: 1 pass, 0 fail. |

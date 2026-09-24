@@ -34,6 +34,8 @@ if (cmd === "mint") {
     if (!res.ok) throw new Error(`mint ${seat}: HTTP ${res.status} ${await res.text()}`);
     const body = (await res.json()) as { key: string; data: { hash: string } };
     seats.push({ seat, hash: body.data.hash, key: body.key, limit });
+    // append-only on purpose: consumers (box-seed.sh) must select the newest
+    // record per seat; older records stay here so `revoke` can still delete them.
     save(seats); // persist after EACH mint so a crash mid-loop still leaves hashes to revoke
     console.log(`minted ${seat} hash=${body.data.hash} limit=$${limit}`);
   }
