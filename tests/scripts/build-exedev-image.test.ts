@@ -1252,7 +1252,15 @@ describe("buildIdFileInputs", () => {
       // hoisted above the tree measurement, the per-assert `|| exit 1`s). All
       // inside the file whose bytes this entry pins; measured on the final
       // tree, same-commit re-pin per the discipline below.
-      "oci/exedev/Dockerfile": "2b9b437ede2d939ff8a656537149cfbc1973da29609a6ad75ae8b7d18ef2e61c",
+      //
+      // ff2dcbcc: R0 first-build reconciliation (2026-09-24) — the engine
+      // COPY set takes the S1 provider closure (credentials/driver/errors/
+      // harvest/path-guard/quota/viz-guard; the #284 merge build refused at
+      // the stage probe on openrig-swarm.ts:32, `bun build` resolves before
+      // it tree-shakes, and the enumeration must carry every RESOLVED file —
+      // seven, not the four the import sites alone suggest). Dockerfile
+      // bytes only; measured on the final tree, same-commit re-pin.
+      "oci/exedev/Dockerfile": "ff2dcbcc1bbfba7d94c24927bbe7785227d9e72f1ec2e631d23c6c8f0a8cf26c",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1779,7 +1787,21 @@ describe("buildIdFileInputs", () => {
       // sources. RE-DERIVED from this test's own failing run on the final
       // tree (re-pin LAST, per the discipline). The image stays UN-PINNED
       // per the aaa26243 note.
-      "da700724556c81c3816e695a1f830269416968beff77515a6bc8cfb747d49218",
+      //
+      // a9f9039e: moved from da700724 by the R0 first-build reconciliation
+      // (2026-09-24): the S1 merge itself had ALREADY left this pin stale —
+      // verified against a clean HEAD (7957e8a4) with the working tree
+      // stashed, still red, the DF5.3 shape again — because the S1 wave
+      // edited walked COPY inputs (src/phase-engine/**, src/fleet/dispatch.ts,
+      // scripts/pipeline-run.ts, src/providers/{credentials,teardown}.ts) and
+      // re-pinned the per-asset Dockerfile map but missed this whole-walk
+      // literal. This convergence adds SEVEN walked inputs (the engine COPY
+      // set takes credentials/driver/errors/harvest/path-guard/quota/
+      // viz-guard, with both workflow lists following) and re-pins both
+      // halves. RE-DERIVED from this test's own failing run on the final
+      // tree, adopted LAST (this file is NOT a walked input). The image
+      // stays UN-PINNED per the aaa26243 note.
+      "a9f9039e50e6410a828e36879fc4cf5d21940c3d12967720867a9450825510b0",
     );
   });
 });

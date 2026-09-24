@@ -318,6 +318,33 @@ COPY src/providers/step-log.ts src/providers/step-log.ts
 COPY src/providers/cap-rejection.ts src/providers/cap-rejection.ts
 COPY src/providers/run-record.ts src/providers/run-record.ts
 COPY src/providers/fs-atomic.ts src/providers/fs-atomic.ts
+# The 2026-09-24 publish (post-#284 rig_swarm S1 merge) refused at this stage's
+# probe the same way the 2026-09-18 precedent above did — `error: Could not
+# resolve: "../../providers/credentials.ts"` at
+# src/phase-engine/phases/openrig-swarm.ts:32 — because S1's two new phase
+# bodies import the credentials module into the engine's bundle graph for the
+# first time (SWARM_SEAT_KEYS_ENV, usdToMicros), and credentials.ts drags its
+# own provider-family closure in with it. Seven additions. This time converged
+# WITHOUT the scratch-tree probe loop's iteration: a Bun.build onResolve plugin
+# recorded every import edge bun must RESOLVE (sourcemap sources under-report —
+# see the tree-shake note above) for both probe entry points, the resolved set
+# was diffed against this COPY enumeration, and the scratch-tree probe ran once
+# on the completed set:
+#   credentials.ts  — imported directly by the S1 phase bodies
+#                     (openrig-swarm.ts, openrig-cost.ts)
+#   errors.ts       — sibling import of credentials.ts (ProviderError)
+#   driver.ts       — sibling import of credentials.ts; provider entry
+#   harvest.ts      — reached through the provider chain (evidence harvest)
+#   path-guard.ts   — sibling import of credentials.ts (assertPlainBoxPath)
+#   quota.ts        — sibling import of driver.ts
+#   viz-guard.ts    — sibling import of driver.ts
+COPY src/providers/credentials.ts src/providers/credentials.ts
+COPY src/providers/errors.ts src/providers/errors.ts
+COPY src/providers/driver.ts src/providers/driver.ts
+COPY src/providers/harvest.ts src/providers/harvest.ts
+COPY src/providers/path-guard.ts src/providers/path-guard.ts
+COPY src/providers/quota.ts src/providers/quota.ts
+COPY src/providers/viz-guard.ts src/providers/viz-guard.ts
 COPY src/swarmclaw/ src/swarmclaw/
 COPY cli-anything/src/ cli-anything/src/
 COPY cli-anything/scripts/ cli-anything/scripts/

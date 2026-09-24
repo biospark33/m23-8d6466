@@ -132,6 +132,19 @@ on:
       - src/providers/cap-rejection.ts
       - src/providers/run-record.ts
       - src/providers/fs-atomic.ts
+      # 2026-09-24 COPY-set convergence (post-#284 rig_swarm S1): the engine
+      # stage's resolution probe refused on
+      # "../../providers/credentials.ts" (openrig-swarm.ts:32) because S1's
+      # phase bodies import the credentials module — and its provider-family
+      # closure — into the engine bundle graph for the first time. Seven new
+      # COPYs, and both lists take all seven, same as the 2026-09-18 wave.
+      - src/providers/credentials.ts
+      - src/providers/errors.ts
+      - src/providers/driver.ts
+      - src/providers/harvest.ts
+      - src/providers/path-guard.ts
+      - src/providers/quota.ts
+      - src/providers/viz-guard.ts
       - src/swarmclaw/**
       - cli-anything/src/**
       - cli-anything/scripts/**
@@ -523,7 +536,11 @@ jobs:
                         src/fleet src/lib src/phase-engine src/providers/bounded-exec.ts \
                         src/providers/timeout.ts \
                         src/providers/step-log.ts src/providers/cap-rejection.ts \
-                        src/providers/run-record.ts src/providers/fs-atomic.ts src/swarmclaw \
+                        src/providers/run-record.ts src/providers/fs-atomic.ts \
+                        src/providers/credentials.ts src/providers/errors.ts \
+                        src/providers/driver.ts src/providers/harvest.ts \
+                        src/providers/path-guard.ts src/providers/quota.ts \
+                        src/providers/viz-guard.ts src/swarmclaw \
                         cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts \
                         pi-vs-claude-code-vendor/self-compact/extensions/self-compact \
                         cli-anything/package.json pi-vs-claude-code-vendor/package.json \
