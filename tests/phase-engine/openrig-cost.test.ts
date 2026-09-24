@@ -20,9 +20,12 @@ const line4 = JSON.stringify({
 });
 
 test("parseSeatSessionJsonl keeps only messages carrying usage.cost", () => {
-  const rows = parseSeatSessionJsonl([line1, line2, line3, line4].join("\n"), "worker", "dev-worker@spike");
-  expect(rows).toHaveLength(2);
-  expect(rows[0]).toEqual({
+  const result = parseSeatSessionJsonl([line1, line2, line3, line4].join("\n"), "worker", "dev-worker@spike");
+  expect(result).toMatchObject({ seat: "worker", sessionName: "dev-worker@spike" });
+  // The two skipped lines (usage-less, unparsable) are counted, not dropped silently.
+  expect(result.unpricedTurns).toBe(2);
+  expect(result.usages).toHaveLength(2);
+  expect(result.usages[0]).toEqual({
     seat: "worker",
     sessionName: "dev-worker@spike",
     model: "deepseek/deepseek-v3.2",
@@ -35,8 +38,22 @@ test("parseSeatSessionJsonl keeps only messages carrying usage.cost", () => {
   });
 });
 
+test("a NEGATIVE usage.cost is unpriced, never summed (provider artifact, not spend)", () => {
+  const negative = JSON.stringify({
+    role: "assistant",
+    model: "deepseek/deepseek-v3.2",
+    timestamp: "2026-09-23T18:02:00.000Z",
+    usage: { cost: -0.5, input: 10, output: 2, cacheRead: 0, cacheWrite: 0 },
+  });
+  const result = parseSeatSessionJsonl(negative, "worker", "dev-worker@spike");
+  expect(result.usages).toHaveLength(0);
+  expect(result.unpricedTurns).toBe(1);
+});
+
 test("empty file parses to no rows", () => {
-  expect(parseSeatSessionJsonl("", "lead", "dev-lead@spike")).toHaveLength(0);
+  const result = parseSeatSessionJsonl("", "lead", "dev-lead@spike");
+  expect(result.usages).toHaveLength(0);
+  expect(result.unpricedTurns).toBe(0);
 });
 
 test("emitSeatCosts emits one cost_attribution line per usage with the dispatch-task shape", () => {
@@ -76,9 +93,54 @@ test("emitSeatCosts emits one cost_attribution line per usage with the dispatch-
 });
 
 test("emitSeatCosts returns 0 for an empty seat", () => {
-  const total = emitSeatCosts([], {
-    emitMoneyLine: () => {},
-    requestId: "r", runId: "run", phaseId: "p", role: "lead",
-  });
+  const emitted: Record<string, unknown>[] = [];
+  const total = emitSeatCosts(
+    { seat: "lead", sessionName: "dev-lead@spike", usages: [], unpricedTurns: 0 },
+    {
+      emitMoneyLine: (l) => emitted.push(l),
+      requestId: "r", runId: "run", phaseId: "p", role: "lead",
+    },
+  );
   expect(total).toBe(0);
+  expect(emitted).toHaveLength(0); // a silent seat emits nothing
+});
+
+test("a seat that spoke but priced nothing emits ONE zero-µ$ row carrying its unpricedTurns", () => {
+  const emitted: Record<string, unknown>[] = [];
+  const total = emitSeatCosts(
+    { seat: "worker", sessionName: "dev-worker@spike", usages: [], unpricedTurns: 3 },
+    {
+      emitMoneyLine: (l) => emitted.push(l),
+      requestId: "r", runId: "run", phaseId: "p", role: "worker",
+    },
+  );
+  expect(total).toBe(0);
+  expect(emitted).toHaveLength(1);
+  expect(emitted[0]).toMatchObject({
+    type: "cost_attribution",
+    agentId: "dev-worker@spike",
+    costMicroUsd: 0,
+    turnCount: 0,
+    unpricedTurns: 3,
+    model: null,
+  });
+});
+
+test("the seat's unpricedTurns ride the FIRST emitted row only", () => {
+  // line1 (priced), a usage-less line, line4 (priced): 2 usages, 1 unpriced.
+  const result = parseSeatSessionJsonl(
+    [line1, line2, line4].join("\n"),
+    "worker",
+    "dev-worker@spike",
+  );
+  expect(result.usages).toHaveLength(2);
+  expect(result.unpricedTurns).toBe(1);
+  const emitted: Record<string, unknown>[] = [];
+  emitSeatCosts(result, {
+    emitMoneyLine: (l) => emitted.push(l),
+    requestId: "r", runId: "run", phaseId: "p", role: "worker",
+  });
+  expect(emitted).toHaveLength(2);
+  expect(emitted[0]).toMatchObject({ unpricedTurns: 1 });
+  expect(emitted[1]).toMatchObject({ unpricedTurns: 0 });
 });

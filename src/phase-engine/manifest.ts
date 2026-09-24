@@ -116,6 +116,37 @@ const nonBlankString = z
 const argv = z.array(nonBlankString).min(1);
 
 /**
+ * Seat-identifier grammar, DUPLICATED from `src/providers/credentials.ts`
+ * (`SEAT_NAME_RE`, which is module-private there): the member ids a rig_swarm
+ * phase declares are minted as provider keys under exactly this regex at
+ * `mintSeatKeys`, and until S1 the only check was at that mint — post-box, so
+ * a bad id cost a provisioned box to discover. Enforcing the same grammar here
+ * lands the refusal at manifest parse instead. The copies MUST stay in lockstep:
+ * a parse-time grammar looser than the mint's reopens the post-box refusal this
+ * exists to close; tighter, and the loader refuses ids the mint would accept.
+ */
+const SEAT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * Pod-id / rig-name grammar: lowercase letters, digits and INTERIOR hyphens,
+ * at most 63 characters. These names compose filesystem paths
+ * (`rigHome/state/pi/<pod.id>-<member.id>`) and tmux session names
+ * (`<pod.id>-<member.id>@<rig.name>`), and `rig.name` is interpolated into
+ * `rig` CLI argv at teardown — so a `/`, `..`, or leading `-` is path escape
+ * or flag injection, not a name.
+ */
+const RIG_COMPONENT_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * `objective` is delivered to the box as a single `rig queue create -d`
+ * argument; past ~128KB that spawn dies E2BIG — after the seats are seeded and
+ * the daemon already exists, i.e. the late post-state-change death the manifest
+ * boundary exists to front-run. 65_536 is conservative headroom over any honest
+ * objective.
+ */
+const MAX_OBJECTIVE_CHARS = 65_536;
+
+/**
  * The kinds `makeBodyFactory` has an executor for — the schema's copy of
  * `PhaseKind`, pinned to it in BOTH directions:
  *
@@ -286,6 +317,25 @@ export const PhaseSpecSchema = z
         message: `testCommand is forbidden when kind is '${spec.kind}'`,
       });
     }
+    // The rig_swarm fields get the same reverse-direction refusal as
+    // command/testCommand/roster/task: on every other kind they are silently
+    // dead, and dead payload an author can believe is enforced is exactly what
+    // this file refuses rather than tolerates.
+    if (spec.kind !== "rig_swarm") {
+      for (const [field, value] of [
+        ["rigSpec", spec.rigSpec],
+        ["objective", spec.objective],
+        ["leadSeat", spec.leadSeat],
+        ["seatBudgets", spec.seatBudgets],
+      ] as const) {
+        if (value !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${field} is forbidden when kind is '${spec.kind}'`,
+          });
+        }
+      }
+    }
     // S1: rig_swarm's required field set. Each missing field is its own issue
     // so an author sees everything wrong at once.
     if (spec.kind === "rig_swarm") {
@@ -298,6 +348,70 @@ export const PhaseSpecSchema = z
       for (const [field, value] of required) {
         if (value === undefined) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} is required when kind is 'rig_swarm'` });
+        }
+      }
+      // `objective` is delivered to the box as a single `rig queue create -d`
+      // argument; past ~128KB that spawn dies E2BIG — after the seats are
+      // seeded and the daemon already exists, i.e. the late post-state-change
+      // death the manifest boundary exists to front-run. 65_536 is conservative
+      // headroom over any honest objective. (A `.max` on the field's zod chain
+      // is not available: `nonBlankString` is a ZodEffects, and chain checks on
+      // it lose the `.max` method.)
+      if (spec.objective !== undefined && spec.objective.length > MAX_OBJECTIVE_CHARS) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `objective must be at most ${MAX_OBJECTIVE_CHARS} characters; it is one queue-create argv element and a longer one dies E2BIG on the box after seeding`,
+        });
+      }
+      // Identifier grammar, checked at parse because everything downstream of
+      // these names is box-local: member ids become provider seat keys (minted
+      // under SEAT_NAME_RE — an id that fails it here used to refuse at mint,
+      // after the box existed), pod ids and the rig name compose tmux session
+      // names and the `state/pi/<session>` path, and the rig name reaches `rig`
+      // argv at teardown.
+      if (spec.rigSpec !== undefined) {
+        if (!RIG_COMPONENT_RE.test(spec.rigSpec.name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `rigSpec name '${sanitizeForMessage(spec.rigSpec.name)}' must match ${RIG_COMPONENT_RE.source} — it names tmux sessions and flows into 'rig' argv, so lowercase letters, digits and interior hyphens only, at most 63 characters, no leading hyphen (a leading '-' parses as a CLI flag)`,
+          });
+        }
+        for (const pod of spec.rigSpec.pods) {
+          if (!RIG_COMPONENT_RE.test(pod.id)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `rigSpec pod id '${sanitizeForMessage(pod.id)}' must match ${RIG_COMPONENT_RE.source} — pod ids compose session names and the state/pi path, so lowercase letters, digits and interior hyphens only, at most 63 characters, no leading or trailing hyphen`,
+            });
+          }
+          for (const member of pod.members) {
+            if (!SEAT_NAME_RE.test(member.id)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `rigSpec member id '${sanitizeForMessage(member.id)}' in pod '${sanitizeForMessage(pod.id)}' must match ${SEAT_NAME_RE.source} — seat keys are minted under this grammar, and refusing here lands the failure at manifest parse instead of post-box at mint`,
+              });
+            }
+          }
+        }
+        // Sessions are named `<pod.id>-<member.id>`, and both halves may
+        // contain hyphens — so pod 'a' + member 'b-c' and pod 'a-b' + member
+        // 'c' compose the SAME session: one auth.json shared by two seats and
+        // one ledger identity for both costs. The budget-key set comparison
+        // below cannot catch it (the member sets differ); only the composed
+        // keys can.
+        const composed = new Map<string, { pod: string; member: string }>();
+        for (const pod of spec.rigSpec.pods) {
+          for (const member of pod.members) {
+            const session = `${pod.id}-${member.id}`;
+            const prior = composed.get(session);
+            if (prior !== undefined) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `composed seat session '${sanitizeForMessage(session)}' is not unique: pod '${sanitizeForMessage(prior.pod)}' member '${sanitizeForMessage(prior.member)}' and pod '${sanitizeForMessage(pod.id)}' member '${sanitizeForMessage(member.id)}' both compose it — sessions are named podId-memberId, so these two seats would share one auth.json and one cost identity; rename one pod or member`,
+              });
+            } else {
+              composed.set(session, { pod: pod.id, member: member.id });
+            }
+          }
         }
       }
       if (spec.rigSpec !== undefined && spec.leadSeat !== undefined && spec.seatBudgets !== undefined) {

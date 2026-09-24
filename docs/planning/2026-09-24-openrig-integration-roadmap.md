@@ -43,7 +43,7 @@
 | Piece | State | Where |
 |---|---|---|
 | S0 research + spike | Code+docs on `feature/openrig-swarm-spike`, **PR #283 OPEN** (unmerged) | `docs/planning/2026-09-23-openrig-swarm-integration-research.md`, `_bmad-output/evidence/openrig-s0/2026-09-23-spike-s0.json`, `spikes/openrig-s0/` |
-| S1 `rig_swarm` phase kind | Complete + final-review READY TO MERGE, **PR #284 OPEN** (11 commits, head `0044e62d`) | schema `src/phase-engine/{types,manifest}.ts`; body `src/phase-engine/phases/openrig-swarm.ts` + `openrig-cost.ts`; keys `src/providers/{credentials,run-record,teardown}.ts` + `src/fleet/dispatch.ts`; harvest `src/providers/harvest.ts`; image `oci/exedev/Dockerfile` + `binary-licenses.json` + `scripts/build-exedev-image.ts` |
+| S1 `rig_swarm` phase kind | Complete + final-review fix wave in flight, **PR #284 OPEN** (12 commits, head `cf629518` at last update — this cell is a cache; §0's `gh`/`git log` commands are the authority, the head moves with every fix commit) | schema `src/phase-engine/{types,manifest}.ts`; body `src/phase-engine/phases/openrig-swarm.ts` + `openrig-cost.ts`; keys `src/providers/{credentials,run-record,teardown}.ts` + `src/fleet/dispatch.ts`; harvest `src/providers/harvest.ts`; image `oci/exedev/Dockerfile` + `binary-licenses.json` + `scripts/build-exedev-image.ts` |
 | S1 progress ledger | 8 tasks + fix waves + final review triage | `.superpowers/sdd/progress.md` (git-ignored scratch — its content is summarized in PR #284 body; copy anything durable into issues/docs) |
 | S1 image | **Pairing debt declared**: driver pins UNTOUCHED; two TOFU ARGs carry `MEASURE-AT-FIRST-BUILD` sentinels that fail-closed at first real build | `src/providers/exedev/driver.ts:451,516` must move ONLY post-merge |
 | Old SDD ledger (self-compact) | Archived, historical | `.superpowers/sdd/progress-self-compact-archived.md` |
@@ -66,9 +66,9 @@ Order and dependencies: **R0 → R1 → {P0 ∥ Q1 ∥ SC1} → S2 → SC2 → A
   - Evidence: PR state merged; research doc present on `dev`.
 - [ ] **R0.2 Merge PR #284** (S1) into `dev`.
   - Evidence: PR state merged; `git log origin/dev` carries `0044e62d`.
-- [ ] **R0.3 Publish the image from `dev`** via the existing workflow. It refuses feature branches — this is why R0 waits for merge.
-  - Evidence: workflow run URL + printed `DEFAULT_IMAGE_REF` digest + `DEFAULT_IMAGE_BUILD_ID`.
-- [ ] **R0.4 Fill the two TOFU sentinels** (`NODE_SHA256`, `OPENRIG_TREE_SHA256` in `oci/exedev/Dockerfile`) with the measured values from the build refusal output (the gate prints the measured hash), and admit any first-build reconciliations the sentinel design anticipates (license paths, `rig --version` layout, sweep adjustments) — one commit on `dev` or a fast PR.
+- [ ] **R0.3 Publish the image from `dev`** via the existing workflow. It refuses feature branches — this is why R0 waits for merge. **BLOCKED BY R0.4**: every build refuses at `NODE_SHA256`/`OPENRIG_TREE_SHA256` until the sentinels carry measured values. The refusal mechanism IS the measurement step: run this workflow once, read the gate's refusal output (it prints the measured hashes), pin them in R0.4, then publish here.
+  - Evidence: workflow run URL + printed `DEFAULT_IMAGE_REF` digest + `DEFAULT_IMAGE_BUILD_ID`, from the post-R0.4 run (the pre-pin run's refusal output is R0.4's measurement evidence).
+- [ ] **R0.4 Fill the two TOFU sentinels** (`NODE_SHA256`, `OPENRIG_TREE_SHA256` in `oci/exedev/Dockerfile`) with the measured values from the build refusal output (the gate prints the measured hash; a R0.3 publish attempt produces it — run that first), and admit any first-build reconciliations the sentinel design anticipates (license paths, `rig --version` layout, sweep adjustments) — one commit on `dev` or a fast PR, landing BEFORE R0.3's successful publish. This is commit 1 of 2: the sentinel pins move the buildId and must precede the build that produces the digest; R0.5's pin adoption is a separate, later commit because the digest does not exist until the pinned build publishes (the Dockerfile's sentinel-section comment states the same sequencing).
   - Evidence: grep finds no `MEASURE-AT-FIRST-BUILD` in the Dockerfile; `bun test tests/scripts/build-exedev-image.test.ts` green (236 expected; walked-input hashes re-derived on the final tree).
 - [ ] **R0.5 Adopt the pin at the three sites in ONE commit on `dev`:** `driver.ts:451` (`DEFAULT_IMAGE_REF`), `driver.ts:516` (`DEFAULT_IMAGE_BUILD_ID`), and the `build-exedev-image.test.ts` expectation — exactly the ritual the qds-live-e2e skill's "Pin adoption" section prescribes.
   - Evidence: one commit touching exactly those sites; `bun test tests/providers/ -f exedev`-scoped pin tests green; no other diffs smuggled in.
@@ -282,7 +282,8 @@ Hard rules (roadmap §1 — never traded away):
   this program's; gate = no NEW failures.
 
 Expected current position (verify, don't assume): PR #283 (S0 docs/spike) and #284
-(S1 rig_swarm phase, READY TO MERGE, head 0044e62d) are OPEN. Stage R0 is therefore
+(S1 rig_swarm phase, in final-review fix wave — check the current head, it moves) are
+OPEN. Stage R0 is therefore
 next: merge both, publish the image, fill the two MEASURE-AT-FIRST-BUILD TOFU
 sentinels from the build refusal output, adopt the pin at the three sites in ONE
 commit, re-push the private mirror, then the first paid live rig_swarm round

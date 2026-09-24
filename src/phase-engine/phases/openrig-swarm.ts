@@ -4,10 +4,14 @@
  *
  * Ordering invariants (each carries a test):
  *  - keys read BEFORE any daemon/box state changes;
- *  - teardown ALWAYS runs (finally), AFTER cost emission, on done / abort /
- *    timeout / throw — a swarm has no natural stop (§9a finding 1);
- *  - the body settles (never fails) on the timeout fallback so the composed
- *    testCommand gate still renders a verdict.
+ *  - teardown ALWAYS runs (finally), AFTER cost emission — a swarm has no
+ *    natural stop (§9a finding 1) — and is RIG-SCOPED: the daemon is stopped
+ *    only if THIS run started it, only this rig's tmux sessions are killed,
+ *    and the seeded per-seat state (plaintext seat keys) is removed;
+ *  - every CLI spawn is bounded (SWARM_CLI_TIMEOUT_MS) and observes the phase
+ *    abort, so a daemon that accepts but never answers cannot strand the run;
+ *  - an unverified swarm never reads as success: timeout fallback settles
+ *    `fail` (the gate still renders a verdict on the journal).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -37,7 +41,10 @@ export const SWARM_MAX_STALE_POLLS = 4;
 export const DEFAULT_OPENRIG_HOME = ".openrig";
 
 export interface CmdResult { exitCode: number; stdout: string; stderr: string; }
-export type CmdRunner = (argv: readonly string[], opts?: { timeoutMs?: number }) => Promise<CmdResult>;
+export type CmdRunner = (argv: readonly string[], opts?: {
+  timeoutMs?: number;
+  signal?: AbortSignal; // phase abort observation, forwarded to the spawned process
+}) => Promise<CmdResult>;
 
 export interface OpenrigSwarmDeps {
   requestId?: string;
@@ -89,10 +96,17 @@ function seatsOf(rig: RigSpec): Seat[] {
 }
 
 interface Settled {
-  reason: "lead-closed" | "timeout-fallback";
+  reason: "lead-closed" | "timeout-fallback" | "queue-terminal";
   state?: string | null;
   closureReason?: string | null;
 }
+
+/**
+ * Queue states that settle the poll loop without a deadline: `done` closes the
+ * item, the others are failure closures. A readable state NOT in this set keeps
+ * polling — unknown vocabulary is never treated as failure.
+ */
+const TERMINAL_QUEUE_STATES = new Set(["done", "failed", "cancelled", "canceled"]);
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -114,6 +128,8 @@ function throwIfAborted(signal: AbortSignal): void {
   throw reason instanceof Error ? reason : new Error("swarm phase aborted");
 }
 
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 /**
  * The rig_swarm phase body. See the file header for the ordering invariants;
  * every block below is its own small function so the body reads top-to-bottom.
@@ -125,6 +141,12 @@ export function openrigSwarmPhase(
   return async (bodyCtx: PhaseBodyContext) => {
     const run = deps.run ?? defaultRun;
     const home = deps.home ?? process.env.HOME ?? "";
+    // A relative or empty home puts rigHome under the cwd and lets the workdir
+    // probe adopt an unrelated ./src checkout as every seat's cwd — refuse
+    // before any path is built or state seeded.
+    if (home === "" || !path.isAbsolute(home)) {
+      throw new Error(`swarm phase needs an absolute HOME, got ${home === "" ? "unset/empty" : `'${home}'`} — refusing`);
+    }
     const rigHome = path.join(home, DEFAULT_OPENRIG_HOME);
     const requestId = deps.requestId ?? bodyCtx.ctx.requestId;
     const trace = (name: string, payload: Record<string, unknown>): void => {
@@ -180,8 +202,18 @@ export function openrigSwarmPhase(
       throw new Error(`no repo workdir under ${home} (probed app/ then src/) — refusing to boot a swarm with no repo`);
     }
 
+    // The deadline is computed ONCE — before seeding/daemon/import/queue — so
+    // wall time never exceeds maxDurationMs by the setup time, and the
+    // healthz window is bounded by the same clock.
+    const deadline = Date.now() + spec.maxDurationMs - SWARM_GATE_MARGIN_MS;
+    // Every CLI spawn: bounded and observing the phase abort — defaultRun
+    // combines both into the spawned process.
+    const cli = (argv: readonly string[]): Promise<CmdResult> =>
+      run(argv, { timeoutMs: SWARM_CLI_TIMEOUT_MS, signal: bodyCtx.signal });
+
     let settled: Settled | undefined;
     let qid = "";
+    let daemonStarted = false;
     try {
       // ── 2. Seed per-seat pi dirs: auth.json (0600) + settings.json ──
       for (const { member, session } of seats) {
@@ -199,20 +231,29 @@ export function openrigSwarmPhase(
         trace("swarm_seat_up", { session });
       }
 
-      // ── 3. Daemon up + healthz. `rig daemon start` is idempotent on an
-      // already-running daemon, and the brief's own test suite pins the call —
-      // so it runs unconditionally, then healthz is awaited (30×1s). ──
-      await run(["rig", "daemon", "start", "--no-kernel"]);
-      let healthy = false;
-      for (let i = 0; i < 30; i++) {
-        throwIfAborted(bodyCtx.signal);
-        if ((await run(["curl", "-fsS", "127.0.0.1:7433/healthz"], { timeoutMs: SWARM_CLI_TIMEOUT_MS })).exitCode === 0) {
-          healthy = true;
-          break;
+      // ── 3. Probe-first daemon up: healthz BEFORE start — an already-green
+      // daemon is adopted, not bounced (a concurrent run owns it), and the
+      // daemon is only ever stopped if THIS run started it. A failed start
+      // throws here, not ~30s later as "failed to become healthy". ──
+      const healthyProbe = async (): Promise<boolean> =>
+        (await cli(["curl", "-fsS", "127.0.0.1:7433/healthz"])).exitCode === 0;
+      if (!(await healthyProbe())) {
+        const start = await cli(["rig", "daemon", "start", "--no-kernel"]);
+        if (start.exitCode !== 0) {
+          throw new Error(`rig daemon start failed (exit ${start.exitCode}): ${start.stderr.trim().slice(0, 500) || "no stderr"}`);
         }
-        await sleep(1_000, bodyCtx.signal);
+        daemonStarted = true;
+        let healthy = false;
+        for (let i = 0; i < 30 && Date.now() < deadline; i++) {
+          throwIfAborted(bodyCtx.signal);
+          if (await healthyProbe()) {
+            healthy = true;
+            break;
+          }
+          await sleep(1_000, bodyCtx.signal);
+        }
+        if (!healthy) throw new Error("rig daemon failed to become healthy");
       }
-      if (!healthy) throw new Error("rig daemon failed to become healthy");
 
       // ── 4. Materialize the rig dir under the phase's run root (NOT the
       // repo): agent.yaml stubs + rig.yaml, cwd per member. ──
@@ -247,7 +288,7 @@ export function openrigSwarmPhase(
       );
 
       // ── 5. Import ──
-      const imp = await run([
+      const imp = await cli([
         "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/rigs/import",
         "-H", `X-Rig-Root: ${rigDir}`,
         "-H", "Content-Type: text/yaml",
@@ -276,16 +317,14 @@ export function openrigSwarmPhase(
       }
       const leadSession = leadSeat.session;
       const objectiveBody =
-        `OBJECTIVE: ${spec.objective}\n\n` +
-        `IDENTITY: before running any rig command, run \`export OPENRIG_SESSION_NAME=${leadSession}\` ` +
-        `(Pi seats do not receive OPENRIG_* env; without it your messages show From: <unknown sender>).`;
+        `OBJECTIVE: ${spec.objective}\n\nIDENTITY: before running any rig command, run \`export OPENRIG_SESSION_NAME=${leadSession}\` (Pi seats do not receive OPENRIG_* env; without it your messages show From: <unknown sender>).`;
       const queuePayload = JSON.stringify({
         sourceSession: "qds-engine",
         destinationSession: leadSession,
         body: objectiveBody,
         nudge: true,
       });
-      const q = await run([
+      const q = await cli([
         "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/queue/create",
         "-H", "Content-Type: application/json",
         "-d", queuePayload,
@@ -299,17 +338,14 @@ export function openrigSwarmPhase(
       }
       if (qid === "") throw new Error(`queue create returned neither id nor qid (exit ${q.exitCode})`);
 
-      // ── 7. Poll loop: settle on done, on abort throw, on deadline fall
-      // back — the body settles so the composed gate still renders a verdict.
-      // Each poll is bounded (SWARM_CLI_TIMEOUT_MS) and SWARM_MAX_STALE_POLLS
-      // consecutive unreadable polls (non-zero exit or null state) throw, so a
-      // daemon that accepts but never answers still reaches the finally. ──
-      const deadline = Date.now() + spec.maxDurationMs - SWARM_GATE_MARGIN_MS;
+      // ── 7. Poll loop: settle on any terminal queue state, on abort throw,
+      // on deadline fall back. Each poll is bounded; SWARM_MAX_STALE_POLLS
+      // consecutive unreadable polls throw, so the finally still runs. ──
       let prevState: string | null = null;
       let stalePolls = 0;
       for (;;) {
         throwIfAborted(bodyCtx.signal);
-        const res = await run(["rig", "queue", "show", qid], { timeoutMs: SWARM_CLI_TIMEOUT_MS });
+        const res = await cli(["rig", "queue", "show", qid]);
         const { state, closureReason } = parseQueueShow(res.stdout);
         if (res.exitCode !== 0 || state === null) {
           stalePolls += 1;
@@ -325,8 +361,10 @@ export function openrigSwarmPhase(
           trace("swarm_qitem_transition", { qid, from: prevState, to: state, closureReason });
           prevState = state;
         }
-        if (state === "done") {
-          settled = { reason: "lead-closed", state, closureReason };
+        if (state !== null && TERMINAL_QUEUE_STATES.has(state)) {
+          settled = state === "done"
+            ? { reason: "lead-closed", state, closureReason }
+            : { reason: "queue-terminal", state, closureReason };
           break;
         }
         if (Date.now() >= deadline) {
@@ -337,60 +375,94 @@ export function openrigSwarmPhase(
       }
     } finally {
       // ── 8. Costs BEFORE teardown — the FIRST thing the finally does, so
-      // every exit path (done / abort / timeout / throw) attributes spend
-      // before `rig down --delete --force` destroys the session JSONLs.
-      // Best-effort per seat: a missing seat log must not skip teardown. ──
+      // every exit path attributes spend before the seeded state is destroyed.
+      // Best-effort per seat AND per file: one torn JSONL degrades to partial,
+      // never skips teardown. ──
       const seq = deps.invocationSeqByAgent ?? new Map<string, number>();
       const emitMoney = deps.emitMoneyLine ?? defaultStderrMoney;
       for (const { member, session } of seats) {
         try {
           const sessionsDir = path.join(rigHome, "state", "pi", session, "sessions");
-          let jsonls: string[] = [];
+          let jsonls: string[];
           try {
             jsonls = fs.readdirSync(sessionsDir).filter((f) => f.endsWith(".jsonl"));
           } catch {
             continue; // no session dir = the seat never spoke; not a failure
           }
-          if (jsonls.length === 0) continue;
-          let best = jsonls[0] as string;
-          let bestSize = -1;
+          let seatTotal = 0;
           for (const f of jsonls) {
-            const size = fs.statSync(path.join(sessionsDir, f)).size;
-            if (size > bestSize) {
-              bestSize = size;
-              best = f;
+            try {
+              // Rotated/multi-session usage ALL attributes: every .jsonl is
+              // parsed and summed, read off the event loop (async, not sync).
+              const text = await Bun.file(path.join(sessionsDir, f)).text();
+              seatTotal += emitSeatCosts(parseSeatSessionJsonl(text, member.id, session), {
+                emitMoneyLine: emitMoney,
+                invocationSeqByAgent: seq,
+                requestId,
+                runId: bodyCtx.ctx.runId,
+                phaseId: bodyCtx.phaseId,
+                role: member.id,
+              });
+            } catch (e) {
+              logLine({ step: "seat-costs", seat: session, file: f, error: errText(e) });
             }
           }
-          const text = fs.readFileSync(path.join(sessionsDir, best), "utf8");
-          emitSeatCosts(parseSeatSessionJsonl(text, member.id, session), {
-            emitMoneyLine: emitMoney,
-            invocationSeqByAgent: seq,
-            requestId,
-            runId: bodyCtx.ctx.runId,
-            phaseId: bodyCtx.phaseId,
-            role: member.id,
-          });
+          if (jsonls.length > 0) {
+            trace("swarm_seat_cost", { session, files: jsonls.length, totalMicroUsd: seatTotal, role: member.id });
+          }
         } catch (e) {
-          logLine({ step: "seat-costs", seat: session, error: e instanceof Error ? e.message : String(e) });
+          logLine({ step: "seat-costs", seat: session, error: errText(e) });
         }
       }
 
-      // ── 9. Teardown ALWAYS runs, fixed order, each step best-effort ──
-      for (const argv of [
-        ["rig", "down", rig.name, "--delete", "--force"],
-        ["rig", "daemon", "stop"],
-        ["tmux", "kill-server"],
-      ] as const) {
+      // ── 9. Teardown ALWAYS runs, fixed order, each step best-effort, and
+      // RIG-SCOPED: this rig's down + tmux sessions + seeded state, and the
+      // daemon only if THIS run started it — kill-server/daemon-stop are
+      // box-global and would destroy a concurrent run. ──
+      try {
+        await cli(["rig", "down", rig.name, "--delete", "--force"]);
+      } catch (e) {
+        logLine({ step: "teardown", argv: `rig down ${rig.name} --delete --force`, error: errText(e) });
+      }
+      // Kill only this rig's tmux sessions (`...@<rig.name>`); no tmux server
+      // running is not a failure.
+      try {
+        const ls = await cli(["tmux", "list-sessions", "-F", "#{session_name}"]);
+        if (ls.exitCode === 0) {
+          const suffix = `@${rig.name}`;
+          for (const name of ls.stdout.split("\n").map((s) => s.trim()).filter((n) => n.endsWith(suffix))) {
+            try {
+              await cli(["tmux", "kill-session", "-t", name]);
+            } catch (e) {
+              logLine({ step: "teardown", argv: `tmux kill-session -t ${name}`, error: errText(e) });
+            }
+          }
+        }
+      } catch (e) {
+        logLine({ step: "teardown", argv: "tmux list-sessions", error: errText(e) });
+      }
+      // The seeded state holds plaintext seat keys — remove exactly the dirs
+      // this run created (per seat, not the whole state dir), post rig down.
+      for (const { session } of seats) {
         try {
-          await run(argv);
+          fs.rmSync(path.join(rigHome, "state", "pi", session), { recursive: true, force: true });
         } catch (e) {
-          logLine({ step: "teardown", argv: argv.join(" "), error: e instanceof Error ? e.message : String(e) });
+          logLine({ step: "teardown", argv: `rm state/pi/${session}`, error: errText(e) });
+        }
+      }
+      if (daemonStarted) {
+        try {
+          await cli(["rig", "daemon", "stop"]);
+        } catch (e) {
+          logLine({ step: "teardown", argv: "rig daemon stop", error: errText(e) });
         }
       }
     }
 
-    // ── 10. Settled trace AFTER teardown, then settle (hard failures threw
-    // above and never reach here — the phase records fail). ──
+    // ── 10. Settled trace AFTER teardown, then settle. Fail-closed: only a
+    // lead-closed item is success — a timeout fallback means the swarm was
+    // never verified, and any other terminal queue state is a failure. The
+    // gate still renders a verdict; hard failures threw above. ──
     trace("swarm_settled", {
       reason: settled!.reason,
       qid,
@@ -398,7 +470,7 @@ export function openrigSwarmPhase(
       closureReason: settled!.closureReason ?? null,
       timeoutFallback: settled!.reason === "timeout-fallback",
     });
-    return { exitStatus: "success" };
+    return { exitStatus: settled!.reason === "lead-closed" ? "success" : "fail" };
   };
 }
 
@@ -411,9 +483,14 @@ const defaultStderrMoney = (line: Record<string, unknown>): void => {
 };
 
 const defaultRun: CmdRunner = async (argv, opts) => {
+  // Both bounds reach the spawned process: the per-call timeout via an
+  // abort timer, the phase abort via the forwarded signal (AbortSignal.any,
+  // Bun ≥ 1.1) — a hung child dies instead of hanging the run's finally.
+  const signals = [opts?.signal, opts?.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined]
+    .filter((s): s is AbortSignal => s !== undefined);
   const proc = Bun.spawn(argv as string[], {
     stdout: "pipe", stderr: "pipe",
-    ...(opts?.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+    ...(signals.length > 0 ? { signal: AbortSignal.any(signals) } : {}),
   });
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   return { exitCode: await proc.exited, stdout, stderr };

@@ -863,8 +863,12 @@ RUN set -e; \
 #       on the authoring machine, 2026-09-23): an unpinned tree builds
 #       NOTHING, it refuses, and the refusal message carries the measured
 #       value to pin. Same TOFU doctrine as BUN_SHA256 and
-#       QDS_ENGINE_TREE_SHA256 above; the pins land in the post-merge
-#       adoption commit together with DEFAULT_IMAGE_REF/BUILD_ID.
+#       QDS_ENGINE_TREE_SHA256 above. Sequencing, which the roadmap owns:
+#       these pins land FIRST (R0.4), because the publish refuses until they
+#       do — and the DEFAULT_IMAGE_REF/DEFAULT_IMAGE_BUILD_ID adoption lands
+#       AFTER that first successful publish (R0.5), because the digest it
+#       pins does not exist until then. Two commits, in that order; they
+#       cannot be one.
 ARG NODE_VERSION=22.20.0
 # SENTINEL, NOT A PIN. When the first build refuses, nodejs.org publishes the
 # corroborating value in SHASUMS256.txt beside the tarball (the
@@ -884,11 +888,13 @@ RUN set -e; \
       || { echo "R3-a TOFU: node-v${NODE_VERSION}-linux-x64.tar.gz hashes to ${sum}, not NODE_SHA256='${NODE_SHA256}' — pin the measured value into the ARG above (cross-check: the SHASUMS256.txt line at https://nodejs.org/dist/v${NODE_VERSION}/) and rebuild" >&2; exit 1; }; \
     tar -xzf node.tar.gz -C /usr/local --strip-components=1; \
     rm node.tar.gz; \
-    [ "$(node --version)" = "v${NODE_VERSION}" ]; \
-    [ "$(command -v node)" = "/usr/local/bin/node" ]; \
-    suout="$(su -s /bin/sh exedev -c 'command -v node')"; \
+    [ "$(node --version)" = "v${NODE_VERSION}" ] \
+      || { echo "node --version printed '$(node --version 2>&1 || true)', not v${NODE_VERSION} — the tarball's bin/ layout or the --strip-components extraction moved the binary" >&2; exit 1; }; \
+    [ "$(command -v node)" = "/usr/local/bin/node" ] \
+      || { echo "command -v node resolved to '$(command -v node || true)', not /usr/local/bin/node — the tarball did not land where the phase's bare 'node' lookups expect it" >&2; exit 1; }; \
+    suout="$(su -l -s /bin/sh exedev -c 'command -v node')"; \
     [ "${suout}" = "/usr/local/bin/node" ] \
-      || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs — the PAM-session proxy for a bare ssh command) resolved node to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }
+      || { echo "a LOGIN shell as exedev (su -l resets PATH from ENV_PATH in /etc/login.defs — what a bare ssh command as exedev resolves) resolved node to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }
 # The extraction above also lands bin/npm, bin/npx, bin/corepack (SYMLINKS into
 # /usr/local/lib/node_modules) — required by the OpenRig RUN next, removed by
 # the cleanup RUN after it.
@@ -904,6 +910,16 @@ RUN set -e; \
 # the range moves the measured value and the build refuses, which is the
 # point. SENTINEL, NOT A PIN (no build has run); pin from the first build's
 # own refusal message.
+#
+# The hash pipeline is NUL-delimited end to end (`-print0 | sort -z |
+# xargs -0`) so a filename carrying a newline or whitespace is one file, not
+# a split that silently drops part of the tree from the measurement, and
+# pipefail makes a mid-pipeline sha256sum/xargs failure refuse the build
+# instead of hashing whatever survived. Residual blindness, stated honestly:
+# `-type f` excludes SYMLINKS and the hash covers CONTENT, not MODES — a
+# mode-only flip (an +x granted to a data file) or a new symlink entry point
+# passes this gate. That is the same named ceiling listExecutables carries;
+# the gate's claim is byte identity of the regular files, nothing more.
 ARG OPENRIG_VERSION=0.5.14
 ARG OPENRIG_TREE_SHA256=MEASURE-AT-FIRST-BUILD
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
@@ -912,20 +928,25 @@ ARG OPENRIG_TREE_SHA256=MEASURE-AT-FIRST-BUILD
 # shipping a dangling symlink — the same fail-closed spirit as the sentinel
 # ARGs. `rig --version` is EXECUTED, not string-compared: its output format is
 # unmeasured from here, and executing it still proves the symlink chain and
-# the node shebang resolve.
+# the node shebang resolve. It runs BEFORE the tree-hash measurement, not
+# after: a CLI that initialises first-run state under /opt/openrig on first
+# execution would otherwise mutate the tree AFTER the pin was taken, and the
+# gate would pin a tree that is not the one that ships.
 RUN set -e; \
     npm i -g --prefix /opt/openrig "@openrig/cli@${OPENRIG_VERSION}"; \
     [ -e /opt/openrig/bin/rig ] \
       || { echo "npm's --prefix install put no bin at /opt/openrig/bin/rig; both the /usr/local/bin/rig symlink below and the phase body's bare 'rig' assume it — re-derive the layout from the actual install, do not guess" >&2; exit 1; }; \
     ln -s /opt/openrig/bin/rig /usr/local/bin/rig; \
-    tree="$(cd /opt/openrig && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"; \
+    rig --version; \
+    [ "$(command -v rig)" = "/usr/local/bin/rig" ] \
+      || { echo "command -v rig resolved to '$(command -v rig || true)', not /usr/local/bin/rig — the symlink below or npm's bin layout differs from what the phase body's bare 'rig' lookup assumes" >&2; exit 1; }; \
+    tree="$(cd /opt/openrig && set -o pipefail && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" \
+      || { echo "R3-a TOFU PRECONDITION: hashing /opt/openrig failed (sha256sum/xargs error mid-pipeline) — a partial pipeline must never read as a tree hash" >&2; exit 1; }; \
     [ "${tree}" = "${OPENRIG_TREE_SHA256}" ] \
       || { echo "R3-a TOFU: the /opt/openrig tree hashes to ${tree}, not OPENRIG_TREE_SHA256='${OPENRIG_TREE_SHA256}' — pin the measured value into the ARG above and rebuild" >&2; exit 1; }; \
-    rig --version; \
-    [ "$(command -v rig)" = "/usr/local/bin/rig" ]; \
-    suout="$(su -s /bin/sh exedev -c 'command -v rig')"; \
+    suout="$(su -l -s /bin/sh exedev -c 'command -v rig')"; \
     [ "${suout}" = "/usr/local/bin/rig" ] \
-      || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs) resolved rig to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }
+      || { echo "a LOGIN shell as exedev (su -l resets PATH from ENV_PATH in /etc/login.defs — what a bare ssh command as exedev resolves) resolved rig to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }
 
 # npm and corepack were BUILD-TIME TOOLING for the OpenRig install above; the
 # node tarball ships them at /usr/local/lib/node_modules with ~75
@@ -942,16 +963,16 @@ RUN set -e; \
 # still find them, the same honest limit the INV-IBOX-1 base-fixture removal
 # records.
 RUN set -e; \
-    [ -d /usr/local/lib/node_modules/npm ]; \
-    [ -d /usr/local/lib/node_modules/corepack ]; \
-    [ -L /usr/local/bin/npm ]; \
-    [ -L /usr/local/bin/npx ]; \
-    [ -L /usr/local/bin/corepack ]; \
+    [ -d /usr/local/lib/node_modules/npm ] || { echo "cleanup precondition failed: /usr/local/lib/node_modules/npm is not a directory — the v${NODE_VERSION} tarball layout changed and this RUN would delete a tree it did not verify" >&2; exit 1; }; \
+    [ -d /usr/local/lib/node_modules/corepack ] || { echo "cleanup precondition failed: /usr/local/lib/node_modules/corepack is not a directory (expected from the v${NODE_VERSION} tarball)" >&2; exit 1; }; \
+    [ -L /usr/local/bin/npm ] || { echo "cleanup precondition failed: /usr/local/bin/npm is not a symlink (expected: the tarball's bin link)" >&2; exit 1; }; \
+    [ -L /usr/local/bin/npx ] || { echo "cleanup precondition failed: /usr/local/bin/npx is not a symlink (expected: the tarball's bin link)" >&2; exit 1; }; \
+    [ -L /usr/local/bin/corepack ] || { echo "cleanup precondition failed: /usr/local/bin/corepack is not a symlink (expected: the tarball's bin link)" >&2; exit 1; }; \
     rm -rf /usr/local/lib/node_modules; \
     rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack; \
-    [ ! -e /usr/local/lib/node_modules ]; \
-    ! find /usr/local -type d -name node_modules | grep -q .; \
-    node --version >/dev/null
+    [ ! -e /usr/local/lib/node_modules ] || { echo "cleanup failed: /usr/local/lib/node_modules still exists after rm -rf" >&2; exit 1; }; \
+    ! find /usr/local -type d -name node_modules | grep -q . || { echo "cleanup failed: a node_modules directory survives under /usr/local — npm's vendored tree would ship as an unswept third npm site" >&2; exit 1; }; \
+    node --version >/dev/null || { echo "node does not run after the cleanup RUN — the removal took something node needs" >&2; exit 1; }
 
 # The self-compact extension (vendored) every seat's settings.json loads, and
 # the /opt/qds root it lives under. Files 0644 root:root like the engine

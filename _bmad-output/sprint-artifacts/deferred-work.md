@@ -34,3 +34,7 @@
   `_bmad-output/workflow-state/qds-dev/df2-2/state.yaml` and `df3-1/state.yaml` fail
   `yaml.safe_load` with the same plain-scalar colon defect CodeRabbit caught in df3-6a's
   file (fixed there 2026-09-18). Outside PR #263's diff; small chore PR candidate.
+
+## Deferred from: code review of 2026-09-23-rig-swarm-phase-s1 (2026-09-24)
+- F-024 (LOW): Cost snapshot races live seats: spend between the JSONL read and rig down is never attributed on any exit path (worst on timeout where seats are mid-work).
+  - Rationale: Inherent TOCTOU on a filesystem the seats own until teardown; the pre-teardown emission is deliberate (crash-safety, ff39b624). Post-teardown re-read + delta emission doubles ledger semantics for marginal accuracy. DEFER: document the window in a comment; revisit with the live-round data.

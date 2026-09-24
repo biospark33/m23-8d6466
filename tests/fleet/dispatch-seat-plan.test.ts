@@ -50,12 +50,44 @@ describe("seatKeyPlan (S1 dispatch clamp)", () => {
   // ceiling (Σ authored ≤ ceiling, single seat 250M µ$) — and mintSeatKeys
   // refuses that AFTER box creation. Regression-sensitive: removing the
   // Math.min(defaultKeyCapMicroUsd, …) clamp turns this red (250M ≠ 50M).
+  // F-031: the LITERAL is asserted alongside the constant — an assertion
+  // against `defaultKeyCapMicroUsd` alone re-passes silently if the constant
+  // itself moves; the literal pins the clamp's actual value.
   test("clamps each seat to the defaultKeyCapMicroUsd backstop", () => {
     const plan = seatKeyPlan({ lead: 250_000_000, worker: 250_000_000 }, 500_000_000);
+    expect(defaultKeyCapMicroUsd).toBe(50_000_000);
     expect(plan).toEqual([
       { seat: "lead", limitMicroUsd: defaultKeyCapMicroUsd },
       { seat: "worker", limitMicroUsd: defaultKeyCapMicroUsd },
     ]);
+    // The same plan, spelled as the number: the clamp lands at 50M µ$.
+    expect(plan).toEqual([
+      { seat: "lead", limitMicroUsd: 50_000_000 },
+      { seat: "worker", limitMicroUsd: 50_000_000 },
+    ]);
+  });
+
+  // F-010: the plan is refused at dispatch, before any arithmetic — a Σ ≤ 0
+  // budget set or a non-positive ceiling used to divide into NaN and poison
+  // every limit via Math.max(1, NaN), surfacing post-box as the mint's
+  // confusing non-integer refusal. Each refusal names its operand.
+  test("refuses seatBudgets that sum to 0 (nothing to divide the ceiling across)", () => {
+    expect(() => seatKeyPlan({}, 50_000_000)).toThrow(/seatKeyPlan: .*sum to 0 µ\$ — need a positive integer total/);
+    expect(() => seatKeyPlan({ a: 0, b: 0 }, 50_000_000)).toThrow(/sum to 0 µ\$/);
+  });
+
+  test("refuses a non-positive ceiling", () => {
+    expect(() => seatKeyPlan({ a: 10 }, 0)).toThrow(/seatKeyPlan: ceiling 0 µ\$ is not a positive integer/);
+    expect(() => seatKeyPlan({ a: 10 }, -5_000_000)).toThrow(/ceiling -5000000 µ\$ is not a positive integer/);
+  });
+
+  test("refuses a non-integer authored budget and a non-integer ceiling", () => {
+    // The Σ guard fires first, so a non-integer-per-seat case needs an INTEGER
+    // total: 10.5 + 9.5 = 20, and the per-seat loop then names the offender.
+    expect(() => seatKeyPlan({ a: 10.5, b: 9.5 }, 50_000_000)).toThrow(
+      /seat 'a' authored budget 10\.5 µ\$ is not an integer/,
+    );
+    expect(() => seatKeyPlan({ a: 10 }, 50.5)).toThrow(/ceiling 50\.5 µ\$ is not a positive integer/);
   });
 
   // The brief's named floor ("never a 0-limit key"), pinned directly: shares

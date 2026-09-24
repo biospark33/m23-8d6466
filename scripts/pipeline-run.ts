@@ -2446,6 +2446,14 @@ function composeGatedBody(args: {
         // may re-run the command, re-solicit the resident, or write
         // journal rows past the abort.
         if (bodyCtx.signal.aborted) throw err;
+        // S1 (F-017): rig_swarm is NOT retryable — a gate failure ends the
+        // phase on the first attempt, fail closed. An authorized attempt N+1
+        // would re-boot the entire swarm (second daemon/import/queue cycle, a
+        // second full OpenRouter spend) and run the seats over attempt 1's
+        // already-mutated worktree. Deferred until the engine can
+        // snapshot/restore swarm state between attempts; `code` and
+        // `dispatch_task` phases keep the exact retry semantics below.
+        if (spec.kind === "rig_swarm") throw err;
         if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
         // DF1.3 authorized attempt N+1 (that dual-loop discipline lived in
         // src/phase-engine/agents/retry.ts, deleted with the unreachable

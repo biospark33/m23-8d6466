@@ -1680,9 +1680,41 @@ function loadManifestAndRoster(
 export function seatKeyPlan(budgets: Record<string, number>, ceilingMicroUsd: number): SeatKeyPlan[] {
   const entries = Object.entries(budgets);
   const total = entries.reduce((a, [, v]) => a + v, 0);
+  // Refuse a degenerate plan BEFORE any arithmetic (F-010). total === 0 (no
+  // authored budgets) or a non-positive ceiling used to turn the share
+  // division into NaN, and `Math.max(1, NaN)` === NaN poisoned every limit —
+  // surfacing post-box as the mint's confusing non-integer-limit refusal.
+  // Each authored budget must be a whole number too: the exact division below
+  // is BigInt arithmetic, and BigInt(1.5) is a bare RangeError with no seat
+  // context. This throw reaches the operator at dispatch, before any key is
+  // minted against the plan.
+  if (!Number.isInteger(total) || total <= 0) {
+    throw new Error(
+      `seatKeyPlan: authored seatBudgets sum to ${total} µ$ — need a positive integer total to divide the ceiling across; declare a positive seatBudgets entry per rigSpec member`,
+    );
+  }
+  if (!Number.isInteger(ceilingMicroUsd) || ceilingMicroUsd <= 0) {
+    throw new Error(
+      `seatKeyPlan: ceiling ${ceilingMicroUsd} µ$ is not a positive integer — refusing to divide it across seats; check the admitted run ceiling`,
+    );
+  }
+  for (const [seat, authored] of entries) {
+    if (!Number.isInteger(authored)) {
+      throw new Error(
+        `seatKeyPlan: seat '${seat}' authored budget ${authored} µ$ is not an integer — seatBudgets are whole micro-dollars`,
+      );
+    }
+  }
   return entries.map(([seat, authored]) => ({
     seat,
-    limitMicroUsd: Math.max(1, Math.min(defaultKeyCapMicroUsd, Math.floor((authored * ceilingMicroUsd) / total))),
+    // Exact where `Math.floor((authored * ceilingMicroUsd) / total)` lost the
+    // integer product at magnitudes the tests themselves use (>2^53): BigInt
+    // floor-division, then narrowed. The 1 µ$ floor and the backstop clamp
+    // keep their documented semantics (see the doc above).
+    limitMicroUsd: Math.max(
+      1,
+      Math.min(defaultKeyCapMicroUsd, Number((BigInt(authored) * BigInt(ceilingMicroUsd)) / BigInt(total))),
+    ),
   }));
 }
 
@@ -1733,35 +1765,59 @@ async function mintAndDeliverKey(
       // mintSeatKeys records the seat hashes and emits one `mint` link per
       // seat before this returns; the Σ ≤ effectiveCeilingMicros invariant is
       // held by `seatKeyPlan` and re-asserted at the mint.
-      const { keys } = await ctx.within("mint", () =>
-        mintSeatKeys(
-          {
-            keyApi: deps.keyApi,
-            driver: deps.driver,
-            store: deps.store,
-            requestId,
-            capMicroUsd: effectiveCeilingMicros,
-            recordAuditLink,
-            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-          },
-          runId,
-          seatPlan,
-        ),
+      const { keys } = await ctx.within(
+        "mint",
+        () =>
+          mintSeatKeys(
+            {
+              keyApi: deps.keyApi,
+              driver: deps.driver,
+              store: deps.store,
+              requestId,
+              capMicroUsd: effectiveCeilingMicros,
+              recordAuditLink,
+              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+            },
+            runId,
+            seatPlan,
+          ),
+        // The same abandoned-mint pointer the single-key arm below keeps
+        // (F-009): an ABANDONED mint that lands anyway leaves N live seat keys,
+        // and this line is the only operator-facing handle for them until the
+        // record write inside `mintSeatKeys` catches up. Compact per-seat
+        // summary, bounded by the plan: hash PREFIX only — the full hash is
+        // the record's business (INV-4 posture, same reasoning as the single
+        // `keyHash` payload), and the prefix is enough to join against the
+        // provider console. Each seat's planned cap rides along because "live"
+        // and "can spend N µ$" are different sizes of incident.
+        (minted) => ({
+          seats: seatPlan.map((p) => ({
+            seat: p.seat,
+            hashPrefix: `${(minted.hashes[p.seat] ?? "").slice(0, 8)}…`,
+            capMicroUsd: p.limitMicroUsd,
+          })),
+        }),
       );
-      await ctx.within("deliver", () =>
-        deliverSeatKeys(
-          {
-            keyApi: deps.keyApi,
-            driver: deps.driver,
-            store: deps.store,
-            requestId,
-            recordAuditLink,
-            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-          },
-          runId,
-          vm.name,
-          keys,
-        ),
+      await ctx.within(
+        "deliver",
+        () =>
+          deliverSeatKeys(
+            {
+              keyApi: deps.keyApi,
+              driver: deps.driver,
+              store: deps.store,
+              requestId,
+              recordAuditLink,
+              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+            },
+            runId,
+            vm.name,
+            keys,
+          ),
+        // Resolves `void`; a late one means the seat keys reached the box
+        // AFTER the operator was told the dispatch failed (the same meaning as
+        // the single-key arm below) — now for several boxes at once.
+        () => ({ vmName: vm.name, seatsDelivered: Object.keys(keys).length }),
       );
     } else {
       const { key } = await ctx.within(

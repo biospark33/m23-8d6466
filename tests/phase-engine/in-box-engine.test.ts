@@ -940,6 +940,32 @@ describe("C19 — PhaseKind is exactly the kinds the closed schema admits", () =
     ).toBe(true);
   });
 
+  test("every kind in the executing set is ADMITTED by the schema — the set equality's other direction", () => {
+    // The refusal-message test above proves the schema lists nothing beyond the
+    // local array; this proves it admits nothing less (a kind dropped from
+    // EXECUTING_KINDS would keep loading OLD manifests but refuse new ones —
+    // the message check alone could not see that). EXECUTING_KINDS itself is
+    // module-private in manifest.ts, so the schema is the runtime oracle:
+    // one minimal valid fixture per kind of the local array.
+    const executing = ["code", "dispatch_task", "rig_swarm"] as const;
+    const minimal: Record<(typeof executing)[number], Record<string, unknown>> = {
+      code: { name: "p", kind: "code", description: "d", command: ["true"] },
+      dispatch_task: { name: "p", kind: "dispatch_task", description: "d", roster: "r.yaml", task: "t" },
+      rig_swarm: {
+        name: "p",
+        kind: "rig_swarm",
+        description: "d",
+        rigSpec: { name: "r", pods: [{ id: "pod", members: [{ id: "lead", model: "m" }] }] },
+        objective: "o",
+        leadSeat: "lead",
+        seatBudgets: { lead: 1000 },
+      },
+    };
+    for (const kind of executing) {
+      expect(PhaseSpecSchema.safeParse(minimal[kind]).success, kind).toBe(true);
+    }
+  });
+
   const removed: [string, RegExp][] = [
     // `agent`'s destination is another KIND; `engineer`'s is a host verb, so it
     // names no kind at all — the remediations are genuinely different shapes.

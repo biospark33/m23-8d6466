@@ -948,7 +948,10 @@ describe("stampManifestLimit — monotonic ceiling guard", () => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// S1 — rig_swarm: the third phase kind, schema side only (no executor yet)
+// S1 — rig_swarm: the third phase kind. The executor shipped (S1's
+// openrigSwarmPhase body, composed by makeBodyFactory — pinned at
+// tests/phase-engine/pipeline-run.test.ts); these tests keep pinning the
+// schema side, unchanged.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe("loadManifest — rig_swarm (S1)", () => {
@@ -1044,5 +1047,101 @@ describe("loadManifest — rig_swarm (S1)", () => {
     const phase = { ...DISPATCH_PHASE, testCommand: ["bun", "test"] }; // existing dispatch fixture
     expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
       .toThrow(/testCommand is forbidden when kind is 'dispatch_task'/);
+  });
+
+  // ── F-005: identifier grammar + composed-session uniqueness ──
+  // Member ids become provider seat keys (minted under the same grammar); an
+  // id that fails it is refused at PARSE, not post-box at mint.
+  test("member id outside the seat grammar is refused at load", () => {
+    for (const bad of ["../../victim", "Lead", "has space", "a".repeat(33)]) {
+      const rigSpec = {
+        ...RIG_SWARM_PHASE.rigSpec,
+        pods: [{ id: "devpod", members: [{ id: bad, model: "m" }] }],
+      };
+      const phase = { ...RIG_SWARM_PHASE, rigSpec, leadSeat: bad, seatBudgets: { [bad]: 1000 } };
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(/rigSpec member id '.+' in pod 'devpod' must match/);
+    }
+  });
+
+  // Pod ids and the rig name compose tmux session names and the state/pi path,
+  // and the rig name reaches `rig` argv — separators, dots and edge hyphens are
+  // refused, not sanitized.
+  test("pod id outside the component grammar is refused at load", () => {
+    for (const bad of ["../escape", "-leading", "trailing-", "Uppercase", "p".repeat(64)]) {
+      const rigSpec = {
+        ...RIG_SWARM_PHASE.rigSpec,
+        pods: [{ id: bad, members: RIG_SWARM_PHASE.rigSpec.pods[0]!.members }],
+      };
+      const phase = { ...RIG_SWARM_PHASE, rigSpec };
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(/rigSpec pod id '.+' must match/);
+    }
+  });
+
+  test("rig name outside the component grammar is refused at load", () => {
+    for (const bad of ["../escape", "-flag", "x".repeat(64)]) {
+      const rigSpec = { ...RIG_SWARM_PHASE.rigSpec, name: bad };
+      const phase = { ...RIG_SWARM_PHASE, rigSpec };
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(/rigSpec name '.+' must match/);
+    }
+  });
+
+  // Sessions are named `<pod.id>-<member.id>` and both halves may contain
+  // hyphens — pod 'a' + member 'b-c' collides with pod 'a-b' + member 'c':
+  // one auth.json and one cost identity shared by two seats.
+  test("cross-pod composed-session collision is refused at load", () => {
+    const rigSpec = {
+      name: "dev",
+      pods: [
+        { id: "a", members: [{ id: "b-c", model: "m" }] },
+        { id: "a-b", members: [{ id: "c", model: "m" }] },
+      ],
+    };
+    const phase = { ...RIG_SWARM_PHASE, rigSpec, leadSeat: "b-c", seatBudgets: { "b-c": 1000, c: 1000 } };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/composed seat session 'a-b-c' is not unique/);
+  });
+
+  test("a duplicated member id within one pod composes the same collision", () => {
+    const rigSpec = {
+      name: "dev",
+      pods: [{ id: "devpod", members: [
+        { id: "lead", model: "m" },
+        { id: "lead", model: "m2" },
+      ] }],
+    };
+    const phase = { ...RIG_SWARM_PHASE, rigSpec, seatBudgets: { lead: 1000 } };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/composed seat session 'devpod-lead' is not unique/);
+  });
+
+  // Grammar-valid boundary fixtures still LOAD — the refusals above must never
+  // tighten acceptance past what the grammar admits.
+  test("a 63-char pod id loads (the grammar's maximum)", () => {
+    const rigSpec = { ...RIG_SWARM_PHASE.rigSpec, pods: [{ id: "p".repeat(63), members: RIG_SWARM_PHASE.rigSpec.pods[0]!.members }] };
+    const phase = { ...RIG_SWARM_PHASE, rigSpec };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] }))).not.toThrow();
+  });
+
+  // ── F-019: rig_swarm fields are dead payload on every other kind ──
+  test("a code phase carrying rig_swarm fields is refused per field", () => {
+    for (const field of ["rigSpec", "objective", "leadSeat", "seatBudgets"] as const) {
+      const bad = phase({ [field]: field === "rigSpec" ? RIG_SWARM_PHASE.rigSpec : field === "seatBudgets" ? { lead: 1 } : "lead" });
+      expect(() => loadManifestForTest(baseManifest({ phases: [bad, CODE_PHASE] })))
+        .toThrow(new RegExp(`${field} is forbidden when kind is 'code'`));
+    }
+  });
+
+  // ── F-026: the objective is one queue-create argv element — past 65,536
+  // chars the spawn dies E2BIG on the box, after seeding. Exactly-at-max
+  // loads; one char more refuses.
+  test("objective over 65536 characters is refused at load; exactly 65536 loads", () => {
+    const atMax = { ...RIG_SWARM_PHASE, objective: "o".repeat(65_536) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [atMax, CODE_PHASE] }))).not.toThrow();
+    const over = { ...RIG_SWARM_PHASE, objective: "o".repeat(65_537) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [over, CODE_PHASE] })))
+      .toThrow(/objective must be at most 65536 characters/);
   });
 });
