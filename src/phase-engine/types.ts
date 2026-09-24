@@ -158,8 +158,14 @@ export function descriptionDefect(name: string, description: string): string | n
  * so adding a member without an executor is a COMPILE error rather than a
  * runtime throw a paid-for run discovers (DF1.10 AC1). `manifest.ts` refuses
  * the two removed spellings at load with a remediation naming the replacement.
+ *
+ * `rig_swarm` (S1) runs an OpenRig swarm INSIDE the box as the tier-2 engine.
+ * The factory's guarantees wrap it: VM sandbox, per-seat capped OpenRouter
+ * keys, wall clock, harvest, out-of-box reverify, human approval, PR. One
+ * tier-2 brain per box: the OpenRig lead seat orchestrates and the resident
+ * agent is off. Research doc §4.1 rule 2.
  */
-export type PhaseKind = "code" | "dispatch_task";
+export type PhaseKind = "code" | "dispatch_task" | "rig_swarm";
 
 /** A phase row is `fail` until the clean-exit branch earns `success`. */
 export type PhaseStatus = "fail" | "success";
@@ -173,6 +179,32 @@ export interface PhaseAgent {
   provider: string;
   model: string;
   contextWindow: number;
+}
+
+/** One seat in an OpenRig pod. Pi-only for S1 (Claude/Codex seats are S2). */
+export interface RigMemberSpec {
+  id: string;
+  /** OpenRouter model slug the seat runs on (e.g. "openrouter/deepseek/deepseek-v3.2"). */
+  model: string;
+  /** Only "pi" today; explicit so a future runtime spelling is a schema change. */
+  runtime?: "pi";
+  /** Working directory the seat starts in; absent = the run's repo workdir. */
+  cwd?: string;
+}
+
+export interface RigPodSpec {
+  id: string;
+  members: RigMemberSpec[];
+}
+
+/**
+ * A native OpenRig RigSpec (research doc §5.6: accept native first; a
+ * roster→RigSpec translator is deferred). The phase body materializes the rig
+ * dir (agent.yaml stubs + rig.yaml) from this and imports it.
+ */
+export interface RigSpec {
+  name: string;
+  pods: RigPodSpec[];
 }
 
 /** A phase as declared in the manifest, post-validation (defaults applied). */
@@ -190,6 +222,19 @@ export interface PhaseSpec {
   roster?: string;
   /** Required iff `kind === "dispatch_task"`; task brief for the team. */
   task?: string;
+  /** Required iff `kind === "rig_swarm"`: the native rig definition. */
+  rigSpec?: RigSpec;
+  /** Required iff `kind === "rig_swarm"`: the objective queued to the lead seat. */
+  objective?: string;
+  /** Required iff `kind === "rig_swarm"`: the seat id that orchestrates. */
+  leadSeat?: string;
+  /**
+   * Required iff `kind === "rig_swarm"`: per-seat spend ceilings in integer µ$.
+   * Keys must exactly equal the rigSpec member id set. Σ(seatBudgets) ≤ the
+   * run's admitted ceiling is enforced at dispatch (seatKeyPlan clamps
+   * proportionally); the per-seat key is the provider-side hard limit.
+   */
+  seatBudgets?: Record<string, number>;
 }
 
 /**

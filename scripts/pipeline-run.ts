@@ -2632,6 +2632,17 @@ function makeBodyFactory(
         return body(bodyCtx);
       };
     }
+    // S1 interim: the rig_swarm executor lands in the factory branch (next
+    // task). Until then a declared swarm phase fails LOUDLY at walk time —
+    // the same residue contract as the never arm below — instead of breaking
+    // the compile-time exhaustiveness check every kind owes (DF1.10 AC1).
+    if (spec.kind === "rig_swarm") {
+      return () => {
+        throw new Error(
+          `phase '${sanitizeForMessage(spec.name)}': kind 'rig_swarm' has no executor yet (S1 task 4 lands it)`,
+        );
+      };
+    }
     // DF1.10 AC1/C19: the COMPILER owns the completeness of this dispatch.
     //
     // This used to be a runtime throw for the two kinds nothing implemented, so
@@ -2649,7 +2660,7 @@ function makeBodyFactory(
     const unreachableKind: never = spec.kind;
     return () => {
       throw new Error(
-        `phase '${sanitizeForMessage(spec.name)}': no executor for kind '${sanitizeForMessage(String(unreachableKind))}' — PhaseKind carries only 'code' and 'dispatch_task' (DF1.10 C19), so this spec did not come through loadManifest`,
+        `phase '${sanitizeForMessage(spec.name)}': no executor for kind '${sanitizeForMessage(String(unreachableKind))}' — PhaseKind carries only 'code', 'dispatch_task' and 'rig_swarm' (DF1.10 C19), so this spec did not come through loadManifest`,
       );
     };
   };

@@ -885,15 +885,17 @@ describe("#217 F-D1 — one engine per run root at a time (concurrent-claim guar
 // C19 — the executing kind set
 // ───────────────────────────────────────────────────────────────────────────
 
-describe("C19 — PhaseKind is exactly the two kinds that execute", () => {
-  test("the closed kind set is exactly `code` and `dispatch_task` (the type half is `bunx tsc`'s to fail, not this runner's)", () => {
-    // Compile-time, not runtime: this file stops TYPECHECKING the day a third
+describe("C19 — PhaseKind is exactly the kinds the closed schema admits", () => {
+  test("the closed kind set is exactly `code`, `dispatch_task` and `rig_swarm` (the type half is `bunx tsc`'s to fail, not this runner's)", () => {
+    // Compile-time, not runtime: this file stops TYPECHECKING the day a new
     // member is added to `PhaseKind` without a decision about its executor.
     // `bun test` transpiles without typechecking, so this runner cannot fail
     // on the assignment below — the gate for that half is the `bunx tsc` /
     // typecheck job in CI, and this test's job is to keep the file honest for
-    // that job while pinning the SET at runtime below.
-    const executing = ["code", "dispatch_task"] as const;
+    // that job while pinning the SET at runtime below. S1 note: `rig_swarm`
+    // is that decision in progress — schema-side here (Task 1), executor in
+    // Task 4, which also resolves the never-residue in makeBodyFactory.
+    const executing = ["code", "dispatch_task", "rig_swarm"] as const;
     type Executing = (typeof executing)[number];
     // The annotation IS the check, for tsc. Deliberately no runtime `expect`
     // on it: the value would be the literal `true` and could never fail.

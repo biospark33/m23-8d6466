@@ -128,7 +128,7 @@ const argv = z.array(nonBlankString).min(1);
  *     silently REJECTING the new kind at load, with `kindIssueMessage` telling
  *     the operator it is not a kind at all.
  */
-const EXECUTING_KINDS = ["code", "dispatch_task"] as const satisfies readonly PhaseKind[];
+const EXECUTING_KINDS = ["code", "dispatch_task", "rig_swarm"] as const satisfies readonly PhaseKind[];
 
 /** `AssertTrue<false>` is a compile error; `AssertTrue<true>` is inert. */
 type AssertTrue<T extends true> = T;
@@ -231,6 +231,39 @@ export const PhaseSpecSchema = z
     // DF1.6 dispatch_task fields
     roster: nonBlankString.optional(),
     task: nonBlankString.optional(),
+    // S1 rig_swarm fields — all four required together via superRefine below.
+    rigSpec: z
+      .object({
+        name: nonBlankString,
+        pods: z
+          .array(
+            z
+              .object({
+                id: nonBlankString,
+                members: z
+                  .array(
+                    z
+                      .object({
+                        id: nonBlankString,
+                        model: nonBlankString,
+                        runtime: z.literal("pi").optional(),
+                        cwd: nonBlankString.optional(),
+                      })
+                      .strict(),
+                  )
+                  .min(1),
+              })
+              .strict(),
+          )
+          .min(1),
+      })
+      .strict()
+      .optional(),
+    objective: nonBlankString.optional(),
+    leadSeat: nonBlankString.optional(),
+    seatBudgets: z
+      .record(nonBlankString, z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+      .optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {
@@ -242,14 +275,46 @@ export const PhaseSpecSchema = z
     if (spec.kind !== "code" && spec.command !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `command is forbidden when kind is '${spec.kind}'` });
     }
-    // testCommand is optional and valid only when kind === "code" (see its
-    // field doc above): elsewhere it is silently dead, so refuse rather than
-    // let an author believe it enforced.
-    if (spec.kind !== "code" && spec.testCommand !== undefined) {
+    // testCommand is optional and valid when kind is "code" (the commandGate
+    // composition) OR "rig_swarm" (the settled-swarm gate — same gate, same
+    // authority): elsewhere it is silently dead, so refuse rather than let an
+    // author believe it enforced.
+    if (spec.kind !== "code" && spec.kind !== "rig_swarm" && spec.testCommand !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `testCommand is forbidden when kind is '${spec.kind}'`,
       });
+    }
+    // S1: rig_swarm's required field set. Each missing field is its own issue
+    // so an author sees everything wrong at once.
+    if (spec.kind === "rig_swarm") {
+      const required = [
+        ["rigSpec", spec.rigSpec],
+        ["objective", spec.objective],
+        ["leadSeat", spec.leadSeat],
+        ["seatBudgets", spec.seatBudgets],
+      ] as const;
+      for (const [field, value] of required) {
+        if (value === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} is required when kind is 'rig_swarm'` });
+        }
+      }
+      if (spec.rigSpec !== undefined && spec.leadSeat !== undefined && spec.seatBudgets !== undefined) {
+        const members = spec.rigSpec.pods.flatMap((p) => p.members.map((m) => m.id));
+        if (!members.includes(spec.leadSeat)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `leadSeat '${sanitizeForMessage(spec.leadSeat)}' is not a member of rigSpec`,
+          });
+        }
+        const budgetSeats = Object.keys(spec.seatBudgets).sort();
+        if (JSON.stringify(budgetSeats) !== JSON.stringify([...members].sort())) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "seatBudgets keys must exactly match rigSpec member ids",
+          });
+        }
+      }
     }
     // DF1.6: roster and task required when kind === "dispatch_task", forbidden otherwise
     if (spec.kind === "dispatch_task") {
@@ -337,7 +402,18 @@ export const PipelineManifestSchema = z
     maxSteeringIterations: z.number().int().min(0).max(MAX_RETRIES).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
-  .strict();
+  .strict()
+  .superRefine((m, ctx) => {
+    // Research doc §4.1 rule 2: ONE tier-2 brain per box. Two rig_swarm phases
+    // would boot two swarms in one box (or two rigs under one daemon).
+    const swarm = m.phases.filter((p) => p.kind === "rig_swarm");
+    if (swarm.length > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `at most one rig_swarm phase per manifest (one tier-2 brain per box); got ${swarm.length}`,
+      });
+    }
+  });
 
 /** INV-4: the manifest carries no credential material. */
 const CREDENTIAL_FIELD = /(^|[-_])(api)?(key|token|secret|password|passwd|credential)s?([-_]|$)/i;

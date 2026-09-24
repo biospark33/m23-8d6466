@@ -205,7 +205,7 @@ describe("loadManifest — closed validation (INV-2)", () => {
     [
       "kind outside the closed set",
       { kind: "wizard" },
-      /kind must be one of 'code' \| 'dispatch_task'; got 'wizard'/,
+      /kind must be one of 'code' \| 'dispatch_task' \| 'rig_swarm'; got 'wizard'/,
     ],
     // A kind that names an `Object.prototype` member. The remediation table is
     // an object literal, so an ungated `table[received]` resolved off the
@@ -214,7 +214,7 @@ describe("loadManifest — closed validation (INV-2)", () => {
     [
       "a kind that collides with an Object.prototype key",
       { kind: "constructor" },
-      /kind must be one of 'code' \| 'dispatch_task'; got 'constructor'/,
+      /kind must be one of 'code' \| 'dispatch_task' \| 'rig_swarm'; got 'constructor'/,
     ],
     // The shape an operator most plausibly produces by deleting `kind:
     // "engineer"` from a pre-C19 manifest. An omitted required field is not a
@@ -944,5 +944,105 @@ describe("stampManifestLimit — monotonic ceiling guard", () => {
   test("the positive-safe-integer validation runs before the guard", () => {
     const once = stampManifestLimit(loadUnstamped(), 500_000);
     expect(() => stampManifestLimit(once, 1.5)).toThrow(/must be a positive integer/);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// S1 — rig_swarm: the third phase kind, schema side only (no executor yet)
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("loadManifest — rig_swarm (S1)", () => {
+  // The brief's `baseManifest`/`loadManifestForTest`, mapped onto this file's
+  // fixtures: a manifest with headroom for a rig phase (whose maxDurationMs
+  // defaults to 600 s, so the admission arithmetic needs a budget to fit) and
+  // a one-line load through a fresh isolated run root.
+  function baseManifest(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return manifestObject({ runBudgetMs: 10_000_000, ...over });
+  }
+  function loadManifestForTest(m: Record<string, unknown>): ReturnType<typeof loadManifest> {
+    const root = freshRoot();
+    return loadManifest(writeManifest(root, m), 20_000_000, root);
+  }
+  const CODE_PHASE = phase();
+  const DISPATCH_PHASE = phase({ kind: "dispatch_task", roster: "r.yaml", task: "do it", command: undefined });
+
+  // A minimal VALID rig_swarm phase, reused across the swarm tests.
+  const RIG_SWARM_PHASE = {
+    name: "swarm_build",
+    kind: "rig_swarm",
+    description: "Run the OpenRig swarm to build the change",
+    rigSpec: {
+      name: "dev",
+      pods: [
+        {
+          id: "devpod",
+          members: [
+            { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5" },
+            { id: "worker", model: "openrouter/deepseek/deepseek-v3.2" },
+          ],
+        },
+      ],
+    },
+    objective: "Add a hello() function plus a test; delegate the test to worker; commit on the checkout branch.",
+    leadSeat: "lead",
+    seatBudgets: { lead: 250_000_000, worker: 250_000_000 },
+  };
+
+  // 1. valid rig_swarm phase loads
+  test("rig_swarm phase with all required fields loads", () => {
+    const m = baseManifest({ phases: [RIG_SWARM_PHASE, CODE_PHASE] }); // helper from the file's existing fixture style
+    expect(() => loadManifestForTest(m)).not.toThrow();
+  });
+
+  // 2. each required field refused when missing
+  test.each(["rigSpec", "objective", "leadSeat", "seatBudgets"] as const)(
+    "rig_swarm without %s is refused at load",
+    (field) => {
+      const phase = { ...RIG_SWARM_PHASE } as Record<string, unknown>;
+      delete phase[field];
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(new RegExp(`${field} is required when kind is 'rig_swarm'`));
+    },
+  );
+
+  // 3. command still forbidden on rig_swarm
+  test("rig_swarm with command is refused", () => {
+    const phase = { ...RIG_SWARM_PHASE, command: ["echo", "hi"] };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/command is forbidden when kind is 'rig_swarm'/);
+  });
+
+  // 4. testCommand is now legal on rig_swarm (today code-only)
+  test("rig_swarm may declare testCommand", () => {
+    const phase = { ...RIG_SWARM_PHASE, testCommand: ["bun", "test"] };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] }))).not.toThrow();
+  });
+
+  // 5. leadSeat must name a rigSpec member
+  test("rig_swarm leadSeat not in rigSpec is refused", () => {
+    const phase = { ...RIG_SWARM_PHASE, leadSeat: "chief" };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/leadSeat 'chief' is not a member of rigSpec/);
+  });
+
+  // 6. seatBudgets keys must exactly equal the member set
+  test("seatBudgets keys must exactly match rigSpec members", () => {
+    const phase = { ...RIG_SWARM_PHASE, seatBudgets: { lead: 100_000_000 } };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/seatBudgets keys must exactly match rigSpec member ids/);
+  });
+
+  // 7. one tier-2 brain per box: at most one rig_swarm phase per manifest
+  test("two rig_swarm phases in one manifest are refused", () => {
+    const m = baseManifest({ phases: [RIG_SWARM_PHASE, { ...RIG_SWARM_PHASE, name: "swarm_two" }] });
+    expect(() => loadManifestForTest(m))
+      .toThrow(/at most one rig_swarm phase per manifest/);
+  });
+
+  // 8. dispatch_task keeps refusing testCommand (no regression)
+  test("dispatch_task still refuses testCommand", () => {
+    const phase = { ...DISPATCH_PHASE, testCommand: ["bun", "test"] }; // existing dispatch fixture
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/testCommand is forbidden when kind is 'dispatch_task'/);
   });
 });
