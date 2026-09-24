@@ -885,17 +885,19 @@ RUN set -e; \
 #   (2) npm and corepack are BUILD-TIME TOOLING ONLY. The node tarball ships
 #       them at /usr/local/lib/node_modules; they are deleted in the cleanup
 #       RUN below rather than shipped.
-#   (3) Both content-gate ARGs carry the literal sentinel MEASURE-AT-FIRST-
-#       BUILD because no build of this file has EVER run (Docker unavailable
-#       on the authoring machine, 2026-09-23): an unpinned tree builds
-#       NOTHING, it refuses, and the refusal message carries the measured
-#       value to pin. Same TOFU doctrine as BUN_SHA256 and
-#       QDS_ENGINE_TREE_SHA256 above. Sequencing, which the roadmap owns:
-#       these pins land FIRST (R0.4), because the publish refuses until they
-#       do — and the DEFAULT_IMAGE_REF/DEFAULT_IMAGE_BUILD_ID adoption lands
-#       AFTER that first successful publish (R0.5), because the digest it
-#       pins does not exist until then. Two commits, in that order; they
-#       cannot be one.
+#   (3) Both content-gate ARGs shipped as the literal sentinel MEASURE-AT-
+#       FIRST-BUILD because no build of this file had then run (Docker
+#       unavailable on the authoring machine, 2026-09-23): an unpinned tree
+#       builds NOTHING, it refuses, and the refusal message carries the
+#       measured value to pin. Same TOFU doctrine as BUN_SHA256 and
+#       QDS_ENGINE_TREE_SHA256 above. That first build has since run and
+#       both ARGs carry measured values (R0.4, 2026-09-24 — the PINNED
+#       comments at each ARG name their runs). Sequencing, which the roadmap
+#       owns: these pins land FIRST (R0.4), because the publish refuses
+#       until they do — and the DEFAULT_IMAGE_REF/DEFAULT_IMAGE_BUILD_ID
+#       adoption lands AFTER that first successful publish (R0.5), because
+#       the digest it pins does not exist until then. Two commits, in that
+#       order; they cannot be one.
 ARG NODE_VERSION=22.20.0
 # PINNED 2026-09-24 from the first build's own refusal (run 36031582204:
 # "hashes to eeaccb03…"), cross-checked byte-identical against the
@@ -934,8 +936,10 @@ RUN set -e; \
 # resolved @openrig/cli's ^-ranged dependencies inside this RUN, and this hash
 # is the only thing freezing that resolution — an upstream republish inside
 # the range moves the measured value and the build refuses, which is the
-# point. SENTINEL, NOT A PIN (no build has run); pin from the first build's
-# own refusal message.
+# point. MEASURED PIN since R0.4 (2026-09-24): the value below came from the
+# first build's own refusal message (run 36032367862) — for an npm-resolved
+# tree there is no external cross-check, so the refusal output IS the
+# measurement.
 #
 # The hash pipeline is NUL-delimited end to end (`-print0 | sort -z |
 # xargs -0`) so a filename carrying a newline or whitespace is one file, not
@@ -956,8 +960,8 @@ ARG OPENRIG_TREE_SHA256=543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
 # (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
 # that layout assumption fail LOUDLY at the first real build rather than
-# shipping a dangling symlink — the same fail-closed spirit as the sentinel
-# ARGs. `rig --version` is EXECUTED, not string-compared: its output format is
+# shipping a dangling symlink — the same fail-closed spirit as the
+# content-gate ARGs. `rig --version` is EXECUTED, not string-compared: its output format is
 # unmeasured from here, and executing it still proves the symlink chain and
 # the node shebang resolve. It runs BEFORE the tree-hash measurement, not
 # after: a CLI that initialises first-run state under /opt/openrig on first

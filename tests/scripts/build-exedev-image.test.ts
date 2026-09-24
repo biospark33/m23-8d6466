@@ -1272,7 +1272,16 @@ describe("buildIdFileInputs", () => {
       // the refusal output IS the measurement). Both sentinels now carry
       // measured values; the un-measured state they guarded is gone.
       // Dockerfile bytes only; same-commit re-pin.
-      "oci/exedev/Dockerfile": "a8805e0c9f5a54c45f3218153fb2dc7e0e0cc017fafc714ada438361ee12f791",
+      // eca4a06f: PR #286 review round (feature/r0-image-convergence,
+      // 2026-09-24) — comment-only rewording of the sentinel paragraphs in
+      // the node + OpenRig sections: both ARGs have carried measured values
+      // since a8805e0c (above), so "no build of this file has EVER run" and
+      // "SENTINEL, NOT A PIN" had gone false on the page. No COPY, ARG or
+      // RUN line moved; Dockerfile bytes only, re-pinned from this test's
+      // own failing run. The trackedSetDigest below did not move: the
+      // Dockerfile is not a files() entry and no walked COPY source
+      // changed.
+      "oci/exedev/Dockerfile": "eca4a06f3ab094faf5884812089e938d6d04e3b4b62628d7beed80a8bb2a0da7",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
