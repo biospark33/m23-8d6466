@@ -1260,7 +1260,13 @@ describe("buildIdFileInputs", () => {
       // it tree-shakes, and the enumeration must carry every RESOLVED file —
       // seven, not the four the import sites alone suggest). Dockerfile
       // bytes only; measured on the final tree, same-commit re-pin.
-      "oci/exedev/Dockerfile": "ff2dcbcc1bbfba7d94c24927bbe7785227d9e72f1ec2e631d23c6c8f0a8cf26c",
+      //
+      // 919341b4: NODE_SHA256 sentinel → pin (same day, run 36031582204's
+      // refusal, cross-checked against nodejs.org's SHASUMS256.txt line).
+      // OPENRIG_TREE_SHA256 still sentinel — the node gate dies first by
+      // Dockerfile order, so the tree measurement is the NEXT refusal.
+      // Dockerfile bytes only; same-commit re-pin.
+      "oci/exedev/Dockerfile": "919341b4d69dce57676e08395198fc16dc4a70b8ae47fc14ea6f0b0d95a23b33",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -3500,14 +3506,25 @@ describe("checksumArgProblems", () => {
     // but generality is exactly what a per-name regression hides in: a typo in
     // one array literal drops that gate from every loop silently. Named, so
     // each new gate is asserted on ITS OWN declared default, empty-override,
-    // equal-override and missing-declaration arms. Their declared defaults are
-    // the MEASURE-AT-FIRST-BUILD sentinel (no build has run to measure them),
-    // which is itself pinned: the sentinel is what makes an unmeasured gate
+    // equal-override and missing-declaration arms. Declared defaults are
+    // pinned per gate: NODE_SHA256 carried the MEASURE-AT-FIRST-BUILD
+    // sentinel until the first build measured it (run 36031582204,
+    // cross-checked against nodejs.org's SHASUMS256.txt line, pinned
+    // 2026-09-24); OPENRIG_TREE_SHA256 is STILL the sentinel — the node gate
+    // dies first by Dockerfile order, so the tree measurement is a later
+    // refusal's output, and the sentinel stays what makes an unmeasured gate
     // refuse any real override instead of silently accepting one.
+    const expectedDefaults: Record<(typeof CHECKSUM_ARGS)[number], string | undefined> = {};
+    const measured: Partial<Record<(typeof CHECKSUM_ARGS)[number], string>> = {
+      NODE_SHA256: "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29",
+    };
+    for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
+      expectedDefaults[name] = measured[name] ?? "MEASURE-AT-FIRST-BUILD";
+    }
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
       expect(CHECKSUM_ARGS, `${name} left CHECKSUM_ARGS`).toContain(name);
       const [declared] = dockerfileArgDefaults(realDockerfile(), name);
-      expect(declared, name).toBe("MEASURE-AT-FIRST-BUILD");
+      expect(declared, name).toBe(expectedDefaults[name]);
       // An override that is not the declared default is refused, as a CONTENT
       // GATE — the same message shape the bun gate dies with in main().
       const overridden = checksumArgProblems(realDockerfile(), { [name]: "f".repeat(64) });

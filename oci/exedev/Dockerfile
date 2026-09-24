@@ -897,11 +897,10 @@ RUN set -e; \
 #       pins does not exist until then. Two commits, in that order; they
 #       cannot be one.
 ARG NODE_VERSION=22.20.0
-# SENTINEL, NOT A PIN. When the first build refuses, nodejs.org publishes the
-# corroborating value in SHASUMS256.txt beside the tarball (the
-# `node-v${NODE_VERSION}-linux-x64.tar.gz` line) — pin the ARG from the
-# build's own measured output and cross-check it against that line.
-ARG NODE_SHA256=MEASURE-AT-FIRST-BUILD
+# PINNED 2026-09-24 from the first build's own refusal (run 36031582204:
+# "hashes to eeaccb03…"), cross-checked byte-identical against the
+# nodejs.org SHASUMS256.txt line the sentinel comment below names.
+ARG NODE_SHA256=eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29
 # .tar.gz, NOT the sketch's .tar.xz: gzip is present wherever tar is, while
 # xz-utils presence in the base is unmeasurable from here (no local build) and
 # a missing `xz` breaks `tar -xJf` before any gate runs. One fewer unmeasured
