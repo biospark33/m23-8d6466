@@ -528,6 +528,66 @@ describe("DF2.5 teardownSandbox", () => {
     expect(existsSync(lock)).toBeTrue();
   }, 30_000);
 
+  // ─── S1 rig_swarm: the per-seat teardown branch (Task 6) ─────────────────────
+  //
+  // A swarm run carries NO core keyHash — only the extensions.swarmSeats
+  // namespace (index-aligned seats/keyHashes, written by mintSeatKeys at
+  // dispatch). Teardown branches on that namespace: captureSeatSpend sums
+  // every seat's usage into spendMicroUsd, revokeSeatKeys revokes+verifies
+  // each hash. The fixture below is the dispatch swarm branch's end state:
+  // two minted seat keys, usage on both, budget attribution + requestId for
+  // the hop-4 links.
+  test("S1: swarmSeats — captures summed spend and revokes every seat key", async () => {
+    const runId = "td-swarm-seats";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    const lead = await api.createKey(`${SBX_KEY_PREFIX}${runId}-lead`, 25);
+    const worker = await api.createKey(`${SBX_KEY_PREFIX}${runId}-worker`, 25);
+    store.set(runId, { extensions: { swarmSeats: { seats: ["lead", "worker"], keyHashes: [lead.hash, worker.hash] } } });
+    store.set(runId, { requestId: "req-swarm", extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } } });
+    const h = orderDeps({ gitCwd: host });
+
+    await teardownSandbox(h.deps, runId, lockFor(runId));
+
+    assertTeardownOrder(h.calls);
+    // usageOnCreateUsd 0.0081 on BOTH seats, summed: 2 × 8100 µ$.
+    expect(store.get(runId).spendMicroUsd).toBe(16_200);
+    expect(api.keys.filter((k) => k.deleted).map((k) => k.hash).sort()).toEqual([lead.hash, worker.hash].sort());
+    expect(store.get(runId).closedAt).toBeString();
+    // Audit-link symmetry (Task 6 controller addition 2): one `revoke` link per
+    // seat hash — the seat twin of the single-key path's revoke emit — then the
+    // teardown link after close. subjectId is the seat hash, never key material.
+    expect(h.links.map((l) => `${l.hop}.${l.event}`)).toEqual([
+      "run-credential.revoke",
+      "run-credential.revoke",
+      "run-box.teardown",
+    ]);
+    expect(h.links.slice(0, 2).map((l) => l.subjectId).sort()).toEqual([lead.hash, worker.hash].sort());
+  }, 30_000);
+
+  test("S1: without swarmSeats the single-key path is unchanged (captureSpend + revokeRunKey)", async () => {
+    const runId = "td-swarm-single";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { requestId: "req-single", extensions: { budget: { repoSlug: "qds/demo", issueId: "7" } } });
+    const h = orderDeps({ gitCwd: host });
+
+    await teardownSandbox(h.deps, runId, lockFor(runId));
+
+    assertTeardownOrder(h.calls);
+    // ONE key's usage (8100 µ$), not a sum; the verify-revoked link still lands
+    // beside revoke — the swarm branch's absence changes nothing here.
+    expect(store.get(runId).spendMicroUsd).toBe(8_100);
+    expect(api.keys.filter((k) => k.deleted)).toHaveLength(1);
+    expect(h.links.map((l) => `${l.hop}.${l.event}`)).toEqual([
+      "run-credential.revoke",
+      "run-credential.verify-revoked",
+      "run-box.teardown",
+    ]);
+    expect(store.get(runId).closedAt).toBeString();
+  }, 30_000);
+
   /**
    * DF1.10 AC4. `orderDeps` wraps the four claimants that touch keyApi/destroy/
    * close; the artifacts pull touches none of them — it is a `driver.exec` —

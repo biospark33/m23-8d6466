@@ -1289,6 +1289,50 @@ export async function deliverSeatKeys(
       "inspect the box by hand, then re-run teardown for the run",
     );
   }
+  // Task 6, audit-link symmetry: the `deliver` link, mirroring `deliverRunKey`'s
+  // DF5.3 emit — after the 0600 + env-append confirmations, one link per seat
+  // hash off the record the mint wrote (never the plaintext — INV-4), record
+  // read BEST-EFFORT with the sibling's skip line. FAIL-LOUD posture like the
+  // sibling's: a run whose credential links cannot be written is a run the
+  // chain can never vouch for. (One deliberate deviation, documented: the
+  // sibling's `redactSecrets(…, key)` parks its single plaintext; N seat keys
+  // cannot park in one `keep` slot, and omission only ever redacts MORE.)
+  let rec: RunRecord | undefined;
+  try {
+    rec = deps.store.get(runId);
+  } catch (e) {
+    rec = undefined; // unattributable — no link is manufactured (INV-AUDIT-4)
+    log({
+      requestId: ctx.requestId,
+      operation: "providers.audit-link-skipped",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId,
+      driver: deps.driver.name,
+      event: "deliver",
+      reason: "record-unreadable",
+      error: { code: "record-read-failed", message: redactSecrets(e instanceof Error ? e.message : String(e)) },
+      message: `run ${runId}'s record could not be read after a SUCCESSFUL seat-key delivery — the deliver links are skipped and hop 4 reports this run unlinked; the keys ARE in the box`,
+    });
+  }
+  const seatHashes = (rec?.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? [];
+  if (rec !== undefined && seatHashes.length > 0) {
+    try {
+      for (const hash of seatHashes) {
+        emitCredentialLink(deps, rec, runId, "deliver", { envFile }, hash);
+      }
+    } catch (e) {
+      // FAIL-LOUD, but never as a DELIVERY failure — the distinct code is what
+      // `runCredentialLifecycle`'s catch discriminates on, same as the sibling.
+      throw new CredentialLifecycleError(
+        DELIVER_AUDIT_LINK_FAILED,
+        `the deliver audit link for run ${runId} could not be recorded (${redactSecrets(e instanceof Error ? e.message : String(e))}) — the seat keys WERE delivered to ${vm}:${keysPath} (mode 600 confirmed) and are live`,
+        `repair the audit store, then tear the run down when it is finished: bun scripts/fleet.ts teardown ${runId}`,
+      );
+    }
+  }
 }
 
 /**
@@ -1346,6 +1390,16 @@ export async function revokeSeatKeys(deps: CredentialDeps, runId: string): Promi
   let n = 0;
   for (const hash of hashes) {
     await revokeAndVerify(deps, hash); // each carries its own timed revoke/verify lines
+    // Task 6, audit-link symmetry: the `revoke` link per seat hash, mirroring
+    // `revokeRunKey`'s emit — BEST-EFFORT (the teardown posture: this runs
+    // before destroy, and an unwritable audit store must not be what keeps a
+    // box billing forever), emitted for BOTH revoke outcomes. `detail` stays
+    // `{}` exactly like the sibling's: only facts stable across replays go in
+    // it (an `outcome` that differs between an attempt and its retry would
+    // collide the evidence digest), the seat's identity rides `subjectId`, and
+    // the store's UNIQUE (run_id, hop, event, subject_key) collapses a re-run's
+    // re-emits onto the first row.
+    emitCredentialLinkBestEffort(deps, rec, runId, "revoke", {}, hash);
     n += 1;
   }
   return n;

@@ -1863,6 +1863,32 @@ describe("S1 rig_swarm per-seat keys", () => {
     await expect(deliverSeatKeys(deps({ capMicroUsd: 500_000_000, driver }), runId, vm, keys))
       .rejects.toThrow(/mode 644/);
   });
+
+  // Task 6, audit-link symmetry (review finding): the single-key siblings emit
+  // `deliver` (deliverRunKey) and `revoke` (revokeRunKey) links — the seat
+  // functions emitted NOTHING, so a swarm run's hop 4 stopped at `mint`. Both
+  // now emit one link per seat hash, same hop/subjectKind as the siblings.
+  test("audit-link symmetry: deliver and revoke emit one link per seat hash", async () => {
+    const runId = "run-seat-links";
+    const vm = await makeRun(runId);
+    store.set(runId, { requestId: "req-seat-links", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const { keys, hashes } = await mintSeatKeys(seatDeps(), runId, PLAN);
+    const { driver } = stubExec((script) => (script.includes("cat >") ? "600" : ""));
+    await deliverSeatKeys(deps({ capMicroUsd: 500_000_000, driver }), runId, vm, keys);
+    await revokeSeatKeys(deps({ capMicroUsd: 500_000_000 }), runId);
+
+    const links = auditLinks.filter((l) => l.runId === runId && l.hop === "run-credential");
+    expect(links.map((l) => l.event)).toEqual(["mint", "mint", "deliver", "deliver", "revoke", "revoke"]);
+    expect(links.every((l) => l.subjectKind === "credential-key")).toBeTrue();
+    // Every subject is one of the two seat hashes — mint, deliver AND revoke —
+    // never key material (INV-4/INV-AUDIT-2).
+    const seatHashes = Object.values(hashes).sort();
+    expect(links.map((l) => l.subjectId).sort()).toEqual([...seatHashes, ...seatHashes, ...seatHashes].sort());
+    // INV-4/INV-AUDIT-2: never key material — hash subjects only, whole-array scan.
+    for (const plaintext of Object.values(keys)) {
+      expect(leakScan(plaintext, JSON.stringify(links))).toBeNull();
+    }
+  });
 });
 
 /** Mint a key for runId without running the whole lifecycle (test helper). */
