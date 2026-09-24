@@ -186,6 +186,33 @@ test("abort mid-poll still tears down (finally)", async () => {
   expect(calls.map((c) => c.join(" ")).some((c) => c.includes("rig down devrig --delete --force"))).toBe(true);
 });
 
+test("abort mid-poll still emits seat costs BEFORE teardown", async () => {
+  const ac = new AbortController();
+  const handlers = baseHandlers();
+  handlers["queue show q-1"] = () => {
+    ac.abort();
+    return { exitCode: 0, stdout: "state: open\n", stderr: "" };
+  };
+  const { run } = fakeRunner(handlers);
+  const { home, money } = makeTempHome({ sessionJsonl: true });
+  const events: string[] = [];
+  const moneyPush = money.push.bind(money);
+  money.push = (...rows: Record<string, unknown>[]) => {
+    events.push(`money:${String(rows[0]?.agentId ?? "")}`);
+    return moneyPush(...rows);
+  };
+  const wrapped: CmdRunner = async (argv, opts) => {
+    const res = await run(argv, opts);
+    events.push(argv.join(" "));
+    return res;
+  };
+  await expect(runPhase(SPEC, wrapped, home, ac.signal)).rejects.toThrow();
+  expect(money.some((l) => (l as { agentId?: string }).agentId === "dev-worker@devrig")).toBe(true);
+  expect(events.findIndex((e) => e.startsWith("money:"))).toBeLessThan(
+    events.findIndex((e) => e.includes("rig down devrig --delete --force")),
+  );
+});
+
 test("timeout fallback settles without done and lets the gate decide", async () => {
   const handlers = baseHandlers();
   handlers["queue show q-1"] = () => ({ exitCode: 0, stdout: "state: open\n", stderr: "" });

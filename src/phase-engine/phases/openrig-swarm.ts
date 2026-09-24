@@ -91,7 +91,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       signal?.removeEventListener("abort", onAbort);
       resolve();
     };
-    const onAbort = (): void => resolve();
+    const onAbort = done;
     const timer = setTimeout(done, ms);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
@@ -301,8 +301,11 @@ export function openrigSwarmPhase(
         }
         await sleep(deps.pollIntervalMs ?? SWARM_POLL_INTERVAL_MS, bodyCtx.signal);
       }
-
-      // ── 8. Costs BEFORE teardown, best-effort per seat ──
+    } finally {
+      // ── 8. Costs BEFORE teardown — the FIRST thing the finally does, so
+      // every exit path (done / abort / timeout / throw) attributes spend
+      // before `rig down --delete --force` destroys the session JSONLs.
+      // Best-effort per seat: a missing seat log must not skip teardown. ──
       const seq = deps.invocationSeqByAgent ?? new Map<string, number>();
       const emitMoney = deps.emitMoneyLine ?? defaultStderrMoney;
       for (const { member, session } of seats) {
@@ -337,7 +340,7 @@ export function openrigSwarmPhase(
           logLine({ step: "seat-costs", seat: session, error: e instanceof Error ? e.message : String(e) });
         }
       }
-    } finally {
+
       // ── 9. Teardown ALWAYS runs, fixed order, each step best-effort ──
       for (const argv of [
         ["rig", "down", rig.name, "--delete", "--force"],
