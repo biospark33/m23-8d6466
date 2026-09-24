@@ -53,7 +53,15 @@ import { auditNonEmpty, auditRepoSlug, emitAuditLink, fillRun, provisionAdmitted
 // `AuditStoreWriter.record` into the `recordAuditLink` seam. Every provider
 // module takes the seam, never this import (DF4.2 direction).
 import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../audit/link-store.ts";
-import { defaultKeyCapMicroUsd, mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
+import {
+  defaultKeyCapMicroUsd,
+  deliverRunKey,
+  deliverSeatKeys,
+  mintRunKey,
+  mintSeatKeys,
+  type KeyApi,
+  type SeatKeyPlan,
+} from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
@@ -1657,6 +1665,77 @@ function loadManifestAndRoster(
 }
 
 /**
+ * S1: turn authored `PhaseSpec.seatBudgets` into the `SeatKeyPlan[]` the seat
+ * mint accepts. Authored budgets may exceed the admitted ceiling (the manifest
+ * is authored before admission); each seat's limit is its proportional share of
+ * the ceiling, floored at 1 µ$ so no seat is minted a 0-limit key. Each share
+ * is ALSO clamped to `defaultKeyCapMicroUsd`: `mintSeatKeys` refuses a seat
+ * above the backstop AFTER box creation, and proportional scaling alone can
+ * leave one there when authored budgets are large but fit the ceiling
+ * (Σ authored ≤ ceiling, single seat 250M µ$).
+ *
+ * The clamp only lowers, so Σ ≤ ceiling EXCEPT where the 1 µ$ floor raises a
+ * sub-1 share back up — which any tiny authored budget (or a ceiling below the
+ * seat count) can produce. The completed plan is therefore verified here and
+ * an inflated one REFUSED at dispatch: the alternative is deferring to the
+ * mint's Σ-guard, which runs after box creation and strands the spend.
+ */
+export function seatKeyPlan(budgets: Record<string, number>, ceilingMicroUsd: number): SeatKeyPlan[] {
+  const entries = Object.entries(budgets);
+  const total = entries.reduce((a, [, v]) => a + v, 0);
+  // Refuse a degenerate plan BEFORE any arithmetic (F-010). total === 0 (no
+  // authored budgets) or a non-positive ceiling used to turn the share
+  // division into NaN, and `Math.max(1, NaN)` === NaN poisoned every limit —
+  // surfacing post-box as the mint's confusing non-integer-limit refusal.
+  // Each authored budget must be a whole number too: the exact division below
+  // is BigInt arithmetic, and BigInt(1.5) is a bare RangeError with no seat
+  // context. This throw reaches the operator at dispatch, before any key is
+  // minted against the plan.
+  if (!Number.isInteger(total) || total <= 0) {
+    throw new Error(
+      `seatKeyPlan: authored seatBudgets sum to ${total} µ$ — need a positive integer total to divide the ceiling across; declare a positive seatBudgets entry per rigSpec member`,
+    );
+  }
+  if (!Number.isInteger(ceilingMicroUsd) || ceilingMicroUsd <= 0) {
+    throw new Error(
+      `seatKeyPlan: ceiling ${ceilingMicroUsd} µ$ is not a positive integer — refusing to divide it across seats; check the admitted run ceiling`,
+    );
+  }
+  for (const [seat, authored] of entries) {
+    if (!Number.isInteger(authored)) {
+      throw new Error(
+        `seatKeyPlan: seat '${seat}' authored budget ${authored} µ$ is not an integer — seatBudgets are whole micro-dollars`,
+      );
+    }
+  }
+  const plan = entries.map(([seat, authored]) => ({
+    seat,
+    // Exact where `Math.floor((authored * ceilingMicroUsd) / total)` lost the
+    // integer product at magnitudes the tests themselves use (>2^53): BigInt
+    // floor-division, then narrowed. The 1 µ$ floor and the backstop clamp
+    // keep their documented semantics (see the doc above).
+    limitMicroUsd: Math.max(
+      1,
+      Math.min(defaultKeyCapMicroUsd, Number((BigInt(authored) * BigInt(ceilingMicroUsd)) / BigInt(total))),
+    ),
+  }));
+  // Verify the COMPLETED plan, not a regime argument about when the floor can
+  // fire: every clamped share sums to at most the ceiling, but a seat whose
+  // share rounds below 1 is raised to 1 µ$, and enough of those (or a ceiling
+  // below the seat count) push Σ over. Refuse here — `mintSeatKeys`' Σ-guard
+  // only fires after box creation, and a plan that mints more than the
+  // admitted ceiling must never reach it. (Limits are ≤ the backstop cap, so
+  // this sum cannot overflow a double at any seat count the schema admits.)
+  const planSum = plan.reduce((acc, p) => acc + p.limitMicroUsd, 0);
+  if (planSum > ceilingMicroUsd) {
+    throw new Error(
+      `seatKeyPlan: the computed plan sums to ${planSum} µ$ against a ${ceilingMicroUsd} µ$ ceiling — the 1 µ$ floor raised seats whose proportional share rounded below it; raise the ceiling (at least one µ$ per seat, more alongside tiny authored budgets) or rebalance seatBudgets`,
+    );
+  }
+  return plan;
+}
+
+/**
  * Step 7 — mint the provider key and deliver it into the box (INV-4: the
  * plaintext exists in the mint return and nowhere else). Lifted out of
  * `dispatch()` verbatim (F003).
@@ -1674,9 +1753,11 @@ async function mintAndDeliverKey(
     effectiveCeilingMicros: number;
     /** DF5.3: the bound audit seam, threaded into both credential deps below. */
     recordAuditLink: (link: ProviderAuditLink) => void;
+    /** S1: present iff the manifest's first rig_swarm phase carries seatBudgets. */
+    seatPlan?: readonly SeatKeyPlan[];
   },
 ): Promise<number> {
-  const { requestId, runId, vm, effectiveCeilingMicros, recordAuditLink } = args;
+  const { requestId, runId, vm, effectiveCeilingMicros, recordAuditLink, seatPlan } = args;
   // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ─
   const tMint = ctx.now();
   const credEnvFile = envFileFor(deps.driver);
@@ -1693,59 +1774,123 @@ async function mintAndDeliverKey(
   // nowhere else, so the provider's free text never reaches a sink here — only
   // its `code`, in the payload.
   try {
-    const { key } = await ctx.within(
-      "mint",
-      () =>
-        mintRunKey(
-          {
-            keyApi: deps.keyApi,
-            driver: deps.driver,
-            store: deps.store,
-            requestId,
-            capMicroUsd: effectiveCeilingMicros,
-            recordAuditLink,
-            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-          },
-          runId,
-        ),
-      // An ABANDONED mint that lands anyway is a live provider key spending
-      // against this issue's cap, and `within` cannot cancel it. The refusal
-      // has already gone out naming nothing about it, so this line is the only
-      // operator-facing pointer that exists until the record write inside
-      // `mintRunKey` catches up.
-      //
-      // `hash`, never `key`: INV-4 says the plaintext exists in the mint
-      // return and nowhere else, and this is a log sink. The hash is the
-      // provider-side IDENTIFIER (credentials.ts persists it in the plaintext
-      // record and keeps it through redaction for exactly this reason) and it
-      // is charset-checked before `mintRunKey` returns, so it cannot carry
-      // anything into a line an operator pastes. The CAP goes with it because
-      // "a key is live" and "it can spend N µ$" are different sizes of
-      // incident.
-      (minted) => ({ keyHash: minted.hash, capMicroUsd: effectiveCeilingMicros }),
-    );
-    await ctx.within(
-      "deliver",
-      () =>
-        deliverRunKey(
-          {
-            keyApi: deps.keyApi,
-            driver: deps.driver,
-            store: deps.store,
-            requestId,
-            recordAuditLink,
-            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-          },
-          // DF5.3: the deliver link needs the run identity, so `deliverRunKey`
-          // now takes it beside the deps (it had only the vm handle).
-          runId,
-          vm.name,
-          key,
-        ),
-      // Resolves `void`; what a late one means is that the key reached the box
-      // AFTER the operator was told the dispatch failed. The box is the fact.
-      () => ({ vmName: vm.name, keyDelivered: true }),
-    );
+    if (seatPlan !== undefined) {
+      // S1: a rig_swarm phase swaps the single run key for per-seat capped
+      // keys — same mint→deliver order, same deps (the audit seam and the
+      // substrate env file mirror the single-key calls below), same INV-4
+      // posture: the plaintexts exist in the mint return and nowhere else.
+      // mintSeatKeys records the seat hashes and emits one `mint` link per
+      // seat before this returns; the Σ ≤ effectiveCeilingMicros invariant is
+      // held by `seatKeyPlan` and re-asserted at the mint.
+      const { keys } = await ctx.within(
+        "mint",
+        () =>
+          mintSeatKeys(
+            {
+              keyApi: deps.keyApi,
+              driver: deps.driver,
+              store: deps.store,
+              requestId,
+              capMicroUsd: effectiveCeilingMicros,
+              recordAuditLink,
+              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+            },
+            runId,
+            seatPlan,
+          ),
+        // The same abandoned-mint pointer the single-key arm below keeps
+        // (F-009): an ABANDONED mint that lands anyway leaves N live seat keys,
+        // and this line is the only operator-facing handle for them until the
+        // record write inside `mintSeatKeys` catches up. Compact per-seat
+        // summary, bounded by the plan: hash PREFIX only — the full hash is
+        // the record's business (INV-4 posture, same reasoning as the single
+        // `keyHash` payload), and the prefix is enough to join against the
+        // provider console. Each seat's planned cap rides along because "live"
+        // and "can spend N µ$" are different sizes of incident.
+        (minted) => ({
+          seats: seatPlan.map((p) => ({
+            seat: p.seat,
+            hashPrefix: `${(minted.hashes[p.seat] ?? "").slice(0, 8)}…`,
+            capMicroUsd: p.limitMicroUsd,
+          })),
+        }),
+      );
+      await ctx.within(
+        "deliver",
+        () =>
+          deliverSeatKeys(
+            {
+              keyApi: deps.keyApi,
+              driver: deps.driver,
+              store: deps.store,
+              requestId,
+              recordAuditLink,
+              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+            },
+            runId,
+            vm.name,
+            keys,
+          ),
+        // Resolves `void`; a late one means the seat keys reached the box
+        // AFTER the operator was told the dispatch failed (the same meaning as
+        // the single-key arm below) — now for several boxes at once.
+        () => ({ vmName: vm.name, seatsDelivered: Object.keys(keys).length }),
+      );
+    } else {
+      const { key } = await ctx.within(
+        "mint",
+        () =>
+          mintRunKey(
+            {
+              keyApi: deps.keyApi,
+              driver: deps.driver,
+              store: deps.store,
+              requestId,
+              capMicroUsd: effectiveCeilingMicros,
+              recordAuditLink,
+              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+            },
+            runId,
+          ),
+        // An ABANDONED mint that lands anyway is a live provider key spending
+        // against this issue's cap, and `within` cannot cancel it. The refusal
+        // has already gone out naming nothing about it, so this line is the only
+        // operator-facing pointer that exists until the record write inside
+        // `mintRunKey` catches up.
+        //
+        // `hash`, never `key`: INV-4 says the plaintext exists in the mint
+        // return and nowhere else, and this is a log sink. The hash is the
+        // provider-side IDENTIFIER (credentials.ts persists it in the plaintext
+        // record and keeps it through redaction for exactly this reason) and it
+        // is charset-checked before `mintRunKey` returns, so it cannot carry
+        // anything into a line an operator pastes. The CAP goes with it because
+        // "a key is live" and "it can spend N µ$" are different sizes of
+        // incident.
+        (minted) => ({ keyHash: minted.hash, capMicroUsd: effectiveCeilingMicros }),
+      );
+      await ctx.within(
+        "deliver",
+        () =>
+          deliverRunKey(
+            {
+              keyApi: deps.keyApi,
+              driver: deps.driver,
+              store: deps.store,
+              requestId,
+              recordAuditLink,
+              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+            },
+            // DF5.3: the deliver link needs the run identity, so `deliverRunKey`
+            // now takes it beside the deps (it had only the vm handle).
+            runId,
+            vm.name,
+            key,
+          ),
+        // Resolves `void`; what a late one means is that the key reached the box
+        // AFTER the operator was told the dispatch failed. The box is the fact.
+        () => ({ vmName: vm.name, keyDelivered: true }),
+      );
+    }
   } catch (e) {
     // Rethrow only when `refuse` already logged this one — a FleetError that
     // did NOT pass through `refuse` (a seam throwing one directly) would
@@ -3351,12 +3496,23 @@ export async function dispatch(
     // (INV-5).
     deps.store.set(runId, { requestId });
 
+    // S1: a rig_swarm phase swaps the single run key for per-seat capped keys.
+    // Authored seatBudgets may exceed the admitted ceiling (the manifest is
+    // authored before admission); clamp proportionally so Σ ≤ ceiling holds
+    // by construction (floor: never a 0-limit key; per-seat backstop clamp —
+    // see seatKeyPlan). Computed ONLY when a rig_swarm phase carries
+    // seatBudgets: every non-swarm dispatch keeps the single-key path below.
+    const swarmPhases = loaded.manifest.phases.filter((p) => p.kind === "rig_swarm");
+    const seatBudgets = swarmPhases[0]?.seatBudgets;
+    const seatPlan = seatBudgets !== undefined ? seatKeyPlan(seatBudgets, effectiveCeilingMicros) : undefined;
+
     const mintedCeilingMicros = await mintAndDeliverKey(ctx, deps, {
       requestId,
       runId,
       vm,
       effectiveCeilingMicros,
       recordAuditLink,
+      ...(seatPlan !== undefined ? { seatPlan } : {}),
     });
 
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─

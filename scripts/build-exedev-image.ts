@@ -192,6 +192,27 @@ const REPRO_BUILDER = "qds-repro";
 export const PI_VERSION = "0.84.4";
 
 /**
+ * The node runtime the S1 rig_swarm phase needs in-box (the seat gate runs
+ * `node --test`; OpenRig's runner is a `#!/usr/bin/env node` script) and the
+ * image ships none of. Must stay in lockstep with `ARG NODE_VERSION` in
+ * oci/exedev/Dockerfile — the loop in {@link gatherBuildIdInputs} refuses a
+ * divergence, and {@link validateBinaryLicenses} refuses a binary-licenses.json
+ * node entry that names a different release. Bumping it changes the buildId
+ * (it is a {@link deriveBuildId} input), which is the point.
+ */
+export const NODE_VERSION = "22.20.0";
+
+/**
+ * The OpenRig CLI the rig_swarm seats run. Same lockstep discipline as
+ * {@link NODE_VERSION}: `ARG OPENRIG_VERSION` in the Dockerfile, the
+ * {@link gatherBuildIdInputs} loop, and binary-licenses.json's openrig entry
+ * must all name one release; an upgrade is the deliberate re-pin ritual the
+ * roadmap records (bump, re-measure OPENRIG_TREE_SHA256, re-run the live
+ * round).
+ */
+export const OPENRIG_VERSION = "0.5.14";
+
+/**
  * The `Install flags:` line the generated NOTICE carries, in one place because
  * three call sites had the same literal and a compliance reader gets whichever
  * one rendered.
@@ -560,6 +581,9 @@ export interface BuildIdInputs {
   platform: string;
   bunVersion: string;
   piVersion: string;
+  /** S1 rig_swarm substrate versions — the same lockstep discipline as `piVersion`. */
+  nodeVersion: string;
+  openrigVersion: string;
   /** Raw file bytes. A string is hashed as its UTF-8 encoding. */
   dockerfile: string | Buffer;
   /**
@@ -649,6 +673,11 @@ export function deriveBuildId(inputs: BuildIdInputs): string {
   field("platform", inputs.platform.trim().toLowerCase());
   field("bun", inputs.bunVersion);
   field("pi", inputs.piVersion);
+  // S1 rig_swarm: an ARG override of NODE_VERSION/OPENRIG_VERSION — or a
+  // lockstep-drifting edit of the Dockerfile defaults — is a different
+  // substrate, so it must move the identity. Framed like every other label.
+  field("node", inputs.nodeVersion);
+  field("openrig", inputs.openrigVersion);
   field("dockerfile", inputs.dockerfile);
   // Code-unit order, NOT `localeCompare`: bare localeCompare collates by the
   // runtime's locale/ICU tables, which order punctuation and case differently
@@ -1436,26 +1465,36 @@ function makeTempDir(prefix: string): string {
   }
 }
 
-/** The image's two `sha256sum -c` gates, by ARG name. */
-export const CHECKSUM_ARGS = ["BUN_SHA256", "PI_AI_SHA256"] as const;
+/**
+ * The image's CONTENT-GATE ARGs, by name: the two `sha256sum -c` download
+ * gates (`BUN_SHA256`, `PI_AI_SHA256`) and the two S1 rig_swarm gates
+ * (`NODE_SHA256` for the nodejs.org tarball, `OPENRIG_TREE_SHA256` for the
+ * whole /opt/openrig tree). `QDS_ENGINE_TREE_SHA256` is deliberately absent:
+ * it is this PR's PREDECESSOR (R3-a, #217), carries a real measured pin, and
+ * was never on this list — folding it in is a separate decision, not a silent
+ * widening.
+ */
+export const CHECKSUM_ARGS = ["BUN_SHA256", "PI_AI_SHA256", "NODE_SHA256", "OPENRIG_TREE_SHA256"] as const;
 
 /**
- * Everything wrong with the two CONTENT GATES, as `die(2)` lines. Empty ⇒ fine.
+ * Everything wrong with the CONTENT GATES, as `die(2)` lines. Empty ⇒ fine.
  *
  * This is the caller side of the exposure oci/exedev/Dockerfile names next to
  * `ARG BUN_SHA256`: "Closing it belongs on the caller side: that script should
  * refuse a BUN_SHA256 override that is not this file's default."
  *
- * Both checksums are `ARG`s, so `docker build --build-arg
- * BUN_SHA256=<hash-of-anything>` makes the image's only two content checks
- * verify an attacker-chosen artifact and pass — and {@link deriveBuildId}
- * hashes the Dockerfile BYTES (the DEFAULTS) plus platform/bunVersion/piVersion
- * and never the EFFECTIVE arg values, so the substituted image carries a
- * byte-identical buildId and gate B's in-box assertion still passes. The
- * Dockerfile self-declares this for `BUN_SHA256` and says nothing at all about
- * `PI_AI_SHA256`, which the same change introduced. {@link buildArgList} passes
- * neither, which is what keeps THIS script's own path safe; the two checks
- * below are about the ways that safety is lost anyway.
+ * Every checksum here is an `ARG`, so `docker build --build-arg
+ * BUN_SHA256=<hash-of-anything>` (or the same override against any other name
+ * in {@link CHECKSUM_ARGS}) makes the image's content checks verify an
+ * attacker-chosen artifact and pass — and {@link deriveBuildId} hashes the
+ * Dockerfile BYTES (the DEFAULTS) plus platform/bunVersion/piVersion/
+ * nodeVersion/openrigVersion and never the EFFECTIVE arg values, so the
+ * substituted image carries a byte-identical buildId and gate B's in-box
+ * assertion still passes. The Dockerfile self-declares this for `BUN_SHA256`
+ * and says nothing at all about `PI_AI_SHA256`, which the same change
+ * introduced, nor about the S1 pair. {@link buildArgList} passes none of them,
+ * which is what keeps THIS script's own path safe; the two checks below are
+ * about the ways that safety is lost anyway.
  *
  * 1. A DECLARATION THAT DISAGREES WITH ITSELF. `BUN_SHA256` is declared in two
  *    stages (the engine builder compiles with the same pinned bun the runtime
@@ -1488,7 +1527,7 @@ export function checksumArgProblems(dockerfile: string, env: Record<string, stri
     if (declared.length === 0) {
       problems.push(
         `oci/exedev/Dockerfile declares no "ARG ${name}=<default>"`,
-        "it is one of the image's two content gates; without an in-repo default the `sha256sum -c` verifies whatever the caller supplies",
+        "it is one of the image's content gates; without an in-repo default the gate verifies whatever the caller supplies",
       );
       continue;
     }
@@ -1635,7 +1674,17 @@ function gatherBuildIdInputs(platform: string): {
   // a moved buildId with an unmoved substrate — or, for BUN_VERSION, as a bare
   // `sha256sum -c` mismatch ten QEMU-emulated minutes in. Compared here, before
   // any of those minutes are spent, and named.
-  for (const [name, ours] of [["BUN_VERSION", bunVersion], ["PI_VERSION", PI_VERSION]] as const) {
+  // S1 rig_swarm extends the same lockstep to the two substrate versions it
+  // added: the node runtime and the OpenRig CLI. The constants live in THIS
+  // script (NODE_VERSION / OPENRIG_VERSION above) so the buildId, the
+  // --build-arg pairing and binary-licenses.json's version check (F-041's
+  // consumer of the same constants) all read one source.
+  for (const [name, ours] of [
+    ["BUN_VERSION", bunVersion],
+    ["PI_VERSION", PI_VERSION],
+    ["NODE_VERSION", NODE_VERSION],
+    ["OPENRIG_VERSION", OPENRIG_VERSION],
+  ] as const) {
     const declared = dockerfileArgDefaults(dockerfile, name);
     if (declared.length === 0) {
       die(2, [
@@ -1663,7 +1712,17 @@ function gatherBuildIdInputs(platform: string): {
               'the version comes from package.json "packageManager"; a bump lands here first',
               "update ARG BUN_VERSION *and* re-measure ARG BUN_SHA256 for the new release, or the build fails inside sha256sum -c",
             ]
-          : [`update ARG ${name} in the Dockerfile, or PI_VERSION in this script — they name the same substrate`]),
+          : name === "NODE_VERSION"
+            ? [
+                "update ARG NODE_VERSION in the Dockerfile, or NODE_VERSION in this script — they name the same substrate",
+                "a bump also moves ARG NODE_SHA256: re-measure it from the new tarball (cross-check the SHASUMS256.txt line at nodejs.org/dist/) and move binary-licenses.json's node entry, or both gates refuse",
+              ]
+            : name === "OPENRIG_VERSION"
+              ? [
+                  "update ARG OPENRIG_VERSION in the Dockerfile, or OPENRIG_VERSION in this script — they name the same substrate",
+                  "a bump also moves ARG OPENRIG_TREE_SHA256 (npm re-resolves the ^-ranges): re-measure it, and move binary-licenses.json's openrig entry (version, names, licenseUrl tag), or both gates refuse",
+                ]
+              : [`update ARG ${name} in the Dockerfile, or PI_VERSION in this script — they name the same substrate`]),
       ]);
     }
   }
@@ -1712,7 +1771,16 @@ function gatherBuildIdInputs(platform: string): {
   return {
     // The dockerfile input is the raw BYTES, not the decoded string above —
     // the buildId hashes what is on disk, with no utf8 round-trip in between.
-    inputs: { baseDigests, platform, bunVersion, piVersion: PI_VERSION, dockerfile: dockerfileBytes, files },
+    inputs: {
+      baseDigests,
+      platform,
+      bunVersion,
+      piVersion: PI_VERSION,
+      nodeVersion: NODE_VERSION,
+      openrigVersion: OPENRIG_VERSION,
+      dockerfile: dockerfileBytes,
+      files,
+    },
     baseRefs,
     runtimeBaseRef,
     runtimeBasePinned,
@@ -2305,6 +2373,15 @@ function scanImage(imageId: string): ImageScan {
  * makes `sweep.unreadable` a `die(1)`. Deleting it on the belief that `-L`
  * covers this reopens the one failure the AC5 gate exists to catch, as a clean
  * build.
+ *
+ * Every caller since S1 passes exactly ONE site: the engine's tree and the
+ * OpenRig tree are swept into SEPARATE scratch dirs and combined by
+ * `mergeSweeps`, because they share package names (yaml, zod) at different
+ * versions and the `/.`-merge branch below would overwrite the earlier site's
+ * bytes in the scratch copy. The merge branch is retained for a future site
+ * that genuinely wants it — with the warning that "name collisions across
+ * sites do not matter" stopped being true the day the second permitted site
+ * arrived.
  */
 function extractNodeModules(imageId: string, sites: readonly string[], dest: string): void {
   const cid = assertCid(run("docker", ["create", imageId], "docker create (tree)"), "docker create (tree)");
@@ -2339,6 +2416,90 @@ function emptySweep(): SweepResult {
     uncommonIds: [],
     licenseTexts: {},
   };
+}
+
+/**
+ * Combine the per-site sweep results into the one result the NOTICE and the
+ * fail-closed gates read. S1 rig_swarm admitted a SECOND npm tree
+ * (/opt/openrig/lib/node_modules), and the trees are swept SEPARATELY rather
+ * than merged into one scratch directory because `@openrig/cli` depends on
+ * `yaml` and `zod` at versions the engine tree does not ship: an
+ * `extractNodeModules` merge would overwrite the engine's copies in the
+ * scratch dir and the sweep would attribute bytes the engine never runs.
+ * Every array/counter field is concatenated or summed — nothing is
+ * deduplicated or reconciled, because no downstream consumer reads a package
+ * twice for harm: the NOTICE renders every entry it is handed and the
+ * fail-closed lists are only ever checked for emptiness.
+ *
+ * The two MAP fields are the exception, because a naive spread silently
+ * DROPS one side of a key collision, which is reconciliation by accident:
+ *   - `piVersions` (keyed by package name): a name seen in both trees at
+ *     DIFFERENT versions joins them `"a, b"` — the same convention
+ *     license-sweep.ts's own sweepTree applies to same-name collisions
+ *     WITHIN one tree — so both shipped versions stay attributed. Same
+ *     version merges as before.
+ *   - `licenseTexts` (keyed by SPDX id): both sweeps resolve against the ONE
+ *     canonical oci/license-texts/ directory this script passes, so equal
+ *     keys carry equal text by construction and the spread cannot lose
+ *     anything today. A DIFFERING value would mean the sweeps disagreed
+ *     about canonical bytes — refused loudly rather than resolved by
+ *     ordering, because silently picking either copy would publish a NOTICE
+ *     claim a canonical text does not back.
+ */
+export function mergeSweeps(parts: readonly SweepResult[]): SweepResult {
+  if (parts.length === 0) return emptySweep();
+  const first = parts[0];
+  if (first === undefined) return emptySweep(); // unreachable past the length guard; keeps noUncheckedIndexedAccess honest
+  return parts.slice(1).reduce<SweepResult>((acc, p) => ({
+    treePackageCount: acc.treePackageCount + p.treePackageCount,
+    entries: [...acc.entries, ...p.entries],
+    denied: [...acc.denied, ...p.denied],
+    covered: [...acc.covered, ...p.covered],
+    uncovered: [...acc.uncovered, ...p.uncovered],
+    unresolved: [...acc.unresolved, ...p.unresolved],
+    missingTexts: [...acc.missingTexts, ...p.missingTexts],
+    upstreamNotices: [...acc.upstreamNotices, ...p.upstreamNotices],
+    unreadable: [...acc.unreadable, ...p.unreadable],
+    pinViolations: [...acc.pinViolations, ...p.pinViolations],
+    piVersions: mergePiVersions(acc.piVersions, p.piVersions),
+    uncommonIds: [...acc.uncommonIds, ...p.uncommonIds],
+    licenseTexts: mergeLicenseTexts(acc.licenseTexts, p.licenseTexts),
+  }), first);
+}
+
+/**
+ * Cross-sweep {@link SweepResult.piVersions} merge. Same name at different
+ * versions joins `"a, b"` (split on `", "` to re-check, exactly as
+ * sweepTree's within-tree loop does), so a package the engine and OpenRig
+ * trees ship at different versions attributes BOTH instead of whichever tree
+ * the reduce happened to reach last.
+ */
+function mergePiVersions(acc: Record<string, string>, next: Record<string, string>): Record<string, string> {
+  const out = { ...acc };
+  for (const [name, version] of Object.entries(next)) {
+    const prev = out[name];
+    if (prev === undefined) out[name] = version;
+    else if (!prev.split(", ").includes(version)) out[name] = `${prev}, ${version}`;
+  }
+  return out;
+}
+
+/**
+ * Cross-sweep {@link SweepResult.licenseTexts} merge. Equal keys are equal by
+ * construction (one canonical license-text directory); a disagreement is a
+ * broken invariant, not a merge decision, and refuses rather than letting
+ * reduce order decide which text the NOTICE publishes.
+ */
+function mergeLicenseTexts(acc: Record<string, string>, next: Record<string, string>): Record<string, string> {
+  for (const [id, text] of Object.entries(next)) {
+    const prev = acc[id];
+    if (prev !== undefined && prev !== text) {
+      throw new Error(
+        `mergeSweeps: two sweeps disagree on the canonical text for "${id}" — they must resolve against the same oci/license-texts/ directory`,
+      );
+    }
+  }
+  return { ...acc, ...next };
 }
 
 /**
@@ -2394,6 +2555,15 @@ interface BinaryEntry {
    */
   paths?: string[];
   project: string;
+  /**
+   * The upstream release this entry attributes, as a BARE machine-comparable
+   * version ("22.20.0"). {@link validateBinaryLicenses} compares the node and
+   * OpenRig entries against the script's NODE_VERSION/OPENRIG_VERSION
+   * constants and refuses drift, so those two must never carry narrative
+   * here; a float-resolved dependency (better-sqlite3) states its comparable
+   * floor first and the float range after it.
+   */
+  version?: string;
   spdxId: string;
   copyright: string;
   licenseUrl: string;
@@ -2432,7 +2602,11 @@ export interface LicenseTableProblems {
  * contract reserves for a licence compliance finding, right next to a
  * malformed-top-level check on the same file that correctly exits 2.
  */
-export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): LicenseTableProblems {
+export function validateBinaryLicenses(
+  raw: unknown,
+  licenseTextsDir: string,
+  expectedVersions?: { nodeVersion: string; openrigVersion: string },
+): LicenseTableProblems {
   const problems: string[] = [];
   const compliance: string[] = [];
   // `null` is valid JSON, so it reaches here past the parse; a property access
@@ -2517,6 +2691,38 @@ export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): L
     for (const [j, b] of (entry.bundled ?? []).entries()) {
       if (!nonEmpty(b?.component) || !nonEmpty(b?.url) || !nonEmpty(b?.note)) {
         problems.push(`${at}, bundled ${j}: "component", "url" and "note" are all required`);
+      }
+    }
+  }
+  // S1 rig_swarm: the table's node/OpenRig version fields must name the SAME
+  // substrate the pinned ARGs install. Without this check a legitimate ARG
+  // bump ships stale legal attribution — licenseUrl tags pinned to the old
+  // release — under an image whose every other gate passes. Compared against
+  // the script-side NODE_VERSION/OPENRIG_VERSION constants (the same source
+  // the ARG lockstep loop and the buildId read), and only when the caller
+  // supplies them: the exported surface predates the check and its shape
+  // assertions stay callable without it. Structural, not compliance — a
+  // drifted version is a forgotten edit to a well-formed table, the same
+  // "bad edit" class as a missing field.
+  if (expectedVersions !== undefined) {
+    for (const [project, argName, expected] of [
+      ["nodejs/node", "NODE_VERSION", expectedVersions.nodeVersion],
+      ["mvschwarz/openrig", "OPENRIG_VERSION", expectedVersions.openrigVersion],
+    ] as const) {
+      const i = entries.findIndex((e) => (e as Partial<BinaryEntry>).project === project);
+      const at = `entry ${i}`;
+      if (i < 0) {
+        problems.push(
+          `${at}: no "${project}" entry — the Dockerfile installs ${argName === "NODE_VERSION" ? "node" : "the OpenRig CLI"} unconditionally, so the table must attribute it`,
+        );
+        continue;
+      }
+      const version = (entries[i] as Partial<BinaryEntry>).version?.trim();
+      if (version !== expected) {
+        problems.push(
+          `${at} (${project}): version ${JSON.stringify(version ?? "(absent)")} is not this build's pinned ${argName} ${expected}`,
+          "an ARG bump without the table is stale attribution (its licenseUrl tag names the old release); move the entry's version, licenseUrl tag and verifiedHow in the same change as the ARG",
+        );
       }
     }
   }
@@ -2999,7 +3205,10 @@ function main(): void {
   }
   // Structural problems exit 2 with the malformed-file check above; only a
   // well-formed table saying something unacceptable is a compliance failure.
-  const tableProblems = validateBinaryLicenses(raw, LICENSE_TEXTS);
+  const tableProblems = validateBinaryLicenses(raw, LICENSE_TEXTS, {
+    nodeVersion: NODE_VERSION,
+    openrigVersion: OPENRIG_VERSION,
+  });
   if (tableProblems.structural.length > 0) {
     die(2, [
       ...tableProblems.structural,
@@ -3413,13 +3622,39 @@ function main(): void {
   // Heartbeated from here on: the phases after extraction write nothing into
   // it, and a concurrently starting run sweeps anything over an hour old.
   liveDirs.push(treeDir);
+  // The SECOND scratch dir — the OpenRig tree's own sweep destination (S1
+  // rig_swarm; see mergeSweeps for why the sites are NOT merged into treeDir).
+  // Same prefix family as treeDir so the stale sweep reaps a crashed run's
+  // leftover, same keepTree escape hatch, same leak registration.
+  const openrigDir = makeTempDir(path.join(os.tmpdir(), opts.keepTree ? "qds-exedev-keep-" : "qds-exedev-tree-"));
+  if (!opts.keepTree) leaked.paths.add(openrigDir);
+  liveDirs.push(openrigDir);
   let sweep: SweepResult;
+  let engineSweep: SweepResult = emptySweep();
   try {
     stillRunning();
     const scan = scanImage(imageId);
     stillRunning();
-    sweep = sweepImageTree(imageId, scan.nodeModulesSites, treeDir);
+    // The ONLY npm trees this image may ship, by literal path: the engine's
+    // runtime closure (yaml+zod, asserted below against the swept tree) and —
+    // since S1 rig_swarm — the OpenRig CLI's dependency tree. Declared here
+    // because the sweep below filters the observed sites against them before
+    // the AC5 narrowing re-derives the same literals for its own gate.
+    const enginePath = "opt/qds-factory/node_modules";
+    const openrigPath = "opt/openrig/lib/node_modules";
+    engineSweep = sweepImageTree(
+      imageId,
+      scan.nodeModulesSites.filter((s) => s === enginePath),
+      treeDir,
+    );
     stillRunning();
+    const openrigSweep = sweepImageTree(
+      imageId,
+      scan.nodeModulesSites.filter((s) => s === openrigPath),
+      openrigDir,
+    );
+    stillRunning();
+    sweep = mergeSweeps([engineSweep, openrigSweep]);
 
     // AC5's finding, NARROWED at DF1.10's route change rather than removed.
     //
@@ -3440,12 +3675,21 @@ function main(): void {
     // to), and still has to be covered by the rendered NOTICE. What changed is
     // WHERE a tree may be, not whether it must be explained.
     //
-    // A tree ANYWHERE ELSE is the original finding, unchanged. Adding a second
-    // permitted site means adding it here deliberately, in the same change that
-    // ships whatever needs it — which is the point of a literal set rather than
-    // a prefix match or a "starts with /opt" rule that would admit the next tree
-    // for free.
-    const enginePath = "opt/qds-factory/node_modules";
+    // A tree ANYWHERE ELSE is the original finding, unchanged. Adding a
+    // permitted site means adding it here deliberately, in the same change
+    // that ships whatever needs it — which is the point of a literal set
+    // rather than a prefix match or a "starts with /opt" rule that would
+    // admit the next tree for free. S1 rig_swarm added the second one: the
+    // OpenRig CLI's dependency tree at /opt/openrig/lib/node_modules, swept
+    // and NOTICE-attributed like the engine's own, but with NO closure
+    // enumeration here — its byte identity is frozen by the Dockerfile's own
+    // OPENRIG_TREE_SHA256 content gate (a TOFU ARG pinned at the first real
+    // build; see that file's S1 section), and re-enumerating its
+    // npm-^resolved package list in this script would be a second, driftier
+    // copy of the same pin. Every OTHER property the gate enforces applies
+    // to it in full, through the merged sweep: complete sweep, zero
+    // denied/unresolved/missing-text findings, NOTICE coverage.
+    //
     // PRESENCE, not just placement. An image whose swept `node_modules` site
     // list is EMPTY used to pass this whole block vacuously — no unexpected
     // sites, no closure to check, a clean NOTICE describing no tree — with
@@ -3468,7 +3712,20 @@ function main(): void {
         "restore the COPY that lands the engine's runtime closure at that exact path — the Dockerfile's own builder asserts cannot see a dropped final COPY",
       ]);
     }
-    const unexpected = scan.nodeModulesSites.filter((s) => s !== enginePath);
+    // The openrig site's absence gets its own refusal for the same reason:
+    // a dropped S1 Dockerfile stage is an image without `rig`, which every
+    // in-Dockerfile assertion would have caught only if the stage survived
+    // far enough to run them. This is the host-side half of that tripwire.
+    if (!scan.nodeModulesSites.includes(openrigPath)) {
+      die(1, [
+        `the built image carries no npm tree at /${openrigPath}`,
+        "the S1 rig_swarm stages install the OpenRig CLI there; an absent tree is a dropped Dockerfile stage, not a smaller image",
+        ...(scan.nodeModulesSites.length > 0
+          ? [`the scan did find npm tree(s) at: ${scan.nodeModulesSites.map((s) => `/${s}`).join(", ")}`]
+          : []),
+      ]);
+    }
+    const unexpected = scan.nodeModulesSites.filter((s) => s !== enginePath && s !== openrigPath);
     if (unexpected.length > 0) {
       const named = sweep.entries.slice(0, 20).map((e) => `${e.name}@${e.version} at /${e.depPath}`);
       // Coverage gaps enrich the finding when the NOTICE machinery can render
@@ -3482,7 +3739,7 @@ function main(): void {
       }
       die(1, [
         `the built image carries an npm tree at an unexpected site: ${unexpected.map((s) => `/${s}`).join(", ")}`,
-        `the only tree this image ships is the engine's own runtime closure at /${enginePath}; anything else is an unswept surface that crept in`,
+        `the only trees this image ships are the engine's runtime closure at /${enginePath} and the OpenRig CLI's dependency tree at /${openrigPath}; anything else is an unswept surface that crept in`,
         "if a new tree is legitimate, add its path to the permitted set in this function, in the same change that ships it",
         `for context, the sweep found ${sweep.treePackageCount} installed copies across every site:`,
         ...named,
@@ -3514,22 +3771,23 @@ function main(): void {
     //
     // TOP-LEVEL only, and `depPath` is a DEPENDENCY CHAIN rather than a
     // filesystem path (`license-sweep.ts` builds it as `[...chain,
-    // name].join(" > ")`), so a root entry is one with no `>` in it. That is
-    // also why this reads `sweep.entries` and not a per-site listing:
-    // `extractNodeModules` merges every permitted site into ONE scratch
-    // directory before the walk, and by this line the only site that survived
-    // the check above is the engine's — so every entry here came from it.
+    // name].join(" > ")`), so a root entry is one with no `>` in it.
     //
     // Transitive dependencies are a different, already-swept and
     // already-attributed fact and are deliberately not counted: `yaml` and
     // `zod` have none today, which is why the builder's count is 2, and if
     // that changes the deeper entries must not trip this while the top-level
     // set stays honest.
+    //
+    // Read from `engineSweep` — the ENGINE site's own sweep — never the
+    // merged `sweep`: /opt/openrig's tree legitimately holds `yaml` and `zod`
+    // (and a dozen more) as its own top-level roots, and before the per-site
+    // split this check would have counted them as the engine's closure.
     const EXPECTED_ENGINE_CLOSURE = ["yaml", "zod"];
     {
       // The presence gate above already refused an absent tree, so this reads
       // unconditionally — a tree at the engine's path is a fact by this line.
-      const closure = [...new Set(sweep.entries.filter((e) => !e.depPath.includes(" > ")).map((e) => e.name))].sort();
+      const closure = [...new Set(engineSweep.entries.filter((e) => !e.depPath.includes(" > ")).map((e) => e.name))].sort();
       if (JSON.stringify(closure) !== JSON.stringify(EXPECTED_ENGINE_CLOSURE)) {
         die(1, [
           `/${enginePath} holds ${closure.length} top-level package(s): ${closure.join(", ") || "<none the sweep could read>"}`,
@@ -3876,8 +4134,12 @@ function main(): void {
       }
     };
     drop(runDir);
-    if (!opts.keepTree) drop(treeDir);
-    else say(`kept extracted tree at ${treeDir}\n`);
+    if (!opts.keepTree) {
+      drop(treeDir);
+      drop(openrigDir);
+    } else {
+      say(`kept extracted trees at ${treeDir} and ${openrigDir}\n`);
+    }
   }
 }
 

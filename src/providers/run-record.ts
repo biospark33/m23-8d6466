@@ -361,6 +361,13 @@ export const EXTENSION_NAMESPACES: Readonly<
       artifactsFailedAt: "string",
     },
   },
+  /**
+   * S1 rig_swarm: per-seat provider keys. `seats` and `keyHashes` are index-
+   * aligned (seat[i]'s hash is keyHashes[i]). The single-key core fields
+   * (`keyHash`/`limitMicroUsd`) stay untouched: a swarm run carries NO core
+   * keyHash, and teardown branches on this namespace's presence.
+   */
+  swarmSeats: { schemaVersion: 1, fields: { seats: "strings", keyHashes: "strings" } },
 };
 
 // ---------------------------------------------------------------------------

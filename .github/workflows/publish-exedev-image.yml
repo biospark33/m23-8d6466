@@ -136,6 +136,10 @@ on:
       - cli-anything/src/**
       - cli-anything/scripts/**
       - pi-vs-claude-code-vendor/coms-core.ts
+      # S1 rig_swarm: the self-compact pi extension every seat's settings.json
+      # loads by absolute path, COPY'd by the runtime stage into
+      # /opt/qds/pi-ext/self-compact — a buildId input like every COPY source.
+      - pi-vs-claude-code-vendor/self-compact/extensions/self-compact/**
       # The workspace member manifests. `COPY <member>/package.json` lands each
       # of these in the builder stage so `bun install --frozen-lockfile` can
       # resolve the workspace — the same reason the root package.json is in
@@ -521,6 +525,7 @@ jobs:
                         src/providers/step-log.ts src/providers/cap-rejection.ts \
                         src/providers/run-record.ts src/providers/fs-atomic.ts src/swarmclaw \
                         cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts \
+                        pi-vs-claude-code-vendor/self-compact/extensions/self-compact \
                         cli-anything/package.json pi-vs-claude-code-vendor/package.json \
                         visualizer/package.json)
           src_sha=$(git log -1 --format=%H -- "${SOURCE_PATHS[@]}")

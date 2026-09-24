@@ -205,7 +205,7 @@ describe("loadManifest — closed validation (INV-2)", () => {
     [
       "kind outside the closed set",
       { kind: "wizard" },
-      /kind must be one of 'code' \| 'dispatch_task'; got 'wizard'/,
+      /kind must be one of 'code' \| 'dispatch_task' \| 'rig_swarm'; got 'wizard'/,
     ],
     // A kind that names an `Object.prototype` member. The remediation table is
     // an object literal, so an ungated `table[received]` resolved off the
@@ -214,7 +214,7 @@ describe("loadManifest — closed validation (INV-2)", () => {
     [
       "a kind that collides with an Object.prototype key",
       { kind: "constructor" },
-      /kind must be one of 'code' \| 'dispatch_task'; got 'constructor'/,
+      /kind must be one of 'code' \| 'dispatch_task' \| 'rig_swarm'; got 'constructor'/,
     ],
     // The shape an operator most plausibly produces by deleting `kind:
     // "engineer"` from a pre-C19 manifest. An omitted required field is not a
@@ -944,5 +944,218 @@ describe("stampManifestLimit — monotonic ceiling guard", () => {
   test("the positive-safe-integer validation runs before the guard", () => {
     const once = stampManifestLimit(loadUnstamped(), 500_000);
     expect(() => stampManifestLimit(once, 1.5)).toThrow(/must be a positive integer/);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// S1 — rig_swarm: the third phase kind. The executor shipped (S1's
+// openrigSwarmPhase body, composed by makeBodyFactory — pinned at
+// tests/phase-engine/pipeline-run.test.ts); these tests keep pinning the
+// schema side, unchanged.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("loadManifest — rig_swarm (S1)", () => {
+  // The brief's `baseManifest`/`loadManifestForTest`, mapped onto this file's
+  // fixtures: a manifest with headroom for a rig phase (whose maxDurationMs
+  // defaults to 600 s, so the admission arithmetic needs a budget to fit) and
+  // a one-line load through a fresh isolated run root.
+  function baseManifest(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return manifestObject({ runBudgetMs: 10_000_000, ...over });
+  }
+  function loadManifestForTest(m: Record<string, unknown>): ReturnType<typeof loadManifest> {
+    const root = freshRoot();
+    return loadManifest(writeManifest(root, m), 20_000_000, root);
+  }
+  const CODE_PHASE = phase();
+  const DISPATCH_PHASE = phase({ kind: "dispatch_task", roster: "r.yaml", task: "do it", command: undefined });
+
+  // A minimal VALID rig_swarm phase, reused across the swarm tests.
+  const RIG_SWARM_PHASE = {
+    name: "swarm_build",
+    kind: "rig_swarm",
+    description: "Run the OpenRig swarm to build the change",
+    rigSpec: {
+      name: "dev",
+      pods: [
+        {
+          id: "devpod",
+          members: [
+            { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5" },
+            { id: "worker", model: "openrouter/deepseek/deepseek-v3.2" },
+          ],
+        },
+      ],
+    },
+    objective: "Add a hello() function plus a test; delegate the test to worker; commit on the checkout branch.",
+    leadSeat: "lead",
+    seatBudgets: { lead: 250_000_000, worker: 250_000_000 },
+  };
+
+  // 1. valid rig_swarm phase loads
+  test("rig_swarm phase with all required fields loads", () => {
+    const m = baseManifest({ phases: [RIG_SWARM_PHASE, CODE_PHASE] }); // helper from the file's existing fixture style
+    expect(() => loadManifestForTest(m)).not.toThrow();
+  });
+
+  // 2. each required field refused when missing
+  test.each(["rigSpec", "objective", "leadSeat", "seatBudgets"] as const)(
+    "rig_swarm without %s is refused at load",
+    (field) => {
+      const phase = { ...RIG_SWARM_PHASE } as Record<string, unknown>;
+      delete phase[field];
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(new RegExp(`${field} is required when kind is 'rig_swarm'`));
+    },
+  );
+
+  // 3. command still forbidden on rig_swarm
+  test("rig_swarm with command is refused", () => {
+    const phase = { ...RIG_SWARM_PHASE, command: ["echo", "hi"] };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/command is forbidden when kind is 'rig_swarm'/);
+  });
+
+  // 4. testCommand is now legal on rig_swarm (today code-only)
+  test("rig_swarm may declare testCommand", () => {
+    const phase = { ...RIG_SWARM_PHASE, testCommand: ["bun", "test"] };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] }))).not.toThrow();
+  });
+
+  // 5. leadSeat must name a rigSpec member
+  test("rig_swarm leadSeat not in rigSpec is refused", () => {
+    const phase = { ...RIG_SWARM_PHASE, leadSeat: "chief" };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/leadSeat 'chief' is not a member of rigSpec/);
+  });
+
+  // 6. seatBudgets keys must exactly equal the member set
+  test("seatBudgets keys must exactly match rigSpec members", () => {
+    const phase = { ...RIG_SWARM_PHASE, seatBudgets: { lead: 100_000_000 } };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/seatBudgets keys must exactly match rigSpec member ids/);
+  });
+
+  // 7. one tier-2 brain per box: at most one rig_swarm phase per manifest
+  test("two rig_swarm phases in one manifest are refused", () => {
+    const m = baseManifest({ phases: [RIG_SWARM_PHASE, { ...RIG_SWARM_PHASE, name: "swarm_two" }] });
+    expect(() => loadManifestForTest(m))
+      .toThrow(/at most one rig_swarm phase per manifest/);
+  });
+
+  // 8. dispatch_task keeps refusing testCommand (no regression)
+  test("dispatch_task still refuses testCommand", () => {
+    const phase = { ...DISPATCH_PHASE, testCommand: ["bun", "test"] }; // existing dispatch fixture
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/testCommand is forbidden when kind is 'dispatch_task'/);
+  });
+
+  // ── F-005: identifier grammar + composed-session uniqueness ──
+  // Member ids become provider seat keys (minted under the same grammar); an
+  // id that fails it is refused at PARSE, not post-box at mint.
+  test("member id outside the seat grammar is refused at load", () => {
+    for (const bad of ["../../victim", "Lead", "has space", "a".repeat(33)]) {
+      const rigSpec = {
+        ...RIG_SWARM_PHASE.rigSpec,
+        pods: [{ id: "devpod", members: [{ id: bad, model: "m" }] }],
+      };
+      const phase = { ...RIG_SWARM_PHASE, rigSpec, leadSeat: bad, seatBudgets: { [bad]: 1000 } };
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(/rigSpec member id '.+' in pod 'devpod' must match/);
+    }
+  });
+
+  // Pod ids and the rig name compose tmux session names and the state/pi path,
+  // and the rig name reaches `rig` argv — separators, dots and edge hyphens are
+  // refused, not sanitized.
+  test("pod id outside the component grammar is refused at load", () => {
+    for (const bad of ["../escape", "-leading", "trailing-", "Uppercase", "p".repeat(64)]) {
+      const rigSpec = {
+        ...RIG_SWARM_PHASE.rigSpec,
+        pods: [{ id: bad, members: RIG_SWARM_PHASE.rigSpec.pods[0]!.members }],
+      };
+      const phase = { ...RIG_SWARM_PHASE, rigSpec };
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(/rigSpec pod id '.+' must match/);
+    }
+  });
+
+  test("rig name outside the component grammar is refused at load", () => {
+    for (const bad of ["../escape", "-flag", "x".repeat(64)]) {
+      const rigSpec = { ...RIG_SWARM_PHASE.rigSpec, name: bad };
+      const phase = { ...RIG_SWARM_PHASE, rigSpec };
+      expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+        .toThrow(/rigSpec name '.+' must match/);
+    }
+  });
+
+  // Sessions are named `<pod.id>-<member.id>` and both halves may contain
+  // hyphens — pod 'a' + member 'b-c' collides with pod 'a-b' + member 'c':
+  // one auth.json and one cost identity shared by two seats.
+  test("cross-pod composed-session collision is refused at load", () => {
+    const rigSpec = {
+      name: "dev",
+      pods: [
+        { id: "a", members: [{ id: "b-c", model: "m" }] },
+        { id: "a-b", members: [{ id: "c", model: "m" }] },
+      ],
+    };
+    const phase = { ...RIG_SWARM_PHASE, rigSpec, leadSeat: "b-c", seatBudgets: { "b-c": 1000, c: 1000 } };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/composed seat session 'a-b-c' is not unique/);
+  });
+
+  test("a duplicated member id within one pod composes the same collision", () => {
+    const rigSpec = {
+      name: "dev",
+      pods: [{ id: "devpod", members: [
+        { id: "lead", model: "m" },
+        { id: "lead", model: "m2" },
+      ] }],
+    };
+    const phase = { ...RIG_SWARM_PHASE, rigSpec, seatBudgets: { lead: 1000 } };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/composed seat session 'devpod-lead' is not unique/);
+  });
+
+  // Grammar-valid boundary fixtures still LOAD — the refusals above must never
+  // tighten acceptance past what the grammar admits.
+  test("a 63-char pod id loads (the grammar's maximum)", () => {
+    const rigSpec = { ...RIG_SWARM_PHASE.rigSpec, pods: [{ id: "p".repeat(63), members: RIG_SWARM_PHASE.rigSpec.pods[0]!.members }] };
+    const phase = { ...RIG_SWARM_PHASE, rigSpec };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] }))).not.toThrow();
+  });
+
+  // ── F-019: rig_swarm fields are dead payload on every other kind ──
+  test("a code phase carrying rig_swarm fields is refused per field", () => {
+    for (const field of ["rigSpec", "objective", "leadSeat", "seatBudgets"] as const) {
+      const bad = phase({ [field]: field === "rigSpec" ? RIG_SWARM_PHASE.rigSpec : field === "seatBudgets" ? { lead: 1 } : "lead" });
+      expect(() => loadManifestForTest(baseManifest({ phases: [bad, CODE_PHASE] })))
+        .toThrow(new RegExp(`${field} is forbidden when kind is 'code'`));
+    }
+  });
+
+  // ── F-026: the objective is one queue-create argv element — past 65,536
+  // UTF-8 bytes of JSON-escaped text the spawn dies E2BIG on the box, after
+  // seeding. Exactly-at-max loads; one byte more refuses. The bound is BYTES
+  // of the ESCAPED form: a multi-byte objective counts its encoded width, not
+  // its JavaScript character count.
+  test("objective over 65536 escaped UTF-8 bytes is refused at load; exactly 65536 loads", () => {
+    const atMax = { ...RIG_SWARM_PHASE, objective: "o".repeat(65_536) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [atMax, CODE_PHASE] }))).not.toThrow();
+    const over = { ...RIG_SWARM_PHASE, objective: "o".repeat(65_537) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [over, CODE_PHASE] })))
+      .toThrow(/objective must be at most 65536 UTF-8 bytes/);
+  });
+
+  test("a multi-byte objective is measured in encoded bytes, not characters", () => {
+    // '🐙' is one JavaScript character (two UTF-16 units) but 4 UTF-8 bytes:
+    // 16_384 of them sit at exactly the byte limit while their character
+    // count (32_768) is only half the old bound — only a byte measure can
+    // catch the 16_385th crossing it.
+    const atMax = { ...RIG_SWARM_PHASE, objective: "🐙".repeat(16_384) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [atMax, CODE_PHASE] }))).not.toThrow();
+    const over = { ...RIG_SWARM_PHASE, objective: "🐙".repeat(16_385) };
+    expect(() => loadManifestForTest(baseManifest({ phases: [over, CODE_PHASE] })))
+      .toThrow(/objective must be at most 65536 UTF-8 bytes/);
   });
 });

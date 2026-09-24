@@ -106,6 +106,82 @@
       "verifiedHow": "PROVENANCE: this is FIRST-PARTY code. The file at this path is a two-line `/bin/sh` wrapper written by DF1.10's engine builder stage (`exec bun /opt/qds-factory/scripts/pipeline-run.ts \"$@\"`); the engine it execs is scripts/pipeline-run.ts and its src/ imports, shipped as UNBUNDLED SOURCE at /opt/qds-factory and interpreted by the pinned /usr/local/bin/bun attributed above. LICENCE: DECLARED, by the owner, in this change. This entry read `UNVERIFIED` — a deliberate build failure — for as long as the repository declared no licence at all. It now declares one: QDS-Factory is private, proprietary software, and the declaration lives in three places that must move together — the root `LICENSE` file, package.json `\"license\": \"LicenseRef-QDS-Proprietary\"` (alongside, not instead of, `\"private\": true`), and the canonical text at oci/license-texts/LicenseRef-QDS-Proprietary.txt, which is byte-identical to the root LICENSE and is what `resolveLicenseText` resolves this identifier against. `LicenseRef-` is the SPDX form for a licence with no SPDX-listed identifier, which is what a first-party proprietary licence is; `parseLicenseExpression` treats it as an ordinary atom and the lookup is case-insensitive, so no validator change was needed. NOT `NOASSERTION` and not an OSS identifier, deliberately: NOASSERTION means 'could not establish', which is false for code whose owner is the one filling in this field and would corrupt the two entries above that use it with that exact meaning for third-party artifacts; an OSS identifier would grant rights the owner is not granting. THE FILE IS A NOTICE, NOT THE COMMERCIAL GRANT — the agreement customers buy under is a separate EULA/MSA, and nothing in this table should be read as that grant. Not reviewed by counsel.",
       "notes": "`bundled` IS DELIBERATELY EMPTY, and that is a CORRECTION made in the same change that moved the delivery route — not an omission. This entry used to disclose statically linked LGPL-2.0-or-later JavaScriptCore and bun's further static libraries, and while the engine shipped as a `bun build --compile` executable that was exactly right: a compiled bun executable EMBEDS the bun runtime, so that file really did redistribute the whole static-link graph and really did carry LGPL-2 clause (1)'s relink obligation. DF1.10 took AC2a's fallback route (see the route note in oci/exedev/Dockerfile: bundling collapses `import.meta.dir` to a single value and the engine's closure has two consumers needing different bases), so the file at this path is now a two-line shell script. A shell script embeds nothing. Leaving the disclosure would have been a FALSE CLAIM — attributing to a 90-byte wrapper a relink obligation it cannot discharge and does not incur — and a false attribution is not the safe direction just because it names more licences. The obligation did not disappear: it moved to the artifact that actually carries it, /usr/local/bin/bun, whose own entry above still discloses JavaScriptCore and the static libraries in full. Verify both together; they were one claim split across two files and must stay consistent. WHAT THIS PATH DOES NOT COVER: the engine's own source tree at /opt/qds-factory ships 0644 and non-executable, so it never enters the added-binary diff — it is first-party text from this repository and rides this same licence decision. Its third-party runtime closure (yaml, zod) ships at /opt/qds-factory/node_modules and is attributed by DF2.9's filesystem SWEEP and the generated NOTICE, not by this table: this table attributes BINARIES, the sweep attributes npm packages, and folding either into the other would put a claim in a place its own validator does not check.",
       "bundled": []
+    },
+    {
+      "names": ["usr/local/bin/node"],
+      "project": "nodejs/node",
+      "version": "22.20.0",
+      "spdxId": "MIT",
+      "copyright": "Copyright Node.js contributors. All rights reserved.",
+      "licenseUrl": "https://github.com/nodejs/node/blob/v22.20.0/LICENSE",
+      "verifiedAt": "2026-09-23",
+      "verifiedHow": "PROVENANCE: 22.20.0 is oci/exedev/Dockerfile's ARG NODE_VERSION default, installed from the nodejs.org dist tarball (the linux-x64 tar.gz variant). The ARG is overridable with --build-arg, so this field states the version of the PINNED build; an override that moves it must move this entry in the same change. NODE_SHA256 pins the tarball bytes the same way bun's pin does: cross-checked against the node-v22.20.0-linux-x64.tar.gz line of nodejs.org's own SHASUMS256.txt published beside the tarball. NODE_SHA256 ships as the TOFU sentinel MEASURE-AT-FIRST-BUILD (no build of that Dockerfile has run; see the ARG's own comment), so the first real build MEASURES the tarball hash, cross-checks it against that line, and pins the corroborated value. LICENCE: the tarball's own top-level LICENSE file, read 2026-09-23 from the downloaded node-v22.20.0-linux-x64 artifact — opens 'Node.js is licensed for use as follows:' quoting the MIT text with 'Copyright Node.js contributors. All rights reserved.'; same text at the tag https://raw.githubusercontent.com/nodejs/node/v22.20.0/LICENSE (200). npm view node@22.20.0 license = MIT.",
+      "notes": "ONE name, deliberately: the tarball's bin/npm, bin/npx and bin/corepack are SYMLINKS (never -type f, so the added-binary diff cannot list them) into /usr/local/lib/node_modules, and that whole tree is DELETED by the Dockerfile's cleanup RUN after the OpenRig install — npm and corepack are build-time tooling, not shipped bytes (the pi node_modules removal is the precedent). What DOES ride besides the ELF: include/node headers and share/doc (which carries node's own LICENSE text in-image). The shipped binary compiles V8, OpenSSL, zlib, ICU and further libraries into itself; they are disclosed under 'bundled' rather than folded into spdxId, for the same reason bun's entry gives: a single identifier cannot honestly carry a compiled-in graph. Node's own LICENSE file enumerates the components and their licences — it is a pointer pinned to the tag, not a transcription, and it must be re-pinned in the same change that moves NODE_VERSION.",
+      "bundled": [
+        {
+          "component": "V8, llhttp, uv, uvwasi, zlib, c-ares, ICU, OpenSSL and further libraries compiled into the node binary",
+          "spdxId": "NOASSERTION",
+          "url": "https://github.com/nodejs/node/blob/v22.20.0/LICENSE",
+          "note": "Enumerated with per-component licences in node's own LICENSE file at the tag (BSD-3-Clause for V8, Apache-2.0 for OpenSSL, Zlib for zlib, MIT/X for ICU and others). Recorded as a pointer pinned to the TAG this image ships, never to main — a transcription drifts on the next NODE_VERSION bump and a stale transcription is a worse attribution than a live reference. No texts for these are checked into oci/license-texts/: the rule stops at the top level (see the $comment above), which is what lets this member carry NOASSERTION while the entry's spdxId resolves to MIT."
+        }
+      ]
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/claude-compaction-restore/scripts/precompact-hook.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/loading-addressable-markdown/scripts/resolve-markdown.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/openrig-operating-model/scripts/compose.py",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/openrig-operating-model/scripts/scaffold.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/openrig-operating-model/scripts/trace-due.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/openrig-operating-model/scripts/trace-stamp.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/openrig-operating-model/scripts/trunk-diff.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/assets/plugins/openrig-core/skills/refocusing/scripts/trace-to-root.py",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/claude-compaction-restore/scripts/precompact-hook.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/core/openrig-upgrade/scripts/migrate-telemetry-state-0.5.9.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/loading-addressable-markdown/scripts/resolve-markdown.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/openrig-operating-model/scripts/compose.py",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/openrig-operating-model/scripts/scaffold.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/openrig-operating-model/scripts/trace-due.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/openrig-operating-model/scripts/trace-stamp.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/openrig-operating-model/scripts/trunk-diff.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/process/systematic-debugging/find-polluter.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/context-packs/skills/refocusing/scripts/trace-to-root.py",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/specs/agents/shared/skills/core/openrig-upgrade/scripts/migrate-telemetry-state-0.5.9.mjs",
+        "opt/openrig/lib/node_modules/@openrig/cli/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/dist/bin-wrapper.js",
+        "opt/openrig/lib/node_modules/@openrig/cli/tui/dist/main.js"
+      ],
+      "project": "mvschwarz/openrig",
+      "version": "0.5.14",
+      "spdxId": "Apache-2.0",
+      "copyright": "Copyright 2026 Mike Schwarz",
+      "licenseUrl": "https://github.com/mvschwarz/openrig/blob/v0.5.14/LICENSE",
+      "verifiedAt": "2026-09-23",
+      "verifiedHow": "PROVENANCE: 0.5.14 is oci/exedev/Dockerfile's ARG OPENRIG_VERSION default, installed by `npm i -g --prefix /opt/openrig` (the S1 rig_swarm phase kind's swarm runtime; the seats invoke it through the /usr/local/bin/rig symlink). The ARG is overridable with --build-arg; an override that moves it must move this entry in the same change. The installed tree's byte identity is gated by OPENRIG_TREE_SHA256, which ships as the TOFU sentinel MEASURE-AT-FIRST-BUILD — the first real build measures and pins it, in the same adoption commit that pins NODE_SHA256 and the image pin. LICENCE: the npm registry metadata for @openrig/cli@0.5.14 declares license Apache-2.0 (fetched 2026-09-23); the published tarball's own LICENSE file, read the same day from the downloaded artifact, is the Apache-2.0 text ending 'Copyright 2026 Mike Schwarz'; the same text resolves at the tag https://raw.githubusercontent.com/mvschwarz/openrig/v0.5.14/LICENSE (200 — a nonexistent tag 404s there, so the 200 is the tag).",
+      "notes": "`names` enumerates EVERY owner-executable file in the published 0.5.14 tarball — MEASURED from the downloaded artifact (find -type f -perm -u+x), not guessed — because the added-binary diff flags exactly those and coverage is by path. The bin links npm creates (/opt/openrig/bin/rig, /opt/openrig/bin/openrig-tui) are symlinks, never -type f, so they are not names (same reasoning as bun's bunx note, inverted: there the symlink was absent, here it is present but not a file). TWO sets this table has NOT yet measured and the first real build reconciles, stated rather than implied: (1) @openrig/cli's dependencies are ^-RANGED and resolved by npm at build time, so their tarballs (ajv, commander, tar, zod, hono, ...) may contribute additional +x paths the diff names — add them to this entry's names in the same adoption commit that pins OPENRIG_TREE_SHA256; (2) better_sqlite3.node arrives via prebuild-install at build time and carries its own entry below. The vendored node_modules/@openrig/* scope inside the cli tarball (daemon 0.5.14, Apache-2.0) contributes no +x files (measured).",
+      "bundled": []
+    },
+    {
+      "names": ["opt/openrig/lib/node_modules/better-sqlite3/build/Release/better_sqlite3.node"],
+      "project": "WiseLibs/better-sqlite3",
+      "version": "11.8.0-or-later (^11.8.0 resolved at build from @openrig/cli; frozen by the OpenRig tree gate)",
+      "spdxId": "MIT",
+      "copyright": "Copyright (c) 2017 Joshua Wise",
+      "licenseUrl": "https://github.com/WiseLibs/better-sqlite3/blob/v11.10.0/LICENSE",
+      "verifiedAt": "2026-09-23",
+      "verifiedHow": "PROVENANCE: better-sqlite3 is a dependency of @openrig/cli (^11.8.0, from the registry metadata fetched 2026-09-23). The npm package carries NO prebuilt binary — verified by reading the 11.10.0 tarball (src/, deps/, lib/, no *.node) — so the shipped better_sqlite3.node is fetched by prebuild-install FROM GITHUB RELEASES at Docker-build time and lands at the standard node-gyp release path named above. The exact resolved version floats inside ^11.8.0 until the OpenRig tree gate's pin freezes the installed tree; the licenseUrl's tag is the version the float resolved to when this entry was written (11.10.0, the latest 11.x on 2026-09-23) and must move with a resolved-version change. LICENCE: the 11.10.0 tarball's own LICENSE, read 2026-09-23 from the downloaded artifact — 'The MIT License (MIT)' / 'Copyright (c) 2017 Joshua Wise'; same text at https://raw.githubusercontent.com/WiseLibs/better-sqlite3/v11.10.0/LICENSE (200).",
+      "notes": "Named whether or not the added-binary diff flags it: the diff filters on the owner-executable bit and a prebuild's mode for a dlopen'd .node is unmeasured from here (no build has run), but the artifact is a redistributed COMPILED BINARY either way and this table is the legal record, not the diff's mirror. If the first real build's diff does NOT list the path, the name is inert coverage (the bun entry's own reasoning about inert names); if it lists it under a different mode/path spelling, reconcile in the same adoption commit that pins the hashes. FIRST-BUILD RECONCILIATION, part of that same adoption commit: record the RESOLVED version (read /opt/openrig/lib/node_modules/better-sqlite3/package.json in the image) and RE-CHECK the LICENSE tag — the licenseUrl's v11.10.0 tag is where the ^11.8.0 float stood when this entry was written, so a resolution that landed elsewhere moves the tag and re-verifies its LICENSE text (and this version field's floor) rather than shipping a tag that names different bytes than the prebuild came from. SQLite itself is compiled INTO this binary from the public-domain amalgamation — disclosed under 'bundled', not folded into spdxId.",
+      "bundled": [
+        {
+          "component": "SQLite (compiled into better_sqlite3.node from the amalgamation)",
+          "spdxId": "NOASSERTION",
+          "url": "https://www.sqlite.org/copyright.html",
+          "note": "SQLite is public domain (its authors decline even the MIT-style 'blessing' wording — the copyright page is the canonical statement), which has no SPDX identifier this entry could resolve; NOASSERTION with the canonical pointer is the honest spelling. The table's $comment rule — the canonical-text requirement stops at the top level — is what lets this member carry it unresolved."
+        }
+      ]
     }
   ]
 }

@@ -35,7 +35,9 @@ import {
   judgeCandidateDir,
   type LicenseTableProblems,
   metadataDigests,
+  NODE_VERSION,
   nodeModulesRoot,
+  OPENRIG_VERSION,
   outputPathAllowed,
   parseBaseRefs,
   PI_VERSION,
@@ -48,6 +50,7 @@ import {
   tarUnescape,
   uncoveredBinaries,
   validateBinaryLicenses,
+  mergeSweeps,
 } from "../../scripts/build-exedev-image.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../..");
@@ -99,6 +102,12 @@ function baseInputs(): BuildIdInputs {
     platform: "linux/amd64",
     bunVersion: "1.3.13",
     piVersion: "0.84.4",
+    // S1 rig_swarm: REQUIRED fields now (F-038), read by `gatherBuildIdInputs`
+    // from the script's own constants. The constants rather than literals, so
+    // a version bump fails the canonical-input-tuple pin below — the same
+    // "the fixture must move with the substrate" discipline as bunVersion.
+    nodeVersion: NODE_VERSION,
+    openrigVersion: OPENRIG_VERSION,
     dockerfile: "FROM base@sha256:aa\nRUN true\n",
     // Repo-relative paths, the shape `gatherBuildIdInputs` produces now that
     // the set is derived from the Dockerfile's COPY sources rather than from
@@ -164,6 +173,12 @@ describe("deriveBuildId", () => {
     ["platform", "the target platform", (i) => ({ ...i, platform: "linux/arm64" })],
     ["bunVersion", "the bun version", (i) => ({ ...i, bunVersion: "1.3.14" })],
     ["piVersion", "the pi version", (i) => ({ ...i, piVersion: "0.84.5" })],
+    // S1 rig_swarm (F-038): an ARG override of NODE_VERSION/OPENRIG_VERSION —
+    // or a lockstep-drifting edit of the Dockerfile defaults — installs a
+    // different substrate, so it must move the identity exactly like a bun
+    // or pi bump does.
+    ["nodeVersion", "the node version", (i) => ({ ...i, nodeVersion: "22.19.0" })],
+    ["openrigVersion", "the openrig version", (i) => ({ ...i, openrigVersion: "0.5.13" })],
     [
       "dockerfile",
       "one byte of the Dockerfile",
@@ -220,6 +235,8 @@ describe("deriveBuildId", () => {
       baseDigests: 0,
       bunVersion: 0,
       dockerfile: 0,
+      nodeVersion: 0,
+      openrigVersion: 0,
       piVersion: 0,
       platform: 0,
       files: 0,
@@ -376,13 +393,16 @@ describe("deriveBuildId", () => {
   });
 
   test("the canonical input tuple derives the id it derived before canonicalization", () => {
-    // The no-op proof D1-6 owes. `377bd92f22a95f4b` is what `deriveBuildId`
-    // returned for EXACTLY this tuple BEFORE the platform canonicalization
-    // landed (measured on the pre-change code) — so if any part of the
-    // derivation moves inputs that were already canonical, this fails. It is
-    // NOT an image pin: the real `DEFAULT_IMAGE_BUILD_ID` hashes real base
-    // digests and real file bytes, and lives in image-contract.test.ts.
-    expect(deriveBuildId(baseInputs())).toBe("377bd92f22a95f4b");
+    // The no-op proof D1-6 owes. `05be4773f08299e9` is what `deriveBuildId`
+    // returns for EXACTLY this tuple on the current code — measured on the
+    // tree this literal lands with (the S1 re-pin; it was `377bd92f22a95f4b`
+    // before F-038 added the required nodeVersion/openrigVersion fields, and
+    // `377bd92f…` was itself the PRE-canonicalization value, which is why the
+    // tuple kept moving) — so if any part of the derivation moves inputs that
+    // were already canonical without a fixture change to match, this fails.
+    // It is NOT an image pin: the real `DEFAULT_IMAGE_BUILD_ID` hashes real
+    // base digests and real file bytes, and lives in image-contract.test.ts.
+    expect(deriveBuildId(baseInputs())).toBe("05be4773f08299e9");
   });
 });
 
@@ -617,6 +637,114 @@ describe("fromInstructions heredoc/continuation refusal", () => {
 
 // ─────────────────────────────── ARG defaults ───────────────────────────────
 
+// mergeSweeps exists because S1 rig_swarm admitted a SECOND permitted npm
+// tree (/opt/openrig/lib/node_modules) whose packages collide BY NAME with
+// the engine's (yaml, zod) at different versions — so the sites are swept
+// into separate scratch dirs and combined HERE, after the walk. What must
+// hold: pure concatenation/summation, no dedup, no reconciliation — the
+// NOTICE renders everything it is handed and the fail-closed lists are only
+// ever checked for emptiness.
+describe("mergeSweeps", () => {
+  const mkSweep = (over: Partial<Parameters<typeof mergeSweeps>[0][number]>) =>
+    ({
+      treePackageCount: 0,
+      entries: [],
+      denied: [],
+      covered: [],
+      uncovered: [],
+      unresolved: [],
+      missingTexts: [],
+      upstreamNotices: [],
+      unreadable: [],
+      pinViolations: [],
+      piVersions: {},
+      uncommonIds: [],
+      licenseTexts: {},
+      ...over,
+    }) as Parameters<typeof mergeSweeps>[0][number];
+
+  test("concatenates every list field and sums treePackageCount, without dedup", () => {
+    const a = mkSweep({
+      treePackageCount: 2,
+      entries: [{ name: "yaml", version: "2.3.0", depPath: "yaml" }, { name: "zod", version: "3.0.0", depPath: "zod" }] as never,
+      unreadable: ["tree-a-unreadable"],
+      piVersions: { pi: "0.84.4" },
+    });
+    // The SAME package name at a DIFFERENT version — the openrig collision
+    // mergeSweeps exists to preserve rather than overwrite.
+    const b = mkSweep({
+      treePackageCount: 15,
+      entries: [{ name: "yaml", version: "2.8.3", depPath: "yaml" }] as never,
+      unreadable: ["tree-b-unreadable"],
+      piVersions: { "another-pkg": "1.0.0" },
+    });
+    const merged = mergeSweeps([a, b]);
+    expect(merged.treePackageCount).toBe(17);
+    expect(merged.entries.map((e) => `${e.name}@${e.version}`)).toEqual([
+      "yaml@2.3.0",
+      "zod@3.0.0",
+      "yaml@2.8.3",
+    ]);
+    expect(merged.unreadable).toEqual(["tree-a-unreadable", "tree-b-unreadable"]);
+    expect(merged.piVersions).toEqual({ pi: "0.84.4", "another-pkg": "1.0.0" });
+  });
+
+  test("an empty input list is the healthy empty sweep, and single-part is identity", () => {
+    const empty = mergeSweeps([]);
+    expect(empty.treePackageCount).toBe(0);
+    expect(empty.entries).toEqual([]);
+    expect(empty.unreadable).toEqual([]);
+    const one = mkSweep({ treePackageCount: 3, unreadable: ["x"] });
+    expect(mergeSweeps([one])).toEqual(one);
+  });
+
+  test("a piVersion seen in both sweeps at DIFFERENT versions JOINS; the same version merges as before (F-044)", () => {
+    // The yaml/zod collision S1 rig_swarm admitted is the point of the join: a
+    // naive spread kept whichever sweep came LAST, so the NOTICE attributed the
+    // openrig tree's yaml@2.8.3 and the engine's yaml@2.3.0 — the version the
+    // engine actually runs — shipped with no attribution at all. The join is
+    // the same `"a, b"` convention sweepTree applies to same-name collisions
+    // WITHIN one tree, so a consumer reading the joined value sees both
+    // shipped versions attributed.
+    const a = mkSweep({ piVersions: { yaml: "2.3.0", zod: "3.0.0" } });
+    const b = mkSweep({ piVersions: { yaml: "2.8.3", zod: "3.0.0" } });
+    const merged = mergeSweeps([a, b]);
+    expect(merged.piVersions).toEqual({ yaml: "2.3.0, 2.8.3", zod: "3.0.0" });
+    // Order-stable in the join, since the sweep order is the traversal order:
+    // the reverse pairing joins the other way, so the rendered NOTICE is a
+    // function of the input order, not of object-key mood.
+    expect(mergeSweeps([b, a]).piVersions).toEqual({ yaml: "2.8.3, 2.3.0", zod: "3.0.0" });
+  });
+
+  test("sweeps DISAGREEING on a canonical licence text throw; agreeing sweeps merge (F-044)", () => {
+    // licenseTexts is keyed by SPDX id and both sweeps resolve against the ONE
+    // canonical oci/license-texts/ directory, so equal keys carry equal text by
+    // construction — a differing value means the sweeps disagreed about
+    // canonical bytes, and the old last-write-wins spread published whichever
+    // NOTICE claim happened to be swept last. Refused, not reconciled.
+    const disagree = () =>
+      mergeSweeps([
+        mkSweep({ licenseTexts: { MIT: "canonical MIT text" } }),
+        mkSweep({ licenseTexts: { MIT: "a different MIT text" } }),
+      ]);
+    expect(disagree).toThrow(/two sweeps disagree on the canonical text for "MIT"/);
+    // The refusal is ORDER-SYMMETRIC: whichever sweep is acc sees the other's
+    // divergence, so a reordering cannot smuggle the disagreement through.
+    expect(() =>
+      mergeSweeps([
+        mkSweep({ licenseTexts: { MIT: "a different MIT text" } }),
+        mkSweep({ licenseTexts: { MIT: "canonical MIT text" } }),
+      ]),
+    ).toThrow(/disagree on the canonical text/);
+    // Equal keys merge as before — the shape every real sweep produces.
+    const agreeing = mergeSweeps([
+      mkSweep({ licenseTexts: { MIT: "canonical MIT text" } }),
+      mkSweep({ licenseTexts: { MIT: "canonical MIT text", Zlib: "zlib text" } }),
+    ]);
+    expect(agreeing.licenseTexts).toEqual({ MIT: "canonical MIT text", Zlib: "zlib text" });
+  });
+});
+
 describe("dockerfileArgDefaults", () => {
   test("reads a default, with or without surrounding whitespace", () => {
     expect(dockerfileArgDefaults("ARG FOO=bar\n", "FOO")).toEqual(["bar"]);
@@ -690,6 +818,17 @@ describe("dockerfileArgDefaults", () => {
     // substrate. (`BUN_VERSION`'s half of this pairing lives in
     // tests/scripts/exedev-bun-pin.test.ts.)
     expect(dockerfileArgDefaults(realDockerfile(), "PI_VERSION")).toEqual([PI_VERSION]);
+  });
+
+  test("the script's NODE_VERSION / OPENRIG_VERSION constants ARE the Dockerfile's ARG defaults (F-038 lockstep)", () => {
+    // The S1 pair under the same discipline as PI_VERSION, with one extra
+    // consumer: `validateBinaryLicenses` refuses a binary-licenses.json entry
+    // whose version names another release, so a bump here has to move the ARG,
+    // the constant AND the table in one change — the gatherBuildIdInputs loop
+    // refuses a two-way divergence, and this pins the constant↔Dockerfile half
+    // the way the PI_VERSION test above pins its own.
+    expect(dockerfileArgDefaults(realDockerfile(), "NODE_VERSION")).toEqual([NODE_VERSION]);
+    expect(dockerfileArgDefaults(realDockerfile(), "OPENRIG_VERSION")).toEqual([OPENRIG_VERSION]);
   });
 });
 
@@ -1091,7 +1230,29 @@ describe("buildIdFileInputs", () => {
       // is rebuilt and re-published — recorded as OPEN in the story's Dev Agent
       // Record, because this re-pin is the OFFLINE half of DF2.10's ritual and
       // the publish is the other.
-      "oci/exedev/Dockerfile": "47e9b084a1b8a47ee1ec9e74a32cceade2b57f47814966b80017575e3ed14761",
+      // 9ebe455f: S1 rig_swarm (feature/rig-swarm-phase, 2026-09-23). The
+      // Dockerfile gains the node + OpenRig + self-compact runtime-stage
+      // section after the engine-assertion RUN — a buildId input like every
+      // byte of this file. The image itself is UN-PINNED on this branch by
+      // design (NODE_SHA256/OPENRIG_TREE_SHA256 ship as MEASURE-AT-FIRST-
+      // BUILD sentinels; no build has run), so this offline half of the pin
+      // moves now while the publish/adoption half is the recorded post-merge
+      // ritual — same shape as the DF2.10 open pairing the map above documents.
+      // 9ebe455f: S1 rig_swarm (feature/rig-swarm-phase, 2026-09-23). The
+      // Dockerfile gains the node + OpenRig + self-compact runtime-stage
+      // section after the engine-assertion RUN — a buildId input like every
+      // byte of this file. The image itself is UN-PINNED on this branch by
+      // design (NODE_SHA256/OPENRIG_TREE_SHA256 ship as MEASURE-AT-FIRST-
+      // BUILD sentinels; no build has run), so this offline half of the pin
+      // moves now while the publish/adoption half is the recorded post-merge
+      // ritual — same shape as the DF2.10 open pairing the map above documents.
+      // 2b9b437e: PR #284 review round — the F-038/F-039/F-040/F-041/F-042/F-043
+      // fixes (script-side NODE_VERSION/OPENRIG_VERSION constants + the two new
+      // sentinel checksum ARGs, the pipefail tree-hash pipeline, the rig probe
+      // hoisted above the tree measurement, the per-assert `|| exit 1`s). All
+      // inside the file whose bytes this entry pins; measured on the final
+      // tree, same-commit re-pin per the discipline below.
+      "oci/exedev/Dockerfile": "2b9b437ede2d939ff8a656537149cfbc1973da29609a6ad75ae8b7d18ef2e61c",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1591,7 +1752,34 @@ describe("buildIdFileInputs", () => {
       // source and contribute nothing walked. The value is RE-DERIVED from
       // the joined tree by this test's own failing run. KEPT: every parent
       // paragraph above, per the join, not a replacement.
-      "3aa2eadb07bd6c788940d74927edf7864cb0facb0660a398f07386fc57f08824",
+      //
+      // aaa26243: S1 rig_swarm (feature/rig-swarm-phase, 2026-09-23). Moved
+      // by the runtime stage's node/OpenRig/self-compact section — the
+      // Dockerfile itself (already pinned in the map above) and ONE new
+      // walked COPY source (pi-vs-claude-code-vendor/self-compact/extensions/
+      // self-compact, added to both publish-workflow lists in the same
+      // change). RE-DERIVED from this test's own failing run on the final
+      // tree. The image this tree describes is deliberately UN-PINNED until
+      // the first real build measures the sentinel ARGs — see the Dockerfile's
+      // S1 section and the PR's pairing-debt note.
+      //
+      // 9321ec75: PR #284 review round (feature/rig-swarm-phase,
+      // 2026-09-24) — the wave-1 fixers' walked-input edits plus the F-038
+      // Dockerfile bytes this file's map pins above. RE-DERIVED from this
+      // test's own failing run on the review tree, adopted LAST after this
+      // file's own edits landed (this test file is NOT a walked input, so
+      // nothing here moves it). The image remains UN-PINNED per the
+      // aaa26243 note — the sentinel measurement / publish / adoption ritual
+      // is the recorded post-merge debt.
+      //
+      // da700724: moved from 9321ec75 by the same review round's LAST edits
+      // on walked files — the teardown hybrid-spend composition
+      // (src/providers/teardown.ts) and the biome useTemplate rewrites
+      // (src/phase-engine/phases/openrig-swarm.ts), both under walked COPY
+      // sources. RE-DERIVED from this test's own failing run on the final
+      // tree (re-pin LAST, per the discipline). The image stays UN-PINNED
+      // per the aaa26243 note.
+      "da700724556c81c3816e695a1f830269416968beff77515a6bc8cfb747d49218",
     );
   });
 });
@@ -2172,6 +2360,50 @@ function goodEntry(over: Record<string, unknown> = {}): Record<string, unknown> 
 }
 
 /**
+ * F-041: `main()` validates the table against the script's NODE_VERSION /
+ * OPENRIG_VERSION constants, and a table with no nodejs/node or
+ * mvschwarz/openrig entry — or one whose `version` names another release — is
+ * a STRUCTURAL refusal (exit 2). The wiring tests need tables that are
+ * structurally clean so the gate under test is the only thing firing; these
+ * fixtures carry versions matching the script-side constants, the same source
+ * `main` compares against.
+ */
+const EXPECTED_VERSIONS = { nodeVersion: NODE_VERSION, openrigVersion: OPENRIG_VERSION } as const;
+
+function nodeEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return goodEntry({
+    names: ["usr/local/bin/node"],
+    project: "nodejs/node",
+    spdxId: "MIT",
+    copyright: "Copyright Node.js contributors. All rights reserved.",
+    licenseUrl: `https://raw.githubusercontent.com/nodejs/node/v${NODE_VERSION}/LICENSE`,
+    verifiedHow: `fetched the upstream LICENSE at tag v${NODE_VERSION}`,
+    version: NODE_VERSION,
+    ...over,
+  });
+}
+
+function openrigEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return goodEntry({
+    names: ["opt/openrig/lib/node_modules/@openrig/cli/dist/bin-wrapper.js"],
+    project: "mvschwarz/openrig",
+    spdxId: "MIT",
+    copyright: "Copyright (c) mvschwarz",
+    licenseUrl: `https://raw.githubusercontent.com/mvschwarz/openrig/v${OPENRIG_VERSION}/LICENSE`,
+    verifiedHow: `fetched the upstream LICENSE at tag v${OPENRIG_VERSION}`,
+    version: OPENRIG_VERSION,
+    ...over,
+  });
+}
+
+/** The structurally clean table shape `main()` demands: bun + node + openrig. */
+const versionedEntries = (...extra: Record<string, unknown>[]): Record<string, unknown>[] => [
+  ...extra,
+  nodeEntry(),
+  openrigEntry(),
+];
+
+/**
  * `main()`'s WIRING, not its pure parts. Two contracts live only between
  * `main`'s statements and were unreachable from here: the checksum-gate call
  * site (`gatherBuildIdInputs` is not exported, and `main` sits behind the
@@ -2314,9 +2546,13 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // `.compliance`; only main() proves that bucket dies(1) — swap the two
     // `die` codes and every one of those tests stays green while the
     // classifier misdiagnoses a denied licence as a registry/auth essay.
+    // The node/openrig entries ride along (F-041) because `main` also runs
+    // the version-lockstep check: a bun-only table is STRUCTURALLY refused
+    // (exit 2) before the compliance class is ever reached, and the test
+    // would then be pinning the wrong gate.
     const { status, stderr } = runMain(
       { PATH: dockerOnPath() },
-      checkoutWithTable(JSON.stringify({ entries: [goodEntry({ spdxId: "UNVERIFIED" })] })),
+      checkoutWithTable(JSON.stringify({ entries: versionedEntries(goodEntry({ spdxId: "UNVERIFIED" })) })),
     );
     expect(status).toBe(1);
     expect(stderr).toMatch(/UNVERIFIED — establish it upstream/);
@@ -2891,6 +3127,69 @@ describe("validateBinaryLicenses", () => {
     expect(validateBinaryLicenses(JSON.parse(realTable()), REAL_TEXTS).compliance).toEqual([]);
   });
 
+  test("the repo's own table also passes the F-041 version-lockstep check", () => {
+    // `main()` validates with the script constants; the two repo-table tests
+    // above call the two-arg form, which SKIPS the check. This is the same
+    // file through the three-arg door: nodejs/node at NODE_VERSION and
+    // mvschwarz/openrig at OPENRIG_VERSION, or this build refuses before it
+    // starts.
+    expect(validateBinaryLicenses(JSON.parse(realTable()), REAL_TEXTS, EXPECTED_VERSIONS).structural).toEqual([]);
+  });
+
+  test("a node/OpenRig entry whose version drifts from the script constants is STRUCTURAL", () => {
+    // An ARG bump without the table is stale attribution — the licenseUrl tag
+    // names a release the image no longer ships — and a well-formed table
+    // saying the wrong thing is a forgotten edit (the "bad edit" class,
+    // exit 2), not a licence position (exit 1). Each drift asserted alone, on
+    // an otherwise clean table, so the failure names exactly one cause. The
+    // drifted entry REPLACES its healthy twin rather than joining it — a
+    // second nodejs/node entry would trip the #188 duplicate-claim rule and
+    // drown the drift this test is about.
+    const nodeDrift = validateBinaryLicenses(
+      { entries: [nodeEntry({ version: "22.19.0" }), openrigEntry()] },
+      REAL_TEXTS,
+      EXPECTED_VERSIONS,
+    );
+    // The refusal is TWO lines — the finding plus its remediation — so both
+    // are pinned.
+    expect(nodeDrift.structural).toEqual([
+      expect.stringMatching(/entry 0 \(nodejs\/node\): version "22\.19\.0" is not this build's pinned NODE_VERSION 22\.20\.0/),
+      expect.stringMatching(/^an ARG bump without the table is stale attribution.*move the entry's version, licenseUrl tag and verifiedHow in the same change/),
+    ]);
+    expect(nodeDrift.compliance).toEqual([]);
+
+    const openrigDrift = validateBinaryLicenses(
+      { entries: [nodeEntry(), openrigEntry({ version: "0.5.13" })] },
+      REAL_TEXTS,
+      EXPECTED_VERSIONS,
+    );
+    expect(openrigDrift.structural).toEqual([
+      expect.stringMatching(/entry 1 \(mvschwarz\/openrig\): version "0\.5\.13" is not this build's pinned OPENRIG_VERSION 0\.5\.14/),
+      expect.stringMatching(/^an ARG bump without the table is stale attribution/),
+    ]);
+    expect(openrigDrift.compliance).toEqual([]);
+  });
+
+  test("a table with no node/OpenRig entry at all is STRUCTURAL — the image ships both unconditionally", () => {
+    // Absence is the pre-S1 shape, and the pre-S1 shape is exactly what a
+    // forgotten table edit leaves behind. Both absences in one table, in the
+    // declaration order the check walks (node first).
+    const problems = validateBinaryLicenses({ entries: [goodEntry()] }, REAL_TEXTS, EXPECTED_VERSIONS);
+    expect(problems.structural).toEqual([
+      expect.stringMatching(/entry -1: no "nodejs\/node" entry — the Dockerfile installs node unconditionally/),
+      expect.stringMatching(/entry -1: no "mvschwarz\/openrig" entry — the Dockerfile installs the OpenRig CLI unconditionally/),
+    ]);
+    expect(problems.compliance).toEqual([]);
+  });
+
+  test("omitting expectedVersions skips the lockstep check — the exported surface's opt-in shape", () => {
+    // The two-arg form predates F-041 and the pure tests above exercise it
+    // with bun-only tables on purpose. Pinned so "the check exists" cannot
+    // silently become "the check is unconditional" (or vice versa) without a
+    // test noticing which contract moved.
+    expect(validateBinaryLicenses({ entries: [goodEntry()] }, REAL_TEXTS).structural).toEqual([]);
+  });
+
   test("the LGPL relink obligation sits on the artifact that carries it, and on no other", () => {
     // The correction most likely to be missed, pinned so it cannot regress in
     // EITHER direction — and both directions are real defects, which is why one
@@ -3172,6 +3471,36 @@ describe("checksumArgProblems", () => {
   test("a MISSING declaration is refused — a gate with no in-repo default is not a gate", () => {
     const stripped = realDockerfile().replace(/^\s*ARG PI_AI_SHA256=.*$/gm, "");
     expect(checksumArgProblems(stripped, {})[0]).toMatch(/declares no "ARG PI_AI_SHA256=<default>"/);
+  });
+
+  test("the S1 gates NODE_SHA256 / OPENRIG_TREE_SHA256 answer every refusal the bun gate answers (F-038)", () => {
+    // The loops above generalise over CHECKSUM_ARGS, which grew 2 → 4 names —
+    // but generality is exactly what a per-name regression hides in: a typo in
+    // one array literal drops that gate from every loop silently. Named, so
+    // each new gate is asserted on ITS OWN declared default, empty-override,
+    // equal-override and missing-declaration arms. Their declared defaults are
+    // the MEASURE-AT-FIRST-BUILD sentinel (no build has run to measure them),
+    // which is itself pinned: the sentinel is what makes an unmeasured gate
+    // refuse any real override instead of silently accepting one.
+    for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
+      expect(CHECKSUM_ARGS, `${name} left CHECKSUM_ARGS`).toContain(name);
+      const [declared] = dockerfileArgDefaults(realDockerfile(), name);
+      expect(declared, name).toBe("MEASURE-AT-FIRST-BUILD");
+      // An override that is not the declared default is refused, as a CONTENT
+      // GATE — the same message shape the bun gate dies with in main().
+      const overridden = checksumArgProblems(realDockerfile(), { [name]: "f".repeat(64) });
+      expect(overridden[0], name).toMatch(new RegExp(`^${name}=f{64} is set in the environment and is not `));
+      expect(overridden.join(" "), name).toContain(`change ARG ${name} in the Dockerfile`);
+      // The sentinel default itself passes, and set-but-empty is still a refusal.
+      expect(checksumArgProblems(realDockerfile(), { [name]: declared }), name).toEqual([]);
+      expect(checksumArgProblems(realDockerfile(), { [name]: "  " })[0], name).toMatch(
+        new RegExp(`^${name} is set in the environment but is empty or whitespace-only`),
+      );
+      // And a gate stripped from the Dockerfile is a missing declaration.
+      const stripped = realDockerfile().replace(new RegExp(`^\\s*ARG ${name}=.*$`, "gm"), "");
+      expect(stripped, name).not.toBe(realDockerfile());
+      expect(checksumArgProblems(stripped, {})[0], name).toMatch(new RegExp(`declares no "ARG ${name}=<default>"`));
+    }
   });
 });
 

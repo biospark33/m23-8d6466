@@ -13,11 +13,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { readJournal } from "./journal-test-util.ts";
-import { runContextFrom } from "../../scripts/pipeline-run.ts";
+import { makeBodyFactory, runContextFrom } from "../../scripts/pipeline-run.ts";
 // DF5.3: the re-point test seeds a prior session row through the same store
 // the engine will open — the tracer's own initiateSession, never hand-written
 // SQL, so the seed cannot drift from the schema the refusal reads.
-import { Tracer } from "../../src/phase-engine/index.ts";
+// FileJournal + PhaseSpec: the rig_swarm factory-shape tests below compose a
+// real journal port and a real spec the way `main` hands them to the factory.
+import { FileJournal, Tracer, type PhaseSpec } from "../../src/phase-engine/index.ts";
+// The seat-keys env-var name is owned by the providers layer (never hardcoded).
+import { SWARM_SEAT_KEYS_ENV } from "../../src/providers/credentials.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
@@ -3002,4 +3006,175 @@ describe("pipeline-run DF5.3: a dispatched run records the issue its witness nam
     expect(stderr2).toContain("carries no positive integer effectiveCeilingMicros");
     expect(stderr2).not.toContain("JSON but not an object");
   }, 90_000);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// S1 — the rig_swarm executor branch of makeBodyFactory
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("makeBodyFactory rig_swarm branch (S1)", () => {
+  // The two factory SHAPES, pinned at construction time. The bodies are never
+  // INVOKED here: invoking the swarm's base body spawns the real OpenRig CLI
+  // (the in-box tier-2 engine), which is live-spend territory the qds-live-e2e
+  // skill owns. What these tests pin is the seam the factory owes every kind —
+  // a COMPOSED body (gated over testCommand, or bare without one), never the
+  // S1 interim arm's throwing residue — and that seam is fully decided by the
+  // time `factory(spec)` returns.
+  const swarmSpec = (extra: Partial<PhaseSpec> = {}): PhaseSpec => ({
+    name: "swarm_build",
+    kind: "rig_swarm",
+    description: "swarm",
+    maxDurationMs: 600_000,
+    retries: 0,
+    rigSpec: { name: "r", pods: [{ id: "p", members: [{ id: "lead", model: "m" }] }] },
+    objective: "o",
+    leadSeat: "lead",
+    seatBudgets: { lead: 1000 },
+    ...extra,
+  });
+
+  test("rig_swarm spec with testCommand yields a gated body", () => {
+    const ws = workspace();
+    const tracer = new Tracer({
+      dataDir: path.join(ws.dir, "trace"),
+      boundaryRoot: ws.dir,
+      requestId: "req-swarm-shape",
+      pipelineName: "rig-swarm-shape",
+    });
+    // A journal present + a declared testCommand is the gated composition's
+    // precondition — the same `journal === undefined` escape the code branch
+    // honours (DF3.3: no journal = no composition).
+    const journal = new FileJournal(ws.journal, "run-swarm-shape");
+    const factory = makeBodyFactory(ws.dir, tracer, "req-swarm-shape", undefined, journal);
+    const body = factory(swarmSpec({ testCommand: ["true"] }));
+    expect(typeof body).toBe("function"); // a composed body, NOT the interim throw
+    // F-013 wanted the composed body distinguishable from the throwing residue.
+    // A `body.name` pin does not survive this runtime: composeGatedBody names
+    // its closure (`const gated = …`) in the source, but Bun's transpiler drops
+    // function-name inference for closures returned from inner scopes, so the
+    // gated body, the bare body and the never-residue ALL read "" here. The
+    // distinction is therefore pinned by INVOCATION below ("a GateFailureError
+    // on a rig_swarm phase does NOT retry"), where the residue would throw "no
+    // executor for kind", the bare body would run the swarm ungated, and only
+    // the composed body reports a gate failure.
+    tracer.close();
+  });
+
+  test("rig_swarm spec without testCommand yields the bare body", () => {
+    const ws = workspace();
+    const tracer = new Tracer({
+      dataDir: path.join(ws.dir, "trace"),
+      boundaryRoot: ws.dir,
+      requestId: "req-swarm-shape",
+      pipelineName: "rig-swarm-shape",
+    });
+    const factory = makeBodyFactory(ws.dir, tracer, "req-swarm-shape");
+    const body = factory(swarmSpec());
+    expect(typeof body).toBe("function");
+    tracer.close();
+  });
+
+  test("a GateFailureError on a rig_swarm phase does NOT retry, even with retries ≥ 1 (F-017)", async () => {
+    // The composed loop's retry arm re-authorizes GateFailureError for `code`
+    // and `dispatch_task`; F-017's guard rethrows it for rig_swarm on attempt
+    // 1 — an authorized attempt 2 would re-boot the whole swarm (a second
+    // daemon/import/queue cycle, a second full provider spend) over attempt 1's
+    // already-mutated worktree. This runs the REAL runner as a child (the
+    // file's e2e shape) because the fake box seam must be on the child's BOOT
+    // PATH: Bun snapshots PATH at process start, so an in-process
+    // process.env.PATH prepend cannot make the body's bare `rig` spawn
+    // resolve. The in-box daemon port (7433) is served by THIS process, and a
+    // stub `rig` answers `queue show` with terminal `done`, so the swarm body
+    // settles SUCCESS and the gate (testCommand `false`) is the ONLY failure:
+    // the queue-create count is the attempt counter. Attempt 2 would re-queue.
+    const ws = workspace();
+    const home = path.join(tmpRoot, "swarm-single-home");
+    fs.mkdirSync(path.join(home, "app"), { recursive: true }); // the workdir probe target
+    fs.writeFileSync(path.join(home, "seat-keys.json"), JSON.stringify({ lead: "sk-or-v1-single" }));
+    const binDir = path.join(tmpRoot, "swarm-single-bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const rig = path.join(binDir, "rig");
+    fs.writeFileSync(
+      rig,
+      "#!/bin/sh\nif [ \"$1\" = \"queue\" ] && [ \"$2\" = \"show\" ]; then printf 'state: done\\n'; fi\nexit 0\n",
+    );
+    fs.chmodSync(rig, 0o755);
+
+    const manifest = path.join(ws.dir, `pipeline-swarm-${seq++}.json`);
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "swarm-single-attempt",
+        runBudgetMs: 200_000,
+        phases: [
+          {
+            // MIN_PHASES is 2; a trivial code phase warms the walk and proves
+            // the single-attempt rule is the swarm's own, not the walk's.
+            name: "warmup",
+            kind: "code",
+            description: "d",
+            maxDurationMs: 10_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          {
+            name: "swarm_build",
+            kind: "rig_swarm",
+            description: "The swarm the gate fails on",
+            maxDurationMs: 20_000,
+            retries: 1, // a code phase WOULD re-authorize — rig_swarm must not
+            rigSpec: { name: "r", pods: [{ id: "p", members: [{ id: "lead", model: "m" }] }] },
+            objective: "o",
+            leadSeat: "lead",
+            seatBudgets: { lead: 1000 },
+            testCommand: ["false"], // the gate: exits 1, fail-closed
+          },
+        ],
+      }),
+    );
+
+    let queueCreates = 0;
+    const server = Bun.serve({
+      port: 7433, // the body's hardcoded in-box daemon port
+      fetch: (req) => {
+        const pathname = new URL(req.url).pathname;
+        if (pathname === "/healthz") return new Response("OK");
+        if (pathname === "/api/rigs/import") return Response.json({ ok: true, name: "r" });
+        if (pathname === "/api/queue/create") {
+          queueCreates += 1;
+          return Response.json({ id: "q-1" });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const proc = spawnRunner(
+        ["--manifest", manifest, "--budget-ms", "200000", "--journal", ws.journal, "--run-root", ws.dir, "--run-id", "swarm-single"],
+        ws.markerRoot,
+        REPO_ROOT,
+        {
+          PATH: `${binDir}:${process.env.PATH}`, // the CHILD's boot PATH — the only one Bun consults
+          HOME: home,
+          [SWARM_SEAT_KEYS_ENV]: path.join(home, "seat-keys.json"),
+        },
+      );
+      const exitCode = await proc.exited;
+      // The gate failure settles the PHASE (and the run fails), not the
+      // process: the runner exits 1 with the journal telling the story.
+      expect(exitCode).toBe(1);
+      const journal = readJournal(ws.journal);
+      expect(journal.ok).toBe(false);
+      expect(journal.phases.map((p) => [p.name, p.status])).toEqual([
+        ["warmup", "success"],
+        ["swarm_build", "fail"],
+      ]);
+      // THE assertion: one swarm boot, one queue — the GateFailureError was
+      // rethrown on attempt 1, never re-authorized (a `code` phase with
+      // retries: 2 would have queued three times here).
+      expect(queueCreates).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  }, 60_000);
 });

@@ -39,7 +39,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
-import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
+import {
+  captureSeatSpend,
+  captureSpend,
+  revokeRunKey,
+  revokeSeatKeys,
+  verifyRevoked,
+  type CredentialDeps,
+  type KeyApi,
+} from "./credentials.ts";
 import {
   auditLinkSkip,
   auditNonEmpty,
@@ -974,6 +982,18 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   }
 
   const keyed = rec.keyHash !== undefined;
+  // S1 rig_swarm: swarm runs carry per-seat keys in extensions.swarmSeats and
+  // (post-F007, which made both mints refuse the other shape) NO core keyHash
+  // (run-record.ts registers the namespace) — the steps below branch on the
+  // shapes so every recorded key is captured and revoked. A record carrying
+  // BOTH (a hybrid: possible only from a pre-guard mint) is handled
+  // DEFENSIVELY, not refused: the hybrid arms capture core spend AND seat
+  // spend, revoke the core key AND the seat keys — a recorded core hash is
+  // never left live just because seat keys share the record. The namespace is
+  // written at dispatch, long before this sequence, so the same single-read
+  // staleness discipline as `keyed` applies.
+  const swarmSeatHashes = (rec.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? [];
+  const swarmed = swarmSeatHashes.length > 0;
   // captureSpend/revokeRunKey/verifyRevoked read only keyApi, store and
   // requestId off this — driver rides along for the interface's shape.
   const cred: CredentialDeps | undefined =
@@ -1003,18 +1023,34 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
 
   // 1. spend — read usage from the live key BEFORE the DELETE makes it
   // unrecoverable (INV-4). captureSpend writes spendMicroUsd itself (DF2.3).
-  if (!keyed) {
+  if (!keyed && !swarmed) {
     skipStep(ctx, "spend", "no key was ever minted for this run");
   } else {
     await runStep(ctx, "spend", async () => {
       if (cred === undefined) {
         throw new TeardownError(
           "provisioning-key-missing",
-          `run ${runId} carries a keyHash but deps.keyApi is absent — spend cannot be read before revoke`,
+          `run ${runId} carries credential keys (keyHash or swarm seat keys) but deps.keyApi is absent — spend cannot be read before revoke`,
           "run teardown with the provider key API wired (set $OPENROUTER_PROVISIONING_KEY), or revoke the key by hand first",
         );
       }
-      await captureSpend(cred, runId);
+      // S1: swarm keys are captured summed across seats; the single-key read
+      // below is unchanged for every non-swarm record. F007: each call no-ops
+      // on the shape it doesn't carry (captureSeatSpend on an empty namespace,
+      // captureSpend on an absent keyHash). On a HYBRID record both shapes
+      // carry spend from two independent sources, so the authoritative number
+      // is their SUM — captureSpend's core write is provisional and the final
+      // store.set composes the total (a plain `if`/`if` pair would let the
+      // second write clobber the first shape's contribution).
+      if (swarmed && keyed) {
+        const coreUsd = await captureSpend(cred, runId);
+        const seatUsd = await captureSeatSpend(cred, runId);
+        deps.store.set(runId, { spendMicroUsd: coreUsd + seatUsd });
+      } else if (swarmed) {
+        await captureSeatSpend(cred, runId);
+      } else {
+        await captureSpend(cred, runId);
+      }
     });
   }
 
@@ -1040,17 +1076,37 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
 
   // 4. revoke — "revoked" | "already-gone" both OK; a throw aborts with the
   // key possibly still live. (keyed && !cred already threw at spend.)
-  if (!keyed || cred === undefined) {
+  if ((!keyed && !swarmed) || cred === undefined) {
     skipStep(ctx, "revoke", "no key was ever minted for this run");
   } else {
     await runStep(ctx, "revoke", async () => {
-      await revokeRunKey(cred, runId);
+      // S1: swarm keys are revoked (and verified, per hash) as a set; the
+      // single-key revoke below is unchanged for every non-swarm record.
+      // F007: a hybrid record revokes BOTH — never leave a recorded core hash
+      // live because the record also carries seat keys.
+      if (swarmed) {
+        await revokeSeatKeys(cred, runId);
+      }
+      if (keyed) {
+        await revokeRunKey(cred, runId);
+      }
     });
   }
 
   // 5. verify — list-authoritative (INV-5: never mark torn down unverified).
   if (!keyed || cred === undefined) {
-    skipStep(ctx, "verify", "no key was ever minted for this run");
+    // S1: a pure-swarm run's seat keys were verified INSIDE the revoke step
+    // (revokeSeatKeys → per-hash list-authoritative absence proof, now also
+    // emitting the verify-revoked links, F006) — with no core keyHash there is
+    // nothing for this step to verify. A hybrid record HAS a core keyHash, so
+    // it falls through to the step and its core key is verified here.
+    skipStep(
+      ctx,
+      "verify",
+      swarmed
+        ? "swarm seat keys were verified inside the revoke step (revokeSeatKeys)"
+        : "no key was ever minted for this run",
+    );
   } else {
     await runStep(ctx, "verify", async () => {
       await verifyRevoked(cred, runId);

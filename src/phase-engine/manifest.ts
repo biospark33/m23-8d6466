@@ -116,6 +116,41 @@ const nonBlankString = z
 const argv = z.array(nonBlankString).min(1);
 
 /**
+ * Seat-identifier grammar, DUPLICATED from `src/providers/credentials.ts`
+ * (`SEAT_NAME_RE`, which is module-private there): the member ids a rig_swarm
+ * phase declares are minted as provider keys under exactly this regex at
+ * `mintSeatKeys`, and until S1 the only check was at that mint — post-box, so
+ * a bad id cost a provisioned box to discover. Enforcing the same grammar here
+ * lands the refusal at manifest parse instead. The copies MUST stay in lockstep:
+ * a parse-time grammar looser than the mint's reopens the post-box refusal this
+ * exists to close; tighter, and the loader refuses ids the mint would accept.
+ */
+const SEAT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * Pod-id / rig-name grammar: lowercase letters, digits and INTERIOR hyphens,
+ * at most 63 characters. These names compose filesystem paths
+ * (`rigHome/state/pi/<pod.id>-<member.id>`) and tmux session names
+ * (`<pod.id>-<member.id>@<rig.name>`), and `rig.name` is interpolated into
+ * `rig` CLI argv at teardown — so a `/`, `..`, or leading `-` is path escape
+ * or flag injection, not a name.
+ */
+const RIG_COMPONENT_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * `objective` is delivered to the box inside one JSON queue-create payload —
+ * a single argv element; past ~128KB of ARGV bytes that spawn dies E2BIG —
+ * after the seats are seeded and the daemon already exists, i.e. the late
+ * post-state-change death the manifest boundary exists to front-run. The
+ * bound is therefore the UTF-8 BYTE length of the JSON-ESCAPED objective
+ * (`JSON.stringify` applies the escaping the payload will wrap it in), not
+ * the JavaScript string length a multi-byte or control-character-heavy
+ * objective would silently understate. 65_536 bytes keeps headroom for the
+ * identity preamble and the payload's other fields.
+ */
+const MAX_OBJECTIVE_BYTES = 65_536;
+
+/**
  * The kinds `makeBodyFactory` has an executor for — the schema's copy of
  * `PhaseKind`, pinned to it in BOTH directions:
  *
@@ -128,7 +163,7 @@ const argv = z.array(nonBlankString).min(1);
  *     silently REJECTING the new kind at load, with `kindIssueMessage` telling
  *     the operator it is not a kind at all.
  */
-const EXECUTING_KINDS = ["code", "dispatch_task"] as const satisfies readonly PhaseKind[];
+const EXECUTING_KINDS = ["code", "dispatch_task", "rig_swarm"] as const satisfies readonly PhaseKind[];
 
 /** `AssertTrue<false>` is a compile error; `AssertTrue<true>` is inert. */
 type AssertTrue<T extends true> = T;
@@ -224,13 +259,47 @@ export const PhaseSpecSchema = z
       .default(DEFAULT_MAX_DURATION_MS),
     retries: z.number().int().min(MIN_RETRIES).max(MAX_RETRIES).default(MIN_RETRIES),
     command: argv.optional(),
-    /** Optional gate argv — valid only when kind is "code": superRefine
-     *  refuses it on every other kind, because only a code phase composes a
-     *  commandGate over it (elsewhere it would be silently dead). */
+    /** Optional gate argv — valid when kind is "code" (the commandGate
+     *  composition) or "rig_swarm" (the settled-swarm gate — same gate, same
+     *  authority): superRefine refuses it on every other kind, because
+     *  elsewhere it would be silently dead. */
     testCommand: argv.optional(),
     // DF1.6 dispatch_task fields
     roster: nonBlankString.optional(),
     task: nonBlankString.optional(),
+    // S1 rig_swarm fields — all four required together via superRefine below.
+    rigSpec: z
+      .object({
+        name: nonBlankString,
+        pods: z
+          .array(
+            z
+              .object({
+                id: nonBlankString,
+                members: z
+                  .array(
+                    z
+                      .object({
+                        id: nonBlankString,
+                        model: nonBlankString,
+                        runtime: z.literal("pi").optional(),
+                        cwd: nonBlankString.optional(),
+                      })
+                      .strict(),
+                  )
+                  .min(1),
+              })
+              .strict(),
+          )
+          .min(1),
+      })
+      .strict()
+      .optional(),
+    objective: nonBlankString.optional(),
+    leadSeat: nonBlankString.optional(),
+    seatBudgets: z
+      .record(nonBlankString, z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+      .optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {
@@ -242,14 +311,136 @@ export const PhaseSpecSchema = z
     if (spec.kind !== "code" && spec.command !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `command is forbidden when kind is '${spec.kind}'` });
     }
-    // testCommand is optional and valid only when kind === "code" (see its
-    // field doc above): elsewhere it is silently dead, so refuse rather than
-    // let an author believe it enforced.
-    if (spec.kind !== "code" && spec.testCommand !== undefined) {
+    // testCommand is optional and valid when kind is "code" (the commandGate
+    // composition) OR "rig_swarm" (the settled-swarm gate — same gate, same
+    // authority): elsewhere it is silently dead, so refuse rather than let an
+    // author believe it enforced.
+    if (spec.kind !== "code" && spec.kind !== "rig_swarm" && spec.testCommand !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `testCommand is forbidden when kind is '${spec.kind}'`,
       });
+    }
+    // The rig_swarm fields get the same reverse-direction refusal as
+    // command/testCommand/roster/task: on every other kind they are silently
+    // dead, and dead payload an author can believe is enforced is exactly what
+    // this file refuses rather than tolerates.
+    if (spec.kind !== "rig_swarm") {
+      for (const [field, value] of [
+        ["rigSpec", spec.rigSpec],
+        ["objective", spec.objective],
+        ["leadSeat", spec.leadSeat],
+        ["seatBudgets", spec.seatBudgets],
+      ] as const) {
+        if (value !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${field} is forbidden when kind is '${spec.kind}'`,
+          });
+        }
+      }
+    }
+    // S1: rig_swarm's required field set. Each missing field is its own issue
+    // so an author sees everything wrong at once.
+    if (spec.kind === "rig_swarm") {
+      const required = [
+        ["rigSpec", spec.rigSpec],
+        ["objective", spec.objective],
+        ["leadSeat", spec.leadSeat],
+        ["seatBudgets", spec.seatBudgets],
+      ] as const;
+      for (const [field, value] of required) {
+        if (value === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} is required when kind is 'rig_swarm'` });
+        }
+      }
+      // `objective` is delivered to the box as a single `rig queue create -d`
+      // argument; past ~128KB that spawn dies E2BIG — after the seats are
+      // seeded and the daemon already exists, i.e. the late post-state-change
+      // death the manifest boundary exists to front-run. 65_536 is conservative
+      // headroom over any honest objective. (A `.max` on the field's zod chain
+      // is not available: `nonBlankString` is a ZodEffects, and chain checks on
+      // it lose the `.max` method.)
+      if (
+        spec.objective !== undefined &&
+        // `JSON.stringify` applies the escaping the queue payload wraps the
+        // objective in; the wrapping quotes are trimmed so the measure is the
+        // escaped objective's own byte width.
+        new TextEncoder().encode(JSON.stringify(spec.objective).slice(1, -1)).length > MAX_OBJECTIVE_BYTES
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `objective must be at most ${MAX_OBJECTIVE_BYTES} UTF-8 bytes once JSON-escaped; it is one queue-create argv element and a longer one dies E2BIG on the box after seeding`,
+        });
+      }
+      // Identifier grammar, checked at parse because everything downstream of
+      // these names is box-local: member ids become provider seat keys (minted
+      // under SEAT_NAME_RE — an id that fails it here used to refuse at mint,
+      // after the box existed), pod ids and the rig name compose tmux session
+      // names and the `state/pi/<session>` path, and the rig name reaches `rig`
+      // argv at teardown.
+      if (spec.rigSpec !== undefined) {
+        if (!RIG_COMPONENT_RE.test(spec.rigSpec.name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `rigSpec name '${sanitizeForMessage(spec.rigSpec.name)}' must match ${RIG_COMPONENT_RE.source} — it names tmux sessions and flows into 'rig' argv, so lowercase letters, digits and interior hyphens only, at most 63 characters, no leading hyphen (a leading '-' parses as a CLI flag)`,
+          });
+        }
+        for (const pod of spec.rigSpec.pods) {
+          if (!RIG_COMPONENT_RE.test(pod.id)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `rigSpec pod id '${sanitizeForMessage(pod.id)}' must match ${RIG_COMPONENT_RE.source} — pod ids compose session names and the state/pi path, so lowercase letters, digits and interior hyphens only, at most 63 characters, no leading or trailing hyphen`,
+            });
+          }
+          for (const member of pod.members) {
+            if (!SEAT_NAME_RE.test(member.id)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `rigSpec member id '${sanitizeForMessage(member.id)}' in pod '${sanitizeForMessage(pod.id)}' must match ${SEAT_NAME_RE.source} — seat keys are minted under this grammar, and refusing here lands the failure at manifest parse instead of post-box at mint`,
+              });
+            }
+          }
+        }
+        // Sessions are named `<pod.id>-<member.id>`, and both halves may
+        // contain hyphens — so pod 'a' + member 'b-c' and pod 'a-b' + member
+        // 'c' compose the SAME session: one auth.json shared by two seats and
+        // one ledger identity for both costs. The budget-key set comparison
+        // below cannot catch it (the member sets differ); only the composed
+        // keys can.
+        const composed = new Map<string, { pod: string; member: string }>();
+        for (const pod of spec.rigSpec.pods) {
+          for (const member of pod.members) {
+            const session = `${pod.id}-${member.id}`;
+            const prior = composed.get(session);
+            if (prior !== undefined) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `composed seat session '${sanitizeForMessage(session)}' is not unique: pod '${sanitizeForMessage(prior.pod)}' member '${sanitizeForMessage(prior.member)}' and pod '${sanitizeForMessage(pod.id)}' member '${sanitizeForMessage(member.id)}' both compose it — sessions are named podId-memberId, so these two seats would share one auth.json and one cost identity; rename one pod or member`,
+              });
+            } else {
+              composed.set(session, { pod: pod.id, member: member.id });
+            }
+          }
+        }
+      }
+      if (spec.rigSpec !== undefined && spec.leadSeat !== undefined && spec.seatBudgets !== undefined) {
+        const members = spec.rigSpec.pods.flatMap((p) => p.members.map((m) => m.id));
+        if (!members.includes(spec.leadSeat)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `leadSeat '${sanitizeForMessage(spec.leadSeat)}' is not a member of rigSpec`,
+          });
+        }
+        const budgetSeats = Object.keys(spec.seatBudgets).sort();
+        if (JSON.stringify(budgetSeats) !== JSON.stringify([...members].sort())) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "seatBudgets keys must exactly match rigSpec member ids",
+          });
+        }
+      }
     }
     // DF1.6: roster and task required when kind === "dispatch_task", forbidden otherwise
     if (spec.kind === "dispatch_task") {
@@ -337,7 +528,18 @@ export const PipelineManifestSchema = z
     maxSteeringIterations: z.number().int().min(0).max(MAX_RETRIES).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
-  .strict();
+  .strict()
+  .superRefine((m, ctx) => {
+    // Research doc §4.1 rule 2: ONE tier-2 brain per box. Two rig_swarm phases
+    // would boot two swarms in one box (or two rigs under one daemon).
+    const swarm = m.phases.filter((p) => p.kind === "rig_swarm");
+    if (swarm.length > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `at most one rig_swarm phase per manifest (one tier-2 brain per box); got ${swarm.length}`,
+      });
+    }
+  });
 
 /** INV-4: the manifest carries no credential material. */
 const CREDENTIAL_FIELD = /(^|[-_])(api)?(key|token|secret|password|passwd|credential)s?([-_]|$)/i;

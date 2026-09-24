@@ -7,29 +7,37 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createRun , type ProviderAuditLink } from "../../src/providers/driver.ts";
+import { createRun , type ProviderAuditLink, type ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import {
   SBX_KEY_PREFIX,
+  SWARM_KEYS_DIR,
+  SWARM_SEAT_KEYS_ENV,
   CredentialLifecycleError,
+  captureSeatSpend,
   captureSpend,
   defaultKeyCapMicroUsd,
   deliverRunKey,
+  deliverSeatKeys,
   KEY_ENV_FILE,
   mintRunKey,
+  mintSeatKeys,
   openRouterKeyApi,
   revokeAndVerify,
   revokeRunKey,
+  revokeSeatKeys,
   runCredentialLifecycle,
   verifyRevoked,
   type CredentialDeps,
   type KeyApi,
+  type SeatKeyPlan,
 } from "../../src/providers/credentials.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
@@ -1678,6 +1686,430 @@ describe("openRouterKeyApi (production client, fetch double)", () => {
     });
     await api.deleteKey("a b/c?x=1");
     expect(deletedPath).toBe("/a%20b%2Fc%3Fx%3D1");
+  });
+});
+
+// ─── S1 rig_swarm: per-seat provider keys ─────────────────────────────────────
+//
+// The brief's `makeCredDeps()` maps onto this file's fixtures: module-level
+// `api` (FakeKeyApi) + `store` (temp RunRecordStore), with the run cap at the
+// backstop boundary (see seatDeps below). `keyApi.created` → POST rows of
+// `api.requests`; `usageByHash` → `api.setUsage`; `revokedHashes` → deleted
+// rows of `api.keys`.
+describe("S1 rig_swarm per-seat keys", () => {
+  // NOTE (brief deviation, documented in the task report): the brief's PLAN
+  // used 250_000_000 µ$ seats under a 500_000_000 µ$ deps cap, which its OWN
+  // backstop test (50_000_001 = defaultKeyCapMicroUsd + 1 must refuse) and
+  // snippet (`p.limitMicroUsd > defaultKeyCapMicroUsd`) make unsatisfiable —
+  // no single per-seat ceiling admits 250M while refusing 50_000_001. Every
+  // production guard sides with the backstop: the budget gate admits
+  // min(defaultKeyCapMicroUsd, remaining), resident-bounds enforces
+  // capMicroUsd ≤ defaultKeyCapMicroUsd, and dispatch refuses an admitted
+  // ceiling above it (resident-cap-above-backstop) — a seat above 50M can
+  // never legitimately reach a mint. Fixtures therefore sit at the backstop
+  // boundary: 25M µ$ per seat, Σ = 50M = defaultKeyCapMicroUsd exactly — the
+  // run cap IS the backstop, because F033's run-level guard (mintSeatKeys'
+  // port of mintRunKey's) refuses any capMicroUsd above it pre-mint.
+  const PLAN: readonly SeatKeyPlan[] = [
+    { seat: "lead", limitMicroUsd: 25_000_000 },
+    { seat: "worker", limitMicroUsd: 25_000_000 },
+  ];
+
+  /** The brief's makeCredDeps: fixture deps with the swarm run cap. */
+  const seatDeps = () => deps({ capMicroUsd: defaultKeyCapMicroUsd });
+
+  test("mintSeatKeys mints one key per seat with its own limit and records the namespace", async () => {
+    store.create("run-1");
+    const { keys, hashes } = await mintSeatKeys(seatDeps(), "run-1", PLAN);
+    expect(Object.keys(keys).sort()).toEqual(["lead", "worker"]);
+    expect(
+      api.requests.filter((r) => r.method === "POST").map(({ name, limitUsd }) => ({ name, limitUsd })),
+    ).toEqual([
+      { name: "sbx-run-1-lead", limitUsd: 25 }, // microsToUsd boundary
+      { name: "sbx-run-1-worker", limitUsd: 25 },
+    ]);
+    const rec = store.get("run-1");
+    expect(rec.extensions?.swarmSeats?.seats).toEqual(["lead", "worker"]);
+    // Index-aligned: seats[i]'s hash is keyHashes[i] (the namespace contract).
+    expect(rec.extensions?.swarmSeats?.keyHashes).toEqual(Object.values(hashes));
+  });
+
+  test("mintSeatKeys refuses when seat limits sum above the run cap", async () => {
+    store.create("run-2");
+    await expect(mintSeatKeys(seatDeps(), "run-2", [
+      { seat: "lead", limitMicroUsd: 400_000_000 },
+      { seat: "worker", limitMicroUsd: 400_000_000 },
+    ])).rejects.toThrow(/seat limits sum .* above the run cap/);
+  });
+
+  test("mintSeatKeys refuses a seat above the backstop ceiling", async () => {
+    // Post-F033 the RUN cap is itself bounded by the backstop, so a seat above
+    // the backstop always breaches the Σ ≤ cap guard first — the per-seat
+    // backstop check below it is defence in depth (reachable only if
+    // defaultKeyCapMicroUsd ever moves). The refusal is still pre-mint and
+    // typed, which is the property under test.
+    store.create("run-3");
+    await expect(mintSeatKeys(seatDeps(), "run-3", [{ seat: "lead", limitMicroUsd: 50_000_001 }]))
+      .rejects.toThrow(CredentialLifecycleError);
+    let err: unknown;
+    try {
+      await mintSeatKeys(seatDeps(), "run-3", [{ seat: "lead", limitMicroUsd: 50_000_001 }]);
+    } catch (e) {
+      err = e;
+    }
+    expect((err as CredentialLifecycleError).code).toBe("cap-invalid");
+    expect((err as CredentialLifecycleError).message).toMatch(/above the run cap/);
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+  });
+
+  test("a compensating revoke that fails during mintSeatKeys is REPORTED, not swallowed", async () => {
+    // Seat 1 mints fine; seat 2 over-grants (F004) so the mint catch
+    // compensates BOTH live hashes — and every revoke fails too.
+    // afterMintFailure must append the revoke failures to the propagated
+    // error: compensateMint logs them but never throws, so a catch-based
+    // collector never fires (the aggregation used to be dead code).
+    store.create("run-agg");
+    const flaky = Object.create(api) as FakeKeyApi;
+    let minted = 0;
+    flaky.createKey = async (name: string, limitUsd: number) => {
+      minted += 1;
+      if (minted < 2) return api.createKey(name, limitUsd);
+      api.requests.push({ method: "POST", path: "/keys", name, limitUsd });
+      return { key: `sk-or-fake-over-${name}`, hash: "b".repeat(64), limitUsd: limitUsd + 5, usageUsd: 0 };
+    };
+    flaky.deleteKey = (): Promise<number> =>
+      Promise.reject(new CredentialLifecycleError("revoke-failed", "DELETE /keys/… returned 500", "revoke by hand"));
+    let err: unknown;
+    try {
+      await mintSeatKeys(deps({ capMicroUsd: defaultKeyCapMicroUsd, keyApi: flaky }), "run-agg", PLAN);
+    } catch (e) {
+      err = e;
+    }
+    // The ORIGINAL mint failure is still the reported cause…
+    expect((err as CredentialLifecycleError).code).toBe("mint-ceiling-mismatch");
+    expect((err as Error).message).toContain("provider granted");
+    // …but the failed compensating revokes ride the message now, both of them.
+    expect((err as Error).message).toMatch(/2 of 2 compensating revokes also failed/);
+    expect((err as Error).message).toContain("DELETE /keys/… returned 500");
+  });
+
+  test("mintSeatKeys refuses an already-minted run (single key OR swarm)", async () => {
+    store.create("run-4");
+    store.set("run-4", { keyHash: "aaaaaaaa" }); // single-key mint already happened
+    await expect(mintSeatKeys(seatDeps(), "run-4", PLAN)).rejects.toThrow(/already carries keyHash/);
+    // …and the swarm shape: a second mint over an existing swarm namespace.
+    store.create("run-4b");
+    await mintSeatKeys(seatDeps(), "run-4b", PLAN);
+    await expect(mintSeatKeys(seatDeps(), "run-4b", PLAN)).rejects.toThrow(/already carries swarm seat keys/);
+  });
+
+  test("mintSeatKeys refuses duplicate seat names and bad seat spellings", async () => {
+    store.create("run-5");
+    await expect(mintSeatKeys(seatDeps(), "run-5", [
+      { seat: "lead", limitMicroUsd: 10 }, { seat: "lead", limitMicroUsd: 10 },
+    ])).rejects.toThrow(/duplicate seat/);
+    await expect(mintSeatKeys(seatDeps(), "run-5", [{ seat: "Big Seat", limitMicroUsd: 10 }]))
+      .rejects.toThrow(/seat name/);
+  });
+
+  test("a mid-mint failure compensates: every earlier seat key is revoked, nothing is recorded", async () => {
+    store.create("run-comp");
+    const originalCreate = api.createKey.bind(api);
+    let calls = 0;
+    api.createKey = async (name: string, limitUsd: number) => {
+      calls++;
+      if (calls === 2) throw new Error("second mint failed");
+      return originalCreate(name, limitUsd);
+    };
+    await expect(mintSeatKeys(seatDeps(), "run-comp", PLAN)).rejects.toThrow("second mint failed");
+    expect(api.keys).toHaveLength(1); // the lead key was minted…
+    expect(api.keys[0]!.deleted).toBeTrue(); // …and compensated (revoked + verified)
+    expect(store.get("run-comp").extensions?.swarmSeats).toBeUndefined();
+  });
+
+  test("captureSeatSpend sums provider usage across seats into spendMicroUsd", async () => {
+    store.create("run-6");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-6", PLAN);
+    api.setUsage(hashes.lead!, 0.1);
+    api.setUsage(hashes.worker!, 0.1);
+    const total = await captureSeatSpend(seatDeps(), "run-6");
+    expect(total).toBe(200_000); // 0.1 + 0.1 USD in µ$
+    expect(store.get("run-6").spendMicroUsd).toBe(200_000);
+  });
+
+  test("captureSeatSpend treats an absent (out-of-band revoked) seat as 0, not a lie", async () => {
+    store.create("run-7");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-7", PLAN);
+    await api.deleteKey(hashes.lead!); // revoked out-of-band: absent from the fully-enumerated list
+    api.setUsage(hashes.worker!, 0.25);
+    const total = await captureSeatSpend(seatDeps(), "run-7");
+    expect(total).toBe(250_000);
+  });
+
+  test("captureSeatSpend refuses a PRESENT seat with non-numeric usage (fail-closed like captureSpend)", async () => {
+    // Absent → 0 is correct (the test above); PRESENT with NaN usage must throw
+    // with the single-key path's typed refusal — silently contributing 0 would
+    // be the same authoritative-looking lie F035 exists to prevent.
+    store.create("run-9");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-9", PLAN);
+    api.setUsage(hashes.lead!, Number.NaN);
+    let err: unknown;
+    try {
+      await captureSeatSpend(seatDeps(), "run-9");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("invalid-provider-usage");
+    expect((err as CredentialLifecycleError).message).toContain("run-9");
+    expect(store.get("run-9").spendMicroUsd).toBeUndefined(); // no authoritative-looking spend written
+  });
+
+  test("revokeSeatKeys revokes every recorded hash", async () => {
+    store.create("run-8");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-8", PLAN);
+    const n = await revokeSeatKeys(seatDeps(), "run-8");
+    expect(n).toBe(2);
+    expect(api.keys.filter((k) => k.deleted).map((k) => k.hash).sort())
+      .toEqual(Object.values(hashes).sort());
+  });
+
+  test("run-record accepts swarmSeats with real-shaped 64-char lowercase hex hashes (assertNoSecret compatibility)", () => {
+    // The namespace's hashes are provider sha256 hex: 64 chars, lowercase-only,
+    // so the mixed-class heuristic cannot fire by construction and no
+    // SECRET_PREFIXES entry matches. This test proves the argument against the
+    // real store — a regression in either the heuristic or the namespace
+    // registration bricks every swarm mint at the record write.
+    store.create("run-scan");
+    const hexes = [randomBytes(32).toString("hex"), randomBytes(32).toString("hex")];
+    store.set("run-scan", { extensions: { swarmSeats: { seats: ["lead", "worker"], keyHashes: hexes } } });
+    expect(store.get("run-scan").extensions?.swarmSeats?.keyHashes).toEqual(hexes);
+  });
+
+  // Stub driver: records argv+stdin, never executes — the seat script's fixed
+  // absolute SWARM_KEYS_DIR is a real-box concern (live E2E owns it); what is
+  // unit-testable here is the TRANSPORT contract: which argv ran, what rode
+  // stdin, and what the mode gate did with the answer.
+  function stubExec(stdoutFor: (script: string) => string) {
+    const calls: { argv: string[]; stdin?: string }[] = [];
+    const driver = {
+      name: "stub",
+      exec: async (_vm: string, argv: string[], stdin?: string) => {
+        calls.push({ argv: [...argv], stdin });
+        return { exitCode: 0, stdout: stdoutFor(String(argv[2])), stderr: "" };
+      },
+    } as unknown as ProviderDriver;
+    return { calls, driver };
+  }
+
+  test("deliverSeatKeys ships key material on stdin only — never argv — and gates on the 0600 confirmation", async () => {
+    const runId = "run-deliver";
+    const vm = await makeRun(runId);
+    const { keys } = await mintSeatKeys(seatDeps(), runId, PLAN);
+    const { calls, driver } = stubExec((script) => (script.includes("cat >") ? "600" : ""));
+    await deliverSeatKeys({ ...seatDeps(), driver }, runId, vm, keys);
+    expect(calls).toHaveLength(2);
+    const write = calls[0]!;
+    expect(write.argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(write.argv[2]).toContain(`${SWARM_KEYS_DIR}/${runId}.json`);
+    expect(write.stdin).toBe(JSON.stringify(keys));
+    // INV-4: no plaintext fragment in any argv or log line — stdin is the only carrier.
+    for (const plaintext of Object.values(keys)) {
+      expect(leakScan(plaintext, JSON.stringify(calls.map((c) => c.argv)), JSON.stringify(logs))).toBeNull();
+    }
+    const append = calls[1]!;
+    expect(append.argv[2]).toContain("grep -q");
+    expect(append.argv[2]).toContain(`${SWARM_SEAT_KEYS_ENV}=${SWARM_KEYS_DIR}/${runId}.json`);
+  });
+
+  test("deliverSeatKeys refuses a keys file whose confirmed mode is not 0600", async () => {
+    const runId = "run-deliver-mode";
+    const vm = await makeRun(runId);
+    const { keys } = await mintSeatKeys(seatDeps(), runId, PLAN);
+    const { driver } = stubExec((script) => (script.includes("cat >") ? "644" : ""));
+    await expect(deliverSeatKeys({ ...seatDeps(), driver }, runId, vm, keys))
+      .rejects.toThrow(/mode 644/);
+  });
+
+  // Task 6, audit-link symmetry (review finding): the single-key siblings emit
+  // `deliver` (deliverRunKey) and `revoke` (revokeRunKey) links — the seat
+  // functions emitted NOTHING, so a swarm run's hop 4 stopped at `mint`. Both
+  // now emit one link per seat hash, same hop/subjectKind as the siblings —
+  // and F006 adds a `verify-revoked` per seat hash after its `revoke`, so the
+  // swarm hop-4 chain satisfies chain.ts's 4-event credential set.
+  test("audit-link symmetry: mint, deliver, revoke and verify-revoked, one per seat hash", async () => {
+    const runId = "run-seat-links";
+    const vm = await makeRun(runId);
+    store.set(runId, { requestId: "req-seat-links", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    const { keys, hashes } = await mintSeatKeys(seatDeps(), runId, PLAN);
+    const { driver } = stubExec((script) => (script.includes("cat >") ? "600" : ""));
+    await deliverSeatKeys({ ...seatDeps(), driver }, runId, vm, keys);
+    await revokeSeatKeys(seatDeps(), runId);
+
+    const links = auditLinks.filter((l) => l.runId === runId && l.hop === "run-credential");
+    expect(links.map((l) => l.event)).toEqual([
+      "mint",
+      "mint",
+      "deliver",
+      "deliver",
+      // revokeSeatKeys composes revoke → verify → both emits per hash, in
+      // hashOrder: each seat's verify-revoked lands immediately after its own
+      // revoke, then the next seat's pair.
+      "revoke",
+      "verify-revoked",
+      "revoke",
+      "verify-revoked",
+    ]);
+    expect(links.every((l) => l.subjectKind === "credential-key")).toBeTrue();
+    // Every subject is one of the two seat hashes — mint, deliver, revoke AND
+    // verify-revoked — never key material (INV-4/INV-AUDIT-2).
+    const seatHashes = Object.values(hashes).sort();
+    expect(links.map((l) => l.subjectId).sort())
+      .toEqual([...seatHashes, ...seatHashes, ...seatHashes, ...seatHashes].sort());
+    // F006's rows carry the emitter's standard detail — `{ keyHash }` (the
+    // passed detail spreads in after it; the seat's identity rides subjectId,
+    // the hash in detail is the same non-secret provider-side identifier).
+    expect(links.filter((l) => l.event === "verify-revoked").map((l) => l.detail)).toEqual([
+      { keyHash: hashes.lead },
+      { keyHash: hashes.worker },
+    ]);
+    // INV-4/INV-AUDIT-2: never key material — hash subjects only, whole-array scan.
+    for (const plaintext of Object.values(keys)) {
+      expect(leakScan(plaintext, JSON.stringify(links))).toBeNull();
+    }
+  });
+
+  // F007: the exclusion is SYMMETRIC. mintSeatKeys refuses a keyed record
+  // (asserted above); this is the other door — mintRunKey over an existing
+  // swarm namespace. Without it the single-key mint manufactures a hybrid
+  // whose core hash teardown's verify step can never see revoked.
+  test("mintRunKey refuses a swarm-keyed record — the single-key and per-seat paths are mutually exclusive", async () => {
+    store.create("run-f007");
+    await mintSeatKeys(seatDeps(), "run-f007", PLAN);
+    let err: unknown;
+    try {
+      await mintRunKey(seatDeps(), "run-f007");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("already-minted");
+    expect((err as CredentialLifecycleError).message).toMatch(/already carries swarm seat keys/);
+    expect((err as CredentialLifecycleError).remediation).toMatch(/mutually exclusive/);
+    // No second namespace, no core mint either — the refusal is total.
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(2);
+    expect(store.get("run-f007").keyHash).toBeUndefined();
+  });
+
+  // F033: mintRunKey's three run-level cap guards, ported. Without them a NaN
+  // cap sails `sum > capMicroUsd` (false for NaN) and mints live seat keys
+  // against no real ceiling — INV-CAP-1 broken at the run level while every
+  // per-seat check still passes. Each case refused BEFORE any seat mints.
+  test("mintSeatKeys refuses a degenerate or above-backstop run cap before any mint (F033)", async () => {
+    store.create("run-cap-guards");
+    for (const [capMicroUsd, messageRe] of [
+      [Number.NaN, /must be a positive integer/],
+      [0, /must be a positive integer/],
+      [-5_000_000, /must be a positive integer/],
+      [Number.MAX_SAFE_INTEGER, /does not round-trip/],
+      [50_000_001, /exceeds the backstop/],
+    ] as const) {
+      let err: unknown;
+      try {
+        await mintSeatKeys(deps({ capMicroUsd }), "run-cap-guards", PLAN);
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `capMicroUsd ${capMicroUsd}`).toBeInstanceOf(CredentialLifecycleError);
+      expect((err as CredentialLifecycleError).code, `capMicroUsd ${capMicroUsd}`).toBe("cap-invalid");
+      expect((err as CredentialLifecycleError).message, `capMicroUsd ${capMicroUsd}`).toMatch(messageRe);
+    }
+    // Every refusal was pre-mint: the provider was never asked for a seat key.
+    expect(api.requests).toHaveLength(0);
+  });
+
+  // F029: the runId becomes provider key names and remediation text here, so
+  // it faces the same grammar deliverSeatKeys enforces before its `sh -c`
+  // interpolation — the two halves of the seat lifecycle agree on what a
+  // runId is, and the provider never sees the unvalidated form first.
+  test("mintSeatKeys refuses a runId outside the store's hostname grammar (F029)", async () => {
+    let err: unknown;
+    try {
+      await mintSeatKeys(seatDeps(), "run/../../etc passwd", PLAN);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("run-id-invalid");
+    expect((err as CredentialLifecycleError).message).toMatch(/refusing to build provider key names/);
+    expect(api.requests).toHaveLength(0);
+  });
+
+  // F034: the composed `sbx-<runId>-<seat>` is bounded by the provider's
+  // 100-char key-name limit. At the grammar maxima (runId and seat both long)
+  // the composition exceeds it — the wrong place to learn that is a mid-plan
+  // provider death, so the refusal is pre-mint, before ANY seat.
+  test("mintSeatKeys refuses a composed key name above the provider's 100-char bound (F034)", async () => {
+    const longRunId = `run-${"x".repeat(88)}`; // 92 chars; passes the run-id grammar
+    let err: unknown;
+    try {
+      await mintSeatKeys(seatDeps(), longRunId, PLAN);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("key-name-too-long");
+    expect((err as CredentialLifecycleError).message).toMatch(/sbx-.*is 10[01] chars — the provider's key-name bound is 100/);
+    expect(api.requests).toHaveLength(0);
+  });
+
+  // F011: spend MERGES instead of overwriting. A teardown retry after
+  // hand-revoked seats re-reads a smaller total; storing that would rewrite
+  // real captured spend downward — the authoritative-looking lie captureSpend's
+  // absent-key branch exists to prevent.
+  test("captureSeatSpend merges with prior spend — never rewrites it downward (F011)", async () => {
+    store.create("run-merge");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-merge", PLAN);
+    api.setUsage(hashes.lead!, 0.1);
+    api.setUsage(hashes.worker!, 0.1);
+    expect(await captureSeatSpend(seatDeps(), "run-merge")).toBe(200_000);
+    // A retry re-reads LESS (both seats now absent → computed 0): the stored
+    // figure stands, in the return AND on the record.
+    await api.deleteKey(hashes.lead!);
+    await api.deleteKey(hashes.worker!);
+    expect(await captureSeatSpend(seatDeps(), "run-merge")).toBe(200_000);
+    expect(store.get("run-merge").spendMicroUsd).toBe(200_000);
+    // The other arm: a HIGHER computed total is the one that lands — spend
+    // only ever accumulates.
+    store.create("run-merge-up");
+    const { hashes: up } = await mintSeatKeys(seatDeps(), "run-merge-up", PLAN);
+    store.set("run-merge-up", { spendMicroUsd: 500_000 }); // prior, hand-recorded
+    api.setUsage(up.lead!, 0.1);
+    api.setUsage(up.worker!, 0.1); // computed 200_000 < prior 500_000
+    expect(await captureSeatSpend(seatDeps(), "run-merge-up")).toBe(500_000);
+    api.setUsage(up.lead!, 0.8); // now computed 0.8 + 0.1 = 900_000 µ$ > prior
+    expect(await captureSeatSpend(seatDeps(), "run-merge-up")).toBe(900_000);
+    expect(store.get("run-merge-up").spendMicroUsd).toBe(900_000);
+  });
+
+  // F032: the count is FRESH revokes — a hash the provider answers
+  // already-gone for is proven absent but was not revoked BY this call. A
+  // retry over an all-already-gone namespace returns 0, so a caller can tell
+  // "this pass killed N keys" from "everything was already gone".
+  test("revokeSeatKeys counts fresh revokes only — already-gone seats do not count (F032)", async () => {
+    store.create("run-fresh");
+    const { hashes } = await mintSeatKeys(seatDeps(), "run-fresh", PLAN);
+    expect(await revokeSeatKeys(seatDeps(), "run-fresh")).toBe(2);
+    // Full retry: both already gone → 0, not 2.
+    expect(await revokeSeatKeys(seatDeps(), "run-fresh")).toBe(0);
+    // Mixed namespace: one seat revoked out of band, one live → exactly 1.
+    store.create("run-fresh-mixed");
+    const { hashes: mixed } = await mintSeatKeys(seatDeps(), "run-fresh-mixed", PLAN);
+    await api.deleteKey(mixed.lead!);
+    expect(await revokeSeatKeys(seatDeps(), "run-fresh-mixed")).toBe(1);
+    // And every recorded hash is still proven absent, fresh or not.
+    expect(api.keys.filter((k) => k.deleted).map((k) => k.hash).sort())
+      .toEqual([...Object.values(hashes), ...Object.values(mixed)].sort());
   });
 });
 
