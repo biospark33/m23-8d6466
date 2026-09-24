@@ -250,7 +250,11 @@
       "bundled": []
     },
     {
-      "names": ["opt/openrig/lib/node_modules/@openrig/cli/node_modules/better-sqlite3/build/Release/better_sqlite3.node"],
+      "names": [
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/better-sqlite3/deps/download.sh",
+        "opt/openrig/lib/node_modules/@openrig/cli/node_modules/better-sqlite3/deps/sqlite3.gyp"
+      ],
       "project": "WiseLibs/better-sqlite3",
       "version": "11.10.0",
       "spdxId": "MIT",
@@ -258,7 +262,7 @@
       "licenseUrl": "https://github.com/WiseLibs/better-sqlite3/blob/v11.10.0/LICENSE",
       "verifiedAt": "2026-09-24",
       "verifiedHow": "PROVENANCE: better-sqlite3 is a dependency of @openrig/cli (^11.8.0, from the registry metadata fetched 2026-09-23). The npm package carries NO prebuilt binary — verified by reading the 11.10.0 tarball (src/, deps/, lib/, no *.node) — so the shipped better_sqlite3.node is fetched by prebuild-install (its own entry above) FROM GITHUB RELEASES at Docker-build time and lands at the standard node-gyp release path named above. RESOLUTION NOW MEASURED: the first real build resolved 11.10.0 (run 36033368044, 2026-09-24), frozen by OPENRIG_TREE_SHA256 543e846b…; the original entry's path guessed the HOISTED location (opt/openrig/lib/node_modules/better-sqlite3/...) and the diff corrected it — npm NESTED the package at @openrig/cli/node_modules/, and that measured path is the one covered here. LICENCE: the 11.10.0 tarball's own LICENSE, read 2026-09-23 and re-verified 2026-09-24 at the tag — 'The MIT License (MIT)' / 'Copyright (c) 2017 Joshua Wise'; same text at https://raw.githubusercontent.com/WiseLibs/better-sqlite3/v11.10.0/LICENSE (200). A resolution change moves OPENRIG_TREE_SHA256 and refuses the build; the re-pin ritual re-reads the version and re-verifies this tag in the same change.",
-      "notes": "Named because the added-binary diff DID flag it (run 36033368044), under the nested path above. SQLite itself is compiled INTO this binary from the public-domain amalgamation — disclosed under 'bundled', not folded into spdxId.",
+      "notes": "Named because the added-binary diff DID flag it (run 36033368044), under the nested path above. The tarball's +x set the diff measured is THREE files — the .node prebuild plus deps/download.sh and deps/sqlite3.gyp, the package's own build-time helper and GYP project shipped +x — all covered by this one entry: same project, same license, same redistribution. SQLite itself is compiled INTO this binary from the public-domain amalgamation — disclosed under 'bundled', not folded into spdxId.",
       "bundled": [
         {
           "component": "SQLite (compiled into better_sqlite3.node from the amalgamation)",
