@@ -1252,7 +1252,36 @@ describe("buildIdFileInputs", () => {
       // hoisted above the tree measurement, the per-assert `|| exit 1`s). All
       // inside the file whose bytes this entry pins; measured on the final
       // tree, same-commit re-pin per the discipline below.
-      "oci/exedev/Dockerfile": "2b9b437ede2d939ff8a656537149cfbc1973da29609a6ad75ae8b7d18ef2e61c",
+      //
+      // ff2dcbcc: R0 first-build reconciliation (2026-09-24) — the engine
+      // COPY set takes the S1 provider closure (credentials/driver/errors/
+      // harvest/path-guard/quota/viz-guard; the #284 merge build refused at
+      // the stage probe on openrig-swarm.ts:32, `bun build` resolves before
+      // it tree-shakes, and the enumeration must carry every RESOLVED file —
+      // seven, not the four the import sites alone suggest). Dockerfile
+      // bytes only; measured on the final tree, same-commit re-pin.
+      //
+      // 919341b4: NODE_SHA256 sentinel → pin (same day, run 36031582204's
+      // refusal, cross-checked against nodejs.org's SHASUMS256.txt line).
+      // OPENRIG_TREE_SHA256 still sentinel — the node gate dies first by
+      // Dockerfile order, so the tree measurement is the NEXT refusal.
+      // Dockerfile bytes only; same-commit re-pin.
+      //
+      // a8805e0c: OPENRIG_TREE_SHA256 sentinel → pin (run 36032367862's
+      // refusal; no external cross-check exists for an npm-resolved tree —
+      // the refusal output IS the measurement). Both sentinels now carry
+      // measured values; the un-measured state they guarded is gone.
+      // Dockerfile bytes only; same-commit re-pin.
+      // eca4a06f: PR #286 review round (feature/r0-image-convergence,
+      // 2026-09-24) — comment-only rewording of the sentinel paragraphs in
+      // the node + OpenRig sections: both ARGs have carried measured values
+      // since a8805e0c (above), so "no build of this file has EVER run" and
+      // "SENTINEL, NOT A PIN" had gone false on the page. No COPY, ARG or
+      // RUN line moved; Dockerfile bytes only, re-pinned from this test's
+      // own failing run. The trackedSetDigest below did not move: the
+      // Dockerfile is not a files() entry and no walked COPY source
+      // changed.
+      "oci/exedev/Dockerfile": "eca4a06f3ab094faf5884812089e938d6d04e3b4b62628d7beed80a8bb2a0da7",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1779,7 +1808,21 @@ describe("buildIdFileInputs", () => {
       // sources. RE-DERIVED from this test's own failing run on the final
       // tree (re-pin LAST, per the discipline). The image stays UN-PINNED
       // per the aaa26243 note.
-      "da700724556c81c3816e695a1f830269416968beff77515a6bc8cfb747d49218",
+      //
+      // a9f9039e: moved from da700724 by the R0 first-build reconciliation
+      // (2026-09-24): the S1 merge itself had ALREADY left this pin stale —
+      // verified against a clean HEAD (7957e8a4) with the working tree
+      // stashed, still red, the DF5.3 shape again — because the S1 wave
+      // edited walked COPY inputs (src/phase-engine/**, src/fleet/dispatch.ts,
+      // scripts/pipeline-run.ts, src/providers/{credentials,teardown}.ts) and
+      // re-pinned the per-asset Dockerfile map but missed this whole-walk
+      // literal. This convergence adds SEVEN walked inputs (the engine COPY
+      // set takes credentials/driver/errors/harvest/path-guard/quota/
+      // viz-guard, with both workflow lists following) and re-pins both
+      // halves. RE-DERIVED from this test's own failing run on the final
+      // tree, adopted LAST (this file is NOT a walked input). The image
+      // stays UN-PINNED per the aaa26243 note.
+      "a9f9039e50e6410a828e36879fc4cf5d21940c3d12967720867a9450825510b0",
     );
   });
 });
@@ -3478,14 +3521,25 @@ describe("checksumArgProblems", () => {
     // but generality is exactly what a per-name regression hides in: a typo in
     // one array literal drops that gate from every loop silently. Named, so
     // each new gate is asserted on ITS OWN declared default, empty-override,
-    // equal-override and missing-declaration arms. Their declared defaults are
-    // the MEASURE-AT-FIRST-BUILD sentinel (no build has run to measure them),
-    // which is itself pinned: the sentinel is what makes an unmeasured gate
-    // refuse any real override instead of silently accepting one.
+    // equal-override and missing-declaration arms. Both declared defaults are
+    // now MEASURED PINS, and the map below records which refusal measured
+    // each: NODE_SHA256 from run 36031582204, cross-checked against
+    // nodejs.org's SHASUMS256.txt line; OPENRIG_TREE_SHA256 from run
+    // 36032367862 once the node gate stopped dying first — no external
+    // cross-check exists for an npm-resolved tree, so the refusal output IS
+    // the measurement, and the hash is what freezes ^-range resolution.
+    const measuredDefault = (name: "NODE_SHA256" | "OPENRIG_TREE_SHA256"): string => {
+      switch (name) {
+        case "NODE_SHA256":
+          return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
+        case "OPENRIG_TREE_SHA256":
+          return "543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200";
+      }
+    };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
       expect(CHECKSUM_ARGS, `${name} left CHECKSUM_ARGS`).toContain(name);
       const [declared] = dockerfileArgDefaults(realDockerfile(), name);
-      expect(declared, name).toBe("MEASURE-AT-FIRST-BUILD");
+      expect(declared, name).toBe(measuredDefault(name));
       // An override that is not the declared default is refused, as a CONTENT
       // GATE — the same message shape the bun gate dies with in main().
       const overridden = checksumArgProblems(realDockerfile(), { [name]: "f".repeat(64) });

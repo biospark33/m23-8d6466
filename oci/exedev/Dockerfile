@@ -318,6 +318,33 @@ COPY src/providers/step-log.ts src/providers/step-log.ts
 COPY src/providers/cap-rejection.ts src/providers/cap-rejection.ts
 COPY src/providers/run-record.ts src/providers/run-record.ts
 COPY src/providers/fs-atomic.ts src/providers/fs-atomic.ts
+# The 2026-09-24 publish (post-#284 rig_swarm S1 merge) refused at this stage's
+# probe the same way the 2026-09-18 precedent above did — `error: Could not
+# resolve: "../../providers/credentials.ts"` at
+# src/phase-engine/phases/openrig-swarm.ts:32 — because S1's two new phase
+# bodies import the credentials module into the engine's bundle graph for the
+# first time (SWARM_SEAT_KEYS_ENV, usdToMicros), and credentials.ts drags its
+# own provider-family closure in with it. Seven additions. This time converged
+# WITHOUT the scratch-tree probe loop's iteration: a Bun.build onResolve plugin
+# recorded every import edge bun must RESOLVE (sourcemap sources under-report —
+# see the tree-shake note above) for both probe entry points, the resolved set
+# was diffed against this COPY enumeration, and the scratch-tree probe ran once
+# on the completed set:
+#   credentials.ts  — imported directly by the S1 phase bodies
+#                     (openrig-swarm.ts, openrig-cost.ts)
+#   errors.ts       — sibling import of credentials.ts (ProviderError)
+#   driver.ts       — sibling import of credentials.ts; provider entry
+#   harvest.ts      — reached through the provider chain (evidence harvest)
+#   path-guard.ts   — sibling import of credentials.ts (assertPlainBoxPath)
+#   quota.ts        — sibling import of driver.ts
+#   viz-guard.ts    — sibling import of driver.ts
+COPY src/providers/credentials.ts src/providers/credentials.ts
+COPY src/providers/errors.ts src/providers/errors.ts
+COPY src/providers/driver.ts src/providers/driver.ts
+COPY src/providers/harvest.ts src/providers/harvest.ts
+COPY src/providers/path-guard.ts src/providers/path-guard.ts
+COPY src/providers/quota.ts src/providers/quota.ts
+COPY src/providers/viz-guard.ts src/providers/viz-guard.ts
 COPY src/swarmclaw/ src/swarmclaw/
 COPY cli-anything/src/ cli-anything/src/
 COPY cli-anything/scripts/ cli-anything/scripts/
@@ -858,23 +885,24 @@ RUN set -e; \
 #   (2) npm and corepack are BUILD-TIME TOOLING ONLY. The node tarball ships
 #       them at /usr/local/lib/node_modules; they are deleted in the cleanup
 #       RUN below rather than shipped.
-#   (3) Both content-gate ARGs carry the literal sentinel MEASURE-AT-FIRST-
-#       BUILD because no build of this file has EVER run (Docker unavailable
-#       on the authoring machine, 2026-09-23): an unpinned tree builds
-#       NOTHING, it refuses, and the refusal message carries the measured
-#       value to pin. Same TOFU doctrine as BUN_SHA256 and
-#       QDS_ENGINE_TREE_SHA256 above. Sequencing, which the roadmap owns:
-#       these pins land FIRST (R0.4), because the publish refuses until they
-#       do — and the DEFAULT_IMAGE_REF/DEFAULT_IMAGE_BUILD_ID adoption lands
-#       AFTER that first successful publish (R0.5), because the digest it
-#       pins does not exist until then. Two commits, in that order; they
-#       cannot be one.
+#   (3) Both content-gate ARGs shipped as the literal sentinel MEASURE-AT-
+#       FIRST-BUILD because no build of this file had then run (Docker
+#       unavailable on the authoring machine, 2026-09-23): an unpinned tree
+#       builds NOTHING, it refuses, and the refusal message carries the
+#       measured value to pin. Same TOFU doctrine as BUN_SHA256 and
+#       QDS_ENGINE_TREE_SHA256 above. That first build has since run and
+#       both ARGs carry measured values (R0.4, 2026-09-24 — the PINNED
+#       comments at each ARG name their runs). Sequencing, which the roadmap
+#       owns: these pins land FIRST (R0.4), because the publish refuses
+#       until they do — and the DEFAULT_IMAGE_REF/DEFAULT_IMAGE_BUILD_ID
+#       adoption lands AFTER that first successful publish (R0.5), because
+#       the digest it pins does not exist until then. Two commits, in that
+#       order; they cannot be one.
 ARG NODE_VERSION=22.20.0
-# SENTINEL, NOT A PIN. When the first build refuses, nodejs.org publishes the
-# corroborating value in SHASUMS256.txt beside the tarball (the
-# `node-v${NODE_VERSION}-linux-x64.tar.gz` line) — pin the ARG from the
-# build's own measured output and cross-check it against that line.
-ARG NODE_SHA256=MEASURE-AT-FIRST-BUILD
+# PINNED 2026-09-24 from the first build's own refusal (run 36031582204:
+# "hashes to eeaccb03…"), cross-checked byte-identical against the
+# nodejs.org SHASUMS256.txt line the sentinel comment below names.
+ARG NODE_SHA256=eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29
 # .tar.gz, NOT the sketch's .tar.xz: gzip is present wherever tar is, while
 # xz-utils presence in the base is unmeasurable from here (no local build) and
 # a missing `xz` breaks `tar -xJf` before any gate runs. One fewer unmeasured
@@ -908,8 +936,10 @@ RUN set -e; \
 # resolved @openrig/cli's ^-ranged dependencies inside this RUN, and this hash
 # is the only thing freezing that resolution — an upstream republish inside
 # the range moves the measured value and the build refuses, which is the
-# point. SENTINEL, NOT A PIN (no build has run); pin from the first build's
-# own refusal message.
+# point. MEASURED PIN since R0.4 (2026-09-24): the value below came from the
+# first build's own refusal message (run 36032367862) — for an npm-resolved
+# tree there is no external cross-check, so the refusal output IS the
+# measurement.
 #
 # The hash pipeline is NUL-delimited end to end (`-print0 | sort -z |
 # xargs -0`) so a filename carrying a newline or whitespace is one file, not
@@ -921,12 +951,17 @@ RUN set -e; \
 # passes this gate. That is the same named ceiling listExecutables carries;
 # the gate's claim is byte identity of the regular files, nothing more.
 ARG OPENRIG_VERSION=0.5.14
-ARG OPENRIG_TREE_SHA256=MEASURE-AT-FIRST-BUILD
+# PINNED 2026-09-24 from the first build's own refusal (run 36032367862:
+# "the /opt/openrig tree hashes to 543e846b…"). Unlike NODE_SHA256 there is
+# no external cross-check for an npm-resolved tree — the refusal output IS
+# the measurement, which is the TOFU doctrine for this gate: the hash is
+# what freezes npm's ^-range resolution inside the pin.
+ARG OPENRIG_TREE_SHA256=543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
 # (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
 # that layout assumption fail LOUDLY at the first real build rather than
-# shipping a dangling symlink — the same fail-closed spirit as the sentinel
-# ARGs. `rig --version` is EXECUTED, not string-compared: its output format is
+# shipping a dangling symlink — the same fail-closed spirit as the
+# content-gate ARGs. `rig --version` is EXECUTED, not string-compared: its output format is
 # unmeasured from here, and executing it still proves the symlink chain and
 # the node shebang resolve. It runs BEFORE the tree-hash measurement, not
 # after: a CLI that initialises first-run state under /opt/openrig on first
