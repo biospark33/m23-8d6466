@@ -32,7 +32,7 @@ import {
   type ProviderAuditLink,
   type ProviderDriver,
 } from "./driver.ts";
-import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import { LEGACY_RUN_ID_RE, type RunRecord, type RunRecordStore } from "./run-record.ts";
 // INV-4: the plaintext key exists in the mint return and nowhere else. Every
 // sink below logs a CAUGHT error's free text, and `deliverRunKey` writes the
 // key through `driver.exec` — an exec wrapper that echoes the argv it ran (the
@@ -1047,6 +1047,308 @@ async function verifyHash(deps: CredentialDeps, ctx: StepContext, keyHash: strin
       );
     }
   });
+}
+
+// ─── S1 rig_swarm: per-seat provider keys ─────────────────────────────────────
+
+/** The env-var name the in-box swarm runtime reads the seat-keys file through (owned here — see SWARM_KEYS_DIR). */
+export const SWARM_SEAT_KEYS_ENV = "QDS_SWARM_KEYS_FILE";
+
+/** Fixed in-box home of the per-run seat-keys JSON (0600). Task 3's phase body reads it via SWARM_SEAT_KEYS_ENV. */
+export const SWARM_KEYS_DIR = "/opt/qds/swarm-keys";
+
+/** Seat names become provider key name suffixes: lowercase hostname-label text, ≤32 chars. */
+const SEAT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+export interface SeatKeyPlan {
+  seat: string;
+  limitMicroUsd: number;
+}
+
+/**
+ * Mint one capped key per swarm seat (S1). Guards mirror mintRunKey's:
+ * already-minted (core keyHash OR swarm namespace), per-seat cap ≤ backstop,
+ * cap round-trip — plus Σ(seat limits) ≤ deps.capMicroUsd, the run-level
+ * ceiling the budget gate admitted (budget-gate.ts mintCapMicroUsd).
+ * Dispatch clamps authored budgets proportionally BEFORE calling
+ * (dispatch.ts seatKeyPlan), so Σ ≤ ceiling holds by construction there;
+ * the guard here is the invariant's home. `mintRunKey` itself is untouched —
+ * the one-live-key-per-run invariant it guards holds for single-key runs;
+ * this is the sibling for swarm runs, and the two are mutually exclusive
+ * on one record (both shapes refuse below).
+ */
+export async function mintSeatKeys(
+  deps: CredentialDeps,
+  runId: string,
+  plan: readonly SeatKeyPlan[],
+): Promise<{ keys: Record<string, string>; hashes: Record<string, string> }> {
+  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId };
+  if (plan.length === 0) {
+    throw new CredentialLifecycleError("cap-invalid", "seat plan is empty", "declare at least one rigSpec member");
+  }
+  const seats = plan.map((p) => p.seat);
+  if (new Set(seats).size !== seats.length) {
+    throw new CredentialLifecycleError("cap-invalid", "duplicate seat in plan", "rigSpec member ids must be unique");
+  }
+  for (const seat of seats) {
+    if (!SEAT_NAME_RE.test(seat)) {
+      throw new CredentialLifecycleError(
+        "cap-invalid",
+        `seat name '${seat}' must match ${SEAT_NAME_RE.source}`,
+        "use lowercase alphanumerics and hyphens (rigSpec member ids become provider key names)",
+      );
+    }
+  }
+  // Read once, kept: the mint emits below need the record's budget attribution
+  // and requestId — neither of which this function writes (the same single-read
+  // reasoning as mintRunKey's).
+  const rec = deps.store.get(runId);
+  if (rec.keyHash) {
+    throw new CredentialLifecycleError(
+      "already-minted",
+      `run ${runId} already carries keyHash ${rec.keyHash.slice(0, 8)}… — revoke it before minting seat keys`,
+      "the single-key and per-seat paths are mutually exclusive on one run",
+    );
+  }
+  if ((((rec.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? [])).length > 0) {
+    throw new CredentialLifecycleError(
+      "already-minted",
+      `run ${runId} already carries swarm seat keys`,
+      "revoke before re-minting",
+    );
+  }
+  const capMicroUsd = deps.capMicroUsd ?? defaultKeyCapMicroUsd;
+  const sum = plan.reduce((a, p) => a + p.limitMicroUsd, 0);
+  if (!Number.isInteger(sum) || sum > capMicroUsd) {
+    throw new CredentialLifecycleError(
+      "cap-invalid",
+      `seat limits sum to ${sum} µ$, above the run cap ${capMicroUsd} µ$`,
+      "dispatch clamps authored seatBudgets proportionally before minting; this refusal means the caller skipped that",
+    );
+  }
+  for (const p of plan) {
+    if (!Number.isInteger(p.limitMicroUsd) || p.limitMicroUsd <= 0) {
+      throw new CredentialLifecycleError(
+        "cap-invalid",
+        `seat '${p.seat}' limitMicroUsd must be a positive integer of micro-dollars, got ${p.limitMicroUsd}`,
+        "pass an integer µ$ ceiling per seat (e.g. 250_000_000)",
+      );
+    }
+    // INV-CAP-1, per seat: the backstop is enforced pre-mint, exactly as
+    // mintRunKey enforces it for the single-key cap.
+    if (p.limitMicroUsd > defaultKeyCapMicroUsd) {
+      throw new CredentialLifecycleError(
+        "cap-invalid",
+        `seat '${p.seat}' limitMicroUsd ${p.limitMicroUsd} exceeds the backstop defaultKeyCapMicroUsd (${defaultKeyCapMicroUsd}) — refusing to mint a key above the provider ceiling`,
+        "lower the per-seat ceiling below the backstop (dispatch clamps proportionally), or raise defaultKeyCapMicroUsd in src/providers/credentials.ts — a code change that owes a test naming it",
+      );
+    }
+    if (usdToMicros(microsToUsd(p.limitMicroUsd)) !== p.limitMicroUsd) {
+      throw new CredentialLifecycleError(
+        "cap-invalid",
+        `seat '${p.seat}' limitMicroUsd ${p.limitMicroUsd} does not round-trip through the provider's dollar-denominated API — refusing to mint with a lossy cap`,
+        "pass a µ$ ceiling that survives microsToUsd/usdToMicros unchanged (e.g. 250_000_000)",
+      );
+    }
+  }
+  const keys: Record<string, string> = {};
+  const hashes: Record<string, string> = {};
+  const seatOrder: string[] = [];
+  const hashOrder: string[] = [];
+  const grantedOrder: number[] = [];
+  try {
+    for (const p of plan) {
+      const name = `${SBX_KEY_PREFIX}${runId}-${p.seat}`;
+      const res = await timed(ctx, "mint_seat", () => deps.keyApi.createKey(name, microsToUsd(p.limitMicroUsd)));
+      // Injection guard (same charset as mintRunKey's): the provider-supplied
+      // hash flows into revoke remediations and the record, so its charset is
+      // asserted BEFORE it is kept anywhere.
+      if (!/^[A-Za-z0-9_-]+$/.test(res.hash)) {
+        throw new CredentialLifecycleError(
+          "mint-malformed",
+          `provider returned a malformed hash (rejected charset) for ${name}`,
+          `inspect the provider console for the key named ${name}, revoke it by hand, then re-run`,
+        );
+      }
+      keys[p.seat] = res.key;
+      hashes[p.seat] = res.hash;
+      seatOrder.push(p.seat);
+      hashOrder.push(res.hash);
+      // Echo guards AFTER the hash is kept: a refusal below must find it in
+      // hashOrder so the compensation revokes it — mintRunKey records before
+      // judging for the same reason (a live key must never be unreachable).
+      if (res.limitUsd === null || !Number.isFinite(res.limitUsd) || res.limitUsd <= 0) {
+        throw new CredentialLifecycleError(
+          "uncapped-key",
+          `provider returned an unusable limit for ${name} despite a ${microsToUsd(p.limitMicroUsd)} USD request`,
+          "the mint compensation revokes this key; inspect the provider console, then re-run",
+        );
+      }
+      // F004, per seat: the cap is a ceiling — an echo ABOVE the request is refused.
+      if (res.limitUsd > microsToUsd(p.limitMicroUsd)) {
+        throw new CredentialLifecycleError(
+          "mint-ceiling-mismatch",
+          `provider granted ${res.limitUsd} USD for ${name} against a ${p.limitMicroUsd} micro-USD cap`,
+          "the mint compensation revokes the over-granted key; fix the provider request, then re-run",
+        );
+      }
+      grantedOrder.push(usdToMicros(res.limitUsd));
+    }
+  } catch (e) {
+    // Compensation: revoke every seat key minted before the failure — the same
+    // orphan discipline mintRunKey's arms apply, now for N-1 live keys.
+    for (const h of hashOrder) {
+      await compensateMint(deps, ctx, runId, h);
+    }
+    throw e;
+  }
+  try {
+    deps.store.set(runId, { extensions: { swarmSeats: { seats: seatOrder, keyHashes: hashOrder } } });
+  } catch (e) {
+    // All N keys are live and UNRECORDED — the one post-acceptance failure the
+    // loop's compensation cannot cover (an unrecorded live key is exactly the
+    // orphan the lifecycle exists to prevent). Compensate, then rethrow.
+    for (const h of hashOrder) {
+      await compensateMint(deps, ctx, runId, h);
+    }
+    throw e;
+  }
+  // The `mint` link per seat (where mintRunKey emits), BEST-EFFORT: a throwing
+  // emit must not discard the plaintext keys this function is about to return —
+  // INV-4's exact exposure at mintRunKey's emit, avoided by the teardown
+  // posture instead of a compensating revoke. Unattributed runs skip the emit
+  // and log one line (never an invented identity — INV-AUDIT-4).
+  for (const [i, hash] of hashOrder.entries()) {
+    emitCredentialLinkBestEffort(deps, rec, runId, "mint", { limitMicroUsd: grantedOrder[i] }, hash);
+  }
+  return { keys, hashes };
+}
+
+/**
+ * The seat-keys file script: same shape as `deliverScript` — fixed script in
+ * argv, payload on stdin, confirmation by `stat` mode never by echoing the
+ * value back. `install -d -m 700` makes the directory private; `chmod 600`
+ * re-asserts the file mode even if a previous (failed) delivery left one.
+ */
+function seatKeysScript(keysPath: string): string {
+  // Single quotes are safe and sufficient: the path is the fixed SWARM_KEYS_DIR
+  // plus a runId already validated against LEGACY_RUN_ID_RE below.
+  return (
+    `umask 077 && install -d -m 700 "$(dirname '${keysPath}')" && cat > '${keysPath}' && ` +
+    `chmod 600 '${keysPath}' && ` +
+    `python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' '${keysPath}'`
+  );
+}
+
+/**
+ * Deliver the per-seat keys into the box as `/opt/qds/swarm-keys/<runId>.json`
+ * (0600) and point the runtime at them: `QDS_SWARM_KEYS_FILE` is appended to
+ * the env file once (grep-guarded). Key material rides exec STDIN only — never
+ * argv — the same transport contract as `deliverRunKey` (fill.just:147-155).
+ */
+export async function deliverSeatKeys(
+  deps: CredentialDeps,
+  runId: string,
+  vm: string,
+  keys: Record<string, string>,
+): Promise<void> {
+  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId };
+  // The runId becomes a filename inside a `sh -c` script: validate it against
+  // the store's own read-path grammar BEFORE interpolation — the same door
+  // assertEnvFileSafe holds for the env-file path.
+  if (!LEGACY_RUN_ID_RE.test(runId)) {
+    throw new CredentialLifecycleError(
+      "run-id-invalid",
+      `runId ${JSON.stringify(runId)} is not plain hostname text — refusing to build a shell script from it`,
+      "pass the run id the store already validated",
+    );
+  }
+  const envFile = deps.envFile ?? KEY_ENV_FILE;
+  assertEnvFileSafe(envFile);
+  const keysPath = `${SWARM_KEYS_DIR}/${runId}.json`;
+  const envLine = `${SWARM_SEAT_KEYS_ENV}=${keysPath}`;
+  const res = await timed(ctx, "deliver_seat", async () => {
+    const write = await deps.driver.exec(vm, ["sh", "-c", seatKeysScript(keysPath)], JSON.stringify(keys));
+    const append = await deps.driver.exec(vm, ["sh", "-c",
+      `grep -q '^${SWARM_SEAT_KEYS_ENV}=' '${envFile}' 2>/dev/null || printf '%s\\n' '${envLine}' >> '${envFile}'`,
+    ]);
+    return { write, append };
+  });
+  const mode = res.write.stdout.trim();
+  if (res.write.exitCode !== 0 || mode !== "600") {
+    throw new CredentialLifecycleError(
+      "delivery-failed",
+      `seat key delivery to ${vm}:${keysPath} failed (exit ${res.write.exitCode}, mode ${mode || "unknown"})`,
+      "inspect the box by hand, then re-run teardown for the run",
+    );
+  }
+  if (res.append.exitCode !== 0) {
+    throw new CredentialLifecycleError(
+      "delivery-failed",
+      `appending ${SWARM_SEAT_KEYS_ENV} to ${vm}:${envFile} failed (exit ${res.append.exitCode})`,
+      "inspect the box by hand, then re-run teardown for the run",
+    );
+  }
+}
+
+/**
+ * Read usage for EVERY seat key before anything is destroyed — the swarm
+ * analogue of `captureSpend`. An absent (out-of-band revoked) seat contributes
+ * 0 rather than aborting teardown: the other seats' spend is still
+ * recoverable, and stranding N-1 live keys over one dead hash is the exact
+ * failure the single-key path's guards exist to prevent. An unenumerable list
+ * still fails closed (`list-unverified`) — 0 across the board would be an
+ * authoritative-looking lie.
+ */
+export async function captureSeatSpend(deps: CredentialDeps, runId: string): Promise<number> {
+  const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId };
+  const rec = deps.store.get(runId);
+  const hashes = ((rec.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? []);
+  if (hashes.length === 0) return 0; // no swarm keys were ever minted for this run
+  const totalMicroUsd = await timed(ctx, "capture_seat_spend", async () => {
+    let total = 0;
+    for (const hash of hashes) {
+      const { entry, truncated } = await deps.keyApi.getKeyEntry(hash, MAX_VERIFY_PAGES);
+      if (truncated) {
+        throw new CredentialLifecycleError(
+          "list-unverified",
+          `could not enumerate the provider key list to read spend for run ${runId} — refusing to record 0`,
+          `re-list by hand with paging: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+        );
+      }
+      if (entry === null || !Number.isFinite(entry.usageUsd)) continue; // absent/refunded-out seat contributes 0
+      total += usdToMicros(entry.usageUsd);
+    }
+    return total;
+  });
+  // Same overflow backstop as captureSpend: finite dollars can still overflow
+  // to an unsafe integer once scaled to micro-dollars across N seats.
+  if (!Number.isSafeInteger(totalMicroUsd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported an unusable usage for run ${runId}'s seat keys — refusing to record it as spend`,
+      `read the usage by hand and record it, then tear down: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
+  deps.store.set(runId, { spendMicroUsd: totalMicroUsd });
+  return totalMicroUsd;
+}
+
+/**
+ * Revoke-and-verify every seat key the namespace records (S1 teardown). Each
+ * hash goes through `revokeAndVerify` — prefix re-assert, list-authoritative
+ * absence proof — so a failure mid-loop leaves the REMAINING hashes recorded
+ * and a re-run reaches them. Returns the count revoked this call.
+ */
+export async function revokeSeatKeys(deps: CredentialDeps, runId: string): Promise<number> {
+  const rec = deps.store.get(runId);
+  const hashes = ((rec.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? []);
+  let n = 0;
+  for (const hash of hashes) {
+    await revokeAndVerify(deps, hash); // each carries its own timed revoke/verify lines
+    n += 1;
+  }
+  return n;
 }
 
 /**

@@ -20,15 +20,13 @@ import type { PhaseSpec, RigMemberSpec, RigSpec } from "../types.ts";
 // the real Tracer structurally UNassignable to the dep.
 import type { Tracer } from "../trace/tracer.ts";
 import { emitSeatCosts, parseSeatSessionJsonl } from "./openrig-cost.ts";
+// The seat-keys env-var name is owned by the providers layer (providers must
+// not import from phase-engine; phase-engine already imports from providers).
+import { SWARM_SEAT_KEYS_ENV } from "../../providers/credentials.ts";
 
 export const SWARM_POLL_INTERVAL_MS = 15_000;
 export const SWARM_GATE_MARGIN_MS = 60_000;
 export const DEFAULT_OPENRIG_HOME = ".openrig";
-// Task 5 owns this name in src/providers/credentials.ts (providers must not
-// import from phase-engine; phase-engine already imports from providers), but
-// Task 5 has not landed. Until it does, THIS declaration is the single source;
-// when it lands, delete this and import it from ../../providers/credentials.ts.
-export const SWARM_SEAT_KEYS_ENV = "QDS_SWARM_KEYS_FILE";
 
 export interface CmdResult { exitCode: number; stdout: string; stderr: string; }
 export type CmdRunner = (argv: readonly string[], opts?: { timeoutMs?: number }) => Promise<CmdResult>;
