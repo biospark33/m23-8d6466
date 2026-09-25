@@ -1843,7 +1843,19 @@ describe("buildIdFileInputs", () => {
       // halves. RE-DERIVED from this test's own failing run on the final
       // tree, adopted LAST (this file is NOT a walked input). The image
       // stays UN-PINNED per the aaa26243 note.
-      "a9f9039e50e6410a828e36879fc4cf5d21940c3d12967720867a9450825510b0",
+      //
+      // 4906cc92: moved from a9f9039e on feature/r0-live-swarm-test by the
+      // R0.7 live-round fixes (2026-09-25) — three walked-source edits the
+      // first ten rounds root-caused: deliverSeatKeys's append arm
+      // (src/providers/credentials.ts: mkdir the dirname + own the 0600
+      // mode), the gate's seat-key probe seam (host-side only, NOT walked),
+      // and pipeline-run.ts's resident arming (a rig_swarm manifest
+      // disarms — invariant 2). PAIRING DEBT DECLARED per the DF1.10
+      // playbook: this tree's image is intentionally unpublished; the merge
+      // triggers the publish, gate B prints the next pin, and the adoption
+      // ritual closes the debt. RE-DERIVED from this test's own failing run
+      // on this tree.
+      "4906cc92909b38c33c718b10a813fdbcb412602a68c5375a4ce5c441e8f65440",
     );
   });
 });
