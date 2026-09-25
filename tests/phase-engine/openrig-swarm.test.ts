@@ -2,6 +2,7 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   SWARM_CLI_TIMEOUT_MS,
   SWARM_MAX_STALE_POLLS,
@@ -182,8 +183,42 @@ test("full lifecycle: seeds, boots, imports, queues, polls to done, tears down",
   expect(names).toContain("swarm_settled");
 });
 
-test("auth.json is seeded BEFORE the import call (the import handler reads it)", async () => {
+// R0.7 rounds 11–12 forensics: the daemon's FIRST-PASS validator (OpenRig
+// 0.5.14 rigspec-schema.js) refuses any rig.yaml without `version`,
+// `pods[].label`, and per-member `agent_ref`/`profile` — and agent.yaml needs
+// `name`+`version`+a `profiles` map the member's `profile` names. The authored
+// shape below is what the pinned daemon ACCEPTED (proven on a real box before
+// this fix landed); these pins keep a future edit from re-losing a field the
+// schema refuses silently at 4.7 s into a paid round.
+test("materialized rig.yaml/agent.yaml carry the fields the daemon's import validator requires", async () => {
+  const { run } = fakeRunner(baseHandlers());
   const { home } = makeTempHome();
+  await runPhase(SPEC, run, home);
+  const rigDir = path.join(home, ".openrig", "runs", "run-1", "rig");
+  const rig = parseYaml(fs.readFileSync(path.join(rigDir, "rig.yaml"), "utf8")) as {
+    version?: string;
+    pods?: Array<{ id: string; label?: string; members?: Array<{ id: string; agent_ref?: string; profile?: string; cwd?: string }> }>;
+  };
+  expect(rig.version).toBe("1");
+  expect(rig.pods?.[0]?.label).toBe(rig.pods?.[0]?.id);
+  for (const m of rig.pods?.[0]?.members ?? []) {
+    expect(m.agent_ref).toBe(`local:agents/${m.id}`);
+    expect(m.profile).toBe("default");
+    expect(m.cwd).not.toBe("");
+  }
+  for (const seat of ["lead", "worker"]) {
+    const agent = parseYaml(fs.readFileSync(path.join(rigDir, "agents", seat, "agent.yaml"), "utf8")) as {
+      name?: string;
+      version?: string;
+      profiles?: Record<string, { preferences?: { runtime?: string } }>;
+    };
+    expect(agent.name).toBe(seat);
+    expect(agent.version).toBe("1");
+    expect(agent.profiles?.default?.preferences?.runtime).toBe("pi");
+  }
+});
+
+test("auth.json is seeded BEFORE the import call (the import handler reads it)", async () => {  const { home } = makeTempHome();
   const seenAtImport: Record<string, string | null> = {};
   const handlers = baseHandlers();
   handlers["/api/rigs/import"] = () => {

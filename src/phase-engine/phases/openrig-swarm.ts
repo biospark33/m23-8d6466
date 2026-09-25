@@ -200,9 +200,14 @@ export function openrigSwarmPhase(
         throw new Error(`rigSpec member '${member.id}' has no key in the seat keys file — refusing to boot a keyless seat`);
       }
     }
-    const workdir = ["app", "src"].map((d) => path.join(home, d)).find((p) => fs.existsSync(p));
+    // src FIRST: `src` is the repo clone (fill.ts's DEFAULT_FILL_WORKDIR) and
+    // `app` is the ENV directory (credentials.ts's KEY_ENV_FILE dirname —
+    // which always exists on a delivered box since the seat-key delivery
+    // creates it). The original app-first order made every seat's cwd the env
+    // dir (R0.7 round 11 forensics: rig.yaml `cwd: /home/exedev/app`).
+    const workdir = ["src", "app"].map((d) => path.join(home, d)).find((p) => fs.existsSync(p));
     if (workdir === undefined) {
-      throw new Error(`no repo workdir under ${home} (probed app/ then src/) — refusing to boot a swarm with no repo`);
+      throw new Error(`no repo workdir under ${home} (probed src/ then app/) — refusing to boot a swarm with no repo`);
     }
 
     // The deadline is computed ONCE — before seeding/daemon/import/queue — so
@@ -268,6 +273,16 @@ export function openrigSwarmPhase(
 
       // ── 4. Materialize the rig dir under the phase's run root (NOT the
       // repo): agent.yaml stubs + rig.yaml, cwd per member. ──
+      // The shapes below are OpenRig 0.5.14's ACTUAL import contract
+      // (rigspec-schema.js, validated empirically against the pinned daemon
+      // in the R0.7 round-11/12 forensics): the daemon's first-pass validator
+      // requires rig.yaml `version` + `pods[].label` + per-member
+      // `agent_ref`/`profile`, agent.yaml requires `name` + `version` + a
+      // `profiles` map the member's `profile` names — the first authored
+      // shape (name/runtime/model/cwd only) was refused with
+      // validation_failed before a single seat ever launched. The member's
+      // session name the daemon derives (`<pod.id>-<member.id>@<rig.name>`)
+      // is exactly `seatsOf`'s, so queueing identity holds.
       const rigDir = path.join(rigHome, "runs", bodyCtx.ctx.runId, "rig");
       for (const { member } of seats) {
         const dir = path.join(rigDir, "agents", member.id);
@@ -276,22 +291,32 @@ export function openrigSwarmPhase(
           path.join(dir, "agent.yaml"),
           stringify({
             name: member.id,
-            runtime: member.runtime ?? "pi",
-            model: member.model,
-            cwd: member.cwd ?? workdir,
+            version: "1",
+            profiles: {
+              default: {
+                preferences: {
+                  runtime: member.runtime ?? "pi",
+                  ...(member.model !== undefined ? { model: member.model } : {}),
+                },
+              },
+            },
           }),
         );
       }
       fs.writeFileSync(
         path.join(rigDir, "rig.yaml"),
         stringify({
+          version: "1",
           name: rig.name,
           pods: rig.pods.map((pod) => ({
             id: pod.id,
+            label: pod.id,
             members: pod.members.map((m) => ({
               id: m.id,
+              agent_ref: `local:agents/${m.id}`,
+              profile: "default",
               runtime: m.runtime ?? "pi",
-              model: m.model,
+              ...(m.model !== undefined ? { model: m.model } : {}),
               cwd: m.cwd ?? workdir,
             })),
           })),

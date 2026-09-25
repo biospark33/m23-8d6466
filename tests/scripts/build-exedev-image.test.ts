@@ -1855,7 +1855,16 @@ describe("buildIdFileInputs", () => {
       // triggers the publish, gate B prints the next pin, and the adoption
       // ritual closes the debt. RE-DERIVED from this test's own failing run
       // on this tree.
-      "4906cc92909b38c33c718b10a813fdbcb412602a68c5375a4ce5c441e8f65440",
+      //
+      // 390104f0: moved from 4906cc92 by the round-11/12 forensics fix —
+      // openrig-swarm.ts's materialized rig.yaml/agent.yaml now carry the
+      // fields OpenRig 0.5.14's import validator requires (version, pods[]
+      // .label, member agent_ref/profile, agent profiles map; the authored
+      // shape was refused validation_failed 4.7s into the phase, before any
+      // seat launched), and the workdir probe prefers src/ (the repo) over
+      // app/ (the env dir). Same playbook: debt declared, the merge
+      // publishes, gate B prints the pin, adoption closes it.
+      "390104f04c947b8a4f6ae4ed5e4f3933a8ddcf4089c5fd2ca46a4ca65370f6e1",
     );
   });
 });
