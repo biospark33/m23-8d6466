@@ -353,10 +353,23 @@ export function openrigSwarmPhase(
           "-H", "Content-Type: text/yaml",
           "--data-binary", `@${path.join(rigDir, "rig.yaml")}`,
         ]);
+        let body: { ok?: unknown; code?: unknown } = {};
         try {
-          importOk = (JSON.parse(imp.stdout) as { ok?: unknown }).ok === true;
+          body = JSON.parse(imp.stdout) as { ok?: unknown; code?: unknown };
+          importOk = body.ok === true;
         } catch {
           /* non-JSON body is a failed import */
+        }
+        // rig_name_running on a DEDICATED per-run box with a fresh daemon
+        // (program invariant 1: one tier-2 brain per box) can only be OUR OWN
+        // prior attempt — the import succeeded server-side (rig created,
+        // seats launched) and the response was lost. Round 14: attempt 1
+        // launched both seats, attempts 2–3 hit this exact refusal. Adopt
+        // the running rig and proceed; the finally still owns its teardown.
+        if (body.code === "rig_name_running") {
+          importOk = true;
+          trace("swarm_import_adopted_running", { attempt, body: imp.stdout.slice(0, 300) });
+          break;
         }
         // BOTH signals must say success: an ok body over a nonzero curl exit
         // is a transport anomaly worth the remaining attempts, not a break.

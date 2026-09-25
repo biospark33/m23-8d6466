@@ -232,6 +232,32 @@ test("materialized rig.yaml/agent.yaml carry the fields the daemon's import vali
   }
 });
 
+test("import adopts rig_name_running as success — on a dedicated box it is our own prior attempt", async () => {
+  // Round 14: attempt 1 launched both seats but its response was lost; the
+  // retries hit `rig_name_running` (runningSessionCount 2) and the phase
+  // died on a rig that was, in fact, UP. Invariant 1 (one tier-2 brain per
+  // box, fresh daemon per run) makes that collision unambiguous — adopt.
+  const handlers = baseHandlers();
+  handlers["/api/rigs/import"] = () => ({
+    exitCode: 0,
+    stdout: JSON.stringify({
+      ok: false,
+      code: "rig_name_running",
+      message: 'A rig named "r0-e2e" is already RUNNING',
+      runningRig: { id: "01M3CZ0TD24S94938MAPXJSGH0", name: "r0-e2e", runningSessionCount: 2 },
+    }),
+    stderr: "",
+  });
+  const { run, traces } = { ...fakeRunner(handlers), traces: [] as TraceRow[] };
+  const { home } = makeTempHome();
+  const liveBefore = live;
+  live = { traces: (traces as TraceRow[]), money: [] };
+  const value = await runPhase(SPEC, run, home);
+  live = liveBefore;
+  expect(value.exitStatus).toBe("success");
+  expect(traces.map((t) => t.name)).toContain("swarm_import_adopted_running");
+});
+
 test("import retries a refused body and succeeds on a later attempt (the daemon-init race)", async () => {
   // Round 12 forensics: healthz answers while the daemon is still starting
   // up, and the first import raced that init — refused ~6 s in, identical

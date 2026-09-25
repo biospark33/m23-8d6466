@@ -1881,7 +1881,14 @@ describe("buildIdFileInputs", () => {
       // (873387db) and adopted on the twentieth-pin branch, whose remaining
       // diffs (exedev driver.ts, image-contract.test.ts) are NOT walked —
       // so this value binds the healing tree too.
-      "b424be86e83d8c0f31c9ae45428844f583f384b4ac8d2547ca725bde949fa786",
+      //
+      // 04da51d5: moved from b424be86 by the round-14 fix — the import loop
+      // now ADOPTS `rig_name_running` as success (invariant 1: on a
+      // dedicated per-run box the collision is our own prior attempt's
+      // server-side success whose response was lost; round 14 launched both
+      // seats then died on the collision). Computed on the FINAL branch
+      // tree, after every other edit.
+      "04da51d5e79d288d2e510816093ea1b8db7b5b25994effcbb8eb880631e1cc1b",
     );
   });
 });
