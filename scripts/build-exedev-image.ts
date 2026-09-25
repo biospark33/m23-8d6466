@@ -984,8 +984,8 @@ export function parseManifestRaw(text: string): ManifestInventory | { error: str
     for (const l of raw.layers) {
       if (
         typeof l?.digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(l.digest) ||
-        typeof l?.size !== "number" || !Number.isSafeInteger(l.size) ||
-        typeof l?.mediaType !== "string"
+        typeof l?.size !== "number" || !Number.isSafeInteger(l.size) || l.size < 0 ||
+        typeof l?.mediaType !== "string" || l.mediaType === ""
       ) {
         return { error: "manifest raw JSON carries a layer without digest/size/mediaType" };
       }

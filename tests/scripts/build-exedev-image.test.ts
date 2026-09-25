@@ -4084,5 +4084,12 @@ describe("parseManifestRaw", () => {
     expect("error" in parseManifestRaw(goodManifest([goodLayer({ digest: "not-a-digest" })]))).toBeTrue();
     expect("error" in parseManifestRaw(goodManifest([goodLayer({ size: Number.MAX_SAFE_INTEGER + 1 })]))).toBeTrue();
     expect("error" in parseManifestRaw(goodManifest([goodLayer({ mediaType: null })]))).toBeTrue();
+    // A negative or non-finite size is a fabricated measurement, not a row:
+    // the inventory's whole job is layer-level size diffing, so a row whose
+    // size lies poisons the one comparison it exists to serve.
+    expect("error" in parseManifestRaw(goodManifest([goodLayer({ size: -1 })]))).toBeTrue();
+    // An empty mediaType is the same species: a row that records nothing where
+    // a type belongs.
+    expect("error" in parseManifestRaw(goodManifest([goodLayer({ mediaType: "" })]))).toBeTrue();
   });
 });
