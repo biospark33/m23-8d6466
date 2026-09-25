@@ -133,10 +133,20 @@ export async function pollInBoxRun(
       activeState === "failed" ||
       (activeState === "inactive" && (result !== "success" || mainStatus !== "0"));
     if (unitDead) {
-      const markerRead = classifyMarkerRead(
-        await readBoxFile(driver, vmName, boxMarkerPath(opts.runId), DEFAULT_PER_CALL_DEADLINE_MS),
-        opts.runId,
-      );
+      // Guarded like the probe above: the unit JUST died, so the box is at its
+      // least reliable this exact instant, and a rejected marker read must not
+      // prevent the unit-dead evidence from landing or the engine-log tail
+      // (the actual diagnosis) from being collected. "read-failed" is the
+      // retained status wherever a classified kind would be recorded.
+      let markerKind = "read-failed";
+      try {
+        markerKind = classifyMarkerRead(
+          await readBoxFile(driver, vmName, boxMarkerPath(opts.runId), DEFAULT_PER_CALL_DEADLINE_MS),
+          opts.runId,
+        ).kind;
+      } catch (markerError) {
+        opts.evidence.push({ phase: "marker-read-failed", attempt, error: markerError instanceof Error ? markerError.message : String(markerError) });
+      }
       // The engine-log tail is the whole diagnosis for a Restart=no unit that
       // refused; guarded like the probe, and redacted before it reaches the
       // error message AND the evidence file.
@@ -146,9 +156,9 @@ export async function pollInBoxRun(
       } catch (tailError) {
         tailText = `(engine-log read failed: ${tailError instanceof Error ? tailError.message : String(tailError)})`;
       }
-      opts.evidence.push({ phase: "unit-dead", attempt, activeState, result, mainStatus, markerKind: markerRead.kind, engineLogTail: redactSecrets(tailText).slice(-2000) });
+      opts.evidence.push({ phase: "unit-dead", attempt, activeState, result, mainStatus, markerKind, engineLogTail: redactSecrets(tailText).slice(-2000) });
       throw new Error(
-        `${runUnitName(opts.runId)} terminated after ${attempt} poll(s): ActiveState=${activeState} Result=${result} ExecMainStatus=${mainStatus} marker=${markerRead.kind}. ` +
+        `${runUnitName(opts.runId)} terminated after ${attempt} poll(s): ActiveState=${activeState} Result=${result} ExecMainStatus=${mainStatus} marker=${markerKind}. ` +
           `Engine log tail: ${redactSecrets(tailText).slice(-1200) || "(empty — the engine produced no log)"}`,
       );
     }

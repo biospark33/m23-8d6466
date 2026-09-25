@@ -470,8 +470,9 @@ test.todoIf(liveTodoOff())(
   // abort that skips cleanup — fail-safe direction is UP.
   //
   //   ls-before          1 control ls at 120                             120 s
-  //   dispatch verb      runFleet timeoutMs 1_200_000 (fill + gate C/D +
-  //                      deliverSeatKeys; the swarm manifest is small) 1 200 s
+  //   dispatch verb      runFleet timeoutMs DISPATCH_TIMEOUT_MS 2_100_000
+  //                      (fill + gate C/D + deliverSeatKeys; raised above the
+  //                      manifest's runBudgetMs + headroom, rounds 1–3) 2 100 s
   //   box-live ls        1 control ls at 120                             120 s
   //   delivery + witness probes  3 × driver.exec at 120                  360 s
   //   run verb           runFleet timeoutMs 180_000                      180 s
@@ -488,7 +489,7 @@ test.todoIf(liveTodoOff())(
   //   post-teardown      listedKeyHashes, allowance                      240 s
   //   ledger + records   local SQLite/JSON reads                          10 s
   //                                                              body ────────
-  //                                                                    9 220 s
+  //                                                                   10 120 s
   //   teardownQuietly    timeoutMs 180_000                               180 s
   //   destroyQuietly     1 control rm at 120                             120 s
   //   fleetLeftovers     5 × (ls 120 + 8 wait) + destroy + re-list       880 s
@@ -497,10 +498,10 @@ test.todoIf(liveTodoOff())(
   //                                                           finally ────────
   //                                                                    1 550 s
   //                                                                   ────────
-  //                                                                   10 770 s
+  //                                                                   11 670 s
   //
-  // Hence 10_900 s. Every inner ceiling FIRING is safe — it rejects into the
+  // Hence 11_700 s. Every inner ceiling FIRING is safe — it rejects into the
   // catch and the finally still runs. WHOEVER RAISES AN INNER CEILING OR ADDS
   // A CLEANUP STEP MUST RE-ADD IT HERE.
-  10_900_000,
+  11_700_000,
 );
