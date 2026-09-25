@@ -203,9 +203,22 @@ test.todoIf(liveTodoOff())(
       const rec = store.get(runId);
       expect(rec.vmName).toBe(vmName);
       expect(rec.commitSha).toBe(ctx.sha);
-      expect(rec.keyHash ?? "").not.toBe("");
+      // Seat mode: NO core keyHash (shape-D — keyHash and swarmSeats never
+      // coexist on one record); the per-seat hashes ride the extension, one
+      // per seat, in delivery order. Round 7 died on the stale single-key
+      // assertion here.
+      expect(rec.keyHash ?? "").toBe("");
+      const seatKeyHashes = (rec.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? [];
+      expect(seatKeyHashes).toHaveLength(2);
+      for (const h of seatKeyHashes) expect(h).not.toBe("");
       expect(rec.limitMicroUsd).toBe(RUN_CAP_MICRO_USD);
-      evidence.push({ phase: "record", ok: true, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd });
+      evidence.push({
+        phase: "record",
+        ok: true,
+        seatKeyHashes: seatKeyHashes.length,
+        swarmSeats: rec.extensions?.swarmSeats?.seats,
+        limitMicroUsd: rec.limitMicroUsd,
+      });
 
       const gatePath = join(REPO_ROOT, ".sandbox", "setup-gate", `${runId}.json`);
       expect(existsSync(gatePath)).toBeTrue();
@@ -395,7 +408,11 @@ test.todoIf(liveTodoOff())(
       const seatSpend = tokenRows.reduce((sum, r) => sum + r.cost_micro_usd, 0);
       expect(seatSpend).toBeLessThanOrEqual(2 * SEAT_CAP_MICRO_USD);
 
-      expect(await listedKeyHashes()).not.toContain(closed.keyHash); // run key revoked + verified
+      // Seat mode: no core keyHash to revoke — assert each recorded seat hash
+      // is gone from the provider list (teardown's compensate-mint arm).
+      for (const h of ((closed.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? [])) {
+        expect(await listedKeyHashes()).not.toContain(h);
+      }
       const gone = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
       expect(gone.absent).toBeTrue();
     } catch (e) {
