@@ -353,10 +353,41 @@ export function openrigSwarmPhase(
           "-H", "Content-Type: text/yaml",
           "--data-binary", `@${path.join(rigDir, "rig.yaml")}`,
         ]);
+        let body: { ok?: unknown; code?: unknown } = {};
         try {
-          importOk = (JSON.parse(imp.stdout) as { ok?: unknown }).ok === true;
+          body = JSON.parse(imp.stdout) as { ok?: unknown; code?: unknown };
+          importOk = body.ok === true;
         } catch {
           /* non-JSON body is a failed import */
+        }
+        // rig_name_running on a DEDICATED per-run box with a fresh daemon
+        // (program invariant 1: one tier-2 brain per box) can only be OUR OWN
+        // prior attempt — the import succeeded server-side (rig created,
+        // seats launched) and the response was lost. Round 14: attempt 1
+        // launched both seats, attempts 2–3 hit this exact refusal.
+        //
+        // OWNERSHIP before adoption (never trust the box): the collision is
+        // ours only if EVERY expected seat session `<pod.id>-<member.id>@
+        // <rig.name>` is live in tmux — the same names the teardown kills by.
+        // A listing that does not name all of them is a rig we cannot vouch
+        // for; adopting it would queue work onto, and teardown would delete,
+        // a rig this run does not own. Adoption ALSO requires curl exit 0 —
+        // an asymmetric body over a failed transport is retried, same as the
+        // ok-body case below.
+        if (body.code === "rig_name_running" && imp.exitCode === 0) {
+          const listed = await cli(["tmux", "list-sessions", "-F", "#S"]);
+          const names = new Set(
+            listed.stdout
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean),
+          );
+          const owned = listed.exitCode === 0 && seats.every(({ session }) => names.has(session));
+          if (owned) {
+            importOk = true;
+            trace("swarm_import_adopted_running", { attempt, sessions: [...names].sort() });
+            break;
+          }
         }
         // BOTH signals must say success: an ok body over a nonzero curl exit
         // is a transport anomaly worth the remaining attempts, not a break.
