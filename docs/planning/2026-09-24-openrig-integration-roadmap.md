@@ -42,11 +42,11 @@
 
 | Piece | State | Where |
 |---|---|---|
-| S0 research + spike | Code+docs on `feature/openrig-swarm-spike`, **PR #283 OPEN** (unmerged) | `docs/planning/2026-09-23-openrig-swarm-integration-research.md`, `_bmad-output/evidence/openrig-s0/2026-09-23-spike-s0.json`, `spikes/openrig-s0/` |
-| S1 `rig_swarm` phase kind | Complete + final-review fix wave in flight, **PR #284 OPEN** (12 commits, head `cf629518` at last update — this cell is a cache; §0's `gh`/`git log` commands are the authority, the head moves with every fix commit) | schema `src/phase-engine/{types,manifest}.ts`; body `src/phase-engine/phases/openrig-swarm.ts` + `openrig-cost.ts`; keys `src/providers/{credentials,run-record,teardown}.ts` + `src/fleet/dispatch.ts`; harvest `src/providers/harvest.ts`; image `oci/exedev/Dockerfile` + `binary-licenses.json` + `scripts/build-exedev-image.ts` |
+| S0 research + spike | **MERGED** (PR #283 → dev, 2026-09-24T12:32:40Z, `8fbc66bc`) | `docs/planning/2026-09-23-openrig-swarm-integration-research.md`, `_bmad-output/evidence/openrig-s0/2026-09-23-spike-s0.json` |
+| S1 `rig_swarm` phase kind | **MERGED** (PR #284 → dev, 2026-09-24T16:33:04Z, `7957e8a4`) | schema `src/phase-engine/{types,manifest}.ts`; body `src/phase-engine/phases/openrig-swarm.ts` + `openrig-cost.ts`; keys `src/providers/{credentials,run-record,teardown}.ts` + `src/fleet/dispatch.ts`; harvest `src/providers/harvest.ts` |
 | S1 progress ledger | 8 tasks + fix waves + final review triage | `.superpowers/sdd/progress.md` (git-ignored scratch — its content is summarized in PR #284 body; copy anything durable into issues/docs) |
-| S1 image | **Pairing debt declared**: driver pins UNTOUCHED; two TOFU ARGs carry `MEASURE-AT-FIRST-BUILD` sentinels that fail-closed at first real build | `src/providers/exedev/driver.ts:451,516` must move ONLY post-merge |
-| Old SDD ledger (self-compact) | Archived, historical | `.superpowers/sdd/progress-self-compact-archived.md` |
+| S1 image | TOFU sentinels pinned (R0.4 ✓); publish chain LIVE — repro sources R3-a (npm cacache, PR #288) and R3-c (node V8 compile cache, PR #292) both fixed + asserted; **SEVENTEENTH pin printed, adoption pending** (see R0.3/R0.5) | `oci/exedev/Dockerfile`, `src/providers/exedev/driver.ts:464,535`, `scripts/build-exedev-image.ts` (layer inventory, PR #291) |
+| Live-round test | T2.8 DRAFTED + offline-verified (not yet run): `feature/r0-live-swarm-test` → rebased as needed | `tests/fleet/e2e/tier2-rig-swarm.live.test.ts` + `in-box-status-poll.ts` + `config/rosters/r0-swarm.pipeline.json` |
 | Pre-existing dev test failures | 16 (vendor self-compact, story-consistency) + 2 flaky wall-clock tests + GitHub #280 (pi handoff-return) | NOT this program's bugs; do not fix here, do not count them against stage gates |
 
 ---
@@ -69,12 +69,13 @@ Order and dependencies: **R0 → R1 → {P0 ∥ Q1 ∥ SC1} → S2 → SC2 → A
 - [ ] **R0.3 Publish the image from `dev`** via the existing workflow. It refuses feature branches — this is why R0 waits for merge. **BLOCKED BY R0.4**: every build refuses at `NODE_SHA256`/`OPENRIG_TREE_SHA256` until the sentinels carry measured values. The refusal mechanism IS the measurement step: run this workflow once, read the gate's refusal output (it prints the measured hashes), pin them in R0.4, then publish here.
   - Evidence: workflow run URL + printed `DEFAULT_IMAGE_REF` digest + `DEFAULT_IMAGE_BUILD_ID`, from the post-R0.4 run (the pre-pin run's refusal output is R0.4's measurement evidence).
   - Measurement-chain record (all on `feature/r0-image-convergence`, dispatched dry runs): run 36028156132 (merge push) refused at the ENGINE probe — S1's phase bodies import `src/providers/credentials.ts`, the engine COPY enumeration lacked it and its provider closure (7 files; bun resolves before tree-shaking, so sourcemap closures under-report) — fixed in `e2660618` with both workflow lockstep lists + same-commit re-pin of the per-asset Dockerfile sha and the whole-walk digest (the latter already stale at the S1 merge, verified against clean HEAD). Run 36031582204 then refused at the node gate; run 36032367862 cleared node and refused at the tree gate; run 36033368044 cleared both TOFU gates and refused at the license sweep (10 nested `@openrig/cli` dep executables — reconciled in `b825949c`/`cbc4563b`); run 36037302102 passed EVERY gate and ended at the designed dry terminal state: buildId `7ab13076ccec247c` measured at `cbc4563b`, digest withheld by design until a real push.
-  - PUBLISH HISTORY (2026-09-24): run 36048175927 (first real publish, src_sha `07db7e3e`) pushed `9d1822c6…` / buildId `68fca032d53c0de6`, gate B refused pre-adoption → **workflow pruned the digest by design** and printed the paste-ready pair. Adoption #15 merged as PR #287 (`e3500764`). The healing run 36056831164 then pushed a THIRD digest `b090c2a7…` with an UNCHANGED buildId — the exact case the gate's text says to FIX, not re-pin. Root-caused via the runs' own evidence artifacts (identical buildId/builtAt/gitSha/piSha256/sweep/NOTICE; `imageSizeBytes` ±12 compressed bytes): **npm's `/root/.npm` cacache ships wall-clock bytes** (`time`, `resHeaders.date`, etags), invisible to every gate. Fixed in PR #288 (`55215f51`): cache+logs redirected to /tmp, deleted same-layer, fail-closed assertions on `/root/.npm`+`/root/.npmrc`. Run 36063335634 (post-fix publish, src_sha `55215f51`) prints the SIXTEENTH pin — its gate-B refusal output is the adoption input; the subsequent healing run is the reproducibility proof and R0.3's completion evidence.
+  - PUBLISH HISTORY (2026-09-24): run 36048175927 (first real publish, src_sha `07db7e3e`) pushed `9d1822c6…` / buildId `68fca032d53c0de6`, gate B refused pre-adoption → **workflow pruned the digest by design** and printed the paste-ready pair. Adoption #15 merged as PR #287 (`e3500764`). The healing run 36056831164 then pushed a THIRD digest `b090c2a7…` with an UNCHANGED buildId — the exact case the gate's text says to FIX, not re-pin. Root-caused via the runs' own evidence artifacts (identical buildId/builtAt/gitSha/piSha256/sweep/NOTICE; `imageSizeBytes` ±12 compressed bytes): **npm's `/root/.npm` cacache ships wall-clock bytes** (`time`, `resHeaders.date`, etags), invisible to every gate. Fixed in PR #288 (`55215f51`): cache+logs redirected to /tmp, deleted same-layer, fail-closed assertions on `/root/.npm`+`/root/.npmrc`.
+  - PUBLISH HISTORY CONTINUED (2026-09-24/25, the R3-c chapter): run 36063335634 (post-#288, src_sha `55215f51`) printed the SIXTEENTH pin (`02d7a0f4…`/`7fc93c21509a6d2a`); adopted as PR #290 (`613dd6e2`). Its healing run 36077483206 printed a digest at an UNCHANGED buildId AGAIN (`8928a265…`, +48 compressed bytes) — billing did NOT cause it (full 9m13s run, gate B refused on merits). Diagnosis by exhaustion (npm exonerated by #288's own assertion; pi updater proven content-deterministic via full-fs hash diff ×2 in the pinned base; bun frozen-lockfile leaves NO cache; builder buildkit image `buildx-stable-1` unmoved since 2026-08-12; local micro-probe reproduced the CLASS — RUN wall-clock content moves the digest, `rewrite-timestamp` covers mtimes only). Both CI manifests were pruned before layer-level forensics → PR #291 (`2b29e804`) added `manifestInventory` (config + per-layer digest/size) to publish-evidence.json so the NEXT divergence names its layer. Two dispatched runs (36082995077 `f9df4a03…`, 36084574659 `b268d776…`) diverged in EXACTLY ONE layer (#59, the openrig npm install RUN, +9 bytes). Registry prune had deleted the manifests but the BLOBS survived: config blobs → `rootfs.diff_id[59]` differs (tar bytes genuinely differ); layer blobs pulled via the registry API → forensic diff: **12,415 tar entries of `/tmp/node-compile-cache/v22.20.0-x64-…` — node's V8 compilation cache — 125,790 uncompressed bytes differing**, while the RUN's own `/opt/openrig` tree gate (`543e846b…`) passed on every run. Writer: the RUN's own `npm i` + `rig --version` node executions; npm cache/logs were cleaned, the compile cache never was. Control: a local double build of the exact node+npm sequence under the `qds-repro` builder produced IDENTICAL manifests. Fixed in PR #292 (`aa3d7d33`, R3-c): delete `/tmp/node-compile-cache` in the same RUN + fail-closed assertion naming the measurement; Dockerfile walk literal re-pinned from the test's own failing run (`ef691e7f…` → `230ba65b…`). Run 36134427077 (post-#292) printed the **SEVENTEENTH pin — `f73409b4…` / buildId `9a025fc31fc1bc88`** (both moved: the Dockerfile is a buildId input, a legitimate substrate change). Its adoption + GREEN healing run are R0.3/R0.5's remaining work; if the healing run prints yet another digest at an unchanged buildId, the layer inventory (now recording on every push run) names the source in one round trip.
 - [x] **R0.4 Fill the two TOFU sentinels** (`NODE_SHA256`, `OPENRIG_TREE_SHA256` in `oci/exedev/Dockerfile`) with the measured values from the build refusal output (the gate prints the measured hash; a R0.3 publish attempt produces it — run that first), and admit any first-build reconciliations the sentinel design anticipates (license paths, `rig --version` layout, sweep adjustments) — one commit on `dev` or a fast PR, landing BEFORE R0.3's successful publish. This is commit 1 of 2: the sentinel pins move the buildId and must precede the build that produces the digest; R0.5's pin adoption is a separate, later commit because the digest does not exist until the pinned build publishes (the Dockerfile's sentinel-section comment states the same sequencing).
   - Evidence: grep finds no `MEASURE-AT-FIRST-BUILD` in the Dockerfile (`NODE_SHA256=eeaccb03…` from run 36031582204's refusal, cross-checked byte-identical against nodejs.org's SHASUMS256.txt line; `OPENRIG_TREE_SHA256=543e846b…` from run 36032367862's refusal — no external cross-check exists for an npm-resolved tree, the refusal IS the measurement, and the hash freezes ^-range resolution); `bun test tests/scripts/build-exedev-image.test.ts` green (246/246, incl. both re-pinned digests and the F-038 per-gate declared-default map). The first-build reconciliations the design anticipated, admitted on the same fast PR: (a) the engine stage's resolution-probe refusal → 7-file COPY convergence + workflow lockstep (`e2660618`); (b) the DF2.9 sweep's 10 unattributed executables → license table reconciliation, each LICENSE verified at its pinned ref (`b825949c`, `cbc4563b`). Landing as fast PR → `dev` before R0.3's publish.
 - [ ] **R0.5 Adopt the pin at the three sites in ONE commit on `dev`:** `driver.ts:451` (`DEFAULT_IMAGE_REF`), `driver.ts:516` (`DEFAULT_IMAGE_BUILD_ID`), and the `build-exedev-image.test.ts` expectation — exactly the ritual the qds-live-e2e skill's "Pin adoption" section prescribes.
   - Evidence: one commit touching exactly those sites; `bun test tests/providers/ -f exedev`-scoped pin tests green; no other diffs smuggled in.
-  - PROGRESS: adoption #15 (PR #287, `cb7f8c19`) landed the `9d1822c6…`/`68fca032d53c0de6` pair + struck the DF3.6b debt (the build carries the Delegate=memory unit + resident sources — the resident arms on this pin). That pin is now SUPERSEDED by the repro fix: the sixteenth pin (from run 36063335634's gate-B refusal) is the one to adopt, and its healing run must go GREEN — a third-digest outcome means the npm cache was not the only wall-clock source (next suspect: `exeuntu update pi` residue under /home/exedev), to be fixed the same way, never re-pinned around.
+  - PROGRESS: adoption #15 (PR #287) landed `9d1822c6…`/`68fca032d53c0de6` (SUPERSEDED); adoption #16 (PR #290, `613dd6e2`) landed the sixteenth pin `02d7a0f4…`/`7fc93c21509a6d2a` (SUPERSEDED by R3-c — its healing run exposed source #2, the V8 compile cache, fixed as PR #292). **PENDING: adopt the SEVENTEENTH pin (`f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81` / `9a025fc31fc1bc88`, printed by run 36134427077's gate-B refusal at src_sha `aa3d7d33`) in ONE commit off `dev`: `driver.ts` `DEFAULT_IMAGE_REF` + `DEFAULT_IMAGE_BUILD_ID` + pin-history comment (sixteenth-pin entry retained, seventeenth added), and BOTH by-hand literals in `tests/providers/exedev/image-contract.test.ts`. NOT the walk literal in `tests/scripts/build-exedev-image.test.ts` (offline file-input hash ≠ image digest; already at `230ba65b…` from #292). `bun test` on image-contract + build-exedev-image + `bun run typecheck` + GitNexus `detect_changes` before commit. PR → dev, operator merges. The verify check WILL be red (pruned digest unfetchable) — by design. THE MERGE IS THE HEALING RUN and must go GREEN — that green run = R0.5's evidence AND the reproducibility proof. If it prints a digest at an unchanged buildId `9a025fc31fc1bc88`: do NOT re-pin — the layer inventory now records on every push run; diff two runs' `manifestInventory` (and, if the layer blobs survive the prune, fetch them via `gh auth token` against `https://ghcr.io/v2/.../blobs/<digest>` and diff the uncompressed tars — that chain is what found R3-c).**
 - [ ] **R0.6 Re-push the private mirror** (per the qds-live-e2e skill).
   - Evidence: mirror push output; the pinned digest resolves from the mirror.
 - [ ] **R0.7 Run the paid live round** under `qds-live-e2e`, tiers scoped to `rig_swarm`:
@@ -258,97 +259,146 @@ Owner stages are named in R1; this section is the index. NOTHING here blocks a s
 
 ```text
 You are continuing the OpenRig × QDS-Factory integration program. The tracker is
-docs/planning/2026-09-24-openrig-integration-roadmap.md — read it FIRST, top to bottom.
-It is the single source of truth for what remains. Do not re-research; research doc
-§4/§7/§8 decisions are settled. Execute the next unchecked stage with full rigor.
-No shortcuts, no band-aids: every fix lands with its test, every claim carries an
-artifact (commit SHA, run URL, evidence JSON), and a checkbox is checked only when
-its evidence exists.
+docs/planning/2026-09-24-openrig-integration-roadmap.md — read it FIRST, top to
+bottom. It is the single source of truth for what remains. Do not re-research;
+the research doc (docs/planning/2026-09-23-openrig-swarm-integration-research.md,
+§4/§7/§8) decisions are SETTLED. Execute the next unchecked stage with full
+rigor. No shortcuts, no band-aids: every fix lands with its test, every claim
+carries an artifact (commit SHA, run URL, evidence JSON), and a checkbox is
+checked only when its evidence exists.
 
-VERIFIED POSITION (2026-09-24 ~22:00 UTC, verify anyway with the §0 commands):
-- PRs #283, #284, #286, #287, #288 all MERGED to dev. HEAD ≈ 215ae347.
-- R0.1 ✓ R0.2 ✓ R0.4 ✓ (both TOFU sentinels measured + pinned: NODE_SHA256
-  eeaccb03… cross-checked vs nodejs.org SHASUMS256.txt; OPENRIG_TREE_SHA256
-  543e846b…; engine COPY set converged +7 provider files; DF2.9 license table
-  reconciled, 10 nested @openrig/cli dep executables, every LICENSE verified at
-  its pinned ref — see the R0.3/R0.4 evidence blocks in this doc).
-- R0.5 HALF DONE: adoption #15 (`9d1822c6…`/`68fca032d53c0de6`, PR #287) landed
-  but is SUPERSEDED — its healing run pushed a third digest with an unchanged
-  buildId, which exposed a REAL reproducibility bug: npm's /root/.npm cacache
-  (wall-clock bytes: time, resHeaders.date, etags) ships in the image, invisible
-  to every gate. FIXED in PR #288 (cache+logs → /tmp, deleted same-layer,
-  fail-closed assertions on /root/.npm + /root/.npmrc). THIS IS SETTLED — do not
-  re-derive it; the R0.3 evidence block carries the full chain (runs
-  36028156132 → 36031582204 → 36032367862 → 36033368044 → 36037302102 →
-  36048175927 → 36056831164 → 36063335634).
+WHAT THIS PROGRAM IS (situational awareness):
+QDS-Factory is a dark-factory code factory: a DAG plans work, a fleet layer
+dispatches it to short-lived exe.dev boxes, a phase engine runs phases in-box,
+work is harvested out-of-box and reverified, money is enforced only in QDS
+(µ$-capped per-seat OpenRouter keys). We are integrating OpenRig (pinned 0.5.14
+by hashed tree INSIDE our qds-exedev box image) as the S1 phase kind
+`rig_swarm`: one lead + N worker Pi seats collaborating in-box on an objective,
+settled by queue-closure (lead marks done → phase success), cost-attributed
+per seat, torn down in finally. Remaining program stages after R0: R1 (file
+I1–I8 follow-up issues) → {P0 worker-rpc hardening ∥ Q1 factory service
+surface ∥ SC1 SwarmClaw fixes} → S2 (mixed runtimes) → SC2 (SwarmClaw
+external_job adapter; the exactly-one-box kill test) → ADR.
+The factory is the only way code enters; the DAG never approves; the cockpit
+watches but never operates boxes; never trust the box.
+
+VERIFIED POSITION (2026-09-25, verify anyway with the §0 commands):
+- PRs #283, #284, #286, #287, #288, #289, #290, #291, #292 all MERGED to dev.
+  HEAD ≈ cfcbe4b8.
+- R0.1 ✓ R0.2 ✓ R0.4 ✓ (TOFU sentinels pinned; license table reconciled).
+- R0.3/R0.5: the image reproducibility campaign converged through TWO real
+  bug fixes: R3-a (npm cacache wall-clock bytes shipped; PR #288) and R3-c
+  (node V8 compile cache under /tmp/node-compile-cache shipped — 12,415
+  blobs, 125,790 bytes differing between same-source builds; root-caused by
+  pulling the pruned runs' SURVIVING BLOBS via the ghcr registry API and
+  diffing rootfs.diff_ids + uncompressed tars; PR #292 deletes + asserts).
+  PR #291 added manifestInventory (per-layer digest/size) to
+  publish-evidence.json so any future divergence names its layer in one
+  round trip. Full chains: R0.3's two evidence blocks in this doc.
+- The publish run 36134427077 printed the SEVENTEENTH pin (DESIGNED gate-B
+  refusal; push pruned):
+    export const DEFAULT_IMAGE_REF =
+      "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81";
+    export const DEFAULT_IMAGE_BUILD_ID = "9a025fc31fc1bc88";
+  buildId moved 7fc93c21509a6d2a → 9a025fc31fc1bc88 legitimately (R3-c
+  changed the Dockerfile, a buildId input). NEVER hand-compute a digest;
+  re-extract with:
+    gh run view 36134427077 --log | grep -A2 "export const DEFAULT_IMAGE"
+- R0.7's tier-2 live test is DRAFTED and offline-verified (tsc, biome,
+  live-coupling sweep 29/0): tests/fleet/e2e/tier2-rig-swarm.live.test.ts +
+  in-box-status-poll.ts + config/rosters/r0-swarm.pipeline.json (branch
+  feature/r0-live-swarm-test, commit 0ee64569 — REBASE onto current dev
+  before pushing; it was cut before #291/#292 landed).
 
 YOUR WORK, IN ORDER:
-1. Run 36063335634 (the post-fix publish) has COMPLETED by now with the DESIGNED
-   failure: it pushed a NEW digest (the Dockerfile changed in #288) and gate B
-   refused it → workflow pruned the push and printed the SIXTEENTH pin. Extract
-   the paste-ready pair — NEVER hand-compute:
-     gh run view 36063335634 --log | grep -A2 "export const DEFAULT_IMAGE"
-2. Adopt it: branch feature/r0-pin-adoption-2 off dev; ONE commit, exactly the
-   qds-live-e2e skill's "Pin adoption" ritual (skill file
-   .claude/skills/qds-live-e2e/SKILL.md §"Pin adoption", ~line 120): driver.ts
-   DEFAULT_IMAGE_REF + DEFAULT_IMAGE_BUILD_ID + the pin-history comment
-   (sixteenth-pin entry), and BOTH by-hand literals in
-   tests/providers/exedev/image-contract.test.ts (~:1397). NOT the walk literal
-   in tests/scripts/build-exedev-image.test.ts (offline file-input hash ≠ image
-   digest). driver.ts + test files are NOT walked inputs — no offline re-pin
-   needed. bun test on image-contract + build-exedev-image suites + bun run
-   typecheck + GitNexus detect_changes before commit. PR → dev, operator merges.
-   NOTE: the verify (default) PR check WILL be red (the pruned digest is
-   unfetchable) — that is by design; it clears after the healing run. The
-   check/tests failures are the documented dev baseline (story-consistency ×2,
-   stash-verified identical on clean HEAD; flaky DF2.11 teardown race; GitHub
-   #280) — the gate is no NEW failures.
-3. THE MERGE IS THE HEALING RUN and this time it MUST go green: same src_sha,
-   byte-identical bytes (the wall-clock residue is gone), gate B closes on the
-   adopted pair. That green run = R0.5's evidence AND the reproducibility proof.
-   IF IT PRINTS A THIRD DIGEST AGAIN: do NOT re-pin. The npm cache was not the
-   only varying source — next suspect is `exeuntu update pi` residue under
-   /home/exedev (line ~679 of the Dockerfile). Diff the two runs' evidence
-   artifacts (gh run download <id> → publish-evidence.json) exactly as the
-   36048175927-vs-36056831164 diff was done, isolate the layer, fix at the
-   source with an assertion, same pattern as #288.
-4. R0.6 mirror: gh auth token has write:packages. docker login ghcr.io (as
-   biospark33), then
+1. ADOPT THE SEVENTEENTH PIN (R0.5 completion): branch feature/r0-pin-adoption-3
+   off dev; ONE commit, exactly the qds-live-e2e skill's "Pin adoption" ritual
+   (.claude/skills/qds-live-e2e/SKILL.md §"Pin adoption"): driver.ts
+   DEFAULT_IMAGE_REF (~:464) + DEFAULT_IMAGE_BUILD_ID (~:535) + the pin-history
+   comment (add the seventeenth entry: run 36134427077 at src_sha aa3d7d33,
+   the R3-c build; buildId moved because the Dockerfile changed), and BOTH
+   by-hand literals in tests/providers/exedev/image-contract.test.ts (~:1397).
+   NOT the walk literal in tests/scripts/build-exedev-image.test.ts (offline
+   file-input hash ≠ image digest; already at 230ba65b… from #292). bun test on
+   image-contract + build-exedev-image suites, bun run typecheck, GitNexus
+   detect_changes before commit. PR → dev, operator merges. The verify check
+   WILL be red (pruned digest unfetchable) — by design; documented dev-baseline
+   failures apply (story-consistency ×2, flaky DF2.11 teardown race, #280) —
+   the gate is no NEW failures. Operator has been killing CI on adoption PRs
+   to save billing minutes — ask first.
+2. THE MERGE IS THE HEALING RUN and it MUST go GREEN: driver.ts is excluded
+   from SOURCE_PATHS so the rebuild is byte-identical at src_sha aa3d7d33 and
+   gate B closes on the adopted pair. That green run = R0.5's evidence AND the
+   reproducibility proof. IF IT PRINTS A DIGEST AT UNCHANGED BUILDID
+   9a025fc31fc1bc88: do NOT re-pin — download both runs' publish-evidence.json
+   artifacts, diff their manifestInventory (per-layer digest/size), and if the
+   diverging layer's blobs survive the prune (they did for R3-c), fetch them:
+     TOKEN=$(curl -s -u "biospark33:$(gh auth token)" \
+       "https://ghcr.io/token?service=ghcr.io&scope=repository:quantum-digital-solutions/qds-exedev:pull" | jq -r .token)
+     curl -s -H "Authorization: Bearer $TOKEN" -L \
+       "https://ghcr.io/v2/quantum-digital-solutions/qds-exedev/blobs/<digest>" -o blob.gz
+   then diff rootfs.diff_ids (config blob) and the uncompressed tars (layer
+   blobs) — that chain found R3-c. Fix at source with a fail-closed assertion
+   (#288/#292 pattern), same commit re-pin the walk literal from the test's
+   own failing run, and loop.
+3. R0.6 mirror: docker login ghcr.io as biospark33 (gh auth token has
+   write:packages), then
      docker buildx imagetools create \
-       --tag ghcr.io/quantum-digital-solutions/qds-exedev-private:build-<buildId> \
-       ghcr.io/quantum-digital-solutions/qds-exedev@sha256:<digest>
-   and verify the mirror digest resolves with imagetools inspect.
-5. R0.7 live round — the qds-live-e2e skill is MANDATORY. First DRAFT the tier-2
-   live test (none exists for rig_swarm yet): a dispatch whose manifest carries
-   a rig_swarm phase (shape in tests/fleet/dispatch-swarm-wiring.test.ts ~:130:
-   rigSpec.pods[].members[], objective, leadSeat, seatBudgets in micros) with
-   2 Pi seats at 500_000 µ$ ($0.50) each, an objective that produces one trivial
-   COMMITTED change (so harvest + out-of-box reverify have a tip), the
-   testCommand gate green, per-seat cost_attribution rows, teardown in finally,
-   `ssh exe.dev ls --json` empty + zero sbx- keys at the end. Then print the
-   worst-case spend estimate and get the operator's EXPLICIT "go" before any
-   box or key. Evidence JSON under _bmad-output/evidence/openrig-s1/.
-6. R0.8: file every red as a GitHub issue with the evidence attached.
-7. Then R1: issues I1–I8 (durable reasoning in .superpowers/sdd/progress.md is
-   git-ignored scratch — PASTE it into the issue bodies).
-8. At session end: update the roadmap checkboxes WITH evidence, carry the doc
-   in the stage's PR.
+       --tag ghcr.io/quantum-digital-solutions/qds-exedev-private:build-9a025fc31fc1bc88 \
+       ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81
+   and verify with imagetools inspect. (tier1-registry-auth needs this mirror.)
+4. R0.7 LIVE ROUND — the qds-live-e2e skill is MANDATORY (env contract, no
+   fakes, spend protocol, gotchas #1–#21 — read the whole skill). The test is
+   DRAFTED; rebase feature/r0-live-swarm-test onto dev, resolve any drift,
+   push it, then:
+     export QDS_E2E_LIVE=1 QDS_E2E_TIER=2
+     export QDS_EXEDEV_REPO_URL=https://github.com/Quantum-Digital-Solutions/QDS-Factory.git
+     export QDS_EXEDEV_SHA=$(git rev-parse HEAD)   # must be PUSHED
+     export QDS_EXEDEV_ROSTER=$PWD/config/rosters/roster.yaml
+     export QDS_E2E_EVIDENCE_DIR=$PWD/_bmad-output/evidence/openrig-s1
+     bun test tests/fleet/e2e/tier2-rig-swarm.live.test.ts
+   QDS_EXEDEV_SHA must carry the ADOPTED pin (i.e. the dev of step 1's merge).
+   UNSANDBOXED shell (gotcha #17); assert ≥1 (pass) in output (gotcha #16);
+   run alone, never parallel to the suite (hard rule 4); own shell call at max
+   timeout (gotcha #10). Worst-case spend ALREADY approved by the operator
+   (2026-09-24: run key $1.20 ceiling + 2 seat keys × $0.50 + box-hours ≈
+   $2.89 worst / ~$0.65 expected; S0 actuals $0.41) — restate the estimate
+   and get an explicit fresh "go" if anything moved. The round must produce:
+   rig_swarm phase settles lead-closed (journal swarm_settled), testCommand
+   gate green, harvested commit, out-of-box reverify of the gate's own
+   testCommand on the harvested tip, per-seat cost_attribution rows (role
+   lead + worker), teardown in finally, `ssh exe.dev ls --json` empty, zero
+   sbx- keys, spend ≤ caps. ALSO verify in-round: seat-keys 0600 +
+   env-append idempotency (in the test), rig daemon start idempotency
+   (probe-first adopt in openrig-swarm.ts), first-build sentinels (R0.4 ✓).
+   Evidence JSON lands in _bmad-output/evidence/openrig-s1/.
+5. R0.8: file every red as a GitHub issue with the evidence attached, BEFORE
+   declaring R0 done. Green or triaged-issues, nothing between.
+6. Then R1: issues I1–I8 (the durable reasoning in
+   .superpowers/sdd/progress.md is git-ignored scratch — PASTE it into the
+   issue bodies; the issue list with one-line summaries is in this doc §R1).
+7. At session end: update the roadmap checkboxes WITH evidence, carry the doc
+   in the stage's PR (or a docs PR — precedent #289 needed --admin merge;
+   operator has been merging promptly).
 
 Hard rules (roadmap §1 — never traded away):
-- Factory is the only way code enters; one tier-2 brain per box; cockpit watches
-  but never operates boxes; DAG never approves; money enforced only in QDS
-  (seat caps are the hard limit); never trust the box.
-- GitNexus impact() before editing any symbol; detect_changes() before every
-  commit; tests ALWAYS teed to /tmp/qds-test.log + read via the CLAUDE.md
-  tr/perl filter (a bare grep "(fail)" on the raw log silently matches nothing);
-  feature/* off dev, PR target dev; files < 500 lines.
-- bun test does NOT typecheck — run `bun run typecheck` too; CI's tsc is the
-  arbiter (a union-keyed Record initialized from {} is TS2739 — learned the
-  hard way in d19f750b).
+- Factory is the only way code enters; one tier-2 brain per box; cockpit
+  watches but never operates boxes; DAG never approves; money enforced only
+  in QDS (seat caps are the hard limit); never trust the box.
+- GitNexus impact() before editing any symbol (repo param: "QDS-Factory" —
+  multiple repos are indexed); detect_changes() before every commit; tests
+  ALWAYS teed to /tmp/qds-test.log and read via the CLAUDE.md tr/perl filter
+  (a bare grep "(fail)" on the raw log silently matches nothing); run bun
+  test from the REPO ROOT with a ./tests/... path (a relative filter from a
+  stray cwd matches zero files and reads as "no failures" — burned once).
+- feature/* off dev, PR target dev, operator merges; files < 500 lines.
+- bun test does NOT typecheck — run `bun run typecheck` too.
 - The publish workflow's gate-B refusal + prune is the RITUAL, not a failure:
   never hand-compute a digest, never adopt a digest the workflow didn't print.
 - A digest that moves with an unchanged buildId is a BUG to fix at the source,
   never a re-pin.
+- No fakes in live tests; keys revoked + boxes destroyed in finally; account
+  baselined before and after (listedKeyHashes + ssh ls).
 
 First action: run the §0 ritual, report the verified position to the operator,
 then start at step 1 above.
