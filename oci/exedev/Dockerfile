@@ -997,6 +997,9 @@ RUN set -e; \
       || { echo "R3-a TOFU PRECONDITION: hashing /opt/openrig failed (sha256sum/xargs error mid-pipeline) — a partial pipeline must never read as a tree hash" >&2; exit 1; }; \
     [ "${tree}" = "${OPENRIG_TREE_SHA256}" ] \
       || { echo "R3-a TOFU: the /opt/openrig tree hashes to ${tree}, not OPENRIG_TREE_SHA256='${OPENRIG_TREE_SHA256}' — pin the measured value into the ARG above and rebuild" >&2; exit 1; }; \
+    rm -rf /tmp/node-compile-cache; \
+    [ ! -d /tmp/node-compile-cache ] \
+      || { echo "REPRO R3-c: node's V8 compile cache shipped at /tmp/node-compile-cache — every node execution in this RUN (npm i, rig --version) materializes it under /tmp and its content varies between builds, so the layer's tar bytes (rootfs.diff_id) move while every /opt/openrig file hashes identical. MEASURED: layer 59 of publish runs 36082995077 vs 36084574659 — 12,415 cache blobs, 125,790 uncompressed bytes differing, same tree hash both runs. Delete it in the same RUN; do not delete the assertion." >&2; exit 1; }; \
     suout="$(su -l -s /bin/sh exedev -c 'command -v rig')"; \
     [ "${suout}" = "/usr/local/bin/rig" ] \
       || { echo "a LOGIN shell as exedev (su -l resets PATH from ENV_PATH in /etc/login.defs — what a bare ssh command as exedev resolves) resolved rig to '${suout:-nothing}' (F-D6 pattern, #217)" >&2; exit 1; }

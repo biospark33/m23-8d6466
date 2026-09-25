@@ -1293,7 +1293,16 @@ describe("buildIdFileInputs", () => {
       // compressed bytes apart, so the pin-adoption healing run could never
       // converge. Dockerfile bytes only, re-pinned from this test's own
       // failing run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "ef691e7f5bf811d5a920ba362d5c30ab59211787adb158ac46fc1cccd3a34f6b",
+      //
+      // 230ba65b: the R3-c repro fix (2026-09-25) — the same RUN now deletes
+      // /tmp/node-compile-cache and ASSERTS it absent: rig --version's node
+      // run materializes V8's compilation cache under /tmp, its content
+      // varies between builds, and it shipped in the openrig layer (layer 59
+      // of runs 36082995077 vs 36084574659: 12,415 blobs, 125,790
+      // uncompressed bytes differing, same /opt/openrig tree hash both
+      // runs). Dockerfile bytes only, re-pinned from this test's own failing
+      // run; trackedSetDigest did not move (not a files() entry).
+      "oci/exedev/Dockerfile": "230ba65bc17e03225337cab0e5f4a8548a6a2d008c7f7ffa3fc6e89f78c7b37c",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
