@@ -258,6 +258,30 @@ test("import adopts rig_name_running as success — on a dedicated box it is our
   expect(traces.map((t) => t.name)).toContain("swarm_import_adopted_running");
 });
 
+test("rig_name_running WITHOUT our sessions live is refused, not adopted", async () => {
+  // Ownership arm (CR): adopting a collision whose tmux sessions do not
+  // match the expected seat set would queue work onto, and teardown delete,
+  // a rig this run does not own. The listing here names only a foreign
+  // session, so every attempt must fall through to the final refusal.
+  const handlers = baseHandlers();
+  handlers["/api/rigs/import"] = () => ({
+    exitCode: 0,
+    stdout: JSON.stringify({
+      ok: false,
+      code: "rig_name_running",
+      message: 'A rig named "devrig" is already RUNNING',
+      runningRig: { id: "x", name: "devrig", runningSessionCount: 2 },
+    }),
+    stderr: "",
+  });
+  handlers["tmux list-sessions"] = () => ({ exitCode: 0, stdout: "other@otherrig\n", stderr: "" });
+  const { run } = fakeRunner(handlers);
+  const { home } = makeTempHome();
+  // The unadopted collision rethrows after the finally — the engine layer is
+  // what journals it as a phase fail; the unit seam sees the rejection.
+  await expect(runPhase(SPEC, run, home)).rejects.toThrow(/rig import failed/);
+});
+
 test("import retries a refused body and succeeds on a later attempt (the daemon-init race)", async () => {
   // Round 12 forensics: healthz answers while the daemon is still starting
   // up, and the first import raced that init — refused ~6 s in, identical

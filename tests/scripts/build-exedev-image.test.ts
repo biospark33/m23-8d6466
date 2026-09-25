@@ -1888,7 +1888,12 @@ describe("buildIdFileInputs", () => {
       // server-side success whose response was lost; round 14 launched both
       // seats then died on the collision). Computed on the FINAL branch
       // tree, after every other edit.
-      "04da51d5e79d288d2e510816093ea1b8db7b5b25994effcbb8eb880631e1cc1b",
+      //
+      // 17246e12: moved from 04da51d5 by the review round's ownership arm —
+      // adoption additionally requires curl exit 0 AND every expected seat
+      // session live in tmux before the collision is treated as ours.
+      // Computed on the FINAL branch tree, after every other edit.
+      "17246e1293c7e5647d68ca7d255797ab66ba7e3bd103a1c84ea7cee212f6959c",
     );
   });
 });
