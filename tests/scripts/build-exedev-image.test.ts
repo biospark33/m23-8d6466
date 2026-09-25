@@ -1864,7 +1864,14 @@ describe("buildIdFileInputs", () => {
       // seat launched), and the workdir probe prefers src/ (the repo) over
       // app/ (the env dir). Same playbook: debt declared, the merge
       // publishes, gate B prints the pin, adoption closes it.
-      "390104f04c947b8a4f6ae4ed5e4f3933a8ddcf4089c5fd2ca46a4ca65370f6e1",
+      //
+      // e04db606: moved from 390104f0 by the round-12 forensics fix — the
+      // rig import now retries a refused body (healthz answers while the
+      // daemon is still initializing; the phase's first import raced that
+      // init ~6s in, the identical yaml imported on replay) and the error
+      // carries the last response body instead of discarding stdout.
+      // Debt declared; the merge publishes, adoption closes.
+      "e04db606e22c56d88e525fea93ba69eedb8d68b8956a5bf9c9da93797778f977",
     );
   });
 });

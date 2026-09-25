@@ -232,6 +232,28 @@ test("materialized rig.yaml/agent.yaml carry the fields the daemon's import vali
   }
 });
 
+test("import retries a refused body and succeeds on a later attempt (the daemon-init race)", async () => {
+  // Round 12 forensics: healthz answers while the daemon is still starting
+  // up, and the first import raced that init — refused ~6 s in, identical
+  // yaml imported fine on replay. The phase must retry a non-ok body within
+  // its budget instead of dying on attempt 1; each refusal is traced.
+  let attempts = 0;
+  const handlers = baseHandlers();
+  handlers["/api/rigs/import"] = () => {
+    attempts += 1;
+    if (attempts < 3) return { exitCode: 0, stdout: JSON.stringify({ ok: false, code: "initializing" }), stderr: "" };
+    return { exitCode: 0, stdout: JSON.stringify({ ok: true, name: "devrig" }), stderr: "" };
+  };
+  const { run, calls } = fakeRunner(handlers);
+  const { home, traces } = makeTempHome();
+  const value = await runPhase(SPEC, run, home);
+  expect(value.exitStatus).toBe("success");
+  expect(attempts).toBe(3);
+  expect(calls.filter((c) => c.join(" ").includes("/api/rigs/import")).length).toBe(3);
+  const retried = traces.filter((t) => t.name === "swarm_import_retry");
+  expect(retried.length).toBe(2);
+});
+
 test("auth.json is seeded BEFORE the import call (the import handler reads it)", async () => {  const { home } = makeTempHome();
   const seenAtImport: Record<string, string | null> = {};
   const handlers = baseHandlers();
