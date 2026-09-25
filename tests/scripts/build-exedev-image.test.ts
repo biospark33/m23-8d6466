@@ -1871,7 +1871,17 @@ describe("buildIdFileInputs", () => {
       // init ~6s in, the identical yaml imported on replay) and the error
       // carries the last response body instead of discarding stdout.
       // Debt declared; the merge publishes, adoption closes.
-      "e04db606e22c56d88e525fea93ba69eedb8d68b8956a5bf9c9da93797778f977",
+      //
+      // b424be86: REPLACES e04db606, which was pinned BEFORE the review
+      // round's final commit (70c0a9e6, the retry loop's exit/deadline
+      // hardening) edited openrig-swarm.ts again — a walked input — and the
+      // walk suite was not re-run on that final tree, so #300 merged a
+      // stale whole-walk literal. Miss owned: "re-pin LAST" means the LAST
+      // commit. RE-DERIVED from this test's own failing run on clean dev
+      // (873387db) and adopted on the twentieth-pin branch, whose remaining
+      // diffs (exedev driver.ts, image-contract.test.ts) are NOT walked —
+      // so this value binds the healing tree too.
+      "b424be86e83d8c0f31c9ae45428844f583f384b4ac8d2547ca725bde949fa786",
     );
   });
 });

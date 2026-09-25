@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:762e82f3178324e797f4f326e56dd88987126b9c34250349f0c7c4ca59dedffd";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:132dcd896cdd3bad9d027af5748c3dbaedb4844cda6383612c06d1bf5f95de8b";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,26 +573,24 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (nineteenth pin, 2026-09-25): buildId 8ae9a6819f1b311a,
- * adopted from gate B's own paste-ready output on publish run 36162921844,
- * baked at gitSha 9a33b117 (the rigspec-shape build — the src_sha the
+ * CURRENT PAIRING (twentieth pin, 2026-09-25): buildId c69efc791236d1e2,
+ * adopted from gate B's own paste-ready output on publish run 36170479590,
+ * baked at gitSha 873387db (the import-retry build — the src_sha the
  * workflow's SOURCE_PATHS resolution names for THAT build; driver.ts is
  * excluded from SOURCE_PATHS, so this adoption commit rebuilds at the same
  * sha, byte identical, and gate B must close GREEN on it).
  *
- * Why BOTH values moved from the eighteenth pin (0a6ca461… /
- * 1421d73aa7cff658): PR #298 edited src/phase-engine/phases/
- * openrig-swarm.ts (a walked COPY input) — the materialized rig.yaml/
- * agent.yaml now carry the fields OpenRig 0.5.14's import validator
- * requires (version, pods[].label, member agent_ref/profile, agent
- * profiles map) and the workdir probe prefers src/ (the repo) over app/
- * (the env dir). Round 11's phase failed validation_failed 4.7 s in, before
- * any seat launched; the corrected shape was proven ON the pinned daemon
- * (import ok, both seats LAUNCHED) before this fix landed. The whole-walk
- * literal moved WITH the merge itself (390104f0, debt declared on the
- * branch) — this adoption is image-only, the three driver/test sites.
+ * Why BOTH values moved from the nineteenth pin (762e82f3… /
+ * 8ae9a6819f1b311a): PR #300 edited src/phase-engine/phases/
+ * openrig-swarm.ts (a walked COPY input) — the rig import now retries a
+ * refused body (round 12: healthz answers while the daemon is still
+ * initializing; the first import raced that init ~6 s in, the identical
+ * yaml imported ok on replay) and the error carries the last response
+ * body instead of discarding stdout. The whole-walk literal moved WITH
+ * the merge itself (e04db606, debt declared on the branch) — this
+ * adoption is image-only, the three driver/test sites.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "8ae9a6819f1b311a";
+export const DEFAULT_IMAGE_BUILD_ID = "c69efc791236d1e2";
 
 
 
