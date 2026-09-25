@@ -75,7 +75,11 @@ const MANIFEST_PATH = "config/rosters/r0-swarm.pipeline.json";
 // source that could silently drift. The poll bounds live in
 // in-box-status-poll.ts (the measured tier2-in-box-engine vocabulary).
 
-const DISPATCH_TIMEOUT_MS = 1_200_000;
+// The dispatch call's own kill ceiling must exceed BOTH the manifest's
+// runBudgetMs (1_840_000 — the runner refuses a caller budget below it, the
+// first live round's exit-2) and the run it bounds, with slack for harvest
+// and the ack round trip.
+const DISPATCH_TIMEOUT_MS = 2_100_000;
 
 test.todoIf(liveTodoOff())(
   "T2.8 dispatch→rig_swarm(2 Pi seats)→gate→harvest→reverify→teardown — real box, real per-seat spend, caps $1.20 run + 2×$0.50 seats",
@@ -131,8 +135,26 @@ test.todoIf(liveTodoOff())(
       // ceiling REJECTS, and `dispatch` is the verb that creates a real box
       // before it can still fail — the partial streams are where the ids and
       // the box name live on that path.
+      // `--budget-ms` is read from the manifest itself (the single source):
+      // the runner refuses a caller budget below the manifest's runBudgetMs
+      // ("runBudgetMs 1840000 exceeds callerBudgetMs 599993", exit 2 — the
+      // first live round died here before any box existed).
+      const manifestBudgetMs = (
+        JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as { runBudgetMs: number }
+      ).runBudgetMs;
       const dispatch = await runFleet(
-        ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
+        [
+          "dispatch",
+          "--driver",
+          "exedev",
+          "--brief",
+          briefPath,
+          "--dir",
+          recordsDir,
+          // must be ≥ the manifest's runBudgetMs (1_840_000)
+          "--budget-ms",
+          String(manifestBudgetMs),
+        ],
         { cwd: REPO_ROOT, timeoutMs: DISPATCH_TIMEOUT_MS },
       ).catch((e: unknown) => {
         const partial = fleetPartialOutput(e);
