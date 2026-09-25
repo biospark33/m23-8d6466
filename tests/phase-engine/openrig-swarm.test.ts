@@ -206,15 +206,23 @@ test("materialized rig.yaml/agent.yaml carry the fields the daemon's import vali
     expect(m.profile).toBe("default");
     expect(m.cwd).not.toBe("");
   }
+  const expectedModels: Record<string, string> = {
+    lead: "openrouter/anthropic/claude-haiku-4.5",
+    worker: "openrouter/deepseek/deepseek-v3.2",
+  };
   for (const seat of ["lead", "worker"]) {
     const agent = parseYaml(fs.readFileSync(path.join(rigDir, "agents", seat, "agent.yaml"), "utf8")) as {
       name?: string;
       version?: string;
-      profiles?: Record<string, { preferences?: { runtime?: string } }>;
+      profiles?: Record<string, { preferences?: { runtime?: string; model?: string } }>;
     };
     expect(agent.name).toBe(seat);
     expect(agent.version).toBe("1");
     expect(agent.profiles?.default?.preferences?.runtime).toBe("pi");
+    // The daemon resolves member.model ?? profile.preferences?.model — the
+    // profile-side model is the fallback the seat launches with if a future
+    // edit drops it from rig.yaml, so it must track SPEC, not go stale.
+    expect(agent.profiles?.default?.preferences?.model).toBe(expectedModels[seat]);
   }
 });
 
