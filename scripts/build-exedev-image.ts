@@ -947,6 +947,73 @@ export function refRepository(ref: string): string {
 }
 
 /**
+ * The LAYER INVENTORY of a pushed manifest, parsed from `imagetools inspect
+ * --raw`: the config digest plus one {digest, size, mediaType} row per layer.
+ *
+ * WHY evidence carries it: gate B compares ONE digest, so when two same-source
+ * runs diverge it says only THAT — publish runs 36063335634 and 36077483206
+ * built identical buildId/builtAt/gitSha/piSha256/sweep and still landed
+ * 48 compressed bytes apart, and nothing in their evidence named WHICH layer
+ * moved (both manifests were pruned before anyone could look). The inventory
+ * makes the next divergence name its layer directly: the row whose size or
+ * digest differs IS the varying one, and its position in the list maps onto
+ * the Dockerfile's RUN/COPY sequence.
+ *
+ * Additive on purpose: the workflow's gate reads named fields and tolerates
+ * new ones, and a run that cannot fetch the raw manifest (a prune racing the
+ * evidence write) records `manifestInventoryError` instead of inventing rows —
+ * an unmeasured inventory is a recorded failure, never a fabricated one.
+ */
+export interface ManifestInventory {
+  config: string;
+  layers: ReadonlyArray<{ digest: string; size: number; mediaType: string }>;
+}
+
+export function parseManifestRaw(text: string): ManifestInventory | { error: string } {
+  try {
+    const raw = JSON.parse(text) as {
+      config?: { digest?: unknown };
+      layers?: ReadonlyArray<{ digest?: unknown; size?: unknown; mediaType?: unknown }>;
+    };
+    const config = raw.config?.digest;
+    if (typeof config !== "string" || !/^sha256:[0-9a-f]{64}$/.test(config)) {
+      return { error: "manifest raw JSON carries no sha256 config digest" };
+    }
+    if (!Array.isArray(raw.layers)) return { error: "manifest raw JSON carries no layers array" };
+    const layers = [];
+    for (const l of raw.layers) {
+      if (
+        typeof l?.digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(l.digest) ||
+        typeof l?.size !== "number" || !Number.isSafeInteger(l.size) || l.size < 0 ||
+        typeof l?.mediaType !== "string" || l.mediaType === ""
+      ) {
+        return { error: "manifest raw JSON carries a layer without digest/size/mediaType" };
+      }
+      layers.push({ digest: l.digest, size: l.size, mediaType: l.mediaType });
+    }
+    return { config, layers };
+  } catch (e) {
+    return { error: `manifest raw is not JSON (${e instanceof Error ? e.name : "error"})` };
+  }
+}
+
+function manifestInventory(image: string, digest: string): ManifestInventory | { error: string } {
+  const res = spawnSync("docker", ["buildx", "imagetools", "inspect", `${image}@${digest}`, "--raw"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    // Same five-minute bound as {@link inspectManifest}: a registry that never
+    // replies must answer "recorded failure", not hang the evidence write.
+    timeout: 5 * 60 * 1000,
+    killSignal: "SIGKILL",
+  });
+  if (res.error || res.status !== 0) {
+    const detail = (res.stderr ?? (res.error ? res.error.message : "")).split("\n").filter((l) => l.trim() !== "").at(-1)?.trim() ?? "";
+    return { error: `imagetools --raw failed: ${detail || `exit ${res.status ?? "signal"}`}` };
+  }
+  return parseManifestRaw(res.stdout ?? "");
+}
+
+/**
  * The `RepoDigests` entry that belongs to `ref`'s own repository, or null.
  *
  * `{{index .RepoDigests 0}}` took whichever entry happened to be first. A
@@ -4057,6 +4124,12 @@ function main(): void {
       // has no digest to pin, and says so rather than implying one.
       pinShape: digest === null ? "local-tag-only (not published by this run)" : "digest",
       imageDigest: digest,
+      // The layer inventory of the pushed manifest (see parseManifestRaw) —
+      // the evidence that makes a digest divergence NAME its layer instead of
+      // leaving the next session to re-derive the whole elimination chain.
+      // Null when there was no push; an {error} row when the registry could
+      // not be read back — both honest, neither fabricated.
+      manifestInventory: digest === null ? null : manifestInventory(opts.tag, digest),
       baseRefs,
       runtimeBaseRef,
       baseDigests: inputs.baseDigests,
