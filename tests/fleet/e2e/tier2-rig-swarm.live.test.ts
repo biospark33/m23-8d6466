@@ -75,10 +75,10 @@ const MANIFEST_PATH = "config/rosters/r0-swarm.pipeline.json";
 // source that could silently drift. The poll bounds live in
 // in-box-status-poll.ts (the measured tier2-in-box-engine vocabulary).
 
-// The dispatch call's own kill ceiling must exceed BOTH the manifest's
-// runBudgetMs (1_840_000 — the runner refuses a caller budget below it, the
-// first live round's exit-2) and the run it bounds, with slack for harvest
-// and the ack round trip.
+// The test's kill ceiling on the dispatch call must exceed BOTH the manifest's
+// runBudgetMs (1_840_000 — dispatch's --timeout-ms must admit it, the first
+// live round's exit-2) and the --timeout-ms the call itself carries (1_840_000),
+// with slack for harvest and the ack round trip.
 const DISPATCH_TIMEOUT_MS = 2_100_000;
 
 test.todoIf(liveTodoOff())(
@@ -135,10 +135,13 @@ test.todoIf(liveTodoOff())(
       // ceiling REJECTS, and `dispatch` is the verb that creates a real box
       // before it can still fail — the partial streams are where the ids and
       // the box name live on that path.
-      // `--budget-ms` is read from the manifest itself (the single source):
-      // the runner refuses a caller budget below the manifest's runBudgetMs
-      // ("runBudgetMs 1840000 exceeds callerBudgetMs 599993", exit 2 — the
-      // first live round died here before any box existed).
+      // `--timeout-ms` (dispatch's OWN flag — `--budget-ms` is not a dispatch
+      // verb; the second live round died on it in the CLI usage printer) is
+      // dual-role: the verb's wall clock AND the manifest loader's
+      // callerBudgetMs ceiling. It must be ≥ the manifest's runBudgetMs
+      // (1_840_000), read from the manifest itself (the single source); the
+      // first live round died pre-box on the 600_000 default ("runBudgetMs
+      // 1840000 exceeds callerBudgetMs 599993", exit 2).
       const manifestBudgetMs = (
         JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as { runBudgetMs: number }
       ).runBudgetMs;
@@ -151,8 +154,8 @@ test.todoIf(liveTodoOff())(
           briefPath,
           "--dir",
           recordsDir,
-          // must be ≥ the manifest's runBudgetMs (1_840_000)
-          "--budget-ms",
+          // dual-role: dispatch wall clock AND callerBudgetMs ceiling; must be ≥ runBudgetMs
+          "--timeout-ms",
           String(manifestBudgetMs),
         ],
         { cwd: REPO_ROOT, timeoutMs: DISPATCH_TIMEOUT_MS },
