@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:0a6ca461aae4f05f348c58dc05716e70450a813aff0e13b4001fe1b0855da842";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,28 +573,28 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (seventeenth pin, 2026-09-25): buildId 9a025fc31fc1bc88,
- * adopted from gate B's own paste-ready output on publish run 36134427077,
- * baked at gitSha aa3d7d3383277955c4e64f1e9b8bbaf93916398b (the R3-c build —
- * aa3d7d33 is the src_sha the workflow's SOURCE_PATHS resolution names for
- * THAT build; driver.ts is excluded from SOURCE_PATHS, so this adoption
- * commit rebuilds at the same sha, byte identical, and gate B must close
- * GREEN on it).
+ * CURRENT PAIRING (eighteenth pin, 2026-09-25): buildId 1421d73aa7cff658,
+ * adopted from gate B's own paste-ready output on publish run 36153031180,
+ * baked at gitSha 5ef21035d1ad6d64df6cce1909644fd17b5e2a54 (the R0.7 swarm-fixes
+ * merge — 5ef21035 is the src_sha the workflow's SOURCE_PATHS resolution
+ * names for THAT build; driver.ts is excluded from SOURCE_PATHS, so this
+ * adoption commit rebuilds at the same sha, byte identical, and gate B
+ * must close GREEN on it).
  *
- * Why BOTH values moved from the sixteenth pin (02d7a0f4… /
- * 7fc93c21509a6d2a): PR #292 changed `oci/exedev/Dockerfile` bytes (the
- * node V8 compile cache under /tmp/node-compile-cache deleted in the same
- * RUN + a fail-closed assertion — the third repro source, after #288's npm
- * cacache) — a genuine substrate change, so the buildId moved (the
- * Dockerfile is a buildId input); the digest moved with it (both Dockerfile
- * bytes and layer contents changed). This is the ordinary both-move case,
- * the INVERSE of the 36056831164/36077483206 alarms where the digest moved
- * at an UNCHANGED buildId (the wall-clock bugs #288/#292 fixed — #292's
- * divergence was named by #291's per-layer manifestInventory). The sixteenth
- * pin's healing run could not close (it printed the alarm that became #292);
- * this pin's healing run is the reproducibility proof.
+ * Why BOTH values moved from the seventeenth pin (f73409b4… /
+ * 9a025fc31fc1bc88): PR #295 edited walked COPY inputs — scripts/
+ * pipeline-run.ts (a rig_swarm manifest now disarms the resident; the
+ * engine had refused EVERY swarm run at fork via INV-RES-3, root-caused
+ * by the first ten live rounds) and src/providers/credentials.ts
+ * (deliverSeatKeys's append arm creates the env file's dirname and owns
+ * its 0600 mode) — a genuine substrate change, so the buildId moved (a
+ * walked input is a buildId input); the digest moved with it. The
+ * ordinary both-move case. The whole-walk literal in
+ * tests/scripts/build-exedev-image.test.ts moved WITH the merge itself
+ * (4906cc92, pairing debt declared on the branch per the DF1.10
+ * playbook) — this adoption is image-only, the three driver/test sites.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "9a025fc31fc1bc88";
+export const DEFAULT_IMAGE_BUILD_ID = "1421d73aa7cff658";
 
 
 
