@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:132dcd896cdd3bad9d027af5748c3dbaedb4844cda6383612c06d1bf5f95de8b";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:b11b380ca78c10bede89ef3b582df300efc4ec5d5a56d4542d48ca8844504e3a";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,24 +573,24 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twentieth pin, 2026-09-25): buildId c69efc791236d1e2,
- * adopted from gate B's own paste-ready output on publish run 36170479590,
- * baked at gitSha 873387db (the import-retry build — the src_sha the
+ * CURRENT PAIRING (twenty-first pin, 2026-09-25): buildId fb118a3f00443833,
+ * adopted from gate B's own paste-ready output on publish run 36174418936,
+ * baked at gitSha ec106143 (the import-adopt build — the src_sha the
  * workflow's SOURCE_PATHS resolution names for THAT build; driver.ts is
  * excluded from SOURCE_PATHS, so this adoption commit rebuilds at the same
  * sha, byte identical, and gate B must close GREEN on it).
  *
- * Why BOTH values moved from the nineteenth pin (762e82f3… /
- * 8ae9a6819f1b311a): PR #300 edited src/phase-engine/phases/
- * openrig-swarm.ts (a walked COPY input) — the rig import now retries a
- * refused body (round 12: healthz answers while the daemon is still
- * initializing; the first import raced that init ~6 s in, the identical
- * yaml imported ok on replay) and the error carries the last response
- * body instead of discarding stdout. The whole-walk literal moved WITH
- * the merge itself (e04db606, debt declared on the branch) — this
- * adoption is image-only, the three driver/test sites.
+ * Why BOTH values moved from the twentieth pin (132dcd89… /
+ * c69efc791236d1e2): PR #303 edited src/phase-engine/phases/
+ * openrig-swarm.ts (a walked COPY input) — the import loop now ADOPTS a
+ * `rig_name_running` collision after proving ownership (every expected
+ * seat session live in tmux; round 14 launched both seats then died on
+ * the collision its own success created) and requires curl exit 0 before
+ * any adoption. The whole-walk literal moved WITH the merge itself
+ * (17246e12, debt declared on the branch) — this adoption is image-only,
+ * the three driver/test sites.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "c69efc791236d1e2";
+export const DEFAULT_IMAGE_BUILD_ID = "fb118a3f00443833";
 
 
 
