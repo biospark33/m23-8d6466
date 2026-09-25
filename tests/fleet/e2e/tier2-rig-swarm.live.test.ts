@@ -77,9 +77,14 @@ const MANIFEST_PATH = "config/rosters/r0-swarm.pipeline.json";
 
 // The test's kill ceiling on the dispatch call must exceed BOTH the manifest's
 // runBudgetMs (1_840_000 — dispatch's --timeout-ms must admit it, the first
-// live round's exit-2) and the --timeout-ms the call itself carries (1_840_000),
-// with slack for harvest and the ack round trip.
+// live round's exit-2) and the --timeout-ms the call itself carries
+// (1_840_000 + 60_000 headroom), with slack for harvest and the ack round trip.
 const DISPATCH_TIMEOUT_MS = 2_100_000;
+// dispatch's callerBudgetMs = --timeout-ms MINUS setup elapsed (dispatch.ts
+// passes what is left of the flag); the third live round failed at +0ms slack
+// ("runBudgetMs 1840000 exceeds callerBudgetMs 1839991"). One minute of
+// headroom covers loader startup with orders of magnitude to spare.
+const BUDGET_HEADROOM_MS = 60_000;
 
 test.todoIf(liveTodoOff())(
   "T2.8 dispatch→rig_swarm(2 Pi seats)→gate→harvest→reverify→teardown — real box, real per-seat spend, caps $1.20 run + 2×$0.50 seats",
@@ -138,10 +143,9 @@ test.todoIf(liveTodoOff())(
       // `--timeout-ms` (dispatch's OWN flag — `--budget-ms` is not a dispatch
       // verb; the second live round died on it in the CLI usage printer) is
       // dual-role: the verb's wall clock AND the manifest loader's
-      // callerBudgetMs ceiling. It must be ≥ the manifest's runBudgetMs
-      // (1_840_000), read from the manifest itself (the single source); the
-      // first live round died pre-box on the 600_000 default ("runBudgetMs
-      // 1840000 exceeds callerBudgetMs 599993", exit 2).
+      // callerBudgetMs ceiling. The loader spends some of it on setup before
+      // the runBudgetMs check, so it needs HEADROOM over runBudgetMs (read
+      // from the manifest itself — the single source), not equality.
       const manifestBudgetMs = (
         JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as { runBudgetMs: number }
       ).runBudgetMs;
@@ -154,9 +158,13 @@ test.todoIf(liveTodoOff())(
           briefPath,
           "--dir",
           recordsDir,
-          // dual-role: dispatch wall clock AND callerBudgetMs ceiling; must be ≥ runBudgetMs
+          // dual-role: dispatch wall clock AND callerBudgetMs ceiling. The loader
+      // passes what is LEFT of the flag to the manifest check (dispatch.ts:
+      // setup elapsed is subtracted first), so the flag must exceed
+      // runBudgetMs by more than startup overhead — the third live round died
+      // at +0ms slack: "runBudgetMs 1840000 exceeds callerBudgetMs 1839991".
           "--timeout-ms",
-          String(manifestBudgetMs),
+          String(manifestBudgetMs + BUDGET_HEADROOM_MS),
         ],
         { cwd: REPO_ROOT, timeoutMs: DISPATCH_TIMEOUT_MS },
       ).catch((e: unknown) => {
