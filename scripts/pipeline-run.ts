@@ -2986,6 +2986,35 @@ function deriveInBoxArgv(runId: string): string[] {
  * keep unarmed. A parameter cannot leak across calls, so the hazard is removed
  * rather than documented.
  */
+/**
+ * The engine's resident-arming decision, as one pure predicate.
+ *
+ * Program invariant 2 (one tier-2 brain per box): a manifest carrying a
+ * `rig_swarm` phase puts the OpenRig lead seat in charge and the resident
+ * agent is OFF — the manifest, not argv, is what the engine can see at arm
+ * time, and the seat keys replace the single run key, so an armed resident
+ * would die in INV-RES-3's key assertion anyway (R0.7 round 10,
+ * engine-start-refused: "pipeline-run: resident refused" on a box whose
+ * app/.env carried only QDS_SWARM_KEYS_FILE). `noResident` stays the
+ * operator's manual override on every manifest shape; the brief's identity
+ * fields decide arming exactly as before on non-swarm runs.
+ */
+export function residentArmedFor(
+  brief: Record<string, unknown> | undefined,
+  phases: ReadonlyArray<{ kind: string }>,
+  noResident: boolean,
+): boolean {
+  if (noResident) return false;
+  if (phases.some((p) => p.kind === "rig_swarm")) return false;
+  return (
+    brief !== undefined &&
+    ["requestId", "repoSlug", "issueId", "issueUrl"].some((key) => {
+      const v = brief?.[key];
+      return v !== undefined && v !== null && `${v}`.length > 0;
+    })
+  );
+}
+
 async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<number> {
   // The unit's front door. One level of re-entry, never more: the derived argv
   // is all flags, so it cannot come back through this branch.
@@ -3912,13 +3941,13 @@ async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<nu
   // Arming reads BRIEF content — any of the dispatch brief's identity fields —
   // never requestId alone. `effectiveCeilingMicros` is deliberately excluded:
   // it is the CAP witness's own field, present on every capped run, and must
-  // not conjure a resident out of a ceiling statement.
-  const residentArmed =
-    residentBrief !== undefined &&
-    ["requestId", "repoSlug", "issueId", "issueUrl"].some((key) => {
-      const v = residentBrief?.[key];
-      return v !== undefined && v !== null && `${v}`.length > 0;
-    });
+  // not conjure a resident out of a ceiling statement. A rig_swarm manifest
+  // disarms regardless of brief (invariant 2 — see residentArmedFor).
+  const residentArmed = residentArmedFor(
+    residentBrief,
+    manifest.phases,
+    noResident,
+  );
   // DOD-Security / INV-RES-3: a brief whose values or field names match a
   // credential shape refuses the run BEFORE any spawn — a manifest is already
   // scanned for exactly this (manifest.ts's INV-4 walk), and the brief reaches

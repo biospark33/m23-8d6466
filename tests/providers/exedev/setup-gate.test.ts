@@ -406,6 +406,37 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(parsed.notRun).toBeUndefined(); // the artifact carries no empty complement either
   }, 60_000);
 
+  test("swarm mode (S1/R0.7 round 6): QDS_SWARM_KEYS_FILE replaces OPENROUTER_API_KEY — the gate probes on a seat key", async () => {
+    // In seat mode dispatch delivers NO run key (the single-key arm never
+    // runs), so app/.env carries only the pointer to the per-seat keys file —
+    // round 6 died exactly here: gate C refused "missing dependency:
+    // OPENROUTER_API_KEY". The contract the script now implements: when the
+    // pointer is present, the C/D/E probes source their key from the file
+    // (first value = lead by delivery order — the probe's µ$-trivial spend
+    // lands on that seat's ledger row BY DESIGN, within its cap, never a
+    // second key topology: a delivered run key beside swarmSeats is I2's
+    // forbidden shape-D).
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-swarm-1", originDir, rosterDir);
+    const keysPath = join(fake.homeDir(box.vm), "swarm-keys", "gate-swarm-1.json");
+    mkdirSync(join(keysPath, ".."), { recursive: true });
+    writeFileSync(
+      keysPath,
+      JSON.stringify({ lead: "sk-test-9900000000000000000000", worker: "sk-test-9800000000000000000000" }),
+      { mode: 0o600 },
+    );
+    writeFileSync(join(fake.homeDir(box.vm), "app", ".env"), `QDS_SWARM_KEYS_FILE=${keysPath}\n`, { mode: 0o600 });
+
+    let result: Awaited<ReturnType<typeof driver.setup>>;
+    result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(true);
+    expect(result.failedItem).toBeUndefined();
+    expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
+    for (const a of result.assertions) {
+      expect(a.ok).toBe(true);
+    }
+  }, 60_000);
+
   test("AC2 negative control: exit-0 'No models available' fails B on CONTENT", async () => {
     const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
     const box = await makeBox(fake, driver, "gate-b-trap", originDir, rosterDir);
