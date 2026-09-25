@@ -341,8 +341,11 @@ export function openrigSwarmPhase(
           // Retries spend the phase's remaining budget; the FIRST attempt is
           // unconditional (the deadline-immediate paths still import once and
           // fail downstream — the timeout-fallback contract depends on it).
-          if (Date.now() >= deadline) break;
+          // The sleep can consume the last of the budget, so the deadline is
+          // re-checked AFTER it (abort propagates out of the sleep itself).
           await sleep(2_000, bodyCtx.signal);
+          throwIfAborted(bodyCtx.signal);
+          if (Date.now() >= deadline) break;
         }
         imp = await cli([
           "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/rigs/import",
@@ -355,7 +358,9 @@ export function openrigSwarmPhase(
         } catch {
           /* non-JSON body is a failed import */
         }
-        if (importOk) break;
+        // BOTH signals must say success: an ok body over a nonzero curl exit
+        // is a transport anomaly worth the remaining attempts, not a break.
+        if (importOk && imp.exitCode === 0) break;
         trace("swarm_import_retry", { attempt, exitCode: imp.exitCode, body: imp.stdout.slice(0, 300) });
       }
       if (imp.exitCode !== 0 || !importOk) {
