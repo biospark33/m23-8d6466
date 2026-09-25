@@ -294,8 +294,22 @@ test.todoIf(liveTodoOff())(
       });
       evidence.push({ phase: "status-poll", seenStates: poll.seenStates, terminal: poll.terminal, statusExitFailures: poll.statusExitFailures });
       if (poll.terminal !== "ok") {
+        // Fetch the journal NOW: the finally destroys the box, and the journal
+        // is the ONLY artifact that names the failed phase's error (rounds
+        // 12–13 each burned a probe round re-deriving it post-destroy).
+        // Guarded: a dead box must not replace the run's own failure with a
+        // read failure.
+        let journalTail = "";
+        try {
+          journalTail = (
+            await ctx.driver.execTimed(vmName, ["sh", "-c", `tail -c 4000 ${shellQuote(journalBoxPath)} 2>&1`], 30_000)
+          ).stdout;
+        } catch (e) {
+          journalTail = `(journal read failed: ${e instanceof Error ? e.message : String(e)})`;
+        }
+        evidence.push({ phase: "failed-run-journal", runId, vmName, journalTail: redactSecrets(journalTail).slice(-4000) });
         throw new Error(
-          `in-box run did not settle to \`ok\` (states seen: ${poll.seenStates.join(" → ") || "none"}). \`not-ok\` means the engine settled and the run FAILED — the harvested journal names the phase. Diagnose on the box: ${journalBoxPath}.`,
+          `in-box run did not settle to \`ok\` (states seen: ${poll.seenStates.join(" → ") || "none"}). \`not-ok\` means the engine settled and the run FAILED — the failed-run-journal evidence phase names the phase.`,
         );
       }
 
