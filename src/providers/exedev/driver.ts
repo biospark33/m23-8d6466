@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:0a6ca461aae4f05f348c58dc05716e70450a813aff0e13b4001fe1b0855da842";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:762e82f3178324e797f4f326e56dd88987126b9c34250349f0c7c4ca59dedffd";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,28 +573,26 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (eighteenth pin, 2026-09-25): buildId 1421d73aa7cff658,
- * adopted from gate B's own paste-ready output on publish run 36153031180,
- * baked at gitSha 5ef21035d1ad6d64df6cce1909644fd17b5e2a54 (the R0.7 swarm-fixes
- * merge — 5ef21035 is the src_sha the workflow's SOURCE_PATHS resolution
- * names for THAT build; driver.ts is excluded from SOURCE_PATHS, so this
- * adoption commit rebuilds at the same sha, byte identical, and gate B
- * must close GREEN on it).
+ * CURRENT PAIRING (nineteenth pin, 2026-09-25): buildId 8ae9a6819f1b311a,
+ * adopted from gate B's own paste-ready output on publish run 36162921844,
+ * baked at gitSha 9a33b117 (the rigspec-shape build — the src_sha the
+ * workflow's SOURCE_PATHS resolution names for THAT build; driver.ts is
+ * excluded from SOURCE_PATHS, so this adoption commit rebuilds at the same
+ * sha, byte identical, and gate B must close GREEN on it).
  *
- * Why BOTH values moved from the seventeenth pin (f73409b4… /
- * 9a025fc31fc1bc88): PR #295 edited walked COPY inputs — scripts/
- * pipeline-run.ts (a rig_swarm manifest now disarms the resident; the
- * engine had refused EVERY swarm run at fork via INV-RES-3, root-caused
- * by the first ten live rounds) and src/providers/credentials.ts
- * (deliverSeatKeys's append arm creates the env file's dirname and owns
- * its 0600 mode) — a genuine substrate change, so the buildId moved (a
- * walked input is a buildId input); the digest moved with it. The
- * ordinary both-move case. The whole-walk literal in
- * tests/scripts/build-exedev-image.test.ts moved WITH the merge itself
- * (4906cc92, pairing debt declared on the branch per the DF1.10
- * playbook) — this adoption is image-only, the three driver/test sites.
+ * Why BOTH values moved from the eighteenth pin (0a6ca461… /
+ * 1421d73aa7cff658): PR #298 edited src/phase-engine/phases/
+ * openrig-swarm.ts (a walked COPY input) — the materialized rig.yaml/
+ * agent.yaml now carry the fields OpenRig 0.5.14's import validator
+ * requires (version, pods[].label, member agent_ref/profile, agent
+ * profiles map) and the workdir probe prefers src/ (the repo) over app/
+ * (the env dir). Round 11's phase failed validation_failed 4.7 s in, before
+ * any seat launched; the corrected shape was proven ON the pinned daemon
+ * (import ok, both seats LAUNCHED) before this fix landed. The whole-walk
+ * literal moved WITH the merge itself (390104f0, debt declared on the
+ * branch) — this adoption is image-only, the three driver/test sites.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "1421d73aa7cff658";
+export const DEFAULT_IMAGE_BUILD_ID = "8ae9a6819f1b311a";
 
 
 
