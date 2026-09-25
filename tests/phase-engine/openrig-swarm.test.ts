@@ -193,6 +193,11 @@ test("full lifecycle: seeds, boots, imports, queues, polls to done, tears down",
 test("materialized rig.yaml/agent.yaml carry the fields the daemon's import validator requires", async () => {
   const { run } = fakeRunner(baseHandlers());
   const { home } = makeTempHome();
+  // BOTH workdir candidates present: with only app/ the probe's fallback
+  // would mask the order, and the whole point of the src-first fix (round
+  // 11 forensics: seats cwd'd into the ENV dir) is that src WINS when both
+  // exist on a delivered box.
+  fs.mkdirSync(path.join(home, "src"), { recursive: true });
   await runPhase(SPEC, run, home);
   const rigDir = path.join(home, ".openrig", "runs", "run-1", "rig");
   const rig = parseYaml(fs.readFileSync(path.join(rigDir, "rig.yaml"), "utf8")) as {
@@ -204,7 +209,8 @@ test("materialized rig.yaml/agent.yaml carry the fields the daemon's import vali
   for (const m of rig.pods?.[0]?.members ?? []) {
     expect(m.agent_ref).toBe(`local:agents/${m.id}`);
     expect(m.profile).toBe("default");
-    expect(m.cwd).not.toBe("");
+    // Exact: the repo clone wins over the env dir (app/ also exists here).
+    expect(m.cwd).toBe(path.join(home, "src"));
   }
   const expectedModels: Record<string, string> = {
     lead: "openrouter/anthropic/claude-haiku-4.5",
