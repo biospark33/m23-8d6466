@@ -1395,8 +1395,15 @@ export async function deliverSeatKeys(
   const envLine = `${SWARM_SEAT_KEYS_ENV}=${keysPath}`;
   const res = await timed(ctx, "deliver_seat", async () => {
     const write = await deps.driver.exec(vm, ["sh", "-c", seatKeysScript(keysPath)], JSON.stringify(keys));
+    // The mkdir is load-bearing, not decoration: in seat mode NO deliverRunKey
+    // runs before this, so this arm is `app/.env`'s FIRST toucher and the real
+    // shell refuses `>>` into a missing `$HOME/app` (R0.7 round 4,
+    // delivery-pointer-missing). The sibling's deliverScript has always
+    // mkdir -p'd its dirname; the parens keep the grep-guard compound's exit
+    // status independent of the mkdir.
     const append = await deps.driver.exec(vm, ["sh", "-c",
-      `grep -q '^${SWARM_SEAT_KEYS_ENV}=' '${envFile}' 2>/dev/null || printf '%s\\n' '${envLine}' >> '${envFile}'`,
+      `mkdir -p "$(dirname '${envFile}')" && ` +
+      `(grep -q '^${SWARM_SEAT_KEYS_ENV}=' '${envFile}' 2>/dev/null || printf '%s\\n' '${envLine}' >> '${envFile}')`,
     ]);
     return { write, append };
   });
