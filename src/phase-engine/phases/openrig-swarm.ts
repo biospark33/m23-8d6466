@@ -324,20 +324,50 @@ export function openrigSwarmPhase(
       );
 
       // ── 5. Import ──
-      const imp = await cli([
-        "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/rigs/import",
-        "-H", `X-Rig-Root: ${rigDir}`,
-        "-H", "Content-Type: text/yaml",
-        "--data-binary", `@${path.join(rigDir, "rig.yaml")}`,
-      ]);
+      // Bounded retry: healthz answers while the daemon is STILL initializing
+      // (round 12 forensics — the phase's first import raced the startup
+      // work, e.g. the plugin-vendor's network fetch, and the daemon refused
+      // or dropped it ~6 s in; a replay against the settled daemon with the
+      // IDENTICAL yaml imported and launched both seats). The pinned tree
+      // owns that readiness gap; a short retry bound is our honest handle on
+      // it — fail-closed after the bound, with the LAST response body in the
+      // error so an import refusal can never again be diagnosed blind (the
+      // old message discarded stdout and cost a whole probe round).
+      let imp: CmdResult = { exitCode: 1, stdout: "", stderr: "not attempted" };
       let importOk = false;
-      try {
-        importOk = (JSON.parse(imp.stdout) as { ok?: unknown }).ok === true;
-      } catch {
-        /* non-JSON body is a failed import */
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        throwIfAborted(bodyCtx.signal);
+        if (attempt > 1) {
+          // Retries spend the phase's remaining budget; the FIRST attempt is
+          // unconditional (the deadline-immediate paths still import once and
+          // fail downstream — the timeout-fallback contract depends on it).
+          // The sleep can consume the last of the budget, so the deadline is
+          // re-checked AFTER it (abort propagates out of the sleep itself).
+          await sleep(2_000, bodyCtx.signal);
+          throwIfAborted(bodyCtx.signal);
+          if (Date.now() >= deadline) break;
+        }
+        imp = await cli([
+          "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/rigs/import",
+          "-H", `X-Rig-Root: ${rigDir}`,
+          "-H", "Content-Type: text/yaml",
+          "--data-binary", `@${path.join(rigDir, "rig.yaml")}`,
+        ]);
+        try {
+          importOk = (JSON.parse(imp.stdout) as { ok?: unknown }).ok === true;
+        } catch {
+          /* non-JSON body is a failed import */
+        }
+        // BOTH signals must say success: an ok body over a nonzero curl exit
+        // is a transport anomaly worth the remaining attempts, not a break.
+        if (importOk && imp.exitCode === 0) break;
+        trace("swarm_import_retry", { attempt, exitCode: imp.exitCode, body: imp.stdout.slice(0, 300) });
       }
       if (imp.exitCode !== 0 || !importOk) {
-        throw new Error(`rig import failed (exit ${imp.exitCode}) — the finally still tears down`);
+        throw new Error(
+          `rig import failed (exit ${imp.exitCode}) — the finally still tears down. ` +
+            `Last response: ${imp.stdout.trim().slice(0, 500) || "(empty)"}`,
+        );
       }
 
       // ── 6. Queue the objective (identity preamble per seat finding 2) ──
