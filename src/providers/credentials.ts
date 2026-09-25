@@ -1398,12 +1398,17 @@ export async function deliverSeatKeys(
     // The mkdir is load-bearing, not decoration: in seat mode NO deliverRunKey
     // runs before this, so this arm is `app/.env`'s FIRST toucher and the real
     // shell refuses `>>` into a missing `$HOME/app` (R0.7 round 4,
-    // delivery-pointer-missing). The sibling's deliverScript has always
-    // mkdir -p'd its dirname; the parens keep the grep-guard compound's exit
-    // status independent of the mkdir.
+    // delivery-pointer-missing). Round 5 added the second half: the arm that
+    // may CREATE the file owns its MODE — `>>` under the default umask made
+    // app/.env 644 and gate C rightly refused it (DF2.3: the env file is
+    // 0600; run qds-20260925-2b7c05). umask 077 covers the create, chmod 600
+    // is the belt — and normalizes a pre-existing wrong mode, which is the
+    // contract, not a side effect. The parens keep the grep-guard compound's
+    // exit status independent of the mkdir/chmod.
     const append = await deps.driver.exec(vm, ["sh", "-c",
-      `mkdir -p "$(dirname '${envFile}')" && ` +
-      `(grep -q '^${SWARM_SEAT_KEYS_ENV}=' '${envFile}' 2>/dev/null || printf '%s\\n' '${envLine}' >> '${envFile}')`,
+      `mkdir -p "$(dirname '${envFile}')" && umask 077 && ` +
+      `(grep -q '^${SWARM_SEAT_KEYS_ENV}=' '${envFile}' 2>/dev/null || printf '%s\\n' '${envLine}' >> '${envFile}') && ` +
+      `chmod 600 '${envFile}'`,
     ]);
     return { write, append };
   });

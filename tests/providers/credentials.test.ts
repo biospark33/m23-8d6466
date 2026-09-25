@@ -1956,6 +1956,13 @@ describe("S1 rig_swarm per-seat keys", () => {
     } as unknown as ProviderDriver;
     await deliverSeatKeys({ ...seatDeps(), driver }, runId, vm, keys);
     expect(calls[1]!.argv[2]).toContain("mkdir -p");
+    // R0.7 round 5 (run qds-20260925-2b7c05): with the dirname created, the
+    // append's `>>` CREATED app/.env under the shell's default umask — 644,
+    // and gate C rightly refused it (DF2.3: the env file is 0600). The arm
+    // that may create the file owns its mode: umask 077 while appending and
+    // a chmod 600 belt afterwards, matching the sibling deliverScript.
+    expect(calls[1]!.argv[2]).toContain("umask 077");
+    expect(calls[1]!.argv[2]).toContain(`chmod 600 '${KEY_ENV_FILE}'`);
   });
 
   // Task 6, audit-link symmetry (review finding): the single-key siblings emit
