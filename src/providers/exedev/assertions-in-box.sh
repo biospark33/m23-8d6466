@@ -75,6 +75,23 @@ if [ "$env_mode" != "600" ]; then
 fi
 # shellcheck disable=SC1090
 . "$EnvFile"
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -n "${QDS_SWARM_KEYS_FILE:-}" ] && [ -r "${QDS_SWARM_KEYS_FILE}" ]; then
+  # S1/R0.7 (round 6): in seat mode deliverRunKey never runs, so app/.env has
+  # no OPENROUTER_API_KEY — only the pointer to the per-seat keys file. The
+  # C/D/E probes (roster pings, solicitations, credit check) still need ONE
+  # key: the FIRST value in the file (lead by delivery order) is used BY
+  # DESIGN — the probes' µ$-trivial spend lands on that seat's ledger row,
+  # within its cap; no second key topology exists (a delivered run key beside
+  # swarmSeats is the record contract's forbidden shape-D). The key content
+  # never touches argv: python reads the FILE, the assignment is env-local.
+  OPENROUTER_API_KEY="$(python3 -c 'import json,sys
+ks = json.load(open(sys.argv[1]))
+v = next((v for v in ks.values() if isinstance(v, str) and v), None)
+print(v) if v is not None else sys.exit(3)' "$QDS_SWARM_KEYS_FILE" 2>/dev/null)" || {
+    echo "missing dependency: a readable seat key in QDS_SWARM_KEYS_FILE=$QDS_SWARM_KEYS_FILE" >&2
+    exit 125
+  }
+fi
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   echo "missing dependency: OPENROUTER_API_KEY in $EnvFile" >&2
   exit 125
