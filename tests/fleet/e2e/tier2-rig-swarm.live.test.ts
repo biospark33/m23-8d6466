@@ -180,7 +180,7 @@ test.todoIf(liveTodoOff())(
         phase: "dispatch-verb",
         exitCode: dispatch.exitCode,
         stdoutTail: redactSecrets(dispatch.stdout.trim().slice(-400)),
-        stderrTail: redactSecrets(dispatch.stderr.trim().slice(-600)),
+        stderrTail: redactSecrets(dispatch.stderr.trim().slice(-2400)),
       });
       // Ownership armed BEFORE the assertion that can throw.
       const emitted = emittedRunId(dispatch.stdout, dispatch.stderr);
@@ -277,7 +277,7 @@ test.todoIf(liveTodoOff())(
         cwd: REPO_ROOT,
         timeoutMs: 180_000,
       });
-      evidence.push({ phase: "run-verb", exitCode: start.exitCode, stdout: redactSecrets(start.stdout.trim().slice(0, 300)), stderrTail: redactSecrets(start.stderr.trim().slice(-400)) });
+      evidence.push({ phase: "run-verb", exitCode: start.exitCode, stdout: redactSecrets(start.stdout.trim().slice(0, 300)), stderrTail: redactSecrets(start.stderr.trim().slice(-2400)) });
       expect(start.exitCode).toBe(0);
       expect(start.stdout).toContain(`started: ${runId}`);
 
