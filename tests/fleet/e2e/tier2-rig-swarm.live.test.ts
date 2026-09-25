@@ -211,13 +211,16 @@ test.todoIf(liveTodoOff())(
       const seatKeyHashes = (rec.extensions?.swarmSeats?.keyHashes as string[] | undefined) ?? [];
       expect(seatKeyHashes).toHaveLength(2);
       for (const h of seatKeyHashes) expect(h).not.toBe("");
-      expect(rec.limitMicroUsd).toBe(RUN_CAP_MICRO_USD);
+      expect(rec.extensions?.swarmSeats?.seats).toEqual(["lead", "worker"]);
+      // NO core limitMicroUsd either (run-record.ts: a swarm run carries no
+      // core key fields) — the ceiling is proven by the witness assertion
+      // below, per-seat caps by the mint.
+      expect(rec.limitMicroUsd).toBeUndefined();
       evidence.push({
         phase: "record",
         ok: true,
         seatKeyHashes: seatKeyHashes.length,
         swarmSeats: rec.extensions?.swarmSeats?.seats,
-        limitMicroUsd: rec.limitMicroUsd,
       });
 
       const gatePath = join(REPO_ROOT, ".sandbox", "setup-gate", `${runId}.json`);
