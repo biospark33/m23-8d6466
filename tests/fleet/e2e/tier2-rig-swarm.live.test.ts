@@ -319,9 +319,19 @@ test.todoIf(liveTodoOff())(
         runId,
       );
       expect(markerRead.kind).toBe("settled");
+      // The settled/seat-cost TRACE rows are read from the ENGINE LOG, not the
+      // journal: the engine's final journal doc (version/resident/phases)
+      // REPLACES the pre-settle JSONL stream at settle, wiping trace rows —
+      // round 18 read a fully-settled-ok journal and found zero swarm rows.
+      // stderr survives as <runId>.engine.log, and the phase mirrors both rows
+      // there. The journal itself stays as evidence (the phase doc names
+      // status/error per phase).
+      const engineLogText = await ctx.driver.exec(vmName, ["sh", "-c", `cat ${shellQuote(engineLogBoxPath)} 2>&1`]);
+      expect(engineLogText.exitCode).toBe(0);
       const journalText = await ctx.driver.exec(vmName, ["sh", "-c", `cat ${shellQuote(journalBoxPath)}`]);
       expect(journalText.exitCode).toBe(0);
-      const settledRows = journalText.stdout
+      evidence.push({ phase: "journal-doc", journalHead: redactSecrets(journalText.stdout.trim().slice(0, 1200)) });
+      const settledRows = engineLogText.stdout
         .split("\n")
         .filter((l) => l.includes('"swarm_settled"'))
         .map((l) => {
@@ -341,7 +351,7 @@ test.todoIf(liveTodoOff())(
       // means the marker lied, which is exactly what this round exists to catch.
       expect(settledPayload.reason).toBe("lead-closed");
       expect(settledPayload.timeoutFallback).toBe(false);
-      const seatCostRows = journalText.stdout
+      const seatCostRows = engineLogText.stdout
         .split("\n")
         .filter((l) => l.includes('"swarm_seat_cost"'))
         .map((l) => {

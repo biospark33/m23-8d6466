@@ -522,6 +522,16 @@ export function openrigSwarmPhase(
           }
           if (jsonls.length > 0) {
             trace("swarm_seat_cost", { session, files: jsonls.length, totalMicroUsd: seatTotal, role: member.id });
+            // Mirror to stderr: the tracer's rows live in the pre-settle JSONL
+            // stream, which the engine's final journal DOC replaces on settle —
+            // the round-18 test read the journal and found ZERO swarm rows on a
+            // fully-settled-ok run. stderr survives: it is the engine log
+            // (`<runId>.engine.log`) that out-of-box evidence reads.
+            defaultStderrLog({
+              type: "log",
+              name: "swarm_seat_cost",
+              payloadJson: JSON.stringify({ session, files: jsonls.length, totalMicroUsd: seatTotal, role: member.id }),
+            });
           }
         } catch (e) {
           logLine({ step: "seat-costs", seat: session, error: errText(e) });
@@ -576,12 +586,20 @@ export function openrigSwarmPhase(
     // lead-closed item is success — a timeout fallback means the swarm was
     // never verified, and any other terminal queue state is a failure. The
     // gate still renders a verdict; hard failures threw above. ──
-    trace("swarm_settled", {
+    const settledPayload = {
       reason: settled!.reason,
       qid,
       state: settled!.state ?? null,
       closureReason: settled!.closureReason ?? null,
       timeoutFallback: settled!.reason === "timeout-fallback",
+    };
+    trace("swarm_settled", settledPayload);
+    // stderr mirror — same consolidation reasoning as swarm_seat_cost above:
+    // the engine log outlives the JSONL stream the final doc replaces.
+    defaultStderrLog({
+      type: "log",
+      name: "swarm_settled",
+      payloadJson: JSON.stringify(settledPayload),
     });
     return { exitStatus: settled!.reason === "lead-closed" ? "success" : "fail" };
   };
