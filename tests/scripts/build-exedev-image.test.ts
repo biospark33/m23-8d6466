@@ -1923,7 +1923,19 @@ describe("buildIdFileInputs", () => {
       // the tee and reaches journald only, which is why rounds 19-20 saw no
       // rows in engine.log). Computed on the FINAL branch tree, after every
       // other edit.
-      "21af92781b1030e06e3bce47e9a8a4637af8ba604f0bf2cced6fa22449435d2f",
+      //
+      // c51554d9: supersedes 9f55e706, which was received from this test's
+      // own failing run on the post-#315 dev tree but NEVER LANDED — the
+      // twenty-sixth-pin adoption's docs follow-up committed a driver.ts
+      // comment fix and silently dropped the walk file from its staging
+      // (exactly the "landed WITHOUT touching this literal" failure the
+      // run-lock paragraph above records; #316's healing run stayed green
+      // because scripts/fleet.ts is not a SOURCE_PATHS member, hiding the
+      // gap until the next offline receive). Received from this test's own
+      // failing run on the post-#317 dev tree (39b66d84): the walked delta
+      // since 9f55e706's tree is src/phase-engine/phases/openrig-cost.ts
+      // (#315) — scripts/fleet.ts and every test file are outside the walk.
+      "c51554d955af74816f7f1b7b04022bebbe7d4f7fefe6de3a18aba6e2333809e6",
     );
   });
 });
