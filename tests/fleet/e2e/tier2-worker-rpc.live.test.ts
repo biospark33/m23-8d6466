@@ -85,6 +85,7 @@ test.todoIf(liveTodoOff())(
         JSON.stringify({
           repoUrl: ctx.repoUrl,
           commitSha: ctx.sha,
+          manifestPath: MANIFEST_PATH,
           taskId: "p0.8-worker-rpc-live",
           objective: "prove the hardened worker-rpc transport end-to-end on a real box",
         }),
@@ -98,8 +99,6 @@ test.todoIf(liveTodoOff())(
           "dispatch",
           "--brief",
           briefPath,
-          "--manifest",
-          MANIFEST_PATH,
           "--driver",
           "exedev",
           "--dir",
