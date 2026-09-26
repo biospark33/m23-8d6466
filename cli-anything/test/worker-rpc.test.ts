@@ -12,7 +12,7 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runRpcWorker, type RpcChild, type RpcSpawnFn } from "../scripts/worker-rpc.ts";
+import { runRpcWorker, rpcWorkerEnv, type RpcChild, type RpcSpawnFn } from "../scripts/worker-rpc.ts";
 
 class FakeChild {
   stdinWrites: string[] = [];
@@ -322,5 +322,189 @@ describe("runRpcWorker — headless safety", () => {
     expect(child.killed).toContain("SIGKILL"); // …but pi never exited
     child.emitClose(0);
     await done;
+  });
+});
+
+describe("runRpcWorker — P0 hardening", () => {
+  it("P0.1: a prompt ERROR settles the worker now, not at the ceiling", async () => {
+    const child = new FakeChild();
+    const spawn = fakeSpawn(child);
+    const done = runRpcWorker({
+      argv: [], prompt: "p", agentId: "perr", timeoutMs: 5_000,
+      settleGraceMs: 5_000, lingerMs: 500, spawn, // grace AND linger > test: only the error path can end this
+    });
+    await sleep(5);
+    child.emitLine({ id: "qds-prompt:perr", type: "error", error: "model overloaded" });
+    await sleep(40);
+    expect(child.stdinEnded).toBe(true);            // settled NOW…
+    expect(child.killed).not.toContain("SIGKILL");  // …not via ceiling or linger
+    child.emitClose(0);
+    const r = await done;
+    expect(r.drainReason).toBe("prompt-error");
+  });
+
+  it("P0.2: a failed get_state REFUSES shutdown and retries — fail closed", async () => {
+    const child = new FakeChild();
+    const spawn = fakeSpawn(child);
+    const done = runRpcWorker({
+      argv: [], prompt: "p", agentId: "gserr", timeoutMs: 5_000,
+      settleGraceMs: 10, lingerMs: 10, spawn,
+    });
+    await sleep(5);
+    child.emitLine({ type: "agent_settled" });
+    await sleep(30);
+    const states = () => child.responses().filter((o) => o.type === "get_state");
+    expect(states()).toHaveLength(1);
+    child.emitLine({ id: "qds-drain:gserr", type: "error", error: "state unavailable" });
+    expect(child.stdinEnded).toBe(false);  // NOT treated as idle (fail closed)
+    await sleep(30);
+    expect(states().length).toBe(2);       // …and the drain re-armed for a retry
+    child.emitLine({ ...IDLE_STATE, id: states()[1]?.id });
+    expect(child.stdinEnded).toBe(true);
+    child.emitClose(0);
+    await done;
+  });
+
+  it("P0.2: three consecutive get_state failures stop retrying; the ceiling is the backstop", async () => {
+    const child = new FakeChild();
+    const spawn = fakeSpawn(child);
+    const done = runRpcWorker({
+      argv: [], prompt: "p", agentId: "gsfail", timeoutMs: 5_000,
+      settleGraceMs: 10, lingerMs: 10, spawn,
+    });
+    await sleep(5);
+    child.emitLine({ type: "agent_settled" });
+    // Deterministic: wait until the Nth get_state exists, then fail it.
+    const ask = async (n: number): Promise<void> => {
+      for (let i = 0; i < 100; i++) {
+        const s = child.responses().filter((o) => o.type === "get_state");
+        if (s.length >= n && s[n - 1] !== undefined) {
+          child.emitLine({ id: (s[n - 1] as { id?: unknown }).id, type: "error", error: "down" });
+          return;
+        }
+        await sleep(5);
+      }
+      throw new Error(`get_state #${n} never arrived`);
+    };
+    await ask(1);
+    await ask(2);
+    await ask(3);
+    await sleep(60);                       // retries have STOPPED: no 4th ask
+    const states = child.responses().filter((o) => o.type === "get_state");
+    expect(states).toHaveLength(3);
+    expect(child.stdinEnded).toBe(false);  // never drained fail-open
+    child.emitClose(0);
+    const r = await done;
+    expect(r.drainReason).toBe("drain-unconfirmed");
+  });
+
+  it("P0.4: compaction_end after a FAILED compaction re-arms the drain", async () => {
+    const child = new FakeChild();
+    const spawn = fakeSpawn(child);
+    const done = runRpcWorker({
+      argv: [], prompt: "p", agentId: "cfail", timeoutMs: 5_000,
+      settleGraceMs: 10, lingerMs: 10, spawn,
+    });
+    await sleep(5);
+    child.emitLine({ type: "agent_settled" });
+    // Cancel BEFORE the grace expires: compaction_start at ~5ms, grace 10ms.
+    child.emitLine({ type: "compaction_start", reason: "manual" });
+    await sleep(20);                       // grace would have fired here — it was canceled
+    expect(child.responses().filter((o) => o.type === "get_state")).toHaveLength(0);
+    child.emitLine({ type: "compaction_end", reason: "manual", error: "compaction failed" });
+    await sleep(30);
+    const states = child.responses().filter((o) => o.type === "get_state");
+    expect(states).toHaveLength(1);        // re-armed WITHOUT a new settle/agent_start
+    child.emitLine({ ...IDLE_STATE, id: states[0]?.id });
+    child.emitClose(0);
+    await done;
+  });
+
+  it("P0.5: the default environment is an allowlist, never process.env", () => {
+    process.env.QDS_RPC_TEST_SECRET = "s3cr3t-value";
+    try {
+      const env = rpcWorkerEnv({ QDS_CAPTURE_EXTRA: "v1" });
+      expect(env.PATH).toBeDefined();
+      expect(env.HOME).toBeDefined();
+      expect(env.QDS_RPC_TEST_SECRET).toBeUndefined();
+      expect(env.QDS_CAPTURE_EXTRA).toBe("v1");
+      const prevKey = process.env.OPENROUTER_API_KEY;
+      process.env.OPENROUTER_API_KEY = "sk-or-test";
+      const env2 = rpcWorkerEnv();
+      expect(env2.OPENROUTER_API_KEY).toBe("sk-or-test");
+      if (prevKey === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = prevKey;
+      }
+    } finally {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_RPC_TEST_SECRET;
+    }
+  });
+
+  it("P0.6: extraArgv is appended to the spawn argv (opt-in session file)", () => {
+    let seen: string[] | undefined;
+    const child = new FakeChild();
+    const spawn: RpcSpawnFn = (argv) => {
+      seen = argv;
+      return child as unknown as RpcChild;
+    };
+    const done = runRpcWorker({
+      argv: ["--mode", "rpc"], prompt: "p", agentId: "argv", timeoutMs: 5_000,
+      settleGraceMs: 10, lingerMs: 10, spawn,
+      extraArgv: ["--session", "/tmp/resume.json"],
+    });
+    child.emitClose(0);
+    return done.then((r) => {
+      expect(r.exitCode).toBe(0);
+      expect(seen).toEqual(["--mode", "rpc", "--session", "/tmp/resume.json"]);
+    });
+  });
+
+  it("P0.6: the result carries a drainReason on every path", async () => {
+    const child = new FakeChild();
+    const spawn = fakeSpawn(child);
+    const done = runRpcWorker({
+      argv: [], prompt: "p", agentId: "reason", timeoutMs: 5_000,
+      settleGraceMs: 10, lingerMs: 10, spawn,
+    });
+    await sleep(5);
+    child.emitLine({ type: "agent_settled" });
+    await sleep(30);
+    const states = child.responses().filter((o) => o.type === "get_state");
+    child.emitLine({ ...IDLE_STATE, id: states[0]?.id });
+    child.emitClose(0);
+    const r = await done;
+    expect(r.drainReason).toBe("get-state-idle");
+  });
+
+  it("P0.7: U+2028/U+2029 inside a JSON string never split the frame", async () => {
+    const child = new FakeChild();
+    const spawn = fakeSpawn(child);
+    const dir = mkdtempSync(join(tmpdir(), "rpc-ls-frame-"));
+    const captureFile = join(dir, "ls.ndjson");
+    const done = runRpcWorker({
+      argv: [], prompt: "p", agentId: "ls", timeoutMs: 5_000,
+      settleGraceMs: 10, lingerMs: 10, spawn,
+      captureFile,
+    });
+    await sleep(5);
+    // One LINE (single LF) whose string payload contains raw U+2028 and
+    // U+2029: Node's readline splits on both (they are legal inside JSON
+    // strings), so adopting it would cut this event into three bogus frames.
+    // Strict LF framing must deliver it as ONE intact captured line.
+    const LS = "";
+    const PS = "";
+    const payload = `{"note":"a${LS}b${PS}c","n":1}`;
+    expect(payload.includes(LS) && payload.includes(PS)).toBe(true);
+    child.emitEvent("data", Buffer.from(`${payload}\n`, "utf8"));
+    await sleep(20);
+    const captured = readFileSync(captureFile, "utf8");
+    expect(captured.trim()).toBe(payload);  // one intact line, separators intact
+    child.emitClose(0);
+    await done;
+    rmSync(dir, { recursive: true, force: true });
   });
 });

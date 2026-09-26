@@ -47,6 +47,8 @@ const RPC_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const DEFAULT_SETTLE_GRACE_MS = 5_000;
 /** How long to wait for pi to exit after stdin closes before SIGKILL. */
 const DEFAULT_LINGER_MS = 10_000;
+/** P0.2: consecutive get_state failures before retries stop (ceiling backstop). */
+const DRAIN_MAX_FAILURES = 3;
 
 /** Structural child-process surface runRpcWorker needs; satisfied by node's spawn. */
 export interface RpcChild {
@@ -60,6 +62,22 @@ export interface RpcChild {
 
 export type RpcSpawnFn = (argv: string[]) => RpcChild;
 
+/**
+ * Why the worker ended. Every path names itself so the caller's evidence says
+ * HOW a run finished, not just that it did: `get-state-idle` (the healthy
+ * drain), `prompt-error` (P0.1 — pi refused the prompt; settle-with-failure),
+ * `drain-unconfirmed` (P0.2 — get_state kept failing; the timeout ceiling is
+ * the backstop), `closed-before-drain` (pi exited on its own first),
+ * `timeout-ceiling` (SIGKILL at timeoutMs), `spawn-error`.
+ */
+export type DrainReason =
+  | "get-state-idle"
+  | "prompt-error"
+  | "drain-unconfirmed"
+  | "closed-before-drain"
+  | "timeout-ceiling"
+  | "spawn-error";
+
 export interface RpcRunResult {
   /** The worker's complete stdout stream, verbatim (NDJSON events). */
   stdout: string;
@@ -68,6 +86,48 @@ export interface RpcRunResult {
   durationMs: number;
   /** Spawn failure description (missing binary, EAGAIN...); null on a real run. */
   spawnError: string | null;
+  /** Why the run ended (P0.6) — see {@link DrainReason}. */
+  drainReason: DrainReason;
+}
+
+/**
+ * P0.5: the worker's environment is an ALLOWLIST, never `process.env` — a
+ * factory worker needs a path, a home and its own provider credential, and
+ * nothing else the host happens to carry (secrets included). `captureEnv`
+ * entries ride along: they are the delivery vehicle for the run's own
+ * credential material. `PI_*` passes with a prefix — pi's own configuration
+ * surface is namespaced by design.
+ */
+export function rpcWorkerEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const ALLOWED = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+  ];
+  const env: Record<string, string> = {};
+  for (const name of ALLOWED) {
+    const v = process.env[name];
+    if (v !== undefined) env[name] = v;
+  }
+  for (const [name, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (name.startsWith("PI_")) env[name] = v;
+  }
+  for (const [name, v] of Object.entries(extra)) env[name] = v;
+  return env;
 }
 
 export interface RunRpcWorkerOptions {
@@ -91,6 +151,12 @@ export interface RunRpcWorkerOptions {
    */
   captureFile?: string;
   captureEnv?: Record<string, string>;
+  /**
+   * P0.6: appended verbatim to the spawn argv — the opt-in session file for
+   * resume (`--session <path>`) and any other caller-owned pi flag. The
+   * transport does not interpret these.
+   */
+  extraArgv?: string[];
   /** Injectable for tests; defaults to node's spawn. */
   spawn?: RpcSpawnFn;
 }
@@ -107,18 +173,20 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
   const spawn: RpcSpawnFn =
     opts.spawn ??
     // `argv` is pi's flag list (the binary name is implied by the contract —
-    // the print path spawns "pi" the same way).
+    // the print path spawns "pi" the same way). The environment is the P0.5
+    // allowlist, never the host's process.env.
     ((argv) =>
       nodeSpawn("pi", argv, {
         stdio: ["pipe", "pipe", "pipe"],
-        env: process.env,
+        env: rpcWorkerEnv(opts.captureEnv),
       }));
+  const argv = opts.extraArgv === undefined ? opts.argv : [...opts.argv, ...opts.extraArgv];
   return new Promise((resolve) => {
     let lingerTimer: ReturnType<typeof setTimeout> | null = null;
     let hardTimer: ReturnType<typeof setTimeout> | null = null;
     let child: RpcChild;
     try {
-      child = spawn(opts.argv);
+      child = spawn(argv);
     } catch (err) {
       resolve({
         stdout: "",
@@ -126,6 +194,7 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
         exitCode: null,
         durationMs: Date.now() - started,
         spawnError: err instanceof Error ? err.message : String(err),
+        drainReason: "spawn-error",
       });
       return;
     }
@@ -137,12 +206,19 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
     let buffer = "";
     let stdinEnded = false;
     let done = false;
+    let timedOut = false;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
     let stateInFlight = false;
+    // P0.2: consecutive get_state failures. A failed state read is UNKNOWN,
+    // not idle — fail closed. After DRAIN_MAX_FAILURES the retries stop
+    // (a dead control channel would otherwise loop forever) and the
+    // timeoutMs SIGKILL is the documented backstop.
+    let drainFailures = 0;
+    let drainReason: DrainReason = "closed-before-drain";
     // Correlation id for the drain-confirming get_state — per worker, so two
     // workers sharing a stream (tests) cannot cross-answer.
     const drainId = `qds-drain:${opts.agentId}`;
-    const finish = (exitCode: number | null) => {
+    const finish = (exitCode: number | null, spawnError: string | null = null) => {
       if (done) return;
       done = true;
       if (drainTimer !== null) clearTimeout(drainTimer);
@@ -165,7 +241,8 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
         stderr,
         exitCode,
         durationMs: Date.now() - started,
-        spawnError: null,
+        spawnError,
+        drainReason: spawnError !== null ? "spawn-error" : timedOut ? "timeout-ceiling" : drainReason,
       });
     };
 
@@ -249,8 +326,32 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
           // next agent_settled re-arms the drain.
           armDrain();
         } else {
+          drainReason = "get-state-idle";
           shutdown();
         }
+        return;
+      }
+      // P0.2: an ERROR answer to the drain probe is UNKNOWN state, not idle —
+      // fail closed (never shutdown on it). Retry within a bound; past the
+      // bound the timeoutMs SIGKILL is the documented backstop.
+      if (e.type === "error" && e.id === drainId) {
+        stateInFlight = false;
+        drainFailures += 1;
+        if (drainFailures < DRAIN_MAX_FAILURES) {
+          armDrain();
+        } else {
+          drainReason = "drain-unconfirmed";
+          stderr += `worker-rpc: get_state failed ${drainFailures}x — drain retries exhausted; the timeout ceiling will end this worker\n`;
+        }
+        return;
+      }
+      // P0.1: pi refused the PROMPT — nothing will ever settle. Treat it as a
+      // settle-with-failure: end the run now (the error line itself is in the
+      // captured stdout stream and the caller classifies from it), instead of
+      // hanging to the ceiling.
+      if (e.type === "error" && e.id === `qds-prompt:${opts.agentId}`) {
+        drainReason = "prompt-error";
+        shutdown();
         return;
       }
       if (e.type === "agent_settled") {
@@ -259,6 +360,13 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
       }
       if (e.type === "agent_start" || e.type === "compaction_start" || e.type === "auto_retry_start") {
         cancelDrain();
+        return;
+      }
+      // P0.4: an end event after a FAILED compaction/retry leaves the session
+      // quiescent with nothing to re-arm the drain — arm it here. The get_state
+      // gate before shutdown makes this safe on every shape.
+      if (e.type === "compaction_end" || e.type === "auto_retry_end") {
+        armDrain();
         return;
       }
       if (e.type === "extension_ui_request") {
@@ -306,18 +414,16 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
       // Binding ceiling, identical to the print path: SIGKILL the worker at
       // the phase deadline. The truncated-stream classification (unpriced
       // turns) is handled downstream by harvestPiStream.
+      timedOut = true;
       child.kill("SIGKILL");
     }, opts.timeoutMs);
 
     child.on("error", (err: Error) => {
-      if (done) return;
-      resolve({
-        stdout,
-        stderr,
-        exitCode: null,
-        durationMs: Date.now() - started,
-        spawnError: err.message,
-      });
+      // P0.3: route through the SAME cleanup as close — timers cleared, the
+      // decoder ended, the capture flushed and closed — or the leaked
+      // hardTimer keeps the event loop alive to the ceiling and a later
+      // SIGKILL fires on a dead child.
+      finish(null, err.message);
     });
     child.on("close", (code: number | null) => {
       finish(code);
