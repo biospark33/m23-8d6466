@@ -593,7 +593,8 @@ export const DEFAULT_IMAGE_REF =
  * JSONL (entry wrapper + Usage.cost.total) — live rounds 19-21 had priced
  * ZERO of 81 seat turns against the spike's assumed flat shape. The
  * whole-walk literal's debt from that merge is settled in this adoption's
- * same commit (9f55e706…, declared on the branch).
+ * same commit (the whole-walk literal now 9f55e706…, its debt declared on
+ * the branch).
  */
 export const DEFAULT_IMAGE_BUILD_ID = "85d75d0ccbfb259a";
 
