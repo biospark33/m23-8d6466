@@ -51,7 +51,7 @@ import { assertDirMode0700, atomicReplaceFile, fsyncDir, rmQuiet } from "./fs-at
  * cannot be credentials, text can, so the two take different paths through
  * `assertNoSecret`. Collapsing them is how the scan gets skipped.
  */
-export type FieldKind = "string" | "int" | "ports" | "strings";
+export type FieldKind = "string" | "int" | "ports" | "strings" | "numbers";
 
 /**
  * How many elements a `strings` field may hold, and how long each may be.
@@ -151,7 +151,7 @@ export interface RunRecord {
  * `FieldKind`. Widening this is what lets `supersededReportIds` carry its
  * ordered rebind history instead of one displaced id.
  */
-export type ExtensionValue = string | number | string[];
+export type ExtensionValue = string | number | string[] | number[];
 
 export interface ExtensionEntry {
   schemaVersion: number;
@@ -362,12 +362,19 @@ export const EXTENSION_NAMESPACES: Readonly<
     },
   },
   /**
-   * S1 rig_swarm: per-seat provider keys. `seats` and `keyHashes` are index-
-   * aligned (seat[i]'s hash is keyHashes[i]). The single-key core fields
-   * (`keyHash`/`limitMicroUsd`) stay untouched: a swarm run carries NO core
-   * keyHash, and teardown branches on this namespace's presence.
+   * S1 rig_swarm: per-seat provider keys. `seats`, `keyHashes` and
+   * `limitMicroUsd` are index-aligned (seat[i]'s hash is keyHashes[i], its
+   * granted cap limitMicroUsd[i] — the cost ledger's INV-COST-5 attribution
+   * for a swarm token row resolves through this trio). The single-key core
+   * fields (`keyHash`/`limitMicroUsd`) stay untouched: a swarm run carries NO
+   * core keyHash, and teardown branches on this namespace's presence.
+   * `limitMicroUsd` is optional by era: records written before the stamp
+   * predate it, and the ledger refuses those rows rather than guessing a cap.
    */
-  swarmSeats: { schemaVersion: 1, fields: { seats: "strings", keyHashes: "strings" } },
+  swarmSeats: {
+    schemaVersion: 1,
+    fields: { seats: "strings", keyHashes: "strings", limitMicroUsd: "numbers" },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -790,6 +797,15 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
     }
     return;
   }
+  // S1: an index-aligned array of µ$ figures (swarmSeats.limitMicroUsd) —
+  // integers like `int`, plural like `ports`/`strings`, but WITHOUT ports'
+  // 1..65535 range: a 500_000 µ$ seat cap is a legal, ordinary value here.
+  if (kind === "numbers") {
+    if (!Array.isArray(value) || value.some((n) => typeof n !== "number" || !Number.isSafeInteger(n))) {
+      throw runRecordError("schema-rejected", `${key} must be an array of safe integers`);
+    }
+    return;
+  }
   // Also explicit. Making `ports` explicit while leaving `strings` as the new
   // trailing else would hand kind #5 the identical bug one branch later, and
   // silently — the `never` assignment below is what makes the compiler, not a
@@ -901,7 +917,10 @@ function shedStrings(key: string, value: unknown): unknown {
  * ever starts using read mode's RESULT has to deep-copy here first.
  */
 function detached(value: ExtensionValue): ExtensionValue {
-  return Array.isArray(value) ? [...value] : value;
+  // The cast is the union-widening talking: spreading `string[] | number[]`
+  // infers `(string | number)[]`, which is neither member. Runtime is the
+  // same shallow copy it always was.
+  return Array.isArray(value) ? ([...value] as ExtensionValue) : value;
 }
 
 /**

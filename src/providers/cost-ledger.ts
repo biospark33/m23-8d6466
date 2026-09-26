@@ -840,6 +840,15 @@ export interface RunCostRecord {
   limitMicroUsd?: number;
   createdAt: string;
   closedAt?: string;
+  /**
+   * S1 rig_swarm: the record's per-seat keys and their granted caps, carried
+   * verbatim from extensions.swarmSeats so a swarm token row can still satisfy
+   * INV-COST-5 — the row's key_hash/key_limit name the ONE seat credential
+   * that produced it, resolved by the ingest ctx's role. `limitMicroUsd` is
+   * absent on records written before the stamp; those rows refuse (below)
+   * rather than persist under a guessed cap.
+   */
+  swarmSeats?: { seats: string[]; keyHashes: string[]; limitMicroUsd?: number[] };
 }
 
 export interface CostLedgerDeps {
@@ -1486,13 +1495,27 @@ export class CostLedger {
     const record = this.readRunRecord(ctx.runId);
     // INV-COST-5: every token-kind row carries the DF2.3 key's hash and cap —
     // spend is attributable to the one credential that could have produced it.
-    const keyHash = record?.keyHash;
-    const keyLimit = record?.limitMicroUsd;
+    // S1 rig_swarm: a swarm record has NO core keyHash — the credential is the
+    // SEAT key, resolved by the line's role naming the seat (seats and
+    // keyHashes are index-aligned in extensions.swarmSeats; limitMicroUsd[i]
+    // is the granted cap the mint echoed). A role that names no seat, or a
+    // record written before the limit stamp, still refuses — fail closed
+    // rather than persist under a guessed credential.
+    let keyHash = record?.keyHash;
+    let keyLimit = record?.limitMicroUsd;
+    const swarmSeats = record?.swarmSeats;
+    if ((keyHash === undefined || keyLimit === undefined) && swarmSeats !== undefined) {
+      const idx = swarmSeats.seats.indexOf(ctx.role);
+      if (idx >= 0) {
+        keyHash = swarmSeats.keyHashes[idx];
+        keyLimit = swarmSeats.limitMicroUsd?.[idx];
+      }
+    }
     if (keyHash === undefined || keyLimit === undefined) {
       const missing = keyHash === undefined ? "keyHash" : "limitMicroUsd";
       throw new CostLedgerError(
         "key-hash-missing",
-        `run ${ctx.runId} has no resolvable ${missing} — token spend is unattributable, refusing to persist under a guessed key`,
+        `run ${ctx.runId} has no resolvable ${missing} for role '${ctx.role}' — token spend is unattributable, refusing to persist under a guessed key`,
         `re-run the ingest after mintRunKey records the run's key (see scripts/run-record.ts ${ctx.runId}), or pass the record through readRunRecord`,
       );
     }

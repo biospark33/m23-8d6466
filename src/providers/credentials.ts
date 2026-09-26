@@ -1305,7 +1305,19 @@ export async function mintSeatKeys(
           "the mint compensation revokes the over-granted key; fix the provider request, then re-run",
         );
       }
-      grantedOrder.push(usdToMicros(res.limitUsd));
+      // The GRANTED figure is what the cost ledger records as the seat's
+      // INV-COST-5 cap: a positive-USD echo that rounds to 0 µ$ would land a
+      // token row with a zero cap beside real spend — refuse and compensate
+      // like any other unusable echo.
+      const grantedMicroUsd = usdToMicros(res.limitUsd);
+      if (grantedMicroUsd <= 0) {
+        throw new CredentialLifecycleError(
+          "uncapped-key",
+          `provider granted ${res.limitUsd} USD for ${name}, which rounds to ${grantedMicroUsd} µ$ — not a usable cap`,
+          "the mint compensation revokes this key; inspect the provider console, then re-run",
+        );
+      }
+      grantedOrder.push(grantedMicroUsd);
     }
   } catch (e) {
     // F008: a createKey transport timeout whose POST landed server-side leaves
@@ -1332,7 +1344,9 @@ export async function mintSeatKeys(
     await afterMintFailure(deps, ctx, runId, e, hashOrder);
   }
   try {
-    deps.store.set(runId, { extensions: { swarmSeats: { seats: seatOrder, keyHashes: hashOrder } } });
+    deps.store.set(runId, {
+      extensions: { swarmSeats: { seats: seatOrder, keyHashes: hashOrder, limitMicroUsd: grantedOrder } },
+    });
   } catch (e) {
     // All N keys are live and UNRECORDED — the one post-acceptance failure the
     // loop's compensation cannot cover (an unrecorded live key is exactly the

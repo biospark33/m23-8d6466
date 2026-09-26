@@ -100,7 +100,7 @@ import { resolveRunsDir, RunRecordStore } from "../src/providers/index.ts";
  * not the provider layer, was where redaction stopped.
  */
 import { MAX_ECHO, boundedEcho, redactSecrets } from "../src/providers/step-log.ts";
-import type { BoxHoursCtx, CostWireEvent, IngestCtx, IngestResult } from "../src/providers/cost-ledger.ts";
+import type { BoxHoursCtx, CostWireEvent, IngestCtx, IngestResult, RunCostRecord } from "../src/providers/cost-ledger.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import {
@@ -1783,7 +1783,7 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
             runsDir: store.dir,
             readRunRecord: (id: string) => {
               try {
-                return store.get(id);
+                return costRecordProjection(store.get(id));
               } catch (e) {
                 if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
                 throw e;
@@ -2086,7 +2086,7 @@ async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): 
               runsDir: store.dir,
               readRunRecord: (id: string) => {
                 try {
-                  return store.get(id);
+                  return costRecordProjection(store.get(id));
                 } catch (e) {
                   if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
                   throw e;
@@ -3117,7 +3117,7 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
               ...costLedgerOpts(store.dir),
               readRunRecord: (id: string) => {
                 try {
-                  return store.get(id);
+                  return costRecordProjection(store.get(id));
                 } catch (e) {
                   if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
                   throw e;
@@ -5797,6 +5797,31 @@ async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): 
  * `finally`'s cleanup diagnostics. The caller re-raises it in the same place,
  * which keeps that ordering exactly.
  */
+/**
+ * The narrow projection every ledger `readRunRecord` seam hands over. ONE
+ * function, not four inline literals: the S1 swarm token ingest resolves
+ * INV-COST-5 attribution through `swarmSeats` (role → seat index), so every
+ * producer must forward the trio at the TOP LEVEL — a full `RunRecord` does
+ * not satisfy it (its seat trio lives under `extensions`), and a producer
+ * that forgets the field reads as "key-hash-missing" at ingest, stranding
+ * the very attribution the row exists to carry.
+ */
+function costRecordProjection(r: RunRecord): RunCostRecord {
+  const swarm = r.extensions?.swarmSeats;
+  return {
+    createdAt: r.createdAt,
+    closedAt: r.closedAt,
+    keyHash: r.keyHash,
+    limitMicroUsd: r.limitMicroUsd,
+    swarmSeats:
+      swarm && {
+        seats: swarm.seats as string[],
+        keyHashes: swarm.keyHashes as string[],
+        limitMicroUsd: swarm.limitMicroUsd as number[] | undefined,
+      },
+  };
+}
+
 async function runTeardown(
   ctx: VerbCtx,
   args: {
@@ -5856,13 +5881,7 @@ async function runTeardown(
         runsDir: store.dir,
         readRunRecord: (id: string) => {
           try {
-            const r = getRecord({ store }, id);
-            return {
-              createdAt: r.createdAt,
-              closedAt: r.closedAt,
-              keyHash: r.keyHash,
-              limitMicroUsd: r.limitMicroUsd,
-            };
+            return costRecordProjection(getRecord({ store }, id));
           } catch (e) {
             if ((e as HarvestError | null)?.code === "no-record") return undefined;
             throw e;
