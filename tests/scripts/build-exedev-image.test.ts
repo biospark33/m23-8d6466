@@ -1923,7 +1923,22 @@ describe("buildIdFileInputs", () => {
       // the tee and reaches journald only, which is why rounds 19-20 saw no
       // rows in engine.log). Computed on the FINAL branch tree, after every
       // other edit.
-      "21af92781b1030e06e3bce47e9a8a4637af8ba604f0bf2cced6fa22449435d2f",
+      //
+      // 9f55e706: the re-landing of a value a834d6e7 DELETED — the
+      // twenty-sixth-pin adoption's docs follow-up staged only driver.ts and
+      // silently reverted the walk entry the adoption had just committed
+      // (exactly the "landed WITHOUT touching this literal" failure the
+      // run-lock paragraph above records; #316's healing run stayed green
+      // because scripts/fleet.ts is not a SOURCE_PATHS member, hiding the gap
+      // until this offline receive). MEASURED TWICE on the post-#317 dev tree
+      // (39b66d84): no walked input differs from the tree 9f55e706 was first
+      // received on — the #315/#317 deltas (openrig-cost.ts, scripts/
+      // fleet.ts, test files) are either already in 9f55e706 or outside the
+      // walk — so the dropped value IS the committed tree's digest. First
+      // receive attempt read c51554d9 off a tree with unrelated working-tree
+      // dirt; the discipline paragraph above is why a second receive, on a
+      // verified-clean tree, is the binding one.
+      "9f55e70681b11a5b3b41765adcf77883af7aeb59b2c8c1b5d7c3a8346f2c203c",
     );
   });
 });
