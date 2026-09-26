@@ -86,8 +86,6 @@ test.todoIf(liveTodoOff())(
           repoUrl: ctx.repoUrl,
           commitSha: ctx.sha,
           manifestPath: MANIFEST_PATH,
-          taskId: "p0.8-worker-rpc-live",
-          objective: "prove the hardened worker-rpc transport end-to-end on a real box",
         }),
       );
       evidence.push({ phase: "ls-before", boxes: await ctx.driver.list() });
