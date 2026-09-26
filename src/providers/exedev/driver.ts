@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:05910e94fcf3892bbf7bd3a96a230964958cf4619f2b0366dc69ebbe4f15c56e";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ba58a0d92772fe4c15e0e4a0a2e6c5b2cd0663cda702732a9dfab11f90825a54";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,23 +573,24 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-second pin, 2026-09-26): buildId 32950e6ebfe97359,
- * adopted from gate B's own paste-ready output on publish run 36240485438,
- * baked at gitSha b0a53468 (the qitemId build — the src_sha the workflow's
- * SOURCE_PATHS resolution names for THAT build; driver.ts is excluded from
- * SOURCE_PATHS, so this adoption commit rebuilds at the same sha, byte
- * identical, and gate B must close GREEN on it).
+ * CURRENT PAIRING (twenty-third pin, 2026-09-26): buildId 5d317ee1b82aab04,
+ * adopted from gate B's own paste-ready output on publish run 36243944893,
+ * baked at gitSha 3857be8c (the queue-show-parse build — the src_sha the
+ * workflow's SOURCE_PATHS resolution names for THAT build; driver.ts is
+ * excluded from SOURCE_PATHS, so this adoption commit rebuilds at the same
+ * sha, byte identical, and gate B must close GREEN on it).
  *
- * Why BOTH values moved from the twenty-first pin (b11b380c… /
- * fb118a3f00443833): PR #305 edited src/phase-engine/phases/
- * openrig-swarm.ts (a walked COPY input) — the queue-create parser now
- * reads the daemon's real id field `qitemId` (queue-repository.js row
- * mapping; round 15's 6-minute swarm died on the `id`/`qid` miss). The
- * whole-walk literal moved WITH the merge itself (43c9600a, debt declared
+ * Why BOTH values moved from the twenty-second pin (05910e94… /
+ * 32950e6ebfe97359): PR #308 edited src/phase-engine/phases/
+ * openrig-swarm.ts (a walked COPY input) — parseQueueShow slices the JSON
+ * object out of possibly warning-prefixed stdout (the daemon emits pretty
+ * JSON; round 17's four exit-0 polls parsed null on a state field that was
+ * demonstrably there) and stale polls now trace their raw output. The
+ * whole-walk literal moved WITH the merge itself (7bd88619, debt declared
  * on the branch) — this adoption is image-only, the three driver/test
  * sites.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "32950e6ebfe97359";
+export const DEFAULT_IMAGE_BUILD_ID = "5d317ee1b82aab04";
 
 
 

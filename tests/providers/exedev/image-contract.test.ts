@@ -1394,8 +1394,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // buildId inputs are the ones the current pin was derived from" — which
     // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
     // SAME COMMIT; that pairing is the whole ritual.
-    expect(marker.buildId).toBe("32950e6ebfe97359"); // adopted by the twenty-second-pin ritual (gate B run 36240485438 at src_sha b0a53468 — the post-#305 qitemId build; buildId moved from the twenty-first pin because openrig-swarm.ts (walked) now parses the daemon's real queue-create id field, the ordinary both-move case); re-pinned here (the pairing the comment above demands)
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("32950e6ebfe97359");
+    expect(marker.buildId).toBe("5d317ee1b82aab04"); // adopted by the twenty-third-pin ritual (gate B run 36243944893 at src_sha 3857be8c — the post-#308 queue-show-parse build; buildId moved from the twenty-second pin because openrig-swarm.ts (walked) now parses the daemon's pretty-JSON queue show, the ordinary both-move case); re-pinned here (the pairing the comment above demands)
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("5d317ee1b82aab04");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 
