@@ -1923,7 +1923,17 @@ describe("buildIdFileInputs", () => {
       // the tee and reaches journald only, which is why rounds 19-20 saw no
       // rows in engine.log). Computed on the FINAL branch tree, after every
       // other edit.
-      "21af92781b1030e06e3bce47e9a8a4637af8ba604f0bf2cced6fa22449435d2f",
+      //
+      // 9f55e706: moved from 21af9278 by PR #315's merge (9b5b5559) — the
+      // seat-cost parser now reads pi 0.84.4's real session JSONL (entry
+      // wrapper + Usage.cost.total), a walked COPY input
+      // (src/phase-engine/phases/openrig-cost.ts). The walk literal was NOT
+      // re-pinned on the branch this time — declared debt, settled here in
+      // the twenty-sixth-pin adoption commit. Received from this test's own
+      // failing run on the post-merge dev tree; the adoption commit's
+      // driver.ts/test edits are outside the walk, so the value the suite
+      // received is the value the committed tree hashes.
+      "9f55e70681b11a5b3b41765adcf77883af7aeb59b2c8c1b5d7c3a8346f2c203c",
     );
   });
 });
