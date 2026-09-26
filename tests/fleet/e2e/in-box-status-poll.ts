@@ -149,14 +149,25 @@ export async function pollInBoxRun(
       }
       // The engine-log tail is the whole diagnosis for a Restart=no unit that
       // refused; guarded like the probe, and redacted before it reaches the
-      // error message AND the evidence file.
+      // error message AND the evidence file. The run JOURNAL is fetched too
+      // (round 16: the engine tail showed only settle lines while the phase's
+      // own error lived in the journal — same guard, and the journal path is
+      // the engine log's sibling, `<runId>.journal.jsonl` beside
+      // `<runId>.engine.log`).
       let tailText = "";
       try {
         tailText = (await driver.execTimed(vmName, ["sh", "-c", `tail -c 2000 ${shellQuote(opts.engineLogBoxPath)} 2>&1`], 30_000)).stdout;
       } catch (tailError) {
         tailText = `(engine-log read failed: ${tailError instanceof Error ? tailError.message : String(tailError)})`;
       }
-      opts.evidence.push({ phase: "unit-dead", attempt, activeState, result, mainStatus, markerKind, engineLogTail: redactSecrets(tailText).slice(-2000) });
+      let journalTail = "";
+      try {
+        const journalBoxPath = opts.engineLogBoxPath.replace(/\.engine\.log$/, ".journal.jsonl");
+        journalTail = (await driver.execTimed(vmName, ["sh", "-c", `tail -c 4000 ${shellQuote(journalBoxPath)} 2>&1`], 30_000)).stdout;
+      } catch (journalError) {
+        journalTail = `(journal read failed: ${journalError instanceof Error ? journalError.message : String(journalError)})`;
+      }
+      opts.evidence.push({ phase: "unit-dead", attempt, activeState, result, mainStatus, markerKind, engineLogTail: redactSecrets(tailText).slice(-2000), journalTail: redactSecrets(journalTail).slice(-4000) });
       throw new Error(
         `${runUnitName(opts.runId)} terminated after ${attempt} poll(s): ActiveState=${activeState} Result=${result} ExecMainStatus=${mainStatus} marker=${markerKind}. ` +
           `Engine log tail: ${redactSecrets(tailText).slice(-1200) || "(empty — the engine produced no log)"}`,
