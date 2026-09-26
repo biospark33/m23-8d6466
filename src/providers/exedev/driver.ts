@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ba58a0d92772fe4c15e0e4a0a2e6c5b2cd0663cda702732a9dfab11f90825a54";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ed1714e2d83548c992579b7414790d08efc1540d1af52982e14f2e0ebe8606d2";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,24 +573,28 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-third pin, 2026-09-26): buildId 5d317ee1b82aab04,
- * adopted from gate B's own paste-ready output on publish run 36243944893,
- * baked at gitSha 3857be8c (the queue-show-parse build — the src_sha the
- * workflow's SOURCE_PATHS resolution names for THAT build; driver.ts is
- * excluded from SOURCE_PATHS, so this adoption commit rebuilds at the same
- * sha, byte identical, and gate B must close GREEN on it).
+ * CURRENT PAIRING (twenty-fourth pin, 2026-09-26): buildId b8e0c53589faadec,
+ * adopted from gate B's own paste-ready output on publish run 36247656104,
+ * baked at gitSha 8251931e767b8f6295b89207f1cbadb85b951d38 (the trace-stderr
+ * build — the src_sha the workflow's SOURCE_PATHS resolution names for THAT
+ * build; NOTE: that resolution names the last commit TOUCHING walked inputs —
+ * the #310 branch tip — not the merge commit 1332e5e4 the push carried;
+ * driver.ts is excluded from SOURCE_PATHS, so this adoption commit rebuilds
+ * at the same resolved sha, byte identical, and gate B must close GREEN on
+ * it).
  *
- * Why BOTH values moved from the twenty-second pin (05910e94… /
- * 32950e6ebfe97359): PR #308 edited src/phase-engine/phases/
- * openrig-swarm.ts (a walked COPY input) — parseQueueShow slices the JSON
- * object out of possibly warning-prefixed stdout (the daemon emits pretty
- * JSON; round 17's four exit-0 polls parsed null on a state field that was
- * demonstrably there) and stale polls now trace their raw output. The
- * whole-walk literal moved WITH the merge itself (7bd88619, debt declared
+ * Why BOTH values moved from the twenty-third pin (ba58a0d9… /
+ * 5d317ee1b82aab04): PR #310 edited src/phase-engine/phases/
+ * openrig-swarm.ts (a walked COPY input) — the swarm_settled +
+ * swarm_seat_cost trace rows now MIRROR to stderr (durable in
+ * <runId>.engine.log; the tracer's rows live in the pre-settle JSONL stream
+ * that the engine's final journal doc replaces, which is why round 18's
+ * settled-ok journal held zero swarm rows), through a guarded helper. The
+ * whole-walk literal moved WITH the merge itself (c3e60c10, debt declared
  * on the branch) — this adoption is image-only, the three driver/test
  * sites.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "5d317ee1b82aab04";
+export const DEFAULT_IMAGE_BUILD_ID = "b8e0c53589faadec";
 
 
 
