@@ -228,4 +228,10 @@ test.todoIf(liveTodoOff())(
     }
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
+  // Budget audit, priced at DECLARED CEILINGS (tier2-dispatch-engine shape):
+  // dispatch 960 s + poll 600 s + teardown 300 s + cleanup slack ≈ 2 200 s.
+  // A bun test-timeout abort is the ONE path where the finally does not run,
+  // so this ceiling must outlive every inner one. WHOEVER RAISES AN INNER
+  // CEILING MUST RE-ADD IT HERE.
+  2_300_000,
 );
