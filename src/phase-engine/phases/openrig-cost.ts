@@ -24,57 +24,91 @@ export interface SeatParseResult {
   sessionName: string;
   usages: SeatUsage[];
   /**
-   * Lines consumed but NOT priced: unparsable, usage-less, or negative-cost
-   * (a negative cost is a provider artifact, never spend — skipped, not summed).
+   * Assistant turns consumed but NOT priced: torn/unparsable lines and
+   * assistant entries whose usage is missing or whose cost.total is missing,
+   * non-numeric, or negative (a negative cost is a provider artifact, never
+   * spend — skipped, not summed). Non-assistant entries (user, toolResult)
+   * and non-message entries (session header, model-change) are NOT turns:
+   * they make no provider call and never reach this count.
    */
   unpricedTurns: number;
 }
 
 /**
- * Parse one seat's session JSONL. Tolerant by design: pi writes role/user
- * lines and assistant lines without usage between priced ones, and a torn
- * tail line is a crash artifact, not a parse error — each unparsable or
- * usage-less line is skipped into `unpricedTurns`, never thrown.
+ * Parse one seat's session JSONL — pi 0.84.4's REAL shape, verified against
+ * upstream source after live rounds 19–21 priced ZERO rows out of 81 (the S0
+ * spike's assumed flat shape — `{role, model, usage: {cost: <number>}}` at
+ * the top level — matches nothing pi writes):
+ *
+ * - every message ships wrapped: `{type:"message", message, id, seq,
+ *   parentId, timestamp}` (pi-mono `packages/agent/src/harness/session/
+ *   types.ts`, MessageEntry); session headers, model-change entries and
+ *   anything else are non-message entries, not turns;
+ * - `Usage.cost` is an OBJECT `{input, output, cacheRead, cacheWrite,
+ *   total}` — the spend figure is `.total`, never a bare number (pi-mono
+ *   `packages/ai/src/types.ts`);
+ * - pi prices LOCALLY from its registry's model rates (`calculateCost` in
+ *   `packages/ai/src/api/openai-completions.ts`); the API's returned cost is
+ *   not consumed — so under AC5's empty in-box registry every turn prices
+ *   legitimately at `total: 0` (a priced zero, NOT unpriced);
+ * - `model` lives on the message, `timestamp` is entry-level Unix ms.
+ *
+ * Tolerant by design: a torn tail line is a crash artifact, not a parse
+ * error — it and any unpriceable assistant turn land in `unpricedTurns`,
+ * never thrown.
  */
 export function parseSeatSessionJsonl(text: string, seat: string, sessionName: string): SeatParseResult {
   const usages: SeatUsage[] = [];
   let unpricedTurns = 0;
+  const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
   for (const line of text.split("\n")) {
     if (line.trim().length === 0) continue; // a trailing newline is not a turn
-    let row: unknown;
+    let entry: unknown;
     try {
-      row = JSON.parse(line);
+      entry = JSON.parse(line);
     } catch {
       unpricedTurns += 1;
       continue;
     }
-    if (typeof row !== "object" || row === null) {
+    if (typeof entry !== "object" || entry === null) {
       unpricedTurns += 1;
       continue;
     }
-    const usage = (row as { usage?: unknown }).usage;
+    if ((entry as { type?: unknown }).type !== "message") continue; // header / model-change / custom: not a turn
+    const message = (entry as { message?: unknown }).message;
+    if (typeof message !== "object" || message === null) {
+      unpricedTurns += 1;
+      continue;
+    }
+    const r = message as Record<string, unknown>;
+    if (r.role !== "assistant") continue; // user/toolResult entries make no provider call
+    const usage = r.usage;
     if (typeof usage !== "object" || usage === null) {
       unpricedTurns += 1;
       continue;
     }
-    const cost = (usage as { cost?: unknown }).cost;
-    if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) {
+    const costObj = (usage as { cost?: unknown }).cost;
+    const total = typeof costObj === "object" && costObj !== null ? (costObj as { total?: unknown }).total : undefined;
+    if (typeof total !== "number" || !Number.isFinite(total) || total < 0) {
       unpricedTurns += 1;
       continue;
     }
     const u = usage as Record<string, unknown>;
-    const r = row as Record<string, unknown>;
-    const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    const ts = (entry as { timestamp?: unknown }).timestamp;
+    // A finite-but-out-of-range ms value (JSON can carry 1e30) makes
+    // toISOString() THROW RangeError — validate the constructed Date, never
+    // let a hostile timestamp crash the whole seat's parse.
+    const tsDate = typeof ts === "number" && Number.isFinite(ts) ? new Date(ts) : null;
     usages.push({
       seat,
       sessionName,
       model: typeof r.model === "string" ? r.model : null,
-      costMicroUsd: usdToMicros(cost),
+      costMicroUsd: usdToMicros(total),
       inputTokens: n(u.input),
       outputTokens: n(u.output),
       cacheReadTokens: n(u.cacheRead),
       cacheWriteTokens: n(u.cacheWrite),
-      timestamp: typeof r.timestamp === "string" ? r.timestamp : null,
+      timestamp: tsDate !== null && !Number.isNaN(tsDate.getTime()) ? tsDate.toISOString() : null,
     });
   }
   return { seat, sessionName, usages, unpricedTurns };
