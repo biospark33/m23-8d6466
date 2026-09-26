@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ed1714e2d83548c992579b7414790d08efc1540d1af52982e14f2e0ebe8606d2";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:6fd78181d8f30a73aa885962be84576f65f6e15d6178994e5394faea221b08fa";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,28 +573,30 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-fourth pin, 2026-09-26): buildId b8e0c53589faadec,
- * adopted from gate B's own paste-ready output on publish run 36247656104,
- * baked at gitSha 8251931e767b8f6295b89207f1cbadb85b951d38 (the trace-stderr
- * build — the src_sha the workflow's SOURCE_PATHS resolution names for THAT
- * build; NOTE: that resolution names the last commit TOUCHING walked inputs —
- * the #310 branch tip — not the merge commit 1332e5e4 the push carried;
- * driver.ts is excluded from SOURCE_PATHS, so this adoption commit rebuilds
- * at the same resolved sha, byte identical, and gate B must close GREEN on
- * it).
+ * CURRENT PAIRING (twenty-sixth pin, 2026-09-26): buildId 85d75d0ccbfb259a,
+ * adopted from gate B's own paste-ready output on publish run 36256066937,
+ * baked at gitSha 3475d77a (the seat-jsonl-shape build — the src_sha the
+ * workflow's SOURCE_PATHS resolution names for THAT build: the last commit
+ * TOUCHING walked inputs, PR #315's tip, not the merge commit 9b5b5559 the
+ * push carried; driver.ts is excluded from SOURCE_PATHS, so this adoption
+ * commit rebuilds at the same resolved sha, byte identical, and gate B must
+ * close GREEN on it).
  *
- * Why BOTH values moved from the twenty-third pin (ba58a0d9… /
- * 5d317ee1b82aab04): PR #310 edited src/phase-engine/phases/
- * openrig-swarm.ts (a walked COPY input) — the swarm_settled +
- * swarm_seat_cost trace rows now MIRROR to stderr (durable in
- * <runId>.engine.log; the tracer's rows live in the pre-settle JSONL stream
- * that the engine's final journal doc replaces, which is why round 18's
- * settled-ok journal held zero swarm rows), through a guarded helper. The
- * whole-walk literal moved WITH the merge itself (c3e60c10, debt declared
- * on the branch) — this adoption is image-only, the three driver/test
- * sites.
+ * Why BOTH values moved from the twenty-fourth pin (ed1714e2… /
+ * b8e0c53589faadec), with the twenty-fifth intervening UNADOPTED: #314
+ * re-pinned OPENRIG_TREE_SHA256 (543e846b… → 41e10c9a…) after upstream ^-
+ * range drift inside @openrig/cli@0.5.14 moved the /opt/openrig tree — run
+ * 36254811811 printed the twenty-fifth pair (b10112df… / da57d8c95005de7d)
+ * but it was superseded within the hour by #315's parser fix (a walked COPY
+ * input moved again) and never adopted; its pruned bytes were pulled by
+ * nobody. #315 rewrote the seat-cost parser to pi 0.84.4's real session
+ * JSONL (entry wrapper + Usage.cost.total) — live rounds 19-21 had priced
+ * ZERO of 81 seat turns against the spike's assumed flat shape. The
+ * whole-walk literal's debt from that merge is settled in this adoption's
+ * same commit (the whole-walk literal now 9f55e706…, its debt declared on
+ * the branch).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "b8e0c53589faadec";
+export const DEFAULT_IMAGE_BUILD_ID = "85d75d0ccbfb259a";
 
 
 
