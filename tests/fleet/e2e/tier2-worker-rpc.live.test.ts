@@ -103,11 +103,8 @@ test.todoIf(liveTodoOff())(
           "exedev",
           "--dir",
           recordsDir,
-          "--cap-micro-usd",
-          String(RUN_CAP_MICRO_USD),
           "--timeout-ms",
           "900000",
-          "--json",
         ],
         { cwd: hostRepo, timeoutMs: 960_000 },
       );
