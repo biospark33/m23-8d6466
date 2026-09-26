@@ -58,7 +58,7 @@ const summary = {
     drainReason: promptError.drainReason,
     exitCode: promptError.exitCode,
     durationMs: promptError.durationMs,
-    errorStreamed: promptError.stdout.includes('"type":"error"') || promptError.stdout.includes("error"),
+    errorStreamed: promptError.stdout.includes('"type":"error"'),
   },
 };
 writeFileSync("worker-rpc-summary.json", `${JSON.stringify(summary, null, 2)}\n`);
