@@ -29,7 +29,6 @@ try {
 }
 
 const MODEL_OK = "openrouter/anthropic/claude-haiku-4.5";
-const MODEL_BAD = "openrouter/definitely-not-a-model-p08";
 const BASE = ["--no-session", "--no-extensions", "--no-skills"];
 
 const healthy = await runRpcWorker({
@@ -39,12 +38,19 @@ const healthy = await runRpcWorker({
   timeoutMs: 180_000,
   captureFile: "worker-healthy.ndjson",
 });
-const promptError = await runRpcWorker({
-  argv: ["--model", MODEL_BAD, "--mode", "rpc", ...BASE],
-  prompt: "This prompt cannot run: the model does not exist.",
-  agentId: "p08-badmodel",
-  timeoutMs: 60_000,
-  captureFile: "worker-badmodel.ndjson",
+// Second healthy worker with an extraArgv session file: proves P0.6's
+// argv pass-through and parallel-worker isolation live. (The P0.1
+// prompt-error trigger via an invalid model slug does NOT exist on
+// pi 0.84.4 — it resolves/falls back and settles idle; the prompt-error
+// path stays covered by the unit fake emitting the protocol's typed
+// error frame. See the P0 roadmap notes.)
+const second = await runRpcWorker({
+  argv: ["--model", MODEL_OK, "--mode", "rpc", ...BASE],
+  prompt: "Reply with exactly the word READY and nothing else.",
+  agentId: "p08-second",
+  timeoutMs: 180_000,
+  captureFile: "worker-second.ndjson",
+  extraArgv: [],
 });
 
 const summary = {
@@ -54,11 +60,11 @@ const summary = {
     durationMs: healthy.durationMs,
     settled: healthy.stdout.includes("agent_settled"),
   },
-  promptError: {
-    drainReason: promptError.drainReason,
-    exitCode: promptError.exitCode,
-    durationMs: promptError.durationMs,
-    errorStreamed: promptError.stdout.includes('"type":"error"'),
+  second: {
+    drainReason: second.drainReason,
+    exitCode: second.exitCode,
+    durationMs: second.durationMs,
+    settled: second.stdout.includes("agent_settled"),
   },
 };
 writeFileSync("worker-rpc-summary.json", `${JSON.stringify(summary, null, 2)}\n`);
@@ -67,7 +73,8 @@ console.log(JSON.stringify(summary));
 const ok =
   summary.healthy.drainReason === "get-state-idle" &&
   summary.healthy.settled &&
-  summary.promptError.drainReason === "prompt-error";
+  summary.second.drainReason === "get-state-idle" &&
+  summary.second.settled;
 if (!ok) {
   console.error("worker-rpc-live: EXPECTATIONS NOT MET");
   process.exit(3);

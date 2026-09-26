@@ -158,7 +158,7 @@ test.todoIf(liveTodoOff())(
       expect(summaryText.exitCode).toBe(0);
       let summary: {
         healthy: { drainReason: string; exitCode: number | null; settled: boolean };
-        promptError: { drainReason: string; exitCode: number | null };
+        second: { drainReason: string; exitCode: number | null; settled: boolean };
       };
       try {
         summary = JSON.parse(summaryText.stdout);
@@ -166,11 +166,14 @@ test.todoIf(liveTodoOff())(
         throw new Error(`runner summary unparseable: ${(e as Error).message}: ${summaryText.stdout.slice(0, 400)}`);
       }
       evidence.push({ phase: "worker-summary", summary: redactSecrets(JSON.stringify(summary)) });
-      // P0.6/P0.1: the healthy turn drained via get_state; the impossible
-      // model settled the worker immediately as a prompt error.
+      // P0.6/P0.1: both real turns drained via the get_state gate, in
+      // parallel isolation. (The P0.1 prompt-error path is unit-proven only:
+      // pi 0.84.4 has no live trigger reachable from the transport — an
+      // invalid model slug resolves/falls back and settles idle.)
       expect(summary.healthy.drainReason).toBe("get-state-idle");
       expect(summary.healthy.settled).toBe(true);
-      expect(summary.promptError.drainReason).toBe("prompt-error");
+      expect(summary.second.drainReason).toBe("get-state-idle");
+      expect(summary.second.settled).toBe(true);
 
       // ── teardown: keys revoked, spend captured, record closed ──
       const teardown = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], {
