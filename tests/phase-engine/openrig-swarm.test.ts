@@ -59,7 +59,13 @@ function baseHandlers(): Record<string, (argv: string[]) => CmdResult> {
     // (queue-repository.js row mapping; round 15 died on the `id`/`qid`
     // miss). The fake mirrors the daemon, not our tolerance.
     "/api/queue/create": () => ({ exitCode: 0, stdout: JSON.stringify({ qitemId: "q-1" }), stderr: "" }),
-    "queue show q-1": () => ({ exitCode: 0, stdout: "id: q-1\nstate: done\nclosureReason: no-follow-on\n", stderr: "" }),
+    // `rig queue show` emits PRETTY JSON (probe box, 2026-09-26) — the fake
+    // mirrors that shape; the yaml-ish fallback keeps its own cases below.
+    "queue show q-1": () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ qitemId: "q-1", state: "done", closureReason: "no-follow-on" }, null, 2) + "\n",
+      stderr: "",
+    }),
     // One foreign rig's session in the list: teardown must leave it alone.
     "tmux list-sessions": () => ({
       exitCode: 0,
@@ -605,6 +611,13 @@ test("parseQueueShow reads the human output shape", () => {
   expect(parseQueueShow('{"id":"q-1","state":"done","closureReason":"no-follow-on"}'))
     .toEqual({ state: "done", closureReason: "no-follow-on" });
   expect(parseQueueShow("")).toEqual({ state: null, closureReason: null });
+  // Round 17: the real daemon emits PRETTY multi-line JSON — and the phase's
+  // polls can carry CLI warnings AROUND it, so the object is sliced from the
+  // first "{" to the last "}" instead of being required to BE the stdout.
+  expect(parseQueueShow('{\n  "qitemId": "qitem-1",\n  "state": "pending",\n  "sourceSession": "qds-engine"\n}'))
+    .toEqual({ state: "pending", closureReason: null });
+  expect(parseQueueShow('warning: tmux socket stale\n{\n  "state": "open"\n}\ntrailer line\n'))
+    .toEqual({ state: "open", closureReason: null });
 });
 
 test("lead seat in a SECOND pod: the objective queues to that pod's session, not pods[0]'s", async () => {

@@ -66,11 +66,17 @@ export interface OpenrigSwarmDeps {
 }
 
 export function parseQueueShow(stdout: string): { state: string | null; closureReason: string | null } {
-  // Tolerant dual shape: the CLI's human "key: value" lines OR a JSON object.
+  // Tolerant triple shape: a JSON object (the real daemon's output, pretty
+  // printed — possibly with CLI warnings AROUND it, so the object is sliced
+  // from the first "{" to the last "}" rather than required to BE the whole
+  // stdout; round 17: four exit-0 polls parsed null on a state field that was
+  // demonstrably there), then the CLI's human "key: value" lines.
   const trimmed = stdout.trim();
-  if (trimmed.startsWith("{")) {
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start !== -1 && end > start) {
     try {
-      const o = JSON.parse(trimmed) as Record<string, unknown>;
+      const o = JSON.parse(trimmed.slice(start, end + 1)) as Record<string, unknown>;
       return {
         state: typeof o.state === "string" ? o.state : null,
         closureReason: typeof o.closureReason === "string" ? o.closureReason : null,
@@ -451,9 +457,14 @@ export function openrigSwarmPhase(
         const { state, closureReason } = parseQueueShow(res.stdout);
         if (res.exitCode !== 0 || state === null) {
           stalePolls += 1;
+          // The raw output rides the trace: round 17 burned its whole window
+          // on exit-0 polls whose stdout was never recorded, so the cause
+          // (warning-prefixed JSON? empty? a different shape?) stayed
+          // unseeable until the next paid round.
+          trace("swarm_queue_show_stale", { qid, attempt: stalePolls, exitCode: res.exitCode, stdout: res.stdout.slice(0, 400), stderr: res.stderr.slice(0, 200) });
           if (stalePolls >= SWARM_MAX_STALE_POLLS) {
             throw new Error(
-              `rig queue show ${qid} unreadable ${stalePolls} polls in a row (last exit ${res.exitCode}) — aborting so teardown runs`,
+              `rig queue show ${qid} unreadable ${stalePolls} polls in a row (last exit ${res.exitCode}) — aborting so teardown runs. Last output: ${res.stdout.trim().slice(0, 300) || "(empty)"} / stderr: ${res.stderr.trim().slice(0, 200) || "(empty)"}`,
             );
           }
         } else {

@@ -1898,7 +1898,13 @@ describe("buildIdFileInputs", () => {
       // parser reads the daemon's real id field `qitemId` (queue-repository
       // row mapping; the phase died on `id`/`qid`, keys the daemon never
       // emits). Computed on the FINAL branch tree, after every other edit.
-      "43c9600a1d1be8fc051a787a7a79abba5836036f9ff2859c5914e3c91046f718",
+      //
+      // 7bd88619: moved from 43c9600a by the round-17 fix — parseQueueShow
+      // slices the JSON object out of possibly warning-prefixed stdout (the
+      // real daemon emits pretty JSON; four exit-0 polls parsed null on a
+      // state field that was demonstrably there), and stale polls now trace
+      // their raw output. Computed on the FINAL branch tree.
+      "7bd88619f77cb9f889fad82bbe663121f7829e6090843ebd92684b9cb8d2bb8b",
     );
   });
 });
