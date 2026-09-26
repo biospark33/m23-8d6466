@@ -1924,18 +1924,21 @@ describe("buildIdFileInputs", () => {
       // rows in engine.log). Computed on the FINAL branch tree, after every
       // other edit.
       //
-      // c51554d9: supersedes 9f55e706, which was received from this test's
-      // own failing run on the post-#315 dev tree but NEVER LANDED — the
-      // twenty-sixth-pin adoption's docs follow-up committed a driver.ts
-      // comment fix and silently dropped the walk file from its staging
+      // 9f55e706: the re-landing of a value a834d6e7 DELETED — the
+      // twenty-sixth-pin adoption's docs follow-up staged only driver.ts and
+      // silently reverted the walk entry the adoption had just committed
       // (exactly the "landed WITHOUT touching this literal" failure the
       // run-lock paragraph above records; #316's healing run stayed green
-      // because scripts/fleet.ts is not a SOURCE_PATHS member, hiding the
-      // gap until the next offline receive). Received from this test's own
-      // failing run on the post-#317 dev tree (39b66d84): the walked delta
-      // since 9f55e706's tree is src/phase-engine/phases/openrig-cost.ts
-      // (#315) — scripts/fleet.ts and every test file are outside the walk.
-      "c51554d955af74816f7f1b7b04022bebbe7d4f7fefe6de3a18aba6e2333809e6",
+      // because scripts/fleet.ts is not a SOURCE_PATHS member, hiding the gap
+      // until this offline receive). MEASURED TWICE on the post-#317 dev tree
+      // (39b66d84): no walked input differs from the tree 9f55e706 was first
+      // received on — the #315/#317 deltas (openrig-cost.ts, scripts/
+      // fleet.ts, test files) are either already in 9f55e706 or outside the
+      // walk — so the dropped value IS the committed tree's digest. First
+      // receive attempt read c51554d9 off a tree with unrelated working-tree
+      // dirt; the discipline paragraph above is why a second receive, on a
+      // verified-clean tree, is the binding one.
+      "9f55e70681b11a5b3b41765adcf77883af7aeb59b2c8c1b5d7c3a8346f2c203c",
     );
   });
 });
