@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "pipelineId": "p0-worker-rpc-live",
-  "runBudgetMs": 700000,
+  "runBudgetMs": 950000,
   "phases": [
     {
       "name": "p08-probe",
