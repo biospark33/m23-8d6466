@@ -85,6 +85,8 @@ test.todoIf(liveTodoOff())(
         JSON.stringify({
           repoUrl: ctx.repoUrl,
           commitSha: ctx.sha,
+          repoSlug: "quantum-digital-solutions/qds-factory",
+          issueId: "46",
           manifestPath: MANIFEST_PATH,
         }),
       );
