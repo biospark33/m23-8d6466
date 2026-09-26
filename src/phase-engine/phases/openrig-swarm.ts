@@ -527,7 +527,7 @@ export function openrigSwarmPhase(
             // the round-18 test read the journal and found ZERO swarm rows on a
             // fully-settled-ok run. stderr survives: it is the engine log
             // (`<runId>.engine.log`) that out-of-box evidence reads.
-            defaultStderrLog({
+            mirrorToEngineLog({
               type: "log",
               name: "swarm_seat_cost",
               payloadJson: JSON.stringify({ session, files: jsonls.length, totalMicroUsd: seatTotal, role: member.id }),
@@ -596,7 +596,7 @@ export function openrigSwarmPhase(
     trace("swarm_settled", settledPayload);
     // stderr mirror — same consolidation reasoning as swarm_seat_cost above:
     // the engine log outlives the JSONL stream the final doc replaces.
-    defaultStderrLog({
+    mirrorToEngineLog({
       type: "log",
       name: "swarm_settled",
       payloadJson: JSON.stringify(settledPayload),
@@ -607,6 +607,23 @@ export function openrigSwarmPhase(
 
 const defaultStderrLog = (line: Record<string, unknown>): void => {
   process.stderr.write(`${JSON.stringify(line)}\n`);
+};
+
+/**
+ * The stderr MIRROR for rows that must outlive the journal consolidation
+ * (swarm_settled, swarm_seat_cost). Guarded, unlike defaultStderrLog: a failed
+ * stderr write (closed pipe, full disk) must never replace the verdict it
+ * mirrors — the settled exitStatus is returned just after one call site, and
+ * the other sits inside the finally BEFORE teardown. Deliberately NOT deps.log:
+ * the durability contract is "lands in <runId>.engine.log", and deps.log may
+ * route somewhere that is consolidated away.
+ */
+const mirrorToEngineLog = (row: Record<string, unknown>): void => {
+  try {
+    defaultStderrLog(row);
+  } catch {
+    /* best-effort by contract — the trace row and the journal still hold it */
+  }
 };
 
 const defaultStderrMoney = (line: Record<string, unknown>): void => {

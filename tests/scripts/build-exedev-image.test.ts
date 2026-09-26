@@ -1911,7 +1911,12 @@ describe("buildIdFileInputs", () => {
       // pre-settle JSONL stream that the engine's final journal doc replaces,
       // which is why round 18's settled-ok journal held zero swarm rows).
       // Computed on the FINAL branch tree, after every other edit.
-      "6ad173cbc93d3bc3267e8ce4c9882758b1ff29fe704fe713cad7e9ac7cb4c82e",
+      //
+      // c3e60c10: moved from 6ad173cb by the review round's guard — the
+      // stderr mirror goes through a guarded helper (a failed stderr write
+      // must not replace the settled verdict, and the seat-cost mirror sits
+      // before teardown). Computed on the FINAL branch tree.
+      "c3e60c106da977d9afc53ca0b29ffd6710d9a82ccc19ebd0d776486ac77c9234",
     );
   });
 });
