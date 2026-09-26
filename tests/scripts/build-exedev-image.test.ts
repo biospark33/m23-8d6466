@@ -1893,7 +1893,12 @@ describe("buildIdFileInputs", () => {
       // adoption additionally requires curl exit 0 AND every expected seat
       // session live in tmux before the collision is treated as ours.
       // Computed on the FINAL branch tree, after every other edit.
-      "17246e1293c7e5647d68ca7d255797ab66ba7e3bd103a1c84ea7cee212f6959c",
+      //
+      // 43c9600a: moved from 17246e12 by the round-15 fix — the queue-create
+      // parser reads the daemon's real id field `qitemId` (queue-repository
+      // row mapping; the phase died on `id`/`qid`, keys the daemon never
+      // emits). Computed on the FINAL branch tree, after every other edit.
+      "43c9600a1d1be8fc051a787a7a79abba5836036f9ff2859c5914e3c91046f718",
     );
   });
 });

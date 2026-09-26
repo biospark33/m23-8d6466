@@ -427,8 +427,13 @@ export function openrigSwarmPhase(
         "-d", queuePayload,
       ]);
       try {
-        const o = JSON.parse(q.stdout) as { id?: unknown; qid?: unknown };
-        if (typeof o.id === "string") qid = o.id;
+        // The daemon's create returns the QITEM ROW: the id field is
+        // `qitemId` (queue-repository.js's row mapping) — round 15's phase
+        // died here reading `id`/`qid`, keys the daemon never emits. `id`
+        // stays tolerated for forward-compat only.
+        const o = JSON.parse(q.stdout) as { id?: unknown; qid?: unknown; qitemId?: unknown };
+        if (typeof o.qitemId === "string") qid = o.qitemId;
+        else if (typeof o.id === "string") qid = o.id;
         else if (typeof o.qid === "string") qid = o.qid;
       } catch {
         /* handled by the guard below */

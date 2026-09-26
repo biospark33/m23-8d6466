@@ -55,7 +55,10 @@ function baseHandlers(): Record<string, (argv: string[]) => CmdResult> {
   return {
     "healthz": () => ({ exitCode: 0, stdout: "OK", stderr: "" }),
     "/api/rigs/import": () => ({ exitCode: 0, stdout: JSON.stringify({ ok: true, name: "devrig" }), stderr: "" }),
-    "/api/queue/create": () => ({ exitCode: 0, stdout: JSON.stringify({ id: "q-1" }), stderr: "" }),
+    // The real daemon returns the QITEM ROW — the id field is `qitemId`
+    // (queue-repository.js row mapping; round 15 died on the `id`/`qid`
+    // miss). The fake mirrors the daemon, not our tolerance.
+    "/api/queue/create": () => ({ exitCode: 0, stdout: JSON.stringify({ qitemId: "q-1" }), stderr: "" }),
     "queue show q-1": () => ({ exitCode: 0, stdout: "id: q-1\nstate: done\nclosureReason: no-follow-on\n", stderr: "" }),
     // One foreign rig's session in the list: teardown must leave it alone.
     "tmux list-sessions": () => ({
