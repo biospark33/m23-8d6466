@@ -119,10 +119,14 @@ test.todoIf(liveTodoOff())(
         stderr: redactSecrets(dispatch.stderr),
       });
       expect(dispatch.exitCode).toBe(0);
-      const ids = recoverDispatchIds(dispatch.stdout, dispatch.stderr);
-      runId = ids.runId;
-      vmName = ids.vmName;
+      // The dispatch summary line IS the ack: parse it directly (the stderr
+      // regexes recoverDispatchIds greps only fire on failure envelopes).
+      const ackLine = dispatch.stdout.trim().split("\n").reverse().find((l) => l.startsWith("{"));
+      const ack = JSON.parse(ackLine ?? "{}") as { runId?: string; vmName?: string };
+      runId = ack.runId ?? "";
+      vmName = ack.vmName ?? "";
       expect(runId).not.toBe("");
+      expect(vmName).not.toBe("");
       evidence.push({ phase: "ack", runId, vmName });
       const home = await boxHome(ctx.driver, vmName);
 
