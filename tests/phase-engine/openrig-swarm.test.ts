@@ -165,7 +165,7 @@ async function runPhase(
 test("full lifecycle: seeds, boots, imports, queues, polls to done, tears down", async () => {
   const { run, calls } = fakeRunner(baseHandlers());
   // A concurrent run's session dir: per-seat teardown must leave it standing.
-  const { home, traces } = makeTempHome();
+  const { home, traces, money } = makeTempHome();
   fs.mkdirSync(path.join(home, ".openrig", "state", "pi", "other-run@devrig", "sessions"), { recursive: true });
   const value = await runPhase(SPEC, run, home);
   expect(value.exitStatus).toBe("success");
@@ -190,6 +190,15 @@ test("full lifecycle: seeds, boots, imports, queues, polls to done, tears down",
   expect(names).toContain("swarm_seat_up");
   expect(names).toContain("swarm_qitem_transition");
   expect(names).toContain("swarm_settled");
+  // Round 20's durability contract: the settled row MIRRORS through
+  // deps.emitMoneyLine (in-box = moneyLineTee = fd 2 = the engine log), because
+  // the tracer's rows are consolidated away when the final journal doc lands.
+  // Row shape is exactly what the live test greps the engine log for.
+  const mirrored = money.filter((m) => m.name === "swarm_settled");
+  expect(mirrored.length).toBeGreaterThanOrEqual(1);
+  const mirroredPayload = JSON.parse(mirrored[0]!.payloadJson as string) as { reason: string; qid: string; timeoutFallback: boolean };
+  expect(mirroredPayload.reason).toBe("lead-closed");
+  expect(mirroredPayload.timeoutFallback).toBe(false);
 });
 
 // R0.7 rounds 11–12 forensics: the daemon's FIRST-PASS validator (OpenRig

@@ -1916,7 +1916,14 @@ describe("buildIdFileInputs", () => {
       // stderr mirror goes through a guarded helper (a failed stderr write
       // must not replace the settled verdict, and the seat-cost mirror sits
       // before teardown). Computed on the FINAL branch tree.
-      "c3e60c106da977d9afc53ca0b29ffd6710d9a82ccc19ebd0d776486ac77c9234",
+      //
+      // 21af9278: moved from c3e60c10 by the round-20 durability fix — the
+      // mirror routes through deps.emitMoneyLine (in-box = moneyLineTee =
+      // writeAll(2) = the engine-log tee; plain process.stderr.write bypasses
+      // the tee and reaches journald only, which is why rounds 19-20 saw no
+      // rows in engine.log). Computed on the FINAL branch tree, after every
+      // other edit.
+      "21af92781b1030e06e3bce47e9a8a4637af8ba604f0bf2cced6fa22449435d2f",
     );
   });
 });
