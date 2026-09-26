@@ -956,7 +956,15 @@ ARG OPENRIG_VERSION=0.5.14
 # no external cross-check for an npm-resolved tree — the refusal output IS
 # the measurement, which is the TOFU doctrine for this gate: the hash is
 # what freezes npm's ^-range resolution inside the pin.
-ARG OPENRIG_TREE_SHA256=543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200
+# RE-PINNED 2026-09-26 from run 36251651875's refusal ("the /opt/openrig tree
+# hashes to 41e10c9a…"): the 543e846b resolution had held for every build from
+# 2026-09-24 through the 14:43Z healing run of the same day, then drifted
+# upstream inside @openrig/cli@0.5.14's ^-ranges — no CLI version change. The
+# drifted resolution's content snapshot (144 packages, darwin host, platform
+# optional-deps excluded) is recorded in the re-pin commit message; from this
+# re-pin forward the snapshot is part of the ritual, since a hash-only record
+# cannot say WHAT moved.
+ARG OPENRIG_TREE_SHA256=41e10c9a6a4b9c075b05c93b8b7f069ccc9d693c854de6230d9cf978254e77ac
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
 # (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
 # that layout assumption fail LOUDLY at the first real build rather than

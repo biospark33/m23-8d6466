@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "230ba65bc17e03225337cab0e5f4a8548a6a2d008c7f7ffa3fc6e89f78c7b37c",
+      "oci/exedev/Dockerfile": "7db06bb74f3c9ef03a0c5b4b1dd030ecf4c9ae8e796f00127b3fc4af04d83810",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -3626,7 +3626,9 @@ describe("checksumArgProblems", () => {
     // now MEASURED PINS, and the map below records which refusal measured
     // each: NODE_SHA256 from run 36031582204, cross-checked against
     // nodejs.org's SHASUMS256.txt line; OPENRIG_TREE_SHA256 from run
-    // 36032367862 once the node gate stopped dying first — no external
+    // 36032367862 once the node gate stopped dying first, RE-MEASURED
+    // 2026-09-26 from run 36251651875 after upstream ^-range drift inside
+    // 0.5.14 (543e846b → 41e10c9a, no CLI version change) — no external
     // cross-check exists for an npm-resolved tree, so the refusal output IS
     // the measurement, and the hash is what freezes ^-range resolution.
     const measuredDefault = (name: "NODE_SHA256" | "OPENRIG_TREE_SHA256"): string => {
@@ -3634,7 +3636,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "543e846b13f40aef1a263bbccf25727c9d3be6eb9c063f1610e18a7f344f2200";
+          return "41e10c9a6a4b9c075b05c93b8b7f069ccc9d693c854de6230d9cf978254e77ac";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
