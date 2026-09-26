@@ -1904,7 +1904,19 @@ describe("buildIdFileInputs", () => {
       // real daemon emits pretty JSON; four exit-0 polls parsed null on a
       // state field that was demonstrably there), and stale polls now trace
       // their raw output. Computed on the FINAL branch tree.
-      "7bd88619f77cb9f889fad82bbe663121f7829e6090843ebd92684b9cb8d2bb8b",
+      //
+      // 6ad173cb: moved from 7bd88619 by the round-18 fix — the phase mirrors
+      // its swarm_settled + swarm_seat_cost trace rows to STDERR (they are
+      // durable in <runId>.engine.log; the tracer's rows live in the
+      // pre-settle JSONL stream that the engine's final journal doc replaces,
+      // which is why round 18's settled-ok journal held zero swarm rows).
+      // Computed on the FINAL branch tree, after every other edit.
+      //
+      // c3e60c10: moved from 6ad173cb by the review round's guard — the
+      // stderr mirror goes through a guarded helper (a failed stderr write
+      // must not replace the settled verdict, and the seat-cost mirror sits
+      // before teardown). Computed on the FINAL branch tree.
+      "c3e60c106da977d9afc53ca0b29ffd6710d9a82ccc19ebd0d776486ac77c9234",
     );
   });
 });
