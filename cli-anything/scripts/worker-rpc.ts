@@ -116,6 +116,12 @@ export function rpcWorkerEnv(extra: Record<string, string> = {}): Record<string,
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
+    // Lowercase is the common shell convention on macOS/Linux — dropping it
+    // silently loses the worker's egress routing (P0.5 review).
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
   ];
   const env: Record<string, string> = {};
   for (const name of ALLOWED) {
@@ -301,6 +307,11 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
     const onLine = (line: string) => {
       const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
       captureWrite(`${trimmed}\n`);
+      // P0.2 review: once the shutdown decision has been made (or the run is
+      // done) LATE lines are captured but never dispatched — a pending
+      // get_state response arriving after a prompt-error shutdown must not
+      // overwrite the reason the run actually ended.
+      if (stdinEnded || done) return;
       if (!trimmed.startsWith("{")) return;
       let event: unknown;
       try {
@@ -317,6 +328,12 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
           typeof e.data === "object" && e.data !== null
             ? (e.data as Record<string, unknown>)
             : undefined;
+        // P0.2 review: a response with NO readable shape is UNKNOWN, not
+        // idle — re-arm (the bounded retries below handle a dead channel).
+        if (data === undefined) {
+          armDrain();
+          return;
+        }
         const busy =
           data?.isStreaming === true ||
           data?.isCompacting === true ||
@@ -360,6 +377,9 @@ export function runRpcWorker(opts: RunRpcWorkerOptions): Promise<RpcRunResult> {
       }
       if (e.type === "agent_start" || e.type === "compaction_start" || e.type === "auto_retry_start") {
         cancelDrain();
+        // A new agent turn is a NEW drain sequence: the failure bound from
+        // the previous quiescent window does not carry into it.
+        drainFailures = 0;
         return;
       }
       // P0.4: an end event after a FAILED compaction/retry leaves the session
