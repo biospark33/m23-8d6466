@@ -113,9 +113,9 @@ One issue each, with the context from `.superpowers/sdd/progress.md` + final rev
 
 ### Stage P0 — worker-rpc hardening (independent of OpenRig; blocks SC2)
 
-**Status:** ☐ NOT STARTED
-**Branch:** existing `feature/rpc-worker-handoff` (has the RPC transport; the four bugs below are its remaining work). Rebase onto current `dev` before starting.
-**Size:** ~50 LOC + 5 tests. **Research ref:** research doc §2.5 (bug list verbatim there).
+**Status:** ✓ COMPLETE 2026-09-26
+**Branch:** `feature/p0-worker-hardening` → PR #331 (the `feature/rpc-worker-handoff` branch was closed unmerged as PR #282 and deleted; the transport was recovered verbatim from its head `d0ba1bfa` — recovery and hardening as separate commits).
+**Size:** ~120 LOC + 14 tests. **Research ref:** research doc §2.5 (bug list verbatim there).
 
 Scope (all in `cli-anything/scripts/worker-rpc.ts` on that branch):
 
