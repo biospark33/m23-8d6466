@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "p0-worker-rpc-live",
+  "runBudgetMs": 700000,
+  "phases": [
+    {
+      "name": "p08-probe",
+      "kind": "code",
+      "description": "P0.8 filler so the manifest clears phaseCount >= 2.",
+      "command": ["true"],
+      "maxDurationMs": 10000,
+      "retries": 0
+    },
+    {
+      "name": "p08-worker-rpc",
+      "kind": "code",
+      "description": "P0.8 live round: exercise the hardened runRpcWorker against real pi --mode rpc - a healthy settle drained via get_state, and a prompt error settled immediately.",
+      "command": ["bun", "cli-anything/scripts/worker-rpc-live-runner.ts"],
+      "maxDurationMs": 300000,
+      "retries": 0
+    }
+  ]
+}
