@@ -100,11 +100,27 @@ afterEach(() => {
 let live: { traces: TraceRow[]; money: Record<string, unknown>[] } | null = null;
 
 function pricedLine(cost: number): string {
+  // pi 0.84.4's real shape: the message is wrapped in a typed entry and
+  // Usage.cost is an object whose spend figure is .total (see
+  // openrig-cost.test.ts's header for the upstream sources).
   return JSON.stringify({
-    role: "assistant",
-    model: "deepseek/deepseek-v3.2",
-    timestamp: "2026-09-23T18:00:00.000Z",
-    usage: { cost, input: 1000, output: 200, cacheRead: 50, cacheWrite: 10 },
+    type: "message",
+    id: `entry-${Math.random().toString(36).slice(2)}`,
+    seq: 0,
+    parentId: null,
+    timestamp: Date.parse("2026-09-23T18:00:00.000Z"),
+    message: {
+      role: "assistant",
+      model: "deepseek/deepseek-v3.2",
+      usage: {
+        input: 1000,
+        output: 200,
+        cacheRead: 50,
+        cacheWrite: 10,
+        totalTokens: 1260,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+      },
+    },
   });
 }
 
