@@ -343,6 +343,13 @@ test.todoIf(liveTodoOff())(
         })
         .filter((r): r is { name: string; payloadJson: string } => r?.name === "swarm_settled");
       evidence.push({ phase: "swarm-settled-rows", count: settledRows.length, payloads: settledRows.map((r) => r.payloadJson) });
+      if (settledRows.length === 0) {
+        // Diagnostic (round 19): zero rows on a settled-ok run means the
+        // mirror's output is not where this test reads — dump the engine-log
+        // tail so the next attempt sees what the log actually holds instead
+        // of burning another round.
+        evidence.push({ phase: "engine-log-tail", tail: redactSecrets(engineLogText.stdout).slice(-3000) });
+      }
       expect(settledRows.length).toBeGreaterThanOrEqual(1);
       const settledPayload = JSON.parse(settledRows.at(-1)!.payloadJson) as { reason: string; qid: string; timeoutFallback: boolean };
       // Fail-closed: only a lead-closed queue item is success. A
