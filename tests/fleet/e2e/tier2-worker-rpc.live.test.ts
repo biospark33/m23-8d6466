@@ -108,11 +108,13 @@ test.todoIf(liveTodoOff())(
       );
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
+      // FULL stderr, not a tail: a refusal envelope lost to truncation cost
+      // three diagnosis cycles on this round family (#320's finding 3).
       evidence.push({
         phase: "dispatch-verb",
         exitCode: dispatch.exitCode,
-        stdoutTail: redactSecrets(dispatch.stdout.trim().slice(-300)),
-        stderrTail: redactSecrets(dispatch.stderr.trim().slice(-400)),
+        stdoutTail: redactSecrets(dispatch.stdout.trim().slice(-600)),
+        stderr: redactSecrets(dispatch.stderr),
       });
       expect(dispatch.exitCode).toBe(0);
       const ids = recoverDispatchIds(dispatch.stdout, dispatch.stderr);
