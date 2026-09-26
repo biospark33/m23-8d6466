@@ -95,6 +95,10 @@ export function parseSeatSessionJsonl(text: string, seat: string, sessionName: s
     }
     const u = usage as Record<string, unknown>;
     const ts = (entry as { timestamp?: unknown }).timestamp;
+    // A finite-but-out-of-range ms value (JSON can carry 1e30) makes
+    // toISOString() THROW RangeError — validate the constructed Date, never
+    // let a hostile timestamp crash the whole seat's parse.
+    const tsDate = typeof ts === "number" && Number.isFinite(ts) ? new Date(ts) : null;
     usages.push({
       seat,
       sessionName,
@@ -104,7 +108,7 @@ export function parseSeatSessionJsonl(text: string, seat: string, sessionName: s
       outputTokens: n(u.output),
       cacheReadTokens: n(u.cacheRead),
       cacheWriteTokens: n(u.cacheWrite),
-      timestamp: typeof ts === "number" && Number.isFinite(ts) ? new Date(ts).toISOString() : null,
+      timestamp: tsDate !== null && !Number.isNaN(tsDate.getTime()) ? tsDate.toISOString() : null,
     });
   }
   return { seat, sessionName, usages, unpricedTurns };

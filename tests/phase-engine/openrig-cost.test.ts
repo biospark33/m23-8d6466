@@ -105,6 +105,19 @@ describe("parseSeatSessionJsonl (real pi 0.84.4 shape)", () => {
     expect(result.usages).toHaveLength(1);
     expect(result.usages.at(0)?.timestamp).toBeNull();
   });
+
+  test("an out-of-range FINITE ms timestamp prices fine, carries null, and does not throw", () => {
+    // new Date(1e30).toISOString() throws RangeError (Invalid time value) —
+    // box-supplied JSONL must not be able to crash the seat's parse.
+    const text = JSON.stringify({
+      type: "message", id: "e", seq: 1, parentId: null, timestamp: 1e30,
+      message: assistant(0.002),
+    });
+    const result = parseSeatSessionJsonl(text, "worker", "s");
+    expect(result.usages).toHaveLength(1);
+    expect(result.usages.at(0)?.costMicroUsd).toBe(2_000);
+    expect(result.usages.at(0)?.timestamp).toBeNull();
+  });
 });
 
 describe("emitSeatCosts", () => {
