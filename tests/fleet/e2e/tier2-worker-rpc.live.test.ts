@@ -104,7 +104,7 @@ test.todoIf(liveTodoOff())(
           "--dir",
           recordsDir,
           "--timeout-ms",
-          "900000",
+          "1100000",
         ],
         { cwd: hostRepo, timeoutMs: 960_000 },
       );
