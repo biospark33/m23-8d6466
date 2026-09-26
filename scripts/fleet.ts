@@ -5862,6 +5862,13 @@ async function runTeardown(
               closedAt: r.closedAt,
               keyHash: r.keyHash,
               limitMicroUsd: r.limitMicroUsd,
+              // S1: the seat trio the token ingest resolves INV-COST-5
+              // attribution through on a swarm record (role → seat index).
+              swarmSeats: r.extensions?.swarmSeats && {
+                seats: r.extensions.swarmSeats.seats as string[],
+                keyHashes: r.extensions.swarmSeats.keyHashes as string[],
+                limitMicroUsd: r.extensions.swarmSeats.limitMicroUsd as number[] | undefined,
+              },
             };
           } catch (e) {
             if ((e as HarvestError | null)?.code === "no-record") return undefined;

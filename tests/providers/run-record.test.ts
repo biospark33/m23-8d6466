@@ -213,6 +213,25 @@ describe("set (AC2)", () => {
     expect(withFanout.extensions?.pr?.prUrl).toBe("https://github.com/x/y/pull/1");
   });
 
+  test("extensions: swarmSeats limitMicroUsd is a numbers array — ints in, non-int refused, read-tolerant when absent", () => {
+    // S1: per-seat granted caps, index-aligned with seats/keyHashes — the
+    // cost ledger resolves a token row's INV-COST-5 attribution from it.
+    store.create("run-nums");
+    const withSeats = store.set("run-nums", {
+      extensions: { swarmSeats: { seats: ["lead", "worker"], keyHashes: ["h1", "h2"], limitMicroUsd: [500_000, 400_000] } },
+    });
+    expect(withSeats.extensions?.swarmSeats?.limitMicroUsd).toEqual([500_000, 400_000]);
+
+    // A float is not a µ$ figure — refuse at the write.
+    expect(() =>
+      store.set("run-nums", { extensions: { swarmSeats: { limitMicroUsd: [500.5] } } }),
+    ).toThrow(/limitMicroUsd/);
+
+    // A record written by a build without the stamp still reads (INV-4: one
+    // old record must never take down list()).
+    expect(() => store.get("run-nums")).not.toThrow();
+  });
+
   test("an unregistered field inside a registered namespace is rejected naming the key", () => {
     expect(() => store.set("run-c", { extensions: { pr: { prTitle: "x" } } })).toThrow(
       /unknown key: extensions\.pr\.prTitle/,

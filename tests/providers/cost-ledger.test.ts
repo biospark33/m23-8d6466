@@ -311,6 +311,66 @@ describe("DF2.8 attribution ctx (DoD: attribution context)", () => {
     expect(rowCount(db, "cost_events")).toBe(0);
     db.close();
   });
+
+  // ── S1 rig_swarm: a swarm record has NO core keyHash — its per-seat keys
+  // ride extensions.swarmSeats (seats/keyHashes/limitMicroUsd, index-aligned).
+  // INV-COST-5 still holds: the row carries the ONE credential that produced
+  // it, resolved by the line's role naming the seat.
+  const swarmSeatRecord = () => ({
+    keyHash: undefined,
+    limitMicroUsd: undefined,
+    createdAt: "2026-09-26T12:00:00.000Z",
+    swarmSeats: {
+      seats: ["lead", "worker"],
+      keyHashes: ["sha256:seat-lead", "sha256:seat-worker"],
+      limitMicroUsd: [500_000, 400_000],
+    },
+  });
+
+  test("swarm record: the seat's OWN hash + granted cap ride the row, resolved by ctx.role", () => {
+    seedRecord("run-sw1", swarmSeatRecord());
+    ledger.ingestCostEvent(mkEvent(), mkCtx({ role: "worker", runId: "run-sw1" }));
+    const db = rawDb();
+    const row = db.prepare("SELECT key_hash, key_limit_micro_usd, role FROM cost_events").get() as {
+      key_hash: string;
+      key_limit_micro_usd: number;
+      role: string;
+    };
+    db.close();
+    expect(row.key_hash).toBe("sha256:seat-worker");
+    expect(row.key_limit_micro_usd).toBe(400_000);
+    expect(row.role).toBe("worker");
+  });
+
+  test("swarm record: ctx.role naming no seat → key-hash-missing, zero rows (fail closed)", () => {
+    seedRecord("run-sw2", swarmSeatRecord());
+    let code = "";
+    try {
+      ledger.ingestCostEvent(mkEvent(), mkCtx({ role: "resident", runId: "run-sw2" }));
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+    }
+    expect(code).toBe("key-hash-missing");
+    const db = rawDb();
+    expect(rowCount(db, "cost_events")).toBe(0);
+    db.close();
+  });
+
+  test("swarm record minted before the limit stamp → refused, zero rows (no guessed cap)", () => {
+    const noLimits = swarmSeatRecord();
+    delete (noLimits.swarmSeats as Record<string, unknown>).limitMicroUsd;
+    seedRecord("run-sw3", noLimits);
+    let code = "";
+    try {
+      ledger.ingestCostEvent(mkEvent(), mkCtx({ role: "lead", runId: "run-sw3" }));
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+    }
+    expect(code).toBe("key-hash-missing");
+    const db = rawDb();
+    expect(rowCount(db, "cost_events")).toBe(0);
+    db.close();
+  });
 });
 
 // ─── AC4: malformed events are persisted unpriced, never dropped ────────────

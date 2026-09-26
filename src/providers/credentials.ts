@@ -1332,7 +1332,9 @@ export async function mintSeatKeys(
     await afterMintFailure(deps, ctx, runId, e, hashOrder);
   }
   try {
-    deps.store.set(runId, { extensions: { swarmSeats: { seats: seatOrder, keyHashes: hashOrder } } });
+    deps.store.set(runId, {
+      extensions: { swarmSeats: { seats: seatOrder, keyHashes: hashOrder, limitMicroUsd: grantedOrder } },
+    });
   } catch (e) {
     // All N keys are live and UNRECORDED — the one post-acceptance failure the
     // loop's compensation cannot cover (an unrecorded live key is exactly the

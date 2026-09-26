@@ -1732,6 +1732,9 @@ describe("S1 rig_swarm per-seat keys", () => {
     expect(rec.extensions?.swarmSeats?.seats).toEqual(["lead", "worker"]);
     // Index-aligned: seats[i]'s hash is keyHashes[i] (the namespace contract).
     expect(rec.extensions?.swarmSeats?.keyHashes).toEqual(Object.values(hashes));
+    // And seats[i]'s GRANTED CAP is limitMicroUsd[i] — the cost ledger resolves
+    // a swarm token row's INV-COST-5 attribution from this trio.
+    expect(rec.extensions?.swarmSeats?.limitMicroUsd).toEqual(PLAN.map((p) => p.limitMicroUsd));
   });
 
   test("mintSeatKeys refuses when seat limits sum above the run cap", async () => {
