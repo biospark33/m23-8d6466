@@ -178,6 +178,21 @@ export function openrigSwarmPhase(
         /* a throwing log sink must not replace the result it reports */
       }
     };
+    // The DURABLE sink for rows that must outlive the journal consolidation
+    // (swarm_settled, swarm_seat_cost): in-box the runner injects
+    // emitMoneyLine = moneyLineTee() = writeAll(2, …) — fd 2 IS the engine-log
+    // tee, so the row lands in <runId>.engine.log. A plain process.stderr.write
+    // bypasses that tee and reaches journald only (DF2.12's own note at the tee;
+    // rounds 19–20 proved it for these mirrors: settled-ok runs, zero visible
+    // rows). Host/tests fall back to defaultStderrLog. Guarded like logLine: a
+    // throwing sink must not replace the settled verdict or skip teardown.
+    const mirrorToEngineLog = (row: Record<string, unknown>): void => {
+      try {
+        (deps.emitMoneyLine ?? defaultStderrLog)(row);
+      } catch {
+        /* best-effort by contract — the trace row still carries it */
+      }
+    };
 
     const rig = spec.rigSpec;
     if (rig === undefined || !spec.leadSeat || !spec.objective || rig.pods.length === 0) {
@@ -607,23 +622,6 @@ export function openrigSwarmPhase(
 
 const defaultStderrLog = (line: Record<string, unknown>): void => {
   process.stderr.write(`${JSON.stringify(line)}\n`);
-};
-
-/**
- * The stderr MIRROR for rows that must outlive the journal consolidation
- * (swarm_settled, swarm_seat_cost). Guarded, unlike defaultStderrLog: a failed
- * stderr write (closed pipe, full disk) must never replace the verdict it
- * mirrors — the settled exitStatus is returned just after one call site, and
- * the other sits inside the finally BEFORE teardown. Deliberately NOT deps.log:
- * the durability contract is "lands in <runId>.engine.log", and deps.log may
- * route somewhere that is consolidated away.
- */
-const mirrorToEngineLog = (row: Record<string, unknown>): void => {
-  try {
-    defaultStderrLog(row);
-  } catch {
-    /* best-effort by contract — the trace row and the journal still hold it */
-  }
 };
 
 const defaultStderrMoney = (line: Record<string, unknown>): void => {
