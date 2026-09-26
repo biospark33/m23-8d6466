@@ -963,6 +963,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   let dir: string;
   let store: RunRecordStore;
   let driver: FakeDriver;
+  let swarmKeyApi: FakeKeyApi;
   // DF3.2 probes reach the fanout/rank wiring, whose stores resolve
   // cwd-relative defaults — redirected into the case tmpdir like cli.test.ts
   // does for QDS_RUNS_DIR, so a probe can never litter the repo's .sandbox.
@@ -1766,6 +1767,35 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         deps: () => ({ driver, store: lockWedgingStore() }),
         stdout: "torn down: ",
         stderr: "lock-release-failed",
+      },
+      // S1 rig_swarm: a swarm record carries NO core keyHash — its revocable
+      // keys live in extensions.swarmSeats.keyHashes. The wiring at
+      // runTeardown built the key client only for `rec.keyHash !== undefined`,
+      // so a swarm teardown hit the spend guard's "deps.keyApi is absent"
+      // refusal and aborted partway: per-seat keys LEFT LIVE on the provider
+      // and the lock deliberately held (exit 6, needs-an-operator) — live
+      // rounds 21-22 stranded real, spending keys on exactly this gap. The
+      // fix wires the client for the swarm namespace too; the fake proves the
+      // DELETEs actually fire per seat hash and the run closes 0.
+      {
+        argv: ["teardown", "teardown-swarm"],
+        code: 0,
+        provision: "teardown-swarm",
+        before: async () => {
+          swarmKeyApi = new FakeKeyApi();
+          const lead = await swarmKeyApi.createKey("sbx-teardown-swarm-lead", 0.01);
+          const worker = await swarmKeyApi.createKey("sbx-teardown-swarm-worker", 0.01);
+          store.set("teardown-swarm", {
+            extensions: { swarmSeats: { seats: ["lead", "worker"], keyHashes: [lead.hash, worker.hash] } },
+          } as never);
+        },
+        deps: () => ({ driver, store, keyApi: swarmKeyApi as never }),
+        stdout: "torn down: teardown-swarm",
+        after: () => {
+          const deletes = swarmKeyApi.requests.filter((r) => r.method === "DELETE");
+          expect(deletes.length).toBe(2);
+          expect(store.get("teardown-swarm").closedAt ?? "").not.toBe("");
+        },
       },
       {
         argv: ["teardown", "teardown-locked"],

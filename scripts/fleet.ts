@@ -1763,7 +1763,12 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
       // Fail-closed BEFORE any box touch on a keyed record: the chain's
       // teardown revokes through this client. Unkeyed: no client is built —
       // an unused one throws on first use rather than minting silently.
-      const keyApi = deps?.keyApi ?? (rec.keyHash !== undefined ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
+      // Keyed includes the S1 swarm namespace: a swarm record's revocable
+      // keys ride extensions.swarmSeats (no core keyHash), and a chain
+      // teardown that refuses at the spend guard strands those keys live.
+      const swarmKeyCount = (rec.extensions?.swarmSeats?.keyHashes as string[] | undefined)?.length ?? 0;
+      const keyApi =
+        deps?.keyApi ?? (rec.keyHash !== undefined || swarmKeyCount > 0 ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
       // The write-path ledger teardown's box-hours ingest settles into — the
       // same constructor shape dispatch/teardown build beside the records dir,
       // WITH dispatch's readRunRecord seam (makeLedgerFactory's wiring): the
@@ -2067,7 +2072,13 @@ async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): 
       // drop policy — per candidate, closed by the sweep after each chain.
       buildChainCtx: (rec) => {
         const runId = rec.runId;
-        const keyApi = deps?.keyApi ?? (rec.keyHash !== undefined ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
+        // Same swarm-namespace wiring as runTeardown: a swarm record's keys
+        // live in extensions.swarmSeats, not keyHash — without this the
+        // chain-driven teardown refuses at the spend guard and strands the
+        // seat keys live.
+        const recKeys = (rec.extensions?.swarmSeats?.keyHashes as string[] | undefined)?.length ?? 0;
+        const keyApi =
+          deps?.keyApi ?? (rec.keyHash !== undefined || recKeys > 0 ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
         const costLedger = asUsage(
           () =>
             new CostLedger({
@@ -5804,7 +5815,17 @@ async function runTeardown(
   // this teardown provably cannot revoke is not a success, and it cannot be
   // reported until the box half has actually run.
   let keyUnattributable = false;
-  if (rec.keyHash !== undefined) {
+  // S1 rig_swarm: a swarm record carries NO core keyHash — its revocable keys
+  // live in extensions.swarmSeats.keyHashes (run-record.ts's registry). The
+  // wiring used to build the client only for `rec.keyHash !== undefined`, so a
+  // swarm teardown hit the spend guard's "deps.keyApi is absent" refusal and
+  // aborted partway: per-seat keys LEFT LIVE on the provider, lock deliberately
+  // held, exit 6 (live rounds 21-22 stranded real, spending keys on exactly
+  // this gap — qds-20260926-35a2e4 / -3fac7f). The namespace's presence is the
+  // same single-read staleness discipline the teardown's own swarmed branch
+  // applies (teardown.ts:995).
+  const swarmSeatHashCount = (rec.extensions?.swarmSeats?.keyHashes as string[] | undefined)?.length ?? 0;
+  if (rec.keyHash !== undefined || swarmSeatHashCount > 0) {
     tdeps.keyApi = deps?.keyApi ?? asUsage(() => openRouterKeyApi());
   } else if (rec.vmName !== undefined && rec.closedAt === undefined) {
     // Absence of `keyHash` is NOT proof that no key exists. `dispatch`
