@@ -102,6 +102,7 @@ One issue each, with the context from `.superpowers/sdd/progress.md` + final rev
 - [x] **I2** (#323) `mintRunKey` symmetric guard: a record carrying BOTH `keyHash` and `extensions.swarmSeats` is unreachable today but unguarded — `swarmed && !keyed`-style hardening in teardown gates + mint-side refusal (Task 6 review, shape-D).
 - [x] **I3** (#324) `openrig-swarm.ts` costing reads only the LARGEST session JSONL per seat — multi-session seats undercount; `reportSpendDivergence` is the current safety net; sum all matched files instead. *(Updated 2026-09-26: with #315's parser the seats price real turns — the undercount now moves real money figures.)*
 - [x] **I4** (#325) PLAN REVISION (before S2): a `rig_swarm` manifest without `testCommand` + timeout-fallback records `success` on an unverified swarm. Either require `testCommand` on `rig_swarm` in the schema, or warn/refuse at dispatch. Needs an explicit operator decision (schema change vs dispatch warning) — do not just pick one.
+  - RESOLVED 2026-09-27: operator chose **schema-required `testCommand`**. Record: the "records success" half was already fail-closed — timeout-fallback settles `fail` since `f9221be6` (PR #284 BMad round); the schema change makes the gate-less manifest *unrepresentable* at authoring instead. PR #346 (commit `25097c99`, RED-first: `rig_swarm without testCommand is refused at load` watched failing → one required-set entry + 3 schema-path fixture updates).
 - [x] **I5** (#326) Flaky wall-clock test assertions (`toBeGreaterThanOrEqual(90)` class) — two load flakes observed 2026-09-23/24; isolate and deflake or mark tier-gated.
 - [x] **I6** (#327) Duplicate-member-id diagnostics (schema refuses via the indirect seatBudgets message; dedicated duplicate-id issue would name the real problem).
 - [x] **I7** (#328) `emitSeatCosts` return value discarded by the caller (doc/usage mismatch — log the seat total or drop the contract).
@@ -240,7 +241,7 @@ Owner stages are named in R1; this section is the index. NOTHING here blocks a s
 | I1 | `usdToMicros` overflow guard | R1 → any credentials toucher |
 | I2 | shape-D mint/teardown hardening | R1 → next teardown toucher |
 | I3 | multi-JSONL seat costing | R1 → S2 |
-| I4 | gate-less `rig_swarm` timeout-fallback records success — plan revision (operator decision) | R1 → before S2 |
+| I4 | gate-less `rig_swarm` timeout-fallback records success — RESOLVED 2026-09-27: schema-required `testCommand` (operator decision, PR #346) | done |
 | I5 | flaky wall-clock assertions | R1 |
 | I6–I8 | diagnostics/harness nits | R1 |
 | — | daemon-start idempotency confirmation | R0 live round |

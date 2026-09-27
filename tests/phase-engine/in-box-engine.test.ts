@@ -959,6 +959,7 @@ describe("C19 — PhaseKind is exactly the kinds the closed schema admits", () =
         objective: "o",
         leadSeat: "lead",
         seatBudgets: { lead: 1000 },
+        testCommand: ["true"], // I4/#325: required on rig_swarm now
       },
     };
     for (const kind of executing) {

@@ -216,7 +216,11 @@ export interface PhaseSpec {
   retries: number;
   /** Required iff `kind === "code"`; the only manifest-borne argv source. */
   command?: string[];
-  /** Optional on any kind; absent means `testsExecuted: false`, never a zero. */
+  /**
+   * Required iff `kind === "rig_swarm"` (the settled-swarm gate — I4/#325);
+   * optional on `kind === "code"`; absent there means `testsExecuted: false`,
+   * never a zero.
+   */
   testCommand?: string[];
   /** Required iff `kind === "dispatch_task"`; path to DF1.5 roster file. */
   roster?: string;

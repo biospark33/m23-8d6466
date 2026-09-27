@@ -989,6 +989,8 @@ describe("loadManifest — rig_swarm (S1)", () => {
     objective: "Add a hello() function plus a test; delegate the test to worker; commit on the checkout branch.",
     leadSeat: "lead",
     seatBudgets: { lead: 250_000_000, worker: 250_000_000 },
+    // I4/#325: the settled-swarm gate is part of the minimal VALID phase now.
+    testCommand: ["bun", "test"],
   };
 
   // 1. valid rig_swarm phase loads
@@ -997,8 +999,10 @@ describe("loadManifest — rig_swarm (S1)", () => {
     expect(() => loadManifestForTest(m)).not.toThrow();
   });
 
-  // 2. each required field refused when missing
-  test.each(["rigSpec", "objective", "leadSeat", "seatBudgets"] as const)(
+  // 2. each required field refused when missing (testCommand = I4/#325:
+  // operator decision 2026-09-27 — a gate-less rig_swarm must be
+  // unrepresentable at authoring, not merely fail-closed on timeout)
+  test.each(["rigSpec", "objective", "leadSeat", "seatBudgets", "testCommand"] as const)(
     "rig_swarm without %s is refused at load",
     (field) => {
       const phase = { ...RIG_SWARM_PHASE } as Record<string, unknown>;
@@ -1015,7 +1019,8 @@ describe("loadManifest — rig_swarm (S1)", () => {
       .toThrow(/command is forbidden when kind is 'rig_swarm'/);
   });
 
-  // 4. testCommand is now legal on rig_swarm (today code-only)
+  // 4. testCommand argv is accepted on rig_swarm (required — pinned by the
+  // required-set loop above; this also pins the SHAPE: a gate argv, not a string)
   test("rig_swarm may declare testCommand", () => {
     const phase = { ...RIG_SWARM_PHASE, testCommand: ["bun", "test"] };
     expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] }))).not.toThrow();
