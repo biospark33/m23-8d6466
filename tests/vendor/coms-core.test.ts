@@ -26,6 +26,7 @@ import {
 	nowIso,
 	parseFrontmatter,
 	readFrontmatterFromArgv,
+	resolveDesiredAgentName,
 	sanitizePeerText,
 	secretEqual,
 	ulid,
@@ -339,5 +340,55 @@ describe("findSystemPromptPath / readFrontmatterFromArgv", () => {
 		expect(readFrontmatterFromArgv(argv)).toEqual({ name: "x", description: undefined, color: undefined });
 		fs.rmSync(gone);
 		expect(readFrontmatterFromArgv(argv)).toEqual({});
+	});
+});
+
+describe("resolveDesiredAgentName (S2.1 — rig seat identity fallback)", () => {
+	// S2.1: the rig_swarm runner strips --cname and the PI_COMS_* env, so a
+	// seat launched inside a rig resolved its coms identity to a random
+	// default and pi-to-pi peer chat had no stable name to address. The
+	// fallback chain is flags > frontmatter > the pi session name (with `@`
+	// mapped to `_`, the runner's `<pod>-<member>@<rig>` session naming) and
+	// null when nothing explicit resolves (the caller applies its random
+	// default, unchanged behavior for standalone pi sessions).
+
+	test("the --cname flag wins over every other source", () => {
+		expect(resolveDesiredAgentName("flag-name", "fm-name", "pod-lead@rig")).toBe("flag-name");
+	});
+
+	test("frontmatter wins over the session-name fallback", () => {
+		expect(resolveDesiredAgentName(undefined, "fm-name", "pod-lead@rig")).toBe("fm-name");
+	});
+
+	test("the session name is used when no flag and no frontmatter name exist", () => {
+		expect(resolveDesiredAgentName(undefined, undefined, "pod1-lead@myrig")).toBe("pod1-lead_myrig");
+	});
+
+	test("null when nothing resolves — the caller keeps its random default", () => {
+		expect(resolveDesiredAgentName(undefined, undefined, undefined)).toBeNull();
+	});
+
+	test("empty strings are treated as absent at every level", () => {
+		expect(resolveDesiredAgentName("", "", "pod-lead@rig")).toBe("pod-lead_rig");
+		expect(resolveDesiredAgentName("", "", "")).toBeNull();
+	});
+
+	test("@ maps to _ everywhere in the session name, not just the first occurrence", () => {
+		expect(resolveDesiredAgentName(undefined, undefined, "a@b@c")).toBe("a_b_c");
+	});
+
+	test("a session name isSafePathComponent refuses degrades to null, never a throw", () => {
+		expect(resolveDesiredAgentName(undefined, undefined, "../escape")).toBeNull();
+		expect(resolveDesiredAgentName(undefined, undefined, "a/b")).toBeNull();
+		expect(resolveDesiredAgentName(undefined, undefined, "a b")).toBeNull();
+	});
+
+	test("a non-string session name (API drift guard) degrades to null", () => {
+		expect(resolveDesiredAgentName(undefined, undefined, 42 as unknown as string)).toBeNull();
+		expect(resolveDesiredAgentName(undefined, undefined, {} as unknown as string)).toBeNull();
+	});
+
+	test("whitespace around the session name is trimmed before the safety check", () => {
+		expect(resolveDesiredAgentName(undefined, undefined, "  pod-lead@rig  ")).toBe("pod-lead_rig");
 	});
 });
