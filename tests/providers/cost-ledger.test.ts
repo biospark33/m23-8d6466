@@ -358,7 +358,7 @@ describe("DF2.8 attribution ctx (DoD: attribution context)", () => {
 
   test("swarm record minted before the limit stamp → refused, zero rows (no guessed cap)", () => {
     const noLimits = swarmSeatRecord();
-    delete (noLimits.swarmSeats as Record<string, unknown>).limitMicroUsd;
+    (noLimits.swarmSeats as Record<string, unknown>).limitMicroUsd = undefined;
     seedRecord("run-sw3", noLimits);
     let code = "";
     try {

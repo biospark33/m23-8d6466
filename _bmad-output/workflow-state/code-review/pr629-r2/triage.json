@@ -1,0 +1,105 @@
+{
+  "pr": 629,
+  "round": 2,
+  "findings": [
+    {
+      "finding_id": "F-001",
+      "finding_text": "Recovery flags every wake call as progress; a silent no-op wake suppresses the generic recovery re-enqueue and wedges the run.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-run-lifecycle.ts@043d6da5",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Wake returns boolean; only progressed wakes suppress generic recovery.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-002",
+      "finding_text": "Wake failure path retains dispatchedTaskId; recovery re-fails an operator-retried run after restart and suppresses its re-execution.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-run-lifecycle.ts@043d6da5",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Key cleared on failed entry.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-003",
+      "finding_text": "DAG wake success branch force-resumes a run parked 'waiting' on an operator wait step, defeating the hold and wedging the loop.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-run-lifecycle.ts@043d6da5",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Hold preserved; held runs not re-enqueued; RED verified.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-004",
+      "finding_text": "for_each and subflow processors persist pre-await snapshots; a mid-await dispatch wake is erased (same class as the collect fix).",
+      "diff_context_ref": "src/lib/server/protocols/protocol-foreach.ts@043d6da5",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Merge + terminal/deleted guard applied; swarm verified synchronous, no window.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-005",
+      "finding_text": "Hard-deleted run resurrected by post-await persist of the stale snapshot.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-step-processors.ts@043d6da5",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Null latest returns without writing, 3 processors.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-006",
+      "finding_text": "Hard-deleted dispatched task parks the run forever; recovery has no path.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-run-lifecycle.ts@043d6da5",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Recovery fails the step so DAG-stuck terminates.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-007",
+      "finding_text": "requeueAfterWake give-up is log-only; zombie chains survive HMR/terminal runs.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-run-lifecycle.ts@043d6da5",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Protocol warning event + terminal/deleted bail.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-008",
+      "finding_text": "Recovery dispatch list truncated at 64 by uniqueIds cap.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-run-lifecycle.ts@043d6da5",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Set-based dedupe, no cap.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-009",
+      "finding_text": "skip-dispatch test predicate matches any live run; no longer gates on parked dispatch.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-wake-dispatch.test.ts@043d6da5",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Predicate gates on keyed dispatch step + created task.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-010",
+      "finding_text": "Tests resolve tasks by createdTaskIds array position; keying swap undetectable.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-dag-dispatch-keying.test.ts@043d6da5",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Per-step key resolution.",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    },
+    {
+      "finding_id": "F-011",
+      "finding_text": "dispatch_delegation per-step keying untested; requeueAfterWake strand window not deterministically pinnable.",
+      "diff_context_ref": "src/lib/server/protocols/protocol-dag-dispatch-keying.test.ts@043d6da5",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Delegation test added; strand covered indirectly + documented; wait-step resume wedge deferred (pre-existing).",
+      "created_at": "2026-09-27T21:27:17+00:00"
+    }
+  ]
+}

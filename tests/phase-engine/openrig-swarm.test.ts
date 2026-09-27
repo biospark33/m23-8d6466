@@ -63,7 +63,7 @@ function baseHandlers(): Record<string, (argv: string[]) => CmdResult> {
     // mirrors that shape; the yaml-ish fallback keeps its own cases below.
     "queue show q-1": () => ({
       exitCode: 0,
-      stdout: JSON.stringify({ qitemId: "q-1", state: "done", closureReason: "no-follow-on" }, null, 2) + "\n",
+      stdout: `${JSON.stringify({ qitemId: "q-1", state: "done", closureReason: "no-follow-on" }, null, 2)}\n`,
       stderr: "",
     }),
     // One foreign rig's session in the list: teardown must leave it alone.

@@ -4145,29 +4145,29 @@ describe("parseManifestRaw", () => {
   // malformed shape lands in `error` — never in a fabricated inventory.
   const goodLayer = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     mediaType: "application/vnd.oci.image.layer.v1.tar+gzip",
-    digest: "sha256:" + "a".repeat(64),
+    digest: `sha256:${"a".repeat(64)}`,
     size: 1234,
     ...over,
   });
   const goodManifest = (layers: Record<string, unknown>[] = [goodLayer()]): string =>
-    JSON.stringify({ schemaVersion: 2, mediaType: "application/vnd.oci.image.manifest.v1+json", config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: "sha256:" + "b".repeat(64), size: 42 }, layers });
+    JSON.stringify({ schemaVersion: 2, mediaType: "application/vnd.oci.image.manifest.v1+json", config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: `sha256:${"b".repeat(64)}`, size: 42 }, layers });
 
   test("a well-formed single-layer manifest parses to config + one row", () => {
     const parsed = parseManifestRaw(goodManifest());
     expect("error" in parsed).toBeFalse();
     const inv = parsed as ManifestInventory;
-    expect(inv.config).toBe("sha256:" + "b".repeat(64));
+    expect(inv.config).toBe(`sha256:${"b".repeat(64)}`);
     expect(inv.layers.length).toBe(1);
     expect(inv.layers[0]).toEqual({
-      digest: "sha256:" + "a".repeat(64),
+      digest: `sha256:${"a".repeat(64)}`,
       size: 1234,
       mediaType: "application/vnd.oci.image.layer.v1.tar+gzip",
     });
   });
 
   test("a multi-layer manifest preserves layer order (the inventory maps onto the Dockerfile's RUN sequence)", () => {
-    const l1 = goodLayer({ digest: "sha256:" + "1".repeat(64) });
-    const l2 = goodLayer({ digest: "sha256:" + "2".repeat(64), size: 2_000_000 });
+    const l1 = goodLayer({ digest: `sha256:${"1".repeat(64)}` });
+    const l2 = goodLayer({ digest: `sha256:${"2".repeat(64)}`, size: 2_000_000 });
     const parsed = parseManifestRaw(goodManifest([l1, l2]));
     expect("error" in parsed).toBeFalse();
     expect((parsed as ManifestInventory).layers.map((l) => l.digest.slice(7, 8))).toEqual(["1", "2"]);
@@ -4177,7 +4177,7 @@ describe("parseManifestRaw", () => {
     const index = JSON.stringify({
       schemaVersion: 2,
       mediaType: "application/vnd.oci.image.index.v1+json",
-      manifests: [{ mediaType: "application/vnd.oci.image.manifest.v1+json", digest: "sha256:" + "c".repeat(64), size: 99 }],
+      manifests: [{ mediaType: "application/vnd.oci.image.manifest.v1+json", digest: `sha256:${"c".repeat(64)}`, size: 99 }],
     });
     const parsed = parseManifestRaw(index);
     expect("error" in parsed).toBeTrue();
@@ -4186,7 +4186,7 @@ describe("parseManifestRaw", () => {
   test("each malformed shape lands in error, never in rows", () => {
     expect("error" in parseManifestRaw("not json at all")).toBeTrue();
     expect("error" in parseManifestRaw(JSON.stringify({ config: { digest: "sha256:short" }, layers: [goodLayer()] }))).toBeTrue();
-    expect("error" in parseManifestRaw(JSON.stringify({ config: { digest: "sha256:" + "b".repeat(64) } }))).toBeTrue();
+    expect("error" in parseManifestRaw(JSON.stringify({ config: { digest: `sha256:${"b".repeat(64)}` } }))).toBeTrue();
     expect("error" in parseManifestRaw(goodManifest([goodLayer({ digest: "not-a-digest" })]))).toBeTrue();
     expect("error" in parseManifestRaw(goodManifest([goodLayer({ size: Number.MAX_SAFE_INTEGER + 1 })]))).toBeTrue();
     expect("error" in parseManifestRaw(goodManifest([goodLayer({ mediaType: null })]))).toBeTrue();
