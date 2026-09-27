@@ -152,6 +152,7 @@ describe("dispatch rig_swarm wiring: seatPlan → mintSeatKeys → deliverSeatKe
             leadSeat: "lead",
             // Σ 60M authored vs the 50M admitted ceiling — proportional shares.
             seatBudgets: { lead: 40_000_000, worker: 20_000_000 },
+            testCommand: ["true"], // I4/#325: required on rig_swarm now
           },
         ],
       }),

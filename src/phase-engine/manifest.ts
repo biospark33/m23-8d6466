@@ -259,9 +259,10 @@ export const PhaseSpecSchema = z
       .default(DEFAULT_MAX_DURATION_MS),
     retries: z.number().int().min(MIN_RETRIES).max(MAX_RETRIES).default(MIN_RETRIES),
     command: argv.optional(),
-    /** Optional gate argv — valid when kind is "code" (the commandGate
-     *  composition) or "rig_swarm" (the settled-swarm gate — same gate, same
-     *  authority): superRefine refuses it on every other kind, because
+    /** Gate argv — required when kind is "rig_swarm" (the settled-swarm gate —
+     *  same gate, same authority; I4/#325 made a gate-less rig_swarm
+     *  unrepresentable), optional when kind is "code" (the commandGate
+     *  composition): superRefine refuses it on every other kind, because
      *  elsewhere it would be silently dead. */
     testCommand: argv.optional(),
     // DF1.6 dispatch_task fields
@@ -311,10 +312,10 @@ export const PhaseSpecSchema = z
     if (spec.kind !== "code" && spec.command !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `command is forbidden when kind is '${spec.kind}'` });
     }
-    // testCommand is optional and valid when kind is "code" (the commandGate
-    // composition) OR "rig_swarm" (the settled-swarm gate — same gate, same
-    // authority): elsewhere it is silently dead, so refuse rather than let an
-    // author believe it enforced.
+    // testCommand is valid when kind is "code" (the commandGate composition —
+    // optional) or "rig_swarm" (the settled-swarm gate — REQUIRED there; the
+    // rig_swarm required-set below enforces it): elsewhere it is silently dead,
+    // so refuse rather than let an author believe it enforced.
     if (spec.kind !== "code" && spec.kind !== "rig_swarm" && spec.testCommand !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -341,13 +342,18 @@ export const PhaseSpecSchema = z
       }
     }
     // S1: rig_swarm's required field set. Each missing field is its own issue
-    // so an author sees everything wrong at once.
+    // so an author sees everything wrong at once. testCommand joined the set
+    // as I4/#325 (operator decision 2026-09-27): the settled-swarm gate is not
+    // optional payload — a gate-less rig_swarm records fail on timeout-fallback
+    // since f9221be6, but it must be UNREPRESENTABLE at authoring, not merely
+    // fail-closed at runtime.
     if (spec.kind === "rig_swarm") {
       const required = [
         ["rigSpec", spec.rigSpec],
         ["objective", spec.objective],
         ["leadSeat", spec.leadSeat],
         ["seatBudgets", spec.seatBudgets],
+        ["testCommand", spec.testCommand],
       ] as const;
       for (const [field, value] of required) {
         if (value === undefined) {
