@@ -1,0 +1,56 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t28probe-muh0lt8n1uak"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdoutTail": "",
+      "stderrTail": "EEP_INTERVAL_MINUTES in src/fleet/observe.ts)\\n        --window-ms (string, optional) — observation window in ms; the default is 7200000 — both exit-1 outcomes (run-completion-unobserved, box-unreachable) are transient, so re-invoke and the poll starts over\\n        --help (boolean, optional)\\n        Exit codes: 0, 1, 2, 4, 5, 6\"}\n{\"requestId\":\"0d1f81ad-0ba4-4c96-8ea8-d69ddadf66c1\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T13:47:05.974Z\",\"duration\":13,\"durationMs\":13,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "",
+      "vmName": ""
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-25T13:47:07.810Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81",
+    "buildId": "9a025fc31fc1bc88",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

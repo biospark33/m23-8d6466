@@ -1,0 +1,48 @@
+{
+  "test": "P0.8",
+  "outcome": "fail",
+  "runId": "",
+  "runCapMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdoutTail": "",
+      "stderr": "{\"requestId\":\"unresolved\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-26T21:24:32.966Z\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"error\":{\"code\":\"invalid-brief\",\"message\":\"brief rejected: field \\\"repoSlug\\\"\"},\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"refused\",\"exitStatus\":\"logic\",\"timings\":{\"validate_ms\":0}}\n{\"field\":\"repoSlug\",\"issueCount\":2,\"issues\":[\"repoSlug: Required\",\"issueId: Required\"],\"runId\":null,\"code\":\"invalid-brief\",\"message\":\"brief rejected: field \\\"repoSlug\\\"\",\"remediation\":\"fix or remove \\\"repoSlug\\\" in the brief JSON\"}\n{\"requestId\":\"7ab03a8e-0b64-4cbd-964e-eb0e6606c7bc\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-26T21:24:32.966Z\",\"duration\":5,\"durationMs\":5,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}\n"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "",
+      "vmName": ""
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-26T21:24:34.498Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:6fd78181d8f30a73aa885962be84576f65f6e15d6178994e5394faea221b08fa",
+    "buildId": "85d75d0ccbfb259a",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

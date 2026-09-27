@@ -1,0 +1,82 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "qds-20260925-4ae7e9",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t28probe-muh1med4f7ru"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 3,
+      "stdoutTail": "",
+      "stderrTail": "e.xyz 'cat /etc/qds-image.json'; ssh qds-20260925-4ae7e9.exe.xyz 'pi --list-models'; ssh qds-20260925-4ae7e9.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json' — teardown when done: ssh exe.dev rm qds-20260925-4ae7e9  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)\"}\n{\"requestId\":\"eb5b0cf7-e8c2-417e-8e0e-0f7a3f34cfc3\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T14:16:25.950Z\",\"duration\":54282,\"durationMs\":54282,\"status\":\"error\",\"runId\":\"qds-20260925-4ae7e9\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":3,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 3\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260925-4ae7e9",
+      "vmName": "qds-20260925-4ae7e9"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260925-4ae7e9",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 6,
+      "refusalCode": "lock-held",
+      "stderrTail": "k was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t28-NMyqog/runs/qds-20260925-4ae7e9.lock only once you know the teardown state"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260925-4ae7e9",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "leaked": [
+        "0eb496d88304a525fccc5ceb93074d4e4ef14893b07083d9481a17f1fc8accaa",
+        "e9e35da6c74813344cc04409f99e1617c5573e800c1ee0b5cb885d13f18e9624"
+      ]
+    },
+    {
+      "phase": "key-hash-delta-recheck",
+      "ok": false,
+      "surviving": [
+        "0eb496d88304a525fccc5ceb93074d4e4ef14893b07083d9481a17f1fc8accaa",
+        "e9e35da6c74813344cc04409f99e1617c5573e800c1ee0b5cb885d13f18e9624"
+      ],
+      "attemptedRevoke": true
+    }
+  ],
+  "writtenAt": "2026-09-25T14:16:33.565Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81",
+    "buildId": "9a025fc31fc1bc88",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
