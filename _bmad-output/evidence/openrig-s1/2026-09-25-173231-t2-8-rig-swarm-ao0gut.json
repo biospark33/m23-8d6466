@@ -1,0 +1,171 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "qds-20260925-baba19",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t28probe-muh8khf37cod"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260925-baba19\",\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"state\":\"ready\",\"vmName\":\"qds-20260925-baba19\",\"httpsUrl\":\"https://qds-20260925-baba19.exe.xyz\"}",
+      "stderrTail": "vm\":\"qds-20260925-baba19\",\"item\":\"gate_b0\",\"outcome\":\"ok\",\"gate_ms\":2095,\"gate_b0_ms\":2095,\"marker_assert_ms\":2095}\n{\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"operation\":\"exedev.gate\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:37.036Z\",\"duration\":5666,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"driver\":\"exedev\",\"vm\":\"qds-20260925-baba19\",\"item\":\"gate_b\",\"outcome\":\"ok\",\"gate_ms\":5666,\"gate_b_ms\":5666}\n{\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"operation\":\"exedev.gate\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:42.893Z\",\"duration\":5856,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"driver\":\"exedev\",\"vm\":\"qds-20260925-baba19\",\"item\":\"gate_cde\",\"outcome\":\"ok\",\"gate_ms\":5856,\"gate_cde_ms\":5856}\n{\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"operation\":\"exedev.gate\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:42.893Z\",\"duration\":18099,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"driver\":\"exedev\",\"vm\":\"qds-20260925-baba19\",\"ready\":true,\"gate_ms\":18099}\n{\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:42.896Z\",\"duration\":1,\"operation\":\"audit-link.record\",\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"setup-gate\",\"subjectKind\":\"box\",\"outcome\":\"inserted\",\"message\":\"audit link inserted: run qds-20260925-baba19 hop run-box.setup-gate\"}\n{\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:42.898Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}\n{\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:42.898Z\",\"duration\":103278,\"durationMs\":103278,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":51326,\"mint_ms\":3404,\"fill_ms\":29230,\"setup_gate_ms\":18106}}\n{\"requestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:42.900Z\",\"duration\":103285,\"durationMs\":103285,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260925-baba19",
+      "vmName": "qds-20260925-baba19"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260925-baba19"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "seatKeyHashes": 2,
+      "swarmSeats": [
+        "lead",
+        "worker"
+      ]
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260925-baba19",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD a0d500f, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.6 (limit 0.6 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260925-baba19.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260925-baba19.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260925-baba19.exe.xyz 'pi --list-models'",
+          "ssh qds-20260925-baba19.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260925-baba19  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260925-baba19",
+        "durationMs": 18099,
+        "createdAt": "2026-09-25T17:31:42.894Z"
+      }
+    },
+    {
+      "phase": "seat-keys-delivery",
+      "exitCode": 0,
+      "stdout": "600\n1",
+      "stderrTail": ""
+    },
+    {
+      "phase": "env-append-idempotent",
+      "ok": true
+    },
+    {
+      "phase": "witness",
+      "budgetMs": 1899999,
+      "effectiveCeilingMicros": 1200000
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20260925-baba19",
+      "stderrTail": "{\"requestId\":\"883f5b10-39dd-4aa3-9390-7031e534b89a\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:53.533Z\",\"duration\":4474,\"durationMs\":4474,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"verb\":\"run\",\"dispatchRequestId\":\"b2f4c076-b367-40b9-a065-3dfbd298d594\",\"outcome\":\"started\",\"vm\":\"qds-20260925-baba19\",\"unit\":\"qds-run@qds-20260925-baba19.service\",\"printed\":true}\n{\"requestId\":\"883f5b10-39dd-4aa3-9390-7031e534b89a\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-25T17:31:53.534Z\",\"duration\":4475,\"durationMs\":4475,\"status\":\"ok\",\"runId\":\"qds-20260925-baba19\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "status-poll",
+      "seenStates": [
+        "running",
+        "not-ok"
+      ],
+      "terminal": "not-ok",
+      "statusExitFailures": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "in-box run did not settle to `ok` (states seen: running → not-ok). `not-ok` means the engine settled and the run FAILED — the harvested journal names the phase. Diagnose on the box: /home/exedev/qds-20260925-baba19.journal.jsonl."
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260925-baba19",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 6,
+      "refusalCode": "lock-held",
+      "stderrTail": "k was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t28-oARK1O/runs/qds-20260925-baba19.lock only once you know the teardown state"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260925-baba19",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "leaked": [
+        "d35be9c4b3640cc198e1c2b562173f726f57a7007578ed6086ff99c5bef9852b",
+        "0529623f707205d4c404601104e5af08a99431cf31953fdbf3c2e5451042107a"
+      ]
+    },
+    {
+      "phase": "key-hash-delta-recheck",
+      "ok": false,
+      "surviving": [
+        "d35be9c4b3640cc198e1c2b562173f726f57a7007578ed6086ff99c5bef9852b",
+        "0529623f707205d4c404601104e5af08a99431cf31953fdbf3c2e5451042107a"
+      ],
+      "attemptedRevoke": true
+    }
+  ],
+  "writtenAt": "2026-09-25T17:32:31.614Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:762e82f3178324e797f4f326e56dd88987126b9c34250349f0c7c4ca59dedffd",
+    "buildId": "8ae9a6819f1b311a",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

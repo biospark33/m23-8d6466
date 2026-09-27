@@ -1,0 +1,87 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "qds-20260925-3e167e",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t28probe-muh267k8559h"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260925-3e167e\",\"requestId\":\"a4929390-3db5-4fcb-9dce-6c7c9ce83442\",\"state\":\"ready\",\"vmName\":\"qds-20260925-3e167e\",\"httpsUrl\":\"https://qds-20260925-3e167e.exe.xyz\"}",
+      "stderrTail": "9-25T14:32:05.928Z\",\"duration\":69631,\"durationMs\":69631,\"status\":\"ok\",\"runId\":\"qds-20260925-3e167e\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":4444,\"mint_ms\":3733,\"fill_ms\":39960,\"setup_gate_ms\":19527}}\n{\"requestId\":\"a4929390-3db5-4fcb-9dce-6c7c9ce83442\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T14:32:05.930Z\",\"duration\":69637,\"durationMs\":69637,\"status\":\"ok\",\"runId\":\"qds-20260925-3e167e\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260925-3e167e",
+      "vmName": "qds-20260925-3e167e"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260925-3e167e"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBe(expected)\n\nExpected: not \"\"\n"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260925-3e167e",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 6,
+      "refusalCode": "lock-held",
+      "stderrTail": "k was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t28-CoYbOR/runs/qds-20260925-3e167e.lock only once you know the teardown state"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260925-3e167e",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "leaked": [
+        "8bed741ca76f9a75881b4ca941d3023bab19dd28942c8e4bd210f8c97e0779b1",
+        "1cf4f868c1d7f3ace6acdef6fe75943dde1390a0fd15ff7dd85ea149066f329c"
+      ]
+    },
+    {
+      "phase": "key-hash-delta-recheck",
+      "ok": false,
+      "surviving": [
+        "8bed741ca76f9a75881b4ca941d3023bab19dd28942c8e4bd210f8c97e0779b1",
+        "1cf4f868c1d7f3ace6acdef6fe75943dde1390a0fd15ff7dd85ea149066f329c"
+      ],
+      "attemptedRevoke": true
+    }
+  ],
+  "writtenAt": "2026-09-25T14:32:16.135Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81",
+    "buildId": "9a025fc31fc1bc88",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t28probe-muh0uwe36748"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdoutTail": "",
+      "stderrTail": "gic\",\"timings\":{\"validate_ms\":1}}\n{\"manifestPath\":\"/Users/steve/QDS-Factory/config/rosters/r0-swarm.pipeline.json\",\"runId\":null,\"code\":\"manifest-rejected\",\"message\":\"manifest rejected: runBudgetMs 1840000 exceeds callerBudgetMs 1839991\",\"remediation\":\"fix the manifest, or point manifestPath at one beneath /Users/steve/QDS-Factory\"}\n{\"requestId\":\"c340ada3-80af-4355-93cc-0e740cc5f051\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T13:54:12.655Z\",\"duration\":55,\"durationMs\":55,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "",
+      "vmName": ""
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-25T13:54:14.679Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f73409b4b8b394f9dabb83580530ce82eda80143ddb1cadc21920c7ff062fa81",
+    "buildId": "9a025fc31fc1bc88",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

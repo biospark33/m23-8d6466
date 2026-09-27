@@ -1,0 +1,78 @@
+{
+  "test": "T2.8",
+  "outcome": "fail",
+  "runId": "qds-20260925-6dff18",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t28probe-muhbjrjxmi"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "false,\"create_ms\":76527}\n{\"requestId\":\"455bbbc2-1697-481e-a1ae-0ad45491a763\",\"operation\":\"provider.create\",\"agentId\":null,\"timestamp\":\"2026-09-25T18:54:44.366Z\",\"duration\":76532,\"status\":\"error\",\"error\":{\"code\":\"create-failed\",\"message\":\"ssh exe.dev new --name qds-20260925-6dff18 --image ghcr.io/quantum-digital-solutions/qds-exedev@«redacted» exited 255: ssh_dispatch_run_fatal: Connection to 52.35.87.134 port 22: Operation timed out\"},\"runId\":null,\"driver\":\"exedev\",\"verb\":\"create\",\"durationMs\":76532,\"outcome\":\"error\",\"driver_call_ms\":76532}\n{\"requestId\":\"455bbbc2-1697-481e-a1ae-0ad45491a763\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-09-25T18:54:44.371Z\",\"duration\":4,\"status\":\"ok\",\"runId\":\"qds-20260925-6dff18\",\"driver\":null,\"verb\":\"set\",\"durationMs\":4,\"outcome\":\"ok\",\"record_write_ms\":4}\n{\"requestId\":\"455bbbc2-1697-481e-a1ae-0ad45491a763\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T18:54:44.372Z\",\"duration\":77772,\"durationMs\":77772,\"status\":\"error\",\"error\":{\"code\":\"provision-failed\",\"message\":\"provisioning failed for run qds-20260925-6dff18: ssh exe.dev new --name qds-20260925-6dff18 --image ghcr.io/quantum-digital-solutions/qds-exedev@«redacted» exited 255: ssh_dispatch_run_fatal: Connection to 52.35.87.134 port 22: Operation timed out\"},\"runId\":\"qds-20260925-6dff18\",\"verb\":\"dispatch\",\"phase\":\"refused\",\"exitStatus\":\"transient\",\"timings\":{\"validate_ms\":0}}\n{\"providerCode\":\"create-failed\",\"runId\":\"qds-20260925-6dff18\",\"debugCommands\":[\"bun scripts/fleet.ts status qds-20260925-6dff18\"],\"teardownCommand\":\"bun scripts/fleet.ts teardown qds-20260925-6dff18\",\"code\":\"provision-failed\",\"message\":\"provisioning failed for run qds-20260925-6dff18: ssh exe.dev new --name qds-20260925-6dff18 --image ghcr.io/quantum-digital-solutions/qds-exedev@«redacted» exited 255: ssh_dispatch_run_fatal: Connection to 52.35.87.134 port 22: Operation timed out\",\"remediation\":\"re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`; if the failure is an image pull, mirror the pin (crane copy) and set QDS_EXEDEV_IMAGE + QDS_EXEDEV_IMAGE_BUILD_ID\"}\n{\"requestId\":\"455bbbc2-1697-481e-a1ae-0ad45491a763\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-25T18:54:44.373Z\",\"duration\":77777,\"durationMs\":77777,\"status\":\"error\",\"runId\":\"qds-20260925-6dff18\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260925-6dff18",
+      "vmName": "qds-20260925-6dff18"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260925-6dff18",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 6,
+      "refusalCode": "lock-held",
+      "stderrTail": "k was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t28-snpN9Y/runs/qds-20260925-6dff18.lock only once you know the teardown state"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260925-6dff18",
+      "ok": false,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 1,
+      "remaining": null,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0",
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 2,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-25T18:55:44.146Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:132dcd896cdd3bad9d027af5748c3dbaedb4844cda6383612c06d1bf5f95de8b",
+    "buildId": "c69efc791236d1e2",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
