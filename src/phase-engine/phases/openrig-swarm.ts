@@ -252,6 +252,29 @@ export function openrigSwarmPhase(
     let qid = "";
     let daemonStarted = false;
     try {
+      // ── 1b. S2.4 gate: refuse non-pi members BEFORE any spend. ──
+      // The schema (RigMemberSpec.runtime) admits pi|claude|codex, but the
+      // key delivery for claude/codex rides S2.2's node-launcher patch +
+      // member-env.json, which is not in the image yet. A non-pi member
+      // seeded today would launch with NO working key path, so the phase
+      // refuses up front — before the daemon starts, never mid-run after
+      // spend. Per-runtime seat-dir layouts (the delivery contract this
+      // gate guards until S2.2 lands):
+      //   pi     — $OPENRIG_HOME/state/pi/<pod>-<member>@<rig>/agent/{auth.json,settings.json}
+      //            (seeded below; the only runtime seeded today).
+      //   claude — no dir: ANTHROPIC_BASE_URL/AUTH_TOKEN/API_KEY ride
+      //            member-env.json → the seat's tmux session env.
+      //   codex  — per-seat CODEX_HOME=<dir> (config.toml with
+      //            model_providers.openrouter, Responses API only) +
+      //            OPENROUTER_API_KEY, both via member-env.json.
+      for (const { member, session } of seats) {
+        if (member.runtime !== undefined && member.runtime !== "pi") {
+          throw new Error(
+            `rig_swarm member '${member.id}' (session ${session}) declares runtime '${member.runtime}' — non-pi runtimes need S2.2's per-member env delivery (node-launcher patch + member-env.json), not yet in the image; drop the runtime field (defaults to pi) or wait for the S2.2 stage`,
+          );
+        }
+      }
+
       // ── 2. Seed per-seat pi dirs: auth.json (0600) + settings.json ──
       for (const { member, session } of seats) {
         const agentDir = path.join(rigHome, "state", "pi", session, "agent");
