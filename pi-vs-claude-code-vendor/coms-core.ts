@@ -252,6 +252,25 @@ export function isSafePathComponent(s: unknown): s is string {
 	return typeof s === "string" && /^[a-zA-Z0-9_.-]+$/.test(s) && s !== "." && s !== "..";
 }
 
+// S2.1: the desired coms agent name from the EXPLICIT sources only — the
+// --cname flag, then the agent.md frontmatter, then the pi session name with
+// `@` mapped to `_`. The session fallback exists for rig_swarm seats: the rig
+// runner strips --cname and the PI_COMS_* env, and pi names each seat's
+// session `<pod>-<member>@<rig>`, so the session name is the only stable
+// identity such a seat has (a random default makes pi-to-pi peer chat
+// unaddressable). `@` is not in isSafePathComponent's whitelist, hence the
+// mapping; anything the safety check refuses degrades to null and the caller
+// keeps its random default. Returns null when no explicit source resolves —
+// standalone pi sessions (no rig, no --cname) keep today's behavior.
+export function resolveDesiredAgentName(flagName: unknown, fmName: unknown, sessionName: unknown): string | null {
+	for (const candidate of [flagName, fmName]) {
+		if (typeof candidate === "string" && candidate.length > 0) return candidate;
+	}
+	if (typeof sessionName !== "string") return null;
+	const mapped = sessionName.trim().replaceAll("@", "_");
+	return mapped.length > 0 && isSafePathComponent(mapped) ? mapped : null;
+}
+
 // ━━ Wire-protocol narrowing (trust boundary) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
 // Anything decoded from a peer/hub (JSON.parse of a socket line or an SSE

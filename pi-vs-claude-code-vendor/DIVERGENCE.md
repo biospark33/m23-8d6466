@@ -102,6 +102,18 @@ are transport-coupled; unifying would not be zero-behavior:
 
 ## `coms.ts` (local Unix-socket IPC transport)
 
+- **Session-name identity fallback (S2.1)** — the desired-agent-name chain was
+  `flags.name || fm.name || defaultName`; it is now
+  `resolveDesiredAgentName(flags.name, fm.name, ctx.sessionManager?.getSessionName?.()) ?? defaultName`
+  (helper in `coms-core.ts`). The rig_swarm runner strips `--cname` and the
+  `PI_COMS_*` env, so a seat inside a rig used to get a random
+  `agent-XXXXXX` name no peer could address; the fallback is the runner's
+  `<pod>-<member>@<rig>` session name with `@`→`_` (`@` is outside
+  `isSafePathComponent`'s whitelist). Standalone pi sessions are unchanged —
+  no session name resolves to null → the same random default. `coms-net.ts`
+  deliberately does NOT adopt the fallback: the hub relay is always launched
+  with an explicit `--cname` (its documented CLI), so there is nothing for a
+  session fallback to fix there.
 - **Provenance header corrected (DF2.9)** — the file docblock claimed the file
   was vendored "from the pi-mono coms extension". It was not: it comes from
   `disler/pi-vs-claude-code` `extensions/` at commit `0ed11f44`, exactly as

@@ -37,6 +37,7 @@ import {
 	isDuplicateRegistration,
 	isSafePathComponent,
 	isValidHex,
+	resolveDesiredAgentName,
 	isWireRecord,
 	type WireRecord,
 	MAX_FULFILLED_TOMBSTONES,
@@ -1424,7 +1425,11 @@ export default function (pi: ExtensionAPI) {
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
 
-		// 1. Resolve identity from CLI flags > frontmatter > defaults.
+		// 1. Resolve identity from CLI flags > frontmatter > the pi session
+		// name > defaults. The session-name fallback (S2.1) covers rig_swarm
+		// seats: the rig runner strips --cname and PI_COMS_* env, and pi names
+		// each seat's session <pod>-<member>@<rig>, so without the fallback a
+		// seat's coms identity was a random default no peer could address.
 		const flags = readCliFlags(pi);
 		const fm = readFrontmatterFromArgv(process.argv);
 		const project = flags.project || "default";
@@ -1437,7 +1442,8 @@ export default function (pi: ExtensionAPI) {
 		const session_id = ulid();
 
 		const defaultName = `agent-${session_id.slice(-6)}`;
-		const desiredName = flags.name || fm.name || defaultName;
+		const desiredName =
+			resolveDesiredAgentName(flags.name, fm.name, ctx.sessionManager?.getSessionName?.()) ?? defaultName;
 		if (!isSafePathComponent(desiredName)) {
 			ctx.ui?.notify?.(`📡 coms: invalid agent name "${desiredName}"`, "error");
 			finishInit();
