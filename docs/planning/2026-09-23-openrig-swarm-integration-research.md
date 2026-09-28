@@ -365,6 +365,16 @@ A plain `code` phase is still fine for the spike.
 
 ---
 
+### 5.7 Cockpit posture for mixed rigs (S2.7)
+
+The cockpit's contract is invariant 3 and does not change with runtime mix: **it watches, never operates** — no `rig_up`/`rig_down` against factory boxes, ever; access is the tunnel plus `rig mcp serve` for read-only surfaces (`rig ps`, `rig queue show`, pane capture). For mixed (pi + claude/codex) rigs three runtime facts shape what "watching" means:
+
+1. **MCP messaging carries no sender.** A message an operator pushes via MCP lands in the seat with no attributable origin, and a claude/codex seat has no coms identity at all (coms is pi-only; S2.1's session-name fallback gives pi seats stable peer names but does nothing for the other runtimes). Posture: the operator **reads** via pane capture (`rig_capture` / transcript rotation) and, when a nudge is genuinely needed, **sends through the queue with an explicit `--session <pod>-<member>@<rig>`** — the one addressed channel every runtime understands. Never aim MCP messages at a queue-watched seat "also": §5.3's coms/queue conflict applies to operator pushes the same way.
+2. **Seats cannot identify themselves** (§5.4): whatever the cockpit displays about "who said this" comes from the session/pane the row was read from, not from the message. Correlate by session name; do not trust in-band identity.
+3. **Spend visibility is per seat, per runtime**: pi seats price from their session JSONL; claude/codex seats price via the OpenRouter key API (`GET /api/v1/auth/key` per seat key, fetched in the phase's finally before revocation). Both ride the `<runId>.engine.log` mirror (`swarm_seat_cost` rows, `runtime`/`source` fields say which). The cockpit never queries OpenRouter directly — the engine log is the evidence surface, and the per-seat key caps remain the hard money boundary.
+
+Net: for mixed rigs the cockpit stays a read-only pane + queue-nudge surface, correlating everything by OpenRig session name, with money read off the engine log rather than recomputed.
+
 ## 6. Rejected alternatives
 
 | Option | Why rejected |
