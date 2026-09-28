@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "da8182de62a65af2e594819b25b09f6e7d26569583d15e28de9774df5a83fe64",
+      "oci/exedev/Dockerfile": "0b33d7c76e997e3767f41e444eeeb479190d8f5494640c67af2fa93fd93257ad",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
