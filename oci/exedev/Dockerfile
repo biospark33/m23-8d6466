@@ -968,13 +968,23 @@ ARG OPENRIG_VERSION=0.5.14
 # CLI install grew the same tree (e2cb427c → 6b60a34b) — the second measured
 # loop of the same ritual, expected when the applier + a new package both land
 # inside the scoped tree.
+# RE-PINNED A THIRD TIME 2026-09-28, measured LOCALLY (bun
+# scripts/build-exedev-image.ts --push): 6b60a34b → e035abfa — upstream
+# ^-range drift inside @openrig/cli@0.5.14 struck again ~10h after the CI
+# measurement, the known class. PROVENANCE DEVIATION, recorded: GitHub
+# Actions billing failed account-wide (runs refuse to start), so the
+# measuring build ran on the operator host with the script's own gates —
+# the same machine the workflow would have used a runner for. When Actions
+# billing is restored, the next push-triggered build re-validates: any
+# digest divergence from a CI rebuild refuses at gate B, per the standing
+# ritual.
 # RE-PINNED 2026-09-28 from run 36367093271's refusal ("the /opt/openrig tree
 # hashes to e2cb427c…"): OUR OWN S2.2 patch moved it — the member-env applier
 # (oci/exedev/openrig-patches/member-env.mjs) modifies node-launcher.js inside
 # the tree-measured RUN, so the patched bytes are the pinned identity by
 # design. Nothing upstream drifted: the delta is exactly the patch (2 imports
 # + the qdsMemberEnv merge block) plus whatever npm re-resolved identically.
-ARG OPENRIG_TREE_SHA256=6b60a34bf4587e6ab026eeb800bccd2701779b24eee1cba4a00a838f27c42091
+ARG OPENRIG_TREE_SHA256=e035abfa9dd126561d972162500820a56c7fb5ad022190765819d7fa12e88e13
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a
