@@ -333,6 +333,15 @@ _bmad-output/evidence/openrig-sc2/. Q1 (fleet submit/result/cancel
 contract) merged at dev bdbb02bd; full suite 6981 tests, failures =
 baseline reds only.
 
+PR #644 CI disposition (checked 2026-09-28 evening): the PR-only `verify`
+workflow is RED (156/2736, knowledge-graph route suites — zero file overlap
+with #644). This is the PRE-EXISTING verify-red baseline, not ours: PR #645
+MERGED the same evening with verify FAILURE; swarmclaw dev's own [CI] runs
+are GREEN at 7ce84fc9/b4060f37/d91d56a2. Do not chase it; note the baseline
+at merge time (operator --admin policy). Dev heads moved after the branch
+point (pii-gate/clerk/env-docs commits) with ZERO overlap on #644's files —
+merge is clean; refresh mergeability before merging.
+
 FIRST ACTION
 
 Run §0 of the roadmap (verify the snapshot — never trust checkboxes). Then
@@ -355,11 +364,23 @@ SC2.6/SC2.7, IN ORDER:
    the ritual on its account.
 4. SC2.6: kill SwarmClaw mid-submit → restart → exactly one box + one key.
    The code seam is proven (persist-before-exec + crash-window replay);
-   this is the LIVE proof.
+   this is the LIVE proof. TWO crash windows must be named by the design:
+   (a) after requestId persist, before the exec — replay mints the box
+   once; (b) after the exec, before the ack persist — replay re-asks with
+   the SAME requestId and Q1's O_EXCL intent returns the existing run.
+   Assert via fleet status / `ssh exe.dev ls --json` box+key counts, and
+   end with `fleet cancel` teardown → fleetBoxes [] + zero sbx- keys.
+   The daemon must run code ⊇ PR #644 (a worktree on the branch, or dev
+   after the merge).
 5. SC2.7: the live exit test — a live protocol runs factory_run, branches
    on the verdict, notifies; kill SwarmClaw mid-submit; exactly one box.
    qds-live-e2e skill MANDATORY; worst-case spend printed; operator "go"
    FIRST; run in background (never let a tool timeout kill a finally).
+   SEQUENCING FACT: the factory run parks at `awaiting-approval` (the DAG
+   never approves) — the branch can only see `approved` after a HUMAN runs
+   the scrypt-gated `fleet approve <runId>` mid-test. Script that human
+   step explicitly (operator or operator-delegated shell), or the protocol
+   waits forever.
 6. Then ADR.1 (reverse DD-7, one page, operator signature).
 
 OPERATOR-SIDE ITEMS (surface, don't fix silently)
@@ -371,6 +392,11 @@ OPERATOR-SIDE ITEMS (surface, don't fix silently)
    SUPERSEDED — solstice-ai 96b2ca28 already folded SC1.5 at 3445e9ea and
    later advances carried the pin to 7ce84fc9 (⊇ 3bf73872, verified via
    GitHub compare, behind_by=0). Nothing to do.
+3. swarmclaw `verify` (PR-only workflow) is red on the knowledge-graph
+   route suites (156/2736) — pre-existing baseline, NOT #644: #645 merged
+   the same evening with verify FAILURE and dev's own [CI] is green. If
+   the next session wants it fixed, it is its own investigation, NOT this
+   program's.
 
 WHAT SC2.6/SC2.7 CODE AGAINST (landed in PR #644, do not re-derive)
 
