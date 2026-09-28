@@ -225,32 +225,13 @@ test.todoIf(liveTodoOff())(
       const journalBoxPath = `${home}/${runId}.journal.jsonl`; // live-mirror: $HOME/<runId>.journal.jsonl (pipeline-run.ts)
       const engineLogBoxPath = `${home}/${runId}.engine.log`;
       const markerBoxPath = boxMarkerPath(runId);
-
-      // ── 2b. the member-env patch's per-seat map is ON the box, pre-launch ──
-      // S2.2: the phase writes $OPENRIG_HOME/member-env.json BEFORE rig up; the
-      // patched launcher consumes it at launchNode. Read it mid-run (the seats
-      // are already launched by the time the run verb returns... no — the run
-      // verb STARTS the engine and returns; the phase seeds member-env.json
-      // BEFORE importing the rig, so by the first status poll the file exists
-      // and still holds the claude seat's env (teardown removes it at the END).
-      const rigHomeBox = `${home}/.openrig`; // live-mirror: $OPENRIG_HOME default (openrig-compat.js getOpenRigHome)
-      const memberEnvBox = `${rigHomeBox}/member-env.json`; // live-mirror: node-launcher.js qdsMemberEnv read path
-      const memberEnvRead = await ctx.driver.exec(vmName, [
-        "sh",
-        "-c",
-        `cat ${shellQuote(memberEnvBox)} 2>&1 && echo --- && stat -c '%a' ${shellQuote(memberEnvBox)}`,
-      ]);
-      evidence.push({ phase: "member-env-live", exitCode: memberEnvRead.exitCode, stdout: redactSecrets(memberEnvRead.stdout.trim().slice(0, 600)).replace(/sk-or-v1-[A-Za-z0-9-]+/g, "sk-or-v1-REDACTED") });
-      expect(memberEnvRead.exitCode).toBe(0);
-      const memberEnvText = memberEnvRead.stdout.split("---")[0]?.trim() ?? "";
-      const memberEnv = JSON.parse(memberEnvText) as Record<string, Record<string, string>>;
-      // Keyed by the daemon node logicalId <pod>.<member>; the claude seat's
-      // entry rides ANTHROPIC_* env, the pi seat gets none (auth.json path).
-      const workerEnv = memberEnv["pod-1.worker"];
-      expect(workerEnv).toBeDefined();
-      expect(workerEnv?.ANTHROPIC_BASE_URL).toBe("https://openrouter.ai/api");
-      expect(workerEnv?.ANTHROPIC_API_KEY).toBe("");
-      expect(memberEnv["pod-1.lead"]).toBeUndefined();
+      // NOTE (attempt-1 lesson): $OPENRIG_HOME/member-env.json is written by
+      // the PHASE BODY (inside fleet run), not by dispatch — a read here is
+      // always ENOENT and attempt 1 burned a probe round proving it. The
+      // member-env patch is instead proven operationally below: the claude
+      // seat's swarm_seat_up trace (runtime=claude) + its priced
+      // openrouter-key-api cost row — no env delivery ⇒ no auth ⇒ no spend ⇒
+      // no settled run, so reaching those assertions IS the delivery proof.
 
       const witnessText = await ctx.driver.exec(vmName, ["sh", "-c", `cat ${shellQuote(witnessBoxPath)}`]);
       expect(witnessText.exitCode).toBe(0);
@@ -339,6 +320,24 @@ test.todoIf(liveTodoOff())(
       const workerCostRow = seatCostRows.find((r) => r.role === "worker");
       expect(workerCostRow?.source).toBe("openrouter-key-api");
       expect(workerCostRow?.runtime).toBe("claude");
+      // S2.2 seeding path on the box: the phase's swarm_seat_up trace names
+      // the claude seat's runtime (the mid-run member-env file read is
+      // impossible — see the attempt-1 note above the run verb).
+      const seatUpRows = engineLogText.stdout
+        .split("\n")
+        .filter((l) => l.includes('"swarm_seat_up"'))
+        .map((l) => {
+          try {
+            return JSON.parse(l) as { payloadJson?: string };
+          } catch {
+            return undefined;
+          }
+        })
+        .filter((r): r is { payloadJson: string } => r?.payloadJson !== undefined)
+        .map((r) => JSON.parse(r.payloadJson) as { session: string; runtime: string });
+      evidence.push({ phase: "swarm-seat-up-traces", rows: seatUpRows });
+      expect(seatUpRows.find((r) => r.session === "pod-1-worker@s2-e2e")?.runtime).toBe("claude");
+      expect(seatUpRows.find((r) => r.session === "pod-1-lead@s2-e2e")?.runtime).toBe("pi");
 
       // ── 6. harvest: bundle → tip → OUT-OF-BOX reverify on the harvested tip ──
       const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
