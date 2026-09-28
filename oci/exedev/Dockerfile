@@ -971,6 +971,15 @@ ARG OPENRIG_VERSION=0.5.14
 # design. Nothing upstream drifted: the delta is exactly the patch (2 imports
 # + the qdsMemberEnv merge block) plus whatever npm re-resolved identically.
 ARG OPENRIG_TREE_SHA256=e2cb427c98086028ffa0b882fd5ecac1f88f367348fca7870aa7d59a0f3d2e45
+# S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
+# prefix — deliberately: the tree-hash gate above scopes that whole tree, so
+# the claude-code install is frozen by the same measurement instead of a
+# second gate to forget. The wrapper package's install.cjs copies the
+# optionalDependencies' platform binary over its bin placeholder locally
+# (no network at that step); the linux-x64 optional dep is what ships.
+# License: Anthropic's proprietary terms (SEE LICENSE IN README.md),
+# attributed in binary-licenses.json like every other shipped executable.
+ARG CLAUDE_CODE_VERSION=2.1.283
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
 # (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
 # that layout assumption fail LOUDLY at the first real build rather than
@@ -1003,6 +1012,9 @@ COPY oci/exedev/openrig-patches/member-env.mjs /tmp/qds-member-env.mjs
 RUN set -e; \
     export npm_config_cache=/tmp/npm-cache npm_config_logs=/tmp/npm-logs; \
     npm i -g --prefix /opt/openrig "@openrig/cli@${OPENRIG_VERSION}"; \
+    npm i -g --prefix /opt/openrig "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+    [ -e /opt/openrig/bin/claude ] \
+      || { echo "S2.2 precondition failed: npm's --prefix install put no claude bin at /opt/openrig/bin/claude — the rig claude-code adapter sends bare 'claude' argv into every claude seat's pane, so a missing binary is a dead seat at run start, not a build error" >&2; exit 1; }; \
     [ -e /opt/openrig/bin/rig ] \
       || { echo "npm's --prefix install put no bin at /opt/openrig/bin/rig; both the /usr/local/bin/rig symlink below and the phase body's bare 'rig' assume it — re-derive the layout from the actual install, do not guess" >&2; exit 1; }; \
     ln -s /opt/openrig/bin/rig /usr/local/bin/rig; \

@@ -59,7 +59,9 @@
   "schema": 1,
   "entries": [
     {
-      "names": ["usr/local/bin/bun"],
+      "names": [
+        "usr/local/bin/bun"
+      ],
       "project": "oven-sh/bun",
       "version": "1.3.13",
       "spdxId": "MIT",
@@ -84,7 +86,9 @@
       ]
     },
     {
-      "names": ["home/exedev/.local/pi/pi"],
+      "names": [
+        "home/exedev/.local/pi/pi"
+      ],
       "project": "earendil-works/pi",
       "version": "0.84.4",
       "spdxId": "MIT",
@@ -96,7 +100,9 @@
       "bundled": []
     },
     {
-      "names": ["usr/local/bin/qds-engine"],
+      "names": [
+        "usr/local/bin/qds-engine"
+      ],
       "project": "Quantum-Digital-Solutions/QDS-Factory",
       "version": "0.1.0",
       "spdxId": "LicenseRef-QDS-Proprietary",
@@ -108,7 +114,9 @@
       "bundled": []
     },
     {
-      "names": ["usr/local/bin/node"],
+      "names": [
+        "usr/local/bin/node"
+      ],
       "project": "nodejs/node",
       "version": "22.20.0",
       "spdxId": "MIT",
@@ -271,6 +279,21 @@
           "note": "SQLite is public domain (its authors decline even the MIT-style 'blessing' wording — the copyright page is the canonical statement), which has no SPDX identifier this entry could resolve; NOASSERTION with the canonical pointer is the honest spelling. The table's $comment rule — the canonical-text requirement stops at the top level — is what lets this member carry it unresolved."
         }
       ]
+    },
+    {
+      "names": [
+        "opt/openrig/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "opt/openrig/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+        "opt/openrig/lib/node_modules/@anthropic-ai/claude-code/install.cjs",
+        "opt/openrig/lib/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+      ],
+      "project": "anthropics/claude-code",
+      "version": "2.1.283",
+      "spdxId": "LicenseRef-Anthropic-Commercial",
+      "copyright": "Copyright Anthropic PBC (anthropics/claude-code)",
+      "licenseUrl": "https://github.com/anthropics/claude-code/blob/main/LICENSE.md",
+      "verifiedAt": "2026-09-28",
+      "verifiedHow": "PROVENANCE: 2.1.283 is oci/exedev/Dockerfile's ARG CLAUDE_CODE_VERSION default, installed by `npm i -g --prefix /opt/openrig` in the same RUN as @openrig/cli (S2.2: the rig claude-code adapter sends bare 'claude' argv into every claude seat's pane, so the CLI must ship in the image). The install lands inside the OPENRIG_TREE_SHA256-scoped tree, so the claude-code bytes are frozen by that measured pin like the rest of /opt/openrig. The wrapper package resolves the native binary from its optionalDependencies (@anthropic-ai/claude-code-linux-x64 on linux/x64) and its install.cjs copies it over the bin placeholder locally — no network at that step. LICENCE: the npm registry metadata declares \"SEE LICENSE IN README.md\"; the published LICENSE.md is Anthropic's proprietary terms for the Claude Code product (no SPDX identifier exists), recorded here as LicenseRef-Anthropic-Commercial per the schema's LicenseRef precedent (the repo's own LicenseRef-QDS-Proprietary entry). Shipped under the operator's Anthropic account terms; the seats authenticate through OpenRouter seat keys (S2.2), never an Anthropic login — the image carries no Anthropic credentials by construction (INV-IBOX-1)."
     }
   ]
 }
