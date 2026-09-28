@@ -715,11 +715,17 @@ test("S2.4 gate: a claude member is refused before the daemon starts (S2.2 deliv
   const { home } = makeTempHome();
   await expect(runPhase(spec, run, home, new AbortController().signal))
     .rejects.toThrow(/member 'lead' .* declares runtime 'claude'/);
-  // Refusal is PRE-SPEND: no daemon start, no import, no queue create.
+  // Refusal is PRE-SPEND and OUTSIDE the try/finally: no daemon start, no
+  // import, no queue create — and NO teardown either. The finally's
+  // `rig down <rig> --delete --force` would target a rig this invocation
+  // never imported (possibly a concurrent/earlier run's same-named rig),
+  // so the gate must throw before the cleanup semantics exist at all.
   const joined = calls.map((c) => c.join(" "));
   expect(joined.some((c) => c.includes("daemon"))).toBe(false);
   expect(joined.some((c) => c.includes("rigs/import"))).toBe(false);
   expect(joined.some((c) => c.includes("queue/create"))).toBe(false);
+  expect(joined.some((c) => c.includes("rig down"))).toBe(false);
+  expect(joined.some((c) => c.includes("tmux"))).toBe(false);
 });
 
 test("S2.4 gate: same refusal for a codex member", async () => {
