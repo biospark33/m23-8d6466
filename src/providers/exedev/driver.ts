@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:6fd78181d8f30a73aa885962be84576f65f6e15d6178994e5394faea221b08fa";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:70274493381bd7938b54ea6f1556cfe3806fe30a568fbf6bd68d4620c32f3482";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,14 +573,13 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-sixth pin, 2026-09-26): buildId 85d75d0ccbfb259a,
- * adopted from gate B's own paste-ready output on publish run 36256066937,
- * baked at gitSha 3475d77a (the seat-jsonl-shape build — the src_sha the
- * workflow's SOURCE_PATHS resolution names for THAT build: the last commit
- * TOUCHING walked inputs, PR #315's tip, not the merge commit 9b5b5559 the
- * push carried; driver.ts is excluded from SOURCE_PATHS, so this adoption
- * commit rebuilds at the same resolved sha, byte identical, and gate B must
- * close GREEN on it).
+ * CURRENT PAIRING (twenty-seventh pin, 2026-09-28): buildId 2dcef7d5efd113c2,
+ * adopted from gate B's own paste-ready output on publish run 36367790405
+ * (the S2 buildout image — member-env patch + coms-core fallback + the
+ * S2.2-S2.7 engine sources, built after #353's OPENRIG_TREE_SHA256 re-pin to
+ * e2cb427c cleared the tree gate; driver.ts is excluded from SOURCE_PATHS, so
+ * this adoption commit rebuilds at the same resolved sha, byte identical, and
+ * gate B must close GREEN on it).
  *
  * Why BOTH values moved from the twenty-fourth pin (ed1714e2… /
  * b8e0c53589faadec), with the twenty-fifth intervening UNADOPTED: #314
@@ -596,7 +595,7 @@ export const DEFAULT_IMAGE_REF =
  * same commit (the whole-walk literal now 9f55e706…, its debt declared on
  * the branch).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "85d75d0ccbfb259a";
+export const DEFAULT_IMAGE_BUILD_ID = "2dcef7d5efd113c2";
 
 
 
