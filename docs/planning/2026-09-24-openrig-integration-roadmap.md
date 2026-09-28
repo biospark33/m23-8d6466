@@ -289,38 +289,70 @@ You are continuing the OpenRig × QDS-Factory integration program. The tracker i
 docs/planning/2026-09-24-openrig-integration-roadmap.md — read it FIRST, top to
 bottom. It is the single source of truth for what remains. Do not re-research;
 the research doc (docs/planning/2026-09-23-openrig-swarm-integration-research.md)
-decisions are SETTLED (including §5.5's S2.2 patch decision and §5.7 cockpit
-posture). Execute the next unchecked stage with full rigor: every fix lands
-with its test, every claim carries an artifact, a checkbox is checked only when
-its evidence exists.
+decisions are SETTLED (§5.2/§5.3/§5.4 substrate findings, §5.5 caps + the S2.2
+patch decision, §5.6, §5.7 cockpit posture). Execute the next unchecked stage
+with full rigor: every fix lands with its test, every claim carries an
+artifact, a checkbox is checked only when its evidence exists.
 
-VERIFIED POSITION (2026-09-27, end of the S2 buildout session — verify anyway):
-- QDS dev = 68a34986. Five PRs merged this session: #346 (I4 — schema-required
-  testCommand on rig_swarm; #325 closed), #347 (S2.1 coms identity fallback),
-  #348 (S2.4/S2.5 runtime schema + pre-spend gate), #349 (S2.2/S2.3 delivery +
-  the member-env pinned-tree patch), #350 (cost rows via OpenRouter key API),
-  #351 (S2.7 cockpit posture). Every checkbox above carries its evidence line.
-- swarmclaw dev = 3bf73872 (PR #629 merged); SC1.6 lands with SC2.
-- solstice (zeropoint) dev = 4fc158a7, submodule pin = ea060b17 — STILL 4
-  commits behind swarmclaw dev (missing the SC1.5 merge 3bf73872). Pin bump
-  needed before SC2 (pattern: PRs #456/#458). Solstice repo SHARED — worktree
-  rules below.
-- CI-wait policy (operator, 2026-09-27): do NOT wait on CI — full local
-  verification (scoped suites + full suite teed/filtered + tsc + biome +
-  detect_changes) then --admin merge with the baseline noted.
-- Full-suite baseline reds (do NOT fix here, do not count against gates):
-  story-consistency ×2, buildIdFileInputs ×2 (the walk-digest red — its re-pin
-  ritual is S2.6's first step), trace/reader vendor self-compact ×12, wall-clock
-  flakes (open-pr reuse-probe, http retryTransport, failure-recovery handoff,
-  fleet O_EXCL — all green in isolation).
+VERIFIED POSITION (2026-09-28, S2 closeout — verify anyway with the §0 ritual):
+- QDS dev = 2d7d4878. STAGE S2 IS COMPLETE: PRs #346 (I4 schema-required
+  testCommand, #325 closed), #347 (S2.1 coms identity), #348 (S2.4/S2.5
+  runtime schema + pre-spend gate), #349 (S2.2/S2.3 member-env patch + delivery),
+  #350 (cost rows via OpenRouter key API), #351 (S2.7 cockpit posture), and the
+  live-round chain #352-#368 — T2.9 GREEN on run qds-20260928-850157, spend
+  $0.117, evidence _bmad-output/evidence/openrig-s2/…1635qs.json.
+- IMAGE = the twenty-ninth pin a8b3358b…/1282936fe7956d11: member-env patch
+  (S2.2 per-seat key delivery) + claude CLI 2.1.283 + the post-label-fix
+  engine. Adopted #366, mirror re-pushed + inspected. NOTE: measured LOCALLY
+  (provenance deviation recorded in the Dockerfile re-pin comment) because
+  GITHUB ACTIONS BILLING FAILED ACCOUNT-WIDE — workflow_dispatch runs refuse
+  to start ("recent account payments have failed…"). Operator must fix
+  billing; until then, local `bun scripts/build-exedev-image.ts --push` is
+  the measuring build (same gates). When Actions returns, the next
+  push-triggered build re-validates; any divergence refuses at gate B.
+- swarmclaw dev = 3bf73872 (PR #629 merged; SC1.0-SC1.5 done, SC1.6 lands
+  with SC2). solstice/zeropoint dev = 4fc158a7, submodule pin = ea060b17 —
+  STILL 4 commits behind swarmclaw dev (missing the SC1.5 merge). Pin bump
+  needed before SC2 (pattern: PRs #456/#458). Solstice repo is SHARED — see
+  worktree rules below.
+- Runtime label truth: OpenRig 0.5.14 SUPPORTED_RUNTIMES = {claude-code, codex,
+  pi, terminal, stub} — the schema enum says claude-code; "claude" is dead.
+- QDS full-suite baseline reds (do NOT fix here): story-consistency ×2,
+  trace/reader vendor self-compact ×12, wall-clock flakes (open-pr reuse-probe,
+  http retryTransport, failure-recovery handoff, fleet O_EXCL) — all green in
+  isolation. The walk-digest red is GONE (closed by #365).
+- CI-wait policy (operator): do NOT wait on CI — full local verification
+  (scoped suites + full suite teed/filtered via the CLAUDE.md tr/perl filter +
+  tsc + biome + detect_changes) then --admin merge with the baseline noted.
+- GitNexus: QDS index CURRENT; swarmclaw index STALE (grep caller inventories
+  or reindex).
 
-YOUR WORK: S2.6 — the paid live round, operator-gated (qds-live-e2e skill
-MANDATORY, worst-case spend ≈ $2.89 printed first, explicit operator "go").
-Sequence: (1) image ritual — dispatch the publish workflow on dev, read the
-refusal outputs (they measure the moved OPENRIG_TREE_SHA256 + buildId: coms-core
-#347 + member-env patch #349 + engine sources #350 all move bytes), pin-adoption
-commit at the three sites (driver.ts ×2 + build test expectation), healing run
-green; (2) the mixed-rig round (≥1 claude seat + ≥1 pi seat) with full
-teardown/caps evidence; (3) checkboxes + evidence. Then ADR is all that remains.
-Hard rules in §1; swarmclaw branch work only in dedicated worktrees.
+YOUR WORK: next unchecked = Q1 (factory service surface — SC2 depends on it;
+its Q1.8 contract suite is what SC2 codes against). Q1.1 replay-safe submit
+(exactly-one-box), Q1.2 budget-group ledger transaction, Q1.3 result payload,
+Q1.4 idempotent cancel, Q1.5 cross-process VM-headroom, Q1.6 fanout lock
+contention, Q1.7 brief schema — OPERATOR SIGN-OFF required on the schema
+change — Q1.8 the pinned contract suite. Every item lands with its contract
+test (gitnexus cli-contract.ts is the discipline precedent).
+THEN SC2 (external_job adapter; the exactly-one-box kill test is the point)
+and the ADR (reverse DD-7, one page, operator signature — a human decision,
+not a PR merge).
+
+LIVE-ROUND LESSONS now load-bearing (full attempt log in the S2 status block):
+- The in-box ENGINE is the IMAGE-BAKED /opt/qds-factory (F-D5 wrapper runs the
+  baked pipeline-run, NOT the filled clone) — any engine-source change needs
+  the image ritual BEFORE a round, or the baked tree fights the delivered
+  manifest.
+- $OPENRIG_HOME/member-env.json is PHASE-seeded (inside fleet run), never
+  dispatch-seeded; it is torn down with the key material.
+- swarm_seat_up/other trace rows die at the settle wipe (round-18 class);
+  only swarm_settled and swarm_seat_cost mirror to the engine log.
+- First-boot substrate variance is retry-class (probe box: pi registry 10/10
+  green on a box that flaked in-round); one retry before investigating.
+- ssh exe.dev boxes: hostname is <vm>.exe.xyz where <vm> already carries the
+  qds- prefix (probe 2 doubled it and lost the journal).
+
+Hard rules in §1. Branch feature/* off dev, PR to dev. Worktrees: swarmclaw
+branch work only in /Users/steve/swarmclaw-worktrees/<name> (npm ci first);
+NEVER git-touch /Users/steve/solstice or its submodule checkout.
 ```
