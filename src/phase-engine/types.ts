@@ -187,7 +187,17 @@ export interface RigMemberSpec {
   /** OpenRouter model slug the seat runs on (e.g. "openrouter/deepseek/deepseek-v3.2"). */
   model: string;
   /** Only "pi" today; explicit so a future runtime spelling is a schema change. */
-  runtime?: "pi";
+  /**
+   * Seat runtime. S2.4 widened this from pi-only to the OpenRouter-routed set:
+   * every admitted runtime carries a per-seat OpenRouter key cap (§5.5 caps
+   * table — pi auth.json; claude via ANTHROPIC_* env; codex via per-seat
+   * CODEX_HOME). Subscription-auth runtimes (Claude Max / ChatGPT Pro) have no
+   * hard USD cap and are FORBIDDEN in capped runs (S2.5): the closed enum is
+   * the refusal — a non-OpenRouter runtime is unrepresentable at authoring.
+   * The phase body refuses claude|codex until S2.2's per-member env delivery
+   * lands in the image.
+   */
+  runtime?: "pi" | "claude" | "codex";
   /** Working directory the seat starts in; absent = the run's repo workdir. */
   cwd?: string;
 }

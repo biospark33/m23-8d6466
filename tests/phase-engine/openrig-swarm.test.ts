@@ -693,3 +693,70 @@ test("poll-loop queue show and healthz calls carry the bounded SWARM_CLI_TIMEOUT
     expect(c.timeoutMs).toBe(SWARM_CLI_TIMEOUT_MS);
   }
 });
+
+// ─── S2.4/S2.5 — mixed runtimes: schema admits claude|codex, the body refuses ───
+// The schema's RigMemberSpec.runtime widens to pi|claude|codex (S2.4). Until
+// S2.2's per-member env delivery lands in the image (the node-launcher patch +
+// member-env.json), a non-pi member has NO key path: the phase refuses BEFORE
+// the daemon starts — never mid-run after spend.
+
+test("S2.4 gate: a claude member is refused before the daemon starts (S2.2 delivery not wired)", async () => {
+  const spec: PhaseSpec = {
+    ...SPEC,
+    rigSpec: {
+      name: "devrig",
+      pods: [{ id: "dev", members: [
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude" },
+        { id: "worker", model: "openrouter/deepseek/deepseek-v3.2" },
+      ]}],
+    },
+  };
+  const { run, calls } = fakeRunner(baseHandlers());
+  const { home } = makeTempHome();
+  await expect(runPhase(spec, run, home, new AbortController().signal))
+    .rejects.toThrow(/member 'lead' .* declares runtime 'claude'/);
+  // Refusal is PRE-SPEND and OUTSIDE the try/finally: no daemon start, no
+  // import, no queue create — and NO teardown either. The finally's
+  // `rig down <rig> --delete --force` would target a rig this invocation
+  // never imported (possibly a concurrent/earlier run's same-named rig),
+  // so the gate must throw before the cleanup semantics exist at all.
+  const joined = calls.map((c) => c.join(" "));
+  expect(joined.some((c) => c.includes("daemon"))).toBe(false);
+  expect(joined.some((c) => c.includes("rigs/import"))).toBe(false);
+  expect(joined.some((c) => c.includes("queue/create"))).toBe(false);
+  expect(joined.some((c) => c.includes("rig down"))).toBe(false);
+  expect(joined.some((c) => c.includes("tmux"))).toBe(false);
+});
+
+test("S2.4 gate: same refusal for a codex member", async () => {
+  const spec: PhaseSpec = {
+    ...SPEC,
+    rigSpec: {
+      name: "devrig",
+      pods: [{ id: "dev", members: [
+        { id: "lead", model: "openrouter/openai/gpt-5.2", runtime: "codex" },
+      ]}],
+    },
+    seatBudgets: { lead: 250_000_000 },
+  };
+  const { run } = fakeRunner(baseHandlers());
+  const { home } = makeTempHome();
+  await expect(runPhase(spec, run, home, new AbortController().signal))
+    .rejects.toThrow(/member 'lead' .* declares runtime 'codex'/);
+});
+
+test("S2.4: explicit runtime 'pi' behaves exactly like the default (no refusal)", async () => {
+  const spec: PhaseSpec = {
+    ...SPEC,
+    rigSpec: {
+      name: "devrig",
+      pods: [{ id: "dev", members: [
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "pi" },
+        { id: "worker", model: "openrouter/deepseek/deepseek-v3.2", runtime: "pi" },
+      ]}],
+    },
+  };
+  const { run } = fakeRunner(baseHandlers());
+  const { home } = makeTempHome();
+  await expect(runPhase(spec, run, home, new AbortController().signal)).resolves.toBeDefined();
+});

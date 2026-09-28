@@ -1054,6 +1054,40 @@ describe("loadManifest — rig_swarm (S1)", () => {
       .toThrow(/testCommand is forbidden when kind is 'dispatch_task'/);
   });
 
+  // ── S2.4/S2.5 — mixed runtimes ──
+  // S2.4 widens RigMemberSpec.runtime to pi|claude|codex (the OpenRouter-routed
+  // set — §5.5 caps table: every admitted runtime carries a per-seat OpenRouter
+  // key cap; subscription-auth runtimes like Claude Max / ChatGPT Pro have NO
+  // hard USD cap and are FORBIDDEN in capped runs, so the closed enum IS the
+  // S2.5 refusal: a non-OpenRouter runtime is unrepresentable at authoring).
+
+  // 9. claude and codex member runtimes are admitted
+  test.each(["claude", "codex"] as const)("rig_swarm admits member runtime '%s'", (rt) => {
+    const phase: Record<string, unknown> = {
+      ...RIG_SWARM_PHASE,
+      rigSpec: {
+        ...RIG_SWARM_PHASE.rigSpec,
+        pods: [{ id: "devpod", members: [{ id: "lead", model: "m", runtime: rt }] }],
+      },
+      seatBudgets: { lead: 250_000_000 },
+    };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] }))).not.toThrow();
+  });
+
+  // 10. the runtime set is CLOSED — a subscription-auth runtime is refused
+  test("rig_swarm refuses a member runtime outside pi|claude|codex", () => {
+    const phase: Record<string, unknown> = {
+      ...RIG_SWARM_PHASE,
+      rigSpec: {
+        ...RIG_SWARM_PHASE.rigSpec,
+        pods: [{ id: "devpod", members: [{ id: "lead", model: "m", runtime: "claude-max" }] }],
+      },
+      seatBudgets: { lead: 250_000_000 },
+    };
+    expect(() => loadManifestForTest(baseManifest({ phases: [phase, CODE_PHASE] })))
+      .toThrow(/runtime/);
+  });
+
   // ── F-005: identifier grammar + composed-session uniqueness ──
   // Member ids become provider seat keys (minted under the same grammar); an
   // id that fails it is refused at PARSE, not post-box at mint.
