@@ -868,7 +868,7 @@ RUN set -e; \
     grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete the per-run tree at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }; \
     grep -qE '^Delegate=memory$' "${unit}" || { echo "the unit does not set Delegate=memory; the engine runs as User=exedev and could not create the resident's per-solicitation cgroup or write its memory.max, so DF3.6b's kernel-enforced memory bound is unenforceable and every run would start with the resident DISABLED (INV-MEM-2) instead of failing loudly" >&2; exit 1; }
 
-# ── S1 rig_swarm: node, OpenRig, the self-compact extension ─────────────────
+# ── S1 rig_swarm: node, OpenRig, the self-compact extension, the member-env patch ──
 # The rig_swarm phase kind runs an OpenRig swarm inside this box, and needs
 # three baked facts the pinned image does not carry: `node` (the image ships
 # NONE — the seat gate runs `node --test` and OpenRig's runner is a
@@ -987,12 +987,23 @@ ARG OPENRIG_TREE_SHA256=41e10c9a6a4b9c075b05c93b8b7f069ccc9d693c854de6230d9cf978
 # sweep counts packages and executables, the buildId hashes SOURCES. So the
 # redirect sends cache and logs to /tmp, deleted in the same layer, and the
 # assertions below fail the build if npm ever writes them at $HOME again.
+# S2.2: the per-seat env delivery patch, applied to the pinned tree INSIDE the
+# RUN below — before `rig --version` executes and BEFORE the OPENRIG_TREE_SHA256
+# measurement, so the patched bytes ARE the pinned identity (the tree gate then
+# freezes them like any other tree content; upstream drift still refuses).
+# oci/exedev/openrig-patches/member-env.mjs carries the full evidence trail for
+# why a patch is the delivery (no per-seat env surface exists upstream).
+COPY oci/exedev/openrig-patches/member-env.mjs /tmp/qds-member-env.mjs
 RUN set -e; \
     export npm_config_cache=/tmp/npm-cache npm_config_logs=/tmp/npm-logs; \
     npm i -g --prefix /opt/openrig "@openrig/cli@${OPENRIG_VERSION}"; \
     [ -e /opt/openrig/bin/rig ] \
       || { echo "npm's --prefix install put no bin at /opt/openrig/bin/rig; both the /usr/local/bin/rig symlink below and the phase body's bare 'rig' assume it — re-derive the layout from the actual install, do not guess" >&2; exit 1; }; \
     ln -s /opt/openrig/bin/rig /usr/local/bin/rig; \
+    [ -f /opt/openrig/lib/node_modules/@openrig/cli/daemon/dist/domain/node-launcher.js ] \
+      || { echo "S2.2 patch precondition failed: no node-launcher.js at the pinned 0.5.14 layout — re-derive the path from the actual install before applying the member-env patch" >&2; exit 1; }; \
+    node /tmp/qds-member-env.mjs /opt/openrig/lib/node_modules/@openrig/cli; \
+    rm -f /tmp/qds-member-env.mjs; \
     rig --version; \
     [ "$(command -v rig)" = "/usr/local/bin/rig" ] \
       || { echo "command -v rig resolved to '$(command -v rig || true)', not /usr/local/bin/rig — the symlink below or npm's bin layout differs from what the phase body's bare 'rig' lookup assumes" >&2; exit 1; }; \

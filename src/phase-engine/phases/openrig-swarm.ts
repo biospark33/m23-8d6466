@@ -94,12 +94,21 @@ export function parseQueueShow(stdout: string): { state: string | null; closureR
 interface Seat {
   member: RigMemberSpec;
   session: string;
+  /** The daemon's node logicalId (`<pod.id>.<member.id>` — rigspec-instantiator
+   *  JS:468); the key member-env.json is keyed by. */
+  logicalId: string;
 }
 
 function seatsOf(rig: RigSpec): Seat[] {
   const seats: Seat[] = [];
   for (const pod of rig.pods) {
-    for (const member of pod.members) seats.push({ member, session: `${pod.id}-${member.id}@${rig.name}` });
+    for (const member of pod.members) {
+      seats.push({
+        member,
+        session: `${pod.id}-${member.id}@${rig.name}`,
+        logicalId: `${pod.id}.${member.id}`,
+      });
+    }
   }
   return seats;
 }
@@ -116,6 +125,22 @@ interface Settled {
  * polling — unknown vocabulary is never treated as failure.
  */
 const TERMINAL_QUEUE_STATES = new Set(["done", "failed", "cancelled", "canceled"]);
+
+/**
+ * S2.3: the per-seat config.toml written into a codex seat's CODEX_HOME.
+ * OpenRouter's Responses API only (research §5.5 — chat-completions wire
+ * compat is not a supported codex path); the key is read from the seat env
+ * (`env_key`), which member-env.json delivers per seat — never from a
+ * daemon-wide value.
+ */
+const CODEX_CONFIG_TOML = [
+  "[model_providers.openrouter]",
+  'name = "OpenRouter"',
+  'base_url = "https://openrouter.ai/api/v1"',
+  'env_key = "OPENROUTER_API_KEY"',
+  'wire_api = "responses"',
+  "",
+].join("\n");
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -248,52 +273,62 @@ export function openrigSwarmPhase(
     const cliTeardown = (argv: readonly string[]): Promise<CmdResult> =>
       run(argv, { timeoutMs: SWARM_CLI_TIMEOUT_MS });
 
-    // ── 1a. S2.4 gate: refuse non-pi members BEFORE the try/finally. ──
-    // The schema (RigMemberSpec.runtime) admits pi|claude|codex, but the
-    // key delivery for claude/codex rides S2.2's node-launcher patch +
-    // member-env.json, which is not in the image yet. A non-pi member
-    // seeded today would launch with NO working key path, so the phase
-    // refuses up front. The gate sits OUTSIDE the try deliberately: its
-    // throw must not enter the finally, whose rig-scoped teardown
-    // (`rig down --delete --force` + tmux kills) presumes this invocation
-    // imported/owns the rig — at this point nothing has been imported and
-    // the same-named rig on the box may belong to another run. CR #348
-    // round 1: hoisted from inside the try for exactly this reason.
-    // Per-runtime seat-dir layouts (the delivery contract this gate
-    // guards until S2.2 lands):
-    //   pi     — $OPENRIG_HOME/state/pi/<pod>-<member>@<rig>/agent/{auth.json,settings.json}
-    //            (seeded below; the only runtime seeded today).
-    //   claude — no dir: ANTHROPIC_BASE_URL/AUTH_TOKEN/API_KEY ride
-    //            member-env.json → the seat's tmux session env.
-    //   codex  — per-seat CODEX_HOME=<dir> (config.toml with
-    //            model_providers.openrouter, Responses API only) +
-    //            OPENROUTER_API_KEY, both via member-env.json.
-    for (const { member, session } of seats) {
-      if (member.runtime !== undefined && member.runtime !== "pi") {
-        throw new Error(
-          `rig_swarm member '${member.id}' (session ${session}) declares runtime '${member.runtime}' — non-pi runtimes need S2.2's per-member env delivery (node-launcher patch + member-env.json), not yet in the image; drop the runtime field (defaults to pi) or wait for the S2.2 stage`,
-        );
-      }
-    }
-
     let settled: Settled | undefined;
     let qid = "";
     let daemonStarted = false;
     try {
-      // ── 2. Seed per-seat pi dirs: auth.json (0600) + settings.json ──
-      for (const { member, session } of seats) {
-        const agentDir = path.join(rigHome, "state", "pi", session, "agent");
-        fs.mkdirSync(agentDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(agentDir, "auth.json"),
-          JSON.stringify({ openrouter: { type: "api_key", key: keys[member.id] } }),
-          { mode: 0o600 },
-        );
-        fs.writeFileSync(
-          path.join(agentDir, "settings.json"),
-          JSON.stringify({ extensions: ["/opt/qds/pi-ext/self-compact/self-compact.ts"] }),
-        );
-        trace("swarm_seat_up", { session });
+      // ── 2. Seed per-seat key material (runtime-specific, S2.2/S2.3) ──
+      // pi seeds auth.json+settings.json under its agent dir (its only key
+      // path). claude needs NO dir — its key rides the seat's tmux session
+      // env, delivered via member-env.json and merged by the pinned-tree
+      // node-launcher patch (oci/exedev/openrig-patches/member-env.patch;
+      // evidence for patch-over-settings: the daemon's launchSessionEnv
+      // hard-codes one shared HOME/CODEX_HOME, Node carries no env field,
+      // and the claude adapter hard-codes its launch command). codex gets a
+      // per-seat CODEX_HOME (config.toml, OpenRouter Responses API) + the
+      // key as OPENROUTER_API_KEY in the same per-seat env. member-env.json
+      // is keyed by the daemon's node logicalId `<pod.id>.<member.id>` —
+      // the key lookup at launchNode is exact, never a prefix match.
+      const memberEnv: Record<string, Record<string, string>> = {};
+      for (const { member, session, logicalId } of seats) {
+        // The pre-try validation loop proved this non-empty; the local guard
+        // is for the type system (noUncheckedIndexedAccess), not for doubt.
+        const seatKey = keys[member.id];
+        if (seatKey === undefined || seatKey === "") {
+          throw new Error(`rigSpec member '${member.id}' lost its seat key between validation and seeding`);
+        }
+        if ((member.runtime ?? "pi") === "pi") {
+          const agentDir = path.join(rigHome, "state", "pi", session, "agent");
+          fs.mkdirSync(agentDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(agentDir, "auth.json"),
+            JSON.stringify({ openrouter: { type: "api_key", key: seatKey } }),
+            { mode: 0o600 },
+          );
+          fs.writeFileSync(
+            path.join(agentDir, "settings.json"),
+            JSON.stringify({ extensions: ["/opt/qds/pi-ext/self-compact/self-compact.ts"] }),
+          );
+        } else if (member.runtime === "claude") {
+          memberEnv[logicalId] = {
+            ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
+            ANTHROPIC_AUTH_TOKEN: seatKey,
+            // Empty string, not unset: Claude Code must not find an ambient
+            // login and silently bill an uncapped account.
+            ANTHROPIC_API_KEY: "",
+          };
+        } else {
+          const codexHome = path.join(rigHome, "state", "codex", session, "home");
+          fs.mkdirSync(codexHome, { recursive: true });
+          fs.writeFileSync(path.join(codexHome, "config.toml"), CODEX_CONFIG_TOML, { mode: 0o600 });
+          memberEnv[logicalId] = { CODEX_HOME: codexHome, OPENROUTER_API_KEY: seatKey };
+        }
+        trace("swarm_seat_up", { session, runtime: member.runtime ?? "pi" });
+      }
+      // Written only when a non-pi seat exists; the patched launcher treats
+      // an absent file as the no-op it is. Key material: 0600.
+      if (Object.keys(memberEnv).length > 0) {
+        fs.writeFileSync(path.join(rigHome, "member-env.json"), JSON.stringify(memberEnv), { mode: 0o600 });
       }
 
       // ── 3. Probe-first daemon up: healthz BEFORE start — an already-green
@@ -609,12 +644,21 @@ export function openrigSwarmPhase(
       }
       // The seeded state holds plaintext seat keys — remove exactly the dirs
       // this run created (per seat, not the whole state dir), post rig down.
+      // S2.2/S2.3: the codex CODEX_HOME dirs and member-env.json hold the
+      // same class of key material and go with them.
       for (const { session } of seats) {
-        try {
-          fs.rmSync(path.join(rigHome, "state", "pi", session), { recursive: true, force: true });
-        } catch (e) {
-          logLine({ step: "teardown", argv: `rm state/pi/${session}`, error: errText(e) });
+        for (const dir of [path.join(rigHome, "state", "pi", session), path.join(rigHome, "state", "codex", session)]) {
+          try {
+            fs.rmSync(dir, { recursive: true, force: true });
+          } catch (e) {
+            logLine({ step: "teardown", argv: `rm ${dir}`, error: errText(e) });
+          }
         }
+      }
+      try {
+        fs.rmSync(path.join(rigHome, "member-env.json"), { force: true });
+      } catch (e) {
+        logLine({ step: "teardown", argv: "rm member-env.json", error: errText(e) });
       }
       if (daemonStarted) {
         try {

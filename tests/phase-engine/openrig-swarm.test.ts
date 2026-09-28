@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  DEFAULT_OPENRIG_HOME,
   SWARM_CLI_TIMEOUT_MS,
   SWARM_MAX_STALE_POLLS,
   openrigSwarmPhase,
@@ -694,13 +695,16 @@ test("poll-loop queue show and healthz calls carry the bounded SWARM_CLI_TIMEOUT
   }
 });
 
-// ─── S2.4/S2.5 — mixed runtimes: schema admits claude|codex, the body refuses ───
-// The schema's RigMemberSpec.runtime widens to pi|claude|codex (S2.4). Until
-// S2.2's per-member env delivery lands in the image (the node-launcher patch +
-// member-env.json), a non-pi member has NO key path: the phase refuses BEFORE
-// the daemon starts — never mid-run after spend.
+// ─── S2.2/S2.3 — mixed runtimes: per-seat key delivery for claude|codex ───
+// The schema admits pi|claude|codex (S2.4). Delivery: pi seeds auth.json
+// (below, existing); claude rides member-env.json → the seat's tmux session
+// env (the patched node-launcher merges it); codex gets a per-seat CODEX_HOME
+// (config.toml, Responses API) + OPENROUTER_API_KEY, both via member-env.json.
+// member-env.json is keyed by the daemon's node logicalId `<pod.id>.<member.id>`
+// (rigspec-instantiator.js:468) and read by the patched launcher at
+// launchNode — only written when at least one non-pi member exists.
 
-test("S2.4 gate: a claude member is refused before the daemon starts (S2.2 delivery not wired)", async () => {
+test("S2.2: a claude seat's key rides member-env.json, not a pi auth.json", async () => {
   const spec: PhaseSpec = {
     ...SPEC,
     rigSpec: {
@@ -711,24 +715,45 @@ test("S2.4 gate: a claude member is refused before the daemon starts (S2.2 deliv
       ]}],
     },
   };
-  const { run, calls } = fakeRunner(baseHandlers());
+  // The map is written BEFORE the daemon starts and torn down AFTER —
+  // snapshot it at daemon-start time to observe its live content.
+  let live: { text: string; mode: number } | undefined;
+  const handlers = baseHandlers();
+  handlers.healthz = () => {
+    const p = path.join(homeRigHome(), "member-env.json");
+    try {
+      live = { text: fs.readFileSync(p, "utf8"), mode: fs.statSync(p).mode & 0o777 };
+    } catch {
+      live = undefined;
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const { run } = fakeRunner(handlers);
   const { home } = makeTempHome();
-  await expect(runPhase(spec, run, home, new AbortController().signal))
-    .rejects.toThrow(/member 'lead' .* declares runtime 'claude'/);
-  // Refusal is PRE-SPEND and OUTSIDE the try/finally: no daemon start, no
-  // import, no queue create — and NO teardown either. The finally's
-  // `rig down <rig> --delete --force` would target a rig this invocation
-  // never imported (possibly a concurrent/earlier run's same-named rig),
-  // so the gate must throw before the cleanup semantics exist at all.
-  const joined = calls.map((c) => c.join(" "));
-  expect(joined.some((c) => c.includes("daemon"))).toBe(false);
-  expect(joined.some((c) => c.includes("rigs/import"))).toBe(false);
-  expect(joined.some((c) => c.includes("queue/create"))).toBe(false);
-  expect(joined.some((c) => c.includes("rig down"))).toBe(false);
-  expect(joined.some((c) => c.includes("tmux"))).toBe(false);
+  const homeRigHome = () => path.join(home, DEFAULT_OPENRIG_HOME);
+  await runPhase(spec, run, home, new AbortController().signal);
+  expect(live).toBeDefined();
+  const memberEnv = JSON.parse(live!.text) as Record<string, Record<string, string>>;
+  // Keyed by the daemon's node logicalId, not the pi session name.
+  expect(Object.keys(memberEnv).sort()).toEqual(["dev.lead"]);
+  const leadEnv = memberEnv["dev.lead"]!;
+  expect(leadEnv.ANTHROPIC_BASE_URL).toBe("https://openrouter.ai/api");
+  expect(leadEnv.ANTHROPIC_AUTH_TOKEN).toBe("sk-or-v1-lead");
+  // Empty ANTHROPIC_API_KEY: Claude Code must not find an ambient login.
+  expect(leadEnv.ANTHROPIC_API_KEY).toBe("");
+  // Key material: 0600.
+  expect(live!.mode).toBe(0o600);
+  // The claude seat got NO pi dir; the pi seat did — and teardown removed
+  // every seeded key-material path (state dirs + the map).
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "state", "pi", "dev-lead@devrig"))).toBe(false);
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "state", "pi", "dev-worker@devrig", "agent", "auth.json"))).toBe(false);
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "member-env.json"))).toBe(false);
+  // The pi seat's auth.json EXISTED mid-run: the daemon-start snapshot of
+  // the sibling pi dir proves seeding still ran for pi members.
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "state"))).toBe(true);
 });
 
-test("S2.4 gate: same refusal for a codex member", async () => {
+test("S2.3: a codex seat gets a per-seat CODEX_HOME with an OpenRouter Responses config", async () => {
   const spec: PhaseSpec = {
     ...SPEC,
     rigSpec: {
@@ -739,10 +764,50 @@ test("S2.4 gate: same refusal for a codex member", async () => {
     },
     seatBudgets: { lead: 250_000_000 },
   };
+  let memberEnv: Record<string, Record<string, string>> | undefined;
+  let configText: string | undefined;
+  let configMode = 0;
+  const handlers = baseHandlers();
+  handlers.healthz = () => {
+    const rigHome = homeRigHome();
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(rigHome, "member-env.json"), "utf8")) as Record<string, Record<string, string>>;
+      const codexHome = parsed["dev.lead"]?.CODEX_HOME;
+      if (codexHome === undefined) throw new Error("no dev.lead/CODEX_HOME in member-env.json");
+      configText = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");
+      configMode = fs.statSync(path.join(codexHome, "config.toml")).mode & 0o777;
+      memberEnv = parsed;
+    } catch {
+      memberEnv = undefined;
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const { run } = fakeRunner(handlers);
+  const { home } = makeTempHome();
+  const homeRigHome = () => path.join(home, DEFAULT_OPENRIG_HOME);
+  await runPhase(spec, run, home, new AbortController().signal);
+  expect(memberEnv).toBeDefined();
+  const leadEnv = memberEnv!["dev.lead"]!;
+  const codexHome = leadEnv.CODEX_HOME;
+  expect(codexHome).toContain(path.join("state", "codex"));
+  expect(leadEnv.OPENROUTER_API_KEY).toBe("sk-or-v1-lead");
+  expect(configText).toContain("base_url = \"https://openrouter.ai/api/v1\"");
+  expect(configText).toContain("env_key = \"OPENROUTER_API_KEY\"");
+  // Research §5.5: codex via OpenRouter is Responses-API only.
+  expect(configText).toContain("wire_api = \"responses\"");
+  expect(configMode).toBe(0o600);
+  // Teardown removed the CODEX_HOME tree and the member-env map (seat-level
+  // dirs, matching the pi cleanup shape — the parent survives for a
+  // concurrent run's seats).
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "state", "codex", "dev-lead@devrig"))).toBe(false);
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "member-env.json"))).toBe(false);
+});
+
+test("S2.2: an all-pi rig writes NO member-env.json (the file's absence is the patched launcher's no-op)", async () => {
   const { run } = fakeRunner(baseHandlers());
   const { home } = makeTempHome();
-  await expect(runPhase(spec, run, home, new AbortController().signal))
-    .rejects.toThrow(/member 'lead' .* declares runtime 'codex'/);
+  await runPhase(SPEC, run, home, new AbortController().signal);
+  expect(fs.existsSync(path.join(home, DEFAULT_OPENRIG_HOME, "member-env.json"))).toBe(false);
 });
 
 test("S2.4: explicit runtime 'pi' behaves exactly like the default (no refusal)", async () => {
