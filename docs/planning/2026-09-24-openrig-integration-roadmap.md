@@ -135,7 +135,7 @@ Scope (all in `cli-anything/scripts/worker-rpc.ts` on that branch):
 
 ### Stage S2 — mixed runtimes (Claude/Codex seats via OpenRouter)
 
-**Status:** ◐ IN PROGRESS (2026-09-27) — S2.1/S2.4/S2.5 merged; S2.2/S2.3 delivery landed in-repo (image pin adoption + live proof at S2.6); per-runtime cost-row parsers still owed BEFORE S2.6 (the stage DoD demands per-seat per-runtime cost rows; `openrig-cost.ts` parses the pi JSONL shape only).
+**Status:** ◐ IN PROGRESS (2026-09-27) — S2.1/S2.4/S2.5 merged; S2.2/S2.3 delivery + patch merged; per-runtime cost rows landed (S2.6 gate item, operator decision: OpenRouter key API). Remaining: S2.6 live round (image pin adoption ritual + qds-live-e2e mixed rig) and S2.7 cockpit doc.
 **Depends on:** R0 (live rig_swarm baseline) + I4 (RESOLVED, PR #346). **Size:** small→medium. **Research ref:** §5.2, §5.5 (per-runtime cap mechanisms table), §9a finding on coms identity.
 
 - [x] **S2.1** Coms identity fix (~2 lines): identity falls back to `pi.getSessionName()` with `@`→`_` (runner strips `--cname` + `PI_COMS_*`). Test at the adapter level.
@@ -151,7 +151,7 @@ Scope (all in `cli-anything/scripts/worker-rpc.ts` on that branch):
   - CodeRabbit round 1 on #348 verified valid and fixed (c612f907): the S2.4 gate originally threw INSIDE the try, so a refusal entered the finally and ran rig-scoped teardown (`rig down --delete --force`) for a rig the invocation never imported — hoisted above the try, RED-first (test now asserts no `rig down`/`tmux` calls on refusal).
 - [x] **S2.5** Mixed-cap guard: keep Σ seat caps ≤ ceiling for MIXED runtimes (caps table §5.5 — Claude Max/ChatGPT Pro subscription seats are FORBIDDEN in capped runs; enforce by refusing non-OpenRouter runtimes at the schema or dispatch level).
   - Evidence: PR #348 — the closed enum IS the refusal (schema-first posture, consistent with the I4 decision): every admitted runtime carries a per-seat OpenRouter key cap; a subscription-auth runtime is unrepresentable at authoring. Regression witness: `claude-max` refused before AND after the enum swap.
-- [ ] **S2.6** Live round with a mixed rig (≥1 claude seat + ≥1 pi seat), full teardown/caps evidence as R0.7. Gate: per-runtime cost-row parsers land first (DoD demands per-seat per-runtime cost rows) + image pin adoption ritual (batched walk-digest re-pin).
+- [ ] **S2.6** Live round with a mixed rig (≥1 claude seat + ≥1 pi seat), full teardown/caps evidence as R0.7. Gate status 2026-09-27: per-runtime cost rows LANDED (non-pi seats price via the OpenRouter key API — `GET /api/v1/auth/key` per seat key in the finally before revocation; operator decision recorded); remaining gate = the batched image pin adoption ritual (coms-core + member-env patch + engine-source moves) at the round itself.
 - [ ] **S2.7** Cockpit MCP finding carried from S0: messages via MCP carry no sender — read via `rig_capture` or send through the queue with `sourceSession`. Document the cockpit posture for mixed rigs in the research doc.
 
 **Definition of done (stage):** schema + delivery + docs landed; mixed live round green with per-seat per-runtime cost rows; no subscription-OAuth spend path exists.
