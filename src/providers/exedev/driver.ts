@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:70274493381bd7938b54ea6f1556cfe3806fe30a568fbf6bd68d4620c32f3482";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8673cacd09b885c2713554aeab0cd1affe02f91c35869d86c5c56d211be7af5c";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,11 +573,10 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-seventh pin, 2026-09-28): buildId 2dcef7d5efd113c2,
- * adopted from gate B's own paste-ready output on publish run 36367790405
- * (the S2 buildout image — member-env patch + coms-core fallback + the
- * S2.2-S2.7 engine sources, built after #353's OPENRIG_TREE_SHA256 re-pin to
- * e2cb427c cleared the tree gate; driver.ts is excluded from SOURCE_PATHS, so
+ * CURRENT PAIRING (twenty-eighth pin, 2026-09-28): buildId c56de37e27f03812,
+ * adopted from gate B own paste-ready output on publish run 36373548860
+ * (the claude-CLI image: ARG CLAUDE_CODE_VERSION=2.1.283 installed into
+ * /opt/openrig, sweep-attributed; prior pairing:
  * this adoption commit rebuilds at the same resolved sha, byte identical, and
  * gate B must close GREEN on it).
  *
@@ -595,7 +594,7 @@ export const DEFAULT_IMAGE_REF =
  * same commit (the whole-walk literal now 9f55e706…, its debt declared on
  * the branch).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "2dcef7d5efd113c2";
+export const DEFAULT_IMAGE_BUILD_ID = "c56de37e27f03812";
 
 
 
