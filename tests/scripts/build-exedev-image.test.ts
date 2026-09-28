@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "7db06bb74f3c9ef03a0c5b4b1dd030ecf4c9ae8e796f00127b3fc4af04d83810",
+      "oci/exedev/Dockerfile": "4081eb9d75559b8acea5c45a353e3c92fb7ca8731b6f357142549564d2664c97",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1938,7 +1938,15 @@ describe("buildIdFileInputs", () => {
       // receive attempt read c51554d9 off a tree with unrelated working-tree
       // dirt; the discipline paragraph above is why a second receive, on a
       // verified-clean tree, is the binding one.
-      "9f55e70681b11a5b3b41765adcf77883af7aeb59b2c8c1b5d7c3a8346f2c203c",
+      //
+      // 6121efeb: the S2 buildout (2026-09-27/28) — coms-core.ts identity
+      // fallback (#347), the member-env patch applier + its Dockerfile COPY/
+      // RUN + the OPENRIG_TREE_SHA256 re-pin to e2cb427c (#349), and the
+      // S2.2-S2.7 engine-source deltas (#348/#350/#351) all move walked
+      // inputs. Measured offline over the post-re-pin tree (108 tracked
+      // inputs; the value below is the test's own trackedSetDigest oracle's
+      // output on that tree, received from its own failing run).
+      "c172f910cd1ec9a92977b7f6f17ddf0609820f8e5bf632c562ce6559e6d07d0f",
     );
   });
 });
@@ -3643,7 +3651,10 @@ describe("checksumArgProblems", () => {
     // nodejs.org's SHASUMS256.txt line; OPENRIG_TREE_SHA256 from run
     // 36032367862 once the node gate stopped dying first, RE-MEASURED
     // 2026-09-26 from run 36251651875 after upstream ^-range drift inside
-    // 0.5.14 (543e846b → 41e10c9a, no CLI version change) — no external
+    // 0.5.14 (543e846b → 41e10c9a, no CLI version change), and again
+    // 2026-09-28 from run 36367093271 — OUR OWN S2.2 member-env patch
+    // moved it (41e10c9a → e2cb427c), which is the patched bytes being the
+    // pinned identity by design — no external
     // cross-check exists for an npm-resolved tree, so the refusal output IS
     // the measurement, and the hash is what freezes ^-range resolution.
     const measuredDefault = (name: "NODE_SHA256" | "OPENRIG_TREE_SHA256"): string => {
@@ -3651,7 +3662,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "41e10c9a6a4b9c075b05c93b8b7f069ccc9d693c854de6230d9cf978254e77ac";
+          return "e2cb427c98086028ffa0b882fd5ecac1f88f367348fca7870aa7d59a0f3d2e45";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {

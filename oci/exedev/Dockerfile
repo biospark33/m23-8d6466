@@ -964,7 +964,13 @@ ARG OPENRIG_VERSION=0.5.14
 # optional-deps excluded) is recorded in the re-pin commit message; from this
 # re-pin forward the snapshot is part of the ritual, since a hash-only record
 # cannot say WHAT moved.
-ARG OPENRIG_TREE_SHA256=41e10c9a6a4b9c075b05c93b8b7f069ccc9d693c854de6230d9cf978254e77ac
+# RE-PINNED 2026-09-28 from run 36367093271's refusal ("the /opt/openrig tree
+# hashes to e2cb427c…"): OUR OWN S2.2 patch moved it — the member-env applier
+# (oci/exedev/openrig-patches/member-env.mjs) modifies node-launcher.js inside
+# the tree-measured RUN, so the patched bytes are the pinned identity by
+# design. Nothing upstream drifted: the delta is exactly the patch (2 imports
+# + the qdsMemberEnv merge block) plus whatever npm re-resolved identically.
+ARG OPENRIG_TREE_SHA256=e2cb427c98086028ffa0b882fd5ecac1f88f367348fca7870aa7d59a0f3d2e45
 # `npm i -g --prefix` is expected to put the bin link at /opt/openrig/bin/rig
 # (the package's `bin: {rig: dist/bin-wrapper.js}`); the existence check makes
 # that layout assumption fail LOUDLY at the first real build rather than
