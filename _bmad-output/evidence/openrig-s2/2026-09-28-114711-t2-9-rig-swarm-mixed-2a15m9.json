@@ -1,0 +1,70 @@
+{
+  "test": "T2.9",
+  "outcome": "fail",
+  "runId": "qds-20260928-ef403c",
+  "runCapMicroUsd": 1200000,
+  "seatCapMicroUsd": 500000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "runCapMicroUsd": 1200000,
+      "seatCapMicroUsd": 500000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t29probe-mul6lq552j2x"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 3,
+      "stdoutTail": "",
+      "stderrTail": "ord_write_ms\":5}\n{\"requestId\":\"5ee2ef2a-4b87-40e6-9a31-bf97f75e4413\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-28T11:46:58.541Z\",\"duration\":55312,\"durationMs\":55312,\"status\":\"error\",\"error\":{\"code\":\"setup-gate-failed\",\"message\":\"setup gate failed at item B: B: pi --list-models says: No models available. Use /login to log into a provider via OAuth or API key. See: (exits 0 — the registry did NOT load; content decides, never $?)\"},\"runId\":\"qds-20260928-ef403c\",\"verb\":\"dispatch\",\"phase\":\"refused\",\"exitStatus\":\"logic\",\"timings\":{\"validate_ms\":0,\"create_ms\":3884,\"mint_ms\":4895,\"fill_ms\":31504,\"setup_gate_ms\":13818}}\n{\"assertionCode\":1,\"failedItem\":\"B\",\"assertions\":[\"A:ok\",\"B:B: pi --list-models says: No models available. Use /login to log into a provider via OAuth or API key. See: (exits 0 — the registry did NOT load; content decides, never $?)\"],\"runId\":\"qds-20260928-ef403c\",\"vmName\":\"qds-20260928-ef403c\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"debugCommands\":[\"ssh exe.dev ls --json\",\"ssh qds-20260928-ef403c.exe.xyz 'git -C src status --porcelain'\",\"ssh qds-20260928-ef403c.exe.xyz 'cat /etc/qds-image.json'\",\"ssh qds-20260928-ef403c.exe.xyz 'pi --list-models'\",\"ssh qds-20260928-ef403c.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'\"],\"teardownCommand\":\"ssh exe.dev rm qds-20260928-ef403c  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)\",\"code\":\"setup-gate-failed\",\"message\":\"setup gate failed at item B: B: pi --list-models says: No models available. Use /login to log into a provider via OAuth or API key. See: (exits 0 — the registry did NOT load; content decides, never $?)\",\"remediation\":\"debug: ssh exe.dev ls --json; ssh qds-20260928-ef403c.exe.xyz 'git -C src status --porcelain'; ssh qds-20260928-ef403c.exe.xyz 'cat /etc/qds-image.json'; ssh qds-20260928-ef403c.exe.xyz 'pi --list-models'; ssh qds-20260928-ef403c.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json' — teardown when done: ssh exe.dev rm qds-20260928-ef403c  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)\"}\n{\"requestId\":\"5ee2ef2a-4b87-40e6-9a31-bf97f75e4413\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-28T11:46:58.545Z\",\"duration\":55320,\"durationMs\":55320,\"status\":\"error\",\"runId\":\"qds-20260928-ef403c\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":3,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 3\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260928-ef403c",
+      "vmName": "qds-20260928-ef403c"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260928-ef403c",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":29}\n{\"requestId\":\"e03fb4b0-dc9a-4e59-8f02-3e28823a412d\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-28T11:47:07.407Z\",\"duration\":8699,\"durationMs\":8699,\"status\":\"ok\",\"runId\":\"qds-20260928-ef403c\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260928-ef403c",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-28T11:47:11.757Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8673cacd09b885c2713554aeab0cd1affe02f91c35869d86c5c56d211be7af5c",
+    "buildId": "c56de37e27f03812",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
