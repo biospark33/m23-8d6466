@@ -280,23 +280,38 @@ You are continuing the OpenRig × QDS-Factory integration program. The tracker i
 docs/planning/2026-09-24-openrig-integration-roadmap.md — read it FIRST, top to
 bottom. It is the single source of truth for what remains. Do not re-research;
 the research doc (docs/planning/2026-09-23-openrig-swarm-integration-research.md)
-decisions are SETTLED. Execute the next unchecked stage with full rigor: every
-fix lands with its test, every claim carries an artifact, a checkbox is checked
-only when its evidence exists.
+decisions are SETTLED (including §5.5's S2.2 patch decision and §5.7 cockpit
+posture). Execute the next unchecked stage with full rigor: every fix lands
+with its test, every claim carries an artifact, a checkbox is checked only when
+its evidence exists.
 
-VERIFIED POSITION (2026-09-26, verify anyway with the §0 commands):
-- R0 is COMPLETE: PRs #283–#319 merged; image pin closed at the twenty-sixth
-  (6fd78181…/85d75d0ccbfb259a, PR #316); mirror re-pushed; T2.8 live round GREEN
-  (qds-20260926-0532c5, evidence under _bmad-output/evidence/openrig-s1/).
-- R1 is COMPLETE: follow-up issues #320–#329 filed (R0.8 + I1–I8).
-- The T2.8 campaign reds and their fixes, for context: mirror-rides-tee
-  (#312/#313), pi-0.84.4 session-JSONL parser (#315), teardown key-client wiring
-  (#317), swarm INV-COST-5 ledger attribution (#319), walk literal (#318).
-- OPENRIG_TREE_SHA256 is 41e10c9a… (re-measured #314) — upstream ^-range drift
-  inside @openrig/cli@0.5.14 moved it once; it can move again. The refusal IS
-  the measurement; also snapshot the dependency versions at each re-pin.
+VERIFIED POSITION (2026-09-27, end of the S2 buildout session — verify anyway):
+- QDS dev = 68a34986. Five PRs merged this session: #346 (I4 — schema-required
+  testCommand on rig_swarm; #325 closed), #347 (S2.1 coms identity fallback),
+  #348 (S2.4/S2.5 runtime schema + pre-spend gate), #349 (S2.2/S2.3 delivery +
+  the member-env pinned-tree patch), #350 (cost rows via OpenRouter key API),
+  #351 (S2.7 cockpit posture). Every checkbox above carries its evidence line.
+- swarmclaw dev = 3bf73872 (PR #629 merged); SC1.6 lands with SC2.
+- solstice (zeropoint) dev = 4fc158a7, submodule pin = ea060b17 — STILL 4
+  commits behind swarmclaw dev (missing the SC1.5 merge 3bf73872). Pin bump
+  needed before SC2 (pattern: PRs #456/#458). Solstice repo SHARED — worktree
+  rules below.
+- CI-wait policy (operator, 2026-09-27): do NOT wait on CI — full local
+  verification (scoped suites + full suite teed/filtered + tsc + biome +
+  detect_changes) then --admin merge with the baseline noted.
+- Full-suite baseline reds (do NOT fix here, do not count against gates):
+  story-consistency ×2, buildIdFileInputs ×2 (the walk-digest red — its re-pin
+  ritual is S2.6's first step), trace/reader vendor self-compact ×12, wall-clock
+  flakes (open-pr reuse-probe, http retryTransport, failure-recovery handoff,
+  fleet O_EXCL — all green in isolation).
 
-YOUR WORK: the first unchecked stage below — {P0 ∥ Q1 ∥ SC1}, then S2 → SC2 →
-ADR. #325 (I4 gate-less rig_swarm fallback) needs an OPERATOR DECISION before
-S2. Hard rules in §1; live money/boxes under the qds-live-e2e skill only.
+YOUR WORK: S2.6 — the paid live round, operator-gated (qds-live-e2e skill
+MANDATORY, worst-case spend ≈ $2.89 printed first, explicit operator "go").
+Sequence: (1) image ritual — dispatch the publish workflow on dev, read the
+refusal outputs (they measure the moved OPENRIG_TREE_SHA256 + buildId: coms-core
+#347 + member-env patch #349 + engine sources #350 all move bytes), pin-adoption
+commit at the three sites (driver.ts ×2 + build test expectation), healing run
+green; (2) the mixed-rig round (≥1 claude seat + ≥1 pi seat) with full
+teardown/caps evidence; (3) checkboxes + evidence. Then ADR is all that remains.
+Hard rules in §1; swarmclaw branch work only in dedicated worktrees.
 ```
