@@ -1,0 +1,49 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "s2-mixed-live",
+  "runBudgetMs": 1840000,
+  "phases": [
+    {
+      "name": "s2-mixed-probe",
+      "kind": "code",
+      "description": "S2.6 live e2e probe phase that exits cleanly; filler so the manifest clears phaseCount >= 2.",
+      "command": ["true"],
+      "maxDurationMs": 10000,
+      "retries": 0
+    },
+    {
+      "name": "s2-mixed",
+      "kind": "rig_swarm",
+      "description": "S2.6 live e2e: one Pi lead + one claude worker settle one trivial committed change; the per-runtime cost-row proof.",
+      "maxDurationMs": 600000,
+      "retries": 0,
+      "testCommand": ["python3", "s2_mixed_marker_test.py"],
+      "rigSpec": {
+        "name": "s2-e2e",
+        "pods": [
+          {
+            "id": "pod-1",
+            "members": [
+              {
+                "id": "lead",
+                "runtime": "pi",
+                "model": "openrouter/anthropic/claude-haiku-4.5"
+              },
+              {
+                "id": "worker",
+                "runtime": "claude",
+                "model": "anthropic/claude-haiku-4.5"
+              }
+            ]
+          }
+        ]
+      },
+      "objective": "You are the lead seat of rig s2-e2e, working in the current directory (a git repo). 1. Create s2_mixed_marker.py containing exactly one function: def marker() -> int: return 42. 2. Delegate to the worker seat named 'worker' (send it a message with rig send): the worker must create s2_mixed_marker_test.py that imports marker from s2_mixed_marker, asserts marker() == 42, and prints s2-marker-test-passed. 3. When the worker's file exists, run: python3 s2_mixed_marker_test.py — it must print s2-marker-test-passed and exit 0. 4. git add s2_mixed_marker.py s2_mixed_marker_test.py and commit BOTH on the CURRENT branch (do not create a new branch). 5. Then close your queue item as done with no follow-on. Do not start any new work after closing.",
+      "leadSeat": "lead",
+      "seatBudgets": {
+        "lead": 500000,
+        "worker": 500000
+      }
+    }
+  ]
+}
