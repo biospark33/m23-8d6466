@@ -968,7 +968,7 @@ ARG OPENRIG_VERSION=0.5.14
 # CLI install grew the same tree (e2cb427c → 6b60a34b) — the second measured
 # loop of the same ritual, expected when the applier + a new package both land
 # inside the scoped tree.
-RE-PINNED 2026-09-28 from run 36367093271's refusal ("the /opt/openrig tree
+# RE-PINNED 2026-09-28 from run 36367093271's refusal ("the /opt/openrig tree
 # hashes to e2cb427c…"): OUR OWN S2.2 patch moved it — the member-env applier
 # (oci/exedev/openrig-patches/member-env.mjs) modifies node-launcher.js inside
 # the tree-measured RUN, so the patched bytes are the pinned identity by
