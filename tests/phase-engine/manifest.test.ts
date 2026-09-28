@@ -1062,7 +1062,7 @@ describe("loadManifest — rig_swarm (S1)", () => {
   // S2.5 refusal: a non-OpenRouter runtime is unrepresentable at authoring).
 
   // 9. claude and codex member runtimes are admitted
-  test.each(["claude", "codex"] as const)("rig_swarm admits member runtime '%s'", (rt) => {
+  test.each(["claude-code", "codex"] as const)("rig_swarm admits member runtime '%s'", (rt) => {
     const phase: Record<string, unknown> = {
       ...RIG_SWARM_PHASE,
       rigSpec: {

@@ -319,7 +319,7 @@ test.todoIf(liveTodoOff())(
       expect(seatCostRows.map((r) => r.role).sort()).toEqual(["lead", "worker"]);
       const workerCostRow = seatCostRows.find((r) => r.role === "worker");
       expect(workerCostRow?.source).toBe("openrouter-key-api");
-      expect(workerCostRow?.runtime).toBe("claude");
+      expect(workerCostRow?.runtime).toBe("claude-code");
       // S2.2 seeding path on the box: the phase's swarm_seat_up trace names
       // the claude seat's runtime (the mid-run member-env file read is
       // impossible — see the attempt-1 note above the run verb).
@@ -336,7 +336,7 @@ test.todoIf(liveTodoOff())(
         .filter((r): r is { payloadJson: string } => r?.payloadJson !== undefined)
         .map((r) => JSON.parse(r.payloadJson) as { session: string; runtime: string });
       evidence.push({ phase: "swarm-seat-up-traces", rows: seatUpRows });
-      expect(seatUpRows.find((r) => r.session === "pod-1-worker@s2-e2e")?.runtime).toBe("claude");
+      expect(seatUpRows.find((r) => r.session === "pod-1-worker@s2-e2e")?.runtime).toBe("claude-code");
       expect(seatUpRows.find((r) => r.session === "pod-1-lead@s2-e2e")?.runtime).toBe("pi");
 
       // ── 6. harvest: bundle → tip → OUT-OF-BOX reverify on the harvested tip ──

@@ -710,7 +710,7 @@ test("S2.2: a claude seat's key rides member-env.json, not a pi auth.json", asyn
     rigSpec: {
       name: "devrig",
       pods: [{ id: "dev", members: [
-        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude" },
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude-code" },
         { id: "worker", model: "openrouter/deepseek/deepseek-v3.2" },
       ]}],
     },
@@ -838,7 +838,7 @@ test("S2.6: a claude seat's cost row comes from the OpenRouter key API; the key 
     rigSpec: {
       name: "devrig",
       pods: [{ id: "dev", members: [
-        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude" },
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude-code" },
         { id: "worker", model: "openrouter/deepseek/deepseek-v3.2" },
       ]}],
     },
@@ -865,7 +865,7 @@ test("S2.6: a failed key-API fetch degrades the row, not the run", async () => {
     rigSpec: {
       name: "devrig",
       pods: [{ id: "dev", members: [
-        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude" },
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude-code" },
       ]}],
     },
     seatBudgets: { lead: 250_000_000 },
