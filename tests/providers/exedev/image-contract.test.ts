@@ -1394,8 +1394,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // buildId inputs are the ones the current pin was derived from" — which
     // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
     // SAME COMMIT; that pairing is the whole ritual.
-    expect(marker.buildId).toBe("c56de37e27f03812"); // adopted by the twenty-eighth-pin ritual (gate B run 36373548860 — the claude-CLI image (S2.6 prerequisite): ARG CLAUDE_CODE_VERSION install + the two sweep-measured license names; prior pairing: — the S2 buildout image: the member-env patch applier + coms-core identity fallback + the S2.2-S2.7 engine sources; the preceding tree re-pin #353 moved OPENRIG_TREE_SHA256 to e2cb427c so the build could clear its gates at all); re-pinned here (the pairing the comment above demands)
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("c56de37e27f03812");
+    expect(marker.buildId).toBe("1282936fe7956d11"); // adopted by the twenty-ninth-pin ritual (measured LOCALLY via the script itself: GitHub Actions billing failed account-wide, provenance deviation recorded in the Dockerfile re-pin; the prior twenty-eighth was gate B run 36373548860): ARG CLAUDE_CODE_VERSION install + the two sweep-measured license names; prior pairing: — the S2 buildout image: the member-env patch applier + coms-core identity fallback + the S2.2-S2.7 engine sources; the preceding tree re-pin #353 moved OPENRIG_TREE_SHA256 to e2cb427c so the build could clear its gates at all); re-pinned here (the pairing the comment above demands)
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("1282936fe7956d11");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 
