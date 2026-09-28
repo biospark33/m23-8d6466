@@ -67,7 +67,11 @@ const PATCHED = `        // ${MARKER} (S2.2, oci/exedev/openrig-patches): merge 
         // overridden and a malformed map loses keys instead of crashing.
         let qdsMemberEnv;
         try {
-            const parsed = JSON.parse(nodeFs.readFileSync(nodePath.join(process.env.OPENRIG_HOME ?? "", "member-env.json"), "utf8"));
+            // Resolve the home the same getOpenRigHome() does (env, then the
+            // $HOME/.openrig default) — the daemon process itself may run on
+            // the default rather than an explicit OPENRIG_HOME.
+            const qdsHome = process.env.OPENRIG_HOME || process.env.RIGGED_HOME || nodePath.join(process.env.HOME ?? "", ".openrig");
+            const parsed = JSON.parse(nodeFs.readFileSync(nodePath.join(qdsHome, "member-env.json"), "utf8"));
             qdsMemberEnv = parsed && typeof parsed === "object" ? parsed[logicalId] : undefined;
         }
         catch {
