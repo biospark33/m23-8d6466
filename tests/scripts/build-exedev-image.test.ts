@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "0b33d7c76e997e3767f41e444eeeb479190d8f5494640c67af2fa93fd93257ad",
+      "oci/exedev/Dockerfile": "aca8c5ffcbd407d1bb11db6b0365be873ec4f11eb9fd5b68ac937e681855ebf8",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1946,7 +1946,7 @@ describe("buildIdFileInputs", () => {
       // inputs. Measured offline over the post-re-pin tree (108 tracked
       // inputs; the value below is the test's own trackedSetDigest oracle's
       // output on that tree, received from its own failing run).
-      "c172f910cd1ec9a92977b7f6f17ddf0609820f8e5bf632c562ce6559e6d07d0f",
+      "088d4ff10175948505e3e342604a8516745906965a6501377db84f6ef89f4dcb",
     );
   });
 });
@@ -3664,7 +3664,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "6b60a34bf4587e6ab026eeb800bccd2701779b24eee1cba4a00a838f27c42091";
+          return "e035abfa9dd126561d972162500820a56c7fb5ad022190765819d7fa12e88e13";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
