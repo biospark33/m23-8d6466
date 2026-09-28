@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8673cacd09b885c2713554aeab0cd1affe02f91c35869d86c5c56d211be7af5c";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:a8b3358b648bb0da0f18bbdec1259f2c8a3371889dcdc34acf2e9b49c54c24e5";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,7 +573,10 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-eighth pin, 2026-09-28): buildId c56de37e27f03812,
+ * CURRENT PAIRING (twenty-ninth pin, 2026-09-28): buildId 1282936fe7956d11 —
+ * the post-label-fix engine (the round-blocking mismatch: the baked
+ * engine pre-#363 rejected runtime "claude-code"), measured LOCALLY via
+ * the script itself while GitHub Actions billing is failed;
  * adopted from gate B own paste-ready output on publish run 36373548860
  * (the claude-CLI image: ARG CLAUDE_CODE_VERSION=2.1.283 installed into
  * /opt/openrig, sweep-attributed; prior pairing:
@@ -594,7 +597,7 @@ export const DEFAULT_IMAGE_REF =
  * same commit (the whole-walk literal now 9f55e706…, its debt declared on
  * the branch).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "c56de37e27f03812";
+export const DEFAULT_IMAGE_BUILD_ID = "1282936fe7956d11";
 
 
 
