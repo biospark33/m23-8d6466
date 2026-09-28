@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "73aa1cda3caa4529b20e7b55e4e1e54f0c6edb161affa4e9008feb4739d62d61",
+      "oci/exedev/Dockerfile": "da8182de62a65af2e594819b25b09f6e7d26569583d15e28de9774df5a83fe64",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -3653,7 +3653,9 @@ describe("checksumArgProblems", () => {
     // 2026-09-26 from run 36251651875 after upstream ^-range drift inside
     // 0.5.14 (543e846b → 41e10c9a, no CLI version change), and again
     // 2026-09-28 from run 36367093271 — OUR OWN S2.2 member-env patch
-    // moved it (41e10c9a → e2cb427c), which is the patched bytes being the
+    // moved it (41e10c9a → e2cb427c, our own S2.2 patch), then again by the S2.6
+    // claude CLI install (e2cb427c → 6b60a34b) — the patched+installed bytes
+    // being the pinned identity by design, which is the patched bytes being the
     // pinned identity by design — no external
     // cross-check exists for an npm-resolved tree, so the refusal output IS
     // the measurement, and the hash is what freezes ^-range resolution.
@@ -3662,7 +3664,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "e2cb427c98086028ffa0b882fd5ecac1f88f367348fca7870aa7d59a0f3d2e45";
+          return "6b60a34bf4587e6ab026eeb800bccd2701779b24eee1cba4a00a838f27c42091";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {

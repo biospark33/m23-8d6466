@@ -964,13 +964,17 @@ ARG OPENRIG_VERSION=0.5.14
 # optional-deps excluded) is recorded in the re-pin commit message; from this
 # re-pin forward the snapshot is part of the ritual, since a hash-only record
 # cannot say WHAT moved.
-# RE-PINNED 2026-09-28 from run 36367093271's refusal ("the /opt/openrig tree
+# RE-PINNED AGAIN 2026-09-28 from run 36370793886.s refusal: the S2.6 claude
+# CLI install grew the same tree (e2cb427c → 6b60a34b) — the second measured
+# loop of the same ritual, expected when the applier + a new package both land
+# inside the scoped tree.
+RE-PINNED 2026-09-28 from run 36367093271's refusal ("the /opt/openrig tree
 # hashes to e2cb427c…"): OUR OWN S2.2 patch moved it — the member-env applier
 # (oci/exedev/openrig-patches/member-env.mjs) modifies node-launcher.js inside
 # the tree-measured RUN, so the patched bytes are the pinned identity by
 # design. Nothing upstream drifted: the delta is exactly the patch (2 imports
 # + the qdsMemberEnv merge block) plus whatever npm re-resolved identically.
-ARG OPENRIG_TREE_SHA256=e2cb427c98086028ffa0b882fd5ecac1f88f367348fca7870aa7d59a0f3d2e45
+ARG OPENRIG_TREE_SHA256=6b60a34bf4587e6ab026eeb800bccd2701779b24eee1cba4a00a838f27c42091
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a
