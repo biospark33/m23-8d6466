@@ -135,7 +135,13 @@ Scope (all in `cli-anything/scripts/worker-rpc.ts` on that branch):
 
 ### Stage S2 — mixed runtimes (Claude/Codex seats via OpenRouter)
 
-**Status:** ◐ IN PROGRESS (2026-09-27) — S2.1/S2.4/S2.5 merged; S2.2/S2.3 delivery + patch merged; per-runtime cost rows landed (S2.6 gate item, operator decision: OpenRouter key API). Remaining: S2.6 live round (image pin adoption ritual + qds-live-e2e mixed rig) and S2.7 cockpit doc.
+**Status:** ◐ IN PROGRESS (2026-09-28) — ALL in-repo items landed (S2.1-S2.5, S2.7, cost rows, T2.9 test); image ritual COMPLETE through the twenty-eighth pin (c56de37e27f03812 — member-env patch + claude CLI, adopted #360, healing green, mirror pushed). S2.6 is IN THE LIVE-ROUND LOOP: attempts 1-4 below; next = a controlled probe round (boot one box from the pinned image, run gate-B's `pi --list-models` ~10x + a manual `systemctl start qds-run@` + journalctl) to characterize the flake before any further full-round spend.
+
+Attempt log (all cleanup clean — box destroyed, zero key delta each time; actual spend ≈ gate pings only):
+1. run qds-20260928-992635 — TEST bug: member-env read between dispatch and fleet run (phase-seeded, not dispatch-seeded). Fixed #362.
+2. run qds-20260928-83f832 — PRODUCT fix: OpenRig's runtime label is "claude-code" (SUPPORTED_RUNTIMES rigspec-preflight.js:117); our schema invented "claude". Aligned everywhere (#363).
+3. run qds-20260928-a3a269 — engine-start-refused: systemd unit failed after fork; journalctl unreadable post-destroy. UNEXPLAINED.
+4. run qds-20260928-ef403c — setup gate B flaked: `pi --list-models` empty ("No models available") after passing 3x on the same image+sha. UNEXPLAINED. 3 and 4 may share a root (nondeterministic first-boot state in the new image).
 **Depends on:** R0 (live rig_swarm baseline) + I4 (RESOLVED, PR #346). **Size:** small→medium. **Research ref:** §5.2, §5.5 (per-runtime cap mechanisms table), §9a finding on coms identity.
 
 - [x] **S2.1** Coms identity fix (~2 lines): identity falls back to `pi.getSessionName()` with `@`→`_` (runner strips `--cname` + `PI_COMS_*`). Test at the adapter level.
