@@ -6,7 +6,12 @@
  * in dispatch via resolveRunCorrelation.
  */
 import { z } from "zod";
-import { MAX_ISSUE_ID, REPO_SLUG_PATTERN, canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
+import {
+  MAX_ISSUE_ID,
+  REPO_SLUG_PATTERN,
+  canonicalRepoSlug,
+  isValidWorkId,
+} from "../phase-engine/issue-correlation.ts";
 
 /**
  * `.` and `..` pass the slug charset but are not repository names. They are
@@ -318,7 +323,24 @@ export const BriefSchema = z.strictObject({
   // bound and `resolveRunCorrelation` refuses against its copy, so a literal
   // here is a second money-adjacent rule that silently stops agreeing the moment
   // either moves — the same argument `REPO_SLUG_PATTERN` above already makes.
-  issueId: z.number().int().positive().max(MAX_ISSUE_ID),
+  //
+  // Q1.7: OPTIONAL. Headless (non-issue) DAG work carries `workId` instead of a
+  // synthetic issue id (G8); the object-level refine below enforces exactly one
+  // of the two, so neither-at-all is as unrepresentable as both-at-once.
+  issueId: z.number().int().positive().max(MAX_ISSUE_ID).optional(),
+  // Q1.7 headless briefs: the caller-chosen work id (e.g. "dag/build-docs").
+  // The shape rule LIVES in issue-correlation (isValidWorkId) and is imported,
+  // not restated — same discipline as REPO_SLUG_PATTERN/MAX_ISSUE_ID above:
+  // that module owns (repoSlug, issueId | workId) identity, and the all-digit
+  // refusal is a MONEY-adjacent rule (`workId: "42"` would share issue 42's
+  // cap) that must not silently diverge between the two layers.
+  workId: z
+    .string()
+    .refine(isValidWorkId, {
+      message:
+        "workId must match ^[A-Za-z0-9._/-]{1,64}$ and may not be all digits (all digits collide with a numeric issue's spend identity)",
+    })
+    .optional(),
   // DF3.1 D2: optional string URL. Same scheme allow-list as repoUrl below:
   // this value lands in the box's run-context.json and in log lines an operator
   // clicks, and `.url()` alone admits `file://` and `javascript:`.
@@ -475,7 +497,25 @@ export const BriefSchema = z.strictObject({
   .refine((b) => repoSlugOfUrl(b.repoUrl) === canonicalRepoSlug(b.repoSlug), {
     message: "repoUrl must name the same repository as repoSlug",
     path: ["repoUrl"],
-  });
+  })
+  /**
+   * Q1.7: exactly one of issueId / workId. Field-level rules run FIRST (so a
+   * malformed workId is named as a workId problem), and this refine names the
+   * SHAPE problem: a brief is issue work or headless work, never both, never
+   * neither. The missing-identity arm keeps its path on `issueId` — the field
+   * an operator upgrading a pre-Q1.7 brief already has — and its message names
+   * both fields, because the refusal is about the pair, not either half.
+   */
+  .refine(
+    (b) => (b.issueId !== undefined) !== (b.workId !== undefined),
+    (b) => ({
+      message:
+        b.workId !== undefined
+          ? "exactly one of issueId or workId is required — a brief cannot carry both"
+          : "exactly one of issueId or workId is required — issue work carries issueId, headless work carries workId",
+      path: [b.workId !== undefined ? "workId" : "issueId"],
+    }),
+  );
 
 export type Brief = z.infer<typeof BriefSchema>;
 

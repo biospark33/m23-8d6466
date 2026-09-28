@@ -21,11 +21,13 @@
  *   close record (closedAt) → FleetLock.release() in FINALLY.
  */
 import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
 
 import {
   checkHeadroom,
   type HeadroomResult,
 } from "../providers/quota.ts";
+import { claimQuotaIntentWeighted, releaseQuotaIntent } from "../providers/quota-intents.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 import type { ProviderAuditLink } from "../providers/driver.ts";
@@ -400,14 +402,40 @@ export async function fanout(
   const input = validatePatternInput(pattern, n, briefs, deps);
   const mono = deps.monotonic ?? (() => performance.now());
   const now = (): Date => new Date(deps.clock?.() ?? Date.now());
-  const lock = new FleetLock({ path: deps.lockPath ?? FLEET_LOCK_PATH, requestId: deps.requestId });
+  // Q1.6 (G7): the lock is THIS record's, not the fleet's. The old global
+  // fleet lock made a second concurrent fan-out fail exit-5 fleet-busy for as
+  // long as the first held it — up to the 1h race ceiling — which is exactly
+  // the contention a DAG host cannot absorb. The shared state the global lock
+  // used to stand over is arbitrated at its own layers now: money in the
+  // ledger's transactions (Q1.2), the VM ceiling in the quota intents the arms
+  // claim through dispatch (Q1.5), record identity in O_EXCL creates (AC9).
+  // What still needs a mutex is ONE fan-out record's lifecycle — its close and
+  // its loser teardown against a second invocation of the SAME record — and
+  // the lock scopes to that: <fanoutsDir>/<fanoutId>.lock. The id is minted
+  // BEFORE the acquire for the path; AC9's create-before-first-mint ordering
+  // is untouched (the RECORD is still created inside the lock, before any
+  // runId mint).
+  const fanoutId = mintFanoutId();
+  const lockBase = deps.lockPath ?? FLEET_LOCK_PATH;
+  const lock = new FleetLock({ path: join(dirname(lockBase), `fanout-${fanoutId}.lock`), requestId: deps.requestId });
   lock.acquire();
   try {
     // AC1: EXACTLY ONE checkHeadroom(N), inside the lock, before anything minted.
     const tAdmit = mono();
     let headroom: HeadroomResult;
+    // Q1.5/Q1.6: the aggregate intent goes down BEFORE the ceiling read —
+    // ONE weighted claim covering all N arms — and comes up when the fan-out
+    // exits (the lock's own finally below). A concurrent plain dispatch's
+    // checkHeadroom counts this fan-out's not-yet-visible boxes; the arms
+    // themselves claim NOTHING (quotaIntentSkip) because this claim already
+    // stands for them.
+    const fanoutIntentsDir = join(dirname(deps.store.dir), "quota-intents");
+    const fanoutOwnIntent = claimQuotaIntentWeighted(fanoutIntentsDir, deps.requestId, n);
     try {
-      headroom = await checkHeadroom(deps.driver, n, deps.quotaLimits);
+      headroom = await checkHeadroom(deps.driver, n, deps.quotaLimits, undefined, {
+        dir: fanoutIntentsDir,
+        exclude: fanoutOwnIntent ? deps.requestId : undefined,
+      });
     } catch (e) {
       if (e instanceof FleetError) throw e;
       // Copied from dispatch.ts's admission gate: checkHeadroom's default
@@ -525,7 +553,6 @@ export async function fanout(
     // AC9: the record exists before the FIRST mint. Arms are attached right
     // after the mints (the schema wants real runIds, so create-then-fill).
     const store = new FanoutRecordStore({ dir: deps.fanoutsDir, requestId: deps.requestId });
-    const fanoutId = mintFanoutId();
     const pin = input.pattern === "many-stories" ? null : (input.briefList[0]?.commitSha ?? null);
     store.create({
       fanoutId,
@@ -599,6 +626,10 @@ export async function fanout(
       headroom,
     };
   } finally {
+    // Q1.6: the aggregate intent comes up with the fan-out — the arms' boxes
+    // are created (visible in the listing), refused, or abandoned, and the
+    // ceiling reopens for the next submit either way.
+    releaseQuotaIntent(join(dirname(deps.store.dir), "quota-intents"), deps.requestId);
     lock.release();
   }
 }
@@ -661,6 +692,9 @@ async function runArms(
           timeoutMs: deps.timeoutMs,
           setupGate: deps.setupGate,
           dispatchLogPath: deps.dispatchLogPath,
+          // Q1.6: the aggregate intent already covers this arm — a per-arm
+          // claim would double-count it (and collide on the shared requestId).
+          quotaIntentSkip: true,
           ...(deps.capMicroUsd === undefined ? {} : { capMicroUsd: deps.capMicroUsd }),
         };
         try {

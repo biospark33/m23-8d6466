@@ -62,7 +62,21 @@ function validBrief(over: Record<string, unknown> = {}): Record<string, unknown>
  * commitSha at all is admitted and the dispatcher provisions against an
  * unspecified commit, or reads a `manifestPath` of `undefined`.
  */
-const REQUIRED_KEYS = ["repoSlug", "issueId", "commitSha", "manifestPath", "repoUrl"] as const;
+/**
+ * Every key the schema requires. The fixture supplies exactly these (asserted
+ * below), so INV-2's closed validation is pinned for all of them rather than for
+ * `repoSlug` alone: every OTHER rejection case here starts from a complete
+ * fixture and corrupts one value, which cannot fail when a field stops being
+ * required. Make `commitSha` `.optional()` and the 40-hex cases still reject bad
+ * values and the valid-parse case still passes — while a brief carrying no
+ * commitSha at all is admitted and the dispatcher provisions against an
+ * unspecified commit, or reads a `manifestPath` of `undefined`.
+ *
+ * Q1.7: `issueId` left this list — headless work carries `workId` instead, and
+ * exactly one of the two is enforced by the object-level refine, not by a
+ * required field.
+ */
+const REQUIRED_KEYS = ["repoSlug", "commitSha", "manifestPath", "repoUrl"] as const;
 
 /**
  * Assert a brief is refused for the REASON claimed, not merely refused.
@@ -282,7 +296,11 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // Binds REQUIRED_KEYS to the fixture: a newly required field with no fixture
     // value fails `valid minimal brief parses`, and a newly OPTIONAL field left
     // in the fixture fails here instead of silently escaping the loop below.
-    expect(Object.keys(validBrief()).sort()).toEqual([...REQUIRED_KEYS].sort());
+    //
+    // Q1.7: the fixture is deliberately an ISSUE brief — it carries the optional
+    // `issueId` identity half (workId's cases build their own headless fixtures)
+    // — so the expected key set is REQUIRED_KEYS plus that one named optional.
+    expect(Object.keys(validBrief()).sort()).toEqual([...REQUIRED_KEYS, "issueId"].sort());
   });
 
   for (const key of REQUIRED_KEYS) {
@@ -1390,6 +1408,93 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
  * the per-issue cap) to the code that RUNS (repoUrl — what gets cloned inside
  * the box). Comparison is canonical on both sides, and EXACT on the path.
  */
+// ─── Q1.7 headless briefs (workId) ──────────────────────────────────────────
+//
+// G8 (research §2.4): the brief required repoSlug+issueId+commitSha+repoUrl, so
+// non-issue work needed a synthetic issue id. The operator-approved shape
+// (2026-09-28): issueId becomes optional, a new optional `workId` (a slug-safe
+// string, e.g. "dag/build-docs") takes its place for headless runs, and exactly
+// one of the two is required. Spend identity becomes `${slug}#${issueId}`,
+// `${slug}#${workId}` — headless rows aggregate under their own key and can
+// never collide with a numeric issue id, which is why an ALL-DIGIT workId is
+// refused at the schema: `workId: "42"` would resolve to issue 42's identity.
+describe("brief workId (Q1.7 headless briefs)", () => {
+  test("headless brief: workId present, issueId absent → parses, workId carried", () => {
+    const brief = {
+      repoSlug: "owner/repo",
+      workId: "dag/build-docs",
+      commitSha: "a".repeat(40),
+      manifestPath: "path/to/pipeline.json",
+      repoUrl: "https://github.com/owner/repo",
+    };
+    const result = BriefSchema.parse(brief);
+    expect(result.workId).toBe("dag/build-docs");
+    expect(result.issueId).toBeUndefined();
+  });
+
+  test("issue brief unchanged: issueId present, workId absent → parses", () => {
+    const result = BriefSchema.parse(validBrief());
+    expect(result.issueId).toBe(123);
+    expect(result.workId).toBeUndefined();
+  });
+
+  test("neither issueId nor workId → refused, naming both fields", () => {
+    const brief = validBrief();
+    delete brief.issueId;
+    // ONE issue, path on `issueId`; the MESSAGE is what names both fields —
+    // the refusal is about the pair, not either half.
+    expectRejected(brief, {
+      field: "issueId",
+      code: "custom",
+      message: /exactly one of issueId or workId/,
+    });
+  });
+
+  test("BOTH issueId and workId → refused (exactly one)", () => {
+    const brief = validBrief({ workId: "dag/build-docs" });
+    expectRejected(brief, {
+      field: "workId",
+      code: "custom",
+      message: /exactly one of issueId or workId/,
+    });
+  });
+
+  test("all-digit workId refused — it would collide with a numeric issue's spend identity", () => {
+    // `workId: "42"` resolves to `owner/repo#42`, byte-identical to issue 42's
+    // identity: two runs sharing one cap. The schema refuses the CLASS, not the
+    // value: any all-digit workId is the same collision.
+    const brief = {
+      repoSlug: "owner/repo",
+      workId: "42",
+      commitSha: "a".repeat(40),
+      manifestPath: "path/to/pipeline.json",
+      repoUrl: "https://github.com/owner/repo",
+    };
+    expectRejected(brief, {
+      field: "workId",
+      code: "custom",
+      message: /digits|issue/,
+    });
+  });
+
+  test("workId charset: spaces, control chars, leading '#' refused; dotted/slashed ids pass", () => {
+    const base = {
+      repoSlug: "owner/repo",
+      commitSha: "a".repeat(40),
+      manifestPath: "path/to/pipeline.json",
+      repoUrl: "https://github.com/owner/repo",
+    };
+    for (const workId of ["has space", "#42", "a\nb", "", "   ", "id?query"]) {
+      expectRejected({ ...base, workId }, { field: "workId", code: "custom" });
+    }
+    for (const workId of ["dag/build-docs", "build.docs", "a_b-c", "x".repeat(64)]) {
+      expect(BriefSchema.safeParse({ ...base, workId }).success).toBe(true);
+    }
+    // 65 chars: over the cap.
+    expect(BriefSchema.safeParse({ ...base, workId: "x".repeat(65) }).success).toBe(false);
+  });
+});
+
 describe("repoUrl/repoSlug cross-check", () => {
   test("a forge that folds case is accepted — the URL names the same repository", () => {
     const brief = validBrief({

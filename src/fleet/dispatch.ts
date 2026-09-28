@@ -64,6 +64,11 @@ import {
 } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
+// Q1.5: the cross-process headroom intent — claimed before the admission's
+// headroom read, released when the single-flight section exits, so a
+// concurrent process's checkHeadroom counts this dispatch as live the whole
+// time a box may be coming into existence (the documented open half, closed).
+import { claimQuotaIntent, releaseQuotaIntent } from "../providers/quota-intents.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import type { AdmissionDecision, CostLedger } from "../providers/cost-ledger.ts";
 import { newId, assertValidRunId, InvalidRunIdError, type RunRecordStore } from "../providers/run-record.ts";
@@ -452,7 +457,16 @@ function storeRunIdRefusal(e: unknown, value: unknown): string {
  */
 export type LedgerLike = Pick<
   CostLedger,
-  "config" | "issueBudgetSnapshot" | "admitIssue" | "releaseAdmission" | "close"
+  | "config"
+  | "issueBudgetSnapshot"
+  | "admitIssue"
+  | "releaseAdmission"
+  // Q1.2: the budget-group reservation rides the same ledger handle — one
+  // SQLite file arbitrates both the per-issue cap and the DAG run's shared
+  // group ceiling.
+  | "reserveBudgetGroup"
+  | "releaseBudgetGroup"
+  | "close"
 >;
 
 export interface DispatchDeps {
@@ -496,6 +510,13 @@ export interface DispatchDeps {
   dispatchLogPath?: string;
   /** Setup-gate seam (test/injection). Default: exedev `.setup`, else fakeGate. */
   setupGate?: (driver: ProviderDriver, vm: string, opts: GateOpts) => Promise<SetupGateResult>;
+  /**
+   * Q1.5/Q1.6: the caller already holds the umbrella — a fan-out's aggregate
+   * admission claimed ONE weighted intent for all N arms before its own
+   * ceiling check, so per-arm claims would double-count the same boxes (and
+   * collide on the shared requestId). Set by the fan-out arm builder only.
+   */
+  quotaIntentSkip?: boolean;
   /**
    * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Validated at dispatch
    * before reaching the budget gate: if provided, must be a positive integer no
@@ -966,7 +987,9 @@ class DispatchContext {
   // shape check has passed, like every other fact this context holds.
   requestId: string | null = null;
   repoSlug: string | null = null;
-  issueId: number | null = null;
+  // Q1.7: the identity half is issueId (number) or workId (string) — never
+  // both. Payloads/log rows carry whichever the brief named.
+  issueId: number | string | null = null;
   runId: string | null = null;
   vmName: string | undefined;
   gate: SetupGateResult | undefined;
@@ -2505,7 +2528,7 @@ export async function dispatch(
   }
   const valid: Brief = parsed.data;
   ctx.repoSlug = valid.repoSlug;
-  ctx.issueId = valid.issueId;
+  ctx.issueId = valid.issueId ?? null;
 
   // ── 2. resolve correlation (CC-9/AC2: malformed requestId mints fresh) ─────
   // AC1: a non-UUID-v4 requestId is NOT a validation failure — it is dropped so
@@ -2619,10 +2642,14 @@ export async function dispatch(
   // `correlation.*` and the dispatch-log keys read a third copy: the resolver
   // trims the slug, so spend could be attributed to an issue the run does not
   // report, and the per-issue cap bypassed with a pair the resolver rewrites.
+  //
+  // Q1.7: the identity is `issueKey` — `String(issueId)` or the headless
+  // `workId` — so the ledger key, the `${slug}#…` cap overrides and the spend
+  // aggregates read ONE string for both brief shapes.
   const repoSlug = correlation.repoSlug;
-  const issueId = String(correlation.issueId);
+  const issueId = correlation.issueKey;
   ctx.repoSlug = repoSlug;
-  ctx.issueId = correlation.issueId;
+  ctx.issueId = correlation.issueId ?? correlation.workId ?? null;
   const resolvedMs = now() - wallStart;
   // GUARDED, like every other `log` in this module. A throwing sink must not
   // break the run: unguarded, this one turned a healthy dispatch into a raw
@@ -2775,13 +2802,37 @@ export async function dispatch(
   // pass a ceiling they sampled before either box existed. See
   // `withAdmissionSingleFlight`'s doc comment for the scope and the half that
   // deliberately stays open.
-  const { provisioned, effectiveCeilingMicros, tCreate } = await withAdmissionSingleFlight(async () => {
+  // Q1.5: the intent goes down BEFORE the ceiling read and comes up when the
+  // admission section exits (either way), so a concurrent process's
+  // checkHeadroom counts this dispatch for exactly the window a box may be
+  // coming into existence. The store dir is the shared surface both processes
+  // already arbitrate their locks through. A refused claim means the SAME
+  // requestId is dispatching in another process right now — a replay caller
+  // should use submit, and racing the same dispatch twice is refused before
+  // anything is sampled.
+  // SIBLING of the runs dir, not inside it: the runs dir is the run-record
+  // listing’s surface (fleet status, the reaper, every readdir over it), and a
+  // bookkeeping subtree inside it would be rows in someone else’s listing.
+  const quotaIntentsDir = join(dirname(storeDir), "quota-intents");
+  if (requestId !== undefined && deps.quotaIntentSkip !== true) {
+    if (!claimQuotaIntent(quotaIntentsDir, requestId)) {
+      throw refuse(
+        5,
+        "quota-intent-in-flight",
+        `requestId ${requestId} is already dispatching in another process (its headroom intent is claimed)`,
+        "wait for the earlier dispatch to settle, or use fleet submit --request-id for replay-safe resubmission — racing one requestId past two headroom reads is how a ceiling is oversubscribed",
+      );
+    }
+  }
+  let admission: { provisioned: Awaited<ReturnType<typeof provisionAdmittedRun>>; effectiveCeilingMicros: number; tCreate: number };
+  try {
+    admission = await withAdmissionSingleFlight(async () => {
     // ── 5. admission (AC7/AC8 — both BEFORE store.create/driver.create) ────────
     // AC8: skipped only under { admitted: true } (DF3.2's single checkHeadroom(N)).
     if (opts.admitted !== true) {
       let headroom: Awaited<ReturnType<typeof checkHeadroom>>;
       try {
-        headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits));
+        headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits, undefined, { dir: quotaIntentsDir, exclude: requestId }));
       } catch (e) {
         // `within`'s own deadline already refused this one (checked, not
         // assumed: a FleetError that never passed `refuse` gets the typed
@@ -3430,16 +3481,26 @@ export async function dispatch(
       );
     }
     return { provisioned, effectiveCeilingMicros, tCreate };
-  }).catch((e: unknown) => {
-    // The audit handle is opened INSIDE the section above (fail-closed, before
-    // anything billable) while the `finally` that closes it belongs to the
-    // create→expose try below — which this path never enters. Every refusal
-    // between the two (`run-id-in-use`, `provision-failed`, a create timeout, a
-    // `HeadroomRefusedError`) would otherwise leak a live `Database` per failed
-    // fan-out arm. Nothing else about the refusal changes: it is rethrown as-is.
-    closeAuditStore();
-    throw e;
-  });
+    }).catch((e: unknown) => {
+      // The audit handle is opened INSIDE the section above (fail-closed, before
+      // anything billable) while the `finally` that closes it belongs to the
+      // create→expose try below — which this path never enters. Every refusal
+      // between the two (`run-id-in-use`, `provision-failed`, a create timeout, a
+      // `HeadroomRefusedError`) would otherwise leak a live `Database` per failed
+      // fan-out arm. Nothing else about the refusal changes: it is rethrown as-is.
+      closeAuditStore();
+      throw e;
+    });
+  } finally {
+    // Q1.5: the claim comes up when the admission section exits — either way.
+    // Past a successful create the box is in the driver's listing and counts
+    // for itself; past a refusal there is nothing to count. An ABANDONED step
+    // (a fill that outran the deadline) keeps working after this release — its
+    // box appears inside the TTL window or the overshoot is the TTL's own
+    // documented ceiling.
+    if (requestId !== undefined && deps.quotaIntentSkip !== true) releaseQuotaIntent(quotaIntentsDir, requestId);
+  }
+  const { provisioned, effectiveCeilingMicros, tCreate } = admission;
   const { vm } = provisioned;
   // DF5.3 / C6: ONE repoSlug for this run's hop-5 links, derived from the
   // RECORD the provisioning sequence just wrote — the same source

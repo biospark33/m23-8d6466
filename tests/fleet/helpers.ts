@@ -23,6 +23,9 @@ export interface RecordingLedger extends LedgerLike {
   readonly admitCalls: AdmitCall[];
   /** One `releaseAdmission` call, exactly as a refusal guard handed it over. */
   readonly releaseCalls: AdmissionInput[];
+  /** Q1.2: the budget-group reserve/release calls, exactly as submit issued them. */
+  readonly groupCalls: { groupId: string; repoSlug: string; issueKey: string; requestId: string; amountMicroUsd: number }[];
+  readonly groupReleases: { groupId: string; requestId: string }[];
   closeCalls: number;
 }
 
@@ -44,6 +47,8 @@ export interface BudgetSnapshot {
 function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDecision): RecordingLedger {
   const admitCalls: AdmitCall[] = [];
   const releaseCalls: AdmissionInput[] = [];
+  const groupCalls: { groupId: string; repoSlug: string; issueKey: string; requestId: string; amountMicroUsd: number }[] = [];
+  const groupReleases: { groupId: string; requestId: string }[] = [];
   const ledger: RecordingLedger = {
     config: { defaultCapMicroUsd, perIssueOverrides: {} },
     issueBudgetSnapshot: () => ({
@@ -69,11 +74,31 @@ function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDeci
       releaseCalls.push(structuredClone(input));
       return { released: true };
     },
+    // Q1.2: the group reservation is part of the same money path. Recording
+    // fakes admit everything and never exceed any cap — the REAL group-cap
+    // arithmetic is a CostLedger test (tests/providers/budget-group.test.ts,
+    // real SQLite transactions); what the fleet-level tests need is the CALL
+    // FACTS (who reserved, who released) on the recording surface.
+    reserveBudgetGroup(input) {
+      groupCalls.push({ ...input });
+      return {
+        admitted: true as const,
+        reservedMicroUsd: input.amountMicroUsd,
+        groupCapMicroUsd: Number.MAX_SAFE_INTEGER,
+        replayed: false,
+      };
+    },
+    releaseBudgetGroup(input) {
+      groupReleases.push({ ...input });
+      return { released: true };
+    },
     close() {
       ledger.closeCalls += 1;
     },
     admitCalls,
     releaseCalls,
+    groupCalls,
+    groupReleases,
     closeCalls: 0,
   };
   return ledger;

@@ -24,6 +24,7 @@ import { readFileSync } from "node:fs";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
 import { ProviderError } from "./errors.ts";
+import { countQuotaIntents } from "./quota-intents.ts";
 
 export interface QuotaLimits {
   /** Concurrent provider VMs (D5: foreign VMs burn the same ceiling). */
@@ -241,6 +242,13 @@ export async function checkHeadroom(
   requested: number,
   limits: LoadedQuotaLimits = loadQuotaLimits(),
   listTimeoutMs: number = LIST_TIMEOUT_MS,
+  /**
+   * Q1.5: outstanding cross-process VM intents, counted as LIVE VMs beside the
+   * driver listing. Absent (the default) ⇒ the check is single-process — the
+   * exact behaviour every pre-Q1.5 caller keeps. Dispatch passes its
+   * intents dir; the closed ceiling is the point (G5).
+   */
+  intents?: { dir: string; now?: () => number; exclude?: string },
 ): Promise<HeadroomResult> {
   // Guard against caller bugs: negative or zero requested makes headroom nonsense
   if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested < 1) {
@@ -302,13 +310,19 @@ export async function checkHeadroom(
       reason: "list-unverified",
     };
   }
-  const liveVms = vms.length;
+  // Q1.5: intents this process cannot see in the listing count as live. The
+  // merge happens AFTER the verified-listing gates — a corrupt or partial
+  // listing still refuses on its own terms before intents are consulted.
+  const intentCount =
+    intents === undefined ? 0 : countQuotaIntents(intents.dir, { now: intents.now, exclude: intents.exclude });
+  const liveVms = vms.length + intentCount;
   const result = {
     ...base,
     liveVms,
     headroom: L.maxVms - liveVms,
     usedDiskGiB: liveVms * L.perVmDiskReservationGiB,
     verified: true as const,
+    ...(intentCount > 0 ? { outstandingIntents: intentCount } : {}),
   };
   if (liveVms + requested > L.maxVms) {
     return { ...result, allowed: false, reason: "vm-ceiling" as const };

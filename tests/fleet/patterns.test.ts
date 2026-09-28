@@ -2206,14 +2206,19 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
   // ─── AC8: two FULL invocations race the fleet lock ─────────────────────────────
 
   describe("single-operator enforcement across full invocations (AC8)", () => {
-    test("a second fanout while the first sits between admission and mint refuses exit 5 having written nothing", async () => {
+    test("Q1.6: a second fanout PROGRESSES while the first sits between admission and mint — the scoped lock no longer draws a fleet-wide queue", async () => {
+      // SUPERSEDES the AC8 global-exclusion pin: the global fleet lock made a
+      // second concurrent fan-out exit 5 fleet-busy for the winner's whole
+      // lifetime (up to the 1h race ceiling) — the contention a DAG host
+      // cannot absorb. The lock is the RECORD's now (one record's lifecycle:
+      // close + loser teardown), and the shared state it used to stand over
+      // is arbitrated at its own layers — money in the ledger's transactions
+      // (Q1.2), the VM ceiling in the weighted quota intents (Q1.5), record
+      // identity in O_EXCL creates. The fleet-lock.ts unit suite still pins
+      // the mutual exclusion itself (two acquires of ONE scoped path refuse);
+      // what this test pins is the SCOPING: the second fanout runs to
+      // completion while the first is parked mid-admission.
       manifest();
-      // Deterministic barrier: the Promise.then synchronization guarantees
-      // the loser attempts lock acquisition while the winner holds it — no
-      // wall-clock races. Barrier IN THE WINNER'S ADMISSION AWAIT:
-      // checkHeadroom's provider list parks until the loser has tried and
-      // failed to take the lock — forced interleaving through a seam, never
-      // natural timing (D14 / r9 lesson).
       let releaseAdmission: (() => void) | undefined;
       const admitted = new Promise<void>((resolve) => {
         releaseAdmission = resolve;
@@ -2225,37 +2230,29 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       });
 
       const roster = { rosterIds: ["r0", "r1"] };
+      // The winner calls fanout and parks INSIDE the admission await, its
+      // record-scoped lock held. Merely CALLING fanout ran the whole
+      // synchronous prefix — validation, id mint, scoped acquire.
       const winner = fanout("best-of-n", 2, brief(), deps({ ...roster, driver: parkedDriver }));
-      // Merely CALLING fanout ran its whole synchronous prefix — validation,
-      // FleetLock.acquire() — and left it parked INSIDE the admission await
-      // with the lock held. Everything below therefore races a HELD lock.
-      const loserErr = await refuseOf(fanout("best-of-n", 2, brief(), deps(roster)));
-      expect(loserErr.exitCode).toBe(5);
-      // SOURCE WINS over the spec sketch's "fleet-busy" here: within ONE
-      // process the own-pid re-entrancy guard is hoisted ABOVE every
-      // contention branch (fleet-lock.ts, r8 HIGH), so a second invocation
-      // from THIS process is refused as fleet-lock-reentrant. The cross-
-      // PROCESS refusal — the shape AC8's prose actually describes — is
-      // fleet-busy, proven by fanout.test.ts's subprocess race. Both codes are
-      // exit 5 and neither provisions anything.
-      expect(loserErr.code).toBe("fleet-lock-reentrant");
-      // The loser wrote ZERO fan-out records, minted ZERO run ids and created
-      // ZERO boxes: its refusal fired before admission even returned.
-      expect(fanoutRecordFiles()).toHaveLength(0);
-      expect(boxCount(driver)).toBe(0);
-      expect(readdirSafe(join(dir, "runs"))).toHaveLength(0);
+      // The second fanout — different record, different scoped lock — runs
+      // to COMPLETION against the shared driver/store while the first is
+      // parked. Under the global lock this exact invocation exited 5 having
+      // written nothing.
+      const second = await fanout("best-of-n", 2, brief(), deps(roster));
+      expect(second.arms.map((a) => a.outcome)).toEqual(["ready", "ready"]);
 
       releaseAdmission?.();
       const res = await winner;
       expect(res.arms.map((a) => a.outcome)).toEqual(["ready", "ready"]);
-      // Exactly ONE record, TWO run records and TWO boxes exist IN TOTAL —
-      // decisive under the shared driver/store, where per-invocation
-      // attribution is not directly observable: any loser-side write would
-      // break one of these counts.
-      expect(fanoutRecordFiles()).toEqual([`${res.fanoutId}.json`]);
-      expect(boxCount(driver)).toBe(2);
-      expect(readdirSafe(join(dir, "runs")).filter((f) => f.endsWith(".json"))).toHaveLength(2);
-      // The critical section closed cleanly behind the winner.
+      // TWO records — one per fan-out — and FOUR run records and boxes IN
+      // TOTAL: both invocations provisioned, neither refused the other.
+      const recordIds = [res.fanoutId, second.fanoutId].sort();
+      expect(recordIds[0]).not.toBe(recordIds[1]);
+      expect(fanoutRecordFiles().sort()).toEqual(recordIds.map((id) => `${id}.json`));
+      expect(boxCount(driver)).toBe(4);
+      expect(readdirSafe(join(dir, "runs")).filter((f) => f.endsWith(".json"))).toHaveLength(4);
+      // Both scoped locks closed cleanly behind their owners. The OLD global
+      // path is never created at all.
       expect(existsSync(lockPath)).toBe(false);
     });
   });

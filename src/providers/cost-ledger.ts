@@ -415,6 +415,43 @@ CREATE TRIGGER IF NOT EXISTS gate_admissions_no_delete
 BEFORE DELETE ON gate_admissions
 BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
 
+-- Budget-GROUP reservations (Q1.2, G6): a DAG run's submits share one ceiling.
+-- Keyed on (group_id, request_id) because the reserve happens at SUBMIT time —
+-- before the dispatcher has minted a runId. Append-only with a companion
+-- releases table, exactly the gate_admissions discipline above.
+CREATE TABLE IF NOT EXISTS budget_group_admissions (
+  group_id           TEXT NOT NULL,
+  request_id         TEXT NOT NULL,
+  repo_slug          TEXT NOT NULL,
+  issue_key          TEXT NOT NULL,
+  reserved_micro_usd INTEGER NOT NULL,
+  decided_at         TEXT NOT NULL,
+  PRIMARY KEY (group_id, request_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS budget_group_admissions_group
+  ON budget_group_admissions (group_id);
+CREATE TRIGGER IF NOT EXISTS budget_group_admissions_no_update
+BEFORE UPDATE ON budget_group_admissions
+BEGIN SELECT RAISE(ABORT, 'budget_group_admissions is append-only (INV-COST-1)'); END;
+CREATE TRIGGER IF NOT EXISTS budget_group_admissions_no_delete
+BEFORE DELETE ON budget_group_admissions
+BEGIN SELECT RAISE(ABORT, 'budget_group_admissions is append-only (INV-COST-1)'); END;
+
+CREATE TABLE IF NOT EXISTS budget_group_releases (
+  group_id    TEXT NOT NULL,
+  request_id  TEXT NOT NULL,
+  repo_slug   TEXT NOT NULL,
+  issue_key   TEXT NOT NULL,
+  released_at TEXT NOT NULL,
+  PRIMARY KEY (group_id, request_id)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS budget_group_releases_no_update
+BEFORE UPDATE ON budget_group_releases
+BEGIN SELECT RAISE(ABORT, 'budget_group_releases is append-only (INV-COST-1)'); END;
+CREATE TRIGGER IF NOT EXISTS budget_group_releases_no_delete
+BEFORE DELETE ON budget_group_releases
+BEGIN SELECT RAISE(ABORT, 'budget_group_releases is append-only (INV-COST-1)'); END;
+
 -- Admission RELEASES (DF2.8-owned API, added 2026-09-18 under the operator
 -- sanction from DF3.6a's review round): gate_admissions is append-only
 -- (INV-COST-1), so retiring a reservation cannot mark the admission row — a
@@ -2815,6 +2852,159 @@ export class CostLedger {
    * of the same admission, and `ON CONFLICT DO NOTHING` makes that race
    * idempotent — admission rows themselves are immutable (INV-COST-1).
    */
+  /**
+   * Q1.2 (G6): reserve against a budget GROUP's shared ceiling, in ONE
+   * transaction — the outstanding-sum read and the INSERT are atomic, so two
+   * concurrent submits (two CLI processes sharing this ledger file) cannot
+   * both read the same headroom and both spend it.
+   *
+   * Keyed (group_id, request_id): the reserve happens at SUBMIT time, before
+   * the dispatcher mints a runId. Replay-idempotent on that key — the second
+   * call answers from the first's row (`replayed: true`) instead of reserving
+   * twice, the same contract admitIssue offers per (requestId, runId).
+   *
+   * Append-only with a companion releases table (see the DDL): retiring a
+   * reservation is a compensating insert, never an edit.
+   *
+   * THE ONE DELIBERATE CEILING: an unreleased row holds its amount forever —
+   * the caller (submit) releases on every refusal path, SC2's cancel releases
+   * at teardown, and a leaked row wedges the group visibly in the ledger
+   * rather than silently freeing headroom a live run may be using. No time
+   * expiry: expiring on the clock alone could free headroom a live run is
+   * spending against, which is the over-admit direction INV-COST-6 forbids.
+   */
+  reserveBudgetGroup(
+    input: {
+      groupId: string;
+      repoSlug: string;
+      issueKey: string;
+      requestId: string;
+      amountMicroUsd: number;
+    },
+    groupCapMicroUsd: number,
+  ): { admitted: true; reservedMicroUsd: number; groupCapMicroUsd: number; replayed: boolean } {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
+    for (const [field, v] of Object.entries(input)) {
+      if (field === "amountMicroUsd") continue;
+      if (typeof v !== "string" || v.length === 0) {
+        throw new CostLedgerError(
+          "budget-group-input-invalid",
+          `budget-group reserve input is missing ${field} — refusing to decide against a NULL bind`,
+          "supply { groupId, repoSlug, issueKey, requestId, amountMicroUsd } from the submit's resolved identity",
+        );
+      }
+    }
+    if (!Number.isSafeInteger(input.amountMicroUsd) || input.amountMicroUsd <= 0) {
+      throw new CostLedgerError(
+        "budget-group-input-invalid",
+        `amountMicroUsd must be a positive integer of micro-dollars, got ${input.amountMicroUsd}`,
+        "pass the run's own ceiling (its key cap), not the group cap — the group cap is the second parameter",
+      );
+    }
+    if (!Number.isSafeInteger(groupCapMicroUsd) || groupCapMicroUsd <= 0) {
+      throw new CostLedgerError(
+        "budget-group-input-invalid",
+        `groupCapMicroUsd must be a positive integer of micro-dollars, got ${groupCapMicroUsd}`,
+        "pass the DAG run's shared ceiling in micro-dollars",
+      );
+    }
+    this.assertQueryable();
+    const repoSlug = canonicalRepoSlug(input.repoSlug);
+    const issueKey = input.issueKey;
+    const decidedAt = new Date().toISOString();
+    const decide = this.db.transaction((): {
+      admitted: true;
+      reservedMicroUsd: number;
+      groupCapMicroUsd: number;
+      replayed: boolean;
+    } => {
+      // Replay: this submit's row already exists — answer from it.
+      const prior = this.db
+        .prepare(
+          "SELECT reserved_micro_usd AS reserved FROM budget_group_admissions WHERE group_id = ? AND request_id = ?",
+        )
+        .get(input.groupId, input.requestId) as { reserved: number } | null | undefined;
+      if (prior != null) {
+        return {
+          admitted: true,
+          reservedMicroUsd: prior.reserved,
+          groupCapMicroUsd,
+          replayed: true,
+        };
+      }
+      // The outstanding sum: every row in the group WITHOUT a compensating
+      // release. Inside the same transaction as the INSERT below.
+      const outstanding = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(a.reserved_micro_usd), 0) AS total
+           FROM budget_group_admissions a
+           WHERE a.group_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM budget_group_releases r
+               WHERE r.group_id = a.group_id AND r.request_id = a.request_id
+             )`,
+        )
+        .get(input.groupId) as { total: number };
+      if (outstanding.total + input.amountMicroUsd > groupCapMicroUsd) {
+        throw new CostLedgerError(
+          "budget-group-exceeded",
+          `budget group ${input.groupId} is at ${outstanding.total} of ${groupCapMicroUsd} µ$ — a ${input.amountMicroUsd} µ$ reservation does not fit`,
+          "raise the group cap (--group-cap), wait for a sibling submit to settle, or submit under a different budget group",
+        );
+      }
+      this.db
+        .prepare(
+          `INSERT INTO budget_group_admissions (group_id, request_id, repo_slug, issue_key, reserved_micro_usd, decided_at)
+           VALUES (?,?,?,?,?,?)`,
+        )
+        .run(input.groupId, input.requestId, repoSlug, issueKey, input.amountMicroUsd, decidedAt);
+      return {
+        admitted: true,
+        reservedMicroUsd: outstanding.total + input.amountMicroUsd,
+        groupCapMicroUsd,
+        replayed: false,
+      };
+    });
+    return decide();
+  }
+
+  /**
+   * Q1.2's compensating release: retires ONE group reservation by its
+   * (groupId, requestId) key. Idempotent — the second call is a no-op
+   * (`released: false`), never an error, because the submit path releases on
+   * every refusal path and two racing releases must not fault each other.
+   */
+  releaseBudgetGroup(input: { groupId: string; requestId: string }): { released: boolean } {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
+    for (const [field, v] of Object.entries(input)) {
+      if (typeof v !== "string" || v.length === 0) {
+        throw new CostLedgerError(
+          "budget-group-input-invalid",
+          `budget-group release input is missing ${field} — refusing to release against a NULL bind`,
+          "supply the { groupId, requestId } of the reservation being released, exactly as its reserveBudgetGroup call did",
+        );
+      }
+    }
+    this.assertQueryable();
+    // The identity columns ride the release row for attribution; the release
+    // is keyed on (group_id, request_id) and ON CONFLICT DO NOTHING makes the
+    // second call the no-op the contract states.
+    const prior = this.db
+      .prepare(
+        "SELECT repo_slug AS repoSlug, issue_key AS issueKey FROM budget_group_admissions WHERE group_id = ? AND request_id = ?",
+      )
+      .get(input.groupId, input.requestId) as { repoSlug: string; issueKey: string } | null | undefined;
+    if (prior == null) return { released: false };
+    const { changes } = this.db
+      .prepare(
+        `INSERT INTO budget_group_releases (group_id, request_id, repo_slug, issue_key, released_at)
+         VALUES (?,?,?,?,?)
+         ON CONFLICT(group_id, request_id) DO NOTHING`,
+      )
+      .run(input.groupId, input.requestId, prior.repoSlug, prior.issueKey, new Date().toISOString());
+    return { released: changes === 1 };
+  }
+
   releaseAdmission(input: AdmissionInput): { released: boolean } {
     if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
     const started = Date.now();

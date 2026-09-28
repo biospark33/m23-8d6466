@@ -1717,7 +1717,7 @@ async function solicitResident(
  * the original refusal.
  */
 function dispatchFail(
-  ctx: { repoSlug: string | null; issueId: number | null; requestId: string | null },
+  ctx: { repoSlug: string | null; issueId: number | string | null; requestId: string | null },
   err: unknown,
 ): number {
   const rawCode = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
@@ -2557,7 +2557,7 @@ export function makeBodyFactory(
   cwd: string,
   tracer: Tracer,
   requestId: string,
-  correlation?: { runId: string; repoSlug: string; issueId: number },
+  correlation?: { runId: string; repoSlug: string; issueId: number | string | undefined },
   journal?: PhaseJournal,
   resident?: ResidentHooks,
 ) {
@@ -3508,7 +3508,7 @@ async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<nu
       /* the initiation error outranks a close failure */
     }
     return dispatchFail(
-      { repoSlug: resolved.repoSlug, issueId: resolved.issueId, requestId: resolved.requestId },
+      { repoSlug: resolved.repoSlug, issueId: resolved.issueId ?? resolved.workId ?? null, requestId: resolved.requestId },
       err,
     );
   }
@@ -3637,7 +3637,7 @@ async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<nu
     // path: nothing was read, so there is no pair to name.
     const reportUncorrelated = (
       err: unknown,
-      pair: { repoSlug: string | null; issueId: number | null },
+      pair: { repoSlug: string | null; issueId: number | string | null },
       // The FALLBACK's own failure, when even the bare session could not be
       // written. Reported beside the first error rather than folded into it, so
       // the primary cause keeps its field and a consumer can tell "no
@@ -3779,7 +3779,7 @@ async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<nu
         }
         reportUncorrelated(
           err,
-          { repoSlug: witnessedCorrelation.repoSlug, issueId: witnessedCorrelation.issueId },
+          { repoSlug: witnessedCorrelation.repoSlug, issueId: witnessedCorrelation.issueId ?? witnessedCorrelation.workId ?? null },
           sessionErr,
         );
       }
@@ -4630,7 +4630,7 @@ async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<nu
             runRoot,
             tracer,
             requestId,
-            resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId } : undefined,
+            resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId ?? resolved.workId } : undefined,
             journal,
             {
               steering,
