@@ -1,0 +1,47 @@
+{
+  "stage": "SC2",
+  "items": ["SC2.1", "SC2.2", "SC2.3", "SC2.4", "SC2.5"],
+  "date": "2026-09-28",
+  "kind": "code-only round (operator deferred docker/image builds this session; SC2.6/SC2.7 live rounds NOT run)",
+  "swarmclaw_pr": "https://github.com/Quantum-Digital-Solutions/swarmclaw/pull/644",
+  "swarmclaw_branch": "feature/sc2-factory-adapter",
+  "swarmclaw_head": "a05b502c",
+  "swarmclaw_base": "7ce84fc9 (swarmclaw dev at PR time; ⊇ solstice pin, ⊇ SC1.5's 3bf73872)",
+  "tdd": {
+    "watched_red": [
+      "normalizeStep drops externalJobConfig + a2aDelegateConfig (SC2 suite wave 1, 4 failing for the drop)",
+      "protocol-factory.test.ts first full run: 4/10 (submit seam + condition + refusal green), 6 failing for missing/broken implementation paths",
+      "each fix landed minimal, then GREEN"
+    ],
+    "final_green": {
+      "factory_suite": "10/10 (protocol-factory.test.ts)",
+      "protocol_plus_heartbeat": "207/207",
+      "touched_suites": "67/67 (factory, normalization, run-lifecycle, wake-dispatch, dag-dispatch-keying)",
+      "tsc": "clean (npx tsc --noEmit --incremental false, exit 0, 0 errors)",
+      "eslint": "clean on all 10 touched files"
+    },
+    "logs": [
+      "_bmad-output/evidence/openrig-sc2/2026-09-28-protocol-heartbeat-207of207.log",
+      "_bmad-output/evidence/openrig-sc2/2026-09-28-touched-suites-67of67.log"
+    ]
+  },
+  "key_facts": {
+    "sc2_1_seam": "requestId (UUIDv4) persisted into run.factoryState[step.id] BEFORE the fleet submit exec; proven by the exec fake loading the run from storage AT EXEC TIME and asserting the id is already durable; crash-window replay asserts the SAME --request-id across attempts",
+    "sc2_2_poller": "heartbeat tick (60s) polls fleet result per outstanding entry; awaiting-approval/pausing stay OPEN (DAG never approves); terminal approved|completed -> factory_result artifact + stepOutputs.structuredData + step completion + requeue; pollTimeoutMs deadline (default 1h) fleet-cancels + fails",
+    "sc2_3_condition": "artifact_field_equals: newest matching artifact parsed as JSON, dot-path field compared as strings; non-JSON/missing = false, never throws",
+    "sc2_4_cancel": "protocol cancel fleet-cancels outstanding entries MARK-FIRST (entry flipped before exec — crash mid-cancel cannot strand a live entry on a terminal run); terminal entries skip (Q1 idempotent both sides)",
+    "sc2_5_hygiene": "execFile (no shell), absolute path enforced ($SWARMCLAW_FACTORY_FLEET_CLI / deps.factory.fleetCli), env allowlist PATH/HOME/TMPDIR/LANG; proven by a REAL fake CLI journaling env keys — injected SC2_SECRET absent from the child env; bash-injected PWD/SHLVL/__CF_USER_TEXT_ENCODING accounted",
+    "dag_park": "run loop's SC1.5 park predicate gained the factory arm (factoryState submitting|submitted parks the loop); without it a healthy parked run failed 'DAG stuck' — RED-proven by the engine-driven park test",
+    "twin_bug_found": "normalizeStep historically DROPPED a2aDelegateConfig (SC1 bug-0 class; persistRun normalizes on every save) — a2a_delegate config died at first persist. Fixed in the same carry as externalJobConfig; normalizeCondition also gained artifact_field_equals carry (unusable condition drops to null)"
+  },
+  "prereq_note": {
+    "solstice_pin_bump": "OBSOLETE — handoff prerequisite 1 (bump ea060b17 -> 3bf73872) was already superseded before this session: solstice-ai PR (commit 96b2ca28) advanced the swarmclaw pin to 3445e9ea explicitly folding SC1.5, and three later advances (5ca81636, 8df438e5, 7ce84fc9) carried it further; 3445e9ea verified ancestor-containing 3bf73872 via GitHub compare (behind_by=0). No pin bump was needed; a worktree created for it was removed unused.",
+    "image_rebuild": "DEFERRED by operator this session (docker resources scarce; billing still failed account-wide). a1af12ce walk-digest rebuild remains the PREREQUISITE for SC2.6/SC2.7 live rounds.",
+    "gitnexus": "swarmclaw indexes in GitNexus are stale snapshots of OTHER checkouts (Solstice submodule 511 behind; scratch fork 94 behind) — no index of the QDS fork exists, so impact() N/A; grep-based caller enumeration + RED-first tests used instead (SC1 precedent). QDS-Factory source untouched this session (docs + evidence only)."
+  },
+  "operator_surfaces": [
+    "GitHub Actions billing still failed account-wide (from handoff; not re-verified this session)",
+    "Image rebuild adopting walk digest a1af12ce still pending — REQUIRED before SC2.6/SC2.7",
+    "a2aDelegateConfig normalization drop was a LIVE latent bug in swarmclaw (a2a_delegate phases could never survive a persist) — fixed in PR #644, worth knowing if a2a behavior changes"
+  ]
+}

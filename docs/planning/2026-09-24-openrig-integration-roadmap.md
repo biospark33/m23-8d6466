@@ -215,7 +215,7 @@ Closes the gaps that make the fleet callable as a DAG node. Every item lands wit
   - Evidence (partial scope, stated): deps-based DAG joins previously ALWAYS threw "could not resolve its parallel source step" — a join with `dependsOnStepIds` all completed now finishes via `finishStep` + `join_completed` event. Sibling-root starvation through the wake seam is fixed (bug-3 test: r1 dispatch-waits, r2 executes, join runs, run completes). **Remaining for SC1.5:** the live window between dispatch and wake still parks the whole run (scheduler picks `readyStepIds[0]`, dispatch sets `waiting`), and `phaseState` is a single slot — concurrent dispatches still need per-step dispatch keying.
 - [x] **SC1.5** Scheduler: a long step must not pause the run (the lease/dwell fix behind bug 3's symptom). **Refined scope 2026-09-27:** (a) in DAG mode, a dispatch parking the run must not stop sibling ready steps from executing before the wake; (b) per-step dispatch state keying so two dispatch steps can be outstanding; (c) wake must then match dispatch state per step. Own RED tests first (concurrent-dispatch scenario).
   - Evidence: swarmclaw PR [#629](https://github.com/Quantum-Digital-Solutions/swarmclaw/pull/629) (branch `feature/sc1.5-dag-dispatch-keying` off `ab067804`, commits `b1ccb1d9` + CodeRabbit-round fixes `dc2b5c13` + BMad 3-layer adversarial-review fixes `043d6da5`). (a) The three dispatch processors (`dispatch_task`, `dispatch_delegation`, `a2a_delegate`) in DAG mode write `stepState[step.id].dispatchedTaskId` and keep the run `running`; `runProtocolRun`'s loop parks itself (ready=0 ∧ running entry carries a dispatch key) instead of breaking the run — crash-leftover `running` entries WITHOUT a key keep the existing stuck handling. Cursor-mode `waiting`/`phaseState` park unchanged. (b) `ProtocolRunStepState.dispatchedTaskId` added; `normalizeStepState` carries it (persistRun normalizes every save — the bug-0 drop class). (c) wake guard admits `running` runs, matches the dispatch per stepState entry, resolves the phase from the matched step; recovery scans stepState in both the `running` and `waiting` branches. BONUS race found by the RED test: two task terminals in one drain dropped the second wake's re-enqueue (`pendingRunIds` dedup) and stranded a ready join forever — wakes now retry the re-enqueue (bounded 200×25ms; dedup guarantees no overlap with an active loop). CodeRabbit round (2 Majors, both verified valid, fixed `dc2b5c13`): (1) agent-turn processors' stale-snapshot persists could erase a mid-await dispatch wake — `collectResponses` + `processFacilitatorArtifactPhase` + `processEmitTasksPhase` now merge onto the latest run and bail on terminal (reachable only since SC1.5 un-parked siblings; RED: `completed-then-erased`); (2) recovery first-match woke only the first terminal dispatch and wedged dual-dispatch restarts — now wakes every terminal per-step dispatch (RED: run stuck `running`). BMad round 2 (blind-hunter/edge-hunter/acceptance-auditor subagent layers, all findings code-verified, 11 patched incl. LOWs — strongest: a DAG wake force-resumed a run held on an operator `wait` step; RED-verified `got: running`; triage sidecar `_bmad-output/workflow-state/code-review/pr629-r2/triage.json`). Tests: `protocol-dag-dispatch-keying.test.ts` 6 subprocess-per-test tests (concurrent dispatches, failure semantics, recovery-all-dispatches, wake-vs-collect erase, wait-hold preservation, delegation keying), each RED-verified against its fix; SC1 wake suite 6/6 (park predicates widened to accept `running` parks); full verification 14 protocol + 4 queue suites × 2 rounds = 219/224 and 217/224, failures confined to the baselined pre-existing families (`outcome-notify`, `task-followups` — load-sensitive, green in isolation, outcome-notify ×4 reproduced at clean `ab067804` via stash, zero import-closure overlap with changed symbols); ESLint clean on touched files.
-- [ ] **SC1.6** Blocking risk (adversarial-review finding): the 120 s lease vs minutes-long dispatch — lease expiry → recovery re-runs the step → SECOND BOX + SECOND KEY. Mitigation lands with SC2's persist-request-id-before-submit + Q1's idempotent submit; SC1 documents the dependency and adds the regression test at the SC2 seam. *(Progress note: bug 1's fix means a lease-expiry re-run that fails can no longer false-complete, and the complete-guard blocks success-over-unfinished-work — but the double-box risk itself is untouched until SC2/Q1. **SC1.5 landed the seam**: per-step outstanding-dispatch state (`stepState[id].dispatchedTaskId` + the loop's park condition) is exactly what SC2.6's lease-regression test codes against.)*
+- [ ] **SC1.6** Blocking risk (adversarial-review finding): the 120 s lease vs minutes-long dispatch — lease expiry → recovery re-runs the step → SECOND BOX + SECOND KEY. Mitigation lands with SC2's persist-request-id-before-submit + Q1's idempotent submit; SC1 documents the dependency and adds the regression test at the SC2 seam. *(Progress note: bug 1's fix means a lease-expiry re-run that fails can no longer false-complete, and the complete-guard blocks success-over-unfinished-work — but the double-box risk itself is untouched until SC2/Q1. **SC1.5 landed the seam**: per-step outstanding-dispatch state (`stepState[id].dispatchedTaskId` + the loop's park condition) is exactly what SC2.6's lease-regression test codes against. **SC2 update 2026-09-28**: the code-level mitigation is LANDED (swarmclaw PR #644) — the adapter persists the requestId before any exec and replays it on every retry/recovery path (crash-window replay test green), and the run loop's park predicate now recognizes factory parks. What remains is exactly the SC2.6 live kill test.)*
 
 **Definition of done (stage):** re-created failing tests turn green; no new failures in SwarmClaw's suite; within the 2-week cap or the escape hatch invoked with operator sign-off.
 
@@ -223,16 +223,26 @@ Closes the gaps that make the fleet callable as a DAG node. Every item lands wit
 
 ### Stage SC2 — SwarmClaw `external_job` step (the factory adapter)
 
-**Status:** ☐ NOT STARTED
+**Status:** ◐ CODE COMPLETE 2026-09-28 (SC2.1–SC2.5 landed, swarmclaw [PR #644](https://github.com/Quantum-Digital-Solutions/swarmclaw/pull/644), branch `feature/sc2-factory-adapter` off `7ce84fc9`, head `a05b502c`). SC2.6/SC2.7 (live rounds) remain — gated on the image ritual (a1af12ce walk-digest rebuild; operator deferred docker work this session) + operator "go". Zero boxes, zero spend this round.
 **Depends on:** S1 + P0 + Q1 + SC1. **Size:** ~250 LOC. **Research ref:** §7 SC2 row.
+**Prerequisite note (2026-09-28):** the handoff's solstice pin bump (ea060b17 → 3bf73872) was already SUPERSEDED before this session — solstice-ai `96b2ca28` advanced the swarmclaw submodule to `3445e9ea` explicitly folding SC1.5, and later advances carried the pin to `7ce84fc9` (verified `3bf73872` is an ancestor via GitHub compare, behind_by=0). No pin bump needed.
 
-- [ ] **SC2.1** Factory adapter: persist the request id BEFORE submitting (crash between persist and submit is recoverable; the reverse orphans a box), submit via Q1's idempotent `fleet submit`, persist the returned runId.
-- [ ] **SC2.2** Daemon poller calls `fleet result` per outstanding request; produces a `factory_result` artifact.
-- [ ] **SC2.3** New condition kind `artifact_field_equals` for branching on the verdict.
-- [ ] **SC2.4** Protocol cancel calls `fleet cancel` (idempotent both sides).
-- [ ] **SC2.5** Process hygiene: `execFile` with env allowlist + absolute path (no shell, no inherited env).
-- [ ] **SC2.6** Lease regression test at this seam (SC1.6's risk): a dispatch longer than the lease must not double-create a box — kill SwarmClaw mid-submit, restart, assert exactly one box and one key.
-- [ ] **SC2.7** EXIT TEST (the stage gate): a live protocol runs `factory_run`, branches on the verdict, and notifies; then kill SwarmClaw mid-submit and confirm exactly one box. Full live-round evidence under `_bmad-output/evidence/`.
+- [x] **SC2.1** Factory adapter: persist the request id BEFORE submitting (crash between persist and submit is recoverable; the reverse orphans a box), submit via Q1's idempotent `fleet submit`, persist the returned runId.
+  - Evidence: `src/lib/server/protocols/protocol-factory.ts` (swarmclaw PR #644) — `processExternalJobStep` mints a UUIDv4 `--request-id`, persists `run.factoryState[step.id]` status `submitting` via `persistRun` BEFORE any exec, then `execFile`s `fleet submit --request-id <id> --budget-group <protocolRunId> --group-cap <microUsd> --json` with the strict brief (repoSlug + issueId|workId + requestId) on stdin; ack `runId` captured (status `submitted`); transient exits 1/6 stay `submitting` for replay; refusals 2/3/5 fail or `advance_with_warning` (a2a-mirror `onFailure`). Persist-before-exec PROVEN by the exec fake loading the run from storage AT EXEC TIME (id already durable); crash-window replay asserts the SAME `--request-id` across attempts. Suite: `protocol-factory.test.ts` 10/10 (subprocess-per-test, real storage).
+- [x] **SC2.2** Daemon poller calls `fleet result` per outstanding request; produces a `factory_result` artifact.
+  - Evidence: `pollFactoryRuns` wired into `tickHeartbeats` (the `retryPendingProtocolRunOutcomes` seam); `awaiting-approval`/`pausing` are OPEN — the poller keeps waiting (the DAG never approves); terminal `approved|completed` writes the `factory_result` artifact (payload JSON) + `stepOutputs[].structuredData`, completes the step (DAG `finishStep` / cursor advance) and requeues via `requestProtocolRunExecution`; terminal `cancelled|rejected` fails per `onFailure`; poll deadline `pollTimeoutMs` (default 1h) fleet-cancels + fails (entry records `cancelled`, run records `failed` — factory truth vs step outcome kept distinct). Poller tests: approved-advance / awaiting-approval-parks / deadline-cancels, all green.
+- [x] **SC2.3** New condition kind `artifact_field_equals` for branching on the verdict.
+  - Evidence: `evaluateProtocolCondition` (protocol-step-helpers) + `normalizeCondition` carry — newest matching artifact (default kind `factory_result`) parsed as JSON, one dot-path field compared as strings; non-JSON/missing field is false, never a throw; an unusable condition (no field/value) drops to null at normalization. 6-case evaluation test green (approved/rejected/dot-path/non-JSON/missing-artifact/wrong-kind).
+- [x] **SC2.4** Protocol cancel calls `fleet cancel` (idempotent both sides).
+  - Evidence: `performProtocolRunAction`'s cancel arm fire-and-forgets `cancelFactoryRuns` (dynamic import — no static cycle); MARK-FIRST ordering (entry flips `cancelled` BEFORE the best-effort exec, so a crash mid-cancel cannot strand a live entry on a terminal run); terminal entries skip (second call = zero fleet invocations, asserted against the fake CLI journal).
+- [x] **SC2.5** Process hygiene: `execFile` with env allowlist + absolute path (no shell, no inherited env).
+  - Evidence: `runFleetVerb` — `execFile` (shell: false), absolute path enforced (relative refused, tested), env allowlist `PATH`/`HOME`/`TMPDIR`/`LANG` only; spawn failures surface as exit −1 (never mistaken for a fleet refusal). Proven END-TO-END by a REAL fake CLI script journaling verb/args/stdin/env-keys: a `SC2_SECRET` planted in the child env is verified ABSENT from the fleet child's env (bash-injected `PWD`/`SHLVL`/`__CF_USER_TEXT_ENCODING` accounted); the journal path rides the allowlisted `TMPDIR` so the test does not weaken the allowlist.
+- [ ] **SC2.6** Lease regression test at this seam (SC1.6's risk): a dispatch longer than the lease must not double-create a box — kill SwarmClaw mid-submit, restart, assert exactly one box and one key. *(Code-level mitigation landed with SC2.1: persist-before-exec + replay-same-id + Q1 O_EXCL, crash-window replay test green. The LIVE kill test remains, gated on the image ritual + operator go.)*
+- [ ] **SC2.7** EXIT TEST (the stage gate): a live protocol runs `factory_run`, branches on the verdict, and notifies; then kill SwarmClaw mid-submit and confirm exactly one box. Full live-round evidence under `_bmad-output/evidence/`. *(Gated on the a1af12ce walk-digest image rebuild — operator deferred docker work this session — then qds-live-e2e rules.)*
+
+**Twin bug found and fixed while landing the carries (2026-09-28):** `normalizeStep` historically **dropped `a2aDelegateConfig`** — the SC1 bug-0 class (`persistRun` normalizes on EVERY save), so every `a2a_delegate` phase lost its config at its first persist. Both config carries (`a2aDelegateConfig` + the new `externalJobConfig`) now land in `normalizeStep` with round-trip tests pinning them. Also added while here: the run loop's SC1.5 park predicate gained the factory arm (an outstanding `factoryState` entry parks the loop like an outstanding dispatch — without it a healthy parked run failed as `DAG stuck`; RED-proven by the engine-driven park test).
+
+**Full verification (2026-09-28):** protocol + heartbeat suites 207/207 (`_bmad-output/evidence/openrig-sc2/2026-09-28-protocol-heartbeat-207of207.log`); touched suites 67/67 (`…touched-suites-67of67.log`); `tsc --noEmit` clean; eslint clean on all 10 touched files. Summary + prereq notes: `_bmad-output/evidence/openrig-sc2/2026-09-28-sc2-1-5-code.json`.
 
 **Definition of done (stage):** exit test green end-to-end on real boxes; exactly-one-box property proven under crash.
 
@@ -295,84 +305,93 @@ Owner stages are named in R1; this section is the index. NOTHING here blocks a s
 
 ```text
 ═══════════════════════════════════════════════════════════════════════════
-HANDOFF — OpenRig × QDS-Factory — post-Q1, SC2 → ADR
+HANDOFF — OpenRig × QDS-Factory — post-SC2.1–SC2.5, live rounds → ADR
 Paste into a fresh conversation in /Users/steve/QDS-Factory
 Tracker: docs/planning/2026-09-24-openrig-integration-roadmap.md (read FIRST,
-top to bottom — its §6 handoff is current as of dev e04bc723 and carries the
-verified position, the Q1 evidence, and the attempt log).
+top to bottom — this §6 block is refreshed 2026-09-28 after SC2.1–SC2.5).
 ═══════════════════════════════════════════════════════════════════════════
 
 MISSION
 
-Dark-factory integration. Finish line: SC2's exit test — a live protocol runs
-factory_run, branches on the verdict, kill SwarmClaw mid-submit yields EXACTLY
-ONE box — then a signed ADR (reverse DD-7, one page, operator signature).
+Dark-factory integration. Finish line: SC2's exit test (SC2.6 + SC2.7) —
+kill SwarmClaw mid-submit yields EXACTLY ONE box; a live protocol runs
+factory_run, branches on the verdict — then a signed ADR (reverse DD-7,
+one page, operator signature).
 
 WHERE WE ARE
 
-Stage Q1 is COMPLETE (2026-09-28, PR #370 merged, dev e04bc723): the factory
-service surface — submit/result/cancel behind the Q1.8-pinned contract
-(tests/fleet/q1-contract.test.ts), budget-group ledger transactions,
-cross-process quota intents, per-record fanout lock, workId headless briefs.
-Full suite 6981 tests ×2 runs, failures = baseline reds only. Walk digest
-re-measured a1af12ce (build-exedev-image.test.ts) — the IMAGE REBUILD
-ADOPTING IT IS SC2'S PREREQUISITE (baked engine must match the delivered
-surface before any live round).
-
-WHAT SC2 CODES AGAINST (all merged, do not re-derive)
-
-- fleet submit --request-id --budget-group <id> --group-cap <usd> [--json]:
-  replay-safe on --request-id (O_EXCL intent before dispatch; runId captured
-  at the store create); ack = {schemaVersion:1, runId, requestId,
-  state:"running"|"provisioned", vmName, httpsUrl?, budgetGroup?,
-  groupCapMicroUsd?, replayed} — one JSON line, exit 0 running / 1 engine
-  start failed (transient, replay retries it) / 2 usage / 3 gate / 5
-  refused-or-spoken-for / 6 ack-unwritable.
-- fleet result <runId> [--json]: {schemaVersion:1, runId, requestId
-  (string|null, PRESENT-but-null), status (closed enum), terminal (bool),
-  vmName?, spendMicroUsd?, artifacts:{bundle?}} — pure record read, exit 0
-  found (poller branches on terminal, never the code) / 4 missing record.
-  cancelled outranks closedAt (a cancelled run is not "completed").
-- fleet cancel <runId>: idempotent (anchored on the record close); second
-  call exits 0 "nothing to do"; emits "cancelled: <id>".
-- Brief: headless work carries workId (never all-digits) instead of issueId;
-  spend identity is `${slug}#${issueKey}`, issueKey = String(issueId)|workId.
-- submit --budget-group/--group-cap: ledger reserveBudgetGroup in one
-  BEGIN IMMEDIATE (weighted for fan-out aggregates, which claim ONE intent
-  and set quotaIntentSkip on their arms).
+SC2.1–SC2.5 are CODE COMPLETE (2026-09-28, swarmclaw PR #644, branch
+feature/sc2-factory-adapter off 7ce84fc9, head a05b502c): the external_job
+step kind — persist-requestId-before-exec (crash-safe; replays the SAME id
+through Q1's O_EXCL), heartbeat-tick poller over fleet result
+(awaiting-approval stays OPEN — the DAG never approves), factory_result
+artifact + artifact_field_equals condition, mark-first cancel (fleet-cancel
+rides protocol cancel), execFile with absolute path + env allowlist
+(PATH/HOME/TMPDIR/LANG). Suites: factory 10/10, protocol+heartbeat 207/207,
+tsc clean, eslint clean on touched files. Evidence:
+_bmad-output/evidence/openrig-sc2/. Q1 (fleet submit/result/cancel
+contract) merged at dev bdbb02bd; full suite 6981 tests, failures =
+baseline reds only.
 
 FIRST ACTION
 
 Run §0 of the roadmap (verify the snapshot — never trust checkboxes). Then
-the next unchecked stage is SC2 — the SwarmClaw external_job adapter
-(SC2.1-SC2.7). PREREQUISITES, in order:
-1. Solstice pin bump ea060b17 → 3bf73872 (missing SC1.5's merge; pattern:
-   PRs #456/#458 in solstice-ai). Solstice repo is SHARED with another
-   active session — NEVER git-touch /Users/steve/solstice directly; use
-   /Users/steve/solstice-worktrees/.
-2. Image rebuild adopting walk digest a1af12ce (bun scripts/
-   build-exedev-image.ts --push, same gates) — GitHub Actions billing is
-   STILL FAILED account-wide, so this is a second local-build deviation;
-   record it in the Dockerfile re-pin comment like #366 did. Operator may
-   fix billing first — ask.
-Then SC2: adapter in a NEW swarmclaw branch (worktrees:
-/Users/steve/swarmclaw-worktrees/<name>, npm ci first) — persist the
-request id BEFORE submitting (submit IS that seam), poll fleet result,
-branch via a new artifact_field_equals condition, cancel idempotently,
-execFile with env allowlist + absolute path (SC2.5), then SC2.6 (lease
-regression: kill SwarmClaw mid-submit → restart → exactly one box + one
-key) and SC2.7 (the live exit test, qds-live-e2e skill MANDATORY, worst-
-case spend printed, operator "go" first). Live rounds need the image
-ritual FIRST if any engine-source change landed.
+SC2.6/SC2.7, IN ORDER:
+1. IMAGE RITUAL FIRST: rebuild the qds-exedev image adopting walk digest
+   a1af12ce (bun scripts/build-exedev-image.ts --push, same gates). GitHub
+   Actions billing is FAILED account-wide (workflow_dispatch refuses), so
+   this is a third local-build deviation — record it in the Dockerfile
+   re-pin comment like #366 did. Operator may fix billing first — ASK.
+   Operator note 2026-09-28: docker/image builds were explicitly DEFERRED
+   that session (resources scarce) — get explicit permission before
+   building.
+2. Pin adoption ritual at the three sites (driver.ts DEFAULT_IMAGE_REF +
+   DEFAULT_IMAGE_BUILD_ID + build-exedev-image.test.ts expectation).
+3. swarmclaw PR #644 must merge to swarmclaw dev, then a solstice-ai
+   submodule pin bump folds it (pattern: the chore(submodule) commits;
+   solstice worktrees ONLY — NEVER git-touch /Users/steve/solstice).
+   #644 is daemon-side protocol code, NOT engine-source — the in-box
+   image is unaffected by it; say that reading out loud before skipping
+   the ritual on its account.
+4. SC2.6: kill SwarmClaw mid-submit → restart → exactly one box + one key.
+   The code seam is proven (persist-before-exec + crash-window replay);
+   this is the LIVE proof.
+5. SC2.7: the live exit test — a live protocol runs factory_run, branches
+   on the verdict, notifies; kill SwarmClaw mid-submit; exactly one box.
+   qds-live-e2e skill MANDATORY; worst-case spend printed; operator "go"
+   FIRST; run in background (never let a tool timeout kill a finally).
+6. Then ADR.1 (reverse DD-7, one page, operator signature).
 
-TWO OPERATOR-SIDE ITEMS (surface, don't fix silently)
+OPERATOR-SIDE ITEMS (surface, don't fix silently)
 
-1. GitHub Actions billing failed account-wide — workflow_dispatch refuses
-   to start. The twentieth-ninth pin (S2) and the coming a1af12ce rebuild
-   were/are measured LOCALLY via the build script (same gates; deviation
-   recorded in the Dockerfile re-pin comment). When billing is restored,
-   the next push-triggered build re-validates; divergence refuses at gate B.
-2. Solstice pin bump (see FIRST ACTION) — required before SC2.
+1. GitHub Actions billing failed account-wide — when restored, the next
+   push-triggered build re-validates the local-build deviations; divergence
+   refuses at gate B.
+2. The previous handoff's solstice pin bump (ea060b17 → 3bf73872) was
+   SUPERSEDED — solstice-ai 96b2ca28 already folded SC1.5 at 3445e9ea and
+   later advances carried the pin to 7ce84fc9 (⊇ 3bf73872, verified via
+   GitHub compare, behind_by=0). Nothing to do.
+
+WHAT SC2.6/SC2.7 CODE AGAINST (landed in PR #644, do not re-derive)
+
+- external_job step: config = {repoSlug, issueId|workId (exactly one),
+  groupCapUsd, pollTimeoutMs?, onFailure?}; requestId = UUIDv4 persisted in
+  run.factoryState[step.id] BEFORE the fleet submit exec; entry status
+  chain submitting → submitted → completed|failed|cancelled.
+- Fleet CLI: $SWARMCLAW_FACTORY_FLEET_CLI (absolute path, env-allowlisted
+  child); verbs submit (brief on stdin, ack = one JSON line, exit codes
+  0 / 1-transient / 2 / 3 / 5 / 6), result <runId> --json ({terminal,
+  status closed enum}; awaiting-approval/pausing are OPEN), cancel
+  <runId> (idempotent, "cancelled: <id>" / "nothing to do").
+- Poller: tickHeartbeats → pollFactoryRuns (60s cadence); factory_result
+  artifact content = the full fleet result payload JSON;
+  stepOutputs[stepId].structuredData = same payload.
+- Branch: artifact_field_equals {field (dot path), value, artifactKind?
+  default factory_result}.
+- Budget: the protocol run id IS the budget group; Q1 ledger +
+  budget-group reserve enforce the ceiling.
+- Cancel: performProtocolRunAction('cancel') fire-and-forgets
+  cancelFactoryRuns (mark-first ordering).
 
 ADR CONTEXT (operator's stated destination, for ADR.1's posture section)
 
@@ -380,69 +399,81 @@ Factory-run PRs AUTO-MERGED by default; QA owned by 24/7 Hermes agents
 inside swarmclaw/zeropoint (browser testing, diff QA). The approve gate is
 the ONE seam this relaxes — auto-approve lands as policy beside the gate
 (its own ADR per the deferred list), consuming fleet result's payload
-(status/terminal/artifacts) as the QA verdict carrier. Q1 hard-codes
-nothing human-only beyond the gate verb's scrypt auth.
+(status/terminal/artifacts) as the QA verdict carrier — the external_job
+poller already treats awaiting-approval as OPEN and waits on the human
+gate, so the relaxation is policy, not plumbing.
 
 HARD RULES (roadmap §1 — never traded)
 
 - TDD: RED watched for the right reason → minimal fix → GREEN.
-- GitNexus impact() before editing any symbol; detect_changes() before every
-  commit. QDS index CURRENT as of Q1 merge (reindex if symbols look stale).
-- Full verification before any commit: scoped suites + full suite tee'd to a
-  /tmp log + read via the CLAUDE.md tr/perl filter + tsc + biome. Do NOT wait
-  on CI (operator policy) — --admin merge with the baseline noted. Baseline
+- GitNexus impact() before editing any QDS symbol; detect_changes() before
+  every QDS commit. QDS index STALE (330 commits behind at the 2026-09-28
+  check) — reindex via the canonical script before trusting impact() on
+  QDS code. swarmclaw has NO current GitNexus index (both indexed
+  checkouts are stale snapshots of other clones) — grep-based caller
+  enumeration + RED-first tests instead (SC1/SC2 precedent).
+- Full verification before any commit: scoped suites + full suite tee'd to
+  a /tmp log + read via the tr/perl filter + tsc + lint. Do NOT wait on CI
+  (operator policy) — --admin merge with the baseline noted. QDS baseline
   reds (not ours, do not fix): story-consistency ×2, vendor self-compact
   family ×12-14 (fluctuates with machine load), wall-clock flakes ×4.
-- feature/* off dev → PR to dev. Files < 500 lines. No docker/image builds
-  on this machine without explicit operator permission (resources scarce).
+  swarmclaw baseline reds: outcome-notify ×4 + task-followups family
+  (load-sensitive, green in isolation).
+- QDS: feature/* off dev → PR to dev. swarmclaw: feature/* off dev → PR to
+  swarmclaw dev. Files < 500 lines. NO docker/image builds on this machine
+  without explicit operator permission (resources scarce — other builds
+  run here).
 - Live money/boxes: qds-live-e2e skill MANDATORY; worst-case spend printed;
   explicit operator "go" first; unsandboxed shell; run in background (never
   let a tool timeout kill a finally).
 - NEVER run git commands against /Users/steve/solstice or its submodule
   checkout. swarmclaw branch work only in /Users/steve/swarmclaw-worktrees/
-  <name> (npm ci first). solstice worktrees: /Users/steve/solstice-worktrees/.
+  <name> (npm ci first) — create worktrees FROM an existing worktree
+  (git -C <existing-worktree> worktree add ...), never from the main
+  checkout. solstice worktrees: /Users/steve/solstice-worktrees/.
 
 TRAPS THAT COST REAL TIME THIS SESSION (all measured)
 
-1. Run-record store dir is a LISTING surface (fleet status, reaper, every
-   readdir over it) — bookkeeping subtrees go SIBLING to it, not inside.
-   quota-intents = dirname(runsDir)/quota-intents. submits/ IS inside
-   runsDir (deliberate — it is per-runDir state, never listed).
-2. Zod SKIPS object-level refines when the base parse has field errors —
-   a fixture with any invalid field never reaches the exactly-one refine.
-   Test malformed-brief shapes separately from shape-refusals.
-3. Bun test runs all files in ONE process: module-level state (dispatch's
-   mintedRunIds registry, quota intent dirs, cwd) persists across files —
-   never plant fixtures at shared/global paths; inject deps.store/
-   lockPath/intents dirs per test.
-4. Fanout arms share ONE requestId — per-arm intent claims collide (the
-   aggregate claims once, weight N; arms set quotaIntentSkip: true).
-   A claimed-weight intent's ceiling math: checkHeadroom counts weight,
-   and a caller must EXCLUDE its own claim (checkHeadroom's intents.exclude).
-5. CLI verb tests: inject deps.readBrief — without it ingestBriefJson
-   blocks on stdin for the 5s cap. Same for gate verbs' stdin seams.
-6. Cancel/teardown tests need a cost-config fixture (boxHourRateMicroUsd)
-   or the close step refuses box-hour-rate-unconfigured → exit 6 not 0.
-7. verbs.test.ts snapshot tables: EXPECTED_FLAGS entries must be in
-   ALPHABETICAL flag order (the comparison sorts one side only); the
-   excuse table (ONLY_REACHABLE_ELSEWHERE) binds each excused code to a
-   REAL sibling test title whose body asserts the code — pointing at a
-   file that does not exist, or a title that does not assert, fails.
-8. Legacy traps 1-13 from the S2 handoff all still stand (baked engine,
-   claude-code label, member-env phase-seeding, trace rows die at settle
-   wipe, persistRun normalizes on save, first-boot variance is retry-class,
-   hostname <vm>.exe.xyz already qds-prefixed, tsx --eval no bare return,
-   bun tee+tr/perl ritual, node:test sentinel channel, macOS heredoc →
-   /tmp files, git checkout discards, ^-range drift re-measures the tree).
-9. patterns.test.ts race wall-clock tests and fleet-lock r7-S1a/F047 flake
-   under parallel suite load on THIS machine (reproduced on the clean
-   tree twice; green in isolation) — re-run isolated before investigating.
+1. swarmclaw normalizeStep DROPS unknown step config fields — persistRun
+   normalizes on EVERY save, so any config field not explicitly carried
+   dies at first persist (the SC1 bug-0 class). a2aDelegateConfig was a
+   LIVE latent drop (a2a phases could never survive a persist) — fixed in
+   PR #644 together with the externalJobConfig carry. ANY new step config
+   field MUST get a normalizeStep carry + round-trip test.
+2. loadProtocolRuns() returns a Record<string, ProtocolRun> (a map, NOT an
+   array) — Object.values() it. And under tsx --eval, repository
+   arrow-const exports can arrive undefined through circular init —
+   prefer loadProtocolRunById/findRunStep from protocol-normalization
+   (the processors' pattern) over direct repository imports in new
+   protocol modules.
+3. dagMode is keyed on dependsOnStepIds: computeStepReadiness returns
+   dagMode:false (and NO stepState) for steps without dependsOnStepIds —
+   a "DAG" test fixture without dependsOnStepIds silently runs
+   cursor-mode (parks 'waiting', not 'running').
+4. The env allowlist strips EVERYTHING not allowlisted — test fixtures
+   that need to pass a path into the fleet child must ride an allowlisted
+   key (TMPDIR), not add their own.
+5. bash injects PWD/SHLVL/__CF_USER_TEXT_ENCODING into any child it
+   spawns — env allowlist assertions must account for those three or they
+   read as a breach.
+6. mark-first cancel ordering flips the entry BEFORE the exec — a test
+   that polls the entry then reads the journal races the exec; anchor the
+   poll on the journal file.
+7. Fleet exit -1 = spawn failure (missing/relative CLI), never a fleet
+   refusal — never map it onto a fleet exit code.
+8. All QDS traps 1-9 from the Q1 handoff still stand (listing surfaces,
+   Zod refine skip, bun single-process module state, fanout weighted
+   intents, deps.readBrief stdin, cost-config fixtures, verbs snapshot
+   tables, legacy S2 traps, machine-load flakes).
+9. tsx --eval probes: no top-level await in .ts files (CJS interp) — wrap
+   in `async function main() { ... } void main()`; run probes from the
+   worktree root so tsconfig paths resolve.
 
 DONE MEANS
 
-Every stage lands with tests, evidence files, and roadmap checkboxes — or it
-is not done. SC2's DoD: exit test green on real boxes with exactly-one-box
-proven under crash (SC2.6/SC2.7), full live-round evidence under
-_bmad-output/evidence/. Then ADR: reverse DD-7, one page, operator
+Every stage lands with tests, evidence files, and roadmap checkboxes — or
+it is not done. SC2's DoD: exit test green on real boxes with
+exactly-one-box proven under crash (SC2.6/SC2.7), full live-round evidence
+under _bmad-output/evidence/. Then ADR: reverse DD-7, one page, operator
 signature — a human decision, not a PR merge.
-``````
+```
