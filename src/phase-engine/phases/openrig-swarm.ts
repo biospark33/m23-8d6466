@@ -309,7 +309,7 @@ export function openrigSwarmPhase(
             path.join(agentDir, "settings.json"),
             JSON.stringify({ extensions: ["/opt/qds/pi-ext/self-compact/self-compact.ts"] }),
           );
-        } else if (member.runtime === "claude") {
+        } else if (member.runtime === "claude-code") {
           memberEnv[logicalId] = {
             ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
             ANTHROPIC_AUTH_TOKEN: seatKey,

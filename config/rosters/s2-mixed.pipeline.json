@@ -31,7 +31,7 @@
               },
               {
                 "id": "worker",
-                "runtime": "claude",
+                "runtime": "claude-code",
                 "model": "anthropic/claude-haiku-4.5"
               }
             ]

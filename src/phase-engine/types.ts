@@ -197,7 +197,7 @@ export interface RigMemberSpec {
    * The phase body refuses claude|codex until S2.2's per-member env delivery
    * lands in the image.
    */
-  runtime?: "pi" | "claude" | "codex";
+  runtime?: "pi" | "claude-code" | "codex";
   /** Working directory the seat starts in; absent = the run's repo workdir. */
   cwd?: string;
 }

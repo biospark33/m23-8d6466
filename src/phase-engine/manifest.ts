@@ -286,7 +286,7 @@ export const PhaseSpecSchema = z
                         // S2.4: the OpenRouter-routed runtime set (see
                         // RigMemberSpec.runtime — the closed enum is also the
                         // S2.5 cap refusal for subscription-auth runtimes).
-                        runtime: z.enum(["pi", "claude", "codex"]).optional(),
+                        runtime: z.enum(["pi", "claude-code", "codex"]).optional(),
                         cwd: nonBlankString.optional(),
                       })
                       .strict(),
