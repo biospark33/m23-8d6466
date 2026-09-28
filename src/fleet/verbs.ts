@@ -567,6 +567,99 @@ export function listVerbs(): VerbEntry[] {
       // result line would not print).
       exitCodes: [0, 1, 2, 4, 5, 6],
     },
+    // ── Q1.1's additive entry. No predecessor edited — the property this
+    // registry's docblock names as what keeps DF3.5's skill contract stable.
+    {
+      verb: "submit",
+      summary: "Provision a box, start its engine, and ack — replay-safe on --request-id",
+      flags: [
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--brief", required: false, valueType: "path" },
+        { name: "--dir", required: false, valueType: "path" },
+        // THE idempotency key (Q1.1): the same id always resolves to the same
+        // run — one box, one key, one engine start — no matter how often the
+        // caller retries. Strict UUID v4; the DAG adapter mints one per work item.
+        { name: "--request-id", required: true, valueType: "string" },
+        // The DAG-run budget identity. PAIRED flags: --group-cap without
+        // --budget-group (or the reverse) is a usage refusal. The cap is in
+        // integer micro-dollars (µ$), like --cap-micro-usd on fanout.
+        { name: "--budget-group", required: false, valueType: "string" },
+        { name: "--group-cap", required: false, valueType: "string" },
+        { name: "--timeout-ms", required: false, valueType: "string" },
+        { name: "--port", required: false, valueType: "string" },
+        // The ack IS a JSON line on every submit; the flag is the caller
+        // asserting the contract explicitly (Q1.8 pins the shape). Accepted
+        // with no value semantics beyond that assertion — a no-op on purpose,
+        // so a generated skill can always pass it.
+        {
+          name: "--json",
+          required: false,
+          valueType: "boolean",
+          note: "the ack is already one JSON line — this flag asserts the contract for callers that require the spelling",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // dispatch+run composed: 0 acked and running; 1 = the engine start did
+      // not land (box unreachable — TRANSIENT: re-submit the same --request-id
+      // and the replay retries the start idempotently); 2 usage; 3 the setup
+      // gate refused on a live box (dispatch's own table); 5 = refused before
+      // anything provisioned, OR the requestId is spoken-for by an in-flight/
+      // failed submit; 6 = the run landed but the ack line could not print —
+      // the replay is the recovery, which is why it stays out of 1.
+      exitCodes: [0, 1, 2, 3, 5, 6],
+    },
+    // ── Q1.3's additive entry. No predecessor edited — the property this
+    // registry's docblock names as what keeps DF3.5's skill contract stable.
+    {
+      verb: "result",
+      summary: "Print the versioned completion payload for a run (poller-safe: no box probes)",
+      flags: [
+        // NO --driver, on rank/approve's precedent: this verb reads ONE run
+        // record off the runs dir and touches no box, so requiring a flag
+        // nothing consumes would train operators to paste magic values. It is
+        // also the property that makes it POLLER-SAFE: a DAG adapter can call
+        // it every few seconds with no substrate cost.
+        { name: "--dir", required: false, valueType: "path" },
+        // The ack IS a JSON line; the flag asserts the contract (same posture
+        // as submit's --json).
+        {
+          name: "--json",
+          required: false,
+          valueType: "boolean",
+          note: "the payload is already one JSON line — this flag asserts the contract for callers that require the spelling",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // 0 = the record was found and the payload printed — RUNNING OR NOT:
+      // the payload's `terminal` field is what a poller branches on, so a
+      // running run is a SUCCESSFUL poll, not an error. 2 usage; 4 = no such
+      // run record (the missing-record answer a poller keys on); 6 = the
+      // payload could not print.
+      exitCodes: [0, 2, 4, 6],
+    },
+    // ── Q1.4's additive entry. No predecessor edited — the property this
+    // registry's docblock names as what keeps DF3.5's skill contract stable.
+    {
+      verb: "cancel",
+      summary: "Tear a run's box and keys down exactly once, and mark the record cancelled",
+      flags: [
+        // REQUIRED: cancel REACHES the box (destroy + key revoke) — the same
+        // hazard teardown's entry names, one verb over.
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--dir", required: false, valueType: "path" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // Teardown's own table minus the transient 1: cancel composes
+      // runTeardown, and a mid-teardown transport failure is that machinery's
+      // exit 6 (work may have partially landed; the lock is held; a retry is
+      // NOT advertised). One difference from teardown: 0 covers BOTH the
+      // destroyed run AND the idempotent no-op — the second cancel of a pair
+      // exits 0 having destroyed nothing, which is the contract (Q1.4: cancel
+      // twice ⇒ one teardown, both succeed). 4 = no such run; 5 = the run
+      // lock refused; 6 = the destruction landed (or failed landed-work) and
+      // the completion line could not print / said do-not-retry.
+      exitCodes: [0, 2, 4, 5, 6],
+    },
   ];
 }
 

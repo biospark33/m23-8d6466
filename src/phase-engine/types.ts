@@ -511,7 +511,10 @@ export interface TraceSessionRow {
 /** The dispatch brief's issue reference. `issueUrl` optional (derivable from slug+id). */
 export interface IssueRef {
   repoSlug: string;
-  issueId: number;
+  /** Issue-correlated work. Exactly one of `issueId` / `workId` (Q1.7). */
+  issueId?: number;
+  /** Headless (non-issue) work — a slug-safe caller-chosen id, e.g. "dag/build-docs" (Q1.7, G8). */
+  workId?: string;
   issueUrl?: string;
 }
 
@@ -519,7 +522,14 @@ export interface IssueRef {
 export interface ResolvedRunCorrelation {
   requestId: string;
   repoSlug: string;
-  issueId: number;
+  /**
+   * The identity TAIL every spend predicate keys on: `String(issueId)` for
+   * issue work, `workId` for headless work (Q1.7). `${repoSlug}#${issueKey}`
+   * is one string, byte-compatible with the pre-Q1.7 `${slug}#${issueId}`.
+   */
+  issueKey: string;
+  issueId?: number;
+  workId?: string;
   issueUrl: string | null;
 }
 
@@ -541,16 +551,16 @@ export class RequestIdRepoMismatchError extends Error {
   readonly requestId: string;
   readonly existingRepoSlug: string;
   readonly attemptedRepoSlug: string;
-  /** Issue the row is already correlated to; null only on a malformed row. */
-  readonly existingIssueId: number | null;
-  readonly attemptedIssueId: number | null;
+  /** Issue (or headless workId, Q1.7) the row is already correlated to; null only on a malformed row. */
+  readonly existingIssueId: number | string | null;
+  readonly attemptedIssueId: number | string | null;
 
   constructor(e: {
     requestId: string;
     existingRepoSlug: string;
     attemptedRepoSlug: string;
-    existingIssueId?: number | null;
-    attemptedIssueId?: number | null;
+    existingIssueId?: number | string | null;
+    attemptedIssueId?: number | string | null;
   }) {
     super(
       `requestId ${e.requestId} is already correlated to repo "${e.existingRepoSlug}" issue #${e.existingIssueId ?? "?"} (attempted repo "${e.attemptedRepoSlug}" issue #${e.attemptedIssueId ?? "?"})`,

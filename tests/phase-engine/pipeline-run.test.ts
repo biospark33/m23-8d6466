@@ -2901,7 +2901,7 @@ describe("pipeline-run DF5.3: a dispatched run records the issue its witness nam
       pipelineName: "correlated-demo",
     });
     seeded.initiateSession({
-      correlation: { requestId: ws.requestId, repoSlug: "someone/else", issueId: 4, issueUrl: null },
+      correlation: { requestId: ws.requestId, repoSlug: "someone/else", issueKey: "4", issueId: 4, issueUrl: null },
       request: "correlated-demo",
     });
     seeded.close();

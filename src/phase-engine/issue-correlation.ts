@@ -85,6 +85,28 @@ export const UUID_V4_PATTERN =
 /** GitHub issue numbers are positive int32; nothing larger is ever a real issue. */
 export const MAX_ISSUE_ID = 2 ** 31 - 1;
 
+/**
+ * Headless work ids (Q1.7): slug-safe, 1..64 chars, first char not a separator.
+ * Charset deliberately matches what the ledger identity string tolerates — the
+ * id is half of the `${slug}#${workId}` spend key, so anything a SQL predicate
+ * or a grep would trip on (whitespace, `#`, control characters) never gets in.
+ * `/`, `.`, `_`, `-` are inside so DAG node ids like `dag/build-docs` are
+ * expressible without a second encoding.
+ */
+export const WORK_ID_PATTERN = /^[A-Za-z0-9._/-]{1,64}$/;
+
+/**
+ * Refuse a headless workId. One shape rule and one COLLISION rule:
+ *  - WORK_ID_PATTERN (charset + length); and
+ *  - never ALL DIGITS — `"42"` would resolve to issue 42's spend identity
+ *    (`${slug}#42` after the same canonicalisation issue ids get) and share its
+ *    cap with it. The schema refuses the CLASS, not the value: any all-digit
+ *    workId is the same collision (Q1.7).
+ */
+export function isValidWorkId(value: string): boolean {
+  return WORK_ID_PATTERN.test(value) && !/^[0-9]+$/.test(value);
+}
+
 /** Structured refusal of a dispatch brief — fail-closed, before any row/box/key. */
 export class CorrelationError extends Error {
   name = "CorrelationError";
@@ -116,12 +138,15 @@ export function isValidUuidV4(value: string): boolean {
  * Honours a caller-supplied requestId only if it is a strict UUID v4; absent
  * (undefined) means generate one — the resolved value is what every downstream
  * row carries, and the caller reads it back from the result rather than
- * assuming its own stuck. Validates the (repoSlug, issueId) pair fail-closed.
+ * assuming its own stuck. Validates the (repoSlug, issueId | workId) pair
+ * fail-closed: exactly one of issueId / workId is required (Q1.7) — an issue
+ * brief and a headless brief are the two shapes, and neither both-at-once nor
+ * neither-at-all is representable.
  *
  * PURE: no fs, no db, no network. Refusal happens here, before any session
  * row, box or key exists (AC2/INV-RUN-4).
  *
- * @throws {CorrelationError} INVALID_REPO_SLUG | INVALID_ISSUE_ID | INVALID_REQUEST_ID.
+ * @throws {CorrelationError} INVALID_REPO_SLUG | INVALID_ISSUE_ID | INVALID_WORK_ID | INVALID_REQUEST_ID.
  */
 export function resolveRunCorrelation(
   brief: IssueRef & { requestId?: string },
@@ -133,15 +158,41 @@ export function resolveRunCorrelation(
       `repoSlug must be owner/name, 1..100 chars per segment, charset [A-Za-z0-9._-] (got ${JSON.stringify(brief.repoSlug)})`,
     );
   }
-  if (
-    !Number.isInteger(brief.issueId) ||
-    brief.issueId <= 0 ||
-    brief.issueId > MAX_ISSUE_ID
-  ) {
+  // Q1.7: exactly one of issueId / workId. The neither arm keeps the
+  // INVALID_ISSUE_ID code (it is the missing-identity refusal the schema's own
+  // message names both fields for); a present-but-malformed workId gets its
+  // own INVALID_WORK_ID so an operator can tell "you named no work" from
+  // "the work id you named is not usable".
+  const hasIssue = brief.issueId !== undefined;
+  const hasWork = brief.workId !== undefined;
+  if (hasIssue === hasWork) {
     throw new CorrelationError(
       "INVALID_ISSUE_ID",
-      `issueId must be a positive integer <= ${MAX_ISSUE_ID} (got ${brief.issueId})`,
+      hasWork
+        ? "exactly one of issueId or workId is required — a brief cannot carry both"
+        : "exactly one of issueId or workId is required — issue work carries issueId, headless work carries workId",
     );
+  }
+  let issueId: number | undefined;
+  let workId: string | undefined;
+  if (hasIssue) {
+    const id = brief.issueId as number;
+    if (!Number.isInteger(id) || id <= 0 || id > MAX_ISSUE_ID) {
+      throw new CorrelationError(
+        "INVALID_ISSUE_ID",
+        `issueId must be a positive integer <= ${MAX_ISSUE_ID} (got ${id})`,
+      );
+    }
+    issueId = id;
+  } else {
+    const work = brief.workId as string;
+    if (typeof work !== "string" || !isValidWorkId(work)) {
+      throw new CorrelationError(
+        "INVALID_WORK_ID",
+        `workId must match ${WORK_ID_PATTERN.source} and may not be all digits (all digits collide with a numeric issue's spend identity) (got ${JSON.stringify(work)})`,
+      );
+    }
+    workId = work;
   }
   let requestId: string;
   if (brief.requestId !== undefined) {
@@ -162,7 +213,9 @@ export function resolveRunCorrelation(
     // repository, not the casing. The pattern is case-blind, so the canonical
     // form is always still valid.
     repoSlug: canonicalRepoSlug(repoSlug),
-    issueId: brief.issueId,
+    issueKey: workId ?? String(issueId),
+    issueId,
+    workId,
     issueUrl: brief.issueUrl ?? null,
   };
 }
@@ -182,7 +235,8 @@ export function appendDispatchFailure(
   entry: {
     /** Null when the refusal fired before that half of the pair was known — never ""/0. */
     repoSlug: string | null;
-    issueId: number | null;
+    /** The identity half the brief named: issueId (number) or workId (string) — Q1.7. */
+    issueId: number | string | null;
     requestId: string | null;
     code: string;
     message: string;

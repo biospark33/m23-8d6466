@@ -1946,7 +1946,15 @@ describe("buildIdFileInputs", () => {
       // inputs. Measured offline over the post-re-pin tree (108 tracked
       // inputs; the value below is the test's own trackedSetDigest oracle's
       // output on that tree, received from its own failing run).
-      "088d4ff10175948505e3e342604a8516745906965a6501377db84f6ef89f4dcb",
+      //
+      // a1af12ce: the Q1 service surface (2026-09-28) — submit/result/cancel
+      // verbs (src/fleet/submit.ts, result.ts; scripts/fleet.ts arms), the
+      // workId identity (brief-schema + issue-correlation + tracer), the
+      // budget-group ledger tables, and the quota-intent wiring all move
+      // walked inputs. Measured offline over the verified-clean tree; the
+      // IMAGE REBUILD ADOPTING THIS VALUE IS SC2'S PREREQUISITE (the baked
+      // engine must match the delivered surface before a live round).
+      "a1af12ce1f04ec72611a6777f011439dd43b0c61baa36941ecd97117fd945a15",
     );
   });
 });

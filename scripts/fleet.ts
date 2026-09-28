@@ -183,7 +183,10 @@ import { attachToRun, type AttachOptions } from "../src/fleet/attach.ts";
 // DF1.10: the in-box engine start. Everything substrate-shaped about it (the
 // argv, the `sudo -n`, the deadline, the failure split) lives there; this file
 // is the argv/exit-code surface over it, exactly as it is over DF2.5 and DF3.4.
-import { runUnitName, startRun, type StartRunOptions, type StartRunResult } from "../src/fleet/run.ts";
+import { runUnitName, startRun, type StartRunDriver, type StartRunOptions, type StartRunResult } from "../src/fleet/run.ts";
+import { submitWork, SubmitError } from "../src/fleet/submit.ts";
+import { buildResult, ResultError } from "../src/fleet/result.ts";
+import { isValidUuidV4 } from "../src/phase-engine/issue-correlation.ts";
 import { ATTACH_MESSAGE_CHAR_CEILING } from "../src/phase-engine/steering.ts";
 import { sanitizeForMessage } from "../src/phase-engine/types.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
@@ -300,6 +303,14 @@ export interface FleetDeps
   store: RunRecordStore;
   ledgerFactory: () => LedgerLike;
   readBrief: () => Promise<string>;
+  /**
+   * `submit`'s engine-start seam (Q1.1), for the same reason `readBrief` and
+   * `authenticate` are seams: the production closure runs `startRun` against
+   * the resolved driver, which a verb-exit-mapping test cannot reach (no
+   * systemd under the fake driver). Tests inject the outcome; production
+   * leaves it undefined and gets the real unit start.
+   */
+  startEngine?: (runId: string) => Promise<StartRunResult>;
   /**
    * DF3.4's approver-token intake, seamed like `readBrief` and for the same
    * reason: the token arrives on fd 0, which a test cannot attach to
@@ -637,6 +648,18 @@ const PERMANENT_ERRNOS = new Set(["EACCES", "EPERM", "ENOTDIR", "EISDIR", "ENOEN
 
 /** Render any throw as the envelope + this CLI's exit code. */
 function report(err: (s: string) => void, e: unknown): number {
+  // Submit's own refusals carry their fleet-table exit code (2 usage / 5
+  // refused) — rendered through the same envelope, mapped before the generic
+  // designed-refusal branch would bin them at exit 1.
+  if (e instanceof SubmitError) {
+    printError(err, e.code, e.message, e.remediation);
+    return e.exitCode;
+  }
+  // Result's one refusal: the missing record — the poller's exit-4 answer.
+  if (e instanceof ResultError) {
+    printError(err, e.code, e.message, e.remediation);
+    return e.exitCode;
+  }
   if (e instanceof FleetError) {
     printError(err, e.code, e.message, e.remediation, e.payload);
     // The exit table is 0-6 and `process.exit` takes a BYTE: a code outside
@@ -2503,6 +2526,8 @@ export async function run(
     outputIncomplete: () => outputIncomplete,
   };
   if (verb === "dispatch") return runDispatch(ctx);
+  if (verb === "submit") return runSubmit(ctx);
+  if (verb === "result") return runResult(ctx);
   if (verb === "fanout") return runFanout(ctx);
   if (verb === "rank") return runRank(ctx);
   if (verb === "status") return runStatus(ctx);
@@ -2865,6 +2890,192 @@ async function runDispatch(ctx: VerbCtx): Promise<number> {
   // resolved has no correlation id to report, so one is minted for the
   // invocation rather than a run's id forged for it.
   return finish(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, dispatchCode);
+}
+
+/**
+ * `fleet submit` (Q1.1) — the DAG-facing single call: dispatch → engine start
+ * behind ONE replay-safe entry point. The idempotency machinery (the O_EXCL
+ * intent claim, the mint observation, the replay answer) lives in
+ * src/fleet/submit.ts; this verb is the argv surface over it, composed the way
+ * runDispatch composes its own — driver, store, key client, ledger factory —
+ * with the SAME posture toward construction: nothing is built before the
+ * invocation-shaped inputs (flags, brief) have validated.
+ *
+ * Deliberately NOT runDispatch's interrupt-handler apparatus: submit's
+ * recovery path is the REPLAY (the same --request-id re-invoked), not a
+ * signal-handler warning, and the ack's raw-write posture below is where the
+ * live-box contract lives. The per-run lock runDispatch takes at the mint is
+ * likewise absent — a submit's race window is closed by the intent record the
+ * same instant the run becomes visible; the harvest/teardown lock ceremony is
+ * a dispatch-verb concern until a caller shows the race is reachable here.
+ */
+async function runSubmit(ctx: VerbCtx): Promise<number> {
+  const { deps, verb, positionals, flags, briefPath, storeOpts, dir, out, note, finish } = ctx;
+  let submitRequestId: string | undefined;
+  let submitRunId: string | undefined;
+  let code: number;
+  try {
+    if (positionals.length > 1) {
+      throw usageError("submit takes no positional arguments", "pass the brief on stdin or via --brief <path>");
+    }
+    const driverName = flags.get("--driver");
+    assertDriverChosen("submit", driverName, deps?.driver);
+    // Required, and it is the whole verb's point: without it nothing is
+    // idempotent. Refused BEFORE the brief is read — a missing --request-id
+    // must not make the operator pipe a brief in only to be refused.
+    const requestId = flags.get("--request-id");
+    if (requestId === undefined || requestId.trim() === "") {
+      throw usageError("submit takes --request-id <uuid-v4>", "pass the DAG node's request id — it is the replay key");
+    }
+    // Shape-checked HERE, before the brief is read — the same rule as --port's
+    // placement on dispatch: a usage refusal must not make the operator pipe a
+    // brief in only to be refused. (submitWork re-checks; this is the early
+    // guard that keeps the refusal off a read the invocation never deserved.)
+    if (!isValidUuidV4(requestId)) {
+      throw usageError(
+        `--request-id ${bounded(requestId)} is not a strict UUID v4`,
+        "pass the DAG node's request id as a UUID v4 — it is the idempotency key every replay keys on",
+      );
+    }
+    submitRequestId = requestId;
+    const budgetGroup = flags.get("--budget-group");
+    const groupCapRaw = flags.get("--group-cap");
+    const groupCapMicroUsd =
+      groupCapRaw === undefined
+        ? undefined
+        : parseDecimalFlag(
+            "--group-cap",
+            groupCapRaw,
+            1,
+            Number.MAX_SAFE_INTEGER,
+            "a positive integer of micro-dollars",
+            "--group-cap takes the group's USD ceiling in micro-dollars (e.g. 2900000 for $2.90)",
+          );
+    // The pairing refusal BEFORE the brief is read, like every other usage
+    // refusal on this verb.
+    if ((budgetGroup === undefined) !== (groupCapMicroUsd === undefined)) {
+      throw usageError(
+        "--budget-group and --group-cap stand or fall together — one arrived without the other",
+        "pass both flags for a budget-group run, or neither",
+      );
+    }
+    const portRaw = flags.get("--port");
+    const port =
+      portRaw === undefined
+        ? undefined
+        : parseDecimalFlag("--port", portRaw, 1, 65_535, "a TCP port", "--port takes an integer 1-65535");
+    const timeoutRaw = flags.get("--timeout-ms");
+    const timeoutMs =
+      timeoutRaw === undefined
+        ? undefined
+        : parseDecimalFlag(
+            "--timeout-ms",
+            timeoutRaw,
+            1,
+            MAX_TIMEOUT_MS,
+            "a positive integer of milliseconds",
+            `omit for the 600_000 ms default, or pass a positive integer up to ${MAX_TIMEOUT_MS}`,
+          );
+
+    const briefJson = await ingestBriefJson(briefPath, deps);
+    // INV-4-bis: the submit's requestId IS the correlation id — the record,
+    // the driver's log lines and the ack all carry it (dispatch re-validates
+    // the shape; submit's core refuses before anything is claimed).
+    const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
+    const briefCanMint = BriefSchema.safeParse(briefJson).success;
+    const store =
+      deps?.store ??
+      (briefCanMint
+        ? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }))
+        : unusedStore(resolveRunsDir(dir)));
+    const ledgerFactory = deps?.ledgerFactory ?? makeLedgerFactory(store);
+    const { readBrief: _rb, fanoutsDir: _fd, lockPath: _lp, costLedger: _cl, ...seams } = deps ?? {};
+
+    // The engine seam: the real unit start, exactly what `fleet run` drives.
+    // Its failure is not a throw — the ack says `provisioned` and the verb
+    // maps the exit below (1 = retryable unreachable, 5 = the run's own
+    // refusal shapes).
+    const startEngine = deps?.startEngine ?? (async (runId: string) =>
+      startRun({ driver: driver as StartRunDriver, store: deps?.store ?? store }, runId));
+
+    const ack = await submitWork({
+      ...seams,
+      brief: briefJson,
+      requestId,
+      driver,
+      keyApi: deps?.keyApi ?? (briefCanMint ? asUsage(() => openRouterKeyApi()) : unusedKeyApi()),
+      store,
+      ledgerFactory,
+      startEngine,
+      ...(budgetGroup !== undefined ? { budgetGroup } : {}),
+      ...(groupCapMicroUsd !== undefined ? { groupCapMicroUsd } : {}),
+      ...(port === undefined ? {} : { port }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+    submitRunId = ack.runId;
+    // Raw `out`, not `emit` — the same posture as dispatch's ack: the runId is
+    // the handle on a live box. On the replay path the box may be long gone,
+    // but the line is still the only report of the answer, so a lost line is
+    // exit 6 ("landed but unreportable"), and the recovery is the replay
+    // itself — which is exactly why 6 is not 1 here.
+    try {
+      out(`${JSON.stringify(ack)}\n`);
+      // running = the engine start landed (or the replay corroborated it);
+      // provisioned = the box is ready and the engine did not start — on a
+      // FIRST submit that is the retryable engine-start failure (exit 1); on
+      // a replay of an intent whose engine was never requested it is the
+      // delivered state (exit 0).
+      code = ack.state === "running" || (ack.replayed && ack.state === "provisioned") ? 0 : 1;
+    } catch (e) {
+      const x = (e ?? {}) as { message?: string };
+      printError(
+        note,
+        "ack-unwritable",
+        `the run for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
+        `record run id ${ack.runId} now — re-submitting --request-id ${requestId} replays the same run without provisioning again`,
+        { runId: ack.runId },
+      );
+      code = 6;
+    }
+  } catch (e) {
+    code = reportCode(note, e);
+  }
+  return finish(submitRequestId ?? newRequestId(), verb, submitRunId, code);
+}
+
+/**
+ * `fleet result` (Q1.3) — the poller-facing completion payload. ONE record
+ * read, ONE JSON line: no driver, no box, no lock (the same posture as
+ * `rank`). The payload carries `terminal`; exit 0 means "the record was found
+ * and the payload printed", running or not — a poller branches on the field,
+ * never on the exit code.
+ */
+async function runResult(ctx: VerbCtx): Promise<number> {
+  const { deps, verb, positionals, storeOpts, out, note, finish } = ctx;
+  let code: number;
+  try {
+    if (positionals.length !== 2) {
+      throw usageError("result takes exactly one <run-id> positional", "fleet result <run-id> --json");
+    }
+    const store = deps?.store ?? asUsage(() => new RunRecordStore(storeOpts));
+    const payload = buildResult(store, positionals[1] as string);
+    try {
+      out(`${JSON.stringify(payload)}\n`);
+      code = 0;
+    } catch (e) {
+      const x = (e ?? {}) as { message?: string };
+      printError(
+        note,
+        "payload-unwritable",
+        `the payload for ${payload.runId} was computed but could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
+        "stdout refused the bytes — re-run; the payload is a pure read and the poll loses nothing",
+      );
+      code = 6;
+    }
+  } catch (e) {
+    code = reportCode(note, e);
+  }
+  return finish(newRequestId(), verb, undefined, code);
 }
 
 /** `fleet fanout` (DF3.2 D12) — N isolated dispatch arms as one pattern. */
@@ -5368,7 +5579,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
  * shared body rather than two copies of 190 lines.
  */
 async function runDestructive(ctx: VerbCtx): Promise<number> {
-  const { deps, verb, positionals, flags, dir, storeOpts, startedAt, note, finish } = ctx;
+  const { deps, verb, positionals, flags, dir, storeOpts, startedAt, note, finish, reportCompletion } = ctx;
   const runIdArg = positionals[1];
   const driverName = flags.get("--driver");
   const requestId = newRequestId();
@@ -5604,6 +5815,33 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
     };
     if (verb === "harvest") {
       code = await runHarvest(ctx, tdeps, runIdArg);
+    } else if (verb === "cancel") {
+      // Q1.4: idempotent teardown. The record read under the lock decides:
+      // a CLOSED record is already settled — nothing to destroy, exit 0, and
+      // a settled run is NOT relabelled cancelled (it completed). An OPEN
+      // record with a cancel mark is the crash-recovery case (mark landed,
+      // teardown did not run) — it RE-RUNS the teardown rather than no-op'ing
+      // over a possibly-live box. The mark is written BEFORE the teardown so
+      // a cancelled-then-closed record reads `cancelled` in the result
+      // payload; the close the teardown performs is the idempotency anchor.
+      if (rec.closedAt !== undefined) {
+        const printed = reportCompletion([
+          `nothing to do: ${runIdArg} already settled — no box, no keys, no teardown`,
+        ]);
+        code = printed ? 0 : 6;
+      } else {
+        store.set(runIdArg, {
+          extensions: { cancel: { state: "cancelled", at: new Date().toISOString() } },
+        });
+        const armed = await runTeardown(ctx, { tdeps, store, rec, lock, runIdArg, requestId, state });
+        if (armed.early === true) return armed.code;
+        if (armed.code === 0) {
+          const printed = reportCompletion([`cancelled: ${runIdArg}`]);
+          code = printed ? 0 : 6;
+        } else {
+          code = armed.code;
+        }
+      }
     } else {
       const armed = await runTeardown(ctx, { tdeps, store, rec, lock, runIdArg, requestId, state });
       // Re-raised HERE, inside the try, so the CC-9 line still precedes the

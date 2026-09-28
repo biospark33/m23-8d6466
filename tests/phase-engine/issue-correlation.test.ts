@@ -224,10 +224,14 @@ describe("resolveRunCorrelation validation", () => {
   test("valid slug + issue + url passes through, boundary issueId accepted", () => {
     const url = "https://github.com/qds/demo/issues/42";
     const r = corr({ issueUrl: url, requestId: REQ_ID_A });
+    // Q1.7: the result carries the identity TAIL (`issueKey`) beside the
+    // issue-specific fields; `workId` is undefined on an issue brief.
     expect(r).toEqual({
       requestId: REQ_ID_A,
       repoSlug: "qds/demo",
+      issueKey: "42",
       issueId: 42,
+      workId: undefined,
       issueUrl: url,
     });
     // Upper bound is inclusive (<= MAX_ISSUE_ID).
@@ -528,7 +532,9 @@ describe("initiateSession", () => {
     expect(err.existingRepoSlug).toBe("qds/demo");
     expect(err.attemptedRepoSlug).toBe("qds/demo");
     expect(err.existingIssueId).toBe(42);
-    expect(err.attemptedIssueId).toBe(43);
+    // Q1.7: the attempted half is the correlation's identity TAIL (issueKey) —
+    // the string the identity predicate keys on.
+    expect(err.attemptedIssueId).toBe("43");
     tracer.close();
 
     const db = openRo(dbPath);
@@ -873,6 +879,97 @@ describe("canonicalRepoSlug", () => {
     expect(canonicalRepoSlug("qds / demo")).toBe("qds / demo");
     // Still idempotent once trimmed.
     expect(canonicalRepoSlug(canonicalRepoSlug(" QDS/Demo "))).toBe("qds/demo");
+  });
+});
+
+// ─── Q1.7 headless correlation (workId) ──────────────────────────────────────
+//
+// The correlation layer owns (repoSlug, issueId) identity; Q1.7 widens it to
+// (repoSlug, issueId | workId) with the identity TAIL carried as `issueKey` —
+// `String(issueId)` for issue briefs, `workId` for headless ones. Every spend
+// predicate downstream reads `${slug}#${issueKey}`, so a headless run keys its
+// budget under its own name instead of a synthetic issue id (G8). The
+// all-digit refusal mirrors the schema's: `workId: "42"` would resolve to
+// issue 42's identity and share its cap.
+describe("resolveRunCorrelation workId (Q1.7)", () => {
+  test("headless brief: workId carried, issueKey is the workId, issueId undefined", () => {
+    const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "dag/build-docs", requestId: REQ_ID_A });
+    expect(r.workId).toBe("dag/build-docs");
+    expect(r.issueId).toBeUndefined();
+    expect(r.issueKey).toBe("dag/build-docs");
+    expect(r.repoSlug).toBe("qds/demo");
+    expect(r.requestId).toBe(REQ_ID_A);
+  });
+
+  test("issue brief: issueKey is the stringified issueId, workId undefined", () => {
+    const r = resolveRunCorrelation({ repoSlug: "qds/demo", issueId: 42, requestId: REQ_ID_A });
+    expect(r.issueId).toBe(42);
+    expect(r.workId).toBeUndefined();
+    expect(r.issueKey).toBe("42");
+  });
+
+  test("neither issueId nor workId → INVALID_ISSUE_ID naming both", () => {
+    expectCorrelationError(
+      () => resolveRunCorrelation({ repoSlug: "qds/demo", requestId: REQ_ID_A }),
+      "INVALID_ISSUE_ID",
+    );
+    try {
+      resolveRunCorrelation({ repoSlug: "qds/demo", requestId: REQ_ID_A });
+      throw new Error("expected CorrelationError");
+    } catch (e) {
+      expect((e as CorrelationError).message).toContain("issueId");
+      expect((e as CorrelationError).message).toContain("workId");
+    }
+  });
+
+  test("both issueId and workId → INVALID_ISSUE_ID (exactly one)", () => {
+    expectCorrelationError(
+      () => resolveRunCorrelation({ repoSlug: "qds/demo", issueId: 42, workId: "dag/x", requestId: REQ_ID_A }),
+      "INVALID_ISSUE_ID",
+    );
+  });
+
+  test("malformed workId → INVALID_WORK_ID: charset, blank, leading '#', all-digits, length", () => {
+    for (const workId of [
+      "has space",
+      "#42",
+      "a\nb",
+      "",
+      "   ",
+      "42",
+      "123456",
+      "x".repeat(65),
+      "id?query",
+    ]) {
+      expectCorrelationError(
+        () => resolveRunCorrelation({ repoSlug: "qds/demo", workId, requestId: REQ_ID_A }),
+        "INVALID_WORK_ID",
+      );
+    }
+  });
+
+  test("workId boundary values accepted", () => {
+    for (const workId of ["dag/build-docs", "build.docs", "a_b-c", "x".repeat(64)]) {
+      const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId, requestId: REQ_ID_A });
+      expect(r.issueKey).toBe(workId);
+    }
+  });
+
+  test("purity holds for the workId path too (no fs/db I/O)", () => {
+    const cwd = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, "pure-workid-")));
+    const prevCwd = process.cwd();
+    process.chdir(cwd);
+    try {
+      const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "dag/x", requestId: REQ_ID_A });
+      expect(r.issueKey).toBe("dag/x");
+      expectCorrelationError(
+        () => resolveRunCorrelation({ repoSlug: "qds/demo", workId: "42", requestId: REQ_ID_A }),
+        "INVALID_WORK_ID",
+      );
+    } finally {
+      process.chdir(prevCwd);
+    }
+    expect(fs.readdirSync(cwd)).toEqual([]);
   });
 });
 

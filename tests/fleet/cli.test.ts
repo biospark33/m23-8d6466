@@ -427,6 +427,16 @@ const EXPECTED_VERBS = [
   // DF3.7's `observe`, dispatched by the `verb === "observe"` arm at fleet.ts.
   // Additive like every entry before it.
   "observe",
+  // Q1.1's `submit`, dispatched by the `verb === "submit"` arm at fleet.ts.
+  // Additive like every entry before it — appended, editing no predecessor.
+  "submit",
+  // Q1.3's `result`, dispatched by the `verb === "result"` arm at fleet.ts.
+  // Additive like every entry before it.
+  "result",
+  // Q1.4's `cancel`, dispatched by the `verb === "cancel"` arm inside
+  // runDestructive (it shares that scaffolding: lock, record probe, cleanup
+  // policy). Additive like every entry before it.
+  "cancel",
 ] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
@@ -444,6 +454,9 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   unlock: 2, // missing <run-id>
   run: 2, // missing <run-id> — refused before any box is reached
   observe: 2, // missing <run-id> — refused before any box is reached
+  submit: 2, // missing --request-id — the verb's whole point, refused first
+  result: 2, // missing <run-id>
+  cancel: 2, // missing <run-id>
 };
 
 /**
@@ -1801,6 +1814,140 @@ process.stdout.write(t);
     expectNoBoxes();
   });
 
+  // ─── Q1.1 `submit`: the composed verb's exit mapping, end to end ───────────
+  //
+  // These four are the cases verbs.test.ts's exit-set check owes submit's
+  // declared [0,1,2,3,5,6] beyond the usage/in-flight probes it runs itself:
+  // the provisioning paths need the full wiring (valid brief, ledger, gate or
+  // engine seam), which is this file's subject and not that file's.
+
+  const REQ = "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5";
+
+  test("submit → exit 0: ack line on stdout, engine started through the seam", async () => {
+    const code = await runCli(["submit", "--driver", "fake", "--request-id", REQ], {
+      ...deps(validBriefJson(dir)),
+      startEngine: async (runId: string) => ({
+        outcome: "started" as const,
+        vm: "vm",
+        unit: `qds-run@${runId}`,
+      }),
+    });
+    expect(code).toBe(0);
+    const ack = JSON.parse(outOnly.join("").trim()) as { schemaVersion: number; state: string; runId: string; requestId: string; replayed: boolean };
+    expect(ack.schemaVersion).toBe(1);
+    expect(ack.state).toBe("running");
+    expect(ack.requestId).toBe(REQ);
+    expect(ack.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+    expect(ack.replayed).toBe(false);
+  });
+
+  test("submit whose engine start fails exits 1 with the box provisioned and the run id named", async () => {
+    // Not 5: the refusal machinery never fired — the box is LIVE and the retry
+    // is the replay (the same --request-id re-invoked retries the start
+    // idempotently), which is exactly what 1's `transient` stamp advertises.
+    const code = await runCli(["submit", "--driver", "fake", "--request-id", REQ], {
+      ...deps(validBriefJson(dir)),
+      startEngine: async () => ({
+        outcome: "start-failed" as const,
+        reason: "box-unreachable" as const,
+      }),
+    });
+    expect(code).toBe(1);
+    const ack = JSON.parse(outOnly.join("").trim()) as { state: string; runId: string };
+    expect(ack.state).toBe("provisioned");
+    expect(ack.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+  });
+
+  test("submit's setup-gate refusal is dispatch's exit 3, and the intent keeps pointing at the run", async () => {
+    const base = new FakeDriver(boxesDir);
+    const code = await runCli(["submit", "--driver", "fake", "--request-id", REQ], {
+      ...deps(validBriefJson(dir)),
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) =>
+          argv[0] === "true"
+            ? { exitCode: 1, stdout: "", stderr: "box unreachable" }
+            : base.exec(vm, argv, stdin),
+      }),
+    });
+    expect(code).toBe(3);
+    expect(errCaptured.join("")).toContain("setup-gate-failed");
+    // The requestId stays spoken for: the intent names the run (provisioning
+    // was attempted), so a replay answers from the record instead of
+    // provisioning again.
+    const submits = readdirSync(join(runsDir, "submits"));
+    expect(submits).toEqual([`${REQ}.json`]);
+    const intent = JSON.parse(readFileSync(join(runsDir, "submits", `${REQ}.json`), "utf-8")) as { state: string; runId?: string };
+    expect(intent.state).toBe("failed");
+    expect(intent.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+  });
+
+  test("submit whose ack cannot be written exits 6 with the run id named — the replay is the recovery", async () => {
+    const brokenStdout = (): never => {
+      const e = new Error("EPIPE: broken pipe, write") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    };
+    const code = await run(["submit", "--driver", "fake", "--request-id", REQ], brokenStdout, deps(validBriefJson(dir)), errOut);
+    expect(code).toBe(6);
+    const envelope = errCaptured
+      .map((l) => JSON.parse(l) as { code: string; runId?: string; remediation?: string })
+      .find((e) => e.code === "ack-unwritable");
+    expect(envelope).toBeDefined();
+    const runId = envelope!.runId as string;
+    expect(runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+    // The remediation names the REPLAY, not a teardown: the run is spoken for
+    // by --request-id, so the recovery re-invokes the verb rather than
+    // destroying the box.
+    expect(envelope!.remediation).toContain(`re-submitting --request-id ${REQ}`);
+  });
+
+  test("result → exit 0 with the versioned payload for a real record, running or not", async () => {
+    const store = new RunRecordStore(runsDir);
+    store.create("qds-20260928-res000");
+    store.set("qds-20260928-res000", {
+      requestId: "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5",
+      vmName: "qds-vm",
+      spendMicroUsd: 42_000,
+    });
+    const code = await runCli(["result", "qds-20260928-res000", "--json"], { store });
+    expect(code).toBe(0);
+    const payload = JSON.parse(outOnly.join("").trim()) as {
+      schemaVersion: number;
+      runId: string;
+      requestId: string;
+      status: string;
+      terminal: boolean;
+    };
+    expect(payload).toMatchObject({
+      schemaVersion: 1,
+      runId: "qds-20260928-res000",
+      requestId: "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5",
+      status: "running",
+      terminal: false,
+    });
+    // And a CLOSED record reads terminal — the same verb, the other answer.
+    store.close("qds-20260928-res000");
+    reset();
+    const closedCode = await runCli(["result", "qds-20260928-res000"], { store });
+    expect(closedCode).toBe(0);
+    const closed = JSON.parse(outOnly.join("").trim()) as { status: string; terminal: boolean };
+    expect(closed.status).toBe("completed");
+    expect(closed.terminal).toBe(true);
+  });
+
+  test("result whose payload cannot be written exits 6 — the read itself lost nothing", async () => {
+    const store = new RunRecordStore(runsDir);
+    store.create("qds-20260928-res001");
+    const brokenStdout = (): never => {
+      const e = new Error("EPIPE: broken pipe, write") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    };
+    const code = await run(["result", "qds-20260928-res001"], brokenStdout, { store }, errOut);
+    expect(code).toBe(6);
+    expect(errCaptured.join("")).toContain("payload-unwritable");
+  });
+
   // ─── the run-id grammar: exit 2 before any path is built ───────────────────
 
   test("a run id that fails the grammar is refused with invalid-run-id, on every verb that takes one", async () => {
@@ -2036,6 +2183,103 @@ process.stdout.write(t);
     reset();
     expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
     expect(text()).toContain(`torn down: ${runId}`);
+  });
+
+  // ─── Q1.4 `cancel`: idempotent teardown (G4) ───────────────────────────────
+  //
+  // Cancel tears the box and its keys down EXACTLY once and both invocations
+  // of a double-cancel succeed: the SECOND is a no-op anchored on the record's
+  // close (the teardown closes it), never a second destroy. The record also
+  // carries a `cancel` extension so the result payload says "cancelled", not
+  // "completed" — a DAG brancher reads the difference.
+
+  test("cancel on a live run destroys the box, marks the record, exits 0; result reads cancelled", async () => {
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    const store = shared.store as RunRecordStore;
+    expect(await (shared.driver as FakeDriver).list()).toHaveLength(1);
+
+    reset();
+    expect(await runCli(["cancel", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    expect(text()).toContain(`cancelled: ${runId}`);
+    expect(await (shared.driver as FakeDriver).list()).toHaveLength(0);
+    const rec = store.get(runId);
+    expect(rec.closedAt).toBeDefined();
+    expect((rec.extensions?.cancel?.state as string | undefined)).toBe("cancelled");
+    // The result payload (Q1.3) reads the mark: cancelled, terminal — not
+    // "completed", which would tell a DAG brancher the work SUCCEEDED.
+    reset();
+    expect(await runCli(["result", runId], { store })).toBe(0);
+    const payload = JSON.parse(outOnly.join("").trim()) as { status: string; terminal: boolean };
+    expect(payload.status).toBe("cancelled");
+    expect(payload.terminal).toBe(true);
+  });
+
+  test("cancel twice: ONE teardown, both invocations exit 0", async () => {
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    const store = shared.store as RunRecordStore;
+
+    let destroys = 0;
+    const base = shared.driver as FakeDriver;
+    const countingDriver = driverWith(base, {
+      destroy: async (vm: string) => {
+        destroys += 1;
+        return base.destroy(vm);
+      },
+    });
+    reset();
+    const first = await runCli(["cancel", "--driver", "fake", "--dir", runsDir, runId], { ...shared, driver: countingDriver });
+    expect(first).toBe(0);
+    reset();
+    const second = await runCli(["cancel", "--driver", "fake", "--dir", runsDir, runId], { ...shared, driver: countingDriver });
+    expect(second).toBe(0);
+    expect(text()).toContain("nothing to do");
+    expect(destroys).toBe(1);
+    expect(await (shared.driver as FakeDriver).list()).toHaveLength(0);
+    expect(store.get(runId).closedAt).toBeDefined();
+  });
+
+  test("cancel whose box never answers exits 6 — the composed teardown's do-not-retry arm", async () => {
+    // Composing runTeardown carries teardown's whole exit table with it: a
+    // mid-teardown transport failure is that machinery's exit 6 (work may
+    // have partially landed; the lock is HELD; the remediation is not "retry
+    // me"). Cancel does not re-classify it — the composition is the contract.
+    const base = new FakeDriver(boxesDir);
+    const shared: Partial<FleetDeps> = {
+      ...deps(validBriefJson(dir)),
+      driver: driverWith(base, {
+        exec: async () => {
+          const e = new Error("killed at budget") as NodeJS.ErrnoException;
+          e.code = "SIGKILL";
+          throw e;
+        },
+      }),
+    };
+    expect(await runCli(["dispatch", "--driver", "fake"], { ...shared, driver: base })).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    reset();
+    const code = await runCli(["cancel", "--driver", "fake", "--dir", runsDir, runId], shared);
+    expect(code).toBe(6);
+  });
+
+  test("cancel on an already-settled record is a 0 no-op — no destroy, no re-close", async () => {
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    const store = shared.store as RunRecordStore;
+    // Settle through the TEARDOWN verb (the normal chain), then cancel.
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    reset();
+    expect(await runCli(["cancel", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    expect(text()).toContain("nothing to do");
+    // The settled run is NOT relabelled cancelled — it completed.
+    reset();
+    expect(await runCli(["result", runId], { store })).toBe(0);
+    const payload = JSON.parse(outOnly.join("").trim()) as { status: string };
+    expect(payload.status).toBe("completed");
   });
 
   test("a harvest whose box answers the bundle protocol prints the COUNT-bearing line", async () => {
@@ -3625,12 +3869,16 @@ process.on = ((sig, listener) => {
     // and by the wrong field name — in the one test whose entire subject is
     // that the operator is told WHICH field to fix.
     expect(envelope.field).toBe("repoSlug");
-    // …and the field is the first of the issues, not the only one: a brief
-    // this broken has five, and an operator who fixes only `repoSlug` and
-    // re-runs must not discover the other four one round-trip at a time.
+    // …and the field is the first of the issues, not the only one: an operator
+    // who fixes only `repoSlug` and re-runs must not discover the rest one
+    // round-trip at a time.
+    //
+    // Q1.7: `issueId` is optional, so it no longer appears here. The
+    // exactly-one refine fires only on a brief whose BASE parse succeeded
+    // (zod skips object refinements when a field failed) — the headless
+    // identity cases pin it in brief-schema.test.ts.
     expect(envelope.issues).toEqual([
       "repoSlug: Invalid",
-      "issueId: Required",
       "commitSha: Required",
       "manifestPath: Required",
       "repoUrl: Required",
@@ -5837,43 +6085,49 @@ process.on = ((sig, listener) => {
     expect(result.tie).toBe(false);
   });
 
-  test("a fleet-busy race refusal creates NO loser cost ledger (INV-2: the money file follows admission)", async () => {
+  test("Q1.5/Q1.6: a no-headroom race refusal creates NO loser cost ledger (INV-2: the money file follows admission)", async () => {
     // The loser ledger is LAZY end to end: the hook object itself does no I/O,
     // and the real CostLedger opens its SQLite file only on the first
     // ingestBoxHours — reachable exclusively from a LOSER'S teardown close
-    // step, strictly past admission. A race refused at the lock therefore
-    // leaves no money file behind (the pre-lazy build created one here).
-    const heldLock = join(dir, ".sandbox", "fleet.lock");
-    mkdirSync(dirname(heldLock), { recursive: true });
-    const corpsePid = await deadPid();
+    // step, strictly past admission. A race refused at ADMISSION therefore
+    // leaves no money file behind.
+    //
+    // SUPERSEDED vehicle: the refusal used to come from the GLOBAL fleet lock
+    // (a planted holder), but Q1.6 scoped that lock to the record — a second
+    // fan-out now PROGRESSES (the contract the primitive suite pins). The
+    // pre-admission refusal under test is the QUOTA CEILING's: one weighted
+    // quota intent (Q1.5) from another process fills the ceiling before the
+    // aggregate checkHeadroom(N) reads it. Same property, same exit 5, zero
+    // wall-clock.
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const intentsDir = join(dir, "quota-intents");
+    mkdirSync(intentsDir, { recursive: true, mode: 0o700 });
     writeFileSync(
-      heldLock,
+      join(intentsDir, "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5.json"),
       `${JSON.stringify({
-        pid: corpsePid,
-        pidStartTime: 1,
-        createdAt: new Date().toISOString(), // YOUNG: refused, never stolen
-        requestId: "busy-holder",
+        requestId: "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5",
+        weight: 2,
+        claimedAt: new Date().toISOString(),
       })}\n`,
       { mode: 0o600 },
     );
     reset();
+    // The CLI's quota limits ride the deps seam (the same Omit-dispatch slice
+    // the verb forwards): a 2-VM ceiling plus the planted weight-2 intent is
+    // exactly full, so the aggregate checkHeadroom(2) refuses on arrival.
     const code = await runCli(
       ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
-      deps(validBriefJson(dir)),
+      {
+        ...deps(validBriefJson(dir)),
+        quotaLimits: { limits: { ...DEFAULT_QUOTA_LIMITS, maxVms: 2 }, source: "default" as const },
+      },
     );
     expect(code).toBe(5);
+    expect(text()).toContain("no-headroom");
     expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
     expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
-    // The 20s override this case used to carry is gone with the bug it was
-    // papering over (F093). It was never a slow assertion: `deps()` did not
-    // inject `lockPath`, so the busy holder planted above sat at a tmpdir path
-    // the CLI never opened, and the run went at the REAL `<cwd>/.sandbox/
-    // fleet.lock` instead. Whether this case refused in 9ms or wandered into a
-    // live 2-arm fan-out was then decided by whatever a previous run — or a
-    // concurrent `bun test` in the same worktree — had left at that one shared
-    // path. Hermetic, it is a handful of milliseconds, and bun's 5s default is
-    // the honest budget: a host stall long enough to beat it takes the rest of
-    // the suite's 5s cases down too, which no per-case override can fix.
+    // Hermetic by construction: a planted file, a deterministic refusal, bun's
+    // 5s budget untouched.
   });
 
   test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {

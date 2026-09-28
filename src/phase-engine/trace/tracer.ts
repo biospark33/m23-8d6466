@@ -1036,25 +1036,34 @@ export class Tracer {
     const c = e.correlation;
 
     const selectSlug = this.stmt<
-      { repo_slug: string | null; issue_id: number | null },
+      { repo_slug: string | null; issue_id: number | string | null },
       [string]
     >("SELECT repo_slug, issue_id FROM sessions WHERE request_id = ?");
 
     /** Step 2 logic shared by the found-row and racing-winner paths. */
     const replayOrRefuse = (
-      existing: { repo_slug: string | null; issue_id: number | null },
+      existing: { repo_slug: string | null; issue_id: number | string | null },
     ): { requestId: string; runId: string; replayed: boolean } => {
-      // Full-pair compare: same slug under a different issueId is a re-point
+      // Full-pair compare: same slug under a different identity is a re-point
       // exactly like a different slug — the requestId is spoken for by
-      // (repo, issue), never by the repo alone (INV-RUN-2).
-      if (existing.repo_slug === c.repoSlug && existing.issue_id === c.issueId) {
+      // (repo, identity), never by the repo alone (INV-RUN-2).
+      //
+      // Q1.7: the identity is the correlation's `issueKey` (String(issueId) or
+      // the headless workId), compared STRING-side against the column — SQLite's
+      // INTEGER affinity stores "42" as the integer 42, so String() puts both
+      // spellings back on one side of the `===`.
+      if (
+        existing.repo_slug === c.repoSlug &&
+        existing.issue_id !== null &&
+        String(existing.issue_id) === c.issueKey
+      ) {
         return { requestId: c.requestId, runId: c.requestId, replayed: true };
       }
       if (existing.repo_slug === null) {
         // The one and only write of the correlation columns (INV-RUN-2).
         this.stmt(
           "UPDATE sessions SET repo_slug = ?, issue_id = ?, issue_url = ? WHERE request_id = ?",
-        ).run(c.repoSlug, c.issueId, c.issueUrl, c.requestId);
+        ).run(c.repoSlug, c.issueKey, c.issueUrl, c.requestId);
         return { requestId: c.requestId, runId: c.requestId, replayed: true };
       }
       throw new RequestIdRepoMismatchError({
@@ -1062,7 +1071,7 @@ export class Tracer {
         existingRepoSlug: existing.repo_slug,
         attemptedRepoSlug: c.repoSlug,
         existingIssueId: existing.issue_id,
-        attemptedIssueId: c.issueId,
+        attemptedIssueId: c.issueKey,
       });
     };
 
@@ -1084,7 +1093,7 @@ export class Tracer {
           new Date().toISOString(),
           e.pipelineName ?? this.pipelineName ?? null,
           c.repoSlug,
-          c.issueId,
+          c.issueKey,
           c.issueUrl,
         );
       if (inserted.changes === 1) {

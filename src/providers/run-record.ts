@@ -237,6 +237,14 @@ export const EXTENSION_NAMESPACES: Readonly<
   /** DF3.2 */
   fanout: { schemaVersion: 1, fields: { fanoutId: "string", arm: "string" } },
   /**
+   * Q1.4: the cancel mark. Written by `fleet cancel` BEFORE the teardown runs
+   * (so a cancelled-then-closed record reads `cancelled` in the result payload,
+   * not `completed`), and anchored for idempotency on the RECORD CLOSE the
+   * teardown performs — a mark without a close is the crash-recovery case and
+   * re-runs the teardown, never a no-op that strands a live box.
+   */
+  cancel: { schemaVersion: 1, fields: { state: "string", at: "string" } },
+  /**
    * DF2.8: the budget gate's admission decision, written by `createRun` when the
    * dispatch carries an issue ref. `admittedCeilingMicroUsd` is the one clamped
    * ceiling handed to DF2.3's mint; `repoSlug`/`issueId` are what teardown's

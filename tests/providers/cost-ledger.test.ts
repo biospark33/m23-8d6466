@@ -578,7 +578,16 @@ describe("DF2.8 store invariants (INV-COST-1/2/4)", () => {
     // gate_admission_releases (2026-09-18): the compensating-release table
     // DF3.6a's pre-provision refusals write — append-only like its parent, and
     // carrying no spend figure cost_events does not already own.
-    expect(tables).toEqual(["cost_events", "gate_admissions", "gate_admission_releases"]);
+    // Q1.2 adds the budget-group pair: the reservation and its compensating
+    // release, append-only like the admissions family, carrying the GROUP
+    // ceiling's outstanding sum — no spend figure cost_events does not own.
+    expect(tables).toEqual([
+      "cost_events",
+      "gate_admissions",
+      "budget_group_admissions",
+      "budget_group_releases",
+      "gate_admission_releases",
+    ]);
     for (const forbidden of ["issue_cost", "total", "total_micro_usd", "spend"]) {
       expect(cols).not.toContain(forbidden);
     }
@@ -3262,7 +3271,16 @@ describe("DF2.11 openReadOnly", () => {
       // `releaseAdmission` (2026-09-18): the DF2.8 compensating release — a
       // write (it inserts into gate_admission_releases), so it refuses here
       // like every other one.
-      const WRITES = ["ingestCostEvent", "ingestBoxHours", "admitIssue", "releaseAdmission"];
+      const WRITES = [
+        "ingestCostEvent",
+        "ingestBoxHours",
+        "admitIssue",
+        "releaseAdmission",
+        // Q1.2: the budget-group reservation and its compensating release —
+        // both insert, so both refuse on a read-only handle like the rest.
+        "reserveBudgetGroup",
+        "releaseBudgetGroup",
+      ];
 
       const methods = Object.getOwnPropertyNames(CostLedger.prototype).filter(
         (name) =>

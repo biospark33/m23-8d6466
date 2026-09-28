@@ -53,6 +53,7 @@ import {
   type LoadedQuotaLimits,
 } from "../../src/providers/quota.ts";
 import { ROSTER_MAX_BYTES } from "../../src/phase-engine/roster/schema.ts";
+import { claimQuotaIntent, releaseQuotaIntent, countQuotaIntents, intentExists } from "../../src/providers/quota-intents.ts";
 
 /** Fresh limits — NEVER mutate DEFAULT_QUOTA_LIMITS (shared, unfrozen reference). */
 function limitsWith(overrides: Partial<typeof DEFAULT_QUOTA_LIMITS>): LoadedQuotaLimits {
@@ -1947,6 +1948,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       releaseAdmission() {
         return { released: false };
       },
+      // Q1.2 stubs: dispatch never reserves against a group — the two calls
+      // are submit's, and the group arithmetic is a CostLedger test.
+      reserveBudgetGroup() {
+        throw new Error("dispatch must not reserve against a budget group");
+      },
+      releaseBudgetGroup() {
+        return { released: false };
+      },
       close() {
         closeCalls += 1;
       },
@@ -2224,6 +2233,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       releaseAdmission() {
         return { released: false };
       },
+      // Q1.2 stubs: dispatch never reserves against a group — the two calls
+      // are submit's, and the group arithmetic is a CostLedger test.
+      reserveBudgetGroup() {
+        throw new Error("dispatch must not reserve against a budget group");
+      },
+      releaseBudgetGroup() {
+        return { released: false };
+      },
       close() {
         closeCalls += 1;
       },
@@ -2298,6 +2315,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // The admitted ceiling equals the backstop, so no refusal guard fires and
       // no release is owed — stubbed for the type.
       releaseAdmission() {
+        return { released: false };
+      },
+      // Q1.2 stubs: dispatch never reserves against a group — the two calls
+      // are submit's, and the group arithmetic is a CostLedger test.
+      reserveBudgetGroup() {
+        throw new Error("dispatch must not reserve against a budget group");
+      },
+      releaseBudgetGroup() {
         return { released: false };
       },
       close() {
@@ -2538,6 +2563,61 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // Joinable: the line carries THIS dispatch's resolved correlation id, not
     // the unresolved sentinel an operator cannot grep back to the CLI call.
     expect(refused.requestId).toBe(requestId);
+  });
+
+  // ─── Q1.5: the cross-process headroom intent ────────────────────────────────
+  //
+  // The intent goes down BEFORE the ceiling read and comes up when the
+  // admission section exits, so a concurrent process's checkHeadroom counts
+  // this dispatch for exactly the window a box may be coming into existence.
+  // The unit-level property (claim/release/count) is quota-intents.test.ts;
+  // these pin the DISPATCH WIRING.
+
+  test("Q1.5: a concurrent process's intent closes the ceiling — the dispatch refuses and releases only ITS claim", async () => {
+    const requestId = randomUUID();
+    const intentsDir = join(dirname(store.dir), "quota-intents");
+    // The other process claimed first.
+    expect(claimQuotaIntent(intentsDir, "6f6b4d9f-2a3c-4d4e-8b9f-81d2e3f4a5b6")).toBe(true);
+    try {
+      await dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }), requestId }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      expect((e as FleetError).exitCode).toBe(5);
+      expect((e as FleetError).code).toBe("no-headroom");
+    }
+    // Our own claim is RELEASED on the refusal; the other process's intent is
+    // untouched (releasing it would be the bug that lets the ceiling reopen).
+    expect(countQuotaIntents(intentsDir)).toBe(1);
+    expect(intentExists(intentsDir, "6f6b4d9f-2a3c-4d4e-8b9f-81d2e3f4a5b6")).toBe(true);
+    expect(intentExists(intentsDir, requestId)).toBe(false);
+    releaseQuotaIntent(intentsDir, "6f6b4d9f-2a3c-4d4e-8b9f-81d2e3f4a5b6");
+  });
+
+  test("Q1.5: a successful dispatch releases its claim — the box counts for itself", async () => {
+    const requestId = randomUUID();
+    const intentsDir = join(dirname(store.dir), "quota-intents");
+    const result = await dispatch(validBrief(), deps({ requestId, quotaLimits: limitsWith({ maxVms: 2 }) }));
+    expect(result.state).toBe("ready");
+    expect(countQuotaIntents(intentsDir)).toBe(0);
+  });
+
+  test("Q1.5: racing the SAME requestId past two headroom reads refuses before anything is sampled", async () => {
+    const requestId = randomUUID();
+    const intentsDir = join(dirname(store.dir), "quota-intents");
+    // The other process holds THIS requestId's claim.
+    expect(claimQuotaIntent(intentsDir, requestId)).toBe(true);
+    try {
+      await dispatch(validBrief(), deps({ requestId, quotaLimits: limitsWith({ maxVms: 8 }) }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      expect((e as FleetError).exitCode).toBe(5);
+      expect((e as FleetError).code).toBe("quota-intent-in-flight");
+    }
+    // The planted claim is untouched; nothing was provisioned.
+    expect(intentExists(intentsDir, requestId)).toBe(true);
+    expect(await driver.list()).toHaveLength(0);
   });
 
   test("AC8: checkHeadroom list-unverified → FleetError exit 5", async () => {

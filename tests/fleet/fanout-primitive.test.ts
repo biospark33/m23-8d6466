@@ -912,6 +912,33 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     expect(boxExists(driver, stuck)).toBe(true); // unknown ≠ loser, never torn down
   }, 20_000);
 
+  // ── Q1.6: the lock is the RECORD's, not the fleet's ──────────────────────────
+  //
+  // G7: the fleet lock was GLOBAL, so a second concurrent fan-out failed with
+  // exit 5 fleet-busy for as long as the first held it (up to the 1h race
+  // ceiling). The shared state the global lock used to stand over is now
+  // arbitrated at its own layers — money in the ledger's transactions (Q1.2),
+  // the VM ceiling in the quota intents (Q1.5), record identity in O_EXCL
+  // creates — so what remains to serialize is ONE fan-out record's lifecycle
+  // (close, loser teardown), and THAT is what the lock now scopes to.
+
+  test("two CONCURRENT fan-outs both progress — the second no longer exits 5 fleet-busy (Q1.6)", async () => {
+    manifest();
+    const briefs = [brief(), brief()];
+    const [a, b] = await Promise.all([
+      fanout("many-stories", 2, briefs, raceDeps()),
+      fanout("many-stories", 2, briefs, raceDeps()),
+    ]);
+    // BOTH fulfilled: neither took the fleet-busy exit-5 refusal.
+    expect(a.fanoutId).toMatch(/^fan-/);
+    expect(b.fanoutId).toMatch(/^fan-/);
+    // Four arms across the two records, all attached.
+    expect(a.arms).toHaveLength(2);
+    expect(b.arms).toHaveLength(2);
+    // The records are distinct — two ids, two files.
+    expect(a.fanoutId).not.toBe(b.fanoutId);
+  }, 30_000);
+
   // ── the ownership wiring, end to end through the poller ──────────────────────
 
   test("an arm whose marker claims a FOREIGN run never wins — marker-run-mismatch give-up, sibling takes the race", async () => {

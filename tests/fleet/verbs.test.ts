@@ -376,7 +376,17 @@ describe("verbs.ts (registry)", () => {
      * `age > 1h` door did this same eviction automatically, with no flag, no log
      * line and no operator in the loop.
      */
-    const ARGUED_EXEMPTION = new Set(["unlock --force"]);
+    const ARGUED_EXEMPTION = new Set([
+      "unlock --force",
+      // Q1.1. `submit --budget-group` matches "budget" and is NOT a bypass: it
+      // is the group-cap CEILING ARRIVING — the flag that makes a DAG run's
+      // spends admissible against one shared cap (Q1.2), never one that waives
+      // a gate. The paired --group-cap is the amount; refusing the pair's
+      // lone half is exit 2. It argues its way past this comment by adding a
+      // limit, which is the opposite of the admission-skip this vocabulary
+      // exists to keep out.
+      "submit --budget-group",
+    ]);
     for (const entry of listVerbs()) {
       for (const flag of entry.flags) {
         const exempt = ARGUED_EXEMPTION.has(`${entry.verb} ${flag.name}`);
@@ -729,6 +739,48 @@ describe("verbs.ts (registry)", () => {
       { name: "--driver", required: true, valueType: "string" },
       { name: "--help", required: false, valueType: "boolean" },
     ],
+    // Q1.1. `--driver` REQUIRED: submit provisions, so it may never default a
+    // driver (the same hazard run's entry names). `--request-id` required:true
+    // is the verb's whole point — without it nothing is idempotent.
+    // `--budget-group`/`--group-cap` stand or fall together (the core refuses
+    // the lone half as exit 2). `--json` is the caller asserting the ack
+    // contract; the ack IS one JSON line either way.
+    submit: [
+      { name: "--brief", required: false, valueType: "path" },
+      { name: "--budget-group", required: false, valueType: "string" },
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--group-cap", required: false, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+      {
+        name: "--json",
+        required: false,
+        valueType: "boolean",
+        note: "the ack is already one JSON line — this flag asserts the contract for callers that require the spelling",
+      },
+      { name: "--port", required: false, valueType: "string" },
+      { name: "--request-id", required: true, valueType: "string" },
+      { name: "--timeout-ms", required: false, valueType: "string" },
+    ],
+    // Q1.3. NO --driver: one record read, no box — rank/approve's precedent,
+    // and the property that makes the verb poller-safe.
+    result: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--help", required: false, valueType: "boolean" },
+      {
+        name: "--json",
+        required: false,
+        valueType: "boolean",
+        note: "the payload is already one JSON line — this flag asserts the contract for callers that require the spelling",
+      },
+    ],
+    // Q1.4. `--driver` REQUIRED: cancel reaches the box (destroy + key
+    // revoke) — the same hazard teardown's entry names.
+    cancel: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -825,6 +877,26 @@ describe("verbs.ts (registry)", () => {
     // (vetoed/approval-failed/chain-failed/handed-off). 4 is produced by this
     // verb itself (no such run record) before the module is ever entered.
     observe: [0, 1, 2, 4, 5, 6],
+    // Q1.1. dispatch+run composed: 0 acked and running (or the replay of an
+    // intent whose engine was never requested); 1 = the engine start did not
+    // land but the box is up — TRANSIENT, because re-submitting the same
+    // --request-id replays the run and retries the start idempotently;
+    // 2 usage; 3 = the setup gate refused on a live box (dispatch's own code);
+    // 5 = refused before anything provisioned, or the requestId is
+    // spoken-for by an in-flight/failed submit; 6 = the run landed and the
+    // ack line could not print — the REPLAY is the recovery, which is why it
+    // is not 1.
+    submit: [0, 1, 2, 3, 5, 6],
+    // Q1.3. 0 = record found and payload printed — RUNNING OR NOT (the
+    // payload's `terminal` field is the poller's branch, not the exit code);
+    // 2 usage; 4 = no such run record; 6 = the payload could not print.
+    result: [0, 2, 4, 6],
+    // Q1.4. Teardown's own table minus the transient 1 (a mid-teardown
+    // transport failure is the composed machinery's do-not-retry 6). One
+    // difference: 0 covers BOTH the destroyed run AND the idempotent no-op —
+    // the second cancel of a pair exits 0 having destroyed nothing (the
+    // contract: cancel twice ⇒ one teardown, both succeed).
+    cancel: [0, 2, 4, 5, 6],
   };
 
   // Every entry in the snapshot records, iterated. A hand-written list was the
@@ -938,7 +1010,9 @@ describe("verbs.ts (registry)", () => {
       // D11's `unlock` is the fourth: it takes a <run-id> POSITIONAL (which C6
       // keeps out of the flags list by design) and nothing else it could
       // require, so every declared flag on it is genuinely optional.
-      if (!["rank", "approve", "reject", "unlock"].includes(entry.verb)) {
+      // Q1.3 adds `result`: one record read, no box — every flag genuinely
+      // optional, the same shape as rank.
+      if (!["rank", "approve", "reject", "unlock", "result"].includes(entry.verb)) {
         expect(entry.flags.some((f) => f.required)).toBe(true);
       }
       expect(entry.flags.some((f) => !f.required)).toBe(true);
@@ -1409,6 +1483,101 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       { argv: ["dispatch", "--no-harvest"], code: 2, stderr: "does not take --no-harvest" },
       // `--driver` is required:true, and nothing is injected to stand in for it.
       { argv: ["dispatch"], code: 2, deps: () => ({ store }), stderr: "dispatch requires --driver" },
+    ],
+    // Q1.1. The core refuses before the brief is read wherever the invocation
+    // shape is wrong, so these probes need no manifest fixtures. The
+    // provisioning paths (0/1/3/6) are excused in the table below — they need
+    // a real driver.
+    submit: [
+      { argv: ["submit"], code: 2, stderr: "submit takes --request-id" },
+      { argv: ["submit", "stray-positional"], code: 2, stderr: "no positional arguments" },
+      { argv: ["submit", "--request-id", "not-a-uuid"], code: 2, stderr: "--request-id" },
+      { argv: ["submit", "--request-id", "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5"], code: 2, deps: () => ({ store }), stderr: "submit requires --driver" },
+      // The paired flags stand or fall together — either lone half is usage.
+      {
+        argv: ["submit", "--request-id", "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5", "--driver", "fake", "--budget-group", "dag-2026-09"],
+        code: 2,
+        stderr: "stand or fall together",
+      },
+      {
+        argv: ["submit", "--request-id", "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5", "--driver", "fake", "--group-cap", "500000"],
+        code: 2,
+        stderr: "stand or fall together",
+      },
+      // A flag the registry does not give submit.
+      {
+        argv: ["submit", "--request-id", "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5", "--driver", "fake", "--no-harvest"],
+        code: 2,
+        stderr: "does not take --no-harvest",
+      },
+      // The requestId spoken for by an in-flight intent: refused exit 5,
+      // NOTHING provisioned — before() plants the claim and readBrief hands
+      // back a brief that PARSES (the refusal fires after the brief is read,
+      // before any manifest load or provisioning).
+      {
+        argv: ["submit", "--request-id", "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5", "--driver", "fake"],
+        code: 5,
+        deps: () => ({
+          store,
+          driver,
+          readBrief: async () =>
+            JSON.stringify({
+              repoSlug: "owner/repo",
+              workId: "dag/probe",
+              commitSha: "a".repeat(40),
+              manifestPath: "m.json",
+              repoUrl: "https://github.com/owner/repo",
+            }),
+        }),
+        stderr: "submit-in-flight",
+        before: () => {
+          const submits = join(store.dir as string, "submits");
+          mkdirSync(submits, { recursive: true, mode: 0o700 });
+          writeFileSync(
+            join(submits, "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5.json"),
+            JSON.stringify({ schemaVersion: 1, requestId: "5e5a3c8e-1f2b-4c3d-9a8e-70c1f2d3e4f5", state: "in-flight", startedAt: new Date().toISOString() }),
+            { mode: 0o600 },
+          );
+        },
+      },
+    ],
+    // Q1.3. One record read — the whole surface is probed here except the
+    // payload-print paths, which need a record with real content (cli.test.ts
+    // owns those below via the excuse table).
+    result: [
+      { argv: ["result"], code: 2, stderr: "exactly one <run-id>" },
+      { argv: ["result", "a", "b"], code: 2, stderr: "exactly one <run-id>" },
+      // A flag the registry does not give result.
+      { argv: ["result", "qds-20260101-abcdef", "--driver", "fake"], code: 2, stderr: "does not take --driver" },
+      { argv: ["result", "qds-20260101-abcdef"], code: 4, deps: () => ({ store }), stderr: "run-not-found" },
+    ],
+    // Q1.4. Idempotency IS the cheaply-reachable surface: a closed record
+    // no-ops at 0 (destroying nothing), a missing record refuses at 4. The
+    // destroy arm (0 on a live run) is cli.test.ts's — it needs a provisioned
+    // run and the full destructive wiring.
+    cancel: [
+      { argv: ["cancel"], code: 2, stderr: "cancel requires <run-id>" },
+      { argv: ["cancel", "stray", "positional"], code: 2, stderr: "exactly one <run-id>" },
+      // A flag the registry does not give cancel.
+      { argv: ["cancel", "qds-20260101-abcdef", "--no-harvest"], code: 2, stderr: "does not take --no-harvest" },
+      { argv: ["cancel", "qds-20260101-abcdef"], code: 2, deps: () => ({ store }), stderr: "cancel requires --driver" },
+      // Missing record: exit 4, nothing mutated (the probe before the lock).
+      {
+        argv: ["cancel", "qds-20260101-abcdef", "--driver", "fake"],
+        code: 4,
+        deps: () => ({ store, driver }),
+        stderr: "run-not-found",
+      },
+      // Closed record: the idempotent no-op — exit 0, and the SHADOW-driver
+      // probe pins that NO exec ran (nothing was reached).
+      {
+        argv: ["cancel", "qds-cancelled", "--driver", "fake"],
+        code: 0,
+        deps: () => ({ store, driver }),
+        provision: "qds-cancelled",
+        before: () => void store.close("qds-cancelled"),
+        stdout: "nothing to do",
+      },
     ],
     status: [
       // Empty fleet is a state, not an error (AC4) — and the emptiness is
@@ -2469,6 +2638,64 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         file: "e2e/tier2-run-completion.live.test.ts",
       },
     ],
+    // Q1.1. Probed here: 2 (the whole usage surface) and 5 (the in-flight
+    // refusal — nothing provisioned). The provisioning paths (0/1/3/6) need
+    // the full wiring — valid brief, ledger, the gate/engine seams — which is
+    // cli.test.ts's subject; the entries below bind each excuse to the case
+    // that owes it.
+    submit: [
+      {
+        code: 0,
+        why: "needs a valid brief, the ledger and the engine seam — cli.test.ts",
+        coveredBy: "submit → exit 0: ack line on stdout, engine started through the seam",
+      },
+      {
+        code: 1,
+        why: "the engine start did not land on the provisioned box — cli.test.ts",
+        coveredBy: "submit whose engine start fails exits 1 with the box provisioned and the run id named",
+      },
+      {
+        code: 3,
+        why: "the setup gate refused on a LIVE box — cli.test.ts",
+        coveredBy: "submit's setup-gate refusal is dispatch's exit 3, and the intent keeps pointing at the run",
+      },
+      {
+        code: 6,
+        why: "the ack line could not print on a landed run — cli.test.ts",
+        coveredBy: "submit whose ack cannot be written exits 6 with the run id named — the replay is the recovery",
+      },
+    ],
+    // Q1.3. Probed here: 2 and 4. The payload-print paths need a record with
+    // real content — cli.test.ts owns them.
+    result: [
+      {
+        code: 0,
+        why: "needs a record with real content on disk — cli.test.ts",
+        coveredBy: "result → exit 0 with the versioned payload for a real record, running or not",
+      },
+      {
+        code: 6,
+        why: "the payload could not print — cli.test.ts",
+        coveredBy: "result whose payload cannot be written exits 6 — the read itself lost nothing",
+      },
+    ],
+    // Q1.4. Probed here: 2 (grammar), 4 (missing record), and the 0-no-op arm
+    // (closed record). The destroy arm needs a provisioned run and the full
+    // destructive wiring — cli.test.ts owns it; 5/6 ride teardown's own cases
+    // (cancel composes runTeardown unchanged, codes and all).
+    cancel: [
+      // (0 is NOT excused: the closed-record no-op probe above reaches it.)
+      {
+        code: 5,
+        why: "the run lock refused — the same producer (acquireRunLock) and the same code, through the same destructive scaffolding",
+        coveredBy: "teardown takes the shared run lock: a held lock refuses and mutates nothing",
+      },
+      {
+        code: 6,
+        why: "the destruction landed and the completion line could not print — teardown's landed-but-unreportable arm",
+        coveredBy: "teardown of a run with a box, an OPEN record and no keyHash exits 6, not 0",
+      },
+    ],
   };
 
   /**
@@ -2639,7 +2866,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
           .map((p) => `${p.argv.join(" ")} → exit ${p.code}, not in [${entry.exitCodes.join(",")}]`),
       ).toEqual([]);
       // ⊇ : nothing the registry advertises may be unreachable, bar the allowlist.
-      const excused = new Set(ONLY_REACHABLE_ELSEWHERE[entry.verb]!.map((e) => e.code));
+      const excused = new Set((ONLY_REACHABLE_ELSEWHERE[entry.verb] ?? []).map((e) => e.code));
       expect([...declared].filter((c) => !seen.has(c) && !excused.has(c))).toEqual([]);
       // …and the allowlist itself stays honest: an excused code that a probe
       // now reaches must be struck from it, not left as a standing exemption.
@@ -2825,7 +3052,12 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       if (declared === undefined) continue;
       expect(declared.required).toBe(true);
       const argv =
-        entry.verb === "dispatch" || entry.verb === "status" || entry.verb === "fanout"
+        entry.verb === "dispatch" ||
+        entry.verb === "status" ||
+        entry.verb === "fanout" ||
+        // Q1.1: submit takes no run-id positional — its identity is the
+        // --request-id flag, and a stray positional is its own refusal.
+        entry.verb === "submit"
           ? [entry.verb]
           : [entry.verb, "some-run"];
       const err: string[] = [];
@@ -2845,7 +3077,11 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       // lock file — so assertDriverChosen's hazard (a teardown "destroying" a
       // fake box while the real one bills) cannot arise: no verb here ever
       // destroys, reads or bills a box. A SIXTH must argue it here.
-    ).toEqual(["rank", "approve", "reject", "enrol", "unlock"]);
+      //
+      // Q1.3's `result` is that sixth: ONE run-record read, no box, no driver,
+      // no lock — the property that makes it poller-safe (a DAG adapter can
+      // call it every few seconds at zero substrate cost).
+    ).toEqual(["rank", "approve", "reject", "enrol", "unlock", "result"]);
     // The seam the requirement lives behind: an INJECTED deps.driver stands in
     // for the flag entirely — `required` is about ARGV, not about embedders.
     expect(await run(["status"], sink, { store, driver }, sink)).toBe(0);
