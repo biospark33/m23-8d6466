@@ -29,7 +29,7 @@ import type { Tracer } from "../trace/tracer.ts";
 import { emitSeatCosts, parseSeatSessionJsonl } from "./openrig-cost.ts";
 // The seat-keys env-var name is owned by the providers layer (providers must
 // not import from phase-engine; phase-engine already imports from providers).
-import { SWARM_SEAT_KEYS_ENV } from "../../providers/credentials.ts";
+import { SWARM_SEAT_KEYS_ENV, usdToMicros } from "../../providers/credentials.ts";
 
 export const SWARM_POLL_INTERVAL_MS = 15_000;
 export const SWARM_GATE_MARGIN_MS = 60_000;
@@ -326,8 +326,11 @@ export function openrigSwarmPhase(
         trace("swarm_seat_up", { session, runtime: member.runtime ?? "pi" });
       }
       // Written only when a non-pi seat exists; the patched launcher treats
-      // an absent file as the no-op it is. Key material: 0600.
+      // an absent file as the no-op it is. Key material: 0600. The pi seeding
+      // path mkdirs $OPENRIG_HOME as a side effect; a claude-only rig seeds
+      // no dir, so create it here — on a fresh box nothing else has.
       if (Object.keys(memberEnv).length > 0) {
+        fs.mkdirSync(rigHome, { recursive: true });
         fs.writeFileSync(path.join(rigHome, "member-env.json"), JSON.stringify(memberEnv), { mode: 0o600 });
       }
 
@@ -571,7 +574,66 @@ export function openrigSwarmPhase(
       // never skips teardown. ──
       const seq = deps.invocationSeqByAgent ?? new Map<string, number>();
       const emitMoney = deps.emitMoneyLine ?? defaultStderrMoney;
+      // S2.6 (operator decision 2026-09-27: the OpenRouter API fetch): a
+      // non-pi seat's session files carry usage but NO cost, so its meter is
+      // the seat key itself — GET /api/v1/auth/key returns that key's
+      // cumulative USD spend. One call per non-pi seat, here in the finally
+      // BEFORE the run teardown revokes the keys. The key rides the sh -c
+      // string: same-uid box processes can read each other's argv AND the
+      // pi keys' 0600 files already, so this adds no new exposure; nothing
+      // emitted ever carries it (INV-COST-4). Best-effort like the pi arm:
+      // a failed fetch degrades that seat's row, never the teardown.
+      const emitKeyApiCostRow = async (member: RigMemberSpec, session: string): Promise<void> => {
+        const seatKey = keys[member.id];
+        if (seatKey === undefined || seatKey === "") return;
+        try {
+          const res = await run(
+            ["sh", "-c", `curl -fsS --max-time 15 -H "Authorization: Bearer ${seatKey}" https://openrouter.ai/api/v1/auth/key`],
+            { timeoutMs: SWARM_CLI_TIMEOUT_MS },
+          );
+          if (res.exitCode !== 0) throw new Error(`curl exit ${res.exitCode}`);
+          const parsed = JSON.parse(res.stdout) as { data?: { usage?: unknown } };
+          const usageUsd = parsed?.data?.usage;
+          if (typeof usageUsd !== "number" || !Number.isFinite(usageUsd) || usageUsd < 0) {
+            throw new Error("no numeric non-negative data.usage in the key response");
+          }
+          const costMicroUsd = usdToMicros(usageUsd);
+          const invocationSeq = seq.get(session) ?? 0;
+          seq.set(session, invocationSeq + 1);
+          emitMoney({
+            type: "cost_attribution",
+            requestId,
+            runId: bodyCtx.ctx.runId,
+            phaseId: bodyCtx.phaseId,
+            agentId: session,
+            role: member.id,
+            invocationSeq,
+            model: member.model ?? null,
+            costMicroUsd,
+            // The key API prices in aggregate; the per-token split is not
+            // recoverable from it — zeros/nulls are the truthful row.
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: null,
+            cacheWriteTokens: null,
+            turnCount: 0,
+            unpricedTurns: 0,
+            timestamp: new Date().toISOString(),
+          });
+          mirrorToEngineLog({
+            type: "log",
+            name: "swarm_seat_cost",
+            payloadJson: JSON.stringify({ session, runtime: member.runtime, source: "openrouter-key-api", totalMicroUsd: costMicroUsd, role: member.id }),
+          });
+        } catch (e) {
+          logLine({ step: "seat-costs", seat: session, error: errText(e) });
+        }
+      };
       for (const { member, session } of seats) {
+        if ((member.runtime ?? "pi") !== "pi") {
+          await emitKeyApiCostRow(member, session);
+          continue;
+        }
         try {
           const sessionsDir = path.join(rigHome, "state", "pi", session, "sessions");
           let jsonls: string[];

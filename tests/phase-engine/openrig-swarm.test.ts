@@ -825,3 +825,59 @@ test("S2.4: explicit runtime 'pi' behaves exactly like the default (no refusal)"
   const { home } = makeTempHome();
   await expect(runPhase(spec, run, home, new AbortController().signal)).resolves.toBeDefined();
 });
+
+// ─── S2.6 gate — per-runtime cost rows (operator decision 2026-09-27: the
+// OpenRouter API fetch). A non-pi seat's key IS its meter: GET /api/v1/auth/key
+// with the seat key returns the key's cumulative USD spend (data.usage).
+// Fetched in the finally BEFORE teardown revokes; best-effort like the pi
+// JSONL arm — a failed fetch degrades that seat's row, never the teardown.
+
+test("S2.6: a claude seat's cost row comes from the OpenRouter key API; the key never appears in an emitted row", async () => {
+  const spec: PhaseSpec = {
+    ...SPEC,
+    rigSpec: {
+      name: "devrig",
+      pods: [{ id: "dev", members: [
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude" },
+        { id: "worker", model: "openrouter/deepseek/deepseek-v3.2" },
+      ]}],
+    },
+  };
+  const handlers = baseHandlers();
+  handlers["auth/key"] = () => ({ exitCode: 0, stdout: JSON.stringify({ data: { usage: 0.0125 } }), stderr: "" });
+  const { run } = fakeRunner(handlers);
+  const { home, money } = makeTempHome();
+  const value = await runPhase(spec, run, home, new AbortController().signal);
+  expect(value.exitStatus).toBe("success");
+  const leadRows = money.filter((m) => (m as Record<string, unknown>).role === "lead");
+  expect(leadRows.length).toBe(1);
+  const row = leadRows[0] as Record<string, unknown>;
+  expect(row.type).toBe("cost_attribution");
+  expect(row.costMicroUsd).toBe(12_500); // usdToMicros(0.0125)
+  expect(row.model).toBe("openrouter/anthropic/claude-haiku-4.5");
+  // INV-COST-4: no key material in any emitted line, ever.
+  for (const m of money) expect(JSON.stringify(m)).not.toContain("sk-or-v1");
+});
+
+test("S2.6: a failed key-API fetch degrades the row, not the run", async () => {
+  const spec: PhaseSpec = {
+    ...SPEC,
+    rigSpec: {
+      name: "devrig",
+      pods: [{ id: "dev", members: [
+        { id: "lead", model: "openrouter/anthropic/claude-haiku-4.5", runtime: "claude" },
+      ]}],
+    },
+    seatBudgets: { lead: 250_000_000 },
+  };
+  const handlers = baseHandlers();
+  handlers["auth/key"] = () => ({ exitCode: 1, stdout: "", stderr: "revoked early" });
+  const { run } = fakeRunner(handlers);
+  const { home, money } = makeTempHome();
+  const value = await runPhase(spec, run, home, new AbortController().signal);
+  expect(value.exitStatus).toBe("success");
+  expect(money.filter((m) => (m as Record<string, unknown>).role === "lead").length).toBe(0);
+  // Teardown still ran — the degraded cost arm never skips cleanup.
+  const rigHome = path.join(home, DEFAULT_OPENRIG_HOME);
+  expect(fs.existsSync(path.join(rigHome, "member-env.json"))).toBe(false);
+});
