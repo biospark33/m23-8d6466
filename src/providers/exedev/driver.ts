@@ -490,7 +490,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:a8b3358b648bb0da0f18bbdec1259f2c8a3371889dcdc34acf2e9b49c54c24e5";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f34f74acd0368cf268d0ea8bf3520eb1db19be0bfb63f0a9b5090ba1a7959aad";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -573,7 +573,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  *
- * CURRENT PAIRING (twenty-ninth pin, 2026-09-28): buildId 1282936fe7956d11 —
+ * CURRENT PAIRING (thirtieth pin, 2026-09-29): buildId 3aa9227509786a67 —
  * the post-label-fix engine (the round-blocking mismatch: the baked
  * engine pre-#363 rejected runtime "claude-code"), measured LOCALLY via
  * the script itself while GitHub Actions billing is failed;
@@ -597,7 +597,7 @@ export const DEFAULT_IMAGE_REF =
  * same commit (the whole-walk literal now 9f55e706…, its debt declared on
  * the branch).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "1282936fe7956d11";
+export const DEFAULT_IMAGE_BUILD_ID = "3aa9227509786a67";
 
 
 

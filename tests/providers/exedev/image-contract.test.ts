@@ -1394,8 +1394,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // buildId inputs are the ones the current pin was derived from" — which
     // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
     // SAME COMMIT; that pairing is the whole ritual.
-    expect(marker.buildId).toBe("1282936fe7956d11"); // adopted by the twenty-ninth-pin ritual (measured LOCALLY via the script itself: GitHub Actions billing failed account-wide, provenance deviation recorded in the Dockerfile re-pin; the prior twenty-eighth was gate B run 36373548860): ARG CLAUDE_CODE_VERSION install + the two sweep-measured license names; prior pairing: — the S2 buildout image: the member-env patch applier + coms-core identity fallback + the S2.2-S2.7 engine sources; the preceding tree re-pin #353 moved OPENRIG_TREE_SHA256 to e2cb427c so the build could clear its gates at all); re-pinned here (the pairing the comment above demands)
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("1282936fe7956d11");
+    expect(marker.buildId).toBe("3aa9227509786a67"); // adopted by the THIRTIETH-pin ritual (gate B run 36614519605, CI-measured — billing RESTORED, no provenance deviation): the engine COPY enumeration gained quota-intents.ts (post-Q1 resolution-probe refusal, run 36610326021), OPENRIG_TREE_SHA256 fifth re-pin e035abfa->f8071b8b (upstream ^-range drift, run 36611371706's TOFU refusal), and the Q1 surface itself (submit/result/cancel verbs, budget-group ledger, workId identity, quota-intent wiring) — the baked engine now matches the delivered surface, SC2's live-round prerequisite. Prior pairing: the twenty-ninth (measured LOCALLY, billing-deviation era): ARG CLAUDE_CODE_VERSION install + the two sweep-measured license names — the S2 buildout image; re-pinned here (the pairing the comment above demands)
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("3aa9227509786a67");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 
