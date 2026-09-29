@@ -988,7 +988,7 @@ ARG OPENRIG_VERSION=0.5.14
 # the tree-measured RUN, so the patched bytes are the pinned identity by
 # design. Nothing upstream drifted: the delta is exactly the patch (2 imports
 # + the qdsMemberEnv merge block) plus whatever npm re-resolved identically.
-ARG OPENRIG_TREE_SHA256=e035abfa9dd126561d972162500820a56c7fb5ad022190765819d7fa12e88e13
+ARG OPENRIG_TREE_SHA256=f8071b8b0e4b1ee21d7389bcacf671259302fe576938c8153c5278049aeaa42f
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a

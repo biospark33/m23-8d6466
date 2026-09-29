@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "b0f4b1572b7876a2f138422214dee71dd2ce53e076670606d8121bb00ae95458",
+      "oci/exedev/Dockerfile": "f20a95a23a534e3c30b9dc86cb3668476b51960ada7ef471232169ed9098a0ac",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -3672,8 +3672,10 @@ describe("checksumArgProblems", () => {
     // 2026-09-28 from run 36367093271 — OUR OWN S2.2 member-env patch
     // moved it (41e10c9a → e2cb427c, our own S2.2 patch), then again by the S2.6
     // claude CLI install (e2cb427c → 6b60a34b) — the patched+installed bytes
-    // being the pinned identity by design, which is the patched bytes being the
-    // pinned identity by design — no external
+    // being the pinned identity by design — and a FIFTH time on 2026-09-29
+    // from run 36611371706's refusal (e035abfa → f8071b8b, upstream ^-range
+    // drift again, no CLI version change; the first CI-measured move since
+    // billing was restored). No external
     // cross-check exists for an npm-resolved tree, so the refusal output IS
     // the measurement, and the hash is what freezes ^-range resolution.
     const measuredDefault = (name: "NODE_SHA256" | "OPENRIG_TREE_SHA256"): string => {
@@ -3681,7 +3683,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "e035abfa9dd126561d972162500820a56c7fb5ad022190765819d7fa12e88e13";
+          return "f8071b8b0e4b1ee21d7389bcacf671259302fe576938c8153c5278049aeaa42f";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
