@@ -1302,7 +1302,7 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "aca8c5ffcbd407d1bb11db6b0365be873ec4f11eb9fd5b68ac937e681855ebf8",
+      "oci/exedev/Dockerfile": "b0f4b1572b7876a2f138422214dee71dd2ce53e076670606d8121bb00ae95458",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1951,10 +1951,19 @@ describe("buildIdFileInputs", () => {
       // verbs (src/fleet/submit.ts, result.ts; scripts/fleet.ts arms), the
       // workId identity (brief-schema + issue-correlation + tracer), the
       // budget-group ledger tables, and the quota-intent wiring all move
-      // walked inputs. Measured offline over the verified-clean tree; the
-      // IMAGE REBUILD ADOPTING THIS VALUE IS SC2'S PREREQUISITE (the baked
-      // engine must match the delivered surface before a live round).
-      "a1af12ce1f04ec72611a6777f011439dd43b0c61baa36941ecd97117fd945a15",
+      // walked inputs. Measured offline over the verified-clean tree. (The
+      // post-Q1 CI build refused at the resolution probe BEFORE publishing:
+      // quota.ts's import closure gained quota-intents.ts and the engine
+      // stage's COPY enumeration lacked it — the run printed no pin.)
+      //
+      // 23e4a959: the COPY-enumeration repair (Dockerfile engine stage +
+      // the workflow's on.push.paths and SOURCE_PATHS lockstep) — the
+      // Dockerfile bytes are one walked input, so the enumeration fix moves
+      // this digest. Received from this test's own failing run on the
+      // post-repair tree; the rebuild adopting THIS value is SC2's
+      // prerequisite (the baked engine must match the delivered surface
+      // before a live round).
+      "23e4a959e9ad310e44ec8f1bc75bbaa0f662c868c8373957ee4f887ff44f4167",
     );
   });
 });

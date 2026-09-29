@@ -344,6 +344,10 @@ COPY src/providers/driver.ts src/providers/driver.ts
 COPY src/providers/harvest.ts src/providers/harvest.ts
 COPY src/providers/path-guard.ts src/providers/path-guard.ts
 COPY src/providers/quota.ts src/providers/quota.ts
+# Q1: quota.ts's import closure gained quota-intents.ts (the cross-process
+# VM-headroom intent record) — the resolution probe refused on
+# "./quota-intents.ts" at the post-Q1 build until this line landed.
+COPY src/providers/quota-intents.ts src/providers/quota-intents.ts
 COPY src/providers/viz-guard.ts src/providers/viz-guard.ts
 COPY src/swarmclaw/ src/swarmclaw/
 COPY cli-anything/src/ cli-anything/src/

@@ -144,6 +144,8 @@ on:
       - src/providers/harvest.ts
       - src/providers/path-guard.ts
       - src/providers/quota.ts
+      # Q1: quota.ts's import closure — see the Dockerfile COPY comment.
+      - src/providers/quota-intents.ts
       - src/providers/viz-guard.ts
       - src/swarmclaw/**
       - cli-anything/src/**
@@ -540,6 +542,7 @@ jobs:
                         src/providers/credentials.ts src/providers/errors.ts \
                         src/providers/driver.ts src/providers/harvest.ts \
                         src/providers/path-guard.ts src/providers/quota.ts \
+                        src/providers/quota-intents.ts \
                         src/providers/viz-guard.ts src/swarmclaw \
                         cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts \
                         pi-vs-claude-code-vendor/self-compact/extensions/self-compact \
