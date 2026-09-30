@@ -282,6 +282,37 @@ describe("submitWork (Q1.1 replay-safe submit)", () => {
     expect(ledgers.flatMap((l) => l.groupReleases)).toHaveLength(0);
   });
 
+  test("SC2.6: a group-scoped CLI submit reserves and mints at the GROUP cap (the verb takes no --cap-micro-usd)", async () => {
+    // The real-ledger arithmetic this guards (measured live 2026-09-29, SC2.6
+    // window (b)): submit reserved the $50 defaultKeyCapMicroUsd against a
+    // $0.50 group and refused exit 5 at ZERO spend — the recording ledger's
+    // permissive reserve hid it from this suite. The operator named the group
+    // ceiling; a single run's reservation can never exceed it.
+    const h = harness();
+    const ledgers: Awaited<ReturnType<typeof goodLedger>>[] = [];
+    const admitCalls: AdmitCall[] = [];
+    await h.submit({
+      budgetGroup: "sc2-fj",
+      groupCapMicroUsd: 500_000,
+      ledgerFactory: () => {
+        const ledger = goodLedger();
+        const inner = ledger.admitIssue.bind(ledger);
+        (ledger as { admitIssue: unknown }).admitIssue = (input: AdmitCall["input"], cap: number, keyCap: number) => {
+          admitCalls.push({ input, capMicroUsd: cap, keyCapMicroUsd: keyCap } as AdmitCall);
+          return inner(input, cap, keyCap);
+        };
+        ledgers.push(ledger);
+        return ledger;
+      },
+    });
+    const groupCalls = ledgers.flatMap((l) => l.groupCalls);
+    expect(groupCalls).toHaveLength(1);
+    expect(groupCalls[0]?.amountMicroUsd).toBe(500_000);
+    // The minted key's ceiling rides the same bound — a key cannot outspend
+    // the group it was admitted under.
+    expect(admitCalls[0]?.keyCapMicroUsd).toBe(500_000);
+  });
+
   test("Q1.2: a budget-group-exceeded refusal releases the claim — the requestId is reusable", async () => {
     const h = harness();
     const { CostLedgerError } = await import("../../src/providers/cost-ledger.ts");
