@@ -1,0 +1,15 @@
+{
+  "window": "a",
+  "requestId": "e30971a4-7fad-4fe7-b17a-c0acb9816017",
+  "fleetRunId": "qds-20260930-3c12b3",
+  "submitExecs": 1,
+  "replaySameId": true,
+  "boxesBefore": [],
+  "boxesAfter": [
+    null
+  ],
+  "freshBoxes": [
+    null
+  ],
+  "fjLastError": null
+}

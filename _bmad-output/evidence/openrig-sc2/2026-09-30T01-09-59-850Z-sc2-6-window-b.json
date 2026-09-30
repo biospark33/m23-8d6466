@@ -1,0 +1,14 @@
+{
+  "window": "b",
+  "requestId": "9b0dc01e-d77f-4dc6-af5a-8563ac0b46c8",
+  "fleetRunId": "qds-20260930-ed3e9c",
+  "submitExecs": 2,
+  "boxesBefore": [],
+  "boxesAfter": [
+    null
+  ],
+  "freshBoxes": [
+    null
+  ],
+  "fjLastError": null
+}
