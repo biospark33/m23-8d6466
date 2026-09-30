@@ -340,7 +340,7 @@ export async function killDaemon(dir: string, proc: Bun.Subprocess): Promise<voi
 function assertNoSecrets(obj: unknown): void {
   const s = JSON.stringify(obj) ?? "";
   if (s.includes("sk-or-")) throw new Error("evidence scrub: sk-or- survived");
-  if (s.includes("sc27-")) throw new Error("evidence scrub: sc27- (approver token) survived");
+  if (s.includes("sc27tok-")) throw new Error("evidence scrub: sc27tok- (approver token) survived");
 }
 
 export function writeEvidence(tag: string, name: string, payload: unknown): void {

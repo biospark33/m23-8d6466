@@ -21,7 +21,8 @@ Macro processes — the long-running, multi-step, stateful workflows swarmclaw a
 ## Consequences
 
 - The `ProtocolExternalJobConfig` shape (repoSlug/repoUrl/commitSha/manifestPath, exactly one of issueId|workId, groupCapUsd, pollTimeoutMs) is the macro-process → factory contract; grammar changes go through both sides' reviews (#380's identity-grammar finding is the live example).
-- Two known gaps are accepted until fixed: the observe-chain poller race (#382 — a poller can complete a step pre-gate) and headless `workId` briefs not booking spend (#380 — macro work carries a numeric issueId for now).
+- Two known gaps are accepted until fixed: the observe-chain poller race (#382 — detail below) and headless `workId` briefs not booking spend (#380 — macro work carries a numeric issueId for now).
+- **#382 in detail:** the observe chain closes the run record at teardown start, but the approve gate only registers after reverify (~15s later). A protocol poller tick landing in that window reads the pre-approval terminal `completed` verdict for the `external_job` step and completes it with the wrong verdict. That can fail protocol orchestration — the verdict branch has no case matching `completed`, so the branch refuses and the run fails — but it does **not** authorize anything: the fleet result stays unapproved, no PR is approved, and `fleet approve` (scrypt-gated, human-only) remains the only path to an approved verdict. Current mitigation: the protocol poller is kept stopped while `fleet observe` runs (measured round 5 of the SC2.7 live leg).
 - DD-7's query-surface chassis role stands unchanged; this ADR only adds the `external_job` hosting role on top of it.
 
 ## Signature

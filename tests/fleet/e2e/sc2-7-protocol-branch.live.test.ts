@@ -288,13 +288,14 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           const entry = readEntry(dir, runId);
           return entry?.status === "submitted" && entry?.runId ? entry : null;
         }, 480_000);
+        // Hoisted BEFORE any replay assert: a non-null `submitted` means the
+        // fleet run exists (a box may provision); the finally must be able to
+        // cancel it even if an assert below throws first.
+        fleetRunId = submitted?.runId ?? "";
         assert.ok(submitted, "the replay never reached 'submitted'");
         const submits = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
         assert.equal(submits.length, 1, "exactly one fleet submit exec across the kill + replay");
         assert.equal(submits[0]?.requestId, persisted?.requestId, "the replay carried the SAME --request-id");
-        // hoisted to the outer scope so the finally can cancel it even if a
-        // later assert throws before any other capture point
-        fleetRunId = submitted?.runId ?? "";
         assert.ok(fleetRunId, "the factory run id must be captured");
 
         // EXACTLY ONE box (the kill half's proof, continuing live).
@@ -380,7 +381,10 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         fs.mkdirSync(factoryDir, { recursive: true });
         fs.chmodSync(factoryDir, 0o700);
         const salt = crypto.randomBytes(16).toString("hex");
-        const token = `sc27-${crypto.randomBytes(24).toString("hex")}`;
+        // Token prefix `sc27tok-` is deliberately distinct from APPROVER_ID
+        // ("sc27-e2e-approver"): the evidence scrub keys on the token prefix,
+        // and the approve evidence carries the approver id.
+        const token = `sc27tok-${crypto.randomBytes(24).toString("hex")}`;
         // allowlistPath was hoisted above the try so the finally can
         // restore-or-delete the PRIOR allowlist state (this is a production
         // path — never leave the test's approver behind).
