@@ -270,7 +270,9 @@ describe("submitWork (Q1.1 replay-safe submit)", () => {
     const groupCalls = ledgers.flatMap((l) => l.groupCalls);
     expect(groupCalls).toHaveLength(1);
     expect(groupCalls[0]?.groupId).toBe("dag-2026-09");
-    expect(groupCalls[0]?.issueKey).toBe("dag/build-docs");
+    // #380: the identity carries the sanctioned w: namespace (correlation's
+    // spend key), so a group override key can address headless work too.
+    expect(groupCalls[0]?.issueKey).toBe("w:dag/build-docs");
     expect(groupCalls[0]?.requestId).toBe(REQ_A);
     expect(groupCalls[0]?.amountMicroUsd).toBeGreaterThan(0);
     // The reservation LANDED BEFORE the dispatch's own admission: the group

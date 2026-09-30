@@ -213,7 +213,17 @@ export function resolveRunCorrelation(
     // repository, not the casing. The pattern is case-blind, so the canonical
     // form is always still valid.
     repoSlug: canonicalRepoSlug(repoSlug),
-    issueKey: workId ?? String(issueId),
+    // #380: the identity TAIL is the spend key every budget row and override
+    // lookup is reduced to. Issue briefs keep the numeric spelling; headless
+    // briefs get the SANCTIONED work-key namespace — `w:` + the case-FOLDED
+    // workId — because a bare workId is an identity no `perIssueOverrides` key
+    // can address (the ledger refused every such admission, $0 spent, #380),
+    // and an unfolded one would let `Sc26` and `sc26` open two budget
+    // identities for one piece of work. Folding here (not at the ledger) is
+    // the same choice `canonicalRepoSlug` makes one field above: one spelling
+    // per identity, minted once, at the boundary that owns identity. The raw
+    // `workId` field stays verbatim — it is the caller's own identifier.
+    issueKey: workId === undefined ? String(issueId) : `w:${workId.toLowerCase()}`,
     issueId,
     workId,
     issueUrl: brief.issueUrl ?? null,

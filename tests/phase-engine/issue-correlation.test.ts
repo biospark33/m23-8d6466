@@ -892,13 +892,44 @@ describe("canonicalRepoSlug", () => {
 // all-digit refusal mirrors the schema's: `workId: "42"` would resolve to
 // issue 42's identity and share its cap.
 describe("resolveRunCorrelation workId (Q1.7)", () => {
-  test("headless brief: workId carried, issueKey is the workId, issueId undefined", () => {
+  test("headless brief: workId carried, issueKey is the w:-prefixed spend identity, issueId undefined", () => {
     const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "dag/build-docs", requestId: REQ_ID_A });
     expect(r.workId).toBe("dag/build-docs");
     expect(r.issueId).toBeUndefined();
-    expect(r.issueKey).toBe("dag/build-docs");
+    // #380: the identity TAIL is the SANCTIONED work-key namespace — `w:` +
+    // the case-folded workId — the only shape a perIssueOverrides key
+    // (`owner/repo#w:<id>`) can address. The raw workId field is the caller's
+    // own identifier and stays verbatim.
+    expect(r.issueKey).toBe("w:dag/build-docs");
     expect(r.repoSlug).toBe("qds/demo");
     expect(r.requestId).toBe(REQ_ID_A);
+  });
+
+  test("the work-key identity is CASE-FOLDED — one spelling per spend identity, like the slug half", () => {
+    const r = resolveRunCorrelation({ repoSlug: "QDS/Demo", workId: "Sc26-HandProbe", requestId: REQ_ID_A });
+    expect(r.workId).toBe("Sc26-HandProbe"); // the caller's id, verbatim
+    expect(r.repoSlug).toBe("qds/demo");
+    expect(r.issueKey).toBe("w:sc26-handprobe"); // the spend identity, folded
+    // Two briefs differing only in case share ONE budget identity — the same
+    // fail-safe over-merge direction the slug fold chose (a shared cap can
+    // over-count, never bypass).
+    const again = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "sc26-handprobe", requestId: REQ_ID_B });
+    expect(again.issueKey).toBe(r.issueKey);
+  });
+
+  test("the resolved work-key identity is ADDRESSABLE by a perIssueOverrides work key (#380 glue)", async () => {
+    // Cross-module pin: correlation's issueKey + the ledger's override lookup
+    // must agree on the identity STRING, or the operator's override names a
+    // bucket no dispatch ever books into. Imports directly rather than
+    // re-deriving the grammar in this file — the ledger test pins the ledger
+    // side; THIS pin is the seam.
+    const { capForIssue } = await import("../../src/providers/cost-ledger.ts");
+    const r = resolveRunCorrelation({ repoSlug: "QDS/Demo", workId: "Sc26-HandProbe", requestId: REQ_ID_A });
+    const cfg = {
+      defaultCapMicroUsd: 5_000_000,
+      perIssueOverrides: { "qds/demo#w:sc26-handprobe": 1_000_000 },
+    };
+    expect(capForIssue(cfg, r.repoSlug, r.issueKey)).toBe(1_000_000);
   });
 
   test("issue brief: issueKey is the stringified issueId, workId undefined", () => {
@@ -951,7 +982,8 @@ describe("resolveRunCorrelation workId (Q1.7)", () => {
   test("workId boundary values accepted", () => {
     for (const workId of ["dag/build-docs", "build.docs", "a_b-c", "x".repeat(64)]) {
       const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId, requestId: REQ_ID_A });
-      expect(r.issueKey).toBe(workId);
+      // #380: the identity TAIL carries the sanctioned w: prefix (lower-cased).
+      expect(r.issueKey).toBe(`w:${workId.toLowerCase()}`);
     }
   });
 
@@ -961,7 +993,7 @@ describe("resolveRunCorrelation workId (Q1.7)", () => {
     process.chdir(cwd);
     try {
       const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "dag/x", requestId: REQ_ID_A });
-      expect(r.issueKey).toBe("dag/x");
+      expect(r.issueKey).toBe("w:dag/x");
       expectCorrelationError(
         () => resolveRunCorrelation({ repoSlug: "qds/demo", workId: "42", requestId: REQ_ID_A }),
         "INVALID_WORK_ID",

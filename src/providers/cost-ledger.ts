@@ -196,13 +196,18 @@ function assertCanonicalIdentity(code: string, repoSlug: string, issueId: string
   if (
     canonicalRepoSlug(repoSlug).length === 0 ||
     canonicalIssue.length === 0 ||
-    // The only shape every ISSUE_KEY_RE override key can name: digits, after
-    // the fold. Anything else is an identity perIssueOverrides cannot address.
-    !/^\d+$/.test(canonicalIssue)
+    // TWO sanctioned shapes, each one a perIssueOverrides key can spell:
+    // digits (owner/repo#N), or the #380 work namespace `w:<id>` that
+    // resolveRunCorrelation mints for headless briefs (owner/repo#w:<id>).
+    // The work half is lower-case only — correlation folds it; anything else
+    // (a bare workId, a mixed-case work id, whitespace, `#` inside) is an
+    // identity no override key can name, and the fail-closed answer is still
+    // to refuse: a mis-spelled identity books spend nobody can cap.
+    !( /^\d+$/.test(canonicalIssue) || WORK_IDENTITY_RE.test(canonicalIssue) )
   ) {
     throw new CostLedgerError(
       code,
-      `repoSlug ${JSON.stringify(repoSlug)} / issueId ${JSON.stringify(issueId)} canonicalises to ${JSON.stringify(canonicalRepoSlug(repoSlug))}#${JSON.stringify(canonicalIssue)} — not a budget key a perIssueOverrides entry (owner/repo#N) can name`,
+      `repoSlug ${JSON.stringify(repoSlug)} / issueId ${JSON.stringify(issueId)} canonicalises to ${JSON.stringify(canonicalRepoSlug(repoSlug))}#${JSON.stringify(canonicalIssue)} — not a budget key a perIssueOverrides entry (owner/repo#N or owner/repo#w:<work-id>, lower-case) can name`,
       remediation,
     );
   }
@@ -555,7 +560,7 @@ function unCheckpointedWalNote(ledgerPath: string): string {
 export interface CostConfig {
   /** Default per-issue spend cap, µ$. 5,000,000 µ$ = $5.00 (DD-9 restatement). */
   defaultCapMicroUsd: number;
-  /** Per-issue overrides keyed `owner/repo#N`. */
+  /** Per-issue overrides keyed `owner/repo#N` — or, for headless work (#380), `owner/repo#w:<work-id>` (lower-case). */
   perIssueOverrides?: Record<string, number>;
   /**
    * Box-hour rate, µ$/h. exe.dev pricing is vendor-single-origin [VERIFY]
@@ -574,6 +579,23 @@ export const DEFAULT_COST_CONFIG_FILE = ".sandbox/cost-config.json";
 export const DEFAULT_COST_LEDGER_FILE = ".sandbox/cost-ledger.db";
 
 const ISSUE_KEY_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
+
+/**
+ * The WORK-KEY override spelling (#380): `owner/repo#w:<id>`, where `<id>` is
+ * lower-case `w:` + the WORK_ID_PATTERN charset (`[a-z0-9._/-]`, 1..64) —
+ * `resolveRunCorrelation` mints exactly this shape (`w:` + folded workId), so
+ * the override grammar is its mirror, character class for character class.
+ *
+ * Lower-case ONLY, by construction rather than by folding: the config loader
+ * can fold nothing (it must not invent identity), so a mixed-case override key
+ * is REFUSED at load — an identity two spellings wide is the cap-bypass family
+ * (#380's whole point), and a loud config refusal beats a silently ignored
+ * line. Briefs may carry any case (correlation folds); config may not.
+ */
+const WORK_KEY_OVERRIDE_RE = /^[\w.-]+\/[\w.-]+#w:[a-z0-9._/-]{1,64}$/;
+
+/** The canonical identity spellings `assertCanonicalIdentity` admits. Digits, or the sanctioned work namespace. */
+const WORK_IDENTITY_RE = /^w:[a-z0-9._/-]{1,64}$/;
 
 /** The `<canonical slug>#<canonical issue>` identity both sides of an override lookup are reduced to. */
 function canonicalIssueKey(repoSlug: string, issueId: string): string {
@@ -737,7 +759,7 @@ export function loadCostConfig(
     }
     if (key === "perIssueOverrides") {
       if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        throw configInvalid(file, "perIssueOverrides must be an object keyed owner/repo#N");
+        throw configInvalid(file, "perIssueOverrides must be an object keyed owner/repo#N or owner/repo#w:<work-id>");
       }
       const overrides: Record<string, number> = {};
       // Two keys that name the SAME issue are an operator error, not a value to
@@ -750,8 +772,11 @@ export function loadCostConfig(
       // operator say, which is what every other malformed-config path here does.
       const seen = new Map<string, string>();
       for (const [issueKey, cap] of Object.entries(value as Record<string, unknown>)) {
-        if (!ISSUE_KEY_RE.test(issueKey)) {
-          throw configInvalid(file, `perIssueOverrides key ${JSON.stringify(issueKey)} is not of the form owner/repo#N`);
+        if (!ISSUE_KEY_RE.test(issueKey) && !WORK_KEY_OVERRIDE_RE.test(issueKey)) {
+          throw configInvalid(
+            file,
+            `perIssueOverrides key ${JSON.stringify(issueKey)} is not of the form owner/repo#N or owner/repo#w:<work-id> (lower-case)`,
+          );
         }
         // Non-undefined: ISSUE_KEY_RE already required the '#'.
         const identity = canonicalOverrideKey(issueKey) as string;
