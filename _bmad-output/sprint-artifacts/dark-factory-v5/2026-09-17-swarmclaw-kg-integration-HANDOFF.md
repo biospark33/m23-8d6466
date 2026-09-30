@@ -3,6 +3,67 @@
 > Written 2026-09-17 after the SwarmClaw-drop investigation session. Paste the body below
 > into a fresh session to resume. Re-sync live state before acting — waves move fast.
 
+## STATUS UPDATE 2026-09-30 — read FIRST; the 2026-09-14 snapshot and the plan below are 13 days stale in five places
+
+**Stale flags (this doc says → what is now true):**
+
+1. "9 ready-for-dev" → **6 of the 9 DONE**: DF3.6a, DF3.7, DF3.8, DF5.3, DF5.4, DF6.1a all merged.
+   Remaining: **DF6.1b, DF5.5, DF3.6b**. Both watch items held (DF5.3 shipped lib-separable,
+   PR #258; DF3.6b re-pin correctly not batched).
+2. "NOT approved now: Tier C" → **partially superseded by ADR-1** (ACCEPTED, operator-signed
+   2026-09-30, PR #387): the SwarmClaw `external_job` adapter driving `factory_run` is the
+   approved narrow form — fleet CLI stays the substrate, D6 intact, front door unchanged.
+   Full Tier C drift (events→platform UI, reversing D6) is still out.
+3. The OpenRig integration program (docs/planning/2026-09-24-openrig-integration-roadmap.md)
+   is **COMPLETE and CLOSED** — ran between this doc's writing and now: SC1 protocol-engine
+   fixes (swarmclaw PR #644), SC2 external_job adapter LIVE GREEN end-to-end (SC2.6 + SC2.7,
+   11-round evidence `_bmad-output/evidence/openrig-sc2/`), #380 `w:` work-key namespace
+   (sanctioned spend booking for issueless macro processes — ADR-1 shape), #382 poller race
+   closed (one daemon straight through observe → approve → branch), SC2.7 evidence
+   hardening (PR #388: machine-checked key-count / fleet-empty / delivery artifacts, first
+   exercised by the next live round). DD-7's "dormant-retained for step 6" premise is stale:
+   swarmclaw is awake as protocol orchestrator over the factory adapter.
+4. New blocker: **GitHub Actions billing outage** (2026-09-30 ~15:20Z, repo-wide — "recent
+   account payments have failed or your spending limit needs to be increased"; zero steps
+   start). Merged PRs #384–#388 rode it via `--admin`. Blocks: all CI, and DF3.6b's image
+   publish workflow. Operator fix required.
+5. Epic S sketch (Phase 3 below) is stale: S2's approval pings + run-status/notify and S3's
+   path now have a LIVE substrate (SC2 protocol branch → `factory_result` artifact →
+   `branch_taken` witness; scrypt-gated `fleet approve` proven end-to-end). Epic M1's `qds-`
+   prefix discipline has a landed precedent (the `w:` namespace). Derivation session writes
+   against THIS reality, not the 09-17 sketch. Also reconcile: the never-scheduled P2
+   phase-2 memory epic (13 stories, `_bmad-output/sprint-artifacts/phase-2/README.md`)
+   overlaps the M-ladder — fold or supersede there.
+
+**The finish-line checklist:**
+
+Phase 1 — v5 complete (in order):
+- [ ] **DF6.1b** fix-loop CI verdict + attempt budget + escalation — UNBLOCKED (DF6.1a ✓,
+  DF5.3 ✓), zero box/key/model spend. Dev via qds-dev with /unlazy acceptance gates.
+  Cite #383's live-proven approval park in the evidence instead of hedging against it.
+  Story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df6-1b-fix-loop-verdict-attempt-budget.md`
+- [ ] **DF5.5** KEEP-repoint chore — applied LAST per its own spec. PRE-DEV: reconcile its
+  own Amendment D (SwarmClaw role line) with ADR-1 + the SC2 external_job reality; candidate
+  boundary statement to pin: `SWARMCLAW_FACTORY_FLEET_CLI` — swarmclaw never learns QDS's
+  driver grammar; `--driver exedev` lives only in the deployed wrapper. Story:
+  `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df5-5-keep-repoint-chore.md`
+- [ ] **DF3.6b** resident MemoryMax — HARD GATED on the billing fix (image publish workflow)
+  + the full re-pin ritual + a live tier round. Natural pairing: the next live e2e round
+  (which first exercises PR #388's sc2-7 artifacts). Story:
+  `_bmad-output/sprint-artifacts/dark-factory-v5/stories/` (df3-6b)
+- [ ] After each merge: flip the sprint-status.yaml row, prune the branch. v5 DONE when 0 open DF rows.
+
+Phase 2 — ops, PARALLEL, anytime (operator account-level steps; agents prep/verify only):
+- [ ] GitHub Actions billing fix (payments / spending limit) — unblocks all CI + DF3.6b
+- [ ] Vultr VPS deploy: swarmclaw platform + Hindsight sidecar (compose exists) + factory
+  host CLI (~1–3 days). Closes P0.5/P0.9 (the two stuck `in-review` rows), confirms OQ-4,
+  updates DD-4.
+
+Phase 3 — after both:
+- [ ] Step-6/v6 derivation session (half-day): Epic S re-derived vs the SC2 substrate,
+  Epic M1/M2/M3, Tier C vs ADR-1 reconciliation, P2-vs-M-ladder fold, DD-5 stdio→HTTP fix,
+  D8 amendment, in-repo chassis fate. Input doc drafted on request (see bottom of this doc).
+
 ## Who you are / where this stands (verified 2026-09-14, re-sync before acting)
 
 Repo: /Users/steve/QDS-Factory (Bun/TS). This session's investigation CLOSED OUT a strategic
@@ -121,9 +182,9 @@ views), Tier C (factory as SwarmClaw protocol runs — reverses D6, months, full
 only). Don't drift into them.
 
 ## First actions on pickup
-1. Re-sync: `git -C /Users/steve/QDS-Factory status`, read sprint-status.yaml + latest
-   wave HANDOFF in _bmad-output/sprint-artifacts/dark-factory-v5/, check PR #255 state.
-2. Report current wave/sprint delta vs. the 2026-09-14 snapshot above.
-3. Resume Phase 1 at wherever the campaign actually is (if wave-9 fix mid-flight, continue
-   units per handoff; if done, wave-10 verify; if specs converged, dev phase via qds-dev).
+1. Re-sync: `git -C /Users/steve/QDS-Factory status`, read sprint-status.yaml (top note +
+   live rows), and the STATUS UPDATE 2026-09-30 section above.
+2. Report current delta vs. that section (NOT the 2026-09-14 snapshot below).
+3. Resume Phase 1 at the first unchecked box (as of 2026-09-30: DF6.1b, unblocked, zero
+   spend — dev via qds-dev with /unlazy gates; ops items run in parallel via subagents).
 4. User may ask for the Phase-3 derivation-session input doc — draft only on request.
