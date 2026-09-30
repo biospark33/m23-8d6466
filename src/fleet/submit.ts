@@ -289,6 +289,18 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
   // concurrent-submits case safe (one SQLite file arbitrates both caps).
   // The identity comes from the brief's correlation — resolved PURELY here so
   // the reserve carries the same (repoSlug, issueKey) the dispatch will.
+  //
+  // SC2.6: `submit` takes no --cap-micro-usd, so without an injected deps
+  // cap the reservation was always the $50 defaultKeyCapMicroUsd — any
+  // smaller group refused at ZERO spend (measured live 2026-09-29: a $0.50
+  // swarmclaw step group, exit 5 budget-group-exceeded, 50000000 does not
+  // fit 500000). When the caller injects no explicit cap — the CLI verb never
+  // does — a single run's reservation and its minted key can never exceed the
+  // group ceiling; an injected deps.capMicroUsd wins and can exceed it.
+  const groupBoundedCapMicroUsd =
+    group.groupCapMicroUsd !== undefined && deps.capMicroUsd === undefined
+      ? Math.min(group.groupCapMicroUsd, defaultKeyCapMicroUsd)
+      : undefined;
   if (group.budgetGroup !== undefined && group.groupCapMicroUsd !== undefined) {
     try {
       const correlation = resolveRunCorrelation(deps.brief as IssueRef & { requestId?: string });
@@ -300,12 +312,15 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
             repoSlug: correlation.repoSlug,
             issueKey: correlation.issueKey,
             requestId,
-            amountMicroUsd: deps.capMicroUsd ?? defaultKeyCapMicroUsd,
+            amountMicroUsd: groupBoundedCapMicroUsd ?? deps.capMicroUsd ?? defaultKeyCapMicroUsd,
           },
           group.groupCapMicroUsd,
         );
-        // Retained on success — SC2's cancel/teardown releases it, and the
-        // no-record refusal path below refunds it.
+        // Retained on success — there is NO release wiring yet (cancel /
+        // teardown / completion never call releaseBudgetGroup; the only
+        // release is the no-record refusal refund below). A reused group name
+        // therefore wedges at zero spend until release wiring lands — filed as
+        // the round's top deferred finding.
       } finally {
         ledger.close();
       }
@@ -361,7 +376,11 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
       ledgerFactory: deps.ledgerFactory,
       requestId,
       ...(deps.repoRoot !== undefined ? { repoRoot: deps.repoRoot } : {}),
-      ...(deps.capMicroUsd !== undefined ? { capMicroUsd: deps.capMicroUsd } : {}),
+      ...(deps.capMicroUsd !== undefined
+        ? { capMicroUsd: deps.capMicroUsd }
+        : groupBoundedCapMicroUsd !== undefined
+          ? { capMicroUsd: groupBoundedCapMicroUsd }
+          : {}),
       ...(deps.quotaLimits !== undefined ? { quotaLimits: deps.quotaLimits } : {}),
       ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
       ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
