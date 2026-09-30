@@ -328,6 +328,18 @@ export const EXTENSION_NAMESPACES: Readonly<
     schemaVersion: 2,
     fields: {
       state: "string",
+      /**
+       * Who wrote this extension while it sat in `pausing`. The gate never
+       * sets it — its own registrations are identified by the bound
+       * `reportId` they always carry. The value `"observe-chain"` marks the
+       * DF3.7 chain's #382 pre-registration: `pausing` written BEFORE the
+       * chain's teardown, with no report bound yet, so the gate's resume arm
+       * can ADOPT it (bind the first re-presented report) where an
+       * untagged empty-reportId `pausing` stays the damaged-record refusal
+       * it always was. Additive (DF6.1a's adds-only precedent — no
+       * `schemaVersion` bump); absent on every pre-#382 record.
+       */
+      origin: "string",
       proposal: "string",
       reportId: "string",
       headSha: "string",

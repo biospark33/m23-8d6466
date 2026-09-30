@@ -50,11 +50,14 @@ import {
 } from "../../src/fleet/fanout-primitive.ts";
 import {
   DEFAULT_OBSERVATION_WINDOW_MS,
+  OBSERVE_CHAIN_ORIGIN as chainOrigin,
   observeAndDriveChain,
   promoteStrandedPause,
   type ChainOutcome,
   type RunCompletionDeps,
 } from "../../src/fleet/run-completion.ts";
+import { OBSERVE_CHAIN_ORIGIN as gateOrigin } from "../../src/fleet/approval-gate.ts";
+import { buildResult } from "../../src/fleet/result.ts";
 // The store is opened on a per-test tmp path (never QDS_AUDIT_DB / the
 // operator's `.sandbox/audit.db`): nothing in this file reaches an audit
 // composition root, the links here arrive through the injected
@@ -517,6 +520,25 @@ class OverlayStore extends RunRecordStore {
       return { ...r, extensions: { ...r.extensions, approval: this.overlay } } as ReturnType<RunRecordStore["get"]>;
     }
     return r;
+  }
+}
+
+/**
+ * The #382 write-order probe: records the approval extension's state AT THE
+ * INSTANT the record's close lands. The pre-#382 chain order (teardown →
+ * reverify → gate) observes `undefined` here — the close ran before any
+ * registration — which is exactly the poller window the fix removes; the
+ * fixed order (pre-register → teardown → …) observes `"pausing"`. The
+ * negative control an outcome-only assertion cannot provide: a chain that
+ * registers AFTER the close still ends at `awaiting-approval` and passes
+ * every end-state test in this file.
+ */
+class CloseProbeStore extends RunRecordStore {
+  seenAtClose: string | undefined = undefined;
+  override close(runId: string, now?: Date): ReturnType<RunRecordStore["close"]> {
+    const ext = this.get(runId).extensions?.approval;
+    this.seenAtClose = typeof ext?.state === "string" ? ext.state : undefined;
+    return now === undefined ? super.close(runId) : super.close(runId, now);
   }
 }
 
@@ -1552,6 +1574,111 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
       s.cleanup();
     }
   }, 60_000);
+});
+
+describe("#382 — the chain registers the gate BEFORE the close (the poller window)", () => {
+  test("a vetoed chain leaves closedAt + chain-pausing — the poller payload reads pausing, NEVER completed (the regression)", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      // The run-v1 shape: settled marker, no commitSha → reverify errors inside
+      // its own try → vetoed, and the gate is never reached. The record's end
+      // state is exactly the window shape the old order left TRANSIENTLY:
+      // `closedAt` set with the chain's `pausing` behind it.
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      await createRun(driver, s.store, { runId: "run-w1", recordAuditLink: () => {} });
+      driver.plan = [{ body: { runId: "run-w1", ok: true } }];
+      const out = await observeAndDriveChain(
+        "run-w1",
+        baseDeps("run-w1", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+      );
+      expect(out).toMatchObject({ kind: "vetoed", reason: "no-base-sha" });
+      const rec = s.store.get("run-w1");
+      expect(rec.closedAt).toBeTruthy();
+      expect(rec.extensions?.approval?.state).toBe("pausing");
+      expect(rec.extensions?.approval?.origin).toBe("observe-chain");
+      // THE PIN: `buildResult` over the exact record shape that used to map to
+      // terminal `completed` in the window — the read the swarmclaw poller's
+      // 2 s tick landed on in SC2.7 round 5 and applied as a completed verdict,
+      // defeating the approve seam. With the pre-registration the SAME shape is
+      // the record's stable post-veto state, and it is non-terminal.
+      expect(buildResult(s.store, "run-w1")).toMatchObject({ status: "pausing", terminal: false });
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("the driven chain's promoted record still carries the chain origin (deep-merge survival)", async () => {
+    quietLogs();
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-rc-"));
+    const s = { dir, store: new CloseProbeStore({ dir }), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+    const host = gitHost();
+    try {
+      quarantine(host, "run-w2");
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      await seedGreenRun(s.store, driver, host, "run-w2", { ok: true });
+      const out = await observeAndDriveChain(
+        "run-w2",
+        baseDeps("run-w2", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+      );
+      expect(out).toMatchObject({ kind: "driven", markerOk: true });
+      // THE ORDER PIN: the extension already said `pausing` at the instant the
+      // teardown's close landed — the write-order guarantee the poller window
+      // fix is. (`undefined` here is the pre-#382 order passing every
+      // end-state assertion below.)
+      expect(s.store.seenAtClose).toBe("pausing");
+      const ext = s.store.get("run-w2").extensions?.approval;
+      expect(ext?.state).toBe("awaiting-approval");
+      // The gate's adopt restamps the pair it owns and never rewrites `origin`:
+      // the field survives both the restamp and the promotion, so the record
+      // keeps saying who registered the pause.
+      expect(ext?.origin).toBe("observe-chain");
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 120_000);
+
+  test("W1 crash recovery: chain-pausing on an OPEN record with the marker still settled re-runs the WHOLE chain", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      // The crash window between the chain's pre-registration and its teardown:
+      // the extension is on disk, the record is open, the box is alive and its
+      // marker is settled. promoteStrandedPause presumes a post-teardown record
+      // (no box, no marker) and would strand this one — the honest recovery is
+      // the full chain again, ending in the gate's adopt.
+      quarantine(host, "run-w3");
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      await seedGreenRun(s.store, driver, host, "run-w3", { ok: true });
+      s.store.set("run-w3", {
+        extensions: { approval: { state: "pausing", origin: "observe-chain" } },
+      } as never);
+      const out = await observeAndDriveChain(
+        "run-w3",
+        baseDeps("run-w3", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+      );
+      expect(out).toMatchObject({ kind: "driven", markerOk: true });
+      const ext = s.store.get("run-w3").extensions?.approval;
+      expect(ext?.state).toBe("awaiting-approval");
+      expect(driver.destroyed.length).toBe(1); // the still-alive box was torn down
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 120_000);
+
+  test("the fence stays intact: the chain's local origin literal equals the gate's exported constant", () => {
+    // run-completion.ts may not import ./approval-gate.ts (FORBIDDEN_DIRECT —
+    // the bridge acquires no gate surface), so the two modules each carry the
+    // one literal. This pin is the coupling: if either side renames the value,
+    // the chain's registrations stop being adoptable and this fails.
+    expect(chainOrigin).toBe(gateOrigin);
+    expect(gateOrigin).toBe("observe-chain");
+  });
 });
 
 describe("chain-failed: a step other than the approval leg threw (W16-2)", () => {
