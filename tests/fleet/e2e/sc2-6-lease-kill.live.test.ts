@@ -10,7 +10,7 @@ import {
   REPO_SHA,
   REPO_URL,
   readEntry,
-  sh,
+  shOut,
   spawnDaemon,
   SWARM_WORKTREE,
   wrapperJournal,
@@ -138,26 +138,43 @@ lifecycleU.requestProtocolRunExecution(runId);
 // in-flight exec would replay-race it (no guard exists between the direct
 // call and the poller — measured round 4: no tick anywhere, so the restart
 // sat 'submitting' until the poll ceiling).
+const HEARTBEAT = ${JSON.stringify(path.join(dir, "daemon-heartbeat.jsonl"))};
+// P11a: the poll timer is hoisted so every exit path below can clear it, and a
+// rejected pollFactoryRuns is WITNESSED in the heartbeat file, not swallowed —
+// the heartbeat jsonl is the daemon's only observable log channel.
+let pollTimer = null;
 if (restarting) {
   const factory = unwrap(await import(${JSON.stringify(SWARM_WORKTREE)} + "/src/lib/server/protocols/protocol-factory"));
-  const pollTimer = setInterval(() => { factory.pollFactoryRuns().catch(() => {}); }, 2000);
+  pollTimer = setInterval(() => {
+    factory.pollFactoryRuns().catch((err) => {
+      fs.appendFileSync(HEARTBEAT, JSON.stringify({ t: Date.now(), pollError: String(err && err.message ? err.message : err) }) + "\\n");
+    });
+  }, 2000);
 }
 
 // Heartbeat: print the factory entry state until killed or externally done.
 const loadRun = (id) => normU.loadProtocolRunById(id);
 const deadline = Date.now() + 10 * 60 * 1000;
 while (Date.now() < deadline) {
-  const current = loadRun(runId);
-  const entry = current?.factoryState?.fj ?? null;
-  const line = JSON.stringify({ t: Date.now(), runStatus: current?.status ?? null, entryStatus: entry?.status ?? null, runId: entry?.runId ?? null });
-  fs.appendFileSync(${JSON.stringify(path.join(dir, "daemon-heartbeat.jsonl"))}, line + "\\n");
-  if (entry && (entry.status === "completed" || entry.status === "failed" || entry.status === "cancelled")) {
-    console.log("ENTRY-TERMINAL " + entry.status);
-    process.exit(0);
+  // P11a: one thrown sqlite read must not kill the daemon mid-provision —
+  // both crash windows own their recovery to this heartbeat staying alive.
+  try {
+    const current = loadRun(runId);
+    const entry = current?.factoryState?.fj ?? null;
+    const line = JSON.stringify({ t: Date.now(), runStatus: current?.status ?? null, entryStatus: entry?.status ?? null, runId: entry?.runId ?? null });
+    fs.appendFileSync(HEARTBEAT, line + "\\n");
+    if (entry && (entry.status === "completed" || entry.status === "failed" || entry.status === "cancelled")) {
+      console.log("ENTRY-TERMINAL " + entry.status);
+      if (pollTimer) clearInterval(pollTimer);
+      process.exit(0);
+    }
+  } catch (e) {
+    fs.appendFileSync(HEARTBEAT, JSON.stringify({ t: Date.now(), heartbeatError: String(e && e.message ? e.message : e) }) + "\\n");
   }
   await new Promise((r) => setTimeout(r, 500));
 }
 console.log("DAEMON-DEADLINE");
+if (pollTimer) clearInterval(pollTimer);
 process.exit(3);
 `;
 }
@@ -171,7 +188,7 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
     assert.ok(REPO_SHA.length === 40, `QDS_EXEDEV_SHA must be a full sha (got ${REPO_SHA.length} chars)`);
   });
 
-  test("daemon driver self-check (offline, no box)", () => {
+  test.todoIf(liveTodoOff())("daemon driver self-check (offline, no box)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc26-selfcheck-"));
     fs.writeFileSync(path.join(dir, "sc2-daemon.mts"), daemonScript(dir));
     // The wrapper is a generated bash script — lint its syntax before any leg
@@ -212,70 +229,103 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
       fs.writeFileSync(path.join(dir, "fleet-wrapper.sh"), wrapperScript(dir), { mode: 0o755 });
       fs.writeFileSync(path.join(dir, "wrapper-mode"), "a");
 
-      // ── attempt 1: persist, then killed mid-wrapper-sleep ──
-      const daemonA = spawnDaemon(dir);
-      const persisted = await pollUntil(() => {
-        const runId = fs.existsSync(path.join(dir, "run-id.txt"))
-          ? fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim()
-          : null;
-        if (!runId) return null;
-        const entry = readEntry(dir, runId);
-        return entry.status === "submitting" && entry.requestId ? { runId, requestId: entry.requestId } : null;
-      }, 60_000);
-      assert.ok(persisted, "window (a): the requestId never persisted before the kill window closed");
-      await killDaemon(dir, daemonA);
-      // exec-phase lines only: the wrapper journals "launch" the moment it
-      // starts (before its hold), so a launch line is EXPECTED here — the
-      // assert is that the inner CLI never ran.
-      const journalAfterKill = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
-      assert.equal(
-        journalAfterKill.length,
-        0,
-        "window (a): the fleet-submit exec must NOT have fired before the kill (the wrapper holds it)",
-      );
+      // P1: any assert below can throw mid-leg — the daemon and the billable
+      // box are torn down in finally, never left to the happy path.
+      let fleetRunId = "";
+      let liveDaemon: Bun.Subprocess | undefined;
+      try {
+        assert.match(REPO_SHA, /^[0-9a-f]{40}$/, "QDS_EXEDEV_SHA must be a full 40-hex sha before any live leg runs");
 
-      // ── restart: replay with the SAME id; the wrapper's sleep is done (mode flipped) ──
-      fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
-      const daemonB = spawnDaemon(dir);
-      const submitted = await pollUntil(() => {
-        const runId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
-        const entry = readEntry(dir, runId);
-        return entry.status === "submitted" && entry.runId ? entry : null;
-      }, 480_000); // a real provision (box + key + engine start + ack) measured > 60s and up to minutes
-      assert.ok(submitted, "window (a): the replay never reached 'submitted'");
-      await killDaemon(dir, daemonB);
+        // ── attempt 1: persist, then killed mid-wrapper-sleep ──
+        liveDaemon = spawnDaemon(dir);
+        const persisted = await pollUntil(() => {
+          const runId = fs.existsSync(path.join(dir, "run-id.txt"))
+            ? fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim()
+            : null;
+          if (!runId) return null;
+          const entry = readEntry(dir, runId);
+          return entry.status === "submitting" && entry.requestId ? { runId, requestId: entry.requestId } : null;
+        }, 60_000);
+        assert.ok(persisted, "window (a): the requestId never persisted before the kill window closed");
+        await killDaemon(dir, liveDaemon);
+        liveDaemon = undefined;
+        // exec-phase lines only: the wrapper journals "launch" the moment it
+        // starts (before its hold), so a launch line is EXPECTED here — the
+        // assert is that the inner CLI never ran.
+        const journalAfterKill = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
+        assert.equal(
+          journalAfterKill.length,
+          0,
+          "window (a): the fleet-submit exec must NOT have fired before the kill (the wrapper holds it)",
+        );
 
-      const submits = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
-      assert.equal(submits.length, 1, "exactly one fleet submit exec across both attempts");
-      assert.equal(submits[0]?.requestId, persisted?.requestId, "the replay carried the SAME --request-id");
+        // ── restart: replay with the SAME id; the wrapper's sleep is done (mode flipped) ──
+        fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
+        liveDaemon = spawnDaemon(dir);
+        const submitted = await pollUntil(() => {
+          const runId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
+          const entry = readEntry(dir, runId);
+          return entry.status === "submitted" && entry.runId ? entry : null;
+        }, 480_000); // a real provision (box + key + engine start + ack) measured > 60s and up to minutes
+        fleetRunId = submitted?.runId ?? ""; // arm ownership BEFORE any assert can throw
+        assert.ok(submitted, "window (a): the replay never reached 'submitted'");
+        await killDaemon(dir, liveDaemon);
+        liveDaemon = undefined;
 
-      // ── exactly ONE box ──
-      const after = boxNames();
-      const fresh = after.filter((n) => !before.includes(n));
-      assert.equal(fresh.length, 1, `exactly one box must exist after the crash-replay; saw ${fresh.length}: ${fresh.join(", ")}`);
+        const submits = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
+        assert.equal(submits.length, 1, "exactly one fleet submit exec across both attempts");
+        assert.equal(submits[0]?.requestId, persisted?.requestId, "the replay carried the SAME --request-id");
 
-      writeEvidence("sc2-6", "window-a", {
-        window: "a",
-        requestId: submitted?.requestId,
-        fleetRunId: submitted?.runId,
-        submitExecs: submits.length,
-        replaySameId: submits[0]?.requestId === persisted?.requestId,
-        boxesBefore: before,
-        boxesAfter: after,
-        freshBoxes: fresh,
-        fjLastError: readEntry(dir, fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim()).lastError,
-      });
+        // ── exactly ONE box ──
+        const after = boxNames();
+        const fresh = after.filter((n) => !before.includes(n));
+        assert.equal(fresh.length, 1, `exactly one box must exist after the crash-replay; saw ${fresh.length}: ${fresh.join(", ")}`);
 
-      // ── teardown: window (a) cancels ITS OWN box — the final guard can only
-      // hold if every window cleans up after itself (round 3 exposed the gap:
-      // only (b) canceled, so (a)'s box would have leaked into the guard). ──
-      const cancelOutA = sh(
-        `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(submitted?.runId ?? "")}`,
-        300_000,
-      );
-      const emptiedA = await pollUntil(() => (boxNames().filter((n) => !before.includes(n)).length === 0 ? true : null), 180_000);
-      assert.ok(emptiedA, `window (a) teardown: boxes still alive after fleet cancel: ${boxNames().join(", ")}`);
-      writeEvidence("sc2-6", "window-a-teardown", { cancelStdout: cancelOutA.slice(0, 400), boxesAfterCancel: boxNames() });
+        writeEvidence("sc2-6", "window-a", {
+          window: "a",
+          requestId: submitted?.requestId,
+          fleetRunId: submitted?.runId,
+          submitExecs: submits.length,
+          replaySameId: submits[0]?.requestId === persisted?.requestId,
+          boxesBefore: before,
+          boxesAfter: after,
+          freshBoxes: fresh,
+          fjLastError: readEntry(dir, fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim()).lastError,
+        });
+
+        // ── teardown: window (a) cancels ITS OWN box — the final guard can only
+        // hold if every window cleans up after itself (round 3 exposed the gap:
+        // only (b) canceled, so (a)'s box would have leaked into the guard). ──
+        const cancelOutA = shOut(
+          `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(submitted?.runId ?? "")}`,
+          300_000,
+        );
+        assert.equal(
+          cancelOutA.exitCode,
+          0,
+          `window (a) teardown: fleet cancel failed (exit ${cancelOutA.exitCode}): ${cancelOutA.stderr.slice(-400)}`,
+        );
+        const emptiedA = await pollUntil(() => (boxNames().filter((n) => !before.includes(n)).length === 0 ? true : null), 180_000);
+        assert.ok(emptiedA, `window (a) teardown: boxes still alive after fleet cancel: ${boxNames().join(", ")}`);
+        writeEvidence("sc2-6", "window-a-teardown", { cancelStdout: cancelOutA.stdout.slice(0, 400), boxesAfterCancel: boxNames() });
+      } finally {
+        if (liveDaemon) await killDaemon(dir, liveDaemon);
+        // SC2.4 idempotent cancel: a harmless no-op when the in-body teardown
+        // already canceled; the backstop when anything above threw.
+        if (fleetRunId) {
+          const c = shOut(
+            `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(fleetRunId)}`,
+            300_000,
+          );
+          if (c.exitCode !== 0) {
+            // biome-ignore lint/correctness/noUnsafeFinally: a failed cleanup cancel means a live box is still billing — it must supersede the body's error, not be lost to it
+            throw new Error(`window (a) cleanup: fleet cancel failed (exit ${c.exitCode}): ${c.stderr.slice(-400)}`);
+          }
+        }
+        // P26: the tmpdir holds an UNSCRUBBED submit-stdout tail — it must not
+        // outlive the leg in either outcome.
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     },
     20 * 60_000,
   );
@@ -289,69 +339,108 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
       fs.writeFileSync(path.join(dir, "fleet-wrapper.sh"), wrapperScript(dir), { mode: 0o755 });
       fs.writeFileSync(path.join(dir, "wrapper-mode"), "b");
 
-      // ── attempt 1: real submit completes (box exists), killed holding the exit ──
-      const daemonA = spawnDaemon(dir);
-      const boxAppeared = await pollUntil(() => {
-        const marker = fs.existsSync(path.join(dir, "wrapper-exited.marker"));
-        if (!marker) return null;
-        const now = boxNames();
-        return now.length > before.length ? now : null;
-      }, 480_000); // the submit exec may run to the 300s adapter ceiling before its marker
-      assert.ok(boxAppeared, "window (b): the real fleet submit never produced a box before the kill window closed");
-      const runId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
-      const entryAtKill = readEntry(dir, runId);
-      assert.equal(entryAtKill.status, "submitting", "window (b): the ack persist must NOT have landed before the kill");
-      const requestId = entryAtKill.requestId;
-      assert.ok(requestId, "window (b): requestId must be durable at the kill");
-      await killDaemon(dir, daemonA);
-      await new Promise((r) => setTimeout(r, 500));
+      // P1: any assert below can throw mid-leg — the daemon and the billable
+      // box are torn down in finally, never left to the happy path.
+      let fleetRunId = "";
+      let liveDaemon: Bun.Subprocess | undefined;
+      try {
+        assert.match(REPO_SHA, /^[0-9a-f]{40}$/, "QDS_EXEDEV_SHA must be a full 40-hex sha before any live leg runs");
 
-      // ── restart: replay the SAME id; Q1 returns the EXISTING run ──
-      fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
-      const daemonB = spawnDaemon(dir);
-      const submitted = await pollUntil(() => {
-        const entry = readEntry(dir, runId);
-        return entry.status === "submitted" && entry.runId ? entry : null;
-      }, 180_000);
-      assert.ok(submitted, "window (b): the replay never reached 'submitted'");
-      await killDaemon(dir, daemonB);
+        // ── attempt 1: real submit completes (box exists), killed holding the exit ──
+        liveDaemon = spawnDaemon(dir);
+        const boxAppeared = await pollUntil(() => {
+          const marker = fs.existsSync(path.join(dir, "wrapper-exited.marker"));
+          if (!marker) return null;
+          const now = boxNames();
+          return now.length > before.length ? now : null;
+        }, 480_000); // the submit exec may run to the 300s adapter ceiling before its marker
+        assert.ok(boxAppeared, "window (b): the real fleet submit never produced a box before the kill window closed");
+        const runId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
+        // P8: short retry poll, not a one-shot read — a transient sqlite-busy
+        // read surfaces as nulls, which must not fail the leg after the box
+        // already exists. 5s is far inside the mode-b hold, so a GENUINE ack
+        // landing still fails the assert.
+        const entryAtKill = await pollUntil(() => {
+          const e = readEntry(dir, runId);
+          return e.status === "submitting" && e.requestId ? e : null;
+        }, 5_000);
+        assert.ok(entryAtKill, "window (b): the ack persist must NOT have landed before the kill (or the entry read kept failing)");
+        const requestId = entryAtKill?.requestId ?? "";
+        await killDaemon(dir, liveDaemon);
+        liveDaemon = undefined;
+        await new Promise((r) => setTimeout(r, 500));
 
-      const submits = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
-      assert.equal(submits.length, 2, "window (b): two submit execs (original + replay) expected");
-      assert.equal(submits[0]?.requestId, requestId, "window (b): original carried the --request-id");
-      assert.equal(submits[1]?.requestId, requestId, "window (b): replay carried the SAME --request-id");
+        // ── restart: replay the SAME id; Q1 returns the EXISTING run ──
+        fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
+        liveDaemon = spawnDaemon(dir);
+        const submitted = await pollUntil(() => {
+          const entry = readEntry(dir, runId);
+          return entry.status === "submitted" && entry.runId ? entry : null;
+        }, 180_000);
+        fleetRunId = submitted?.runId ?? ""; // arm ownership BEFORE any assert can throw
+        assert.ok(submitted, "window (b): the replay never reached 'submitted'");
+        await killDaemon(dir, liveDaemon);
+        liveDaemon = undefined;
 
-      // ── STILL exactly one box (the replay mapped onto the EXISTING run) ──
-      const after = boxNames();
-      const fresh = after.filter((n) => !before.includes(n));
-      assert.equal(fresh.length, 1, `exactly one box must survive the (b) crash-replay; saw ${fresh.length}: ${fresh.join(", ")}`);
+        const submits = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
+        assert.equal(submits.length, 2, "window (b): two submit execs (original + replay) expected");
+        assert.equal(submits[0]?.requestId, requestId, "window (b): original carried the --request-id");
+        assert.equal(submits[1]?.requestId, requestId, "window (b): replay carried the SAME --request-id");
 
-      writeEvidence("sc2-6", "window-b", {
-        window: "b",
-        requestId,
-        fleetRunId: submitted?.runId,
-        submitExecs: submits.length,
-        boxesBefore: before,
-        boxesAfter: after,
-        freshBoxes: fresh,
-        fjLastError: readEntry(dir, runId).lastError,
-      });
+        // ── STILL exactly one box (the replay mapped onto the EXISTING run) ──
+        const after = boxNames();
+        const fresh = after.filter((n) => !before.includes(n));
+        assert.equal(fresh.length, 1, `exactly one box must survive the (b) crash-replay; saw ${fresh.length}: ${fresh.join(", ")}`);
 
-      // ── teardown: fleet cancel destroys the box + revokes the key ──
-      const cancelOut = sh(
-        // --driver exedev: `fleet cancel` refuses without it (measured 2026-09-29,
-        // exit 2 "cancel requires --driver") — same seam rule as the wrapper.
-        `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(submitted?.runId ?? "")}`,
-        300_000,
-      );
-      const emptied = await pollUntil(() => (boxNames().filter((n) => !before.includes(n)).length === 0 ? true : null), 180_000);
-      assert.ok(emptied, `teardown: boxes still alive after fleet cancel: ${boxNames().join(", ")}`);
-      writeEvidence("sc2-6", "window-b-teardown", { cancelStdout: cancelOut.slice(0, 400), boxesAfterCancel: boxNames() });
+        writeEvidence("sc2-6", "window-b", {
+          window: "b",
+          requestId,
+          fleetRunId: submitted?.runId,
+          submitExecs: submits.length,
+          boxesBefore: before,
+          boxesAfter: after,
+          freshBoxes: fresh,
+          fjLastError: readEntry(dir, runId).lastError,
+        });
+
+        // ── teardown: fleet cancel destroys the box + revokes the key ──
+        const cancelOut = shOut(
+          // --driver exedev: `fleet cancel` refuses without it (measured 2026-09-29,
+          // exit 2 "cancel requires --driver") — same seam rule as the wrapper.
+          `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(submitted?.runId ?? "")}`,
+          300_000,
+        );
+        assert.equal(
+          cancelOut.exitCode,
+          0,
+          `teardown: fleet cancel failed (exit ${cancelOut.exitCode}): ${cancelOut.stderr.slice(-400)}`,
+        );
+        const emptied = await pollUntil(() => (boxNames().filter((n) => !before.includes(n)).length === 0 ? true : null), 180_000);
+        assert.ok(emptied, `teardown: boxes still alive after fleet cancel: ${boxNames().join(", ")}`);
+        writeEvidence("sc2-6", "window-b-teardown", { cancelStdout: cancelOut.stdout.slice(0, 400), boxesAfterCancel: boxNames() });
+      } finally {
+        if (liveDaemon) await killDaemon(dir, liveDaemon);
+        // SC2.4 idempotent cancel: a harmless no-op when the in-body teardown
+        // already canceled; the backstop when anything above threw.
+        if (fleetRunId) {
+          const c = shOut(
+            `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(fleetRunId)}`,
+            300_000,
+          );
+          if (c.exitCode !== 0) {
+            // biome-ignore lint/correctness/noUnsafeFinally: a failed cleanup cancel means a live box is still billing — it must supersede the body's error, not be lost to it
+            throw new Error(`window (b) cleanup: fleet cancel failed (exit ${c.exitCode}): ${c.stderr.slice(-400)}`);
+          }
+        }
+        // P26: the tmpdir holds an UNSCRUBBED submit-stdout tail — it must not
+        // outlive the leg in either outcome.
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     },
     25 * 60_000,
   );
 
-  test("final guard: the fleet is empty of this round's boxes", () => {
+  test.todoIf(liveTodoOff())("final guard: the fleet is empty of this round's boxes", () => {
     // live-mirror: sc2-6 — the round's final guard: the fleet must be empty.
     const names = boxNames();
     assert.equal(names.length, 0, `SC2.6 LEAK: boxes still alive after the round: ${names.join(", ")}`);

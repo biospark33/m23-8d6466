@@ -67,7 +67,14 @@ export function wrapperJournal(dir: string): WrapperLine[] {
 export async function pollUntil<T>(pred: () => T | null, timeoutMs: number): Promise<T | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const v = pred();
+    // transient substrate errors (ssh blip, torn journal line) must retry,
+    // not abort a 20-minute leg
+    let v: T | null = null;
+    try {
+      v = pred();
+    } catch {
+      /* treat as "not yet" */
+    }
     if (v) return v;
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -125,6 +132,10 @@ if [ "$MODE" = "a" ]; then
     fi
     sleep 0.1
   done
+  # Hold exhausted = the test died before delivering the kill marker; exit 99
+  # marks the step FAILED so a restart never replays into an unwatched submit.
+  printf '{"verb":"submit","requestId":"%s","phase":"hold-expired"}\\n' "$jid" >> "$J"
+  exit 99
 fi
 cd ${JSON.stringify(QDS_ROOT)}
 out="$(bun scripts/fleet.ts submit --driver exedev --request-id "$jid" "\${a[@]}")"
@@ -142,6 +153,11 @@ if [ "$MODE" = "b" ]; then
     if [ -f "$KILL_MARKER" ]; then sleep 5; exit 99; fi
     sleep 0.1
   done
+  # Test dead before the kill marker → refusing the ack stops unsupervised
+  # model spend; the already-provisioned box is bounded by its TTL and the
+  # round's cancel-on-failure cleanup.
+  printf '{"verb":"submit","requestId":"%s","phase":"hold-expired"}\\n' "$jid" >> "$J"
+  exit 99
 fi
 printf '%s\\n' "$out"
 exit $rc
@@ -259,8 +275,10 @@ export function spawnDaemon(dir: string, worktree = SWARM_WORKTREE): Bun.Subproc
   // kill.
   return Bun.spawn(["./node_modules/.bin/tsx", script], {
     cwd: worktree,
-    stdout: "pipe",
-    stderr: "pipe",
+    // the daemon journals to files; nobody drains these pipes — a full pipe
+    // blocks the child silently mid-leg
+    stdout: "ignore",
+    stderr: "ignore",
     stdin: "ignore",
     detached: true,
   });
@@ -280,11 +298,15 @@ export async function killDaemon(dir: string, proc: Bun.Subprocess): Promise<voi
   }
   await new Promise((r) => setTimeout(r, 400)); // > the wrapper's 100ms poll cadence
   let killed = false;
-  try {
-    process.kill(-(proc.pid ?? 0), "SIGKILL");
-    killed = true;
-  } catch {
-    /* not a group leader / already gone */
+  // only a positive pid is a real group leader — a falsy pid would signal the
+  // caller's own process group (-0)
+  if (typeof proc.pid === "number" && proc.pid > 0) {
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+      killed = true;
+    } catch {
+      /* not a group leader / already gone */
+    }
   }
   if (!killed) {
     try {
@@ -292,6 +314,20 @@ export async function killDaemon(dir: string, proc: Bun.Subprocess): Promise<voi
     } catch {
       /* already gone */
     }
+  }
+  // killDaemon runs in finally blocks: report a surviving tree, never throw —
+  // throwing would mask the original failure.
+  let timedOut = false;
+  try {
+    await Promise.race([
+      proc.exited,
+      new Promise<void>((r) => setTimeout(() => { timedOut = true; r(); }, 2000)),
+    ]);
+  } catch {
+    /* noop */
+  }
+  if (timedOut) {
+    console.error(`killDaemon: daemon tree still alive after SIGKILL (pid ${proc.pid})`);
   }
   try {
     proc.unref();
@@ -304,6 +340,7 @@ export async function killDaemon(dir: string, proc: Bun.Subprocess): Promise<voi
 function assertNoSecrets(obj: unknown): void {
   const s = JSON.stringify(obj) ?? "";
   if (s.includes("sk-or-")) throw new Error("evidence scrub: sk-or- survived");
+  if (s.includes("sc27-")) throw new Error("evidence scrub: sc27- (approver token) survived");
 }
 
 export function writeEvidence(tag: string, name: string, payload: unknown): void {

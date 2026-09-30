@@ -1,4 +1,5 @@
 {
+  "boxNameProvenance": "names null: captured before the fleetBoxes vm_name fix (sc2-harness.ts); boxes destroyed at teardown, not re-recordable — the count (1) stands, identity was not captured",
   "window": "a",
   "requestId": "e30971a4-7fad-4fe7-b17a-c0acb9816017",
   "fleetRunId": "qds-20260930-3c12b3",

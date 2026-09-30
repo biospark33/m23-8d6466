@@ -30,6 +30,7 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { goodLedger, admitThrowsLedger, type AdmitCall } from "./helpers.ts";
+import { defaultKeyCapMicroUsd } from "../../src/providers/credentials.ts";
 
 // RED: src/fleet/submit.ts does not exist yet — this import is the first failure.
 import { submitWork, SubmitError, SUBMITS_DIRNAME } from "../../src/fleet/submit.ts";
@@ -278,7 +279,10 @@ describe("submitWork (Q1.1 replay-safe submit)", () => {
       ledgers.find((l) => l.groupCalls.length > 0) as Awaited<ReturnType<typeof goodLedger>>,
     );
     expect(firstGroupAt).toBe(0);
-    // No release: the run exists, the reservation stays (SC2's cancel releases).
+    // No release: the run exists, the reservation stays — and NOTHING releases it
+    // yet: cancel/teardown/completion never call releaseBudgetGroup (the only
+    // release is the no-record refusal refund in submit.ts), so a reused group
+    // name wedges at zero spend until release wiring lands.
     expect(ledgers.flatMap((l) => l.groupReleases)).toHaveLength(0);
   });
 
@@ -287,7 +291,9 @@ describe("submitWork (Q1.1 replay-safe submit)", () => {
     // window (b)): submit reserved the $50 defaultKeyCapMicroUsd against a
     // $0.50 group and refused exit 5 at ZERO spend — the recording ledger's
     // permissive reserve hid it from this suite. The operator named the group
-    // ceiling; a single run's reservation can never exceed it.
+    // ceiling; without an injected caller cap (this verb never injects one) a
+    // single run's reservation can never exceed it — an explicit deps cap wins
+    // and can.
     const h = harness();
     const ledgers: Awaited<ReturnType<typeof goodLedger>>[] = [];
     const admitCalls: AdmitCall[] = [];
@@ -311,6 +317,65 @@ describe("submitWork (Q1.1 replay-safe submit)", () => {
     // The minted key's ceiling rides the same bound — a key cannot outspend
     // the group it was admitted under.
     expect(admitCalls[0]?.keyCapMicroUsd).toBe(500_000);
+  });
+
+  test("SC2.6: an INJECTED deps.capMicroUsd beats the group bound — the reservation and key cap are the explicit cap", async () => {
+    // The group-bounded cap only applies when deps.capMicroUsd is UNDEFINED
+    // (submit.ts's `deps.capMicroUsd === undefined` conjunct). A caller that
+    // injects its own cap — even one ABOVE the group ceiling — wins outright:
+    // both the reservation and the minted key cap are the explicit cap, not
+    // the group's. Guards that conjunct against a future "simplification"
+    // that would silently override caller caps.
+    const h = harness();
+    const ledgers: Awaited<ReturnType<typeof goodLedger>>[] = [];
+    const admitCalls: AdmitCall[] = [];
+    await h.submit({
+      budgetGroup: "sc2-fj",
+      groupCapMicroUsd: 1_000_000,
+      capMicroUsd: 500_000,
+      ledgerFactory: () => {
+        const ledger = goodLedger();
+        const inner = ledger.admitIssue.bind(ledger);
+        (ledger as { admitIssue: unknown }).admitIssue = (input: AdmitCall["input"], cap: number, keyCap: number) => {
+          admitCalls.push({ input, capMicroUsd: cap, keyCapMicroUsd: keyCap } as AdmitCall);
+          return inner(input, cap, keyCap);
+        };
+        ledgers.push(ledger);
+        return ledger;
+      },
+    });
+    const groupCalls = ledgers.flatMap((l) => l.groupCalls);
+    expect(groupCalls).toHaveLength(1);
+    expect(groupCalls[0]?.amountMicroUsd).toBe(500_000);
+    expect(admitCalls[0]?.keyCapMicroUsd).toBe(500_000);
+  });
+
+  test("SC2.6: a group cap at or above the default passes through — reservation and key cap stay the $50 default", async () => {
+    // groupCapMicroUsd >= defaultKeyCapMicroUsd ⇒ Math.min is a pass-through:
+    // the reservation and the minted key cap both equal the $50 default, byte-
+    // for-byte the pre-fix behavior. A cap that large carries no tighter bound
+    // for a single run to inherit.
+    const h = harness();
+    const ledgers: Awaited<ReturnType<typeof goodLedger>>[] = [];
+    const admitCalls: AdmitCall[] = [];
+    await h.submit({
+      budgetGroup: "sc2-fj",
+      groupCapMicroUsd: defaultKeyCapMicroUsd,
+      ledgerFactory: () => {
+        const ledger = goodLedger();
+        const inner = ledger.admitIssue.bind(ledger);
+        (ledger as { admitIssue: unknown }).admitIssue = (input: AdmitCall["input"], cap: number, keyCap: number) => {
+          admitCalls.push({ input, capMicroUsd: cap, keyCapMicroUsd: keyCap } as AdmitCall);
+          return inner(input, cap, keyCap);
+        };
+        ledgers.push(ledger);
+        return ledger;
+      },
+    });
+    const groupCalls = ledgers.flatMap((l) => l.groupCalls);
+    expect(groupCalls).toHaveLength(1);
+    expect(groupCalls[0]?.amountMicroUsd).toBe(defaultKeyCapMicroUsd);
+    expect(admitCalls[0]?.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
   });
 
   test("Q1.2: a budget-group-exceeded refusal releases the claim — the requestId is reusable", async () => {

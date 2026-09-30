@@ -48,7 +48,6 @@ import { dirname, join } from "node:path";
 // `$QDS_RUN_ROOT` and is the seam AC5 took the box-directed probes off.
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import type { ExecResult } from "../../src/providers/driver.ts";
-import { deadPid } from "./helpers.ts";
 
 import { Database } from "bun:sqlite";
 

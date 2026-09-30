@@ -294,8 +294,9 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
   // cap the reservation was always the $50 defaultKeyCapMicroUsd — any
   // smaller group refused at ZERO spend (measured live 2026-09-29: a $0.50
   // swarmclaw step group, exit 5 budget-group-exceeded, 50000000 does not
-  // fit 500000). The operator named the group ceiling; a single run's
-  // reservation and its minted key can never exceed it.
+  // fit 500000). When the caller injects no explicit cap — the CLI verb never
+  // does — a single run's reservation and its minted key can never exceed the
+  // group ceiling; an injected deps.capMicroUsd wins and can exceed it.
   const groupBoundedCapMicroUsd =
     group.groupCapMicroUsd !== undefined && deps.capMicroUsd === undefined
       ? Math.min(group.groupCapMicroUsd, defaultKeyCapMicroUsd)
@@ -315,8 +316,11 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
           },
           group.groupCapMicroUsd,
         );
-        // Retained on success — SC2's cancel/teardown releases it, and the
-        // no-record refusal path below refunds it.
+        // Retained on success — there is NO release wiring yet (cancel /
+        // teardown / completion never call releaseBudgetGroup; the only
+        // release is the no-record refusal refund below). A reused group name
+        // therefore wedges at zero spend until release wiring lands — filed as
+        // the round's top deferred finding.
       } finally {
         ledger.close();
       }

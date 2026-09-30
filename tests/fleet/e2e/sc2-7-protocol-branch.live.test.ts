@@ -58,7 +58,7 @@ import * as path from "node:path";
 
 const GROUP_CAP_USD = 0.5;
 const APPROVER_ID = "sc27-e2e-approver";
-const RECORDS_DIR = ".sandbox/runs"; // the factory run's own store; approve's allowlist root
+const RECORDS_DIR = process.env.QDS_RUNS_DIR ?? ".sandbox/runs"; // resolveRunsDir's chain: --dir wins, else $QDS_RUNS_DIR — approve must match the store the wrapper's submit used
 
 /** live-mirror: sc2-7 — worst-case spend estimate, printed BEFORE any box exists. */
 const WORST_CASE_USD = GROUP_CAP_USD + 3.7; // group cap $0.50 + ≤1h box @ the $3.60/hr ledger rate + headroom
@@ -174,9 +174,14 @@ if (!runId) {
 
 lifecycleU.requestProtocolRunExecution(runId);
 
+let pollTimer;
 if (restarting) {
   const factory = unwrap(await import(${JSON.stringify(SWARM_WORKTREE)} + "/src/lib/server/protocols/protocol-factory"));
-  const pollTimer = setInterval(() => { factory.pollFactoryRuns().catch(() => {}); }, 2000);
+  pollTimer = setInterval(() => {
+    factory.pollFactoryRuns().catch((e) => {
+      fs.appendFileSync(${JSON.stringify(path.join(dir, "daemon-heartbeat.jsonl"))}, JSON.stringify({ t: Date.now(), pollerError: String((e && e.stack) || e) }) + "\\n");
+    });
+  }, 2000);
 }
 
 // Heartbeat: run status + every step's state, until killed or terminal.
@@ -195,10 +200,12 @@ while (Date.now() < deadline) {
   fs.appendFileSync(${JSON.stringify(path.join(dir, "daemon-heartbeat.jsonl"))}, line + "\\n");
   if (current && (current.status === "completed" || current.status === "failed" || current.status === "cancelled")) {
     console.log("RUN-TERMINAL " + current.status);
+    if (pollTimer) clearInterval(pollTimer);
     process.exit(0);
   }
   await new Promise((r) => setTimeout(r, 500));
 }
+if (pollTimer) clearInterval(pollTimer);
 console.log("DAEMON-DEADLINE");
 process.exit(3);
 `;
@@ -213,7 +220,7 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
     assert.ok(REPO_SHA.length === 40, `QDS_EXEDEV_SHA must be a full sha (got ${REPO_SHA.length} chars)`);
   });
 
-  test("daemon driver self-check (offline, no box)", () => {
+  test.todoIf(liveTodoOff())("daemon driver self-check (offline, no box)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc27-selfcheck-"));
     fs.writeFileSync(path.join(dir, "sc2-daemon.mts"), daemonScript(dir));
     fs.writeFileSync(path.join(dir, "fleet-wrapper.sh"), wrapperScript(dir), { mode: 0o755 });
@@ -246,36 +253,48 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
       fs.writeFileSync(path.join(dir, "fleet-wrapper.sh"), wrapperScript(dir), { mode: 0o755 });
       fs.writeFileSync(path.join(dir, "wrapper-mode"), "a"); // kill arm: hold the exec open
 
-      // ── the kill half: persist → group-killed mid-submit ──
-      const daemonA = spawnDaemon(dir);
-      const persisted = await pollUntil(() => {
-        const runId = fs.existsSync(path.join(dir, "run-id.txt"))
-          ? fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim()
-          : null;
-        if (!runId) return null;
-        const entry = readEntry(dir, runId);
-        return entry.status === "submitting" && entry.requestId ? { runId, requestId: entry.requestId } : null;
-      }, 60_000);
-      assert.ok(persisted, "the requestId never persisted before the kill window closed");
-      await killDaemon(dir, daemonA);
-      const execsBeforeRestart = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
-      assert.equal(execsBeforeRestart.length, 0, "the fleet-submit exec must NOT have fired before the kill");
+      // Cleanup state: every daemon spawn below is inside the try, and the
+      // finally owns, in order — daemon kill → allowlist restore → fleet
+      // cancel → dir rm (a live box must never outlive this test).
+      let fleetRunId = "";
+      let liveDaemon: Bun.Subprocess | undefined;
+      const allowlistPath = path.join(QDS_ROOT, RECORDS_DIR, ".factory", "approvers.json");
+      const allowlistPrior = fs.existsSync(allowlistPath) ? fs.readFileSync(allowlistPath) : null;
 
-      // ── restart: replay the SAME id; the REAL factory run provisions ──
-      fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
-      const daemonB = spawnDaemon(dir);
-      let daemonC: Bun.Subprocess | undefined;
       try {
+        // ── the kill half: persist → group-killed mid-submit ──
+        const daemonA = spawnDaemon(dir);
+        liveDaemon = daemonA;
+        const persisted = await pollUntil(() => {
+          const runId = fs.existsSync(path.join(dir, "run-id.txt"))
+            ? fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim()
+            : null;
+          if (!runId) return null;
+          const entry = readEntry(dir, runId);
+          return entry?.status === "submitting" && entry?.requestId ? { runId, requestId: entry.requestId } : null;
+        }, 60_000);
+        assert.ok(persisted, "the requestId never persisted before the kill window closed");
+        await killDaemon(dir, daemonA);
+        liveDaemon = undefined;
+        const execsBeforeRestart = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
+        assert.equal(execsBeforeRestart.length, 0, "the fleet-submit exec must NOT have fired before the kill");
+
+        // ── restart: replay the SAME id; the REAL factory run provisions ──
+        fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
+        const daemonB = spawnDaemon(dir);
+        liveDaemon = daemonB;
         const submitted = await pollUntil(() => {
           const runId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
           const entry = readEntry(dir, runId);
-          return entry.status === "submitted" && entry.runId ? entry : null;
+          return entry?.status === "submitted" && entry?.runId ? entry : null;
         }, 480_000);
         assert.ok(submitted, "the replay never reached 'submitted'");
         const submits = wrapperJournal(dir).filter((l) => l.verb === "submit" && l.phase === "exec");
         assert.equal(submits.length, 1, "exactly one fleet submit exec across the kill + replay");
         assert.equal(submits[0]?.requestId, persisted?.requestId, "the replay carried the SAME --request-id");
-        const fleetRunId = submitted?.runId ?? "";
+        // hoisted to the outer scope so the finally can cancel it even if a
+        // later assert throws before any other capture point
+        fleetRunId = submitted?.runId ?? "";
         assert.ok(fleetRunId, "the factory run id must be captured");
 
         // EXACTLY ONE box (the kill half's proof, continuing live).
@@ -284,12 +303,21 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           return fresh.length >= 1 ? fresh : null;
         }, 120_000);
         assert.ok(midRun && midRun.length === 1, `exactly one box must serve the whole protocol; saw ${midRun?.length ?? 0}`);
+        // The one-box invariant must HOLD, not merely appear — re-check after a
+        // 10s stability window (a late second provision would surface here).
+        await new Promise((r) => setTimeout(r, 10_000));
+        const stableBoxes = boxNames().filter((n) => !before.includes(n));
+        assert.equal(
+          stableBoxes.length,
+          1,
+          `the one-box invariant must hold across the 10s stability window; saw ${stableBoxes.length}: ${stableBoxes.join(", ")}`,
+        );
         writeEvidence("sc2-7", "kill-and-provision", {
           requestId: persisted?.requestId,
           fleetRunId,
           submitExecs: submits.length,
           replaySameId: submits[0]?.requestId === persisted?.requestId,
-          freshBoxes: midRun,
+          freshBoxes: stableBoxes,
         });
 
         // ── box forensics BEFORE the teardown: the harvest verdict rides on the
@@ -297,9 +325,12 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         // Round 1 harvested NOTHING (no bundle → reverify nothing-to-verify →
         // vetoed → closed, never parked) and the box was gone before anyone
         // could ask why — record the answers while the box is alive. ──
-        const box = midRun?.[0] ?? "";
+        const box = stableBoxes[0] ?? "";
+        // The $( command substitution is escaped (\$ in the rendered string)
+        // so the LOCAL /bin/bash -c passes it through to ssh's remote shell —
+        // unescaped it expands against the HOST repo, not the box's.
         const probe = shOut(
-          `ssh ${JSON.stringify(`${box}.exe.xyz`)} "cd ~/src 2>/dev/null && pwd && git branch --show-current && git log --oneline -3 && echo COUNT=$(git rev-list --count ${REPO_SHA}..HEAD 2>/dev/null) || echo NOREPO"`,
+          `ssh ${JSON.stringify(`${box}.exe.xyz`)} "cd ~/src 2>/dev/null && pwd && git branch --show-current && git log --oneline -3 && echo COUNT=\\$(git rev-list --count ${REPO_SHA}..HEAD 2>/dev/null) || echo NOREPO"`,
           120_000,
         );
         writeEvidence("sc2-7", "box-forensics", {
@@ -319,6 +350,7 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         // filed as a product finding; this leg proves the approved-verdict
         // path with the daemon parked.
         await killDaemon(dir, daemonB);
+        liveDaemon = undefined;
 
         // ── the exit half: drive the completion chain to the approval park ──
         // `fleet observe` = harvest → teardown → reverify → gate; a green
@@ -349,7 +381,9 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         fs.chmodSync(factoryDir, 0o700);
         const salt = crypto.randomBytes(16).toString("hex");
         const token = `sc27-${crypto.randomBytes(24).toString("hex")}`;
-        const allowlistPath = path.join(factoryDir, "approvers.json");
+        // allowlistPath was hoisted above the try so the finally can
+        // restore-or-delete the PRIOR allowlist state (this is a production
+        // path — never leave the test's approver behind).
         fs.writeFileSync(
           allowlistPath,
           JSON.stringify({
@@ -384,7 +418,7 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         // and its poller lands it.
         const approved = await pollResult(fleetRunId, (r) => r.status === "approved" && r.terminal, 180_000);
         assert.ok(approved, `the run never reached terminal 'approved' (last: ${JSON.stringify(approved)})`);
-        daemonC = spawnDaemon(dir);
+        liveDaemon = spawnDaemon(dir);
 
         // ── the branch + the notification witness ──
         const protocolRunId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
@@ -411,21 +445,38 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           runStatus: completed?.status,
         });
       } finally {
-        // The daemon holds the poller; take the whole tree down before the
-        // fleet guards run (a live box must never outlive this test).
-        if (daemonC) await killDaemon(dir, daemonC);
+        // Cleanup, in order: (1) the daemon holds the poller — kill it first so
+        // it cannot race the cancel; (2) restore-or-delete the allowlist (P9:
+        // approvers.json is a production path); (3) the fleet cancel is
+        // idempotent (SC2.4) but its FAILURE throws — cleanup failure must not
+        // be silent, even if that masks a prior assert (the conservative
+        // choice); (4) the dir rm removes the plaintext approve token, the
+        // sqlite db, and the journals. A live box must never outlive this test.
+        if (liveDaemon) await killDaemon(dir, liveDaemon);
+        if (allowlistPrior === null) {
+          fs.rmSync(allowlistPath, { force: true });
+        } else {
+          fs.writeFileSync(allowlistPath, allowlistPrior);
+        }
+        if (fleetRunId) {
+          const cancel = shOut(
+            `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts cancel --driver exedev ${JSON.stringify(fleetRunId)}`,
+            300_000,
+          );
+          if (cancel.exitCode !== 0) {
+            // biome-ignore lint/correctness/noUnsafeFinally: deliberate — a failed cleanup cancel must not pass silently, even if it masks a prior assert
+            throw new Error(
+              `SC2.7 cleanup: fleet cancel ${fleetRunId} failed (exit ${cancel.exitCode}): ${(cancel.stderr || cancel.stdout).slice(-800)}`,
+            );
+          }
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
       }
 
       // ── final guard: the fleet is empty of this round's boxes ──
       const leftover = boxNames().filter((n) => !before.includes(n));
       assert.equal(leftover.length, 0, `SC2.7 LEAK: boxes still alive after the round: ${leftover.join(", ")}`);
     },
-    40 * 60_000,
+    46 * 60_000,
   );
-
-  test("final guard: the fleet is empty of this round's boxes", () => {
-    // live-mirror: sc2-7 — the round's final guard: the fleet must be empty.
-    const names = boxNames();
-    assert.equal(names.length, 0, `SC2.7 LEAK: boxes still alive after the round: ${names.join(", ")}`);
-  });
 });

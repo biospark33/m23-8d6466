@@ -1,0 +1,9 @@
+# Deferred Work
+
+## Deferred from: code review of PR #381 (SC2.6/SC2.7 live) — 2026-09-30
+
+- [Review][Defer] **D1 (HIGH): budget-group reservation is never released** — `releaseBudgetGroup` has exactly one production call site (the no-record refusal refund, `src/fleet/submit.ts:425`); cancel / teardown / completion / reaper never release, so a reused `budgetGroup` name wedges at zero spend forever (`reserveBudgetGroup` rows hold until released; the reserve is replay-idempotent on `(groupId, requestId)`, which is why the crash-window rounds passed). Verified against cost-ledger.ts:2977 and a repo-wide grep. Comment in submit.ts corrected this round; wiring release into the teardown/completion paths is a product change needing its own story + tests. **File as an issue.**
+- [Review][Defer] **D2 (MED): concurrent external_job steps under one group cap** — the second concurrent reserve refuses `budget-group-exceeded` at zero spend (single-run-shaped reserve semantics; ADR-1 macro processes are sequential today). Product-design question, pre-existing shape.
+- [Review][Defer] **D3 (LOW): effective clamped key cap unobservable on ack/intent** — group cap ≠ minted key cap ≠ default can now be three different numbers with only the group figure recorded; consumers reconciling spend against the ack overstate headroom.
+- [Review][Defer] **D4 (LOW): non-approved branch case undefined + untested** — SC2.7's `branchCases` holds only `approved-case`; vetoed/failed verdicts reach the gate with no matching case.
+- [Review][Defer] **D5 (MED): evidence gaps from the live rounds** — no observed key count behind SC2.6's "one key", no SC2.7 fleet-empty artifact, notify leg witnessed only by the `branch_taken` event. Needs a dedicated evidence round (real spend); annotated honestly in the roadmap this round.
