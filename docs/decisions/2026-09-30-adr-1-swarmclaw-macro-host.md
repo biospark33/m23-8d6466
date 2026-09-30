@@ -1,6 +1,6 @@
 # ADR-1: SwarmClaw hosts macro processes via `external_job`; the fleet stays the only way code changes enter
 
-- **Status:** PROPOSED — awaits operator signature (the reversal is a human decision, not a PR merge)
+- **Status:** ACCEPTED — signed by the operator 2026-09-30 (in the OpenRig × Factory closeout session); the program is closed
 - **Date:** 2026-09-30
 - **Reverses:** [DD-7](../../docs/superpowers/specs/2026-08-11-v5-story-derivation-decisions.md) ("SwarmClaw = host-side service chassis for factory query surfaces … NOT the factory front door")
 - **Scope of reversal:** exactly as far as the research memo's row — *"SwarmClaw hosts macro processes via `external_job`; the fleet stays the only way code changes enter"* (`docs/planning/2026-09-23-openrig-swarm-integration-research.md:403`). No further.
@@ -22,12 +22,12 @@ Macro processes — the long-running, multi-step, stateful workflows swarmclaw a
 
 - The `ProtocolExternalJobConfig` shape (repoSlug/repoUrl/commitSha/manifestPath, exactly one of issueId|workId, groupCapUsd, pollTimeoutMs) is the macro-process → factory contract; grammar changes go through both sides' reviews (#380's identity-grammar finding is the live example).
 - Two known gaps are accepted until fixed: the observe-chain poller race (#382 — detail below) and headless `workId` briefs not booking spend (#380 — macro work carries a numeric issueId for now).
-- **#382 in detail:** the observe chain closes the run record at teardown start, but the approve gate only registers after reverify (~15s later). A protocol poller tick landing in that window reads the pre-approval terminal `completed` verdict for the `external_job` step and completes it with the wrong verdict. That can fail protocol orchestration — the verdict branch has no case matching `completed`, so the branch refuses and the run fails — but it does **not** authorize anything: the fleet result stays unapproved, no PR is approved, and `fleet approve` (scrypt-gated, human-only) remains the only path to an approved verdict. Current mitigation: the protocol poller is kept stopped while `fleet observe` runs (measured round 5 of the SC2.7 live leg).
+- **#382 in detail:** the observe chain closes the run record at teardown start, but the approve gate only registers after reverify (~15s later). A protocol poller tick landing in that window reads the pre-approval terminal `completed` verdict for the `external_job` step and completes it with the wrong verdict. That can fail protocol orchestration — the verdict branch has no case matching `completed`, so the branch refuses and the run fails — but it does **not** authorize anything: the fleet result stays unapproved, no PR is approved, and `fleet approve` (scrypt-gated, human-only) remains the only path to an approved verdict. Fixed after this ADR was drafted: the chain now pre-registers the approval gate BEFORE its teardown closes the record (QDS PR #383, #382), so no poller tick ever reads a pre-approval terminal verdict — the round-5 park mitigation is retired, and the SC2.7 exit test re-ran LIVE GREEN 2026-09-30 with one daemon straight through observe → approve → branch.
 - DD-7's query-surface chassis role stands unchanged; this ADR only adds the `external_job` hosting role on top of it.
 
 ## Signature
 
 | | |
 |---|---|
-| **Operator (Steve)** | ______________________  _(sign to move this ADR PROPOSED → ACCEPTED; the program closes on the signature)_ |
-| **Date** | ______________________ |
+| **Operator (Steve)** | ✅ SIGNED — "i sign off on the ADR" (2026-09-30, closeout session) |
+| **Date** | 2026-09-30 |
