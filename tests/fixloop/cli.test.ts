@@ -52,6 +52,7 @@ import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError } from "../../scripts/lib/run-lock.ts";
 import { fakeGitHub, type FakeGitHub } from "../pr/helpers.ts";
 import { run, type FixRunDeps, type FixRunPushOpts } from "../../scripts/fix-run.ts";
+import type { GhRunner } from "../../src/fixloop/ci-status.ts";
 import { FIX_DISPATCH_CEILING_MS } from "../../src/fixloop/index.ts";
 
 const SLUG = "acme/widgets";
@@ -193,7 +194,14 @@ function writeRecordedAttempt(store: RunRecordStore, runId: string, commentIds: 
       pollWindowOpenedAt: "2026-09-19T01:00:00.000Z",
     }),
   );
-  store.set(runId, { commitSha: PINNED, extensions: { fixLoop: { fixContext } } });
+  // A recorded PAST attempt is a settled charged failure under DF6.1b: the
+  // poll wrote fixOutcomeClass=ci-red when it settled. A fixContext with no
+  // class and no approval state is the poll-INTERRUPTED arm instead — a
+  // different routing input the DF6.1b legs fixture separately.
+  store.set(runId, {
+    commitSha: PINNED,
+    extensions: { fixLoop: { schemaVersion: 1, fixContext, fixOutcomeClass: "ci-red" } },
+  });
   store.close(runId);
 }
 
@@ -345,6 +353,26 @@ interface Seams {
   assertLockHeld: boolean;
 }
 
+/**
+ * DF6.1b: the fake gh behind the required-check probe and the CI-verdict poll.
+ * The composition is scripted at the same altitude as fakeGitHub: `pr view`
+ * answers with the pushed head sha, `pr checks --required` with a green set,
+ * so invocation 1's probe passes and invocation 2's poll settles green without
+ * a network round trip.
+ */
+function fakeGh(headSha: string = PUSH_SHA): GhRunner {
+  return async (argv) => {
+    const a = argv.join(" ");
+    if (a.startsWith("pr view ")) {
+      return { exitCode: 0, stdout: JSON.stringify({ headRefOid: headSha, headRefName: `qds/${PARENT}` }), stderr: "" };
+    }
+    if (a.startsWith("pr checks ")) {
+      return { exitCode: 0, stdout: JSON.stringify([{ name: "ci", state: "COMPLETED", bucket: "pass" }]), stderr: "" };
+    }
+    throw new Error(`fake gh: unexpected invocation ${a}`);
+  };
+}
+
 async function runCli(
   argv: string[],
   host: Host,
@@ -371,6 +399,7 @@ async function runCli(
   const costLedger = new CostLedger({ path: path.join(host.root, "cost.db"), config: DEFAULT_COST_CONFIG });
   const deps: FixRunDeps = {
     github,
+    gh: fakeGh(),
     token: async () => TOKEN,
     // invocation1 builds `deps?.keyApi ?? openRouterKeyApi()` EAGERLY, before
     // the faked dispatch seam ever runs — so without a stub the production
@@ -555,16 +584,17 @@ describe("G1 intake/routing", () => {
     expect(seams.dispatchCalls).toEqual([]);
   });
 
-  test("all comment IDs already recorded ⇒ exit 0 already-recorded, no dispatch", async () => {
+  test("an unchanged comment set with a recorded failed attempt 1 DISPATCHES attempt 2 — the dedup never refuses a retry (DF6.1b AC2)", async () => {
     const host = makeHost();
     writeParent(host.store, { fixAttemptRunIds: [OLD] });
     writeRecordedAttempt(host.store, OLD, ["9001", "9002"]);
     const github = fakeGitHub();
     openPr(github);
-    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), { chainApprovalState: "awaiting-approval" });
     expect(result.code).toBe(0);
-    expect(result.outLines[0]).toMatchObject({ state: "no-op", reason: "already-recorded" });
-    expect(seams.dispatchCalls).toEqual([]);
+    expect(seams.dispatchCalls).toHaveLength(1); // attempt 2 dispatched on the SAME comment set
+    const brief = seams.dispatchCalls[0]?.brief as { fixContext?: { priorAttempt?: { runId: string; classification: string } } };
+    expect(brief.fixContext?.priorAttempt?.runId).toBe(OLD);
   });
 
   test("a partially-recorded comment set dispatches (dedup is all-or-nothing)", async () => {
@@ -826,7 +856,9 @@ describe("G3 push leg", () => {
     openPr(github);
     const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
     expect(result.code).toBe(0);
-    expect(result.outLines[0]).toMatchObject({ state: "appended", runId: FIX, prNumber: PR, attempt: 1, attemptSha: PUSH_SHA });
+    // DF6.1b: the push leg continues into the poll — the invocation's result
+    // line is the VERDICT (green), not the bare append.
+    expect(result.outLines[0]).toMatchObject({ state: "green", runId: FIX, prNumber: PR, attempt: 1, attempts: 1, polls: 1, checks: ["ci"] });
 
     // The diff is computed against the record's PINNED commitSha — never the
     // default branch (the wrong-diff-base mutant fails this exact argv).
@@ -1061,5 +1093,279 @@ describe("G3 push leg", () => {
     // The lock is released even on the preflight refusal path.
     const handle = acquireRunLock(host.runsDir, FIX, "test-aftermath");
     releaseRunLock(handle);
+  });
+});
+
+// ═══ DF6.1b: attempt budgets, the CI verdict, the escalation ═════════════════
+
+import { parseFixOutcome } from "../../src/fixloop/escalation.ts";
+
+/** A settled CHARGED attempt: pushed (real-sha fixContext) and CI-red. */
+function writeChargedAttempt(store: RunRecordStore, runId: string, commentIds: string[]): void {
+  writeRecordedAttempt(store, runId, commentIds); // already carries fixOutcomeClass: "ci-red"
+}
+
+/** An uncharged-terminal attempt with an explicit classification. */
+function writeClassedAttempt(store: RunRecordStore, runId: string, cls: string, commentIds: string[] = ["9500"]): void {
+  store.create(runId);
+  const fixContext = encodeFixContext(
+    buildFixContextPayload({
+      prNumber: PR, prBranch: `qds/${PARENT}`, commentIds,
+      omittedCommentIds: [], omittedCount: 0, commentsDigest: DIGEST,
+      attemptSha: PUSH_SHA, pollWindowOpenedAt: "2026-09-19T01:00:00.000Z",
+    }),
+  );
+  store.set(runId, { commitSha: PINNED, extensions: { fixLoop: { schemaVersion: 1, fixContext, fixOutcomeClass: cls } } });
+  store.close(runId);
+}
+
+/** The poll-interrupted fixture: pushed, but the poll never settled — no class, no approval state. */
+function writePollInterrupted(store: RunRecordStore, runId: string, windowOpenedAt: string, commentIds: string[] = ["9001", "9002"]): void {
+  store.create(runId);
+  const fixContext = encodeFixContext(
+    buildFixContextPayload({
+      prNumber: PR, prBranch: `qds/${PARENT}`, commentIds,
+      omittedCommentIds: [], omittedCount: 0, commentsDigest: DIGEST,
+      attemptSha: PUSH_SHA, pollWindowOpenedAt: windowOpenedAt,
+    }),
+  );
+  store.set(runId, { commitSha: PINNED, extensions: { fixLoop: { schemaVersion: 1, fixContext } } });
+  store.close(runId);
+}
+
+function fixOutcomeOf(store: RunRecordStore, runId: string): ReturnType<typeof parseFixOutcome> {
+  const raw = (store.get(runId).extensions?.fixLoop as Record<string, unknown> | undefined)?.fixOutcome;
+  return parseFixOutcome(raw);
+}
+
+function outcomeClassOf(store: RunRecordStore, runId: string): unknown {
+  return (store.get(runId).extensions?.fixLoop as Record<string, unknown> | undefined)?.fixOutcomeClass;
+}
+
+describe("DF6.1b — the charged budget, the uncharged ceiling, the escalation", () => {
+  test("red-then-red-then-escalate: two charged failures exhaust the budget, escalate once, dispatch nothing, exit non-zero; later invocations never re-post", async () => {
+    const host = makeHost({});
+    const A1 = "qds-20260930-chg0001";
+    const A2 = "qds-20260930-chg0002";
+    writeParent(host.store, { fixAttemptRunIds: [A1, A2] });
+    writeChargedAttempt(host.store, A1, ["9001"]);
+    writeChargedAttempt(host.store, A2, ["9001", "9002"]);
+    const github = fakeGitHub();
+    openPr(github);
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(result.code).toBe(1);
+    expect(seams.dispatchCalls).toHaveLength(0);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]?.body).toMatch(/ci-red/);
+    expect(github.comments[0]?.body).toContain(A1);
+    expect(github.comments[0]?.body).toContain(A2);
+    const outcome = fixOutcomeOf(host.store, PARENT);
+    expect(outcome.outcome).toBe("escalated");
+    expect(outcome.attempts).toBe(2);
+    expect(outcome.runIds).toEqual([PARENT, A1, A2]);
+    // the lifetime cap: a second invocation reports the recorded outcome and posts NO second comment
+    const second = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(second.result.code).toBe(1);
+    expect(second.seams.dispatchCalls).toHaveLength(0);
+    expect(github.comments).toHaveLength(1);
+  });
+
+  test("a FRESH comment set on an exhausted PR never resets the budget (bot ping-pong) and escalates bot-response-to-fix", async () => {
+    const host = makeHost({});
+    const A1 = "qds-20260930-chg0001";
+    const A2 = "qds-20260930-chg0002";
+    writeParent(host.store, { fixAttemptRunIds: [A1, A2] });
+    writeChargedAttempt(host.store, A1, ["9001"]);
+    writeChargedAttempt(host.store, A2, ["9001", "9002"]);
+    const github = fakeGitHub();
+    openPr(github);
+    // the bot answered the fix: a brand-new comment set
+    github.reviewComments[PR] = [{ id: 9100, body: "this fix made it worse", authorLogin: "qds-review", authorType: "Bot" }];
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(result.code).toBe(1);
+    expect(seams.dispatchCalls).toHaveLength(0);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]?.body).toMatch(/bot-response-to-fix/);
+    expect(fixOutcomeOf(host.store, PARENT).outcome).toBe("escalated");
+  });
+
+  test("three uncharged attempts exhaust the uncharged ceiling; the escalation lists every recorded classification", async () => {
+    const host = makeHost({});
+    const ids = ["qds-20260930-un30001", "qds-20260930-un30002", "qds-20260930-un30003"];
+    writeParent(host.store, { fixAttemptRunIds: ids });
+    writeClassedAttempt(host.store, ids[0]!, "transient", ["9001", "9002"]);
+    writeClassedAttempt(host.store, ids[1]!, "overflow", ["9001", "9002"]);
+    writeClassedAttempt(host.store, ids[2]!, "lead_failure", ["9001", "9002"]);
+    const github = fakeGitHub();
+    openPr(github);
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(result.code).toBe(1);
+    expect(seams.dispatchCalls).toHaveLength(0);
+    const body = github.comments[0]?.body ?? "";
+    for (const cls of ["transient", "overflow", "lead_failure"]) expect(body).toContain(cls);
+    expect(fixOutcomeOf(host.store, PARENT).outcome).toBe("escalated");
+  });
+
+  test("an awaiting-approval last entry is the continuation, never counted: two uncharged + awaiting stays exit 0", async () => {
+    const host = makeHost({});
+    const ids = ["qds-20260930-un30001", "qds-20260930-un30002", FIX];
+    writeParent(host.store, { fixAttemptRunIds: ids });
+    writeClassedAttempt(host.store, ids[0]!, "transient", ["9001"]);
+    writeClassedAttempt(host.store, ids[1]!, "overflow", ["9001"]);
+    // the loop's normal resting state — counting it as orphaned would hit the ceiling and halt
+    host.store.create(FIX);
+    host.store.set(FIX, { extensions: { approval: { schemaVersion: 2, state: "awaiting-approval" } } });
+    host.store.close(FIX);
+    const github = fakeGitHub();
+    openPr(github);
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(result.code).toBe(0);
+    expect(result.outLines[0]).toMatchObject({ state: "no-op", reason: "approval-pending" });
+    expect(seams.dispatchCalls).toHaveLength(0);
+    expect(github.comments).toHaveLength(0);
+  });
+
+  test("a charged attempt-1 failure under budget dispatches attempt 2 with the redacted prior-attempt carrier", async () => {
+    const host = makeHost({});
+    const A1 = "qds-20260930-chg0001";
+    writeParent(host.store, { fixAttemptRunIds: [A1] });
+    writeChargedAttempt(host.store, A1, ["9001"]);
+    const github = fakeGitHub();
+    openPr(github);
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), { chainApprovalState: "awaiting-approval" });
+    expect(result.code).toBe(0);
+    expect(seams.dispatchCalls).toHaveLength(1);
+    const brief = seams.dispatchCalls[0]?.brief as { fixContext?: { priorAttempt?: { runId: string; classification: string; ciFailure: string } } };
+    expect(brief.fixContext?.priorAttempt?.runId).toBe(A1);
+    expect(brief.fixContext?.priorAttempt?.classification).toBe("ci-red");
+    // box ingress got the pattern redactor: no credential shape survives
+    expect(brief.fixContext?.priorAttempt?.ciFailure).not.toMatch(/ghs_|sk-[0-9a-f]|BEGIN PRIVATE KEY/);
+  });
+
+  test("the empty-required-set probe refuses at attempt start BEFORE any dispatch", async () => {
+    const host = makeHost({});
+    writeParent(host.store);
+    const github = fakeGitHub();
+    openPr(github);
+    const gh: GhRunner = async (argv) => {
+      const a = argv.join(" ");
+      if (a.startsWith("pr checks ")) return { exitCode: 1, stdout: "", stderr: `no required checks reported on the 'qds/${PARENT}' branch` };
+      throw new Error(`unexpected ${a}`);
+    };
+    const { result, seams } = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), {}, { gh });
+    expect(result.code).toBe(5);
+    expect(JSON.stringify(result.errLines)).toMatch(/empty-required-set/);
+    expect(seams.dispatchCalls).toHaveLength(0);
+  });
+
+  test("INV-7: a fixOutcome that fails its preflight is refused BEFORE the comment is posted", async () => {
+    const host = makeHost({});
+    const A1 = "qds-20260930-chg0001";
+    const A2 = "qds-20260930-chg0002";
+    writeParent(host.store, { fixAttemptRunIds: [A1, A2] });
+    writeChargedAttempt(host.store, A1, ["9001"]);
+    writeChargedAttempt(host.store, A2, ["9001", "9002"]);
+    const github = fakeGitHub();
+    openPr(github);
+    const { result } = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), {}, {
+      preflightOutcome: () => {
+        throw new Error("schema-rejected: fixOutcome must be a string");
+      },
+    });
+    expect(result.code).toBe(5);
+    expect(JSON.stringify(result.errLines)).toMatch(/fix-outcome-preflight-failed/);
+    expect(github.comments).toHaveLength(0); // no human was paged
+  });
+
+  test("deterministic-refusal: a dispatch_task refusal charges nothing, records dispatch-refused once, and a later invocation never re-posts", async () => {
+    const host = makeHost({});
+    writeParent(host.store);
+    const github = fakeGitHub();
+    openPr(github);
+    const first = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), {
+      chainOutcome: { kind: "refused", code: "roster-refused", message: "QDS_TEAM_RUNNER missing", remediation: "set it" },
+    });
+    expect(first.result.code).toBe(5);
+    expect(first.seams.dispatchCalls).toHaveLength(1); // the refused attempt itself
+    expect(outcomeClassOf(host.store, FIX)).toBe("dispatch-refused");
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]?.body).toMatch(/dispatch-refused/);
+    // a later invocation: dispatches nothing, names the recorded refusal, no second comment
+    const second = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(second.result.code).toBe(1);
+    expect(second.seams.dispatchCalls).toHaveLength(0);
+    expect(github.comments).toHaveLength(1);
+  });
+
+  test("poll recovery on an EXPIRED anchor classifies ci-verdict-unavailable without a single poll", async () => {
+    const host = makeHost({});
+    writeParent(host.store, { fixAttemptRunIds: [FIX] });
+    writePollInterrupted(host.store, FIX, "2026-09-19T01:00:00.000Z"); // long expired
+    const github = fakeGitHub();
+    openPr(github);
+    let ghCalls = 0;
+    const gh: GhRunner = async (argv) => {
+      ghCalls += 1;
+      throw new Error(`no poll may run: ${argv.join(" ")}`);
+    };
+    const { result } = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), {}, { gh });
+    expect(result.code).toBe(1);
+    expect(ghCalls).toBe(0); // the window is spent — no restarted poll, no green
+    expect(outcomeClassOf(host.store, FIX)).toBe("ci-verdict-unavailable");
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]?.body).toMatch(/ci-verdict-unavailable/);
+  });
+
+  test("poll recovery on a LIVE anchor resumes the poll and lands green on the parent record", async () => {
+    const host = makeHost({});
+    writeParent(host.store, { fixAttemptRunIds: [FIX] });
+    const opened = new Date(Date.now() - 60_000).toISOString(); // one minute in
+    writePollInterrupted(host.store, FIX, opened);
+    const github = fakeGitHub();
+    openPr(github);
+    const { result } = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(result.code).toBe(0);
+    expect(result.outLines[0]).toMatchObject({ state: "green", runId: FIX, attempt: 1 });
+    const outcome = fixOutcomeOf(host.store, PARENT);
+    expect(outcome).toMatchObject({ prNumber: PR, attempts: 1, outcome: "green", runIds: [PARENT, FIX] });
+    expect(outcomeClassOf(host.store, FIX)).toBe("green");
+    expect(github.comments).toHaveLength(0); // success pages nobody
+  });
+
+  test("a green loop-terminal marker makes later invocations exit 0 without re-polling", async () => {
+    const host = makeHost({});
+    writeParent(host.store, { fixAttemptRunIds: [FIX] });
+    const opened = new Date(Date.now() - 60_000).toISOString();
+    writePollInterrupted(host.store, FIX, opened);
+    const github = fakeGitHub();
+    openPr(github);
+    await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(fixOutcomeOf(host.store, PARENT).outcome).toBe("green");
+    const second = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(second.result.code).toBe(0);
+    expect(second.result.outLines[0]).toMatchObject({ state: "no-op", reason: "loop-green" });
+  });
+
+  test("two concurrent pre-dispatch invocations: the loser exits 5 lock-refused and provisions nothing; a STALE lock carries the rm line", async () => {
+    const host = makeHost({});
+    writeParent(host.store);
+    const github = fakeGitHub();
+    openPr(github);
+    // the concurrent holder: a REAL subprocess that acquires the PARENT lock and stays alive holding it
+    const holder = Bun.spawn(["bun", "-e", `import { acquireRunLock } from "./scripts/lib/run-lock.ts"; acquireRunLock(${JSON.stringify(host.store.dir)}, ${JSON.stringify(PARENT)}, "concurrent-holder"); setInterval(() => {}, 10_000);`], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    await new Promise((r) => setTimeout(r, 800)); // the lock file lands
+    const held = await runCli(baseDepsArgv(), host, github, new ProbeDriver());
+    expect(held.result.code).toBe(5);
+    expect(held.seams.dispatchCalls).toHaveLength(0);
+    expect(JSON.stringify(held.result.errLines)).toMatch(/lock-refused/);
+    // SIGKILL the holder — no exit handler runs, the lock file remains held by a dead pid: STALE
+    holder.kill(9);
+    await holder.exited;
+    const stale = await runCli(baseDepsArgv(), host, github, new ProbeDriver(), { chainApprovalState: "awaiting-approval" });
+    // a stale lock is REPORTED (never stolen): a distinct remediated outcome carrying the rm line,
+    // never folded into the benign refusal count
+    expect(stale.result.code).toBe(5);
+    expect(JSON.stringify(stale.result.errLines)).toMatch(/rm /);
+    expect(stale.seams.dispatchCalls).toHaveLength(0);
   });
 });

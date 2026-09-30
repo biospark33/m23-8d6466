@@ -135,9 +135,14 @@ export interface ChainReport {
    */
   timings: { prFetchMs: number; perHopMs: Record<string, number> };
   /**
-   * Keyed by contributing runId; EXACTLY one key (the parent run) in this
-   * story. When hop 1 resolved no runId the key falls back to the PR url and
-   * then to the raw ref — a lookup key, never a claim that the run exists.
+   * Keyed by contributing runId. DF5.3 walked the parent run alone; DF6.1b
+   * extends the map ADDS-ONLY with one entry per contributing fix runId
+   * (`extensions.fixLoop.fixOutcome.runIds` on the parent record) — a PR walk
+   * resolves the parent's chain AND each fix run's, and a contributing runId
+   * whose chain is missing or incomplete is a broken hop, never an ignored one
+   * (INV-AUDIT-6). When hop 1 resolved no runId the key falls back to the PR
+   * url and then to the raw ref — a lookup key, never a claim that the run
+   * exists.
    */
   runs: Record<string, RunChain>;
 }
@@ -682,6 +687,36 @@ function duplicateCounts(byEvent: Map<string, AuditLinkRow[]>): Record<string, n
   const counts: Record<string, number> = {};
   for (const [event, rows] of byEvent) if (rows.length > 1) counts[event] = rows.length;
   return Object.keys(counts).length === 0 ? undefined : counts;
+}
+
+/**
+ * DF6.1b: the contributing fix runIds a parent record names, in attempt order,
+ * parsed tolerantly from the JSON-encoded `fixLoop.fixOutcome` string. Empty
+ * when the record is absent, carries no fixOutcome, or the payload is torn —
+ * a torn payload contributes NOTHING here (the loop's own INV-7 discipline
+ * owns the write; the walker only reads what landed).
+ */
+function contributingRunIdsOf(rec: RunRecord | undefined): string[] {
+  if (rec === undefined) return [];
+  const raw = (rec.extensions?.fixLoop as Record<string, unknown> | undefined)?.fixOutcome;
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return [];
+    const runIds = (parsed as { runIds?: unknown }).runIds;
+    if (!Array.isArray(runIds)) return [];
+    return runIds.filter((id): id is string => typeof id === "string" && id.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** The typed broken hop a contributing runId whose chain cannot resolve reports (INV-AUDIT-6). */
+function brokenContributorChain(fixRunId: string, diagnostic: string): RunChain {
+  const hops = Object.fromEntries(
+    HOPS.map((h) => [h, { status: "broken", hop: h, expected: "a resolvable contributing run chain", actual: "unresolved", diagnostic } as HopOutcome]),
+  ) as Record<HopName, HopOutcome>;
+  return { runId: fixRunId, complete: false, hops };
 }
 
 // ---------------------------------------------------------------------------
@@ -1853,9 +1888,41 @@ export async function walkAuditChain(ref: string, opts: WalkOptions = {}): Promi
 
     const hops = Object.fromEntries(HOPS.map((h) => [h, outcomes[h] as HopOutcome])) as Record<HopName, HopOutcome>;
     const runChain: RunChain = { runId, complete: chainComplete(hops), hops };
+
+    // ── DF6.1b, adds only: per-contributing-runId resolution (AC3). The
+    // parent record's `extensions.fixLoop.fixOutcome.runIds` names every
+    // contributing fix run in attempt order; each gets its own RunChain entry
+    // here, walked through the SAME walk (run-id ref kind). A contributing
+    // runId whose chain is missing or incomplete is a BROKEN HOP, never an
+    // ignored one (INV-AUDIT-6): its entry simply reports complete: false, and
+    // the report's top-level `complete` ANDs it in. Expansion is exactly one
+    // level — only the PR's parent record is expanded, never a contributing
+    // run's own (a fix run carries no fixOutcome of its own).
+    const runs: Record<string, RunChain> = { [mapKey]: runChain };
+    let contributionsComplete = true;
+    const contributingIds = contributingRunIdsOf(record);
+    for (const fixRunId of contributingIds) {
+      if (runId !== null && fixRunId === runId) continue;
+      try {
+        const sub = await walkAuditChain(fixRunId, { ...opts, requestId: walkRequestId });
+        const subChain = sub.runs[fixRunId];
+        if (subChain === undefined) {
+          runs[fixRunId] = brokenContributorChain(fixRunId, "the sub-walk resolved no chain for the contributing runId");
+          contributionsComplete = false;
+        } else {
+          runs[fixRunId] = subChain;
+          contributionsComplete = contributionsComplete && subChain.complete;
+        }
+      } catch (e) {
+        runs[fixRunId] = brokenContributorChain(fixRunId, `the contributing run's chain could not be walked: ${cap((e as Error).message)}`);
+        contributionsComplete = false;
+      }
+    }
+
     return {
       ref, refKind: parsed.refKind, generatedAt: now().toISOString(),
-      complete: runChain.complete, timings: { prFetchMs, perHopMs }, runs: { [mapKey]: runChain },
+      complete: runChain.complete && contributionsComplete,
+      timings: { prFetchMs, perHopMs }, runs,
     };
   })().finally(() => {
     // Every other resource in this file closes in a finally (`readTrace`'s

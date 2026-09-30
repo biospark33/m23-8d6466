@@ -1304,8 +1304,13 @@ test.todoIf(liveTodoOff())(
         stderrTail: redactSecrets(inv2.stderr.trim().slice(-600)),
       });
       expect(inv2.exitCode).toBe(0);
-      const inv2Line = lastJsonLine<{ state?: string; runId?: string; prNumber?: number; attempt?: number; attemptSha?: string; requestId?: string }>(inv2.stdout);
-      expect(inv2Line.state).toBe("appended");
+      const inv2Line = lastJsonLine<{ state?: string; runId?: string; prNumber?: number; attempt?: number; attempts?: number; attemptSha?: string; requestId?: string }>(inv2.stdout);
+      // DF6.1b composes the SHA-bound poll into THIS invocation (W6-D-B1): the
+      // result line is the VERDICT — green on the disposable repo's fast
+      // required check (the env leg (i) substrate). The appended commit is
+      // asserted below against the branch API regardless.
+      expect(inv2Line.state).toBe("green");
+      expect(inv2Line.attempts).toBe(1);
       expect(inv2Line.runId).toBe(fixRunId);
       expect(inv2Line.prNumber).toBe(prNumber);
       const attemptSha = typeof inv2Line.attemptSha === "string" ? inv2Line.attemptSha : "";

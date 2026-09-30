@@ -840,7 +840,62 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### 2026-09-30 — Implemented (feature/df6-1b-ci-verdict-budget)
+
+Shipped: `src/fixloop/ci-status.ts` (the three-invocation SHA-bound poll + the attempt-start
+required-check probe, real `gh` child with `GH_TOKEN` on the child env only), `src/fixloop/escalation.ts`
+(the classification union, the derivation ladder with `written`/`approvalState` entry facts, the two
+ceilings, the `fixOutcome` codec with its scratch-store preflight, the PATTERN-redacted escalation
+comment), the `scripts/fix-run.ts` routing (loop-terminal marker, bot-response stop, ceiling
+escalation, discovery arms, poll recovery, the post-push inline poll leg, the once-per-PR refusal
+markers), the adds-only per-contributing-runId resolution in `src/audit/chain.ts`, and the
+`priorAttempt` brief carrier. Offline suites: tests/fixloop 145 green (ci-status 20 · escalation 28 ·
+cli 97), chain legs in tests/audit/chain.test.ts, live demo leg gated `liveGate("2")`.
+
+Implementation rulings (all additive; none re-derive a spec decision):
+
+1. **Files beyond the story's list** — `src/fleet/brief-schema.ts` (AC2's attempt-2 brief carrier
+   needs an optional strict `fixContext.priorAttempt`; adds-only, byte-identical when absent),
+   `tests/audit/chain.test.ts` (AC3's legs live where the DF5.3 walk fixtures live), and
+   `tests/fleet/e2e/fix-loop-verdict.live.test.ts` (the mandatory demo as its own gated file reusing
+   DF6.1a's demo environment). The story's Files list named only the primary surfaces.
+2. **W20-1's "no attemptSha yet" branch** — the all-newer comparison fires only when a REAL
+   `attemptSha` is recorded on some ledger entry (a push happened). With no push there is no anchor to
+   be newer than, and the pre-push refusal paths (dispatch-refused, out-of-scope-diff,
+   scope-requires-privilege, fix-scope-missing) each carry their OWN deterministic bound that fires
+   before the ping-pong clause could. The three pinned DoD legs (ping-pong, fresh-PR, retry
+   exception) all hold under this reading; a literal no-anchor all-newer would break the uncharged
+   retry flow the uncharged ceiling exists to bound.
+3. **"CI failure messages"** = the failed required checks' names and buckets, read from the locked
+   three-invocation surface (`gh pr checks --required` carries no log text). No `gh run view` surface
+   is introduced — the infra table names exactly three invocations, and `--log-failed` would add a
+   fourth plus a read-broader-than-needed posture. The redactor still runs on every prose field, so
+   the egress DoD legs hold verbatim.
+4. **Escalation-once invariant** — a comment posts exactly when this invocation WRITES a
+   classification (`fixOutcomeClass`) or the loop-terminal `fixOutcome`; `AttemptEntry.written`
+   distinguishes written from derived so the discovery arms (approval-timed-out, orphaned) page once
+   and later invocations dispatch silently while the ceiling allows. `dispatch-refused` and
+   `scope-requires-privilege` also write the parent `fixOutcome` at first occurrence (they are
+   loop-terminal by their own bound), which is what makes "no second escalation comment" hold.
+5. **The dedup ordering** — the already-recorded no-op fires only when the LATEST ledger entry has no
+   terminal/poll-recovery story to tell. A terminal latest on an unchanged comment set is precisely
+   the retry case AC2's exception protects, and a poll-recovery latest is an unfinished answer the
+   invocation resumes. This supersedes DF6.1a's unconditional dedup ordering; the G1 leg is
+   repurposed into the DoD's retry-exception leg.
+6. **Attempt ordinal** = ledger length + 1 (every dispatched attempt, refused ones included, is in
+   the ledger); `fixOutcome.attempts` = attempts that reached CI (charged failures plus the green).
+7. **The invocation-2 result line** is now the VERDICT (`state:"green"` with attempts/polls/checks),
+   not the bare `appended` — the poll attaches in the same invocation (W6-D-B1) and the append event
+   rides `fix-attempt-appended` on the log, not stdout.
+8. **The live demo pairs with the next operator-prepared round** — the substrate is DF6.1a's
+   disposable-repo environment (the append round leaves exactly the pushed state this demo resumes);
+   offline, the composition's parser and empty-set probe are exercised against the REAL `gh` surface
+   (gate G5, PR #389, read-only). No live round ran at merge time.
+
+Dev-run verification: tsc clean, biome clean over every touched file, tests/fixloop + tests/audit +
+tests/pr + tests/fleet green, full package suite green, /unlazy gates G1–G6 runnable-met with
+evidence, GitNexus impact LOW on both pre-edit symbols, detect_changes confined to OWNS.
+
 
 ### 2026-09-08 — Split from DF6.1
 

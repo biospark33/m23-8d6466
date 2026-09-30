@@ -277,6 +277,8 @@ export function buildFixBrief(o: {
   pr: { number: number; headRefName: string; headSha: string };
   botComments: BotComment[];
   requestId?: string;
+  /** DF6.1b: attempt ≥ 2 carries the prior attempt's CI failure (already redacted) and runId. */
+  priorAttempt?: { runId: string; classification: string; ciFailure: string };
 }): Brief {
   const budget = o.parent.extensions?.budget;
   const repoSlug = typeof budget?.repoSlug === "string" ? budget.repoSlug : undefined;
@@ -299,7 +301,11 @@ export function buildFixBrief(o: {
     manifestPath: FIX_RUN_MANIFEST_PATH,
     repoUrl,
     ...(o.requestId === undefined ? {} : { requestId: o.requestId }),
-    fixContext: { schemaVersion: 1, botComments: o.botComments },
+    fixContext: {
+      schemaVersion: 1,
+      botComments: o.botComments,
+      ...(o.priorAttempt === undefined ? {} : { priorAttempt: o.priorAttempt }),
+    },
   });
 }
 

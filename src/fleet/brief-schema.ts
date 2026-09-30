@@ -437,6 +437,19 @@ export const BriefSchema = z.strictObject({
           }),
         )
         .max(MAX_FIX_COMMENTS),
+      // DF6.1b: attempt 2's brief carries attempt 1's CI failure and its runId
+      // (story AC2 — the one channel that hands content to the box). The
+      // ciFailure text is PATTERN-redacted on the host BEFORE it reaches this
+      // schema (buildFixBrief's caller), so the box sees what the public PR
+      // comment sees. Optional adds-only: a brief without it is byte-identical
+      // to before.
+      priorAttempt: z
+        .strictObject({
+          runId: z.string().regex(/^[a-z0-9-]{6,64}$/),
+          classification: z.string().min(1).max(64),
+          ciFailure: z.string().max(MAX_FIX_SNIPPET_CHARS),
+        })
+        .optional(),
     })
     .refine(
       (fc) => {

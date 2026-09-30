@@ -1945,3 +1945,89 @@ describe("link rows the store would refuse today (DoD: the read side guards too)
     expect(report.complete).toBe(true);
   });
 });
+
+// ─── DF6.1b: per-contributing-runId resolution (AC3, INV-AUDIT-6) ────────────
+
+/**
+ * Plant the loop-terminal marker the fix loop writes: the JSON-encoded
+ * `fixLoop.fixOutcome` on the PARENT record — the record hop 1 reaches from
+ * the PR — naming the parent plus every fix runId in attempt order.
+ */
+function plantFixOutcome(parentRunId: string, runIds: string[]): void {
+  const store = new RunRecordStore({ dir: runsDir });
+  store.set(parentRunId, {
+    extensions: {
+      fixLoop: {
+        schemaVersion: 1,
+        fixOutcome: JSON.stringify({ schemaVersion: 1, prNumber: 57, attempts: 1, outcome: "green", runIds }),
+      },
+    },
+  });
+}
+
+/** A fully-green run: record, ledger rows, credential/box/bundle links, trace, reverify report. */
+function seedGreenRun(runId: string, requestId: string, reportId: string): void {
+  seedRecord({ runId, requestId, reportId, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+  seedLedger(runId, requestId);
+  seedLinks([...credentialLinks(runId, requestId), ...boxLinks(runId, requestId), ...bundleLinks(runId, requestId)]);
+  buildTrace(join(runsDir, `${runId}-artifacts`), { requestId, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+  writeReports(runId, [mkReport(runId, requestId, reportId)]);
+}
+
+describe("DF6.1b: the walk resolves the parent's chain AND each contributing fix runId's", () => {
+  test("both chains resolve; the report carries one entry per contributing runId", async () => {
+    seedGreenRun(RUN, REQ, REPORT_ID);
+    seedGreenRun(RUN_B, REQ_B, REPORT_ID_B);
+    plantFixOutcome(RUN, [RUN, RUN_B]);
+
+    const report = await walk(PR_URL);
+
+    expect(Object.keys(report.runs).sort()).toEqual([RUN, RUN_B].sort());
+    expect(report.complete).toBe(true);
+    expect(chainVerdict(report).complete).toBe(true);
+    // each entry is its OWN chain: hop 8 binds the run's own report
+    const approvalB = report.runs[RUN_B]?.hops["run-approval"] as { detail: { reportId: string } };
+    expect(approvalB.detail.reportId).toBe(REPORT_ID_B);
+  });
+
+  test("a contributing runId whose chain is missing is a BROKEN HOP, never ignored (INV-AUDIT-6)", async () => {
+    seedGreenRun(RUN, REQ, REPORT_ID);
+    const GHOST = "qds-20260930-gh0st";
+    plantFixOutcome(RUN, [RUN, GHOST]);
+
+    const report = await walk(PR_URL);
+
+    const ghost = report.runs[GHOST];
+    expect(ghost).toBeDefined();
+    expect(ghost?.complete).toBe(false);
+    expect(ghost?.runId).toBe(GHOST);
+    expect(Object.values(ghost?.hops ?? {}).every((h) => h.status === "broken")).toBe(true);
+    expect(report.complete).toBe(false);
+  });
+
+  test("deleting one fix run's links yields a broken chain in THAT run's entry — a parent-only walker reports complete and MUST fail", async () => {
+    seedGreenRun(RUN, REQ, REPORT_ID);
+    // the fix run's RECORD exists but its audit links never landed
+    seedRecord({ runId: RUN_B, requestId: REQ_B, reportId: REPORT_ID_B, prUrl: PR_URL, closedAt: new Date(iso(30)) });
+    seedLedger(RUN_B, REQ_B);
+    buildTrace(join(runsDir, `${RUN_B}-artifacts`), { requestId: REQ_B, repoSlug: SLUG, issueId: ISSUE, gates: [{ gate: "tests-pass", passed: 1 }] });
+    writeReports(RUN_B, [mkReport(RUN_B, REQ_B, REPORT_ID_B)]);
+    plantFixOutcome(RUN, [RUN, RUN_B]);
+
+    const report = await walk(PR_URL);
+
+    expect(report.runs[RUN_B]?.complete).toBe(false);
+    const cred = report.runs[RUN_B]?.hops["run-credential"] as HopOutcome;
+    expect(cred.status === "broken" || cred.status === "unlinked").toBe(true);
+    expect(report.complete).toBe(false);
+  });
+
+  test("no fixOutcome — the DF5.3 shape is unchanged: exactly the parent key", async () => {
+    seedGreenRun(RUN, REQ, REPORT_ID);
+
+    const report = await walk(PR_URL);
+
+    expect(Object.keys(report.runs)).toEqual([RUN]);
+    expect(report.complete).toBe(true);
+  });
+});

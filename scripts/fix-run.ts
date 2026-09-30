@@ -78,19 +78,38 @@ import { startRun, type StartRunDeps, type StartRunResult } from "../src/fleet/r
 import {
   assertFixCeilingCovered,
   assertSingleFixer,
+  ATTEMPT_SHA_PLACEHOLDER,
+  buildEscalationComment,
   buildFixBrief,
   buildFixContextPayload,
+  CHARGED_CLASSES,
   classifyDiffScope,
+  deriveAttemptLadder,
   encodeFixContext,
+  encodeFixOutcome,
+  evaluateCeilings,
   fetchBotComments,
   FIX_DISPATCH_CEILING_MS,
+  fixContextHasRealSha,
+  ghRunnerFromToken,
   parseFixContext,
+  ONCE_PER_PR_CLASSES,
+  parseFixOutcome,
+  pollRequiredChecks,
+  postEscalationComment,
   preflightFixContextWrite,
+  preflightFixOutcomeWrite,
   probeBoxCredentials,
+  probeRequiredChecks,
   readFixScope,
   type BotCommentSet,
+  type BudgetCounts,
+  type EscalationClass,
+  type EscalationDiagnostic,
   type FixScopeAction,
+  type GhRunner,
   type IssueBudgetSnapshotSource,
+  type PollVerdict,
 } from "../src/fixloop/index.ts";
 import { loadRoster, RosterError } from "../src/phase-engine/roster/schema.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
@@ -189,6 +208,12 @@ export interface FixRunDeps {
   now?: () => Date;
   /** The dispatch cap, and the ceiling pre-flight's one uniform rate. Default: defaultKeyCapMicroUsd. */
   capMicroUsd?: number;
+  /** The `gh` runner behind the CI-verdict poll and the required-check probe. Default: ghRunnerFromToken(token). */
+  gh?: GhRunner;
+  /** The poll cadence's sleep. Default: a real 30-second timer (tests inject an immediate resolve). */
+  sleep?: (ms: number) => Promise<void>;
+  /** INV-7 validate-only seam for fixOutcome (default: preflightFixOutcomeWrite). */
+  preflightOutcome?: (encoded: string) => void;
 }
 
 /**
@@ -549,49 +574,150 @@ export async function run(
       return noop("no-bot-comments");
     }
     const attemptIds = fixAttemptRunIdsOf(parent);
+
+    // ── DF6.1b: the loop-terminal marker. fixOutcome is write-once at the
+    // LOOP's terminal, so its presence means every later invocation reports
+    // the recorded outcome, dispatches nothing and posts no second escalation
+    // comment — the escalation was posted once, when the outcome was written.
+    const recordedOutcome = parseRecordedFixOutcome(parent);
+    if (recordedOutcome !== undefined) {
+      if (recordedOutcome.outcome === "green") {
+        return noop("loop-green", { attempts: recordedOutcome.attempts, runIds: recordedOutcome.runIds });
+      }
+      note(
+        `${JSON.stringify({ code: "loop-terminal", classification: recordedOutcome.classification ?? null, attempts: recordedOutcome.attempts, escalation: "already-posted", message: "the fix loop already escalated on this PR; dispatching nothing" })}\n`,
+      );
+      errorDetail = { code: "loop-terminal", message: "the fix loop already escalated on this PR; dispatching nothing" };
+      code = 1;
+      return code;
+    }
+
+    // ── DF6.1b: the attempt ladder, derived across the whole ledger ──
+    const ladder = deriveAttemptLadder((id) => store.get(id), attemptIds);
+    const counts = ladder.counts;
+
+    // The comment-ID dedup (DF6.1a): a FRESH first attempt on comments the
+    // loop already answered is a no-op — but only when the LATEST attempt has
+    // no terminal story to tell. A terminal latest (charged failure, refusal,
+    // orphan) must reach the budget routing below even on an unchanged set:
+    // that is precisely the retry case the DF6.1b arms decide.
     const recorded = recordedCommentIds(store, attemptIds);
-    if (commentSet.commentIds.every((id) => recorded.has(id))) {
+    const latestPre = ladder.entries.at(-1);
+    if (
+      commentSet.commentIds.length > 0 &&
+      commentSet.commentIds.every((id) => recorded.has(id)) &&
+      latestPre !== undefined &&
+      latestPre.arm !== "terminal" &&
+      latestPre.arm !== "orphaned" &&
+      // a poll that never settled is an UNFINISHED answer — the invocation
+      // resumes it against the persisted anchor instead of no-oping
+      latestPre.arm !== "poll-recovery"
+    ) {
+      return noop("already-recorded", { commentIds: commentSet.commentIds });
+    }
+    if (commentSet.commentIds.every((id) => recorded.has(id)) && latestPre === undefined) {
       return noop("already-recorded", { commentIds: commentSet.commentIds });
     }
 
-    // ── routing on the LATEST attempt's approval state ──
-    const latestId = attemptIds.at(-1);
-    let latest: RunRecord | undefined;
-    if (latestId !== undefined) {
+    /** INV-7's ordering, one place: build → validate → write → THEN post. The loop-terminal marker makes every later invocation exit non-zero without a second comment. */
+    const escalateTerminal = async (o: { classification: EscalationClass; charged: boolean; note?: string; diagnostics: EscalationDiagnostic }): Promise<number> => {
+      const encoded = encodeFixOutcome({
+        schemaVersion: 1,
+        prNumber,
+        attempts: counts.charged,
+        outcome: "escalated",
+        classification: o.classification,
+        runIds: [parent.runId, ...attemptIds],
+      });
       try {
-        latest = store.get(latestId);
-      } catch {
-        // A dangling ledger id (reaped/damaged record) routes to a fresh attempt.
-        latest = undefined;
+        (deps?.preflightOutcome ?? preflightFixOutcomeWrite)(encoded);
+      } catch (e) {
+        const x = (e ?? {}) as { message?: string };
+        printRefusal(
+          "fix-outcome-preflight-failed",
+          `the fixOutcome payload failed its validate-only preflight: ${redactSecrets(x.message ?? e)}`,
+          "nothing was posted — the payload that cannot be written is refused BEFORE the escalation comment (INV-7)",
+        );
+        errorDetail = { code: "fix-outcome-preflight-failed", message: redactSecrets(x.message ?? e) };
+        return 5;
       }
-    }
-    const latestState = latest === undefined ? undefined : approvalStateOf(latest);
+      store.set(parent.runId, { extensions: { fixLoop: { fixOutcome: encoded } } });
+      const escStart = Date.now();
+      try {
+        await postEscalationComment({
+          github,
+          owner: repoEntry.owner,
+          repo: repoEntry.repo,
+          prNumber,
+          body: buildEscalationComment({ prNumber, classification: o.classification, charged: o.charged, diagnostics: o.diagnostics, note: o.note }),
+          token,
+        });
+        timings.escalation_ms = Date.now() - escStart;
+      } catch (e) {
+        const x = (e ?? {}) as { message?: string };
+        printRefusal(
+          "escalation-post-failed",
+          `could not post the escalation comment: ${redactSecrets(x.message ?? e)}`,
+          "the loop-terminal outcome IS recorded — the PR has no comment only if GitHub refused the post",
+        );
+      }
+      printRefusal(o.classification, `the fix loop stopped: ${o.note ?? "budget terminal"}`, "inspect the PR and the run records; the loop dispatches nothing further on this PR");
+      errorDetail = { code: o.classification, message: o.note ?? "budget terminal" };
+      return 1;
+    };
 
-    if (latest !== undefined && (latestState === "pausing" || latestState === "awaiting-approval")) {
-      // Approval wait is human time and is never polled (AC3).
-      fixRunId = latest.runId;
-      return noop("approval-pending", { runId: latest.runId, approvalState: latestState });
+    // bot-response-to-fix (the ping-pong stop): the budget is a LIFETIME cap
+    // per PR. A comment set whose IDs are ALL absent from every recorded
+    // attempt's set — on a PR the loop has already pushed to — is the review
+    // bot answering the fix, not new feedback: escalate, never re-dispatch; a
+    // fresh comment set never resets anything.
+    const pushed = attemptIds.some((id) => {
+      try {
+        return fixContextHasRealSha(store.get(id).extensions?.fixLoop?.fixContext);
+      } catch {
+        return false;
+      }
+    });
+    if (pushed && commentSet.commentIds.length > 0 && commentSet.commentIds.every((id) => !recorded.has(id))) {
+      logAttemptRefused("bot-response-to-fix", ["bot-response-to-fix"]);
+      code = await escalateTerminal({
+        classification: "bot-response-to-fix",
+        charged: counts.charged > 0,
+        note: "every comment in this set was posted AFTER the loop's last push — the review bot is responding to the fix; the attempt budget is a lifetime cap per PR and a fresh comment set never resets it",
+        diagnostics: {
+          errorLog: `the loop already pushed ${attemptIds.length} attempt(s) to this PR; this comment set is the bot's response to its own fix`,
+          diffAttempted: [],
+          ciFailureMessages: [],
+          runIds: [parent.runId, ...attemptIds],
+        },
+      });
+      return code;
     }
 
-    if (latest !== undefined && latestState === "approved") {
-      fixRunId = latest.runId;
-      code = await invocation2({
+    const latestId = attemptIds.at(-1);
+    const latestEntry = ladder.entries.at(-1);
+
+    // Poll recovery: invocation 2 died mid-poll. The window's opening is
+    // persisted in fixContext.pollWindowOpenedAt — resume against its
+    // remaining time, never a restarted window.
+    if (latestEntry !== undefined && latestEntry.arm === "poll-recovery" && latestId !== undefined) {
+      fixRunId = latestId;
+      code = await pollRecovery({
         deps,
         store,
         github,
         token,
-        tokenFn,
         requestId,
-        hostRoot,
-        repoSlug,
         owner: repoEntry.owner,
         repo: repoEntry.repo,
-        reposFile: args.reposFile,
         pr: { number: prNumber, headRefName: pr.headRefName },
-        fixRunId: latest.runId,
+        fixRunId: latestId,
+        parentRunId: parent.runId,
+        attemptIds,
+        counts,
         note,
+        printRefusal,
         printResult,
-        logAttemptRefused,
         fixEvent,
         timings,
         setPhase: (p) => {
@@ -600,6 +726,118 @@ export async function run(
         now,
       });
       return code;
+    }
+
+    if (latestEntry !== undefined && latestEntry.arm === "continuation" && latestId !== undefined) {
+      // The approval state decides (AC3) — read off the LADDER ENTRY, not a
+      // second record read: pausing/awaiting-approval is human time and is
+      // never polled; an approved record with no fixContext is the sanctioned
+      // re-attempt of the scope→push leg (invocation 2).
+      const latestState = latestEntry.approvalState;
+      if (latestState === "pausing" || latestState === "awaiting-approval") {
+        fixRunId = latestId;
+        return noop("approval-pending", { runId: latestId, approvalState: latestState });
+      }
+      if (latestState === "approved") {
+        fixRunId = latestId;
+        code = await invocation2({
+          deps,
+          store,
+          github,
+          token,
+          tokenFn,
+          requestId,
+          hostRoot,
+          repoSlug,
+          owner: repoEntry.owner,
+          repo: repoEntry.repo,
+          reposFile: args.reposFile,
+          pr: { number: prNumber, headRefName: pr.headRefName },
+          fixRunId: latestId,
+          parentRunId: parent.runId,
+          attemptIds,
+          counts,
+          attempt: attemptIds.length,
+          diffPaths: [],
+          note,
+          printRefusal,
+          printResult,
+          logAttemptRefused,
+          fixEvent,
+          timings,
+          setPhase: (p) => {
+            phase = p;
+          },
+          now,
+        });
+        return code;
+      }
+    }
+
+    if (latestEntry !== undefined && (latestEntry.arm === "terminal" || latestEntry.arm === "orphaned")) {
+      // The ceilings speak before anything dispatches.
+      const violations = evaluateCeilings(counts);
+      if (violations.length > 0) {
+        logAttemptRefused("attempt-budget-exhausted", violations, { classifications: counts.classifications });
+        code = await escalateTerminal({
+          classification: latestEntry.classification ?? "orphaned",
+          charged: latestEntry.arm === "terminal" && latestEntry.classification !== undefined && CHARGED_CLASSES.has(latestEntry.classification),
+          note: `the attempt budget is exhausted (${violations.join(", ")}); recorded classifications: ${counts.classifications.join(", ")}`,
+          diagnostics: {
+            errorLog: `the loop will not dispatch again on this PR: ${violations.join(", ")} ceiling(s) reached across ${attemptIds.length} recorded attempt(s)`,
+            diffAttempted: [],
+            ciFailureMessages: [],
+            runIds: [parent.runId, ...attemptIds],
+          },
+        });
+        return code;
+      }
+      const cls = latestEntry.classification;
+      if (!latestEntry.written && (cls === "approval-timed-out" || cls === "orphaned")) {
+        // DISCOVERY: the state was written by a process outside this loop
+        // (DF3.4's expiry) or derived from a dead record. Write the class,
+        // page once, stop — the operator's next invocation dispatches while
+        // the uncharged ceiling allows it.
+        fixRunId = latestId!;
+        store.set(latestId!, { extensions: { fixLoop: { fixOutcomeClass: cls } } });
+        try {
+          const escStart = Date.now();
+          await postEscalationComment({
+            github,
+            owner: repoEntry.owner,
+            repo: repoEntry.repo,
+            prNumber,
+            body: buildEscalationComment({
+              prNumber,
+              classification: cls!,
+              charged: false,
+              diagnostics: {
+                errorLog: cls === "approval-timed-out" ? "the approval window expired undecided (DF3.4's expiry)" : "the attempt's record carries no terminal outcome, no live approval state and no fixContext",
+                diffAttempted: [],
+                ciFailureMessages: [],
+                runIds: [latestId!, parent.runId],
+              },
+              note: cls === "approval-timed-out" ? "the attempt is uncharged; re-invoke to dispatch the next attempt" : "the attempt is uncharged; re-invoke to dispatch the next attempt",
+            }),
+            token,
+          });
+          timings.escalation_ms = Date.now() - escStart;
+        } catch (e) {
+          const x = (e ?? {}) as { message?: string };
+          printRefusal(
+            "escalation-post-failed",
+            `could not post the ${cls} escalation comment: ${redactSecrets(x.message ?? e)}`,
+            "the classification is recorded; check the PR's comments by hand",
+          );
+        }
+        printRefusal(cls!, `attempt ${latestId} ended as ${cls} — escalation posted`, "re-invoke to dispatch the next attempt — the uncharged ceiling still allows it");
+        errorDetail = { code: cls!, message: `attempt ${latestId} ended as ${cls}` };
+        code = 1;
+        return code;
+      }
+      // A charged failure under budget, or a written uncharged terminal under
+      // the ceiling: its escalation was posted when the classification was
+      // written — this invocation IS the operator's decision to continue.
     }
 
     code = await invocation1({
@@ -613,6 +851,17 @@ export async function run(
       pr: { number: prNumber, headRefName: pr.headRefName, headSha: pr.headSha },
       commentSet,
       requestId,
+      attempt: attemptIds.length + 1,
+      gh: deps?.gh ?? ghRunnerFromToken(token),
+      owner: repoEntry.owner,
+      repo: repoEntry.repo,
+      token,
+      github,
+      fixEvent,
+      priorAttempt:
+        latestEntry !== undefined && latestEntry.classification !== undefined && latestEntry.classification !== "green"
+          ? { runId: latestEntry.runId, classification: latestEntry.classification }
+          : undefined,
       note,
       printRefusal,
       printResult,
@@ -702,6 +951,8 @@ export async function run(
  * and usage failures are not attempt refusals and are absent here.
  */
 const REFUSAL_EVENT_CODES: ReadonlySet<string> = new Set([
+  "empty-required-set",
+  "poll-anchor-invalid",
   "fix-scope-missing",
   "fix-ceiling-insufficient",
   "fix-roster-not-single-fixer",
@@ -716,6 +967,199 @@ const REFUSAL_EVENT_CODES: ReadonlySet<string> = new Set([
   "fix-context-preflight-failed",
 ]);
 
+// ─── DF6.1b: the loop-terminal marker, the poll verdict, poll recovery ───────
+
+/** Tolerant read of the parent's loop-terminal marker; undefined when absent or torn. */
+function parseRecordedFixOutcome(parent: RunRecord): ReturnType<typeof parseFixOutcome> | undefined {
+  const raw = (parent.extensions?.fixLoop as Record<string, unknown> | undefined)?.fixOutcome;
+  if (typeof raw !== "string") return undefined;
+  try {
+    return parseFixOutcome(raw);
+  } catch {
+    // A torn fixOutcome is never a dispatch authority — the ladder decides.
+    return undefined;
+  }
+}
+
+/** The green/charged terminal the poll (or its recovery) settles into — shared by invocation 2 and recovery. */
+interface PollSettleCtx {
+  deps?: FixRunDeps;
+  store: RunRecordStore;
+  github: GitHubApi;
+  token: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  fixRunId: string;
+  parentRunId: string;
+  attemptIds: readonly string[];
+  counts: BudgetCounts;
+  attempt: number;
+  /** The pushed sha the verdict is bound to — echoed on the result line. */
+  attemptSha: string;
+  diffPaths: readonly string[];
+  verdict: PollVerdict;
+  note: (s: string) => void;
+  printRefusal: (code: string, message: string, remediation?: string, payload?: Record<string, unknown>) => void;
+  printResult: (obj: Record<string, unknown>) => boolean;
+  fixEvent: (fields: Record<string, unknown>) => void;
+  timings: Record<string, number>;
+  now: () => Date;
+}
+
+async function settlePollVerdict(ctx: PollSettleCtx): Promise<number> {
+  if (ctx.verdict.kind === "green") {
+    // Terminal success: the attempt's own class, then the loop-terminal
+    // marker on the PARENT record — the record DF5.3's chain reaches from the
+    // PR at hop 1. INV-7: the payload is validated before anything else.
+    ctx.store.set(ctx.fixRunId, { extensions: { fixLoop: { fixOutcomeClass: "green" } } });
+    const encoded = encodeFixOutcome({
+      schemaVersion: 1,
+      prNumber: ctx.prNumber,
+      attempts: ctx.counts.charged + 1,
+      outcome: "green",
+      runIds: [ctx.parentRunId, ...ctx.attemptIds],
+    });
+    (ctx.deps?.preflightOutcome ?? preflightFixOutcomeWrite)(encoded);
+    ctx.store.set(ctx.parentRunId, { extensions: { fixLoop: { fixOutcome: encoded } } });
+    ctx.fixEvent({ event: "ci-verdict-green", runId: ctx.fixRunId, attempt: ctx.attempt, polls: ctx.verdict.polls });
+    const printed = ctx.printResult({
+      state: "green",
+      runId: ctx.fixRunId,
+      prNumber: ctx.prNumber,
+      attempt: ctx.attempt,
+      attempts: ctx.counts.charged + 1,
+      polls: ctx.verdict.polls,
+      checks: ctx.verdict.checks,
+      attemptSha: ctx.attemptSha,
+    });
+    return printed ? 0 : 6;
+  }
+  const cls: EscalationClass = ctx.verdict.kind === "ci-red" ? "ci-red" : "ci-verdict-unavailable";
+  // A CHARGED failure: the attempt reached CI and failed there. Record the
+  // class, then page once with the four diagnostics — the operator's next
+  // invocation dispatches the next attempt while the charged budget allows.
+  ctx.store.set(ctx.fixRunId, { extensions: { fixLoop: { fixOutcomeClass: cls } } });
+  ctx.fixEvent({ event: "ci-verdict", runId: ctx.fixRunId, attempt: ctx.attempt, classification: cls, polls: ctx.verdict.polls });
+  const body = buildEscalationComment({
+    prNumber: ctx.prNumber,
+    classification: cls,
+    charged: true,
+    diagnostics: {
+      errorLog:
+        ctx.verdict.kind === "ci-red"
+          ? `required check(s) settled non-pass on the pushed sha: ${ctx.verdict.failedChecks.map((c) => `${c.name}=${c.bucket}`).join(", ")}`
+          : ctx.verdict.reason,
+      diffAttempted: [...ctx.diffPaths],
+      ciFailureMessages: ctx.verdict.kind === "ci-red" ? ctx.verdict.failedChecks.map((c) => `${c.name}: ${c.bucket}`) : [],
+      runIds: [ctx.fixRunId, ctx.parentRunId],
+    },
+    note: ctx.verdict.kind === "ci-verdict-unavailable" ? "the 15-minute poll window expired without a settled required-check set" : undefined,
+  });
+  const escStart = Date.now();
+  try {
+    await postEscalationComment({ github: ctx.github, owner: ctx.owner, repo: ctx.repo, prNumber: ctx.prNumber, body, token: ctx.token });
+    ctx.timings.escalation_ms = Date.now() - escStart;
+  } catch (e) {
+    const x = (e ?? {}) as { message?: string };
+    ctx.printRefusal(
+      "escalation-post-failed",
+      `could not post the ${cls} escalation comment: ${redactSecrets(x.message ?? e)}`,
+      "the classification IS recorded on the attempt — check the PR's comments by hand",
+    );
+  }
+  ctx.printRefusal(
+    cls,
+    ctx.verdict.kind === "ci-red"
+      ? `the required checks failed on the pushed sha (${ctx.verdict.failedChecks.map((c) => c.name).join(", ")}) — the attempt charged the budget`
+      : `no settled CI verdict inside the 15-minute window — the attempt charged the budget (${ctx.verdict.reason})`,
+    "re-invoke to dispatch the next attempt — the charged budget still allows it; the loop never reruns CI",
+    { runId: ctx.fixRunId, polls: ctx.verdict.polls },
+  );
+  return 1;
+}
+
+/** Invocation 2 died mid-poll: resume against the persisted window anchor — remaining time only. */
+async function pollRecovery(ctx: {
+  deps?: FixRunDeps;
+  store: RunRecordStore;
+  github: GitHubApi;
+  token: string;
+  requestId: string;
+  owner: string;
+  repo: string;
+  pr: { number: number; headRefName: string };
+  fixRunId: string;
+  parentRunId: string;
+  attemptIds: readonly string[];
+  counts: BudgetCounts;
+  note: (s: string) => void;
+  printRefusal: (code: string, message: string, remediation?: string, payload?: Record<string, unknown>) => void;
+  printResult: (obj: Record<string, unknown>) => boolean;
+  fixEvent: (fields: Record<string, unknown>) => void;
+  timings: Record<string, number>;
+  setPhase: (p: string) => void;
+  now: () => Date;
+}): Promise<number> {
+  ctx.setPhase("recover");
+  let payload: ReturnType<typeof parseFixContext>;
+  try {
+    payload = parseFixContext(ctx.store.get(ctx.fixRunId).extensions?.fixLoop?.fixContext);
+  } catch (e) {
+    throw new FleetError(
+      5,
+      "poll-anchor-invalid",
+      `the poll-interrupted record ${ctx.fixRunId} carries no parseable fixContext: ${redactSecrets((e as Error).message)}`,
+      "the record is torn; inspect it by hand — fail closed: never a restarted window, never a green (INV-6)",
+      { runId: ctx.fixRunId },
+    );
+  }
+  if (payload.attemptSha === ATTEMPT_SHA_PLACEHOLDER || !Number.isFinite(Date.parse(payload.pollWindowOpenedAt))) {
+    throw new FleetError(
+      5,
+      "poll-anchor-invalid",
+      `the poll-interrupted record ${ctx.fixRunId} carries a placeholder sha or an unparseable pollWindowOpenedAt — the window's opening is unrecoverable`,
+      "the record is torn; inspect it by hand — fail closed: never a restarted window, never a green (INV-6)",
+      { runId: ctx.fixRunId },
+    );
+  }
+  ctx.setPhase("ci-poll");
+  const pollStart = Date.now();
+  const gh = ctx.deps?.gh ?? ghRunnerFromToken(ctx.token);
+  const verdict = await pollRequiredChecks({
+    prNumber: ctx.pr.number,
+    attemptSha: payload.attemptSha,
+    windowOpenedAt: payload.pollWindowOpenedAt,
+    gh,
+    now: ctx.now,
+    sleep: ctx.deps?.sleep,
+  });
+  ctx.timings.poll_ms = Date.now() - pollStart;
+  return settlePollVerdict({
+    deps: ctx.deps,
+    store: ctx.store,
+    github: ctx.github,
+    token: ctx.token,
+    owner: ctx.owner,
+    repo: ctx.repo,
+    prNumber: ctx.pr.number,
+    fixRunId: ctx.fixRunId,
+    parentRunId: ctx.parentRunId,
+    attemptIds: ctx.attemptIds,
+    counts: ctx.counts,
+    attempt: payload.attempt,
+    attemptSha: payload.attemptSha,
+    diffPaths: [],
+    verdict,
+    note: ctx.note,
+    printRefusal: ctx.printRefusal,
+    printResult: ctx.printResult,
+    fixEvent: ctx.fixEvent,
+    timings: ctx.timings,
+    now: ctx.now,
+  });
+}
+
 // ─── invocation 1: guard → dispatch → probe → run → chain ─────────────────────
 
 interface Inv1Ctx {
@@ -727,6 +1171,19 @@ interface Inv1Ctx {
   pr: { number: number; headRefName: string; headSha: string };
   commentSet: BotCommentSet;
   requestId: string;
+  /** This attempt's dispatch ordinal — ledger length + 1 (AC2's attempt bookkeeping). */
+  attempt: number;
+  /** The gh runner behind AC1's attempt-start required-check probe. */
+  gh: GhRunner;
+  /** Attempt ≥ 2 carries the prior attempt's classification and runId (its CI failure comes from the probe). */
+  priorAttempt?: { runId: string; classification: EscalationClass };
+  /** GitHub identity for the terminal-classification escalation comment. */
+  owner: string;
+  repo: string;
+  token: string;
+  /** The live GitHub seam for the escalation post. */
+  github: GitHubApi;
+  fixEvent: (fields: Record<string, unknown>) => void;
   note: (s: string) => void;
   printRefusal: (code: string, message: string, remediation?: string, payload?: Record<string, unknown>) => void;
   printResult: (obj: Record<string, unknown>) => boolean;
@@ -742,11 +1199,54 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
   // (dispatch, startFn, the chain) goes through the writable handle.
   ctx.store = writableStoreFor(ctx.deps, ctx.store, ctx.requestId);
   const { deps, store, hostRoot, repoSlug, parent, pr, requestId } = ctx;
+  ctx.setPhase("probe-required");
+
+  // AC1's attempt-start probe: the empty-required-set refusal is evaluated
+  // BEFORE the push, BEFORE any box — a PR whose branch carries no required
+  // checks is refused, never counted green (nothing ran).
+  const requiredProbe = await probeRequiredChecks({ prNumber: pr.number, gh: ctx.gh });
+  if (!requiredProbe.present) {
+    throw new FleetError(
+      5,
+      "empty-required-set",
+      `PR #${pr.number} carries no required checks (${requiredProbe.message.trim().slice(0, 160)}) — a fix whose CI cannot fail can never prove green`,
+      "give the PR's head branch a required check (branch protection or the workflow), then re-invoke",
+      { prNumber: pr.number },
+    );
+  }
+
   ctx.setPhase("dispatch");
 
   // AC6's attempt-start probe: the scope artifact read runs BEFORE anything is
-  // provisioned — a missing/unreadable artifact refuses at no cost.
-  readFixScope(hostRoot, repoSlug);
+  // provisioned — a missing/unreadable artifact refuses at no cost. A missing
+  // artifact is DETERMINISTIC: it pages on EVERY invocation until the operator
+  // creates it (never a continuation, never a once-per-PR record — no run
+  // record is minted on this path and fixOutcome stays write-once-at-terminal).
+  try {
+    readFixScope(hostRoot, repoSlug);
+  } catch (e) {
+    if (e instanceof FleetError && e.code === "fix-scope-missing") {
+      try {
+        await postEscalationComment({
+          github: ctx.github,
+          owner: ctx.owner,
+          repo: ctx.repo,
+          prNumber: pr.number,
+          body: buildEscalationComment({
+            prNumber: pr.number,
+            classification: "fix-scope-missing",
+            charged: false,
+            diagnostics: { errorLog: e.message, diffAttempted: [], ciFailureMessages: [], runIds: [parent.runId] },
+            note: "the scope artifact is missing — create .factory/fix-scope.json and re-invoke; this page repeats on every invocation until then",
+          }),
+          token: ctx.token,
+        });
+      } catch {
+        // the refusal below still fires; the page is best-effort
+      }
+    }
+    throw e;
+  }
 
   // AC5's single-fixer guard, over the roster the run will use, BEFORE the
   // brief reaches the dispatcher. The roster path is injectable so the suite's
@@ -794,7 +1294,24 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
     })();
 
   // An ORDINARY DF3.1 dispatch — the fix run is a normal run pinned to the PR head.
-  const brief = buildFixBrief({ hostRoot, parent, pr, botComments: ctx.commentSet.botComments, requestId });
+  // Attempt ≥ 2's brief carries attempt 1's CI failure (the failed required
+  // buckets read FRESH off this invocation's probe — the red checks are still
+  // red on that sha) PATTERN-redacted before it enters the brief (W12's HIGH:
+  // box ingress gets the same redactor as the public escalation comment).
+  const failedBuckets = requiredProbe.entries.filter((c) => c.bucket !== "pass").map((c) => `${c.name}: ${c.bucket}`);
+  const priorAttempt =
+    ctx.priorAttempt === undefined
+      ? undefined
+      : {
+          runId: ctx.priorAttempt.runId,
+          classification: ctx.priorAttempt.classification,
+          ciFailure: redactSecrets(
+            failedBuckets.length > 0
+              ? `attempt ${ctx.priorAttempt.runId} (${ctx.priorAttempt.classification}): ${failedBuckets.join("; ")}`
+              : `attempt ${ctx.priorAttempt.runId} (${ctx.priorAttempt.classification})`,
+          ),
+        };
+  const brief = buildFixBrief({ hostRoot, parent, pr, botComments: ctx.commentSet.botComments, requestId, priorAttempt });
   const dispatchFn = deps?.dispatch ?? fleetDispatch;
   const dispatchDeps: DispatchDeps = {
     driver,
@@ -962,7 +1479,7 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
     } catch {
       // The verdict above stands; the state word is a courtesy read.
     }
-    const printed = ctx.printResult({ state, runId: ack.runId, prNumber: pr.number, attempt: 1, requestId });
+    const printed = ctx.printResult({ state, runId: ack.runId, prNumber: pr.number, attempt: ctx.attempt, requestId });
     return printed && !ledgerCloseFailed && !auditLinksDropped ? 0 : 6;
   }
   if (outcome.kind === "unsettled") {
@@ -976,31 +1493,110 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
       );
       return 1;
     }
+    // A terminal chain outcome is an uncharged-terminal attempt (transient):
+    // record the class, page once, stop. The ceilings gate the NEXT dispatch.
+    await chargeUnchargedTerminal("transient", t.message, t.code);
     ctx.printRefusal(t.code, t.message, t.remediation, { runId: ack.runId });
     // run-engine-dead is a death certificate (identical on retry) — 5; the
     // transient pair (box-unreachable, run-completion-unobserved) — 1.
     return t.code === "run-engine-dead" ? 5 : 1;
   }
   if (outcome.kind === "refused") {
+    // DF6.2's deterministic refusal class (dispatch_task settled fail with
+    // exitStatus "logic"): charges NOTHING — no attempt increment — and
+    // escalates immediately with the refusal's own message as the diagnostic,
+    // naming the refused precondition. One box-hour and one key cap are sunk;
+    // the loop never dispatches another attempt for it.
+    await chargeUnchargedTerminal("dispatch-refused", outcome.message, outcome.code);
     ctx.printRefusal(outcome.code, outcome.message, outcome.remediation, { runId: ack.runId });
     return 5;
   }
   // vetoed / approval-failed / chain-failed / handed-off: the run LANDED (the
   // chain tore it down and judged it) but the attempt produced nothing
-  // publishable — 6, the landed-but-not-reportable family.
-  ctx.printRefusal(
-    `chain-${outcome.kind}`,
+  // publishable — 6, the landed-but-not-reportable family. vetoed is the
+  // re-verifier refusing the tree: lead_failure. The rest are transient.
+  const chainClass: EscalationClass = outcome.kind === "vetoed" ? "lead_failure" : "transient";
+  const chainMessage =
     outcome.kind === "vetoed"
       ? `the re-verifier refused the fix run's tree: ${outcome.reason}`
       : outcome.kind === "approval-failed"
         ? `the approval gate errored: ${outcome.error}`
         : outcome.kind === "chain-failed"
           ? `the completion chain failed at ${outcome.step}: ${outcome.error}`
-          : `the approval gate returned ${outcome.outcome}, not a fresh approval request`,
+          : `the approval gate returned ${outcome.outcome}, not a fresh approval request`;
+  await chargeUnchargedTerminal(chainClass, chainMessage, `chain-${outcome.kind}`);
+  ctx.printRefusal(
+    `chain-${outcome.kind}`,
+    chainMessage,
     "the run is closed and its box torn down — the records carry the detail",
     { runId: ack.runId },
   );
   return 6;
+
+  /** Record the per-attempt class, page once with the refusal's own message, and keep the invocation's exit. */
+  async function chargeUnchargedTerminal(classification: EscalationClass, message: string, code: string): Promise<void> {
+    try {
+      store.set(ack.runId, { extensions: { fixLoop: { fixOutcomeClass: classification } } });
+      // The once-per-PR deterministic refusal is LOOP-TERMINAL: its
+      // first-occurrence escalation is its own bound, so the parent record
+      // takes the fixOutcome marker now and every later invocation exits
+      // non-zero without a second comment.
+      if (ONCE_PER_PR_CLASSES.has(classification)) {
+        const encodedOutcome = encodeFixOutcome({
+          schemaVersion: 1,
+          prNumber: pr.number,
+          attempts: 0,
+          outcome: "escalated",
+          classification,
+          runIds: [parent.runId, ack.runId],
+        });
+        (deps?.preflightOutcome ?? preflightFixOutcomeWrite)(encodedOutcome);
+        store.set(parent.runId, { extensions: { fixLoop: { fixOutcome: encodedOutcome } } });
+      }
+    } catch (e) {
+      const x = (e ?? {}) as { message?: string };
+      ctx.printRefusal(
+        "fix-outcome-class-write-failed",
+        `could not record fixOutcomeClass=${classification} on ${ack.runId}: ${redactSecrets(x.message ?? e)}`,
+        "the attempt keeps its chain outcome; the next invocation derives it from the record state",
+      );
+      return;
+    }
+    ctx.fixEvent({ event: "attempt-classified", runId: ack.runId, attempt: ctx.attempt, classification });
+    const escStart = Date.now();
+    try {
+      await postEscalationComment({
+        github: ctx.github,
+        owner: ctx.owner,
+        repo: ctx.repo,
+        prNumber: pr.number,
+        body: buildEscalationComment({
+          prNumber: pr.number,
+          classification,
+          charged: false,
+          diagnostics: {
+            errorLog: message,
+            diffAttempted: [],
+            ciFailureMessages: [],
+            runIds: [ack.runId, parent.runId],
+          },
+          note:
+            classification === "dispatch-refused"
+              ? `a deterministic refusal (${code}) — a second identical dispatch cannot fix it, so the loop charges nothing and will not dispatch again`
+              : `the attempt is uncharged (${classification}); re-invoke to dispatch the next attempt while the uncharged ceiling allows it`,
+        }),
+        token: ctx.token,
+      });
+      ctx.timings.escalation_ms = Date.now() - escStart;
+    } catch (e) {
+      const x = (e ?? {}) as { message?: string };
+      ctx.printRefusal(
+        "escalation-post-failed",
+        `could not post the ${classification} escalation comment: ${redactSecrets(x.message ?? e)}`,
+        "the classification IS recorded on the attempt — check the PR's comments by hand",
+      );
+    }
+  }
 }
 
 // ─── invocation 2: bind → diff → scope → preflight → push → write ─────────────
@@ -1021,7 +1617,16 @@ interface Inv2Ctx {
   reposFile?: string;
   pr: { number: number; headRefName: string };
   fixRunId: string;
+  /** The parent-run join — the fixOutcome's hop-1 anchor. */
+  parentRunId: string;
+  attemptIds: readonly string[];
+  counts: BudgetCounts;
+  /** This attempt's dispatch ordinal (the ledger's length). */
+  attempt: number;
+  /** The scope-classified diff paths — the escalation's "diff attempted". */
+  diffPaths: readonly string[];
   note: (s: string) => void;
+  printRefusal: (code: string, message: string, remediation?: string, payload?: Record<string, unknown>) => void;
   printResult: (obj: Record<string, unknown>) => boolean;
   logAttemptRefused: (reason: string, flags: string[], extra?: Record<string, unknown>) => void;
   fixEvent: (fields: Record<string, unknown>) => void;
@@ -1111,9 +1716,54 @@ async function invocation2(ctx: Inv2Ctx): Promise<number> {
     const scope = readFixScope(hostRoot, ctx.repoSlug);
     const verdict = classifyDiffScope(entries, scope);
     if (!verdict.ok) {
+      // Both refusals are recorded AT MOST ONCE per PR (the class lands on the
+      // attempt's own record before the throw) and page with the refusal's own
+      // detail: out-of-scope-diff is capped at 1 (the injection outcome), and
+      // scope-requires-privilege is never retried at all.
+      const recordRefusalClass = async (cls: EscalationClass, errorLog: string): Promise<void> => {
+        try {
+          store.set(fixRunId, { extensions: { fixLoop: { fixOutcomeClass: cls } } });
+          // scope-requires-privilege is LOOP-TERMINAL (never retried): the
+          // marker makes every later invocation exit non-zero silently.
+          if (ONCE_PER_PR_CLASSES.has(cls)) {
+            const encodedOutcome = encodeFixOutcome({
+              schemaVersion: 1,
+              prNumber: ctx.pr.number,
+              attempts: 0,
+              outcome: "escalated",
+              classification: cls,
+              runIds: [ctx.parentRunId, fixRunId],
+            });
+            (ctx.deps?.preflightOutcome ?? preflightFixOutcomeWrite)(encodedOutcome);
+            store.set(ctx.parentRunId, { extensions: { fixLoop: { fixOutcome: encodedOutcome } } });
+          }
+        } catch {
+          // the typed refusal below still fires; the class write is best-effort
+        }
+        ctx.fixEvent({ event: "attempt-classified", runId: fixRunId, attempt: ctx.attempt, classification: cls });
+        try {
+          await postEscalationComment({
+            github: ctx.github,
+            owner: ctx.owner,
+            repo: ctx.repo,
+            prNumber: ctx.pr.number,
+            body: buildEscalationComment({
+              prNumber: ctx.pr.number,
+              classification: cls,
+              charged: false,
+              diagnostics: { errorLog, diffAttempted: entries.map((e2) => e2.path), ciFailureMessages: [], runIds: [fixRunId, ctx.parentRunId] },
+              note: cls === "out-of-scope-diff" ? "a second identical out-of-scope diff is a signal about the comments, not the fixer — the loop will not dispatch again" : "the refusal is deterministic — no retry can succeed; the loop will not dispatch again",
+            }),
+            token: ctx.token,
+          });
+        } catch {
+          // the typed refusal below still fires; the page is best-effort
+        }
+      };
       // The fix-attempt-refused event fires from run()'s catch (both codes are
       // in REFUSAL_EVENT_CODES) and carries this payload — paths, or glob+reason.
       if (verdict.code === "out-of-scope-diff") {
+        await recordRefusalClass("out-of-scope-diff", `the fix's diff touches paths outside the declared scope: ${verdict.paths.join(", ")}`);
         throw new FleetError(
           5,
           "out-of-scope-diff",
@@ -1123,6 +1773,7 @@ async function invocation2(ctx: Inv2Ctx): Promise<number> {
         );
       }
       const matched = verdict.matched.map((m) => `${m.path} (deny ${m.glob}: ${m.reason})`);
+      await recordRefusalClass("scope-requires-privilege", `the fix necessarily requires privileged paths: ${matched.join("; ")}`);
       throw new FleetError(
         5,
         "scope-requires-privilege",
@@ -1194,13 +1845,52 @@ async function invocation2(ctx: Inv2Ctx): Promise<number> {
     // ok:true on EITHER pushed value — the resume arm (pushed:false) is success.
     const attemptSha = outcome.sha;
     const encoded = encodeFixContext(
-      buildFixContextPayload({ ...payloadInput, attemptSha, pollWindowOpenedAt: ctx.now().toISOString() }),
+      buildFixContextPayload({ ...payloadInput, attempt: ctx.attempt, attemptSha, pollWindowOpenedAt: ctx.now().toISOString() }),
     );
     // Written ONCE, post-push, on the fix run's own record (AC4/C4).
     store.set(fixRunId, { extensions: { fixLoop: { fixContext: encoded } } });
     ctx.fixEvent({ event: "fix-attempt-appended", runId: fixRunId, attemptSha });
-    const printed = ctx.printResult({ state: "appended", runId: fixRunId, prNumber: ctx.pr.number, attempt: 1, attemptSha, requestId: ctx.requestId });
-    return printed ? 0 : 6;
+
+    // ── DF6.1b: the poll leg attaches HERE, in this same invocation
+    // (W6-D-B1): the 15-minute window opened when pushVerifiedSha returned, so
+    // polling now is polling while the window is certainly open — a third
+    // invocation would gamble the window on the persisted anchor's remaining
+    // time instead of polling while it is certainly open.
+    ctx.setPhase("ci-poll");
+    const pollStart = Date.now();
+    const gh = ctx.deps?.gh ?? ghRunnerFromToken(ctx.token);
+    const pollVerdict = await pollRequiredChecks({
+      prNumber: ctx.pr.number,
+      attemptSha,
+      windowOpenedAt: ctx.now().toISOString(),
+      gh,
+      now: ctx.now,
+      sleep: ctx.deps?.sleep,
+    });
+    ctx.timings.poll_ms = Date.now() - pollStart;
+    return settlePollVerdict({
+      deps: ctx.deps,
+      store,
+      github: ctx.github,
+      token: ctx.token,
+      owner: ctx.owner,
+      repo: ctx.repo,
+      prNumber: ctx.pr.number,
+      fixRunId,
+      parentRunId: ctx.parentRunId,
+      attemptIds: ctx.attemptIds,
+      counts: ctx.counts,
+      attempt: ctx.attempt,
+      attemptSha,
+      diffPaths: entries.map((e) => e.path),
+      verdict: pollVerdict,
+      note: ctx.note,
+      printRefusal: ctx.printRefusal,
+      printResult: ctx.printResult,
+      fixEvent: ctx.fixEvent,
+      timings: ctx.timings,
+      now: ctx.now,
+    });
   } finally {
     releaseRunLock(handle);
   }
