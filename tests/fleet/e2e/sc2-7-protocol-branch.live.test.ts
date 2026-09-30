@@ -145,9 +145,11 @@ if (!runId) {
           repoUrl: ${JSON.stringify(REPO_URL)},
           commitSha: ${JSON.stringify(REPO_SHA)},
           manifestPath: ${JSON.stringify(MANIFEST_PATH)},
-          // issueId per #380: the ledger's admission grammar names numeric
-          // budget keys; 380 is this round's tracking issue.
-          issueId: 380,
+          // workId, per #380 landed: headless spend books under the sanctioned
+          // w: namespace, so the exit test runs the shape ADR-1 names — a
+          // truly issueless macro process. The numeric-issueId workaround is
+          // retired.
+          workId: "sc27-protocol-branch",
           groupCapUsd: ${GROUP_CAP_USD},
         },
       },

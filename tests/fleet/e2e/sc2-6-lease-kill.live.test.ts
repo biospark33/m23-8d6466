@@ -110,11 +110,11 @@ if (!runId) {
           repoUrl: ${JSON.stringify(REPO_URL)},
           commitSha: ${JSON.stringify(REPO_SHA)},
           manifestPath: ${JSON.stringify(MANIFEST_PATH)},
-          // issueId, not workId: the cost ledger's admission refuses non-numeric
-          // budget keys (assertCanonicalIdentity) — no headless workId dispatch
-          // has ever booked spend (filed as #380; SC2.6 round 3 was the first
-          // live headless attempt and it exposed exactly this).
-          issueId: 380,
+          // workId, per #380 landed: the ledger's sanctioned work-key namespace
+          // (w:<id>, correlation-minted) books headless spend, so the round
+          // runs the shape it exists to prove — issueless macro work. The old
+          // numeric-issueId: 380 workaround is retired.
+          workId: "sc26-lease-kill",
           groupCapUsd: ${GROUP_CAP_USD},
         },
       },
