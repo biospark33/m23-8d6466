@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "pipelineId": "qds-audit-demo-chain",
-  "runBudgetMs": 700000,
+  "runBudgetMs": 1000000,
   "phases": [
     {
       "name": "audit-demo-team",
