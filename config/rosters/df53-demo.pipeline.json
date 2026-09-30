@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "pipelineId": "qds-audit-demo-chain",
-  "runBudgetMs": 570000,
+  "runBudgetMs": 700000,
   "phases": [
     {
       "name": "audit-demo-team",
@@ -9,7 +9,7 @@
       "description": "DF5.3 audit-chain demo: one dispatch_task team on the proven T2 pair. The task is pure arithmetic Q&A so every micro of spend is token spend attributable by roster role, which is what the DF2.12 bridge turns into the run-cost hop's perRole rows.",
       "roster": "config/rosters/roster.yaml",
       "task": "You lead a one-worker team. Immediately spawn the worker named fixer. Ask fixer exactly: Reply with only the number: 19*21. When the reply arrives, finish with a JSON object of shape {\"changedFiles\": [], \"result\": {\"summary\": \"fixer=<the answer>\"}}. Do not modify any files.",
-      "maxDurationMs": 170000,
+      "maxDurationMs": 300000,
       "retries": 0
     },
     {
