@@ -268,12 +268,26 @@ export function readEventsFor<T>(dir: string, runId: string): T[] {
 
 export function spawnDaemon(dir: string, worktree = SWARM_WORKTREE): Bun.Subprocess {
   const script = path.join(dir, "sc2-daemon.mts");
+  // NAMED precondition, not a posix_spawn ENOENT: the worktree is a build
+  // artifact of the ROUND (PR cleanup legitimately deletes worktrees), and a
+  // missing tree used to surface as a bare ENOENT two layers deep into the
+  // paid round's first spawn. The bootstrap is one command; point
+  // SC2_SWARM_WORKTREE at an installed checkout to override.
+  const tsx = path.join(worktree, "node_modules", ".bin", "tsx");
+  if (!fs.existsSync(tsx)) {
+    throw new Error(
+      `SC2 live harness: ${tsx} is missing — the sc2-live worktree was removed (PR cleanup) or never bootstrapped. Run: scripts/bootstrap-sc2-live-worktree.sh (or set SC2_SWARM_WORKTREE to an installed swarmclaw checkout)`,
+    );
+  }
+  // ABSOLUTE tsx path: the relative "./node_modules/.bin/tsx" form resolved
+  // against the SPAWN's cwd (the worktree) and broke whenever the tree was
+  // absent — the same cwd-drift family as the skill's gotcha #1, now moot.
   // detached: tsx is a bootstrap that SPAWNS the real daemon node process —
   // without detached+group-kill, proc.kill(9) takes the tsx wrapper only and
   // the daemon survives as an orphan (measured SC2.6 round 3). As a group
   // leader, the whole tree (tsx → daemon → wrapper) dies on one negative-pid
   // kill.
-  return Bun.spawn(["./node_modules/.bin/tsx", script], {
+  return Bun.spawn([tsx, script], {
     cwd: worktree,
     // the daemon journals to files; nobody drains these pipes — a full pipe
     // blocks the child silently mid-leg

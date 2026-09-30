@@ -230,7 +230,10 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
     assert.equal(bashn.exitCode, 0, `wrapper template failed bash -n: ${bashn.stderr.toString().slice(0, 400)}`);
     const errFile = path.join(dir, "self-check.stderr");
     const errFd = fs.openSync(errFile, "w");
-    const out = Bun.spawnSync(["./node_modules/.bin/tsx", path.join(dir, "sc2-daemon.mts"), "--self-check"], {
+    // ABSOLUTE tsx path (spawnDaemon's named precondition owns the existence
+    // check) — the relative form resolved against the spawn's cwd and broke
+    // whenever the worktree was missing.
+    const out = Bun.spawnSync([path.join(SWARM_WORKTREE, "node_modules", ".bin", "tsx"), path.join(dir, "sc2-daemon.mts"), "--self-check"], {
       cwd: SWARM_WORKTREE,
       stdout: "pipe",
       stderr: errFd,
