@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "bun:test";
-import { liveTodoOff } from "./live-harness";
+import { keyLeakProblems, listedKeyHashes, liveTodoOff } from "./live-harness";
+import { exeDevDriverFromEnv } from "../../../src/providers/exedev/driver";
+import { RunRecordStore } from "../../../src/providers/run-record";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers";
 import {
   boxNames,
@@ -13,6 +15,7 @@ import {
   readEntry,
   readEventsFor,
   readRunRow,
+  sh,
   shOut,
   spawnDaemon,
   SWARM_WORKTREE,
@@ -56,6 +59,19 @@ import * as path from "node:path";
  * box is destroyed by the observe chain's own teardown, the final guard
  * asserts the fleet is empty, and the approve token never touches stdout,
  * stderr, or any evidence payload.
+ *
+ * Evidence hardening (2026-09-30 review note on the LIVE GREEN round): three
+ * DEDICATED artifacts land per round, so none of the three verdicts is
+ * witnessed only by prose or a re-derivable poll —
+ *   key-count   — the machine-checked provider key-hash delta (live-harness
+ *                 keyLeakProblems) against a pre-round listing, with the
+ *                 store-backed fallback revoke, from the finally;
+ *   fleet-empty — the FINAL raw `ssh exe.dev ls --json` persisted whole, not
+ *                 an in-window poll the reader must trust held;
+ *   delivery    — the notify leg's durable witnesses (factory_result artifact
+ *                 + branch_taken + eventTypes + terminal runStatus) in ONE
+ *                 payload, written BEFORE its asserts so a red round still
+ *                 carries what landed.
  */
 
 const GROUP_CAP_USD = 0.5;
@@ -255,6 +271,11 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
     "kill mid-submit → restart → factory run completes → approve → branch takes the approved case → run completes",
     async () => {
       const before = boxNames();
+      // KEY-COUNT baseline: the provider's key-hash listing BEFORE anything
+      // this round could mint. The minted sbx- key belongs to the FLEET run
+      // record (the daemon's wrapper execs the real `fleet submit`), so the
+      // delta against this snapshot — not a prose claim — is the leak verdict.
+      const keyHashesBefore = await listedKeyHashes();
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc27-leg-"));
       fs.writeFileSync(path.join(dir, "sc2-daemon.mts"), daemonScript(dir));
       fs.writeFileSync(path.join(dir, "fleet-wrapper.sh"), wrapperScript(dir), { mode: 0o755 });
@@ -265,6 +286,12 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
       // cancel → dir rm (a live box must never outlive this test).
       let fleetRunId = "";
       let liveDaemon: Bun.Subprocess | undefined;
+      // The finally's key-count verdict and the evidence entries
+      // keyLeakProblems pushed (key-hash-delta / -recheck / finally-revoke) —
+      // the dedicated key-count artifact serializes BOTH, and the post-finally
+      // guard asserts the verdict, never a silent record-only failure.
+      let keyProblems: string[] = [];
+      const keyEvidence: Array<Record<string, unknown>> = [];
       const allowlistPath = path.join(QDS_ROOT, RECORDS_DIR, ".factory", "approvers.json");
       const allowlistPrior = fs.existsSync(allowlistPath) ? fs.readFileSync(allowlistPath) : null;
 
@@ -445,24 +472,35 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           const row = readRunRow<{ status: string; artifacts?: Array<{ kind: string; content: string }> }>(dir, protocolRunId);
           return row?.status === "completed" ? row : null;
         }, 300_000);
-        assert.ok(completed, "the protocol run never completed after the approval");
         const factoryArtifact = (completed?.artifacts ?? []).filter((a) => a.kind === "factory_result").at(-1);
-        assert.ok(factoryArtifact, "no factory_result artifact landed on the protocol run");
         const verdict = JSON.parse(factoryArtifact?.content ?? "{}") as { status?: string; runId?: string };
-        assert.equal(verdict.status, "approved", `the factory_result verdict is not 'approved': ${verdict.status}`);
-        assert.equal(verdict.runId, fleetRunId, "the factory_result verdict names a different fleet run");
         const events = readEventsFor<{ type: string; stepId?: string; summary?: string }>(dir, protocolRunId);
         const branchTaken = events.find((e) => e.type === "branch_taken" && e.stepId === "gate");
-        assert.ok(branchTaken, `no branch_taken event on the gate step; events: ${events.map((e) => e.type).join(",")}`);
-        assert.match(branchTaken?.summary ?? "", /approved-case/, `the branch took the wrong case: ${branchTaken?.summary}`);
-        writeEvidence("sc2-7", "branch-and-complete", {
+        // ── the DELIVERY artifact: the notify leg's durable witnesses in ONE
+        // payload — persisted, never re-derived from the heartbeat or the db
+        // post-hoc. Written BEFORE its asserts so a red round still carries
+        // what actually landed (the round-1 lesson that cost a harvest
+        // classification). ──
+        writeEvidence("sc2-7", "delivery", {
           protocolRunId,
           fleetRunId,
-          verdictStatus: verdict.status,
-          branchSummary: branchTaken?.summary,
+          runStatus: completed?.status ?? null,
+          factoryResult: {
+            present: factoryArtifact !== undefined,
+            verdictStatus: verdict.status ?? null,
+            verdictRunId: verdict.runId ?? null,
+            raw: factoryArtifact?.content ?? null,
+          },
+          artifactKinds: (completed?.artifacts ?? []).map((a) => a.kind),
+          branchTaken: branchTaken === undefined ? null : { stepId: branchTaken.stepId ?? null, summary: branchTaken.summary ?? null },
           eventTypes: events.map((e) => e.type),
-          runStatus: completed?.status,
         });
+        assert.ok(completed, "the protocol run never completed after the approval");
+        assert.ok(factoryArtifact, "no factory_result artifact landed on the protocol run");
+        assert.equal(verdict.status, "approved", `the factory_result verdict is not 'approved': ${verdict.status}`);
+        assert.equal(verdict.runId, fleetRunId, "the factory_result verdict names a different fleet run");
+        assert.ok(branchTaken, `no branch_taken event on the gate step; events: ${events.map((e) => e.type).join(",")}`);
+        assert.match(branchTaken?.summary ?? "", /approved-case/, `the branch took the wrong case: ${branchTaken?.summary}`);
       } finally {
         // Cleanup, in order: (1) the daemon holds the poller — kill it first so
         // it cannot race the cancel; (2) restore-or-delete the allowlist (P9:
@@ -476,6 +514,40 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           fs.rmSync(allowlistPath, { force: true });
         } else {
           fs.writeFileSync(allowlistPath, allowlistPrior);
+        }
+        // ── the KEY-COUNT leg, BEFORE the cancel so a failed cancel cannot
+        // skip it: re-list the provider's key hashes and diff against the
+        // pre-round snapshot. sc2-7 spawns its own wrapper, so the minted
+        // sbx- key is the FLEET run record's — the fallback revoke rides the
+        // same store the observe chain's teardown used (read-mode: revokeRunKey
+        // only store.get()s; the audit link goes to the harness's own store).
+        // keyLeakProblems never throws; the only throws here are the fallback
+        // constructors (half a pin set, a missing records dir), and needing
+        // the fallback revoke IS the defect — the problems land post-finally.
+        try {
+          keyProblems = await keyLeakProblems(
+            keyHashesBefore,
+            {
+              driver: exeDevDriverFromEnv(),
+              store: fleetRunId === "" ? undefined : new RunRecordStore({ dir: RECORDS_DIR, create: false }),
+              runIds: fleetRunId === "" ? [] : [fleetRunId],
+            },
+            keyEvidence,
+          );
+        } catch (e) {
+          keyProblems = [`the key-leak check itself FAILED: ${e instanceof Error ? e.message : String(e)}`];
+        }
+        // The dedicated artifact, still inside the finally (a scrub refusal
+        // must not discard the verdict above — it joins the problems instead).
+        try {
+          writeEvidence("sc2-7", "key-count", {
+            fleetRunId,
+            beforeCount: keyHashesBefore.size,
+            verdict: keyEvidence,
+            problems: keyProblems,
+          });
+        } catch (e) {
+          keyProblems.push(`the key-count evidence write FAILED: ${e instanceof Error ? e.message : String(e)}`);
         }
         if (fleetRunId) {
           const cancel = shOut(
@@ -492,9 +564,33 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         fs.rmSync(dir, { recursive: true, force: true });
       }
 
-      // ── final guard: the fleet is empty of this round's boxes ──
-      const leftover = boxNames().filter((n) => !before.includes(n));
+      // ── final guard, PERSISTED: the FLEET-EMPTY artifact carries the FINAL
+      // raw `ssh exe.dev ls --json` whole — parsed names AND the substrate's
+      // own bytes — written BEFORE the assert (an unmeasured fleet is never a
+      // clean one, and a listing that failed to parse must fail the round,
+      // never read as an empty one). ──
+      const finalLsRaw = sh("ssh exe.dev ls --json", 60_000); // live-mirror: sc2-7 — the raw final box listing
+      let finalNames: string[] | null = null;
+      try {
+        finalNames = (JSON.parse(finalLsRaw) as { vms?: Array<{ vm_name?: string; name?: string }> }).vms?.map(
+          (v) => v.vm_name ?? v.name ?? "",
+        ) ?? [];
+      } catch {
+        /* finalNames stays null — the assert below fails the round */
+      }
+      writeEvidence("sc2-7", "fleet-empty", {
+        fleetRunId,
+        boxNames: finalNames,
+        rawLs: finalLsRaw.slice(0, 4000),
+        freshLeftover: finalNames === null ? null : finalNames.filter((n) => !before.includes(n)),
+      });
+      assert.ok(finalNames !== null, `the final fleet listing failed to parse (raw head): ${finalLsRaw.slice(0, 300)}`);
+      const leftover = (finalNames ?? []).filter((n) => !before.includes(n));
       assert.equal(leftover.length, 0, `SC2.7 LEAK: boxes still alive after the round: ${leftover.join(", ")}`);
+      // The KEY-COUNT verdict, post-finally: a leaked (or fallback-revoked)
+      // key fails the round here, rendered alongside the box verdict rather
+      // than recorded into evidence nobody asserts on.
+      assert.deepEqual(keyProblems, [], `SC2.7 KEY-COUNT: ${keyProblems.join(" | ")}`);
     },
     46 * 60_000,
   );
