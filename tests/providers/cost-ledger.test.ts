@@ -3872,3 +3872,137 @@ describe("DF2.12 ledger-side contracts", () => {
     expect(ratio).toHaveLength(0);
   });
 });
+
+// ─── #380 — headless work keys (the `w:` namespace) ──────────────────────────
+
+/**
+ * Q1.7 legitimately resolves headless briefs (`workId`, no issue), but
+ * `assertCanonicalIdentity` refused every non-numeric identity — so a headless
+ * dispatch provisioned and THEN refused at admission ($0 spent, #380). The fix
+ * is a SANCTIONED work-key namespace, `w:<workId>`, that `perIssueOverrides`
+ * keys can spell (`owner/repo#w:<id>`): the fail-closed invariant "every
+ * bookable identity is spellable in config" is preserved by EXTENDING the
+ * spellable grammar, never by loosening the refusal.
+ *
+ * These tests run the REAL ledger arithmetic on a real (tmp) sqlite file —
+ * recording/fake ledgers hid this bug for months (a permissive reserve never
+ * exercises the admission identity at all).
+ */
+describe("#380 — headless work keys (the `w:` namespace)", () => {
+  const WORK = "w:sc26-handprobe";
+
+  test("a w:-prefixed identity ADMITS on its own bucket — headless dispatch books spend", () => {
+    seedRecord("run-w1");
+    const d = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: WORK, runId: "run-w1", requestId: "req-w1" },
+      5_000_000,
+      50_000_000,
+    );
+    if (!d.admitted) throw new Error(`expected admission, got ${JSON.stringify(d)}`);
+    expect(d.admittedCeilingMicroUsd).toBe(5_000_000);
+  });
+
+  test("a perIssueOverrides WORK KEY addresses the work identity — the cap is operator-reachable", () => {
+    const cfg = {
+      defaultCapMicroUsd: 5_000_000,
+      perIssueOverrides: { "qds/demo#w:sc26-handprobe": 1_000_000 },
+    };
+    expect(capForIssue(cfg, "qds/demo", WORK)).toBe(1_000_000);
+    // The numeric namespace is untouched by the work key.
+    expect(capForIssue(cfg, "qds/demo", "42")).toBe(5_000_000);
+  });
+
+  test("the override CAP is ENFORCED, not merely spelled — spend past a lowered work cap refuses", () => {
+    const workCfg = {
+      defaultCapMicroUsd: 5_000_000,
+      perIssueOverrides: { "qds/demo#w:sc26-handprobe": 1_000_000 },
+    };
+    const workLedger = new CostLedger({
+      path: join(dir, "work-cap.db"),
+      readRunRecord: (id) => RECORDS.get(id),
+      config: workCfg,
+    });
+    try {
+      seedRecord("run-w2");
+      const cap = capForIssue(workCfg, "qds/demo", WORK);
+      workLedger.ingestCostEvent(mkEvent({ costUsd: 1.5 }), mkCtx({ runId: "run-w2", requestId: "req-w2", issueId: WORK }));
+      const d = workLedger.admitIssue(
+        { repoSlug: "qds/demo", issueId: WORK, runId: "run-w2b", requestId: "req-w2b" },
+        cap,
+        50_000_000,
+      );
+      if (d.admitted) throw new Error("expected the lowered work cap to refuse");
+      expect(d.reason).toBe("spend-cap-exceeded");
+      expect(d.capMicroUsd).toBe(1_000_000);
+      expect(d.spentMicroUsd).toBe(1_500_000);
+    } finally {
+      workLedger.close();
+    }
+  });
+
+  test("two work ids and the numeric issue are THREE distinct buckets — no reservation bleeds", () => {
+    seedRecord("run-w3");
+    seedRecord("run-w4");
+    seedRecord("run-w5");
+    const cap = 5_000_000;
+    const a = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "w:build-docs", runId: "run-w3", requestId: "req-w3" }, cap, 50_000_000);
+    const b = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "w:other-work", runId: "run-w4", requestId: "req-w4" }, cap, 50_000_000);
+    const c = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-w5", requestId: "req-w5" }, cap, 50_000_000);
+    expect(a.admitted).toBe(true);
+    expect(b.admitted).toBe(true);
+    expect(c.admitted).toBe(true);
+  });
+
+  // (`w:.` is deliberately ABSENT from the refusal table: the upstream
+  // WORK_ID_PATTERN admits a bare "." as a workId — a first-char laxness that
+  // predates #380 — and this grammar mirrors correlation's charset verbatim
+  // rather than inventing a second, stricter one.)
+  test.each(["sc26-handprobe", "w:", "w:SC26", "w:a b", "w:a#b"])(
+    "an unsanctioned identity spelling refuses at the door (%s) — fail-closed kept",
+    (bad) => {
+      seedRecord("run-wx");
+      expect(() =>
+        ledger.admitIssue({ repoSlug: "qds/demo", issueId: bad, runId: "run-wx", requestId: "req-wx" }, 5_000_000, 50_000_000),
+      ).toThrow(CostLedgerError);
+    },
+  );
+
+  test("box-hours book a w: identity end to end (the teardown attribution path)", () => {
+    seedRecord("run-w6", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T12:30:00.000Z" });
+    const res = ledger.ingestBoxHours({ runId: "run-w6", repoSlug: "qds/demo", issueId: WORK, requestId: "req-w6" });
+    expect(res.inserted).toBe(true);
+    // The same identity the admission refused pre-#380 now prices its box-hours…
+    const view = ledger.issueBudgetSnapshot("qds/demo", WORK);
+    expect(view.spentMicroUsd).toBe(1_800_000); // 0.5h × 3.6M µ$/h
+    // …and an override addressed to the work key LOWERs the ceiling the next
+    // dispatch is judged against (the invariant the refusal used to protect).
+    const cfg = { defaultCapMicroUsd: 5_000_000, perIssueOverrides: { "qds/demo#w:sc26-handprobe": 1_000_000 } };
+    expect(capForIssue(cfg, "qds/demo", WORK)).toBe(1_000_000);
+  });
+
+  test("loadCostConfig accepts the work-key spelling beside the numeric one; uppercase after w: refuses", () => {
+    const file = join(dir, "work-keys.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        defaultCapMicroUsd: 5_000_000,
+        perIssueOverrides: { "qds/demo#42": 2_000_000, "qds/demo#w:sc26-handprobe": 1_000_000 },
+      }),
+    );
+    const loaded = loadCostConfig(file);
+    expect(loaded.config.perIssueOverrides?.["qds/demo#w:sc26-handprobe"]).toBe(1_000_000);
+
+    const bad = join(dir, "bad-work.json");
+    writeFileSync(bad, JSON.stringify({ defaultCapMicroUsd: 1, perIssueOverrides: { "qds/demo#w:SC26": 1 } }));
+    expect(() => loadCostConfig(bad)).toThrow(CostConfigError);
+  });
+
+  test("the slug-case duplication guard covers work keys too", () => {
+    const file = join(dir, "dup-work.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ defaultCapMicroUsd: 1, perIssueOverrides: { "QDS/Demo#w:x": 2, "qds/demo#w:x": 1 } }),
+    );
+    expect(() => loadCostConfig(file)).toThrow(CostConfigError);
+  });
+});
