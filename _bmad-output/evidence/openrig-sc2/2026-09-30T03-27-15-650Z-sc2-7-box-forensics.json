@@ -1,0 +1,6 @@
+{
+  "box": "qds-20260930-114ba1",
+  "probeStdout": "/home/exedev/src\nsbx/qds-20260930-114ba1\n2e360b3c fix(manifest): df53-demo runBudgetMs 700000 -> 1000000 — the real required budget is 955000 ms\nb288f80f fix(manifest): df53-demo dispatch_task budget 170s -> 300s — real two-agent latency overflows the demo ceiling\n1b728136 fix(manifest): df53-demo roster path — config/roster.yaml never existed (config/rosters/roster.yaml)\nCOUNT=0\n",
+  "probeStderr": "",
+  "probeExit": 0
+}

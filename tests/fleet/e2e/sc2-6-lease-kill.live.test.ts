@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, test } from "bun:test";
 import { liveTodoOff } from "./live-harness";
-import { Database } from "bun:sqlite";
+import {
+  boxNames,
+  killDaemon,
+  MANIFEST_PATH,
+  pollUntil,
+  QDS_ROOT,
+  REPO_SHA,
+  REPO_URL,
+  readEntry,
+  sh,
+  spawnDaemon,
+  SWARM_WORKTREE,
+  wrapperJournal,
+  wrapperScript,
+  writeEvidence,
+} from "./sc2-harness";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,80 +31,26 @@ import * as path from "node:path";
  * windows and proves the replay yields EXACTLY ONE box + one key:
  *
  *   window (a): SIGKILL after the requestId persist, BEFORE the fleet-submit
- *               exec fires (the wrapper holds the exec in a sleep). Restart →
- *               the engine replays the SAME --request-id → Q1's O_EXCL intent
- *               maps the replay onto one fresh run → exactly one box.
+ *               exec fires (the wrapper holds the exec). Restart → the engine
+ *               replays the SAME --request-id → Q1's O_EXCL intent maps the
+ *               replay onto one fresh run → exactly one box.
  *   window (b): SIGKILL after the fleet submit COMPLETED (box exists, the
  *               wrapper holds the exit) but BEFORE the ack persist. Restart →
  *               the replay re-asks with the SAME id → Q1 returns the EXISTING
  *               run → still exactly one box.
  *
- * live-mirror: sc2-6 (the whole file is the SC2.6 live round; per-line mirror
- * comments below mark the substrate-touching lines for the #210 sweep).
+ * live-mirror: sc2-6 (the whole file is the SC2.6 live round; the substrate-
+ * touching helpers carry their mirror comments in sc2-harness.ts).
  *
  * Spend protocol: worst case printed in the spend-estimate test below; every
  * artifact is torn down in `finally`-shaped guards (fleet cancel → box
  * destroyed + key revoked → `ssh exe.dev ls --json` empty, zero sbx- keys).
  */
 
-const QDS_ROOT = path.resolve(import.meta.dir, "..", "..", "..");
-const SWARM_WORKTREE = process.env.SC2_SWARM_WORKTREE ?? "/Users/steve/swarmclaw-worktrees/sc2-live";
-const REPO_URL = process.env.QDS_EXEDEV_REPO_URL ?? "https://github.com/Quantum-Digital-Solutions/QDS-Factory.git";
-const REPO_SHA = process.env.QDS_EXEDEV_SHA ?? "";
-const MANIFEST_PATH = process.env.SC2_MANIFEST_PATH ?? "config/rosters/df53-demo.pipeline.json";
 const GROUP_CAP_USD = 0.5;
 
 /** live-mirror: sc2-6 — worst-case spend estimate, printed BEFORE any box exists. */
 const WORST_CASE_USD = GROUP_CAP_USD + 0.1; // group cap bounds model spend; box-hours for ≤1h alive
-
-function sh(cmd: string, timeoutMs = 60_000): string {
-  // live-mirror: sc2-6 — every ssh/CLI call here drives the real substrate
-  return Bun.spawnSync(["/bin/bash", "-c", cmd], { timeout: timeoutMs, stdout: "pipe", stderr: "pipe" }).stdout.toString();
-}
-
-/** live-mirror: sc2-6 — the real box listing (count + names). */
-function fleetBoxes(): Array<{ name: string }> {
-  const out = sh("ssh exe.dev ls --json");
-  const parsed = JSON.parse(out) as { vms?: Array<{ name?: string; vm_name?: string }> };
-  // the ls schema carries vm_name, not name (round 6: the count assert held
-  // but evidence recorded null names)
-  return (parsed.vms ?? []).map((v) => ({ name: v.vm_name ?? v.name ?? "" }));
-}
-
-function boxNames(): string[] {
-  return fleetBoxes().map((v) => v.name);
-}
-
-interface WrapperLine {
-  verb: string;
-  requestId: string | null;
-  /** launch = the wrapper started; exec = the inner CLI actually ran; killed-preexec = window (a) hold released by the kill marker. */
-  phase?: string;
-  rc?: number;
-}
-
-/** The wrapper journal: one line per fleet-CLI invocation the daemon made. */
-function wrapperJournal(dir: string): WrapperLine[] {
-  const p = path.join(dir, "wrapper-journal.jsonl");
-  if (!fs.existsSync(p)) return [];
-  return fs
-    .readFileSync(p, "utf8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as WrapperLine);
-}
-
-/** Poll until pred() or deadline; 100ms cadence. */
-async function pollUntil<T>(pred: () => T | null, timeoutMs: number): Promise<T | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const v = pred();
-    if (v) return v;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return null;
-}
 
 /**
  * The daemon driver script, written into the swarmclaw worktree at runtime.
@@ -105,12 +66,12 @@ process.env.DATA_DIR = DATA_DIR;
 const wrapper = ${JSON.stringify(path.join(dir, "fleet-wrapper.sh"))};
 process.env.SWARMCLAW_FACTORY_FLEET_CLI = wrapper;
 
-const lifecycle = await import(${JSON.stringify(SWARM_WORKTREE) } + "/src/lib/server/protocols/protocol-run-lifecycle");
+const lifecycle = await import(${JSON.stringify(SWARM_WORKTREE)} + "/src/lib/server/protocols/protocol-run-lifecycle");
 const normalization = await import(${JSON.stringify(SWARM_WORKTREE)} + "/src/lib/server/protocols/protocol-normalization");
 const unwrap = (m) => (m && typeof m === "object" && "default" in m ? m.default : m);
 const lifecycleU = unwrap(lifecycle);
 const normU = unwrap(normalization);
-const storage = unwrap(await import("/Users/steve/swarmclaw-worktrees/sc2-live" + "/src/lib/server/storage"));
+const storage = unwrap(await import(${JSON.stringify(SWARM_WORKTREE)} + "/src/lib/server/storage"));
 const storageU = storage;
 
 function makeAgent() {
@@ -199,183 +160,6 @@ while (Date.now() < deadline) {
 console.log("DAEMON-DEADLINE");
 process.exit(3);
 `;
-}
-
-/**
- * The fleet-CLI wrapper: journals every invocation (launch vs exec phases),
- * holds the crash windows open, and supplies the driver the daemon's contract
- * deliberately does not carry (SC2: swarmclaw never learns QDS's driver
- * grammar — the deployed shim is where `--driver exedev` lives; measured
- * 2026-09-29: daemon argv without it is exit-2 "submit requires --driver",
- * and `fleet cancel` needs it too while `fleet result` refuses nothing).
- * Every inner exec runs from QDS_ROOT so bun auto-loads the repo .env
- * (OPENROUTER_PROVISIONING_KEY; live-harness gotcha #1) — the daemon's cwd
- * is the swarmclaw worktree.
- *
- * Crash-window hold is a KILL-MARKER poll, not a fixed sleep: proc.kill(9)
- * on the daemon does NOT kill this execFile child (measured: the orphan
- * completed its work after the kill), so the test writes the marker first
- * and the wrapper exits ≤100ms later, before the daemon dies.
- */
-function wrapperScript(dir: string): string {
-  const journal = JSON.stringify(path.join(dir, "wrapper-journal.jsonl"));
-  return `#!/bin/bash
-set -u
-verb="$1"; shift
-jid=""; a=()
-while [ $# -gt 0 ]; do
-  if [ "$1" = "--request-id" ]; then jid="$2"; shift 2; else a+=("$1"); shift; fi
-done
-J=${journal}
-KILL_MARKER=${JSON.stringify(path.join(dir, "wrapper-kill.marker"))}
-printf '{"verb":"%s","requestId":"%s","phase":"launch"}\\n' "$verb" "$jid" >> "$J"
-MODE_FILE=${JSON.stringify(path.join(dir, "wrapper-mode"))}
-MODE="$(cat "$MODE_FILE" 2>/dev/null || echo normal)"
-if [ "$verb" != "submit" ]; then
-  cd ${JSON.stringify(QDS_ROOT)}
-  if [ "$verb" = "cancel" ]; then
-    exec bun scripts/fleet.ts cancel --driver exedev "\${a[@]}"
-  fi
-  exec bun scripts/fleet.ts "$verb" "\${a[@]}"
-fi
-if [ "$MODE" = "a" ]; then
-  # window (a): hold BEFORE the exec fires — the daemon gets killed mid-hold.
-  # On the marker do NOT exit promptly: an exit hands the daemon's execFile
-  # callback a refusal (99) and it marks the step FAILED — terminal, so the
-  # restart never replays (measured live 2026-09-29). Hold past the kill
-  # instead: the daemon dies at +400ms, this orphan exits 99 to nobody.
-  for i in $(seq 250); do
-    if [ -f "$KILL_MARKER" ]; then
-      printf '{"verb":"submit","requestId":"%s","phase":"killed-preexec"}\\n' "$jid" >> "$J"
-      sleep 5
-      exit 99
-    fi
-    sleep 0.1
-  done
-fi
-cd ${JSON.stringify(QDS_ROOT)}
-out="$(bun scripts/fleet.ts submit --driver exedev --request-id "$jid" "\${a[@]}")"
-rc=$?
-printf '{"verb":"submit","requestId":"%s","phase":"exec","rc":%s}\\n' "$jid" "$rc" >> "$J"
-# The inner CLI's stdout tail survives every kill for post-hoc triage (the
-# daemon never sees wrapper stdout, so this file is the only witness).
-printf '%s\\n' "$out" | tail -c 600 > ${JSON.stringify(path.join(dir, "wrapper-submit-last.txt"))}
-echo "rc=$rc" >> ${JSON.stringify(path.join(dir, "wrapper-submit-last.txt"))}
-if [ "$MODE" = "b" ]; then
-  # window (b): the real submit COMPLETED (box exists); hold the exit so the
-  # daemon is killed after the exec, before the ack persist. Same rule as (a):
-  # never return while the daemon can still process the exit code.
-  printf 'cli-exited\\n' >> ${JSON.stringify(path.join(dir, "wrapper-exited.marker"))}
-  for i in $(seq 250); do
-    if [ -f "$KILL_MARKER" ]; then sleep 5; exit 99; fi
-    sleep 0.1
-  done
-fi
-printf '%s\\n' "$out"
-exit $rc
-`;
-}
-
-/**
- * Read the swarmclaw run record's factory entry straight out of its storage.
- * swarmclaw persists protocol runs in SQLITE (<leg>/swarm-data/swarmclaw.db,
- * table protocol_runs, cols id + data-JSON) — NOT json files (measured
- * 2026-09-29: the file-based readEntry never saw the persist and window (a)
- * red'd on it). Readonly open is safe against a live writer; after a SIGKILL
- * the readonly read is still the right shape (live-harness gotcha #20: never
- * WRITE-open a killed writer's db in this process). A busy/mid-checkpoint
- * read surfaces as nulls so the poller treats it as "not yet".
- */
-function readEntry(dir: string, runId: string): { status: string | null; runId: string | null; requestId: string | null; lastError: string | null } {
-  const nulls = { status: null, runId: null, requestId: null, lastError: null };
-  const dbPath = path.join(dir, "swarm-data", "swarmclaw.db");
-  if (!fs.existsSync(dbPath)) return nulls;
-  let db: Database | null = null;
-  try {
-    db = new Database(dbPath, { readonly: true });
-    const row = db.query("SELECT data FROM protocol_runs WHERE id = ?").get(runId) as { data: string } | null;
-    if (!row) return nulls;
-    const run = JSON.parse(row.data) as {
-      factoryState?: Record<string, { status?: string; runId?: string | null; requestId?: string; lastError?: string }>;
-    };
-    const entry = run.factoryState?.fj ?? {};
-    return { status: entry.status ?? null, runId: entry.runId ?? null, requestId: entry.requestId ?? null, lastError: entry.lastError ?? null };
-  } catch {
-    return nulls;
-  } finally {
-    try {
-      db?.close();
-    } catch {
-      /* noop */
-    }
-  }
-}
-
-function spawnDaemon(dir: string): Bun.Subprocess {
-  const script = path.join(dir, "sc2-daemon.mts");
-  // detached: tsx is a bootstrap that SPAWNS the real daemon node process —
-  // without detached+group-kill, proc.kill(9) takes the tsx wrapper only and
-  // the daemon survives as an orphan (measured round 3: it processed the
-  // wrapper's exit code at +5s, marked the step FAILED — terminal — and the
-  // restart never replayed). As a group leader, the whole tree (tsx → daemon
-  // → wrapper) dies on one negative-pid kill.
-  return Bun.spawn(["./node_modules/.bin/tsx", script], {
-    cwd: SWARM_WORKTREE,
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "ignore",
-    detached: true,
-  });
-}
-
-/**
- * Kill handshake: the wrapper's hold is a KILL-MARKER poll (100ms cadence),
- * so the marker goes down FIRST and the wrapper exits before proc.kill(9)
- * lands on the daemon — the kill alone orphans the execFile child (measured
- * 2026-09-29: the orphaned wrapper completed its work after the kill).
- */
-async function killDaemon(dir: string, proc: Bun.Subprocess): Promise<void> {
-  try {
-    fs.writeFileSync(path.join(dir, "wrapper-kill.marker"), "kill\n");
-  } catch {
-    /* noop */
-  }
-  await new Promise((r) => setTimeout(r, 400)); // > the wrapper's 100ms poll cadence
-  // Group kill first (the tree: tsx → daemon → wrapper); fall back to the
-  // direct kill if the child is not a group leader or is already gone.
-  let killed = false;
-  try {
-    process.kill(-(proc.pid ?? 0), "SIGKILL");
-    killed = true;
-  } catch {
-    /* not a group leader / already gone */
-  }
-  if (!killed) {
-    try {
-      proc.kill(9);
-    } catch {
-      /* already gone */
-    }
-  }
-  try {
-    proc.unref();
-  } catch {
-    /* noop */
-  }
-}
-
-/** Scrub check: the evidence write self-fails if a key material survives. */
-function assertNoSecrets(obj: unknown): void {
-  const s = JSON.stringify(obj) ?? "";
-  if (s.includes("sk-or-")) throw new Error("evidence scrub: sk-or- survived");
-}
-
-function writeEvidence(name: string, payload: unknown): void {
-  assertNoSecrets(payload);
-  const dir = path.join(QDS_ROOT, "_bmad-output", "evidence", "openrig-sc2");
-  fs.mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  fs.writeFileSync(path.join(dir, `${stamp}-${name}.json`), JSON.stringify(payload, null, 2));
 }
 
 describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
@@ -470,7 +254,7 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
       const fresh = after.filter((n) => !before.includes(n));
       assert.equal(fresh.length, 1, `exactly one box must exist after the crash-replay; saw ${fresh.length}: ${fresh.join(", ")}`);
 
-      writeEvidence("sc2-6-window-a", {
+      writeEvidence("sc2-6", "window-a", {
         window: "a",
         requestId: submitted?.requestId,
         fleetRunId: submitted?.runId,
@@ -491,7 +275,7 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
       );
       const emptiedA = await pollUntil(() => (boxNames().filter((n) => !before.includes(n)).length === 0 ? true : null), 180_000);
       assert.ok(emptiedA, `window (a) teardown: boxes still alive after fleet cancel: ${boxNames().join(", ")}`);
-      writeEvidence("sc2-6-window-a-teardown", { cancelStdout: cancelOutA.slice(0, 400), boxesAfterCancel: boxNames() });
+      writeEvidence("sc2-6", "window-a-teardown", { cancelStdout: cancelOutA.slice(0, 400), boxesAfterCancel: boxNames() });
     },
     20 * 60_000,
   );
@@ -542,7 +326,7 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
       const fresh = after.filter((n) => !before.includes(n));
       assert.equal(fresh.length, 1, `exactly one box must survive the (b) crash-replay; saw ${fresh.length}: ${fresh.join(", ")}`);
 
-      writeEvidence("sc2-6-window-b", {
+      writeEvidence("sc2-6", "window-b", {
         window: "b",
         requestId,
         fleetRunId: submitted?.runId,
@@ -562,7 +346,7 @@ describe("SC2.6 lease/kill live round (swarmclaw daemon × QDS fleet)", () => {
       );
       const emptied = await pollUntil(() => (boxNames().filter((n) => !before.includes(n)).length === 0 ? true : null), 180_000);
       assert.ok(emptied, `teardown: boxes still alive after fleet cancel: ${boxNames().join(", ")}`);
-      writeEvidence("sc2-6-window-b-teardown", { cancelStdout: cancelOut.slice(0, 400), boxesAfterCancel: boxNames() });
+      writeEvidence("sc2-6", "window-b-teardown", { cancelStdout: cancelOut.slice(0, 400), boxesAfterCancel: boxNames() });
     },
     25 * 60_000,
   );

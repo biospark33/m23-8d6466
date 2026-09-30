@@ -264,6 +264,7 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
       // ── restart: replay the SAME id; the REAL factory run provisions ──
       fs.writeFileSync(path.join(dir, "wrapper-mode"), "normal");
       const daemonB = spawnDaemon(dir);
+      let daemonC: Bun.Subprocess | undefined;
       try {
         const submitted = await pollUntil(() => {
           const runId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
@@ -307,6 +308,17 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           probeStderr: probe.stderr.slice(0, 400),
           probeExit: probe.exitCode,
         });
+
+        // The daemon goes DOWN across the completion chain: the observe chain
+        // closes the record at teardown START and the gate registers only
+        // after reverify (~15s) — a poller tick in that gap reads terminal
+        // "completed" (closedAt, no approval extension yet) and completes the
+        // step with the WRONG verdict, defeating the approve seam (measured
+        // round 5: fj completed with status "completed", branch refused, LLM
+        // fallback, run failed before the approve ran). The race itself is
+        // filed as a product finding; this leg proves the approved-verdict
+        // path with the daemon parked.
+        await killDaemon(dir, daemonB);
 
         // ── the exit half: drive the completion chain to the approval park ──
         // `fleet observe` = harvest → teardown → reverify → gate; a green
@@ -368,9 +380,11 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           stderrTail: approve.stderr.slice(-600),
         });
 
-        // The verdict turns terminal `approved` — and the poller lands it.
+        // The verdict turns terminal `approved` — then the daemon comes back
+        // and its poller lands it.
         const approved = await pollResult(fleetRunId, (r) => r.status === "approved" && r.terminal, 180_000);
         assert.ok(approved, `the run never reached terminal 'approved' (last: ${JSON.stringify(approved)})`);
+        daemonC = spawnDaemon(dir);
 
         // ── the branch + the notification witness ──
         const protocolRunId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();
@@ -399,7 +413,7 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
       } finally {
         // The daemon holds the poller; take the whole tree down before the
         // fleet guards run (a live box must never outlive this test).
-        await killDaemon(dir, daemonB);
+        if (daemonC) await killDaemon(dir, daemonC);
       }
 
       // ── final guard: the fleet is empty of this round's boxes ──

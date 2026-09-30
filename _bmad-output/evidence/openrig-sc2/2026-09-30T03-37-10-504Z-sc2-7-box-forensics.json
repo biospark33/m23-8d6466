@@ -1,0 +1,6 @@
+{
+  "box": "qds-20260930-80b55e",
+  "probeStdout": "/home/exedev/src\nsbx/qds-20260930-80b55e\n8cfba36d fix(manifest): df53-demo dispatch_task drops the worker-spawn — single-turn arithmetic survives real latency\n2e360b3c fix(manifest): df53-demo runBudgetMs 700000 -> 1000000 — the real required budget is 955000 ms\nb288f80f fix(manifest): df53-demo dispatch_task budget 170s -> 300s — real two-agent latency overflows the demo ceiling\nCOUNT=0\n",
+  "probeStderr": "",
+  "probeExit": 0
+}

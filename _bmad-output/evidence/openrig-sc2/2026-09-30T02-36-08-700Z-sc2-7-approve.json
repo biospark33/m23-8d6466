@@ -1,0 +1,7 @@
+{
+  "fleetRunId": "qds-20260930-20d37d",
+  "approver": "sc27-e2e-approver",
+  "exitCode": 0,
+  "stdoutTail": "{\"runId\":\"qds-20260930-20d37d\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"sc27-e2e-approver\",\"decidedAt\":\"2026-09-30T02:36:08.685Z\",\"reason\":\"sc2-7-exit-test\"}\n",
+  "stderrTail": "12,\"reason\":\"sc2-7-exit-test\",\"requestId\":\"e7d7aa1c-0c49-404c-b7c6-b9101e9eaacd\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-30T02:36:08.697Z\",\"duration\":173,\"durationMs\":173,\"status\":\"ok\",\"runId\":\"qds-20260930-20d37d\",\"event\":\"approve\",\"dispatchRequestId\":\"2fe0ed2c-2fe1-4806-ac56-1ed02705d108\"}\n{\"requestId\":\"e7d7aa1c-0c49-404c-b7c6-b9101e9eaacd\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-30T02:36:08.697Z\",\"duration\":173,\"durationMs\":173,\"status\":\"ok\",\"runId\":\"qds-20260930-20d37d\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+}

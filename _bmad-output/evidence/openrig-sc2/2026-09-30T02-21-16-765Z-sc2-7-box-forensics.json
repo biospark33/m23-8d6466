@@ -1,0 +1,6 @@
+{
+  "box": "qds-20260930-673728",
+  "probeStdout": "/home/exedev/src\nsbx/qds-20260930-673728\n1b728136 fix(manifest): df53-demo roster path — config/roster.yaml never existed (config/rosters/roster.yaml)\n2847abf7 docs(evidence): window-b teardown JSON (glob missed the 01-10 stamp)\n0747dde4 docs(roadmap): SC2.6 + SC1.6 flipped — live lease/kill round GREEN (PR #381 evidence)\nCOUNT=0\n",
+  "probeStderr": "",
+  "probeExit": 0
+}

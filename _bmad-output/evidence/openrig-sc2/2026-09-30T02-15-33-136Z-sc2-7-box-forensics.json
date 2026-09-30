@@ -1,0 +1,6 @@
+{
+  "box": "qds-20260930-128ef9",
+  "probeStdout": "",
+  "probeStderr": "ssh: Could not resolve hostname qds-20260930-128ef9: nodename nor servname provided, or not known\r\n",
+  "probeExit": 255
+}
