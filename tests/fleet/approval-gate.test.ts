@@ -39,6 +39,7 @@ import {
   MAX_TIMEOUT_MS,
   MIN_TIMEOUT_MS,
   MAX_REPORT_ID_CHARS,
+  OBSERVE_CHAIN_ORIGIN,
   reclaimApprovalLock,
   requestApproval,
   submitDecision,
@@ -3584,6 +3585,66 @@ describe("the resume arm compares the record's OWN fields, and refuses what it c
       expect(out).toEqual({ outcome: "requested" });
       expect(log).toEqual(["teardown:run-1:pausing"]);
       expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a CHAIN-authored pausing (origin observe-chain, no reportId) is ADOPTED — the presented report binds and it promotes (#382)", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      // DF3.7's observe chain registers `pausing` BEFORE its teardown (the #382
+      // poller window): nothing is bound yet — no reportId, no headSha — and
+      // `origin` names the writer. The next re-presented report is not a
+      // collision (there is no bound report to collide with); it is the FIRST
+      // binding, so the resume arm adopts it and promotes.
+      s.store.set("run-1", {
+        extensions: {
+          approval: {
+            state: "pausing",
+            origin: OBSERVE_CHAIN_ORIGIN,
+          },
+        },
+      });
+      const log: string[] = [];
+      const out = await requestApproval(
+        deps(s.store, { teardown: recordingTeardown(s.store, log) }),
+        "run-1",
+        req("rv-1"),
+      );
+      expect(out).toEqual({ outcome: "requested" });
+      // The order probe: the gate's own teardown-at-pause still ran, against a
+      // record that was `pausing` when it observed it.
+      expect(log).toEqual(["teardown:run-1:pausing"]);
+      const ext = s.store.get("run-1").extensions?.approval;
+      expect(ext?.state).toBe("awaiting-approval");
+      expect(ext?.reportId).toBe("rv-1");
+      expect(ext?.headSha).toBe(SHA_A);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("an ADOPTED chain pausing that already carries a MISMATCHED headSha refuses — adoption may not move onto different code (#382)", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      s.store.set("run-1", {
+        extensions: {
+          approval: {
+            state: "pausing",
+            origin: OBSERVE_CHAIN_ORIGIN,
+            headSha: SHA_B,
+          },
+        },
+      });
+      const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+      await expect(requestApproval(deps(s.store), "run-1", req("rv-1", SHA_A))).rejects.toThrow(
+        /approval-report-mismatch/,
+      );
+      // Fail-closed: the record is left exactly as found.
+      expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
     } finally {
       s.cleanup();
     }

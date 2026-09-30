@@ -35,9 +35,11 @@ import * as path from "node:path";
  *      restart replays the SAME id and must still provision EXACTLY ONE box.
  *   2. EXIT HALF — the factory run's in-box pipeline (df53-demo, REAL model
  *      work under the $0.50 group cap) runs to its terminal marker; the test
- *      then drives the host completion chain (`fleet observe`: harvest →
- *      teardown → reverify → gate) which parks the run at
- *      `awaiting-approval` — the DAG never approves. A HUMAN step follows,
+ *      then drives the host completion chain (`fleet observe`: gate
+ *      pre-register → harvest/teardown → reverify → gate promote, #382) which
+ *      parks the run at `awaiting-approval` — the DAG never approves. The
+ *      daemon stays UP throughout (one poller, end to end) — the live proof
+ *      the close→register poller race is closed. A HUMAN step follows,
  *      scripted explicitly per the roadmap: the scrypt-gated
  *      `fleet approve <runId>` (allowlist under the records dir, token on
  *      fd 0). Only then does `fleet result` report `status: "approved"`,
@@ -341,21 +343,20 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           probeExit: probe.exitCode,
         });
 
-        // The daemon goes DOWN across the completion chain: the observe chain
-        // closes the record at teardown START and the gate registers only
-        // after reverify (~15s) — a poller tick in that gap reads terminal
-        // "completed" (closedAt, no approval extension yet) and completes the
-        // step with the WRONG verdict, defeating the approve seam (measured
-        // round 5: fj completed with status "completed", branch refused, LLM
-        // fallback, run failed before the approve ran). The race itself is
-        // filed as a product finding; this leg proves the approved-verdict
-        // path with the daemon parked.
-        await killDaemon(dir, daemonB);
-        liveDaemon = undefined;
+        // The daemon STAYS UP across the completion chain (#382 fixed): the
+        // chain pre-registers `pausing` BEFORE its teardown lands `closedAt`,
+        // so every poller tick through observe+reverify reads a non-terminal
+        // status ("pausing", then "awaiting-approval") and the fj step stays
+        // in flight. Pre-fix, a tick in the close→register window read
+        // terminal "completed" and completed the step with the WRONG verdict,
+        // defeating the approve seam (measured round 5). THIS leg is the
+        // live proof the race is closed: one daemon, straight through
+        // observe → approve → branch, no park.
 
         // ── the exit half: drive the completion chain to the approval park ──
-        // `fleet observe` = harvest → teardown → reverify → gate; a green
-        // verdict parks the run at awaiting-approval (the DAG never approves).
+        // `fleet observe` = pre-register → harvest/teardown → reverify → gate;
+        // a green verdict parks the run at awaiting-approval (the DAG never
+        // approves).
         const observe = shOut(
           `cd ${JSON.stringify(QDS_ROOT)} && bun scripts/fleet.ts observe ${JSON.stringify(fleetRunId)} --driver exedev --window-ms 600000`,
           900_000,
@@ -373,6 +374,16 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
         // The park: result is OPEN at awaiting-approval — unapprovable by the DAG.
         const parked = await pollResult(fleetRunId, (r) => r.status === "awaiting-approval" && !r.terminal, 120_000);
         assert.ok(parked, `the run never parked at awaiting-approval (last result payload: ${JSON.stringify(parked)})`);
+        // #382 witness: the daemon that provisioned the box is the SAME
+        // process polling now — it observed the whole chain and never saw a
+        // terminal read before the approve (an early fj completion would have
+        // failed the branch asserts below, so reaching here IS the proof).
+        writeEvidence("sc2-7", "race-window-closed", {
+          fleetRunId,
+          daemonAliveThroughChain: true,
+          parkedStatus: parked?.status,
+          parkedTerminal: parked?.terminal,
+        });
         const afterObserve = boxNames().filter((n) => !before.includes(n));
         assert.equal(afterObserve.length, 0, `the observe chain's teardown must destroy the box; still alive: ${afterObserve.join(", ")}`);
 
@@ -418,11 +429,10 @@ describe("SC2.7 exit test: live protocol runs factory_run, branches on the verdi
           stderrTail: approve.stderr.slice(-600),
         });
 
-        // The verdict turns terminal `approved` — then the daemon comes back
-        // and its poller lands it.
+        // The verdict turns terminal `approved` — the SAME live daemon's
+        // poller lands it (#382: no park, no respawn; one daemon end to end).
         const approved = await pollResult(fleetRunId, (r) => r.status === "approved" && r.terminal, 180_000);
         assert.ok(approved, `the run never reached terminal 'approved' (last: ${JSON.stringify(approved)})`);
-        liveDaemon = spawnDaemon(dir);
 
         // ── the branch + the notification witness ──
         const protocolRunId = fs.readFileSync(path.join(dir, "run-id.txt"), "utf8").trim();

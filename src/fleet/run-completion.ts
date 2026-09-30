@@ -16,6 +16,14 @@
  * is never fed to reverify — DF5.1 re-judges the tree independently, so the
  * two-layer evidence doctrine (INV-IBOX-15) holds by construction.
  *
+ * (#382, 2026-09-30) ONE exception to "written only by the gate": the chain
+ * pre-registers `state: "pausing"` (origin-tagged, nothing bound) BEFORE its
+ * teardown, so no intermediate record read ever shows `closedAt` set with no
+ * approval extension — the window a poller used to read as terminal
+ * `completed`, defeating the approve seam. The gate's resume arm adopts the
+ * pre-registration when reverify presents its report; see
+ * `OBSERVE_CHAIN_ORIGIN` below.
+ *
  * LOCKING: this module acquires NOTHING (INV-IBOX-16). Every caller — `fleet
  * observe`, DF3.8's sweep, DF6.1a's fix run — takes `<runsDir>/<runId>.lock`
  * itself and hands the handle in as `deps.runLock`: the acquire is not
@@ -53,6 +61,23 @@ import { unitActivity } from "./run.ts";
 // inherited from fan-out's race-shaped 1 h. Raise the multiple only with
 // measured evidence; the operator's --window-ms always wins.
 export const DEFAULT_OBSERVATION_WINDOW_MS = 7_200_000;
+
+/**
+ * The `extensions.approval.origin` value this module stamps on its #382
+ * pre-registration — the `pausing` extension written BEFORE the chain's
+ * teardown so no intermediate record read ever shows `closedAt` set with no
+ * approval extension (the shape `buildResult` maps to terminal `completed`,
+ * which a poller applies as a finished verdict, defeating the approve seam).
+ *
+ * The gate — the semantic owner of the approval namespace — exports the same
+ * value as `OBSERVE_CHAIN_ORIGIN`, and its resume arm adopts a `pausing`
+ * extension carrying it (there is no report bound at registration time, so
+ * the next re-presented report is the FIRST binding). This module carries its
+ * own copy of the literal because `./approval-gate.ts` is on this file's
+ * FORBIDDEN_DIRECT import list — the bridge acquires no gate surface — and
+ * run-completion.test.ts pins the two literals equal.
+ */
+export const OBSERVE_CHAIN_ORIGIN = "observe-chain";
 
 /**
  * What `fleet observe` (and DF3.8's sweep, and DF6.1a's fix run) ends in — a
@@ -385,18 +410,31 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
     };
   }
   if (approvalState === "pausing") {
-    // NOT a refusal, and never a poll: a pausing record is post-teardown on
-    // every driven path, so its box and its tmpfs marker are already gone —
-    // polling can only produce skip ticks against a destroyed box.
-    return promoteStrandedPause(runId, deps);
+    // NOT a refusal, and never a poll — EXCEPT for the #382 pre-registration.
+    // A gate-authored `pausing` record is post-teardown on every driven path,
+    // so its box and its tmpfs marker are already gone — polling can only
+    // produce skip ticks against a destroyed box. But a chain-authored one
+    // (origin `observe-chain`) on an OPEN record is the crash window BETWEEN
+    // this chain's pre-registration and its teardown: the box may still be
+    // alive with a settled marker, and the honest recovery is the whole chain
+    // again (teardown → reverify → the gate's adopt), not a promote that
+    // presumes the teardown already landed. Closed chain-authored records are
+    // post-teardown (W3) and promote exactly as before.
+    if (!(rec.closedAt === undefined && String(rec.extensions?.approval?.origin ?? "") === OBSERVE_CHAIN_ORIGIN)) {
+      return promoteStrandedPause(runId, deps);
+    }
+    // Fall through to the poll loop. The extension arms below must not re-arm
+    // over a state this branch has already answered.
   }
-  if (rec.extensions?.approval !== undefined) {
+  if (rec.extensions?.approval !== undefined && approvalState !== "pausing") {
     // Fail-closed (the gate's own posture, moved one tier up): any PRESENT
     // approval extension that is none of the five states above — a hand-edit,
     // a schema drift, or a non-string `state` that `approvalExtensionState`
     // flattens to undefined — must not fall through to the poll, or the chain
     // would drive a destructive teardown over a namespace nobody can read and
-    // the gate would decide it only after the box is gone.
+    // the gate would decide it only after the box is gone. (`pausing` is
+    // exempt here because the arm above has already answered it — promote, or
+    // the #382 fall-through to the poll.)
     return {
       kind: "refused",
       code: "approval-state-unrecognized",
@@ -459,6 +497,37 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
     if (verdict.kind === "settled") {
       const teardownDeps = chainTeardownDeps(deps, requestId);
       const chainStartMs = Date.now();
+      // #382: register the gate's `pausing` state BEFORE the teardown closes
+      // the record. The old order — close, then reverify (~seconds), then the
+      // gate's registration — left a window in which the record read `closedAt`
+      // set with NO approval extension, which `buildResult` maps to terminal
+      // `completed`: a poller ticking inside it applies a finished verdict and
+      // defeats the approve seam (measured live, SC2.7 round 5). Registered
+      // first, every intermediate read is `pausing` — non-terminal — and the
+      // gate's resume arm ADOPTS this extension when reverify re-presents its
+      // report (there is no report bound yet; the adopt IS the first binding).
+      //
+      // A direct store write, not `requestApproval`: the report does not exist,
+      // and the gate's fresh-register bundle guard rightly refuses a run with
+      // no bundle — harvest is teardown's first internal step, still ahead.
+      // Idempotent on re-observation after a W1 crash (same values merge into
+      // the same fields); a throw here leaves the record open, the box alive
+      // and the marker in place, and the next observe re-runs the whole chain.
+      try {
+        deps.store.set(runId, {
+          extensions: { approval: { state: "pausing", origin: OBSERVE_CHAIN_ORIGIN } },
+        });
+      } catch (e) {
+        const outcome: ChainOutcome = { kind: "chain-failed", step: "pause-registration", error: errText(e) };
+        emitTerminal(
+          requestId,
+          runId,
+          { event: "run-complete", markerPollMs },
+          outcome,
+          Math.max(0, Date.now() - chainStartMs),
+        );
+        return outcome;
+      }
       try {
         // Harvest is teardown's own first internal step — never a separate
         // orchestration stage here. An abort leaves the record open and the
@@ -618,6 +687,11 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
  * case is covered by the gate's teardown-at-pause through the SAME wired port
  * (INV-APPROVE-6 enforced at the gate). `driven` here carries NO `markerOk`:
  * no caller of this entry has ever read a marker.
+ *
+ * (#382) The ONE `pausing` shape that never reaches here: a chain-authored,
+ * still-open record — the crash window between the chain's pre-registration
+ * and its teardown — falls through the caller's pre-flight to the poll loop
+ * instead, because its box may still be alive with a settled marker.
  *
  * PRECONDITION: the caller already holds `<runsDir>/<runId>.lock` and passes
  * the handle as `deps.runLock` — this module acquires nothing (see header).

@@ -909,6 +909,28 @@ export const MAX_REPORT_ID_CHARS = STRINGS_MAX_ELEMENT_LEN;
 
 const TERMINAL: ReadonlySet<string> = new Set(["approved", "rejected", "timed-out"]);
 
+/**
+ * The `extensions.approval.origin` value that marks a `pausing` extension as
+ * written by DF3.7's observe chain rather than by this gate (#382).
+ *
+ * The chain registers the pause BEFORE its teardown — that ordering is the
+ * whole fix: it closes the window in which the record read `closedAt` set with
+ * no approval extension, which `buildResult` maps to terminal `completed` and
+ * a poller applies as a finished verdict, defeating the approve seam. At
+ * registration time no reverify report exists yet, so the chain's extension
+ * carries NO `reportId` and NO `headSha` — which is exactly the shape this
+ * module's B9 refusal calls damaged. `origin` is the discriminator: an
+ * empty-reportId `pausing` naming this origin is a pre-registration the next
+ * re-presented report ADOPTS (the first binding, not a collision); the same
+ * shape WITHOUT it stays the damaged-record refusal, because a gate-authored
+ * `pausing` always binds a report at the door.
+ *
+ * run-completion.ts carries its own copy of the literal — `./approval-gate.ts`
+ * is on that module's FORBIDDEN_DIRECT import list — and
+ * run-completion.test.ts pins the two equal.
+ */
+export const OBSERVE_CHAIN_ORIGIN = "observe-chain";
+
 export type Decision = "approved" | "rejected";
 
 export interface RecordedDecision {
@@ -1528,33 +1550,58 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // and a stored id carrying stray whitespace (a hand-edit) must still
       // match its own report or the run wedges as `pause-in-progress` forever.
       const pausedReportId = String(existing?.reportId ?? "").trim();
+      // #382: a `pausing` extension the observe CHAIN wrote (origin-tagged,
+      // pre-teardown) binds no report yet — there is nothing to collide with,
+      // and the re-presented report is the FIRST binding, so the empty
+      // reportId ADOPTS it instead of refusing. The tag is the discriminator:
+      // a gate-authored `pausing` always binds a report at the door, so the
+      // same empty shape WITHOUT the tag stays the damaged-record refusal.
+      const chainAuthored = String(existing?.origin ?? "") === OBSERVE_CHAIN_ORIGIN;
       // A `pausing` record naming NO report cannot be resumed by ANY
       // re-presentation: the compare below can only ever answer
       // `pause-in-progress`, `pausing` never expires, and this arm is the only
       // promoter — so the record would wedge silently forever while every
       // reverify retry returns a bland non-answer. Name the damage instead.
-      if (pausedReportId === "") {
+      if (pausedReportId === "" && !chainAuthored) {
         throw new Error(
           `refusing to resume ${runId}: its pausing approval extension names no reportId, so no re-presented report can ever match it and the record can never be promoted — the run is wedged by a damaged record, not by a competing pause; inspect it with \`fleet status ${runId}\` and correct or clear the extension deliberately`,
         );
       }
-      if (pausedReportId !== reportId) return { outcome: "pause-in-progress" };
-      // BYTE-IDENTICAL ON BOTH FIELDS, not the reportId alone. A resume is the
-      // arm that promotes whatever this record was paused against, so a
-      // re-present that pairs the STRANDED reportId with a different — a
-      // FRESH commit's — headSha would promote an approval bound to report A
-      // onto code from commit B, with no rebind in between to record the
-      // change. Same rule as the reportId above: the stored sha is lower-cased
-      // as written (see the door), and any disagreement refuses.
-      const pausedHeadSha = String(existing?.headSha ?? "").toLowerCase();
-      if (pausedHeadSha !== headSha) {
-        throw new Error(
-          `refusing to resume ${runId}: it is paused against report ${reportId} at headSha ${JSON.stringify(
-            pausedHeadSha.slice(0, 64),
-          )}, but the re-presented report carries headSha ${JSON.stringify(
-            headSha.slice(0, 64),
-          )} (approval-report-mismatch) — a resume may not move a paused approval onto different code; re-run the verify for the original commit, or let the window expire`,
-        );
+      if (pausedReportId !== "" && pausedReportId !== reportId) return { outcome: "pause-in-progress" };
+      if (pausedReportId !== "") {
+        // BYTE-IDENTICAL ON BOTH FIELDS, not the reportId alone. A resume is the
+        // arm that promotes whatever this record was paused against, so a
+        // re-present that pairs the STRANDED reportId with a different — a
+        // FRESH commit's — headSha would promote an approval bound to report A
+        // onto code from commit B, with no rebind in between to record the
+        // change. Same rule as the reportId above: the stored sha is lower-cased
+        // as written (see the door), and any disagreement refuses.
+        const pausedHeadSha = String(existing?.headSha ?? "").toLowerCase();
+        if (pausedHeadSha !== headSha) {
+          throw new Error(
+            `refusing to resume ${runId}: it is paused against report ${reportId} at headSha ${JSON.stringify(
+              pausedHeadSha.slice(0, 64),
+            )}, but the re-presented report carries headSha ${JSON.stringify(
+              headSha.slice(0, 64),
+            )} (approval-report-mismatch) — a resume may not move a paused approval onto different code; re-run the verify for the original commit, or let the window expire`,
+          );
+        }
+      } else if (chainAuthored) {
+        // The adopt arm's one guard: a pre-registration normally carries no
+        // headSha either, but if one IS present it must still agree — a
+        // hand-edited (or future-writer) tag that pairs this origin with a
+        // foreign commit's sha must not let adoption bind report A onto code
+        // from commit B any more than the bound resume above may.
+        const pausedHeadSha = String(existing?.headSha ?? "").toLowerCase();
+        if (pausedHeadSha !== "" && pausedHeadSha !== headSha) {
+          throw new Error(
+            `refusing to adopt ${runId}: its chain-registered pausing extension names headSha ${JSON.stringify(
+              pausedHeadSha.slice(0, 64),
+            )}, but the re-presented report carries headSha ${JSON.stringify(
+              headSha.slice(0, 64),
+            )} (approval-report-mismatch) — adoption binds the FIRST report and may not move it onto different code`,
+          );
+        }
       }
       // Same fail-closed guard as the fresh-register and rebind paths: a
       // resume is the THIRD route to the decidable state, and a report naming
