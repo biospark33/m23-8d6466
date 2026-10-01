@@ -1408,6 +1408,16 @@ function emitPause(ctx: PauseCtx, runId: string): void {
 }
 
 /**
+ * What the in-lock transition reports back to the pause body. `promote` marks
+ * the entries that still owe the tail (guards → teardown → promotion); `bind`
+ * is the #382 ADOPT case only — a chain-authored `pausing` bound no report, so
+ * the re-presented one is the FIRST binding and the promote tail must stamp
+ * it onto the record (a bound resume leaves it undefined: its reportId and
+ * headSha are already on the record and the merge keeps them).
+ */
+type PauseTransition = ApprovalOutcome & { promote?: true; bind?: { reportId: string; headSha: string } };
+
+/**
  * Register the pause and, once teardown has landed, promote it to the state a
  * decision may be submitted against (AC1).
  *
@@ -1504,7 +1514,7 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
   // `promote` marks the two entries that still owe the tail below (guards →
   // teardown → promotion): a fresh registration, and a resume of a `pausing`
   // record this same report already owns.
-  const transition = await withApprovalLock(store.dir, runId, (): ApprovalOutcome & { promote?: true } => {
+  const transition = await withApprovalLock(store.dir, runId, (): PauseTransition => {
     // Clock read AFTER the lock: `withApprovalLock` can wait up to
     // LOCK_TIMEOUT_MS, and stamps taken before it can land minutes in the
     // past — a `requestedAt` older than the record's own `decidedAt`, or a
@@ -1628,7 +1638,15 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
         },
       });
       timings.record_write_ms += Date.now() - tRestamp;
-      return { outcome: "requested", promote: true };
+      // #382 ADOPT: a chain-authored `pausing` bound no report, so the
+      // re-presented one IS the first binding. The promote tail below must
+      // stamp it — the record arrives with no reportId/headSha of its own to
+      // merge, and a promotion that binds nothing leaves an `awaiting-approval`
+      // record bound to nothing: every later rebind, supersede and decision
+      // would read a reportId that was never written.
+      return pausedReportId === ""
+        ? { outcome: "requested", promote: true, bind: { reportId, headSha } }
+        : { outcome: "requested", promote: true };
     }
     // Expiry is applied to the READ, so a rebind arriving after `expiresAt`
     // sees `timed-out` and loses exactly as it would against a real decision.
@@ -1941,6 +1959,14 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       extensions: {
         approval: {
           state: "awaiting-approval",
+          // #382 ADOPT: an adopted chain pausing carries no binding of its
+          // own, so the promoted write stamps the re-presented report here —
+          // the resume arm handed it across as `bind`. A bound resume leaves
+          // this spread empty: its reportId/headSha are already on the record
+          // and `set()` merges field-by-field, byte-identical to before.
+          ...(transition.bind === undefined
+            ? {}
+            : { reportId: transition.bind.reportId, headSha: transition.bind.headSha }),
           requestedAt: promotedAt.toISOString(),
           expiresAt: new Date(promotedAt.getTime() + resolveTimeoutMs(deps)).toISOString(),
         },

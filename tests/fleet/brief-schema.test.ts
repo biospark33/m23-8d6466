@@ -1440,7 +1440,11 @@ describe("brief workId (Q1.7 headless briefs)", () => {
 
   test("neither issueId nor workId → refused, naming both fields", () => {
     const brief = validBrief();
-    delete brief.issueId;
+    // `= undefined` not `delete`: the schema's exactly-one refine tests
+    // `!== undefined`, so the two are behavior-identical here — and biome
+    // forbids the delete operator (noUncheckedIndexedAccess semantics are
+    // untouched: Zod's `.optional()` treats the key the same either way).
+    brief.issueId = undefined;
     // ONE issue, path on `issueId`; the MESSAGE is what names both fields —
     // the refusal is about the pair, not either half.
     expectRejected(brief, {

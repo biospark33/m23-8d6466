@@ -68,9 +68,13 @@ meta:
   # teardown that can lose a harvest irreversibly; a verifier that mutates what it verifies; a D4
   # governance tripwire that is undecidable because nothing writes token rows).
   #
-  # Cross-check, recomputed from the per-story entries: the FOUR not-done stories are
-  # DF3.6b 3 + DF5.5 3 + DF6.1a 4 + DF6.1b 3 = 13 pts, and 169 - 13 = 156. Per-epic declared == summed for all
+  # Cross-check, recomputed from the per-story entries: the TWO not-done stories are
+  # DF3.6b 3 + DF5.5 3 = 6 pts, and 169 - 6 = 163. Per-epic declared == summed for all
   # six epics (df1 45, df2 48, df3 35, df4 10, df5 22, df6 9 = 169; 10+13+9+2+5+3 = 42 stories).
+  # 2026-10-01: FOUR->TWO / 13->6 pts / 156->163 — DF6.1a done (PR #277 merged 07c3b171),
+  # DF6.1b done (PR #390 squash 20a63c7a). The header above had kept "FOUR … 13" through both
+  # merges; surfaced by the first real CI run after the GitHub Actions billing outage
+  # (tests/scripts/story-consistency.test.ts gates it).
   # 2026-09-13: TEN->NINE / 38->35 pts / 131->134 — DF2.13 done (PR #254 merged, 8494999e).
   # Its 1-pt unslotted follow-up DF2.14 (review deferreds D1+D2) also done; it was never a
   # not-done slate row, so the nine-row sum above does not include it.
