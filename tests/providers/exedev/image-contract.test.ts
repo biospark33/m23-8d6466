@@ -1394,8 +1394,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // buildId inputs are the ones the current pin was derived from" — which
     // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
     // SAME COMMIT; that pairing is the whole ritual.
-    expect(marker.buildId).toBe("3aa9227509786a67"); // adopted by the THIRTIETH-pin ritual (gate B run 36614519605, CI-measured — billing RESTORED, no provenance deviation): the engine COPY enumeration gained quota-intents.ts (post-Q1 resolution-probe refusal, run 36610326021), OPENRIG_TREE_SHA256 fifth re-pin e035abfa->f8071b8b (upstream ^-range drift, run 36611371706's TOFU refusal), and the Q1 surface itself (submit/result/cancel verbs, budget-group ledger, workId identity, quota-intent wiring) — the baked engine now matches the delivered surface, SC2's live-round prerequisite. Prior pairing: the twenty-ninth (measured LOCALLY, billing-deviation era): ARG CLAUDE_CODE_VERSION install + the two sweep-measured license names — the S2 buildout image; re-pinned here (the pairing the comment above demands)
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("3aa9227509786a67");
+    expect(marker.buildId).toBe("26b5ce571e50bfcc"); // adopted by the THIRTY-FIRST-pin ritual (gate run 36876842343, CI-measured): OPENRIG_TREE_SHA256 sixth pin (8074bfe6..., hono 4.13.12 floating under @openrig/cli's ^4.7.0 — tarballs verified byte-stable, the closure moved), plus the image's first post-billing-outage rebuild. Prior pairing: the thirtieth (quota-intents.ts in the engine COPY enumeration + OPENRIG_TREE_SHA256's fifth re-pin + the Q1 submit/result/cancel surface — run 36614519605)
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("26b5ce571e50bfcc");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 

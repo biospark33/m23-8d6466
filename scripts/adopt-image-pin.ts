@@ -142,6 +142,30 @@ if (received.length === 0) {
     console.log("tracked-inputs digest: assertion already carries the measured value");
   }
 }
+// ── 3a. the image-contract marker fixture (sixth + seventh sites) ───────────
+// tests/providers/exedev/image-contract.test.ts asserts marker.buildId AND
+// DEFAULT_IMAGE_BUILD_ID against a literal that must move with every pin
+// (adoption 1cc01c55 missed them once before; #397's thirty-first adoption
+// missed them again). Adopt from the same gate block.
+{
+  let icSrc = await Bun.file("tests/providers/exedev/image-contract.test.ts").text();
+  let icChanged = false;
+  icSrc = icSrc.replace(/(expect\(marker\.buildId\)\.toBe\(")([0-9a-f]{16})("\))/g, (whole, a, old, c) => {
+    if (old === newBuildId) return whole;
+    icChanged = true;
+    return a + newBuildId + c;
+  });
+  icSrc = icSrc.replace(/(expect\(DEFAULT_IMAGE_BUILD_ID\)\.toBe\(")([0-9a-f]{16})("\))/g, (whole, a, old, c) => {
+    if (old === newBuildId) return whole;
+    icChanged = true;
+    return a + newBuildId + c;
+  });
+  if (icChanged) {
+    await Bun.write("tests/providers/exedev/image-contract.test.ts", icSrc);
+    console.log("image-contract marker fixture: adopted");
+  } else console.log("image-contract marker fixture: already current");
+}
+
 // ── 3b. the per-file PINNED map (Dockerfile + systemd bytes) ────────────────
 // A Dockerfile/asset edit moves its sha256 in the PINNED map at the
 // "tracked buildId inputs are the ones the current pin was derived from"
@@ -173,11 +197,11 @@ if (mapAnchor >= 0) {
 }
 
 // ── 4. re-measure: report every failure the tree still carries ──────────────
-const after = spawnSync("bun", ["test", "tests/scripts/build-exedev-image.test.ts"], { encoding: "utf8" });
+const after = spawnSync("bun", ["test", "tests/scripts/build-exedev-image.test.ts", "tests/providers/exedev/image-contract.test.ts"], { encoding: "utf8" });
 const afterOut = after.stdout + after.stderr;
 const fails = [...afterOut.matchAll(/\(fail\) (.+)/g)].map((m) => m[1]);
 if (fails.length === 0) {
-  console.log("post-adoption: build-exedev-image suite green");
+  console.log("post-adoption: pin suites green");
 } else {
   console.log(`post-adoption: ${fails.length} failure(s) remain — adopter has no oracle for these, triage by hand:`);
   for (const f of fails) console.log(`  (fail) ${f}`);
