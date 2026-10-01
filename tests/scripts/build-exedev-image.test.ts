@@ -1302,7 +1302,9 @@ describe("buildIdFileInputs", () => {
       // uncompressed bytes differing, same /opt/openrig tree hash both
       // runs). Dockerfile bytes only, re-pinned from this test's own failing
       // run; trackedSetDigest did not move (not a files() entry).
-      "oci/exedev/Dockerfile": "f20a95a23a534e3c30b9dc86cb3668476b51960ada7ef471232169ed9098a0ac",
+      // ee802669/26b5ce57 adoption (2026-10-01): #396 re-pinned OPENRIG_TREE_SHA256 —
+      // Dockerfile bytes only, measured here; publish run 36876842343 pushed the pair.
+      "oci/exedev/Dockerfile": "c52e96448c6e30de101a2ca2557e37e1e42b1d6cd268cb5eb862dd03f077f619",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1963,7 +1965,7 @@ describe("buildIdFileInputs", () => {
       // post-repair tree; the rebuild adopting THIS value is SC2's
       // prerequisite (the baked engine must match the delivered surface
       // before a live round).
-      "23e4a959e9ad310e44ec8f1bc75bbaa0f662c868c8373957ee4f887ff44f4167",
+            "16d15fc18c290f2f47ed4c8dcbef9e588f1487934b5c6b3df674b2b581294708",
     );
   });
 });
@@ -3683,7 +3685,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "f8071b8b0e4b1ee21d7389bcacf671259302fe576938c8153c5278049aeaa42f";
+          return "8074bfe608ef275076554831cc1c3b68ef7244ef6f9fa9754548b6c79bf72646";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {

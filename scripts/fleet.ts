@@ -184,7 +184,7 @@ import { attachToRun, type AttachOptions } from "../src/fleet/attach.ts";
 // argv, the `sudo -n`, the deadline, the failure split) lives there; this file
 // is the argv/exit-code surface over it, exactly as it is over DF2.5 and DF3.4.
 import { runUnitName, startRun, type StartRunDriver, type StartRunOptions, type StartRunResult } from "../src/fleet/run.ts";
-import { submitWork, SubmitError } from "../src/fleet/submit.ts";
+import { submitWork, SubmitError, SUBMITS_DIRNAME } from "../src/fleet/submit.ts";
 import { buildResult, ResultError } from "../src/fleet/result.ts";
 import { isValidUuidV4 } from "../src/phase-engine/issue-correlation.ts";
 import { ATTACH_MESSAGE_CHAR_CEILING } from "../src/phase-engine/steering.ts";
