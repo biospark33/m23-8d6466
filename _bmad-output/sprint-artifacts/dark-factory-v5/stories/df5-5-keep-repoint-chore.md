@@ -1,7 +1,7 @@
 # DF5.5: KEEP-Repoint Chore — Dependency Edges, Boundary Amendments, SwarmClaw Role Line
 
 **Story Points:** 3
-**Status:** ready-for-dev
+**Status:** done — PR #391 merged (squash bbce9b24) 2026-10-01; the 2026-09-18 reconciliation note in `sprint-status.yaml` records the convention
 **Sprint:** v5-S3 — applied last, after all repoint-target stories are merged and the DF slate IDs
 are frozen
 
