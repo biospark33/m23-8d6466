@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "df36b-leg-a-crossing",
+  "residentRssBytes": 134217728,
+  "runBudgetMs": 80000,
+  "phases": [
+    {
+      "name": "prep",
+      "kind": "code",
+      "description": "DF3.6b Leg A (crossing): marker phase before the resident's first solicitation. The run_start solicitation is where the staged allocator (QDS_PI_BIN) crosses the manifest's 134217728-byte memory.max and the kernel OOM-kills the leaf; both phases exist so the journal can prove the run CONTINUED deterministic after the kill (story AC1). No model call, no retries: requiredBudgetMs = 2*1*3*10000 + 2*5000 = 70000 < 80000 (manifest.ts refuses the manifest when declared ceilings exceed runBudgetMs — same coupling t4.resident.pipeline.json documents).",
+      "maxDurationMs": 10000,
+      "retries": 0,
+      "command": ["echo", "df36b leg-a prep complete"]
+    },
+    {
+      "name": "settle",
+      "kind": "code",
+      "description": "DF3.6b Leg A (crossing): marker phase after the resident has been stopped by the OOM arm. The status gate refuses any further solicitation, so this phase runs with the resident already terminal — its success in the journal is the deterministic-completion clause of AC1.",
+      "maxDurationMs": 10000,
+      "retries": 0,
+      "command": ["sh", "-c", "echo 'df36b leg-a settle complete'; true"]
+    }
+  ]
+}

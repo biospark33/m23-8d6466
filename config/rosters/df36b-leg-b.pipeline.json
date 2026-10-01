@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "df36b-leg-b-attachment",
+  "runBudgetMs": 80000,
+  "phases": [
+    {
+      "name": "prep",
+      "kind": "code",
+      "description": "DF3.6b Leg B (attachment): marker phase before the run_start solicitation. NO residentRssBytes field is declared on this manifest, DELIBERATELY: the in-box front door (scripts/pipeline-run.ts, inBoxFrontDoor) supplies the bound from loadResidentBounds — the manifest value or the shipped PROVISIONAL_RESIDENT_RSS_BYTES default — so this leg arms the resident under the PRODUCTION default exactly as a real run would, and its first solicitation's memory.peak read is the pi baseline measurement the story DoD requires (zero marginal spend). Two real pi solicitations (run_start, run_end) ride one key.",
+      "maxDurationMs": 10000,
+      "retries": 0,
+      "command": ["echo", "df36b leg-b prep complete"]
+    },
+    {
+      "name": "settle",
+      "kind": "code",
+      "description": "DF3.6b Leg B (attachment): marker phase after the second solicitation. A healthy leg never trips the bound, so both phases and gates run on the deterministic path with the resident armed the whole way — attachment, not crossing, is what this leg proves.",
+      "maxDurationMs": 10000,
+      "retries": 0,
+      "command": ["sh", "-c", "echo 'df36b leg-b settle complete'; true"]
+    }
+  ]
+}
