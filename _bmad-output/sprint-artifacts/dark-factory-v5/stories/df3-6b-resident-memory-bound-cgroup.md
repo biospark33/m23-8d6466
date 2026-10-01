@@ -1089,7 +1089,9 @@ it from the DoD ticks:
   (`cgroup_teardown_ms` 1 ms; the unit's cgroup dir itself reaped by systemd once inactive —
   `NO-UNIT` is the benign reading, the sampler and the removal probe now say which they saw).
   Check (e): the bad-pid probe fired against the live leaf and its outcome is recorded in the
-  round evidence (best-effort by design). Check (f) was honored: the byte-for-byte
+  round evidence (best-effort by design) — note this is the ESRCH-variant probe, NOT the
+  mid-transition exit-97 confirmation the check originally asked for; that narrower residual
+  stays stated rather than claimed closed. Check (f) was honored: the byte-for-byte
   `memory.max` readback was NOT ported to any live leg.
 - **The pi baseline-RSS measurement** — TAKEN: **126.3 MiB** (repeat run 133.5 MiB, ~5%
   variance), recorded in the round evidence and in the DoD tick above.
