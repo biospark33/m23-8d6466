@@ -446,7 +446,7 @@ async function sampleLeaves(
       // the evidence carried only the literal fallback "PROBE-REJECTED" and
       // the ledger's "ESRCH-variant" wording was asserted, not evidenced.
       const probeSeg = probeAttempted
-        ? ":"
+        ? "true; " // latched off — `:` would lex against the following `done` (round-2 verify catch)
         : `echo "REJECT-PROBE"; err=$(echo 4194304 2>&1 > "$d/cgroup.procs") && echo PROBE-ACCEPTED || echo "PROBE-REJECTED \${err:-?}"; `;
       const script =
         `${findUnit}[ -n "$ud" ] || { echo NO-UNIT; exit 0; }; found=0; for d in "$ud"/resident.*; do [ -d "$d" ] || continue; found=1; echo "LEAF $d"; echo "PROCS"; cat "$d/cgroup.procs" 2>&1; echo "PEAK"; cat "$d/memory.peak" 2>&1; echo "EVENTS"; cat "$d/memory.events" 2>&1; ${probeSeg}done; [ "$found" = 1 ] || echo NO-LEAF`;
