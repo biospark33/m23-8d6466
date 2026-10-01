@@ -1076,7 +1076,10 @@ host-side coverage kept.
 
 ### NOT DONE — required handoff, and the story is not done without it
 
-**RESOLVED 2026-10-01 — the round ran, and every item in this section is closed** (PR #399's
+**RESOLVED 2026-10-01 — the round ran; both AC1 legs and the baseline measurement are complete,
+and every item in this section is closed except ONE narrow residual, stated open at check (e)
+below** (the bad-pid ESRCH-variant probe fired; the narrower mid-transition exit-97 confirmation
+the check originally asked for was NOT directly observed and remains stated, not claimed) (PR #399's
 round; evidence under `_bmad-output/evidence/df3-e2e/*df36b-leg-*.json`; ledger
 `.unlazy/df3-6b/GATES.md`). The section below is preserved verbatim as the record of what was
 open and why; the resolution is stated HERE, at the top, so a reader does not have to re-derive
