@@ -2998,12 +2998,30 @@ async function runSubmit(ctx: VerbCtx): Promise<number> {
     const startEngine = deps?.startEngine ?? (async (runId: string) =>
       startRun({ driver: driver as StartRunDriver, store: deps?.store ?? store }, runId));
 
+    // SEQUENCING ONLY — submitWork's own intent read below is the authoritative
+    // refusal. An IN-FLIGHT intent refuses inside submitWork BEFORE any mint, so
+    // building the key client eagerly would mask that bookkeeping refusal with a
+    // provisioning-key-missing usage error on a keyless host — the same shape the
+    // dispatch-side brief-parse-before-construction ordering above already fixed
+    // for malformed briefs. `asUsage` is eager: the build runs at THIS statement,
+    // before submitWork can answer anything. Conservative: only the in-flight
+    // shape skips construction — every other path (corrupt intent, failed intent,
+    // fresh submit) still builds exactly as before, and submitWork re-derives and
+    // refuses on its own read regardless of what this peek saw.
+    const intentInFlight = (() => {
+      try {
+        const intentPath = resolvePath(store.dir, SUBMITS_DIRNAME, `${requestId}.json`);
+        return (JSON.parse(readFileSync(intentPath, "utf-8")) as { state?: string }).state === "in-flight";
+      } catch {
+        return false;
+      }
+    })();
     const ack = await submitWork({
       ...seams,
       brief: briefJson,
       requestId,
       driver,
-      keyApi: deps?.keyApi ?? (briefCanMint ? asUsage(() => openRouterKeyApi()) : unusedKeyApi()),
+      keyApi: deps?.keyApi ?? (briefCanMint && !intentInFlight ? asUsage(() => openRouterKeyApi()) : unusedKeyApi()),
       store,
       ledgerFactory,
       startEngine,
