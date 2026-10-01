@@ -42,11 +42,14 @@ Phase 1 — v5 complete (in order):
   DF5.3 ✓), zero box/key/model spend. Dev via qds-dev with /unlazy acceptance gates.
   Cite #383's live-proven approval park in the evidence instead of hedging against it.
   Story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df6-1b-fix-loop-verdict-attempt-budget.md`
-- [ ] **DF5.5** KEEP-repoint chore — applied LAST per its own spec. PRE-DEV: reconcile its
+- [x] **DF5.5** KEEP-repoint chore — applied LAST per its own spec. PRE-DEV: reconcile its
   own Amendment D (SwarmClaw role line) with ADR-1 + the SC2 external_job reality; candidate
   boundary statement to pin: `SWARMCLAW_FACTORY_FLEET_CLI` — swarmclaw never learns QDS's
   driver grammar; `--driver exedev` lives only in the deployed wrapper. Story:
-  `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df5-5-keep-repoint-chore.md`
+  `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df5-5-keep-repoint-chore.md`.
+  DONE 2026-10-01 — PR #391 squash bbce9b24; Amendment D re-texted per ADR-1 with operator
+  approval at the pre-dev gate (the SWARMCLAW_FACTORY_FLEET_CLI boundary is IN the landed
+  blockquote); p1-18:50 found pre-discharged by DF6.1a; regression test + e2e demo green.
 - [ ] **DF3.6b** resident MemoryMax — HARD GATED on the billing fix (image publish workflow)
   + the full re-pin ritual + a live tier round. Natural pairing: the next live e2e round
   (which first exercises PR #388's sc2-7 artifacts). Story:
