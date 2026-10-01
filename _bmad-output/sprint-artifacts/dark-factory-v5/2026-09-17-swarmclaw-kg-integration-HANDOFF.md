@@ -57,7 +57,10 @@ Phase 1 — v5 complete (in order):
   membership off real kernfs, deterministic completion; Leg B `qds-20261001-d55b3c`: pi baseline
   126.3 MiB measured, 512 MiB default stands with 4.05× headroom, no re-set, no pin movement).
   v5 slate 42/42. Story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/` (df3-6b)
-- [ ] After each merge: flip the sprint-status.yaml row, prune the branch. v5 DONE when 0 open DF rows.
+- [x] After each merge: flip the sprint-status.yaml row, prune the branch. v5 DONE when 0 open DF rows.
+  DONE 2026-10-01 — PR #399 squash-merged 5feaeec6; DF3.6b row was flipped at close-out (row
+  already `done` pre-merge, cross-check ZERO not-done); branch pruned local+remote (G8-OK);
+  dev synced to origin/dev @ 5feaeec6. **v5 slate: 42/42 — SPRINT CLOSED.**
 
 Phase 2 — ops, PARALLEL, anytime (operator account-level steps; agents prep/verify only):
 - [ ] GitHub Actions billing fix (payments / spending limit) — unblocks all CI + DF3.6b
