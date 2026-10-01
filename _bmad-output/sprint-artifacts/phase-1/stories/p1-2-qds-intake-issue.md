@@ -23,7 +23,7 @@ When the Dev Manager agent receives an intake request via A2A (simulating a /qds
 
 **Wiring closed:** On completion of this story, an intake A2A call produces exactly one owned GitHub issue and one SwarmClaw session, linked by session ID, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P1.1 (Dev Manager registered as A2A agent).
+**Dependency edges (predecessors):** DF3.1 (fleet dispatcher core verbs — the v5 factory front door; was P1.1 "Dev Manager registered as A2A agent", whose A2A front-door premise died with the SwarmClaw protocol engine, audit §2). <!-- v5 amendment (DF5.5) -->
 
 ## Acceptance Criteria
 

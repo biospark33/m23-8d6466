@@ -663,4 +663,81 @@ list: zero hits, never opened.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+Applied 2026-10-01, branch `feature/df5-5-keep-repoint` (cut from dev 20a63c7a). TDD: `tests/scripts/keep-repoints.test.ts` written first, verified RED (3 fails: unannotated retired IDs, missing provenance annotations, zero markers), then amendments applied, then GREEN (12 pass / 0 fail / 80 expect calls, exit 0).
+
+### Pre-flight (re-verification gate, before first edit)
+
+- **Canonical successor set resolves 11/11** on disk under `dark-factory-v5/stories/` (DF1.3, DF1.5, DF1.6, DF1.8, DF2.8, DF2.10, DF3.1, DF5.2, DF5.3, DF1.10, DF6.1a). Gate: `.unlazy/df5-5/GATES.md` G1, evidence captured by gate-check.
+- **Drift absorbed — Amendment D re-texted per ADR-1 (operator-approved 2026-10-01, the story's pre-dev gate).** The as-authored amendment-D text ("It is **not** the factory front door; that is the tier-1 CLI (DD-1/DD-7)") predates ADR-1 (`docs/decisions/2026-09-30-adr-1-swarmclaw-macro-host.md`, ACCEPTED, operator-signed), which amends DD-7's front-door line: the door now also opens through a swarmclaw protocol ending at the approve gate; the gate itself does not move; DD-7's query-chassis role stands unchanged. The p0-7 blockquote below carries the ADR-1-aligned text (including the `$SWARMCLAW_FACTORY_FLEET_CLI` grammar boundary: swarmclaw never learns QDS's driver grammar; `--driver exedev` lives only in the deployed wrapper). No re-ask was needed for the p1-3 header blockquote's "The v5 front door is the tier-1 CLI" sentence: under ADR-1 that statement remains true (the fleet stays the only way code changes enter), so it was kept story-verbatim. **No register edit is owed for DD-7**: ADR-1 already carries the reversal and links the register row (INV-3-consistent; the register is amendable but the pointer exists).
+- **DF5.3 moved to done** since this gate last listed it as "can move again" — risk closed; `df5-3-audit-chain-extended.md` present.
+- **Slate recompute (DoD):** meta block `42 stories / 169 points (DF1 10/45, DF2 13/48, DF3 9/35, DF4 2/10, DF5 5/22, DF6 3/9)` — recomputed from per-story rows: **identical, 42/169** (`DF1:[10,45], DF2:[13,48], DF3:[9,35], DF4:[2,10], DF5:[5,22], DF6:[3,9]`). Command: the G2 gate CHECK (bun -e recount over `^ {6}(DF\d)\.\d+[ab]?:` rows — note the `[ab]?` suffix, needed for the DF3.6a/DF3.6b and DF6.1a/DF6.1b split rows; without it the recount reads 38/156 and mismatches). Match → chore proceeds.
+- **p1-18:50 hand-off pre-discharged:** DF6.1a's fix wave ALREADY landed `p1-18:50` — it **replaced** the `P1.19` identifier with `(DF6.1a)` outright (an identifier substitution, the one INV-1-admitted class in that governed block; no `P1.19` string survives in the file). **Which hand: DF6.1a's. The pre-authorised fallback was NOT taken** (the tripwire stays at five in-block hunks). The line's annotation duty is discharged either way per the P1.18 disposition.
+
+### Amendment log — one row per edit
+
+Line numbers are **apply-time** (after each file's header blockquote insertion). Every line carries the literal marker `v5 amendment (DF5.5)` (p0-7:68 in code-comment bracket form, inside an illustrative snippet).
+
+**Amendment A — dependency-edge repoints (forward-looking repointed; the three enumerated provenance sites annotated):**
+
+| File | Apply-time line | Edit (before → after) |
+|---|---|---|
+| `p1-2:26` | 26 | `P1.1 (Dev Manager registered as A2A agent).` → story-verbatim gloss-rule replacement naming DF3.1 and the dead A2A front-door premise |
+| `p1-3` (19 `P1.1` + 1 `P1.6`) | 28 | CC-12 line: first occurrence → `DF3.1 (was P1.1's additive surface; that A2A surface is historical — see the amendment above)`, other 2 bare `DF3.1`; marker appended |
+| `p1-3` | 30 | 5 occurrences: first → `DF3.1 — was P1.1's "the A2A delegation layer"…`, other 4 bare (`enum extension`, `INV-4`, `A2A delegation:`, `Transport Contract`); marker appended |
+| `p1-3` (in-block, AC4) | 45 | `via P1.1's routing` → `via P1.1's (now DF3.1's) routing` — identifier-only substitution (INV-1-admitted class), marker as inline annotation |
+| `p1-3` | 52 | `matching P1.6's convention` → `matching P1.6's (now DF1.6's) convention`; marker appended |
+| `p1-3` | 144 | `; P1.1 defines no transport-layer 413→JSON-RPC mapping` → `; DF3.1 (was P1.1's transport; that A2A surface is historical — see the amendment above) defines no…`; the line's later `not deferred to P1.1` mention left as historical provenance (line already names DF3.1); marker mid-line |
+| `p1-3` | 148 | `It is not deferred to P1.1 …: P1.1 provides the transport` → second mention `DF3.1 provides the transport`; marker appended |
+| `p1-3` (PROVENANCE) | 153 | `from P1.1 may propagate` → `from P1.1 (now DF3.1) may propagate` — keeps the old ID (JSON-RPC range allocation record, same fact as `p0-9:218`); marker appended |
+| `p1-3` | 160 (in-block, DoD) | `registers with P1.1 A2A layer` + `conforms to P1.1's registration schema` → both gain `(now DF3.1)` / `(now DF3.1's)` — identifier-only; marker appended |
+| `p1-3` (in-block, DoD) | 161 | `routed via P1.1's a2a.delegate(…)` → `routed via P1.1's (now DF3.1) a2a.delegate(…)` — identifier-only; marker appended |
+| `p1-7:26` | 26 | `P0.6, P1.6` → `P0.6, DF1.6 (was P1.6)`; marker appended |
+| `p1-9:25` | 25 | story-verbatim union text: `DF1.6 (was P1.6, per sprint-status), DF1.8 (was P1.8, per this file)` (the divergence disposition) |
+| `p1-11:25` | 32 | `P0.9, P1.6` → `P0.9, DF1.6 (was P1.6)` |
+| `p1-11:48` (Technical Notes, not governed) | 55 | `(P1.1)` → `(P1.1 — now DF3.1; the A2A surface itself is historical, audit §2)` |
+| `p1-11:51` | 58 | `(P1.6 artifact)` → `(DF1.6 artifact, was P1.6)`; marker appended |
+| `p1-12:25` | 32 | `P0.9, P1.6` → `P0.9, DF1.6 (was P1.6)` |
+| `p1-12:31` (in-block, AC3) | 38 | `pinned to P1.6's run-state schema` → `pinned to P1.6's (now DF1.6's) run-state schema` — identifier-only; marker appended |
+| `p1-12:39` | 46 | `(a P1.6 artifact — does not exist yet)` → `(a P1.6 artifact, now DF1.6 — does not exist yet)`; marker appended |
+| `p1-14:24` | 24 | `Predecessors (P1.5, P1.13)` → `Predecessors (P1.5, P1.13 — now DF2.8)`; marker appended |
+| `p1-14:26` | 26 | `P1.5, P1.13` → `P1.5, DF2.8 (was P1.13)`; marker appended |
+| `p1-18:17` | 22 | `After a PR is produced (P1.15)` → `(P1.15 — now DF5.2)`; marker appended |
+| `p1-18:23` | 28 | `Predecessors (P1.15)` → `(P1.15 — now DF5.2)`; marker appended |
+| `p1-18:25` | 30 | `P1.15` → `DF5.2 (was P1.15)` |
+| `p0-9:198` | 198 | `(e.g., P1.6)` → `(e.g., P1.6 — now DF1.6)`; marker appended |
+| `p0-9:218` (PROVENANCE) | 218 | `distinct from P1.1 (-32010..-32013)` → `distinct from P1.1 (now DF3.1) (-32010..-32013)` — keeps the old ID (shipped range allocation); marker appended |
+| `p0-7:55` (PROVENANCE, code comment) | 68 | `// P1.1 requires` → `// P1.1 (now DF3.1) requires` — keeps the old ID (shipped registration requirement); marker in `[v5 amendment (DF5.5)]` bracket form (inside an illustrative snippet — HTML comment would render as code) |
+| `p0-7:136` ×3 | 149 | `(A2A delegation)` → `(A2A delegation — now DF3.1; that A2A surface is historical, audit §2)`, then `updates to P0.9 and P1.1` → `…and DF3.1`, `in P0.9 and P1.1 reference` → `…and DF3.1 reference`; marker appended |
+
+Header blockquotes inserted below each H1 **before** substitutions: `p1-3:3-8` (amendment A preamble), `p1-18:3-7` (UNSCHEDULED disposition), `p1-11:3-8` + `p1-12:3-8` (amendment F), `p0-7:3-13` (amendment D). `p1-5:27-29` + `p1-9:27-36` carry amendment C (inserted after the dep-edge line).
+
+**Amendment B — the two enum-citation fixes are NOT-FOUND (recorded, nothing invented).**
+- `grep -c 'exitStatus'` on `p1-11` → **0**; on `p1-14` → **0** (L44 of p1-11 is a Hindsight transport table row; L29 of p1-14 is blank). Both audit rows confirmed label/line drift; no edit.
+- Corpus 4-value sweep (`grep -rln 'success | transient | overflow | logic'`): hits `p0-4` (RETIRE, not edited — INV-2), `p1-9` (see erratum below — this hit is amendment C's own quotation), and this story file. No KEEP story carries a stale 4-value enum citation. The CC-1 5-value enum needs no correction anywhere.
+- Adjacent drift recorded, not fixed (INV-1: an AC field name is AC substance): `p1-14` names `costCents` 3× while DD-9 settles integer µ$ — DF2.8 restates the cap (5,000,000 µ$). Command: `grep -c 'costCents' p1-14` → 3.
+
+**Amendment C — two boundary blockquotes, AC-untouched:** `p1-9:27-36` (corrected three-value `FailureClass` text — NOT the "keyed on the exitStatus enum" wording) and `p1-5:28-30`. Neither file's AC block changes (zero-character rule: `p1-9`'s only retired-ID line is the dep edge, outside every AC; `p1-5` has no retired-ID hits).
+
+**Amendment D — SwarmClaw role line:** `p0-7:3-13`, the ADR-1-aligned text approved by the operator 2026-10-01 (see Pre-flight). P0.7's AC, DOD items and shipped assets untouched — DONE-KEEP frozen.
+
+**Amendment E — ALREADY-SATISFIED; df2-3 unopened.** `grep -c 'loadResidentBounds' df2-3` → **0** (symbol lives in df3-6a and the corrected `credentials.ts` docstring); `grep -c 'residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd' df2-3` → **2** (the operator-corrected `≤` chain is present verbatim). E stays retired — re-applying it would rewrite the operator-corrected chain back to strict `<`, the exact regression E's retirement prevents. No successor-ID precondition run for DF3.6 (not an edge of this chore).
+
+**Amendment F — engine-seam placement notes:** `p1-11:3-8` and `p1-12:3-8`, story-verbatim blockquote. Neither AC block touched; both files already in the marker set so the 11-count does not move.
+
+**Amendment G — verified ALREADY-APPLIED; `sprint-status.yaml` appears in no hunk of the diff.** Re-verified 2026-10-01 by story key (read of the live file): `P1.2: [DF3.1]` · `P1.7: [P0.6, DF1.6]` · `P1.9: [DF1.6, DF1.8]` (+ the discharged 2026-07-28 clause) · `P1.11: [P0.9, DF1.6]` · `P1.12: [P0.9, DF1.6]` · `P1.14: [P1.5, DF2.8]` · `P1.18: [DF5.2]` — all eight rows carry the `deps repointed by DF5.5 2026-09-08` comment; `P1.3 [P1.2, P0.9]` and `P1.5 [P0.9, P0.10]` carry the comment with no retired ID. The yaml scan (AC1 third grep, KEEP-filtered) returns zero; superseded rows keep their retired-ID deps (historical record). The file is markerless, so the 11-path marker count holds.
+
+**Amendment C erratum (DD-8 class, third instance) — command output changed BY this chore.** The erratum's verification command `grep -c 'exitStatus' p1-9` read **0** at authoring (2026-09-08) and reads **2** post-apply: both hits are amendment C's own corrected blockquote text (lines 29 and 31), which quotes the CC-1 five-value enum by name — the story itself prescribes that wording. The story body carries zero `exitStatus` mentions. Recorded here because the erratum says the command output is the record; it is now a post-apply record.
+
+**INV-1 accounting:** the four admitted in-block hunks are exactly `p1-3` apply-time `:45` (AC4), `:160` and `:161` (DoD), `p1-12:38` (AC3) — each an identifier-only substitution + inline marker annotation, reviewed line by line. `p1-11`'s repoint at apply-time `:55` sits in that file's `## Technical Notes`, not a governed block. No fifth in-block hunk exists; the pre-authorised `p1-18:50` fallback was not taken (DF6.1a's hand landed the line).
+
+### AC1 verification greps (apply time, on the feature branch)
+
+1. Retired-ID grep over all 12 in-scope files: `grep -rnE 'P1\.(1|4|6|8|10|13|15|16|17|19)\b' <12 files> | grep -v 'DF[0-9]'` → **0 lines** (captured: `wc -l` = 0).
+2. Marker grep scoped to the two story dirs: `grep -rl 'v5 amendment (DF5.5)' phase-0/stories/ phase-1/stories/ | sort` → **exactly 11 paths** (`p0-5` absent; yaml carries no marker). Log: `/tmp/df55-green2.log` (test assertion 3 deep-equals the 11-path literal array).
+3. YAML retired-ID scan, KEEP-filtered: `grep -E 'deps: \[[^]]*P1\.(…)\b' sprint-status.yaml | grep -cE '(^| )P1\.(2|3|5|7|9|11|12|14|18):'` → **0** (7 raw hits, all superseded rows — historical record).
+4. Regression test: `bun test tests/scripts/keep-repoints.test.ts` → **12 pass / 0 fail / 80 expect() calls, exit 0** (log `/tmp/df55-green2.log`, read through the CLAUDE.md `tr`/`perl` filter). Four assertions + AC4 missing-successor halt (synthetic DF9.9 → unresolved) + W10E-2 provenance negative control (the three provenance sites assert the OLD ID survives substitution — a find-and-replace of a shipped-PR provenance reference would fail them) all green.
+
+### DoD checklist disposition
+
+Pre-flight ✓ (above) · Impl A ✓ · Impl C ✓ · Impl D ✓ (operator-approved text) · Impl F ✓ · Verify G ✓ (already-applied) · Slate recompute ✓ (42/169 = 42/169) · Hand-off ✓ (DF6.1a's wave; fallback not taken) · Contract ✓ (11 paths) · Integration ✓ (B NOT-FOUNDs + sweep + E verification recorded with commands) · Security ✓ (G9 review: zero AC/DOD/INV substance changes; four in-block hunks identifier-only; no RETIRE file opened; `df2-3`, the register, and `sprint-status.yaml` absent from every hunk) · Test ✓ (all four assertions green under plain `bun test`) · Test missing-successor ✓ (DF9.9 synthetic) · Test negative control ✓ (provenance sites guard the old ID) · Test e2e demo — pending post-merge clean-checkout run (recorded here when it runs).
+

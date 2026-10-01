@@ -195,7 +195,7 @@ AC-3/AC-4/AC-5 are reframed accordingly: "the provisioner/importer returns" (NOT
 
   ### Mulch Priming Consumer Contract
 
-  Mulch priming consumers (e.g., P1.6) should:
+  Mulch priming consumers (e.g., P1.6 — now DF1.6) should: <!-- v5 amendment (DF5.5) -->
   1. Recall from the `{resolveBankId(repoSlug)}-dev-meta` bank with a query matching the task brief.
   2. Rank recalled entries by recall `score` (the recall relevance score returned by Hindsight). The Mulch `confidence` field is metadata only — do NOT rank, filter, or gate on it.
   3. Use the top-k results (k from the `limit` parameter, default 5) to build a context preamble.
@@ -215,7 +215,7 @@ AC-3/AC-4/AC-5 are reframed accordingly: "the provisioner/importer returns" (NOT
   | -32005 | Bank provisioning failed / collision unresolvable | provisioner script (CLI exit code + `{ok:false,error:{code,message},requestId}` on stderr/JSON output) | provisioner (INV-HM6) |
   | —      | (bridge path) Hindsight MCP tool failure / invalid args | `MCPInvokeErrorResponseSchema` (HTTP via P0.7: `-32601`/`-32602` → 400, else → 502) | AC-3 (P0.7 `/invoke` bridge) |
 
-  Note: -32001..-32005 are defined here; -32006..-32009 are reserved for future P0.9 surfaces (undefined in Phase 0). The P0.9 range is distinct from P1.1 (-32010..-32013) and P1.3 (-32014..-32017).
+  Note: -32001..-32005 are defined here; -32006..-32009 are reserved for future P0.9 surfaces (undefined in Phase 0). The P0.9 range is distinct from P1.1 (now DF3.1) (-32010..-32013) and P1.3 (-32014..-32017). <!-- v5 amendment (DF5.5) -->
 
 - **Integration points (each wired & exercised in this story):**
   - Hindsight REST API `/v1/default/banks/{bank_id}/memories` — retain (POST)

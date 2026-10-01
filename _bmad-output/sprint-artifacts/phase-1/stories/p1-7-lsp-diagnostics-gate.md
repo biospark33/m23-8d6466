@@ -23,7 +23,7 @@ After a Pi implement agent finishes editing files inside a Warren burrow, pi-len
 
 **Wiring closed:** On completion of this story, a dirty-diagnostics emit is blocked and a clean-diagnostics emit proceeds using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P0.6, P1.6 — **P0.6 is DONE** (PR #42, merged 2026-07-25).
+**Dependency edges (predecessors):** P0.6, DF1.6 (was P1.6) — **P0.6 is DONE** (PR #42, merged 2026-07-25). <!-- v5 amendment (DF5.5) -->
 
 > ## ⚠️ P0.6 findings this story MUST absorb before implementation
 >

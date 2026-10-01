@@ -22,7 +22,18 @@ When a Pi agent step or protocol phase fails during a run, SwarmClaw classifies 
 
 **Wiring closed:** On completion of this story, failure classification is deterministic given a failure signal, and restart decisions are enforced within caps using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P1.8.
+**Dependency edges (predecessors):** DF1.6 (was P1.6, per sprint-status), DF1.8 (was P1.8, per this file). <!-- v5 amendment (DF5.5) -->
+
+> **v5 amendment (DF5.5):** P1.9 owns **cross-run** restart classification — its own three-value
+> `FailureClass` (`transient | overflow | logic`, `p1-9:36`), which is the *failure subset* of the
+> CC-1 five-value `exitStatus` enum (`success | transient | overflow | logic | lead_failure`,
+> `p0-3-mixed-model-demo.md:126`); the classification input is a `FailureSignal`, not an
+> `exitStatus` literal, and this amendment changes neither. **In-phase** retry — JSON-parse and
+> gate-violation retries re-entering the same agent session — is **DF1.3's**, separately bounded.
+> In-box process supervision is neither: DF2.10 ships `qds-run@.service` with **`Restart=no`**
+> (`df2-10:106,173`) and DF1.10 owns reclaim semantics (`df1-10:91,143`), so a crashed in-box
+> engine is **not** restarted by systemd and is not P1.9's cross-run classification either.
+> <!-- v5 amendment (DF5.5) -->
 
 ## Acceptance Criteria
 

@@ -25,6 +25,10 @@ Build a model router that takes a task description and returns: (1) an archetype
 
 **Dependency edges (predecessors):** P0.9 (Hindsight memory banks operational), P0.10 (GitNexus analysis available for complexity signals).
 
+> **v5 amendment (DF5.5):** P1.5 owns **router scoring against outcome records** (step 6). The
+> roster **config schema and dual slug validation** (pi's bundled catalog AND the provider API,
+> plus `~/.pi/agent/models.json`) is **DF1.5's**. <!-- v5 amendment (DF5.5) -->
+
 ## Acceptance Criteria
 
 1. **(make-or-break)** Given a task brief string and optional context, When the model router is invoked, Then it returns `{ archetype: string, tiers: Record<string, "haiku"|"sonnet"|"opus">, confidence: number (0-1), signals: object }` where archetype is one of the defined archetypes and every tier value is a valid model name.

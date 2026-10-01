@@ -1,5 +1,18 @@
 # P0.7: Register SwarmClaw Agent + MCP Server for Hindsight Memory
 
+> **v5 amendment (DF5.5):** SwarmClaw's v5 role per **ADR-1** (ACCEPTED 2026-09-30 — supersedes
+> the dormant part of DD-7): SwarmClaw **hosts macro processes** via the `external_job` step —
+> protocol state, scheduling, branching, notification — while the QDS fleet stays the only way
+> code changes enter (brief-validated, budget-gated, box-isolated, human-approved via
+> `fleet approve`). The front door now also opens through a swarmclaw protocol that ends at the
+> approve gate; the gate itself does not move (scrypt-gated, allowlisted, token-on-stdin,
+> human-only). Swarmclaw submits work only through `$SWARMCLAW_FACTORY_FLEET_CLI` (absolute
+> path, env-allowlisted; verbs `submit`/`result`/`cancel`, BriefSchema brief on stdin) and never
+> learns QDS's driver grammar — `--driver exedev` lives only in the deployed wrapper. SwarmClaw
+> also remains the host-side service chassis for factory query surfaces — the natural HTTP home
+> for DF5.3's audit-chain query if it ever needs one (DF2.8 shipped its cost view as a CLI
+> surface, `qds cost`, 2026-08-21). P0.7 assets stay frozen; no AC changes.
+
 **Story Points:** 4
 
 ## Spec Reference
@@ -52,7 +65,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
       try { return JSON.stringify(v).length <= 10240; } catch { return false; }
     }, { message: 'metadata exceeds 10KB or contains circular references' }),
   });
-  // P1.1 requires both agentType and endpointUrl for agent registration.
+  // P1.1 (now DF3.1) requires both agentType and endpointUrl for agent registration. [v5 amendment (DF5.5)]
   // P0.7 accepts registrations without them for MCP-only agents.
 
   // POST /api/mcp-servers
@@ -133,7 +146,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 
   **Tool enumeration caching:** Tool lists returned by `/test` are cached per MCP server registration. Cache TTL is 5 minutes (configurable via `SWARMCLAW_TOOL_CACHE_TTL_MS`). TTL must be >= 1000ms and <= 3600000ms (1 hour). Values outside this range are clamped. When clamped, emit a structured warning log: `{ level: 'warn', message: 'SWARMCLAW_TOOL_CACHE_TTL_MS clamped', raw, clamped, min: 1000, max: 3600000 }`. `/invoke` with an unknown tool (not in cache) triggers an on-demand re-enumeration before failing. If an invoke call returns a tool-not-found error from the MCP server, invalidate the cache entry and re-enumerate before retrying. This handles tools being removed between cache refreshes.
 
-  **Downstream contract stability:** P0.9 (Hindsight banks) and P1.1 (A2A delegation) depend on this story's MCP invoke bridge and agent registry interfaces. Breaking changes to `RegisterAgentSchema`, `MCPInvokeSchema`, `MCPInvokeArgumentsSchema`, or the `/api/mcp-servers/{id}/invoke` response format MUST be treated as BLOCKER-level changes requiring coordinated updates to P0.9 and P1.1. The Dependency edges section in P0.9 and P1.1 reference these schemas by name.
+  **Downstream contract stability:** P0.9 (Hindsight banks) and P1.1 (A2A delegation — now DF3.1; that A2A surface is historical, audit §2) depend on this story's MCP invoke bridge and agent registry interfaces. Breaking changes to `RegisterAgentSchema`, `MCPInvokeSchema`, `MCPInvokeArgumentsSchema`, or the `/api/mcp-servers/{id}/invoke` response format MUST be treated as BLOCKER-level changes requiring coordinated updates to P0.9 and DF3.1. The Dependency edges section in P0.9 and DF3.1 reference these schemas by name. <!-- v5 amendment (DF5.5) -->
 
 - **Integration points (each wired & exercised in this story):**
   - SwarmClaw `/api/agents` endpoint — agent CRUD

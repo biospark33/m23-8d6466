@@ -1,5 +1,10 @@
 # P1.18: PR Comment Webhook Ingestion Detects ≥1 Bot Review Comment
 
+> **v5 amendment (DF5.5):** P1.18 is KEEP but **UNSCHEDULED** for v5.0. The PR its polling watches
+> is now produced by **DF5.2** (host-side PR creation). v5.0 has **no webhook ingress** (DD-1
+> makes the operator the channel), so the receiver described below is not a v5 surface — the
+> references are annotated for provenance, not revived as a contract.
+
 **Story Points:** 3
 
 ## Spec Reference
@@ -14,15 +19,15 @@ so that the protocol can re-enter the loop and dispatch agents to address review
 
 ## Overview
 
-After a PR is produced (P1.15), external bot reviewers (e.g., CodeRabbit, Gemini) may post review comments. SwarmClaw must detect these comments to trigger the fix cycle. This story implements PR comment detection via GitHub webhook events. When a PR comment is posted, the webhook payload arrives at SwarmClaw's `/api/webhooks/[id]` endpoint. The system filters for bot-originated review comments using `comment.user.type === "Bot"` or `comment.user.login.endsWith("[bot]")`. Upon detecting ≥1 bot review comment, SwarmClaw updates the protocol state and signals readiness for the fix-dispatch phase.
+After a PR is produced (P1.15 — now DF5.2), external bot reviewers (e.g., CodeRabbit, Gemini) may post review comments. <!-- v5 amendment (DF5.5) --> SwarmClaw must detect these comments to trigger the fix cycle. This story implements PR comment detection via GitHub webhook events. When a PR comment is posted, the webhook payload arrives at SwarmClaw's `/api/webhooks/[id]` endpoint. The system filters for bot-originated review comments using `comment.user.type === "Bot"` or `comment.user.login.endsWith("[bot]")`. Upon detecting ≥1 bot review comment, SwarmClaw updates the protocol state and signals readiness for the fix-dispatch phase.
 
 ## E2E Slice
 
 **Demonstrable behavior:** A GitHub webhook delivers a PR comment event where the comment author has `user.type === "Bot"`. SwarmClaw receives the webhook, validates the signature, identifies the comment as a bot review comment, correlates it to the active protocol run, and updates the protocol state to indicate "bot review detected, ready for fix dispatch."
 
-**Wiring closed:** On completion of this story, a bot review comment on any PR produced by the SwarmClaw protocol is detected and re-enters the protocol loop using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.15) are dependency edges, not unfinished wiring inside this story.
+**Wiring closed:** On completion of this story, a bot review comment on any PR produced by the SwarmClaw protocol is detected and re-enters the protocol loop using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.15 — now DF5.2) are dependency edges, not unfinished wiring inside this story. <!-- v5 amendment (DF5.5) -->
 
-**Dependency edges (predecessors):** P1.15
+**Dependency edges (predecessors):** DF5.2 (was P1.15) <!-- v5 amendment (DF5.5) -->
 
 ## Acceptance Criteria
 

@@ -21,9 +21,9 @@ After every SwarmClaw protocol run completes (or fails), the system writes an ou
 
 **Demonstrable behavior:** A completed protocol run (dispatch_task through summarize) produces an outcome record in Hindsight bank `{repo}-dev-meta` keyed on `runId`, and a router-selection log entry in the same bank. Re-running with the same `runId` upserts (idempotent) rather than duplicates.
 
-**Wiring closed:** On completion of this story, any SwarmClaw protocol run that reaches the summarize phase writes a complete outcome record and router-selection rationale to Hindsight using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.5, P1.13) are dependency edges, not unfinished wiring inside this story.
+**Wiring closed:** On completion of this story, any SwarmClaw protocol run that reaches the summarize phase writes a complete outcome record and router-selection rationale to Hindsight using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.5, P1.13 — now DF2.8) are dependency edges, not unfinished wiring inside this story. <!-- v5 amendment (DF5.5) -->
 
-**Dependency edges (predecessors):** P1.5, P1.13
+**Dependency edges (predecessors):** P1.5, DF2.8 (was P1.13) <!-- v5 amendment (DF5.5) -->
 
 ## Acceptance Criteria
 
