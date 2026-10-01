@@ -1,0 +1,67 @@
+{
+  "test": "DF3.6b Leg A",
+  "outcome": "fail",
+  "runId": "qds-20261001-a7cb93",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "placement": "(sampler never ran)",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/df36b-leg-a.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "io/quantum-digital-solutions/qds-exedev@«redacted» exited 1: Connection to exe.dev closed by remote host.\",\"remediation\":\"re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`; if the failure is an image pull, mirror the pin (crane copy) and set QDS_EXEDEV_IMAGE + QDS_EXEDEV_IMAGE_BUILD_ID\"}\n{\"requestId\":\"a986200a-d933-4c0b-841a-62e1f43b7337\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:02:18.604Z\",\"duration\":34804,\"durationMs\":34804,\"status\":\"error\",\"runId\":\"qds-20261001-a7cb93\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "at": "df36b-cleanup",
+      "runId": "qds-20261001-a7cb93",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":47}\n{\"requestId\":\"4a7ba0df-2f05-4891-b8c6-f65a59329503\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:02:28.618Z\",\"duration\":9940,\"durationMs\":9940,\"status\":\"ok\",\"runId\":\"qds-20261001-a7cb93\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261001-a7cb93",
+      "ok": true
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20261001-a7cb93",
+      "attempts": 1
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "workspace-kept",
+      "workspace": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-df36b-la-79WHf0",
+      "reason": "RED round — forensics kept"
+    }
+  ],
+  "writtenAt": "2026-10-01T18:02:36.958Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ee80266907399d700b33dbe3ed10895187e87c45dfcb56c54db7aba7acc9bcea",
+    "buildId": "26b5ce571e50bfcc",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -50,10 +50,13 @@ Phase 1 — v5 complete (in order):
   DONE 2026-10-01 — PR #391 squash bbce9b24; Amendment D re-texted per ADR-1 with operator
   approval at the pre-dev gate (the SWARMCLAW_FACTORY_FLEET_CLI boundary is IN the landed
   blockquote); p1-18:50 found pre-discharged by DF6.1a; regression test + e2e demo green.
-- [ ] **DF3.6b** resident MemoryMax — HARD GATED on the billing fix (image publish workflow)
-  + the full re-pin ritual + a live tier round. Natural pairing: the next live e2e round
-  (which first exercises PR #388's sc2-7 artifacts). Story:
-  `_bmad-output/sprint-artifacts/dark-factory-v5/stories/` (df3-6b)
+- [x] **DF3.6b** resident MemoryMax — DONE 2026-10-01. The gates fell in sequence: billing fix
+  closed (CI green), the full re-pin ritual completed (#396–#398, 2026-09-30 — the pinned image
+  ships `Delegate=memory`), and the live tier round ran GREEN in PR #399 (Leg A
+  `qds-20261001-5fb45a`: kernel OOM-kill at peak = the 128 MiB bound to the byte, placement
+  membership off real kernfs, deterministic completion; Leg B `qds-20261001-d55b3c`: pi baseline
+  126.3 MiB measured, 512 MiB default stands with 4.05× headroom, no re-set, no pin movement).
+  v5 slate 42/42. Story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/` (df3-6b)
 - [ ] After each merge: flip the sprint-status.yaml row, prune the branch. v5 DONE when 0 open DF rows.
 
 Phase 2 — ops, PARALLEL, anytime (operator account-level steps; agents prep/verify only):
