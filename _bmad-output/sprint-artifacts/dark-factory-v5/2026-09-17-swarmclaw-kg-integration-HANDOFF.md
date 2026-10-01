@@ -55,7 +55,7 @@ Phase 1 — v5 complete (in order):
   ships `Delegate=memory`), and the live tier round ran GREEN in PR #399 (Leg A
   `qds-20261001-5fb45a`: kernel OOM-kill at peak = the 128 MiB bound to the byte, placement
   membership off real kernfs, deterministic completion; Leg B `qds-20261001-d55b3c`: pi baseline
-  126.3 MiB measured, 512 MiB default stands with 3.8× headroom, no re-set, no pin movement).
+  126.3 MiB measured, 512 MiB default stands with 4.05× headroom, no re-set, no pin movement).
   v5 slate 42/42. Story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/` (df3-6b)
 - [ ] After each merge: flip the sprint-status.yaml row, prune the branch. v5 DONE when 0 open DF rows.
 

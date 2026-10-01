@@ -108,12 +108,14 @@ the only shipped shape that executes the engine inside the box — **as its own 
 the AC6 replay guard refuses a second run on a settled box, so the in-box leg cannot share the
 host-side tier's box. Cost, named rather than rounded: the host-side tier's one run key (minted at
 the 50,000 µ$ cap; the tier prices itself ≈ $0.05 model + ~1 box-hour, its measured real
-solicitation ~401 µ$) **plus two more boxes for the in-box dispatches — one per AC1 leg** (Leg
+solicitation ~401 µ$) **plus TWO more keys and two more boxes for the in-box dispatches — one key
++ one box per AC1 leg, as the round actually spent it** (operator-approved out of band for the
+2026-10-01 round; Leg
 A's OOM-kill ends its resident via AC5's stop latch and `startResident` resolves `QDS_PI_BIN`
 once per resident, so the legs cannot share a resident lifecycle, and the AC6 replay guard
-refuses a second run on a settled box, so they cannot share a box) — roughly triple the box count
-the tier alone would suggest. Honour the tier's `finally` teardown discipline — a leaked box on an
-OOM path is a leaked box that bills. A host-side unit test
+refuses a second run on a settled box, so they cannot share a box or its key) — roughly triple
+the box count the tier alone would suggest. Honour the tier's `finally` teardown discipline — a
+leaked box on an OOM path is a leaked box that bills. A host-side unit test
 **cannot** substitute: the enforcer is the kernel, and darwin has no cgroups at all.
 
 **Wiring closed:** On completion of this story the memory bound is kernel-enforced end to end using
@@ -707,7 +709,7 @@ Matches `sprint-status.yaml`'s DF3.6b row (cited by story key), which is authori
       `tests/phase-engine/fixtures/pi-catalog`, teardown in `finally` — a leaked box on an OOM path
       is a leaked box that bills. **A host-side unit test cannot substitute — darwin has no cgroups
       — and the story is not done without this round.**
-- [x] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** **MEASURED LIVE 2026-10-01** (same round as AC1 above): **126.3 MiB** (`rssPeakBytes` 132,444,160 B, run `qds-20261001-d55b3c`; the paired first attempt read 133.5 MiB — ~5% run-to-run variance on real pi in-leaf). **Falsifier verdicts, both evaluated in evidence:** baseline ≥ 32 MiB ⇒ the 64 MiB E2E fixture bound IS invalid as a real-pi crossing fixture — exactly why Leg A's crossing uses the synthetic allocator, and the fixture's remaining use is host-side only; baseline < 256 MiB ⇒ **`PROVISIONAL_RESIDENT_RSS_BYTES` STANDS at 512 MiB** with a MEASURED 3.8× headroom (the round-16 production risk — an unmeasured guess OOM-killing ordinary solicitations — is retired by measurement), no re-set, and because the constant is unchanged **no walked image input moves and no re-pin is owed**. Kernel prerequisite met: `uname -r` = 6.12.93 (≥ 5.19; note the ROOT cgroup exposes no `memory.peak` on this kernel while leaf-level reads work — the probe reads `system.slice`). Original item: on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's `PROVISIONAL_RESIDENT_RSS_BYTES` in `resident-bounds.ts` — that one constant is in this story's Files to Modify** (W6-C-H4 as re-homed by W14C-PAIR-1: the value lives in DF3.6a's bounds module, `manifest.ts` carries no default — the W6-C-H4 rationale stands, the file moved with the required-field design). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. **KERNEL PREREQUISITE, and it is not optional (added round 20):** read `uname -r` on that box FIRST
+- [x] **Test (pi baseline RSS measured, AC1 precondition — LIVE, roster tier 4):** **MEASURED LIVE 2026-10-01** (same round as AC1 above): **126.3 MiB** (`rssPeakBytes` 132,444,160 B, run `qds-20261001-d55b3c`; the paired first attempt read 133.5 MiB — ~5% run-to-run variance on real pi in-leaf). **Falsifier verdicts, both evaluated in evidence:** baseline ≥ 32 MiB ⇒ the 64 MiB E2E fixture bound IS invalid as a real-pi crossing fixture — exactly why Leg A's crossing uses the synthetic allocator, and the fixture's remaining use is host-side only (the shipped crossing manifest's 134217728 B is NOT derived from the pi baseline — it is the allocator's own 8 × 16 MiB growth plan, ≥ 6× the ~21 MiB interpreter entry the attribution guard measured; the 64 MiB figure below remains the host-side fixture only, unchanged); baseline < 256 MiB ⇒ **`PROVISIONAL_RESIDENT_RSS_BYTES` STANDS at 512 MiB** with a MEASURED 4.05× headroom (536 870 912 / 132 444 160; the 3.8× figure belonged to the 133.5 repeat run) (the round-16 production risk — an unmeasured guess OOM-killing ordinary solicitations — is retired by measurement), no re-set, and because the constant is unchanged **no walked image input moves and no re-pin is owed**. Kernel prerequisite met: `uname -r` = 6.12.93 (≥ 5.19; note the ROOT cgroup exposes no `memory.peak` on this kernel while leaf-level reads work — the probe reads `system.slice`). Original item: on the in-box dispatch's own round, read `memory.peak` from a **control solicitation that allocates nothing** — the real-pi leg's own first arming read inside its live leaf, on the box where the bound actually applies (the host-side L2 leg has no cgroup and no `memory.peak` to read) — and record it in the round evidence. This is the measurement neither the ADR nor the 2026-08-31 probe took — the probe measured wall time (2.17 s) and cost, never memory — and both memory figures in this pair currently rest on it being small. **Then set:** the E2E fixture bound to ≥ 2× the measured baseline, and **re-set DF3.6a's `PROVISIONAL_RESIDENT_RSS_BYTES` in `resident-bounds.ts` — that one constant is in this story's Files to Modify** (W6-C-H4 as re-homed by W14C-PAIR-1: the value lives in DF3.6a's bounds module, `manifest.ts` carries no default — the W6-C-H4 rationale stands, the file moved with the required-field design). **Falsifier, and it falsifies the story not the test:** if the baseline is ≥ 32 MiB, the 64 MiB fixture bound is too low and AC1's live round proves the cgroup is *attached* rather than that an allocation *crossed* the bound — the assertion would be passing for the wrong reason. If the baseline is ≥ 256 MiB, the 512 MiB production default has less than one doubling of headroom and must be re-set before this story ships. **KERNEL PREREQUISITE, and it is not optional (added round 20):** read `uname -r` on that box FIRST
   and require **5.19+**. `memory.peak` landed in 5.19; below it the file does not exist and `readLeaf`
   reads **0**. A baseline of 0 passes BOTH falsifiers above — it is neither ≥ 32 MiB nor ≥ 256 MiB — so
   a round on an older kernel would silently conclude "the baseline is small", re-set
@@ -1083,7 +1085,10 @@ it from the DoD ticks:
 - **AC1's two live legs** — RAN AND GREEN (Leg A `qds-20261001-5fb45a`, Leg B
   `qds-20261001-d55b3c`). Check (a) placement TOOK: the sampler read pid 722 back from a live
   leaf's `cgroup.procs` on real kernfs, with `memory.events` all zero at that instant (pre-kill).
-  Check (b) held: the allocator never exited 97 and no unenforceable classification appears.
+  Check (b) held: no exit-97 classification and no unenforceable arming appears in the journal
+  (the allocator's own exit code is not directly observable — its stdout and exit live in the
+  engine's bounded pipe, never journald — so the check rests on the classification absence plus
+  the peak attribution, not on a captured allocator exit status).
   Check (c): `uname -r` = 6.12.93 ≥ 5.19, so the peak conjunct was ASSERTED, not skipped — and
   the kill line's peak equals the bound to the byte. Check (d): the leaf was gone post-run
   (`cgroup_teardown_ms` 1 ms; the unit's cgroup dir itself reaped by systemd once inactive —
@@ -1096,8 +1101,9 @@ it from the DoD ticks:
 - **The pi baseline-RSS measurement** — TAKEN: **126.3 MiB** (repeat run 133.5 MiB, ~5%
   variance), recorded in the round evidence and in the DoD tick above.
 - **`PROVISIONAL_RESIDENT_RSS_BYTES`** — **UNCHANGED at 512 MiB, now measured-backed**: the
-  ≥ 256 MiB falsifier did not fire (126.3 < 256), the shipped default holds a measured 3.8×
-  headroom, and the round-16 "unmeasured guess" risk is retired. No walked image input moved,
+  ≥ 256 MiB falsifier did not fire (126.3 < 256), the shipped default holds a measured 4.05×
+  headroom (536 870 912 / 132 444 160 — the 3.8× figure earlier drafts wrote belonged to the
+  133.5 MiB repeat run, not to the headline 126.3), and the round-16 "unmeasured guess" risk is retired. No walked image input moved,
   so the DF2.10 ritual below needed NO new publish — the pin (`ee802669`/`26b5ce57`, adopted by
   #396–#398 on 2026-09-30, built from the post-merge tree WITH `Delegate=memory`) already
   carries this story's unit; the "RELEASE-BLOCKING" paragraph below was discharged by that
@@ -1112,7 +1118,11 @@ it from the DoD ticks:
 - **Refresh precedence (vii)** — the "engine's `overflow` survives the refresh" direction is
   now PROVEN on a real kernel kill (Leg A's journal read `overflow` after the run-down), not
   merely by construction; Leg B additionally shows the probe's healthy word ("success")
-  filling when the engine wrote nothing, which is edit (vii)'s other half observed live.
+  filling when the engine wrote nothing, which is edit (vii)'s other half observed live
+  (the citeable record is the paired first attempt's evidence,
+  `_bmad-output/evidence/df3-e2e/2026-10-01-185724-df36b-leg-b-attachment-9c9gb7.json` — its
+  journal carries `exitStatus: "success"` and the attempt red'd on exactly that reading before
+  the assertion was corrected).
 
 Everything between here and the next top-level heading is the pre-round text, preserved:
 

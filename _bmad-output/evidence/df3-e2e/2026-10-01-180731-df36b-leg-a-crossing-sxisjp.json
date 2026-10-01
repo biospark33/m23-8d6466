@@ -1,0 +1,117 @@
+{
+  "test": "DF3.6b Leg A",
+  "outcome": "fail",
+  "runId": "qds-20261001-5053b7",
+  "kernel": "6.12.93",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "placement": {
+    "samples": 2,
+    "sawLiveLeaf": false,
+    "sawProcs": false
+  },
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/df36b-leg-a.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20261001-5053b7\",\"requestId\":\"4847fe21-f097-47ee-aa0f-d0bb6f6b615f\",\"state\":\"ready\",\"vmName\":\"qds-20261001-5053b7\",\"httpsUrl\":\"https://qds-20261001-5053b7.exe.xyz\"}",
+      "stderrTail": "18:06:51.667Z\",\"duration\":115867,\"durationMs\":115867,\"status\":\"ok\",\"runId\":\"qds-20261001-5053b7\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":56196,\"mint_ms\":1827,\"fill_ms\":31759,\"setup_gate_ms\":24413}}\n{\"requestId\":\"4847fe21-f097-47ee-aa0f-d0bb6f6b615f\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:06:51.681Z\",\"duration\":115889,\"durationMs\":115889,\"status\":\"ok\",\"runId\":\"qds-20261001-5053b7\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20261001-5053b7",
+      "vmName": "qds-20261001-5053b7"
+    },
+    {
+      "phase": "kernel-probe",
+      "release": "6.12.93",
+      "peakAvailable": true,
+      "rawTail": "6.12.93\nNO-PEAK-FILE"
+    },
+    {
+      "phase": "allocator-staged",
+      "path": "/home/exedev/app/leg-a-allocator.py"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20261001-5053b7",
+      "stderrTail": "f-d0bb6f6b615f\",\"outcome\":\"started\",\"vm\":\"qds-20261001-5053b7\",\"unit\":\"qds-run@qds-20261001-5053b7.service\",\"printed\":true}\n{\"requestId\":\"7d6eedef-43a4-4ec4-b0ab-b51dd4d37eaf\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:07:02.708Z\",\"duration\":6919,\"durationMs\":6919,\"status\":\"ok\",\"runId\":\"qds-20261001-5053b7\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "status-read",
+      "runId": "qds-20261001-5053b7",
+      "state": "running",
+      "exitCode": 0,
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "running"
+        }
+      ]
+    },
+    {
+      "phase": "leaf-samples",
+      "count": 2,
+      "sawLiveLeaf": false,
+      "sawProcs": false,
+      "note": "no live-leaf window hit — the rejection residual is stated, not closed"
+    },
+    {
+      "phase": "settled",
+      "state": "running"
+    },
+    {
+      "at": "df36b-cleanup",
+      "runId": "qds-20261001-5053b7",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "ose_ms\":54}\n{\"requestId\":\"86dc677a-4315-4396-ba0f-e15e3dd2eb8a\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:07:25.035Z\",\"duration\":15408,\"durationMs\":15408,\"status\":\"ok\",\"runId\":\"qds-20261001-5053b7\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261001-5053b7",
+      "ok": true
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20261001-5053b7",
+      "attempts": 1
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "workspace-kept",
+      "workspace": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-df36b-la-GkYa0K",
+      "reason": "RED round — forensics kept"
+    }
+  ],
+  "writtenAt": "2026-10-01T18:07:31.217Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ee80266907399d700b33dbe3ed10895187e87c45dfcb56c54db7aba7acc9bcea",
+    "buildId": "26b5ce571e50bfcc",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "test": "DF3.6b Leg B",
+  "outcome": "fail",
+  "runId": "qds-20261001-7317e3",
+  "kernel": "6.12.93",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/df36b-leg-b.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20261001-7317e3\",\"requestId\":\"20ffd596-ab22-4036-ab57-3bab4e54e73c\",\"state\":\"ready\",\"vmName\":\"qds-20261001-7317e3\",\"httpsUrl\":\"https://qds-20261001-7317e3.exe.xyz\"}",
+      "stderrTail": "T18:56:18.939Z\",\"duration\":101255,\"durationMs\":101255,\"status\":\"ok\",\"runId\":\"qds-20261001-7317e3\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":4461,\"mint_ms\":2012,\"fill_ms\":70623,\"setup_gate_ms\":22703}}\n{\"requestId\":\"20ffd596-ab22-4036-ab57-3bab4e54e73c\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:56:18.953Z\",\"duration\":101295,\"durationMs\":101295,\"status\":\"ok\",\"runId\":\"qds-20261001-7317e3\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20261001-7317e3",
+      "vmName": "qds-20261001-7317e3"
+    },
+    {
+      "phase": "kernel-probe",
+      "release": "6.12.93",
+      "peakAvailable": true,
+      "rawTail": "6.12.93\n30633984"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20261001-7317e3"
+    },
+    {
+      "phase": "status-poll",
+      "finalState": "ok",
+      "seen": [
+        "running",
+        "ok"
+      ]
+    },
+    {
+      "phase": "settled",
+      "state": "ok"
+    },
+    {
+      "phase": "journal-raw-bytes",
+      "bytes": 1440
+    },
+    {
+      "phase": "fd2-lines",
+      "cgroupLineCount": 2,
+      "warnCount": 2,
+      "cgroupLines": [
+        {
+          "event": "resident_cgroup",
+          "bound": "rss",
+          "allowed": true,
+          "runId": "qds-20261001-7317e3",
+          "seq": 1,
+          "residentRssBytes": 536870912,
+          "rssPeakBytes": 139931648,
+          "oomKilled": false,
+          "cgroup_setup_ms": 0,
+          "cgroup_teardown_ms": 1
+        },
+        {
+          "event": "resident_cgroup",
+          "bound": "rss",
+          "allowed": true,
+          "runId": "qds-20261001-7317e3",
+          "seq": 2,
+          "residentRssBytes": 536870912,
+          "rssPeakBytes": 108462080,
+          "oomKilled": false,
+          "cgroup_setup_ms": 0,
+          "cgroup_teardown_ms": 1
+        }
+      ],
+      "warns": [
+        "[resident] pi wrote to stderr on a successful call (qds-20261001-7317e3 solicit 1): [pi-exe-dev] missing pricing for 6 integration models; pi usage cost will be reported as zero",
+        "[resident] pi wrote to stderr on a successful call (qds-20261001-7317e3 solicit 2): [pi-exe-dev] missing pricing for 6 integration models; pi usage cost will be reported as zero"
+      ]
+    },
+    {
+      "at": "df36b-cleanup",
+      "runId": "qds-20261001-7317e3",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "ose_ms\":52}\n{\"requestId\":\"cb87e18e-da03-4ad7-9a7b-641089fa3e6d\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-10-01T18:57:16.530Z\",\"duration\":14309,\"durationMs\":14309,\"status\":\"ok\",\"runId\":\"qds-20261001-7317e3\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261001-7317e3",
+      "ok": true
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20261001-7317e3",
+      "attempts": 1
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "workspace-kept",
+      "workspace": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-df36b-lb-XDahXY",
+      "reason": "RED round — forensics kept"
+    }
+  ],
+  "writtenAt": "2026-10-01T18:57:24.826Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:ee80266907399d700b33dbe3ed10895187e87c45dfcb56c54db7aba7acc9bcea",
+    "buildId": "26b5ce571e50bfcc",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

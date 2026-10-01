@@ -90,6 +90,7 @@ import { join } from "node:path";
 
 import { runUnitName } from "../../../src/fleet/run.ts";
 import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
+import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { redactSecrets } from "../../../src/providers/step-log.ts";
 import {
   EVIDENCE_DIR,
@@ -107,6 +108,7 @@ import {
   liveTodoOff,
   preflight,
   recoverDispatchIds,
+  revokeQuietly,
   runFleet,
   settleRun,
   shellQuote,
@@ -159,6 +161,16 @@ const KERNEL_PEAK_MAJ = 5;
 const KERNEL_PEAK_MIN = 19;
 
 const todo = test.todoIf(liveTodoOff());
+
+/**
+ * The header's ordering clause, made CODE: bun runs this file's tests in
+ * registration order, so Leg A always completes first — but a completed-and-RED
+ * Leg A must also END the round, because Leg B's box-hour and key are spend
+ * the round must not burn on a round that already failed its cheapest
+ * falsifier. Set in Leg A's catch; Leg B checks it BEFORE preflight, so the
+ * suppression costs nothing (no box, no key, no verb).
+ */
+let legAFailed = false;
 
 /**
  * The python3 allocator staged as Leg A's QDS_PI_BIN. python3 is on the
@@ -397,13 +409,12 @@ async function sampleLeaves(
   // 2026-10-01, this unit's slice on the box is `system-qds\x2drun.slice` —
   // NOT the `system.slice` default a reader would assume — and nothing in
   // the repo sets `Slice=` (image-side systemd config). `find` over the
-  // cgroupfs tree (bounded at depth 3) resolves the real root wherever the
-  // image puts it; a missing unit dir answers NO-UNIT and the tick is
-  // recorded like any other.
-  const script =
-    `ud=$(find /sys/fs/cgroup -maxdepth 3 -type d -name ${shellQuote(unitName)} 2>/dev/null | head -1); ` +
-    `[ -n "$ud" ] || { echo NO-UNIT; exit 0; }; ` +
-    `found=0; for d in "$ud"/resident.*; do [ -d "$d" ] || continue; found=1; echo "LEAF $d"; echo "PROCS"; cat "$d/cgroup.procs" 2>&1; echo "PEAK"; cat "$d/memory.peak" 2>&1; echo "EVENTS"; cat "$d/memory.events" 2>&1; echo "REJECT-PROBE"; echo 4194304 > "$d/cgroup.procs" 2>&1 && echo PROBE-ACCEPTED || echo PROBE-REJECTED; done; [ "$found" = 1 ] || echo NO-LEAF`;
+  // cgroupfs tree (bounded at depth 6 — one nesting level more than the
+  // measured layout, so an image-side slice change answers FIND-EMPTY, not
+  // a false NO-UNIT) resolves the real root wherever the image puts it; a
+  // missing unit dir answers NO-UNIT and the tick is recorded like any
+  // other.
+  const findUnit = `ud=$(find /sys/fs/cgroup -maxdepth 6 -type d -name ${shellQuote(unitName)} 2>/dev/null | head -1); `;
   const samples: Record<string, unknown>[] = [];
   let sawLiveLeaf = false;
   let sawProcs = false;
@@ -421,6 +432,24 @@ async function sampleLeaves(
   );
   while (!done && Date.now() < deadline) {
     try {
+      // The bad-pid probe (check (e)) is built per tick and LATCHED OFF in
+      // TypeScript after its first execution — the old script carried it on
+      // every tick, so only its RECORDING was once-per-window while the
+      // write itself re-fired ~hundreds of times, and on a box where
+      // kernel.pid_max had actually allocated 4194304, each re-fire would
+      // migrate that LIVE process into the OOM-armed leaf. Once is the
+      // contract: the header says ONE placement, and now the shell agrees.
+      // The errno capture (`err=$(echo … 2>&1 > file)` — stderr into the
+      // substitution, stdout into the file) records the KERNEL's answer
+      // beside the boolean: measured live 2026-10-01, the old `2>&1` after
+      // `>` routed the write's diagnostic INTO cgroup.procs's failure, so
+      // the evidence carried only the literal fallback "PROBE-REJECTED" and
+      // the ledger's "ESRCH-variant" wording was asserted, not evidenced.
+      const probeSeg = probeAttempted
+        ? ":"
+        : `echo "REJECT-PROBE"; err=$(echo 4194304 2>&1 > "$d/cgroup.procs") && echo PROBE-ACCEPTED || echo "PROBE-REJECTED \${err:-?}"; `;
+      const script =
+        `${findUnit}[ -n "$ud" ] || { echo NO-UNIT; exit 0; }; found=0; for d in "$ud"/resident.*; do [ -d "$d" ] || continue; found=1; echo "LEAF $d"; echo "PROCS"; cat "$d/cgroup.procs" 2>&1; echo "PEAK"; cat "$d/memory.peak" 2>&1; echo "EVENTS"; cat "$d/memory.events" 2>&1; ${probeSeg}done; [ "$found" = 1 ] || echo NO-LEAF`;
       const res = await driver.execTimed(vmName, ["sh", "-c", script], LEAF_POLL_EXEC_DEADLINE_MS);
       const out = res.stdout;
       if (out.includes("LEAF ")) {
@@ -455,7 +484,12 @@ async function sampleLeaves(
     // all-error ticks and genuinely-absent directories look identical in a
     // count. Measured live 2026-10-01 across two runs where sawLiveLeaf was
     // false with 10 ticks: without these bytes the next debugger is blind.
-    ticks: samples.slice(0, 12).map((s) => JSON.stringify(s).slice(0, 220)),
+    // The first 4 ticks AND every leaf-bearing or erroring tick are kept —
+    // a first-12 window discarded exactly the live-leaf ticks when the leaf
+    // appeared late, which is the blindness this field exists to prevent.
+    ticks: [...samples.slice(0, 4), ...samples.filter((s) => s.leaf || s.error).slice(0, 12)].map((s) =>
+      JSON.stringify(s).slice(0, 220),
+    ),
     ...(rejectionProbe === undefined ? { note: "no live-leaf window hit — the rejection residual is stated, not closed" } : { rejectionProbe }),
   });
   return { samples: samples.length, sawLiveLeaf, sawProcs, rejectionProbe };
@@ -528,8 +562,7 @@ async function assertLeavesGone(
     [
       "sh",
       "-c",
-      `ud=$(find /sys/fs/cgroup -maxdepth 3 -type d -name ${shellQuote(runUnitName(runId))} 2>/dev/null | head -1); ` +
-        `[ -n "$ud" ] || { echo NO-UNIT; exit 0; }; ls -d "$ud"/resident.* 2>/dev/null | wc -l`,
+      `ud=$(find /sys/fs/cgroup -maxdepth 6 -type d -name ${shellQuote(runUnitName(runId))} 2>/dev/null | head -1); [ -n "$ud" ] || { echo NO-UNIT; exit 0; }; ls -d "$ud"/resident.* 2>/dev/null | wc -l`,
     ],
     30_000,
   );
@@ -543,11 +576,8 @@ async function assertLeavesGone(
   // hierarchy that does not look like the sampler's assumption (systemd may
   // also reap the unit's directory once the unit is inactive, which is the
   // benign reading of an empty listing here).
-  const layout = await driver.execTimed(
-    vmName,
-    ["sh", "-c", `ls /sys/fs/cgroup/ 2>/dev/null | grep -i qds | head -5; mount | grep -m1 cgroup`],
-    30_000,
-  );
+  const layoutProbe = "ls /sys/fs/cgroup/ 2>/dev/null | grep -i qds | head -5; mount | grep -m1 cgroup";
+  const layout = await driver.execTimed(vmName, ["sh", "-c", layoutProbe], 30_000);
   evidence.push({ phase: "cgroup-layout", raw: redactSecrets(layout.stdout.slice(0, 500)) });
 }
 
@@ -575,6 +605,16 @@ async function legFinally(args: {
     const destroyed = await destroyQuietly(driver, ids.vmName, evidence);
     if (!destroyed.ok) destroyFailures.push(`destroy:${ids.vmName}`);
     await awaitBoxAbsent(driver, ids.vmName, evidence, { maxAttempts: 6 });
+  }
+  if (ids.runId !== "") {
+    // The sibling-tier fallback (tier1-approval-gate, tier2-self-compact,
+    // tier5-gate-steering all carry it): the teardown verb revokes the run
+    // key on the green path, but when that verb failed above — or the run
+    // record half-landed — `revokeQuietly` is the record-backed second
+    // attempt. It answers "none" when no key was ever minted or the key is
+    // already gone, and never throws (#189). Without it, a failed teardown
+    // leaves a LIVE key that `keyLeakProblems` below only DETECTS.
+    await revokeQuietly(driver, new RunRecordStore({ dir: recordsDir }), ids.runId, evidence);
   }
   const leftovers = await fleetLeftovers(driver, ids.vmName === "" ? [] : [ids.vmName], evidence, { maxAttempts: 5 });
   const keyProblems = await keyLeakProblems(hashesBefore, { driver, runIds: ids.runId === "" ? [] : [ids.runId] }, evidence);
@@ -684,7 +724,11 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         const settled = await settle;
         sampler = await sampled;
         evidence.push({ phase: "settled", state: settled.state });
-        expect(["ok", "not-ok"]).toContain(settled.state); // live-mirror: AC5 settled vocabulary (status.ts InBoxState) — "ok" is Leg A's deterministic-completion clause
+        // AC1's deterministic-completion clause asserted POSITIVELY: the
+        // header, story, and sprint row all say the run "settled ok", and a
+        // future regression landing "not-ok" beside an intact phase list
+        // would otherwise pass this leg green.
+        expect(settled.state).toBe("ok"); // live-mirror: status.ts InBoxState settled vocabulary
 
         // Post-settle reads BEFORE teardown.
         outputs = await readRunOutputs(ctx.driver, ids.vmName, home, ids.runId, evidence);
@@ -699,14 +743,18 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         expect(kill?.detail ?? "").toContain("residentRssBytes");
         evidence.push({ phase: "tripwire", row: kill });
 
-        // The fleet measurement line: oomKilled + the peak floor (ruling 8,
-        // skipped below 5.19) + the bound echo + teardown timing (check (d)).
+        // The fleet measurement line: oomKilled + the peak floor (ruling 8) +
+        // the bound echo + teardown timing (check (d)). The peak conjunct is
+        // UNCONDITIONAL now: `readKernel` already refused any kernel below
+        // 5.19, so a `peakAvailable:false` here is a broken probe path on a
+        // 5.19+ box — not an old kernel the ruling's skip was written for —
+        // and silently skipping the make-or-break floor on exactly the box
+        // whose kernfs reads are broken is the wrong fail direction.
         const cg = fd2.cgroupLines.find((l) => l.oomKilled === true);
         expect(cg).toBeDefined(); // live-mirror: resident_cgroup fd-2 line (src/fleet/resident.ts warn chokepoint — ruling 7)
         expect(cg?.residentRssBytes).toBe(LEG_A_BOUND_BYTES);
-        if (kernel.peakAvailable) {
-          expect(Number(cg?.rssPeakBytes)).toBeGreaterThanOrEqual(LEG_A_BOUND_BYTES - OOM_PEAK_SLACK_BYTES);
-        }
+        expect(kernel.peakAvailable).toBeTrue();
+        expect(Number(cg?.rssPeakBytes)).toBeGreaterThanOrEqual(LEG_A_BOUND_BYTES - OOM_PEAK_SLACK_BYTES);
         expect(Number(cg?.cgroup_teardown_ms)).toBeGreaterThan(0);
         evidence.push({ phase: "resident-cgroup-leg-a", line: cg, kernel: kernel.release });
 
@@ -730,6 +778,12 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         expect(allWarns).not.toContain("PlacementRefusedError");
         const killLines = fd2.cgroupLines.filter((l) => l.oomKilled === true);
         expect(killLines.length).toBe(1);
+        // …and exactly ONE line TOTAL, allowed or not: the story cites the
+        // stop latch's refusal of the post-kill second solicitation as part
+        // of what the round proved, and a second ALLOWED line there would
+        // have been the latch failing while every kill-shaped assert above
+        // still passed. Measured green shape x2ikk3: 1 line.
+        expect(fd2.cgroupLines.length).toBe(1);
         const unenforceable = fd2.cgroupLines.filter(
           (l) => l.oomKilled === false && Number(l.rssPeakBytes) === 0,
         );
@@ -757,6 +811,7 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
       } catch (e) {
         outcome = "fail";
         failure = e;
+        legAFailed = true;
       } finally {
         const problems = await legFinally({
           driver: ctx.driver,
@@ -780,6 +835,10 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
             evidenceDir: EVIDENCE_DIR,
             placement: sampler ?? "(sampler never ran)",
             phases: evidence,
+            failure:
+              failure === undefined
+                ? undefined
+                : redactSecrets(failure instanceof Error ? failure.message : String(failure)).slice(0, 400), // the one artifact a RED round exists to produce — WHY — in the file itself
           },
           // The WRITE-failure collection, not destroyFailures: this helper
           // pushes "the evidence write FAILED" into the array it is given
@@ -795,6 +854,9 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
     },
     // Budget audit, priced at DECLARED CEILINGS (tier2-in-box-engine rule):
     // whoever adds a leg, a poll tick class, or a cleanup step re-adds it here.
+    // (Recomputed 2026-10-01 review round — the sampler line had priced a
+    // shape the loop cannot take: the LEAF_POLL_MAX_MS deadline bounds the
+    // window itself, so worst wall is window + one exec, not ticks × exec.)
     //
     //   preflight whoami                          120 s
     //   pre-try listedKeyHashes                   240 s
@@ -804,20 +866,22 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
     //   allocator stage                            30 s
     //   run verb                                  180 s
     //   status poll 10 × (60 verb + 10 wait)      700 s
-    //   leaf sampler 250 ticks × 10 s exec ceiling 2 500 s
-    //   journal + fd-2 + markers + leaves  4 × 30 120 s
+    //   leaf sampler: window 500 s + one 10 s exec 510 s
+    //   journal + fd-2 + leaves-gone ×2 + layout  120 s
     //   finally: teardown 180 + destroy 600 code-worst
     //            + awaitBoxAbsent 6 × (120 + 8)   768 s
-    //            + fleetLeftovers 5 × (120 + 8) + destroy pass 1 360 s
+    //            + fleetLeftovers 5 × (120 + 8)   640 s
+    //            + revokeQuietly (verb-class)     120 s
     //            + keyLeakProblems                360 s
     //   evidence + workspace rm                    10 s
     //                                            ─────────
-    //                                            ≈ 8 140 s
+    //                                            ≈ 5 630 s
     //
-    // Hence 9 000 s. Every inner ceiling firing rejects into the catch and
-    // the finally still runs; this ceiling is the fully-degraded bound on
-    // the ONE abort (bun test timeout) that would skip the finally and leak
-    // a box — the fail-safe direction is up.
+    // Hence 9 000 s — deliberately WELL above the sum: the destroy/teardown
+    // ceilings are code-worst, not measured, and this ceiling exists to make
+    // unreachable the ONE abort (bun test timeout) that would skip the
+    // finally and leak a box. Every inner ceiling firing rejects into the
+    // catch and the finally still runs. Fail-safe direction: up.
     9_000_000,
   );
 
@@ -825,6 +889,16 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
     "Leg B — the attachment: real pi runs inside real leaves under the production default; the baseline is measured",
     async () => {
       liveGate("2");
+      // The header's ordering clause, ENFORCED (bun runs these in
+      // registration order, but a completed-and-RED Leg A is not a reason to
+      // spend Leg B's box-hour + key): suppress BEFORE preflight mints
+      // anything, with a loud error — a silently-passing leg would read as a
+      // green attachment proof in the round list.
+      if (legAFailed) {
+        throw new Error(
+          "Leg A failed earlier in this round — Leg B suppressed before provisioning (the header's ordering clause). Fix Leg A, then re-run the round.",
+        );
+      }
       const ctx = await preflight("2");
       const evidence: Record<string, unknown>[] = [];
       let workspace = "";
@@ -872,6 +946,12 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         outputs = await readRunOutputs(ctx.driver, ids.vmName, home, ids.runId, evidence);
         const { journal, fd2 } = outputs;
 
+        // A journal WITHOUT a resident block would vacuate every negative
+        // assert below (`undefined !== "stopped"`, `?? null !== "overflow"`,
+        // `?? 0 === 0`) — a journal-write regression shipping as a green
+        // attachment proof. The block must EXIST before it is inspected.
+        expect(journal.resident).toBeDefined();
+
         // Attachment, not crossing: the resident armed and stayed healthy —
         // no kill, no tripwire, no breach, and NO "overflow" — the one
         // value only the OOM arm writes. ("success" here is the run-down
@@ -885,17 +965,29 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         const kills = fd2.cgroupLines.filter((l) => l.oomKilled === true);
         expect(kills.length).toBe(0);
 
-        // Every armed call ran inside a real leaf and left it removed.
+        // Every armed call ran inside a real leaf and left it removed — and
+        // the leg's own claim is TWO solicits (run_start + run_end): exactly
+        // two lines, not "at least one" (a refused-then-retried shape would
+        // be a different round than the DoD tick describes). Measured green
+        // shape naql0w: 2 lines, seqs [1, 2].
         const cgLines = fd2.cgroupLines;
-        expect(cgLines.length).toBeGreaterThanOrEqual(1); // run_start at minimum
+        expect(cgLines.length).toBe(2);
         for (const l of cgLines) {
           expect(l.allowed).toBe(true);
+          // The ARMED BOUND is the leg's headline claim: the front door
+          // injected the SHIPPED default. `rssPeakBytes < bound` alone
+          // would pass any default drift downward; this pins the value the
+          // pin contract shipped.
+          expect(l.residentRssBytes).toBe(PROVISIONAL_DEFAULT_BYTES);
           expect(Number(l.cgroup_teardown_ms)).toBeGreaterThan(0);
           expect(Number(l.rssPeakBytes)).toBeLessThan(PROVISIONAL_DEFAULT_BYTES);
         }
 
         // THE BASELINE (the measurement neither the ADR nor the 2026-08-31
-        // probe ever took): the FIRST armed solicitation's peak.
+        // probe ever took): the FIRST armed solicitation's peak — seq 1, so
+        // an unparseable first line silently demoting the baseline to the
+        // second solicitation's peak is caught, not absorbed.
+        expect(cgLines[0]?.seq).toBe(1);
         const baseline = Number(cgLines[0]?.rssPeakBytes);
         expect(baseline).toBeGreaterThan(0); // 0 on a 5.19+ kernel = MEASUREMENT FAILED
         const falsifiers = {
@@ -905,6 +997,11 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
           defaultMustReset: baseline >= BASELINE_DEFAULT_FALSIFIER_BYTES,
           bound: cgLines[0]?.residentRssBytes,
         };
+        // The story's ship-gate, ENFORCED: baseline ≥ 256 MiB means the
+        // shipped default has under one doubling of headroom and "must be
+        // re-set before this story ships" (DoD). Recording the boolean let a
+        // falsified default go green; the leg now reds and names the re-set.
+        expect(falsifiers.defaultMustReset).toBeFalse();
         evidence.push({ phase: "baseline", ...falsifiers });
         // Surface the falsifiers to the operator in the round output too —
         // G4 of the ledger consumes them.
@@ -918,6 +1015,7 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         // No misclassification on the healthy leg either.
         const allWarns = fd2.warns.join("\n");
         expect(allWarns).not.toContain("rss_unenforceable");
+        expect(allWarns).not.toContain("PlacementRefusedError");
         expect(allWarns).not.toContain("watchdog_kill");
       } catch (e) {
         outcome = "fail";
@@ -944,6 +1042,10 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
             capMicroUsd: CAP_MICRO_USD,
             evidenceDir: EVIDENCE_DIR,
             phases: evidence,
+            failure:
+              failure === undefined
+                ? undefined
+                : redactSecrets(failure instanceof Error ? failure.message : String(failure)).slice(0, 400), // same RED-round contract as Leg A
           },
           // Same contract as Leg A: write failures land in the settleRun list.
           problems,
@@ -951,9 +1053,9 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
         await settleRun(failure, problems);
       }
     },
-    // Budget audit: same pricing as Leg A minus the sampler (−2 500) and the
-    // allocator stage (−30), plus nothing. ≈ 5 610 s. Hence 6 500 s — the
-    // same fail-safe direction, one abort bound on this leg's box.
+    // Budget audit: Leg A's pricing minus the sampler (−510). ≈ 5 120 s.
+    // Hence 6 500 s — the same fail-safe direction, one abort bound on this
+    // leg's box.
     6_500_000,
   );
 });
