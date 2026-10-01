@@ -781,7 +781,14 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
             placement: sampler ?? "(sampler never ran)",
             phases: evidence,
           },
-          destroyFailures,
+          // The WRITE-failure collection, not destroyFailures: this helper
+          // pushes "the evidence write FAILED" into the array it is given
+          // (the F11 scrub-refusal path), and `problems` is the list
+          // settleRun is about to consume. destroyFailures was already
+          // folded into problems by legFinally above, so a failure pushed
+          // there now would ship a green, file-less round silently — the
+          // exact outcome F11 exists to prevent. (CodeRabbit, PR #399.)
+          problems,
         );
         await settleRun(failure, problems);
       }
@@ -938,7 +945,8 @@ describe("DF3.6b live — the kernel-enforced resident memory bound, in-box", ()
             evidenceDir: EVIDENCE_DIR,
             phases: evidence,
           },
-          destroyFailures,
+          // Same contract as Leg A: write failures land in the settleRun list.
+          problems,
         );
         await settleRun(failure, problems);
       }
