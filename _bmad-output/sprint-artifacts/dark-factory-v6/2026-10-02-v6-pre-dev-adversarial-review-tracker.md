@@ -307,3 +307,18 @@ Session log (Round 3, 2026-10-02):
 - Known residual: checker still blind to path-less continuation cites (F6-PROP-1, deferred);
   sanity-leg answer pair unnamed (provenance-only until register amendment); $0.042/Mtok
   and 64k/request vendor claims unverifiable from docs (handoff §4 binding).
+
+### R3 final scoped pass (R3-FINAL, re-fix delta only) + close
+
+The scoped verifier over F7–F9's re-fix surface found 1 BLOCKER + 3 MEDIUM + 1 LOW — the
+re-fix wave had introduced one contradiction (j4 AC6's "every ask … one corpus record" vs
+the sanity leg's provenance-only clause) and surfaced 4 residuals (one-directional
+coordination note, `hindsight.env`/`hindsight-qds.env` name drift in m1-1, fallback mode
+silently harness-blocking, dead `refresh-endpoint` enum member). All 5 applied
+parent-direct (fixers stood down; recipes exact). Gates re-run green: checker OK 65/250,
+tests 7/0.
+
+**Campaign total stands at 76 findings (1 BLOCKER / 14 HIGH / 30 MEDIUM / 31 LOW), all
+resolved. This was the last verification wave** — finding rate 51 → 20 → 5 across
+verification rounds, all five final findings within the re-fix delta; a further wave
+would be LOW-only polish at cost > value.

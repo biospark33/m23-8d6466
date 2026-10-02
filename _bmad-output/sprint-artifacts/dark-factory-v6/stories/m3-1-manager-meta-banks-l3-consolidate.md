@@ -78,7 +78,7 @@ Each manager bot (A1's Dev/QA/Maintenance) gets a `*-meta` bank under M1.1's `qd
 
 ## Observability Contract
 
-- Events: `nightly-fire` (`{requestId, leg: crontab | schedule, banks: [...]}`), per bank `consolidate-op` (`{bankId, operationId, consolidate_ms}`) and `refresh-op` (`{bankId, mechanism: refresh-endpoint | consolidation-trigger, receipt}`), `coalesced` (a server-deduped re-fire — a counted success shape, never an error), `nightly-complete` (`{banks_ok, banks_failed, total_ms}`). Errors carry `{code, message, remediation}`.
+- Events: `nightly-fire` (`{requestId, leg: crontab | schedule, banks: [...]}`), per bank `consolidate-op` (`{bankId, operationId, consolidate_ms}`) and `refresh-op` (`{bankId, mechanism: consolidation-trigger, receipt}` — trigger-only per DD-28.16; an endpoint arm would require a register verb amendment first), `coalesced` (a server-deduped re-fire — a counted success shape, never an error), `nightly-complete` (`{banks_ok, banks_failed, total_ms}`). Errors carry `{code, message, remediation}`.
 - Tokens appear only as names/scopes, never values (M2.1's masking idiom). Live-round spend is printed before firing and carried in the evidence JSON; `consolidate_ms` is absent, not `0`, when a bank was skipped as coalescing.
 
 ## Files to Modify

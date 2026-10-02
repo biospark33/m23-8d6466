@@ -87,7 +87,7 @@ Build the unlock machinery the Jev handoff deferred: a milestone gate over the c
 - `scripts/judgment/arm-thresholds.ts` (new CLI — dry-run verdict by default; `--arm`/`--unarm` with the sign-off pair; appends the chained flip)
 - `scripts/judgment/confirm-outcome.ts` (new CLI — appends outcome entries to `corpus/outcomes.jsonl`)
 - `scripts/judgment/route-round.ts` (new CLI — the armed routing manifest; `not-armed` refusal)
-- `scripts/corpus/schema.ts` (adds only — `OutcomeRecordSchema` with `answer_mode: "live" | "mock"` attested at confirm time, joined by the existing `recordKey`)
+- `scripts/corpus/schema.ts` (adds only — `OutcomeRecordSchema` with `answer_mode: "live" | "mock"` attested at confirm time, joined by the existing `recordKey`; coordinated with J4's adds-only `MachineStateRecordSchema` region on the same file — disjoint, merge order safe)
 - `tests/judgment/arm-gate.test.ts` (new — gate, thresholds immutability, sign-off refusals, chain tamper cases, outcome join)
 - `tests/judgment/route-round.test.ts` (new — armed manifest, `not-armed` refusal, provenance digests)
 - `scripts/judgment/observe-round.ts` — **not modified** (declared here; byte-identical is the AC6 invariant)
