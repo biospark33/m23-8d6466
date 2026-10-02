@@ -76,9 +76,9 @@ lands.
 **The finish-line checklist:**
 
 Phase 1 — v5 complete (in order):
-- [ ] **DF6.1b** fix-loop CI verdict + attempt budget + escalation — UNBLOCKED (DF6.1a ✓,
-  DF5.3 ✓), zero box/key/model spend. Dev via qds-dev with /unlazy acceptance gates.
-  Cite #383's live-proven approval park in the evidence instead of hedging against it.
+- [x] **DF6.1b** fix-loop CI verdict + attempt budget + escalation — DONE 2026-09-30: PR #390
+  merged to dev (squash 20a63c7a), zero box/key/model spend as planned; tracker row's dated
+  merge note backfilled 2026-10-02 (close-out audit found the row done but unannotated).
   Story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df6-1b-fix-loop-verdict-attempt-budget.md`
 - [x] **DF5.5** KEEP-repoint chore — applied LAST per its own spec. PRE-DEV: reconcile its
   own Amendment D (SwarmClaw role line) with ADR-1 + the SC2 external_job reality; candidate
