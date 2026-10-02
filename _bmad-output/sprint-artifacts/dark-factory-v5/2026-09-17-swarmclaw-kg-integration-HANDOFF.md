@@ -3,6 +3,15 @@
 > Written 2026-09-17 after the SwarmClaw-drop investigation session. Paste the body below
 > into a fresh session to resume. Re-sync live state before acting — waves move fast.
 
+> **SUPERSEDED FOR v6 SCOPING (2026-10-01, late):** the 2026-10-01 scoping session recovered the
+> v3/v4 Hermes 24/7 vision, mapped the E21 lanes, and locked the operator decisions (two sprints
+> v6a+v6b; dedicated Hindsight 0.10.0 behind an authz gateway; agents as E21 Home bots; Jev
+> adapter seam). **The v6 program charter + handoff prompt now lives at
+> `_bmad-output/sprint-artifacts/dark-factory-v6/2026-10-01-v6-derivation-session-INPUT.md` —
+> point the derivation session THERE.** This file's ground-truth seams (§Ground-truth) remain
+> accurate and binding; its Phase-3 epic sketches (Epic S/M) are superseded by the charter's
+> story tables.
+
 ## STATUS UPDATE 2026-10-01 — read FIRST; operator ruling: v5 closed, ops deferred, pivot to swarmclaw integration
 
 **v5 is CLOSED** — 42/42 stories / 169/169 pts (PR #399 → 5feaeec6; close-out recorded in
