@@ -1,0 +1,130 @@
+# A1: Department Managers as E21 Home Bots — One Factory Home, Heartbeat Digest, Per-Bot Ceilings
+
+**Story Points:** 5
+**Sprint:** v6b (autonomy arc — the story that makes charter D-3's "bots-as-profiles in one factory Home" real)
+**Status:** GATED — starts only after **E21 S02b** (bots as profiles + turn principal), **E21 S03b** (home provider wiring + `writeProfileTokens`), and **Z2** (fork-side trigger wiring) are merged. Factory CI stays green before/during/after E21 lands: this story codes against seam fakes only (charter §5.2/§5.4); live behavior is proven in A2/Z3's rounds, not here.
+
+> **Register-backed design note — the owner adjudication (ratified: DD-28.15):**
+> ADR-RUN-2 D1's `Owner = {kind:'user'|'org', id}` seam admits an `org` kind, but it is **refused
+> by policy until the company-bot feature ships**. This story adjudicates the factory Home's owner
+> shape: **operator-as-user** — `{kind:'user', id:<operator principal>}` — is the available door
+> and is the shape of record. **Org-owner is the later upgrade**, gated on the company-bot feature
+> shipping; this spec refuses it today rather than assuming it (AC1).
+
+## Spec Reference
+
+- Charter `_bmad-output/sprint-artifacts/dark-factory-v6/2026-10-01-v6-derivation-session-INPUT.md` — D-3 (factory 24/7 agents live as E21 Home bots, deep integration) and the A1 row (§3 v6b table). **DD-28.15 (ratified; DD-25(5) carries the policy-refusal fact):** factory Home owner = operator-as-user; org-owner = the later upgrade — the header blockquote is the decision text.
+- v4 vision honored verbatim — `_bmad-output/planning-artifacts/prd-qds-factory-v4.md:327` **FR-MG-1**: "Each department manager (Dev/QA/Maintenance) can run as a 24/7 tool-loop registered as a Paperclip agent under the root org chart with a budget." v6 swaps the Paperclip substrate for E21 Homes (D-3) and keeps the budget (AC4). **Terminology (binding, R2 §5):** "department manager" = these three Home bots; the "proactive/cron agents" (Synthesizer, Meta-Optimizer, Blind Spot Detector, Review Harvester) are a DIFFERENT population, PARKED DD-23.
+- E21 seams (spec-only today — no fork code exists for them yet; R4 Topic 1): **S02b** `TURN_REFUSALS = ['initiator_missing', 'initiator_mismatch', 'no_owner']` (single vocabulary, CON2-20) + `isHomeBackedAgent` (S02B-owned, never referenced by `home-principal.ts`); **S03b** `writeProfileTokens(home, botId)` writing exactly `SOLSTICE_LLM_GATEWAY_TOKEN`, `SOLSTICE_KNOWLEDGE_TOKEN`, `SOLSTICE_MEMORY_GATEWAY_TOKEN`, `SOLSTICE_WORKSPACE_GATEWAY_TOKEN`, refusing `home_gateway_url_mismatch`.
+- **ADR-RUN-2** (`Solstice/docs/planning/adr-run-2-hermes-personal-runtime.md`): D1 (one Home per principal; bots are profiles, `bot-`-prefixed immutable ids), D4 (LLM gateway — Hermes never holds a provider key; E08 per-bot budget), INV-1 (no provider key in the Home), INV-8 (a turn runs only when the recorded `initiatorPrincipal` = the owner), B3 (Bridge default-deny allowlist; **`cli.exec` is deny-listed** — a Home bot cannot exec the fleet CLI, which is why the digest is host-composed).
+- **ADR-1** (`docs/decisions/2026-09-30-adr-1-swarmclaw-macro-host.md`) §2 (the fleet stays the only way code changes enter) and §3 verbatim: "`fleet approve` stays scrypt-gated, allowlisted, token-on-stdin, human-only." **CHANNEL ≠ POLICY: `fleet approve` stays scrypt/stdin/human-only (ADR-1 §3), channel change captured in ADR-2 PROPOSED (operator decides via G1), not decided.** The S05b approvals inbox is a possible future channel; this story builds none of it and relaxes none of the gate.
+- **DD-20** (register): bot-spend source of truth — zeropoint LLM-gateway ledger (E08 budgets) for Home-bot turns; factory cost-ledger (integer micro-USD, DD-9) for fleet runs; **join keys = `workKey` (`w:` namespace) + `runId` + `botId`**.
+- DF6.1a/b fix loop (`src/fixloop/`): the **escalation PR comment is PR-scoped escalation of record** and remains so — this story's digest is additive (AC3). DF3.8 precedent consumed: bounded exiting invocation, documented cron line, no daemon (INV-IBOX-16 lineage).
+
+## User Story
+
+As the factory operator,
+I want the Dev, QA, and Maintenance department managers running as 24/7 Hermes bots in one factory Home that I own, with a scheduled heartbeat digest of fleet state and a spend ceiling per bot,
+so that the v3/v4 department-manager vision lands as observation and reporting — while the fleet remains the only way code enters.
+
+## Overview
+
+Three manager bots (Dev/QA/Maintenance) are declared as profiles of ONE factory Home owned by the operator (AC1), provisioned by E21's S02b/S03b machinery via the counterpart BUILD-IN-FORK story in the solstice repo (charter §5.5 names "factory bot profiles" as fork-side counterpart work; this story owns the factory-side half). The factory-side deliverables: the manager config of record; the heartbeat **digest duty** — a bounded host-side observe poll (read-only `fleet status`/`fleet result`, fixloop escalation-state counts (`EscalationClass` tally + attempt ladder — `src/fixloop/escalation.ts`'s `deriveAttemptLadder`/`fixOutcome`, read-only), approval-park state) whose snapshot becomes the managers' chat digest; the per-bot spend-ceiling config; and the DD-20 join keys surfaced on every digest line. The digest **absorbs the fix-loop runner's duty** (scheduled observe poll → chat digest + escalation) and is **additive**: `src/fixloop/`'s escalation PR comment stays THE PR-scoped escalation channel (AC3).
+
+**What this does NOT deliver, stated before an AC implies otherwise.** No manager-initiated fleet run exists after this story (A2 introduces the first one). No approvals surface changes: the digest never approves anything and ADR-2's inbox channel stays undecided (PROPOSED — the operator decides via G1). No proactive cron agents (PARKED DD-23). No org-kind owner (company-bot feature). No fork/zeropoint code enters the factory import graph — every E21 seam is consumed through fakes (§5.4), so factory CI is green regardless of E21's lane.
+
+## E2E Slice
+
+**Demonstrable behavior:** Given the manager config and the fake Home/gateway journal, When provisioning is validated and `bun scripts/manager-digest.ts --driver exedev` runs, Then the journal records three per-bot budget reservations (one per manager, each ≤ its configured ceiling), the invocation emits one digest snapshot whose per-run lines carry `workKey` (in `w:` form), `runId`, and `botId`, per-bot turn spend sourced from the gateway-ledger fake, fleet-run spend read from the factory cost-ledger (integer micro-USD), and escalation marks (approvals parked past threshold, fix loops that exhausted their attempt ladder, runs in exit-6), and `git diff` shows `src/fixloop/` byte-identical.
+
+**Wiring closed:** On completion of this story, a scheduled observe poll produces a manager-level chat digest through the fake Home-bot seam using only code merged by this story plus DF3.1's verb/exit-code surface, DF6.1's read-only state, and the factory cost-ledger's read path. **No stub, no `TODO: wire later`.** The snapshot→chat delivery leg is the counterpart fork story's seam: consumed at the fake boundary here, proven live in A2/Z3's rounds — stated, not hidden.
+
+**Dependency edges (predecessors):** E21 S02b and S03b are *direct* external gates (seams as written in their story texts); Z2 is a *direct* gate (fork-side trigger wiring the schedule rides); DF3.1 (verb registry — read-only consumer), DF3.7/DF3.8 (observation state surfaces, read-only), DF6.1a/b (attempt-ladder + escalation state, read-only and byte-identical).
+
+> **Not an edge — M3.1's meta banks:** manager memory arrives in M3.1; this story touches no bank.
+> **Not an edge — a `botId` field on run records:** DD-20's fleet-side join key has **no producer** in A1 (no manager-originated run exists yet). The producer-side emission that DOES land is A2's `w:qa-*` `workKey` stamp (A2's contract registers exactly one adds-only run-record field); `botId` needs no run-record field — it is named on this story's digest lines (AC5) and rides the brief, so A3's per-brief records carry all three names without a schema change. Pinning the key NAMES is this story's job; minting a dead field is not.
+> **Not an edge — the S05b approvals inbox:** a possible future channel (ADR-2 PROPOSED — operator decides via G1), never this story's surface.
+
+## Acceptance Criteria
+
+1. **(make-or-break — the owner adjudication)** Given the manager config, When validated, Then it declares exactly ONE factory Home with owner `{kind:'user', id:<operator principal>}` and exactly three bot profiles (`bot-`-prefixed immutable ids per ADR-RUN-2 D1: Dev, QA, Maintenance managers), and a config carrying `{kind:'org'}` is REFUSED with a named error citing ADR-RUN-2 D1's policy refusal and naming the company-bot upgrade door. *Negative control: an implementation that assumes the org-owner kind is available today — a config that accepts `kind:'org'`, or a provisioning path that runs under an org principal — MUST fail this one.*
+2. **The fleet stays the only code-entry path (charter §6, ADR-1 §2).** Given any manager bot turn, digest, or schedule firing, Then no path reaches `fleet approve`, `fleet dispatch`, a merge, or the gate: `src/managers/**` carries a static import fence as an ALLOWLIST — from `src/fleet/` it may import ONLY the read surfaces (`status.ts`, `result.ts`, and type-only `brief-schema.ts`) and nothing else, and the fence test asserts the allowlist, not a denylist. The mutating set the allowlist keeps out is named as rationale, not as the fence — it grows, and a denylist of it can only under-enumerate: `src/fleet/approval-gate`, `src/fleet/approvers`, `src/fleet/dispatch`, the harvest/teardown mutating cores `harvestRun`/`teardownSandbox` in `src/providers/harvest.ts`/`teardown.ts` (the fleet harvest verb is a thin front door over them, not a fleet module), and fixloop's dispatch leg. The composer shells ONLY the read-only verbs (`fleet status --driver exedev`, `fleet result`), and the Bridge deny-list (`cli.exec`, B3) is cited as the reason a Home bot cannot exec the CLI — relied on, never loosened. *Negative control: a bot that gates code entry — any seam-fake turn reaching an approve/dispatch/gate symbol, or a digest carrying approval authority — MUST fail this one.*
+3. **The heartbeat digest absorbs the fix-loop runner's duty — ADDITIVELY.** Given fleet state, When the digest fires, Then it is a bounded exiting invocation (no daemon, no PID file, no `--daemon` flag — DF3.8's precedent), its snapshot assembles read-only surfaces only (status, result, fixloop escalation-state counts (`EscalationClass` tally + attempt ladder — `src/fixloop/escalation.ts`'s `deriveAttemptLadder`/`fixOutcome`, read-only), approval-park state), and its escalation marks are the manager-level view (parked approvals, exhausted fix loops, exit-6 runs). *Negative controls, both MUST fail: a digest that bypasses or replaces the escalation PR-comment channel for PR-scoped failures — `src/fixloop/` is byte-identical after this story and the PR comment remains THE PR-scoped escalation, the digest adding the manager-level view and nothing less; and an implementation that ships any resident process (plist, unit, loop flag) to produce the digest.*
+4. **Per-bot spend ceiling via E21 budget machinery (ADR-RUN-2 D4/E08).** Given the manager config, Then every bot carries a spend ceiling; the gateway-budget seam fake records one budget reservation per bot before its first turn; and config without a ceiling refuses provisioning. Enforcement lives zeropoint-side (the gateway); this story owns the config of record and the seam consumption. *Negative control: spend ceiling absence — a bot provisioned without a ceiling, a zero ceiling silently treated as unlimited, or a first turn recorded with no budget reservation MUST fail this one.*
+5. **DD-20 spend join keys, pinned and surfaced.** Given a digest snapshot, Then every per-run line's schema carries all three join keys — `workKey` (`w:` namespace), `runId`, `botId` — with `botId` absent (never `null`) on fleet-only lines until A2 produces manager-originated runs; Home-bot turn spend is sourced from the zeropoint LLM-gateway ledger (E08) seam, fleet-run spend is read from the factory cost-ledger (integer micro-USD, read-only), and the digest joins both for the operator. The factory ledger is untouched in this story (no bot-originated fleet run exists — see the Not-an-edge note). *Negative control: a per-run line missing any one of the three join keys, or a spend figure produced by converting the micro-USD ledger by rounding, MUST fail this one.*
+6. **Seam fidelity is the CI-green invariant (charter §5.4).** Given the seam fakes, Then they honor the seams AS WRITTEN: `TURN_REFUSALS` exactly the three values with no second refusal vocabulary; `isHomeBackedAgent` modeled as S02B-owned per its boundary; `writeProfileTokens`' four `SOLSTICE_*_TOKEN` names exactly, honoring the `home_gateway_url_mismatch` refusal; and zero fork/zeropoint imports anywhere in the factory graph. *Negative control: a fake that invents a refusal reason, a fifth token name, or any real fork import MUST fail this one.*
+
+## Trigger Surface
+
+| Trigger | Status | E2E Test | Follow-Up |
+|---------|--------|----------|-----------|
+| scheduled heartbeat → digest snapshot → manager-level chat digest | in-scope | `tests/managers/digest-composer.test.ts`, `tests/managers/home-seam.test.ts` | — |
+| manager config of record (one Home + 3 bot profiles + ceilings + owner) | in-scope | `tests/managers/manager-config.test.ts` | — |
+| per-bot budget reservation via the gateway seam | in-scope | `tests/managers/home-seam.test.ts` | — |
+| fork-side Home provisioning, profile sync, schedule→turn delivery | out-of-scope — counterpart BUILD-IN-FORK story in the solstice repo, same contract text (charter §5.5) | — | counterpart story |
+| manager-initiated fleet runs (`botId` emission on fleet rows) | out-of-scope — A2 introduces the first manager-originated run | — | A2 |
+| approvals via the S05b inbox | out-of-scope — CHANNEL ≠ POLICY (ADR-1 §3); channel undecided, ADR-2 PROPOSED (G1) | — | ADR-2 |
+| digest replacing the fix-loop escalation PR comment | out-of-scope — absorption is additive (AC3) | — | none |
+| proactive cron agents (QDS-MEM-001/002) | out-of-scope — PARKED DD-23 with dated triggers; different population | — | DD-23 |
+| org-kind factory Home owner | out-of-scope — refused by policy until the company-bot feature ships (AC1) | — | company-bot upgrade |
+| spend-ceiling enforcement itself | out-of-scope — zeropoint E08 owns enforcement; factory owns config + join keys | — | counterpart story |
+
+## Infra Prerequisites
+
+| Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
+|-----------|-------------------------------|-------------------------|
+| E21 S02b seam text | `Solstice/docs/sprint-artifacts/e21/stories/e21-s02b-bot-profiles-and-turn-principal.md` (spec-only) | story merged by E21; factory fakes encode `TURN_REFUSALS`/`isHomeBackedAgent` verbatim — `bun test tests/managers/` green before this story starts |
+| E21 S03b seam text | `…/e21-s03b-home-provider-wiring.md` (spec-only) | same suite green; four token names + `home_gateway_url_mismatch` encoded |
+| Z2 trigger wiring | fork-side; factory consumes via the seam fake | Z2's own suites green on the pinned fork rev |
+| verb registry (status/result) | `src/fleet/verbs.ts` (DF3.1-owned, read-only for this story) | `bun test tests/fleet/skill-contract.test.ts` green before and **byte-identical after** (no new verbs) |
+| fix loop | `src/fixloop/` (DF6.1a/b-owned, read-only + byte-identical) | `bun test tests/fixloop/` green before and **byte-identical after** — a diff there is the signal AC3 was implemented as a replacement |
+
+> No dedicated Hindsight, no box, no model spend, and no VPS service are prerequisites of this story: every seam is a fake, and the digest poll is read-only.
+
+## Technical Notes
+
+- **Why the digest is host-composed and the bot is presentation-only.** B3 deny-lists `cli.exec`, so a Home bot cannot run the fleet CLI, and INV-1 forbids giving it one. The duty is therefore: host-side bounded poll (documented crontab line, DF3.8's `*/N * * * * cd /path/to/QDS-Factory && bun scripts/manager-digest.ts --driver exedev` shape) → snapshot → the counterpart fork story delivers it into the manager bot's turn (schedule wake; INV-8's recorded initiator is the fork side's to enforce and this story's fakes to honor) → the bot renders the chat digest. The bot decides nothing that gates anything.
+- **Owner adjudication, restated where an implementer will look:** `kind:'org'` is refused (AC1) because ADR-RUN-2 D1 refuses it by policy until the company-bot feature ships. The upgrade is a new decision through the normal review flow (the standing autonomy rule), never a config flip.
+- **Escalation semantics.** "Escalation" in the digest means *marked for operator attention* in the manager-level view. The PR-scoped escalation of record stays `buildEscalationComment`'s PR comment (`src/fixloop/escalation.ts` — that module's only internet egress). The two share no channel and no code path.
+- **Spend ceilings are config + reservation, not enforcement.** E08 (zeropoint gateway) enforces; the factory config declares, the seam fake records the reservation, and DD-20's join keys make the two ledgers reconcilable. Ceilings are denominated in USD at the gateway; the factory cost-ledger stays integer micro-USD (DD-9) — the digest renders both and never converts by rounding.
+- **Guards/limits (named rather than implied):** `MAX_SNAPSHOT_RUNS` (the digest truncates oldest-first with an explicit `truncated` count, never silently); the approval-park threshold (named constant, default derived from the approval timeout's 24 h default — an approval parked past it is an escalation mark); the snapshot line budget (≤ the 8 KiB detail discipline the audit store uses, so a fat snapshot cannot become a log bomb).
+- **Considered and rejected: a Bridge method exposing fleet status in-Home.** It would make the bot self-serve but adds a fork-side policy surface (new allowlist entry + method contract) duplicating a read the host already performs for its own crontab, and it couples factory CI to a fork surface that does not exist. Revisit only after the counterpart story lands and only if the host-composed snapshot measurably lags.
+- **Region ownership on shared files:** `src/fleet/verbs.ts`, `src/fixloop/**`, and the cost-ledger are consumed read-only and are byte-identical after; `src/managers/**` and `scripts/manager-digest.ts` are new and this story's own. **No image pin is owed:** every file this story adds is host-side and outside the box COPY set (R3 §5 — the engine-stage enumeration carries no managers module and gains none).
+
+## Observability Contract
+
+- Events (the composer's own channel): `digest-snapshot` (`{requestId, snapshot_ms, runs_observed, approvals_parked, fixloops_active, bots_aggregated, truncated}`), one `digest-run` line per run in the snapshot (`{workKey, runId, botId?, fleet_spend_micro_usd, escalation?}` — `botId` absent, not `null`, until A2 produces manager-originated runs), `digest-escalation` (one per mark: `{kind: approval-park | fixloop-exhausted | exit-6, runId | approvalId}`), `digest-complete`. Budget reservations are journaled by the gateway fake, not re-emitted by the composer.
+- `requestId` is the digest invocation's own; consumed surfaces' events ride their existing channels unchanged — no second vocabulary for a line someone else's code writes (DF3.8's rule). Sub-timings: `snapshot_ms` per digest; per-verb timings absent, not `0`, when a verb was skipped. Credential material never appears in any line: profile tokens are names, never values, and the composer reads no token material at all.
+
+## Files to Modify
+
+- `src/managers/manager-config.ts` (new — Home + bot-profile config of record, ceilings, owner adjudication; the validation refusing `kind:'org'` and ceiling-less bots)
+- `src/managers/digest-composer.ts` (new — read-only poll, snapshot assembly, escalation marks, DD-20 join-key lines; the only module allowed to shell fleet verbs, and only status/result)
+- `scripts/manager-digest.ts` (new — bounded CLI, documented crontab line, exit table mirroring the composer's outcomes)
+- `tests/managers/manager-config.test.ts` (new — AC1's refusals, ceiling validation)
+- `tests/managers/digest-composer.test.ts` (new — AC2's import fence, AC3's additive absorption, AC5's join keys)
+- `tests/managers/home-seam-fakes.ts` (new — fake Home/gateway/budget journal honoring the S02b + S03b seams exactly)
+- `tests/managers/home-seam.test.ts` (new — AC6's seam fidelity + AC4's reservation record)
+- `src/fixloop/**` (DF6.1a/b-owned) — **not modified**; byte-identical is the AC3 negative control
+- `src/fleet/verbs.ts` (DF3.1-owned) — **not modified**; the composer shells the CLI; the registry grows no verb
+
+## Security Invariants
+
+- **INV-MGR-1 (fleet-only code entry):** no manager bot, digest, or schedule reaches approve/dispatch/gate symbols — the static import fence (the AC2 allowlist) plus the Bridge `cli.exec` deny-list are the fence, and neither is loosened. What this does NOT fence, plainly: a human operator can still run anything the CLI allows — the fence binds bots, never operators.
+- **INV-MGR-2 (channel ≠ policy, verbatim):** CHANNEL ≠ POLICY: `fleet approve` stays scrypt/stdin/human-only (ADR-1 §3), channel change captured in ADR-2 PROPOSED (operator decides via G1), not decided. The digest is a read/report surface; it can never carry, request, or record an approval decision. Scripted approvers, if any ever exist, are labeled (SC2.7 precedent) — none are introduced here.
+- **INV-MGR-3 (no provider key in the Home — inherited, ADR-RUN-2 INV-1):** bot turns traverse the D4 gateway; the factory never provisions, injects, or logs any provider key or profile-token value.
+- **INV-MGR-4 (spend bounded):** every manager bot's turn spend flows through an E08 budget reservation bounded by its configured ceiling; an unreserved turn is a refusal, not a warning.
+- **INV-MGR-5 (box prose never trusted at boundary — inherited F10/INV-7):** the digest is composed from host-side structured state only; no bot-authored prose enters fleet state, ledgers, or logs.
+
+## Definition of Done
+
+- [ ] **Impl:** `manager-config.ts` validates one Home / owner `{kind:'user'}` / three `bot-`-prefixed profiles / per-bot ceilings, refusing `kind:'org'` and ceiling-less bots by name (AC1, AC4).
+- [ ] **Impl:** `digest-composer.ts` shells only `fleet status --driver exedev` and `fleet result`, assembles the snapshot, emits join-key lines and escalation marks; bounded exiting invocation, no daemon artifact (AC2, AC3).
+- [ ] **Contract:** `src/fixloop/` and `src/fleet/verbs.ts` byte-identical after — a diff in either is a failed AC2/AC3, not a patch to argue.
+- [ ] **Test (config):** org-kind refusal, missing-ceiling refusal, duplicate-Home refusal, and `w:`-form `workKey` validation all green with their named errors (AC1, AC4, AC5).
+- [ ] **Test (digest):** snapshot lines carry all three DD-20 join keys; spend joins both ledgers; escalation marks fire for parked-past-threshold approvals, exhausted fix loops, and exit-6 runs; `botId` absent-not-null on fleet-only lines (AC5).
+- [ ] **Test (fence):** the import fence asserts the AC2 allowlist — any manager-module import from `src/fleet/` outside `status.ts`, `result.ts`, or type-only `brief-schema.ts` fails; the fake journal shows no bot turn reaching an approve/dispatch path (AC2).
+- [ ] **Test (seam):** fakes encode `TURN_REFUSALS` (3 values), the four `SOLSTICE_*_TOKEN` names, and the `home_gateway_url_mismatch` refusal; zero fork imports in the factory graph (AC6).
+- [ ] **Test (budget):** one gateway budget reservation per bot before first turn; an unreserved turn refuses (AC4).
+- [ ] **Security:** no token value, provider key, or approval authority appears in any new module, log line, or fixture (INV-MGR-2/3/4).
+- [ ] **Test (e2e demo — MANDATORY):** the full fake-journal loop — config → provisioning validation → budget reservations → digest invocation → snapshot with join keys, escalation marks, and both ledger reads — green in CI with zero fork code present, proving the CI-green invariant holds.

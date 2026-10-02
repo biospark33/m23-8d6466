@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "story": "Z4+A6",
+  "owned": ["Z4", "A6"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    "Z4 HIGH (structural, cross-story): AC1's absolute no-ports rule left AC6's mandated HINDSIGHT_BASE_URL 'dedicated instance origin' with no definable referent for any host-side consumer the same spec cites (runbook §6.3–6.4 host CLI/provisioner; M1.1's on-box curl 127.0.0.1:18889 + host-bun legs, which on a both-stacks box resolve the TENANT instance). Fixed in AC6: origin pinned to compose-network http://hindsight-qds:8888 for compose-side consumers; host-side interim reach declared deliberately undefined; R2 trap #7 'Z4/M1.1 reconcile' marked an open surfaced item (loopback-bind-on-a-dedicated-port named as candidate resolution). Mirrored in INV-Z4-1.",
+    "Z4 MEDIUM: m2-gateway GHCR image publish ownership was silently assigned to M2.1 in AC8 (M2.1 is dev-first/mock-tier per DD-26(1), zero publish mentions in its file; ops register §5 row 5 covers only the exedev image). Fixed: AC8 now marks publish ownership unowned (G9 analog), surfaced to the ops dependency register; new Trigger Surface row added.",
+    "Z4 MEDIUM: AC5's --driver tree scan had no owning test file (Files-to-Modify scoped vps-profile.test.ts to AC1–3, 6–7 while DOD Security demanded the scan). Fixed: AC5 assigned to vps-profile.test.ts.",
+    "Z4 LOW: AC8 cited 'runbook §7 smoke' while §7's last bullet is the G8 backup-timer enable and the fired leg pins G1–G7 exactly. Fixed: G8 exclusion clause added.",
+    "Z4 LOW: secrets-checklist rotation item had no statement. Fixed: rotation posture line added to INV-Z4-3 (operator-held creds, re-placement per G3; no repo-side machinery, none owed).",
+    "Z4 LOW: fired E2E demo probed only :18889 externally while AC8 probes 18889 AND 8888. Fixed: demo line aligned.",
+    "A6 MEDIUM: fired-half Infra Prerequisites cited runbook §2/§6 for host prereqs, but runbook §2 installs neither the gitnexus CLI nor pi — both hard requirements of scripts/install-gitnexus-plus.sh (verified: binary guard exits 1; GITNEXUS_SKIP_INSTALL=1 still needs the binary). Fixed: prereq row names the fired-leg operator step, surfaced to the register.",
+    "A6 MEDIUM: only the stamp override (QDS_GITNEXUS_HOME) was named for fixture isolation; wrapper tests (lock fixture, e2e demo) would append to the live .sandbox/refresh-cron.jsonl. Fixed: log sink + graph home overrides named in the Files-to-Modify wrapper line.",
+    "A6 MEDIUM: INV-A6-3 claimed 'no egress' but the canonical script's install leg is an npm fetch — the invariant as written would fail on first honest egress review. Fixed: fetch-not-push wording."
+  ],
+  "surviving": [
+    {
+      "severity": "HIGH",
+      "scope": "cross-file (M1.1, not owned)",
+      "finding": "m1-1-dedicated-hindsight-vps.md assumes the dedicated instance answers at host loopback 18889 on-box (:29, :66) and that host-bun provisioner/round-trip legs reach it (:23, :103) — while Z4 (normative per the handed pattern note) publishes no host port at all. On a both-stacks box M1.1's curl 127.0.0.1:18889 would hit the TENANT hindsight — the wrong-instance shape M1.1's own AC1 forbids. Z4's side is now coherent and carries the surface note; the arbitration (keep no-ports and run M1.1 legs compose-side/gateway-mediated vs. loopback-bind on a dedicated port) belongs to the derivation register / M1.1 pair."
+    }
+  ],
+  "checklists_fired": {
+    "Z4": ["secrets-invariants", "auth-invariants"],
+    "A6": ["secrets-invariants"]
+  }
+}

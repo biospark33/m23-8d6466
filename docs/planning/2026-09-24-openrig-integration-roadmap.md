@@ -2,6 +2,19 @@
 
 **Status date:** 2026-09-26 · **Owner:** steve · **Research basis:** `docs/planning/2026-09-23-openrig-swarm-integration-research.md` (§4 architecture, §7 roadmap, §8 risks — that doc's decisions are SETTLED; this doc tracks execution, it does not re-open design).
 
+> **PROGRAM CLOSED 2026-09-30** — completed between this doc's last revision and
+> then: SC1 protocol-engine fixes (swarmclaw PR #644), the SC2 `external_job`
+> adapter LIVE GREEN end-to-end (SC2.6 + SC2.7, 11-round evidence under
+> `_bmad-output/evidence/openrig-sc2/`), the #382 poller race closed (QDS PR
+> #383), and [ADR-1](../decisions/2026-09-30-adr-1-swarmclaw-macro-host.md)
+> ACCEPTED and operator-signed 2026-09-30. The program record lives in the
+> integration HANDOFF's status layers
+> (`_bmad-output/sprint-artifacts/dark-factory-v5/2026-09-17-swarmclaw-kg-integration-HANDOFF.md`);
+> the successor program is the v6 pivot (charter:
+> `_bmad-output/sprint-artifacts/dark-factory-v6/2026-10-01-v6-derivation-session-INPUT.md`).
+> Sections below are retained as the historical execution record; no session
+> should pick up an unchecked box here without first reading the v6 charter.
+
 **Purpose:** single durable tracker for the remaining OpenRig-integration work, designed to survive session boundaries. Every stage carries checkboxes with **verifiable** acceptance criteria. A session picks the first unchecked stage, completes it with full rigor (TDD, GitNexus impact/detect_changes, live-e2e rules where money or boxes are involved), marks checkboxes WITH EVIDENCE pointers, and leaves the doc merge-ready.
 
 **Rule of the doc:** a checkbox is checked only when its evidence exists (commit SHA, test-run output, PR URL, live-round evidence file under `_bmad-output/evidence/`). No self-reported "done" without an artifact. No band-aids: every fix lands with its test; every live claim is reverified out-of-box.

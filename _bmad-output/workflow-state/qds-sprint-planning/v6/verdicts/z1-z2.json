@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "story": "Z1+Z2",
+  "owned_story_ids": ["Z1", "Z2"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 2 },
+  "applied": [
+    {
+      "severity": "HIGH",
+      "line": "z1:40 (+ z1:63 Infra Prereq)",
+      "summary": "AC5 claimed 'the 11 SC2 evidence files' under _bmad-output/evidence/openrig-sc2/ but the directory holds 38 files (rounds sc2-1-5 through sc2-7, 2026-09-28 to 2026-09-30); a manifest built to the stated count would leave 27 files unmapped and trip AC6/the coverage check's own 'unmapped' failure. Fixed: AC5 and the prereq row now enumerate the directory at implementation time and pin no count.",
+      "owned_story_ids": ["Z1"],
+      "affected_story_ids": ["Z1", "Z3"],
+      "owner_story_id": "Z1",
+      "cross_boundary": false
+    },
+    {
+      "severity": "HIGH",
+      "line": "z1:42 (+ z1:85 Files-to-Modify, z1:102 DOD)",
+      "summary": "AC7 named tests/fleet/e2e/live-harness.ts as 'the evidence writer', but the SC2 fork-round evidence is written by tests/fleet/e2e/sc2-harness.ts (writeEvidence at :360, writes _bmad-output/evidence/openrig-sc2/); live-harness.ts (writeEvidence at :478) owns the fork-less df3-e2e/ corpus. As written, no fork-round evidence was ever stamped and the drift alarm never armed — AC7's own negative control. Fixed: AC7, Files-to-Modify, and the DOD Integration row retarget sc2-harness.ts's writeEvidence.",
+      "owned_story_ids": ["Z1"],
+      "affected_story_ids": ["Z1"],
+      "owner_story_id": "Z1",
+      "cross_boundary": false
+    },
+    {
+      "severity": "HIGH",
+      "line": "z2:43",
+      "summary": "AC7 asserted 'schedule carries targetSessionId' but the persisted Schedule type (fork:src/types/schedule.ts:28) has no such field; adding one would be a second fork-grammar change contradicting DD-28.6 ('Z2's one fork change = factory_observe added to the artifact-kind union') and was absent from Files-to-Modify. Fixed: the durable notify target now rides the existing persisted protocolConfig bag on Schedule (e.g. notifyTargetSessionId) — no new Schedule field, DD-28.6 accounting preserved, no new files.",
+      "owned_story_ids": ["Z2"],
+      "affected_story_ids": ["Z2"],
+      "owner_story_id": "Z2",
+      "cross_boundary": false
+    },
+    {
+      "severity": "MEDIUM",
+      "line": "z2:13",
+      "summary": "Spec Reference's fork-substrate bullet mixed fork:-prefixed and bare cross-repo cites (protocol-factory-exec.ts, protocol-factory-lifecycle.ts, protocol-run-outcome-notify.ts, schedules/schedule-repository.ts, runtime/watch-job-repository.ts); DD-28.8 makes bare cross-repo cites checker findings. Fixed: all five cites now carry fork: + the full src/ path, verified to resolve in the Solstice worktree fork.",
+      "owned_story_ids": ["Z2"],
+      "affected_story_ids": ["Z2"],
+      "owner_story_id": "Z2",
+      "cross_boundary": false
+    }
+  ],
+  "surviving": [
+    {
+      "severity": "LOW",
+      "line": "z1:28,36",
+      "summary": "'the DAG adapter' is used without a pointer; inferable from src/fleet/verbs.ts:630's poller-safe comment and the q1-contract suite's own framing.",
+      "owned_story_ids": ["Z1"],
+      "affected_story_ids": ["Z1"],
+      "owner_story_id": "Z1",
+      "cross_boundary": false
+    },
+    {
+      "severity": "LOW",
+      "line": "z2:40",
+      "summary": "AC4's 'fork:protocol.ts:193' is shorthand for fork:src/types/protocol.ts:193; left as-is because DD-28.6 itself uses the identical shorthand and the file is unambiguous in-fork.",
+      "owned_story_ids": ["Z2"],
+      "affected_story_ids": ["Z2"],
+      "owner_story_id": "Z2",
+      "cross_boundary": false
+    }
+  ],
+  "checklists_fired": ["auth-invariants", "secrets-invariants", "migration-invariants"]
+}

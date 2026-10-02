@@ -44,8 +44,8 @@ describe("planning artifacts are self-consistent", () => {
     });
     // Run from `/`, the repo-root resolution still works (it is import.meta.dir-based),
     // so this proves the checker is cwd-independent rather than accidentally passing
-    // because it found nothing to check.
+    // because it found nothing to check. 65 = 42 DF rows + 23 v6 rows (DD-27).
     expect(r.exitCode).toBe(0);
-    expect(`${r.stdout.toString()}`).toContain("42 stories");
+    expect(`${r.stdout.toString()}`).toContain("65 stories");
   });
 });

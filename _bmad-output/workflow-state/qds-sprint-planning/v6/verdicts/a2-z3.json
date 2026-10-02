@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "story": "A2+Z3",
+  "owned_story_ids": ["A2", "Z3"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 1 },
+  "applied": [
+    {
+      "severity": "high",
+      "line": "a2:39,49,95; z3:10,21,34,48,90",
+      "summary": "ADR-2 status drift: all 8 'ADR-2 DRAFT' occurrences normalized to PROPOSED per the ADR file's Status line and DD-19, keeping the load-bearing 'decides nothing / operator decides via G1' claim (matches A3 sibling normalization style).",
+      "owned_story_ids": ["A2", "Z3"],
+      "affected_story_ids": [],
+      "owner_story_id": "A2",
+      "cross_boundary": false
+    },
+    {
+      "severity": "medium",
+      "line": "z3:20,25,29,37,91",
+      "summary": "Memory-leg transport contradiction fixed: Z3 claimed QA legs retain 'through the M2 gateway with M2.1 agent tokens', but the protocol it drives (A2) retains per M1.2's pattern — host-side direct REST with the host env token; M1.2's edge states the gateway 'does not re-route host retain/recall'. Agent-token claim re-scoped to the round's own memory-leg assertions (M2.3's round-driver precedent; DD-28.7 honored), A2's retain left on its M1.2-pattern contract.",
+      "owned_story_ids": ["Z3"],
+      "affected_story_ids": ["A2", "M1.2", "M2.1"],
+      "owner_story_id": "Z3",
+      "cross_boundary": true
+    },
+    {
+      "severity": "medium",
+      "line": "z3:70,100",
+      "summary": "Fork-rev stamp gap fixed: Z3's leg JSONs land in _bmad-output/evidence/v6-z3/ but the story extends live-harness.ts unmodified, which stamps nothing fork-side (Z1 AC7: sc2-harness owns the openrig-sc2/ stamp). Leg drivers now own the swarmclawForkRev stamp and the round record names the rev it ran against — Z1's drift alarm covers v6-z3/ and Z1's named bump occasion ('Z3/M-rounds') becomes auditable.",
+      "owned_story_ids": ["Z3"],
+      "affected_story_ids": ["Z1"],
+      "owner_story_id": "Z3",
+      "cross_boundary": true
+    },
+    {
+      "severity": "medium",
+      "line": "z3:80",
+      "summary": "Live-test path normalized: tests/fleet/e2e/live/z3-exit-round.live.test.ts invented a live/ subdir; every existing live test is flat in tests/fleet/e2e/ (tier selection is QDS_E2E_TIER/QDS_E2E_LIVE env, not path). Moved to tests/fleet/e2e/z3-exit-round.live.test.ts.",
+      "owned_story_ids": ["Z3"],
+      "affected_story_ids": [],
+      "owner_story_id": "Z3",
+      "cross_boundary": false
+    }
+  ],
+  "surviving": [
+    {
+      "severity": "low",
+      "line": "z3:35 vs a2:67",
+      "summary": "Latent round-cap tension (register-pinned, not editable in one story): Z3_MAX_FLEET_RUNS=4 assumes A2's current 3-lens composition (3 QA legs + 1 code-affecting run); A2's MAX_QA_LEGS=4 headroom ('one added lens') would make 5 and require a deliberate cap bump. Both constants are register-ratified (DD-28.7 / A2 Technical Notes); flagged for the derivation register if A2 ever adds the 4th lens.",
+      "owned_story_ids": ["Z3"],
+      "affected_story_ids": ["A2"],
+      "owner_story_id": null,
+      "cross_boundary": true
+    }
+  ],
+  "checklists_fired": ["auth-invariants.md", "secrets-invariants.md"]
+}

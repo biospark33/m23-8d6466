@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "story": "Z5",
+  "owned": ["Z5"],
+  "file": "_bmad-output/sprint-artifacts/dark-factory-v6/stories/z5-chassis-fate.md",
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    {
+      "severity": "HIGH",
+      "finding": "AC4(a) was unsatisfiable as written: the dormancy guard fails any module outside src/swarmclaw/ importing createServer, but the story mandates keeping src/index.ts:1-2's dormant re-export (createServer/SwarmClawServer) as the restoration entry point — the guard was red on the story's own end-state tree. Technical Notes' 'Post-move, zero production modules import anything under src/swarmclaw/' had the same ambiguity.",
+      "fix": "AC4(a) now carries an explicit carve-out ('other than the dormant re-export barrel src/index.ts') with rationale; Technical Notes claim reworded to name src/index.ts as the only outside referencer. Verified against src/index.ts:1-2."
+    },
+    {
+      "severity": "MEDIUM",
+      "finding": "Re-export consumer set incomplete: dropping stdio-transport's log re-export breaks 6 test files the story never named — tests/hindsight/{bank-provisioning,bridge-round-trip,client,memory-round-trip,mulch-import}.test.ts (setLogSink/LogEntry) and tests/providers/run-record.test.ts (setLogSink). Verified all 6 are disjoint from the 39 'swarmclaw/log' test matches (they import mcp/stdio-transport, not swarmclaw/log), so the dev-time grep over swarmclaw/log would not surface them; only the tsc Contract gate would catch them.",
+      "fix": "Named all 6 in Overview, AC3's directive enumeration, and Files to Modify (import lines only, consistent with AC1)."
+    },
+    {
+      "severity": "MEDIUM",
+      "finding": "The 27-src parenthetical mis-enumerated its own count: listed 'hindsight x4-inclusive, gate' inside the 27, but no hindsight or gate file matches the swarmclaw/log grep (hindsight's 4 modules import mcp/stdio-transport; gate has zero log imports, comment references only) and the sum with them is 32 != 27. Verified true composition: providers x15 (12 + exedev 3), fleet x8, audit x2, judgment/client x1, reverify x1 = 27.",
+      "fix": "Parenthetical corrected to the verified composition; hindsight x4 + provision-hindsight-banks.ts reclassified as the separate stdio-re-export rewrite set (AC3 already owns it); gate explicitly noted as zero-log-import."
+    },
+    {
+      "severity": "LOW",
+      "finding": "Region-ownership note said 'tool-bridge.ts — section deletion + one import add only', but tool-bridge imports {log, newRequestId, StdioTransport} from ./stdio-transport.ts — the log pair needs a re-point (not an add), and the StdioTransport type must stay on stdio-transport; no maskEnv import is needed (tool-bridge does not consume it).",
+      "fix": "Corrected to 'import splits (log/newRequestId re-pointed to src/lib/log.ts; the StdioTransport type stays)'."
+    },
+    {
+      "severity": "LOW",
+      "finding": "AC4(b) 'imports a swarmclaw utility path' lacked a mechanical definition for the fixture.",
+      "fix": "Defined as AC3's two greps (swarmclaw/log anywhere; maskEnv imported from tool-bridge), folded into the AC4 edit."
+    }
+  ],
+  "surviving": [],
+  "verified_vs_reality": [
+    "Counts reproduce exactly: grep -rln 'swarmclaw/log' = 74 (src 27, scripts 8, tests 39)",
+    "src/swarmclaw tree matches retained-file list (index.ts, mcp/{stdio-transport,tool-bridge}.ts, routes/{agents,mcp-servers}.ts, store/{agent-store,mcp-store}.ts)",
+    "log.ts has zero imports; exports LogEntry/logSink/setLogSink/log/newRequestId; stdio-transport.ts:18 re-export + lines 11-16 docblock contract confirmed",
+    "maskEnv defined tool-bridge.ts:158, pure/no imports; repo-wide maskEnv importers = 3 files (definer + routes/mcp-servers.ts:19 + hindsight/client.ts:26) — AC3's maskEnv enumeration is complete",
+    "src/gate/assertions/p0-10-gitnexus.ts:27 PROBE_SYMBOL='createServer' with src/swarmclaw/index.ts provenance comment — load-bearing-twice claim (b) confirmed",
+    "src/hindsight/client.ts:396 maskEnv call confirmed; hindsight src modules = exactly 4 (client, round-trip-verifier, mulch-importer, bank-provisioner), all via stdio-transport",
+    "src/lib/http.ts + file-lock.ts precedent exists; tests/fleet/skill-contract.test.ts exists (DoD e2e demo leg)",
+    "DD-18 register entry and charter Z5 row (2 pts, deps none) consistent with story"
+  ],
+  "checklists_fired": [
+    "auth-invariants (trigger word 'auth' in story; all items conditional and N/A — story explicitly fences 'auth-fallback logic untouched' / 'does not re-audit that posture', documented reason present)",
+    "secrets-invariants (substantive: env masking/logging — covered by INV-SC5/INV-HM1/CC-9 pins + AC1 negative control; storage/rotation N/A, pure move of a pure masking function, no secret material touched)"
+  ],
+  "checklists_not_fired": ["migration-invariants (no trigger words in story)"]
+}

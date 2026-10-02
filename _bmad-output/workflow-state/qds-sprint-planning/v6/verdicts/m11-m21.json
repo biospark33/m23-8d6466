@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "story": "M1.1+M2.1",
+  "owned_story_ids": ["M1.1", "M2.1"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    {
+      "severity": "HIGH",
+      "line": "m2-1-memory-gateway.md AC6 + Technical Notes constants list",
+      "summary": "Cross-story env-name drift at the M2.1->M2.2 delivery seam: M2.1 invented QDS_MEMORY_RECALL_KEY while M2.2 (Contracts/Schema block, which pins delivery to 'M2.1's deliver leg') registers the wire pair QDS_KG_RECALL_KEY + non-secret QDS_KG_GATEWAY_URL. AC6 renamed to the registered pair; delivery writes both entries under the KEY_ENV_FILE/KEY_ENV_VAR discipline; constants list updated. Neither name was register-ratified; M2.2's explicit registration-of-record wins.",
+      "owned_story_ids": ["M2.1"],
+      "affected_story_ids": ["M2.2"],
+      "owner_story_id": "M2.1",
+      "cross_boundary": true
+    },
+    {
+      "severity": "HIGH",
+      "line": "m2-1-memory-gateway.md Security Invariants (new INV-MG-6) + Technical Notes",
+      "summary": "Secrets-checklist gaps on a new secrets-handling module: no rotation cadence for MEMGATE_ADMIN_KEY / HMAC signature key / long-lived agent tokens, ledger at-rest persistence of key material unstated, no URL/query-string transit rule. Added INV-MG-6: ledger stores digests+scope claims never material; admin+signature keys are operator-rotated env values; per-run keys TTL-bound need no rotation; signature-key rotation fails agent tokens closed with deliberate no-dual-key window (tokens carry no material, re-grant); key material rides headers and the delivery env file, never URLs. Signature-key env named (QDS_MEMGATE_SIGNING_KEY) in the NET-NEW constants list.",
+      "owned_story_ids": ["M2.1"],
+      "affected_story_ids": [],
+      "owner_story_id": "M2.1",
+      "cross_boundary": false
+    },
+    {
+      "severity": "HIGH",
+      "line": "m2-1-memory-gateway.md Files (tests/memgate/gateway.test.ts) + DoD Security bullet",
+      "summary": "Secrets-checklist redaction-test invariant was silently omitted: no test asserted secret material absent from emitted log lines. Added the redaction probe (minted sentinel key never appears in any emitted line) to gateway.test.ts's scope and to the DoD Security bullet (proven by a sentinel-key redaction test, INV-MG-5/6).",
+      "owned_story_ids": ["M2.1"],
+      "affected_story_ids": [],
+      "owner_story_id": "M2.1",
+      "cross_boundary": false
+    },
+    {
+      "severity": "MEDIUM",
+      "line": "m1-1-dedicated-hindsight-vps.md Technical Notes (Deviation 1 bullet)",
+      "summary": "Evidence-filename cross-reference gap: story driver scripts/p0-9/round-trip-dedicated.ts vs closure plan's pinned leg filename ...-p0-9-round-trip-via-bridge.json (plan ACs byte-identical, so its filename stands). Deviation-1 bullet now pins that the re-homed leg writes the plan's filename and the annotation records the driver-name mapping.",
+      "owned_story_ids": ["M1.1"],
+      "affected_story_ids": [],
+      "owner_story_id": "M1.1",
+      "cross_boundary": false
+    },
+    {
+      "severity": "MEDIUM",
+      "line": "m1-1-dedicated-hindsight-vps.md AC4",
+      "summary": "AC4(b) 'authenticated cross-bank attempt' named no credential source, leaving the driver unbuildable without a second guessing session. Now specifies the instance's own env credential (HINDSIGHT_API_TENANT_API_KEY from hindsight.env, runbook G3) presented against a bank outside its scope; probe remains outcome-agnostic per AC4's design.",
+      "owned_story_ids": ["M1.1"],
+      "affected_story_ids": [],
+      "owner_story_id": "M1.1",
+      "cross_boundary": false
+    }
+  ],
+  "surviving": [],
+  "checklists_fired": [
+    "secrets-invariants (both stories; HIGHs found and fixed: rotation cadence, at-rest material, redaction test)",
+    "auth-invariants (M2.1 substantive: capability-before-side-effect, server-side expiry, revocation-on-every-request, closed verb vocabulary, negative-auth/expired probes all present; M1.1 fired-by-term, documented N/A - no authz built, containment-by-topology stated INV-MEM-2/3)",
+    "migration-invariants: not fired (no migration/DDL vocabulary in either story; bun:sqlite store follows audit.db/cost-ledger.db convention)"
+  ]
+}

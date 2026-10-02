@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "story": "M2.2+M2.3",
+  "owned": ["M2.2", "M2.3"],
+  "iterations": 3,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    "M2.2 HIGH — delivered-key env-name drift: M2.1 AC6 registers delivery env QDS_MEMORY_RECALL_KEY while M2.2 reads QDS_KG_RECALL_KEY (same single env-file entry, two names = broken wire; extension never finds its key). Fixed: M2.2 Deviation 1 names the conflict, pins canonical QDS_KG_RECALL_KEY (deliverer writes what the reader reads, register-flagged); sibling-contract line + DoD Contract item + M2.3 sibling line aligned.",
+    "M2.3 HIGH — AC7 asserted 'the memory events the gateway emitted land as audit rows under the hops M2.1 registered': M2.1 registers NO hops (frozen posture — gateway events are log lines; memgate ledger is not the audit chain). Unimplementable as written. Fixed: AC7 rewritten to the rows the round itself produces (teardown run-credential revoke/verify-revoked rows; memory-retain-receipt/retain row when the run harvests), digest-stable on identical-content re-emit, volatile fields in NO row, and the walk asserts gateway events never became rows.",
+    "M2.2 HIGH — ritual batching unstated: M1.2 (brief-schema.ts + pipeline-run.ts, COPY-set) and J3 (adds-only dispatch.ts) also move deriveBuildId; J3 names batching into M2.2's ritual but M2.2 (the definer) did not. Firing alone pins an image without the kgContext render → second paid rebuild, and M2.3 AC1's primed-dispatch leg runs on the wrong image. Fixed: AC5 batching clause (fire on a tree containing M1.2's + J3's COPY-set edits, or re-run) + second negative control; M2.3 infra-prereq row points at the batched fire.",
+    "M2.2+M2.3 HIGH — refusal-vocabulary gap: AC2/M2.3-AC5 demand named reasons for no-auth and cross-run refusals, but M2.1's frozen memgate-refused set {scope-bank, scope-verb, expired, revoked, admin-auth, ledger-unreadable, mint-invalid-ttl} contains neither. Fixed: classes mapped to existing tokens (bank→scope-bank, TTL→expired, revoked→revoked); no-auth register-flagged as the one NET-NEW token (Deviation 2, both files, joint); cross-run probe given an implementable construction (run A's key vs run B's allowlisted bank → existing scope-bank check, no new token); surfaced fallback (non-2xx + reason-as-returned) if the register declines.",
+    "M2.2 HIGH — phantom sibling contract: AC3/INV-M2-2 cited 'M2.1's sanitizer contract', but M2.1 registers NO sanitizer (Presidio lane explicitly skipped factory-side; M2.1's ACs cover ordering/scope/TTL/tokens/admin only) — both stories would skip the sanitize leg. Derivation pattern puts sanitized output in M2.2's deliverables. Fixed: the extension owns the sanitize pass (control-char strip + data-only framing, F10); gateway MAY sanitize, nothing in-box depends on it; INV-M2-2 + DoD Security + M2.3 AC3 realigned.",
+    "M2.2 MEDIUM — infra prereq cited M2.1's suite as tests/memory/; M2.1's files are tests/memgate/{gateway,lifecycle}.test.ts (tests/memory/ is M2.2's own new dir). Fixed to bun test tests/memgate/.",
+    "M2.2+M2.3 MEDIUM — both said memory-retain-receipt 'stays EMPTY by design (INV-AUDIT-4)', contradicting M1.2 Deviation 1 (first writer, vocabulary gains [retain]). Fixed: hop remains the ONLY memory hop with M1.2 as first/only writer; these stories add nothing.",
+    "M2.3 MEDIUM — P0.9 ancestor plan cited as _bmad-output/plans/2026-09-30-p0-9-closure-plan.md; actual file is 2026-09-30-p0-5-p0-9-closure-plan.md. Fixed.",
+    "M2.3 MEDIUM — Deviation 1 attributed the QDS_EVEDEV_ROSTER typo to 'charter §2.1', but charter §2.1 (:42) carries the correct QDS_EXEDEV_* spellings (typo lives in the derivation brief, not the charter). Fixed attribution; driver treats EVEDEV as nonexistent → missing-env exit 2 before spend.",
+    "M2.2 MEDIUM — Observability introduced a second host-side vocabulary (memory-key.delivered / memory-key.revoked-verified) duplicating M2.1's memgate-deliver / memgate-verify-revoked for the same lifecycle. Fixed: box-side kg_recall.* events only; host-side lifecycle is M2.1's memgate-* emission, single vocabulary.",
+    "M2.3 MEDIUM — Files-to-Modify ownership label 'M2.1/M3.7-owned' on src/fleet/run-completion.ts (the not-modified defect-return line); the module is DF3.7-owned. Mislabel would route a round-failing defect to the wrong owner. Fixed to DF3.7-owned.",
+    "M2.2+M2.3 LOW — headers counted M2.1 inside 'v6b story 2/3 of 3'; M2.1 ships in v6a (its own header + charter v6a table). Both headers now say lane story N of 3 with M2.1-in-v6a noted.",
+    "M2.2 LOW — E2E slice -e path carried a trailing slash (/opt/qds/pi-ext/kg-recall/) vs the self-compact COPY convention (dir dest, file inside); normalized — an exact-argv test would have broken on the slash.",
+    "M2.2 LOW — abbreviated roster schema cite roster/schema.ts expanded to src/phase-engine/roster/schema.ts."
+  ],
+  "surviving": [],
+  "checklists_fired": {
+    "auth": "fired — capability-vocabulary/cross-story naming invariants drove the refusal-token + env-name findings; per-request authz (no-auth refusal), fail-closed scope checks, and negative-auth probes (five-probe battery incl. expired-token and cross-tenant-style bank probes) all verified addressable post-fix",
+    "secrets": "fired — env-only injection (DF2.3 env-file, HOME-relative, never argv) verified in both; no-secrets-in-logs/evidence verified (M2.1 memgate hygiene + M2.3 AC6 maskEnv/scrub); rotation N/A-by-design (per-run ephemeral keys revoked-and-verified before destroy — DD-16), documented; consistent-naming invariant drove the QDS_MEMORY_RECALL_KEY/QDS_KG_RECALL_KEY finding",
+    "migration": "not applicable — neither story touches DB schema or migrations (audit.db untouched, memgate ledger is M2.1's new-file store, evidence is JSON files); no DDL invariants trigger"
+  }
+}
