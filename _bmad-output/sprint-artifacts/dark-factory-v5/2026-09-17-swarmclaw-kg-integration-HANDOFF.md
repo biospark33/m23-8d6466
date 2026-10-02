@@ -63,10 +63,19 @@ Phase 1 — v5 complete (in order):
   dev synced to origin/dev @ 5feaeec6. **v5 slate: 42/42 — SPRINT CLOSED.**
 
 Phase 2 — ops, PARALLEL, anytime (operator account-level steps; agents prep/verify only):
-- [ ] GitHub Actions billing fix (payments / spending limit) — unblocks all CI + DF3.6b
+- [x] GitHub Actions billing fix (payments / spending limit) — unblocks all CI + DF3.6b.
+  VERIFIED FUNCTIONAL 2026-10-01: scheduled + dispatched + push-triggered workflow runs
+  execute again (verify-image-pin runs 36867088005 / 36884830294 / 36890064163 all ran
+  to completion with logs). Their FAILURE verdicts are a separate, known condition — the
+  base-drift watcher firing on the weekly exeuntu rebuild (by design) plus the pin
+  provenance check — tracked as the post-v5 image-pin item, not a billing symptom.
 - [ ] Vultr VPS deploy: swarmclaw platform + Hindsight sidecar (compose exists) + factory
   host CLI (~1–3 days). Closes P0.5/P0.9 (the two stuck `in-review` rows), confirms OQ-4,
   updates DD-4.
+  PLAN OF RECORD 2026-09-30: `_bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md`
+  (+ companion `_bmad-output/plans/2026-09-30-p0-5-p0-9-closure-plan.md`). 2026-10-01:
+  plan presented to operator; box state + every `[OPERATOR-GO]` gate in the runbook
+  await explicit operator word — nothing provisioned by agents.
 
 Phase 3 — after both:
 - [ ] Step-6/v6 derivation session (half-day): Epic S re-derived vs the SC2 substrate,
