@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "story": "M3.2+G1",
+  "owned": ["M3.2", "G1"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 6 },
+  "applied": [
+    {
+      "story": "M3.2",
+      "severity": "HIGH",
+      "finding": "Token-class ambiguity could put the retain verb in the bot-held agent-token class: M3.1's INV-MEM-1 pins 'the agent token's verb vocabulary is exactly {consolidate, refresh} ... no content-write verb exists at the token class', while M3.2 granted adds-only reflect+retain 'for agent tokens' with no class split — a dev could satisfy M3.2's text and still land a content-write credential in a Home (DD-16/F10 erosion; auth-checklist cross-story capability drift = HIGH).",
+      "fix": "Explicit class split pinned in four places (Technical Notes bot/carrier bullet, INV-LEARN-4, Infra Prerequisites row, Region ownership note): the weekly job holds a host-held agent-token class scoped exactly {reflect, retain}; the bot-held class keeps M3.1's INV-MEM-1 vocabulary {consolidate, refresh} verbatim; the adds-only scope grant lands on the host-held class only; INV-LEARN-4 adds 'a test asserts the class split'."
+    },
+    {
+      "story": "M3.2",
+      "severity": "MEDIUM",
+      "finding": "Routing-log line shape misattributed to 'R3 facts' — it is not in R3-code-facts.md at all; it lives in J3's own spec (j3-model-router-decision-layer.md:38), and the quoted shape was lossy (score flattened, jev_skipped? dropped). Cross-story drift risk on a consumed read contract.",
+      "fix": "Attribution corrected to 'J3-owned log line shape (per J3's own spec — the read contract's owner, not R3)' and the field list completed to match J3 verbatim."
+    },
+    {
+      "story": "M3.2",
+      "severity": "MEDIUM",
+      "finding": "O_EXCL-create vs replace-per-documentId mechanical conflict: E2E slice required 'O_EXCL + atomic rename' AND 'a re-fire replaces per documentId' — plain O_EXCL fails when the record exists, so the idempotency AC was implementable two contradictory ways (silent stacking or write failure). Also: a shrunken re-fire leaves superseded higher-seq records with no detection path.",
+      "fix": "Mechanism named: O_EXCL applies to the temp file; a re-fire's replace is a rename-over the existing documentId record, never an in-place rewrite; the fire receipt lists the week's full authoritative documentId set so superseded records stay detectable, never silently authoritative. DOD Contract line aligned."
+    },
+    {
+      "story": "G1",
+      "severity": "HIGH",
+      "finding": "AC1's policy-ON-while-PROPOSED negative control was structurally unimplementable as written: it required 'a committed policy setting' and a repo-consistency test that 'makes that tree red' — but .factory/ is gitignored (verified .gitignore:97, 'operator-local factory config ... 0600'), so nothing there can be committed and a CI/fresh-checkout consistency test can never observe the ON state. The named HIGH class (ON-while-PROPOSED passing unnoticed) was exactly what the broken mechanism guarded.",
+      "fix": "Posture corrected in AC1 + AC2 + Technical Notes: the ON setting is operator-local and gitignored by the .factory/ posture (the approvers.json posture), never committed; the consistency test reads the working tree and goes red where the tree lives (operator host, dev lanes); treats a missing or headerless ADR file as PROPOSED; a fresh CI checkout trivially reads OFF because the ON state cannot travel through git — which also means the ON state cannot ride a PR into CI or another lane."
+    },
+    {
+      "story": "G1",
+      "severity": "MEDIUM",
+      "finding": "AC4 inertness claim ('with no producer in the tree, no v6a run is auto-merge-eligible — the chain always parks') flatly contradicted the mandatory three-arm demo's 'accepted-eligible labeled proceed' arm: with no producer anywhere, that arm is untestable. Flat reading forces either an untestable AC or a dev silently loosening eligibility.",
+      "fix": "Production-vs-fixture distinction pinned in AC4 and the DOD inertness line: the inertness test scopes to the production module graph (no real producer); the proceed arm exercises eligibility with a test-fabricated fleet result payload per the A2-owned schema — a fixture, not a producer."
+    },
+    {
+      "story": "G1",
+      "severity": "MEDIUM",
+      "finding": "AC4's 'audit-rowed' consumption requirement had no implementation home under the frozen-hop constraint: AUDIT_HOPS (verified, src/audit/link-store.ts:52) contains no QA-verdict hop and no new hop is ever permitted — an unsatisfiable requirement that would surface only at A2 and invite a quiet relaxation.",
+      "fix": "AC4 pins the meaning: audit-rowed = the verdict is traceable to its producing QA run's audited records (the producing run IS the audit trail; no new hop — AUDIT_HOPS frozen); the exact row mechanism is the A2 producer's to name."
+    },
+    {
+      "story": "G1",
+      "severity": "MEDIUM",
+      "finding": "AC1's pre-verdict license ('plus this story's own tests for the fail-closed default') licensed writing loader-arm tests against a policy module that does not exist pre-verdict — red imports in the pre-verdict tree, or an implementer landing the module early to make its tests run (the exact AC1 violation).",
+      "fix": "AC1 scoped: pre-verdict permitted changes are the verdict block plus repo-state tests only (the consistency and verdict-block tests, which read files and import no policy module); the policy module and its loader-arm tests are implementation and land post-verdict together."
+    },
+    {
+      "story": "G1",
+      "severity": "MEDIUM",
+      "finding": "AC3 claimed the classifyDiffScope class vocabulary was 'restated' but never restated it — the AC was not self-contained and pushed the implementer into opening src/fixloop/feedback-run.ts (verified: codes are scope-requires-privilege / out-of-scope-diff), the exact layer-inversion temptation the never-import fence exists to prevent.",
+      "fix": "AC3 now restates the two codes with their meaning (scope-requires-privilege = deny-glob hit; out-of-scope-diff = no allow match or unpermitted action) and states the boundary: the vocabulary crosses, the fixloop layer does not."
+    },
+    {
+      "story": "G1",
+      "severity": "LOW",
+      "finding": "Deviation note wording: 'its AMENDED block must name the queue as accepted-not-yet-built' — a verbatim-clause-5 ACCEPT has no AMENDED block.",
+      "fix": "Changed to 'the verdict block must name the queue as accepted-not-yet-built'."
+    }
+  ],
+  "surviving": [
+    { "story": "M3.2", "severity": "LOW", "note": "Token values in error messages: the ban rests on INV-LEARN-4 ('never logged') plus the observability discipline (token names/scopes only, never values); no dedicated error-message clause. Subsumed in practice — errors carry {code, message, remediation} through the same event channel." },
+    { "story": "M3.2", "severity": "LOW", "note": "WEEKLY_WALL_CLOCK_BUDGET_MS 'bounds the job above the client's 30 s REFLECT timeout' does not scale the bound by bank count; named-guard precision is an implementation detail." },
+    { "story": "M3.2", "severity": "LOW", "note": "advisory:true is AC-pinned only for threshold-suggestion (matching the locked pattern); other kinds rely on the schema-level 'advisory marking' (DOD) and the AC1 auto-apply ceiling." },
+    { "story": "G1", "severity": "LOW", "note": "INV-G1-1 says 'the repo cannot hold an ON setting' where the precise object is the working tree; the Technical Note now carries the precision." },
+    { "story": "G1", "severity": "LOW", "note": "Trigger-surface row retains the label 'repo-consistency test' for what is now defined as a working-tree test; the Technical Note defines the semantics." },
+    { "story": "G1", "severity": "LOW", "note": "The consistency test's missing-ADR-file arm is now covered ('treats a missing or headerless ADR file as PROPOSED') but no dedicated test row exists in the Trigger Surface table." }
+  ],
+  "checklists_fired": {
+    "M3.2": {
+      "auth": "fired — agent tokens / gateway verb scopes; produced the HIGH token-class finding (cross-story capability drift vs M3.1 INV-MEM-1), now reconciled with an asserted class split; capability vocabulary, default-deny, and scope-binding otherwise addressable from spec (M2.1-owned machinery).",
+      "secrets": "fired — token hygiene, .factory-adjacent posture, no new secrets; no secrets in logs / names-not-values covered; one LOW survivor (error-message channel).",
+      "migration": "not fired — no DB schema change; .sandbox/proposals/ is a file store."
+    },
+    "G1": {
+      "auth": "fired — approval policy seam, approver labeling, token posture; default-deny (fail-closed), labeled non-human decision (system:timeout precedent), auditable decisions on the existing run-approval hop all addressable; the HIGH finding (ON-while-PROPOSED mechanism) was an auth-boundary enforcement gap.",
+      "secrets": "fired — .factory/ 0600 posture, no secrets in logs (no token or verdict payload material), no env-based enablement path (negative control); no secrets introduced, rotation N/A.",
+      "migration": "not fired — no DDL; policy.json is an operator-local file."
+    }
+  }
+}

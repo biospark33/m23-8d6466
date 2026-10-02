@@ -45,7 +45,10 @@ meta:
   # 2026-08-31: +5 stories / +26 pts for the in-box restoration arc (DF2.10, DF1.10, DF1.11,
   # DF3.7, DF3.8 — all v5-S3) per ADR docs/superpowers/specs/2026-08-31-tier2-placement-adr.md;
   # DF3.6 re-sequenced v5-S2 -> v5-S3 (now depends on DF1.10); DF6.2 absorbed (+1 story/+2 pts,
-  # merged 2026-08-28, line added 2026-08-31). SLATE NOW 42 stories / 169 pts. Done to date:
+  # merged 2026-08-28, line added 2026-08-31). v5 slate closed at 42 stories / 169 pts
+  # (reworded 2026-10-02 — DD-27: the bare "SLATE NOW" claim form now belongs to the per-slate
+  # checkers; the DF rows remain authoritative and the v6 section below carries its own claim).
+  # Done to date:
   # 30/42 stories, 125/169 pts.
   # 2026-10-01 CLOSE-OUT: the "30/42" above is the 2026-08-31 snapshot, left as history.
   # v5 CLOSED 2026-10-01 — 42/42 stories / 169/169 pts; PR #399 (DF3.6b finish-line round)
@@ -269,21 +272,112 @@ epics:
       DF6.2: { title: "dispatch_task Verdict Integrity — Refusals and Non-Success Classifications Settle the Phase FAIL", points: 2, status: done, deps: [DF1.1, DF1.6] }  # v5-S3 (unslotted fix; surfaced by PR #135 review round 5, fix-tests-b "found-but-not-fixed" #1) — done 2026-08-28: PR #136 merged to dev (decd385, branch commit bed4b57). Closes a hole in DF1.1's "success is earned" contract: a clean return carrying a non-success verdict was promoted to success. This line was never written at merge time; added 2026-08-31 during the in-box arc wrap-up. Deps inferred from the story's own Spec Reference (DF1.1 phase.ts lifecycle; DF1.6 dispatch-task.ts), not from a recorded edge. Absorbing it moves DF6 1/6 -> 2/8 and every DF total by +1 story / +2 pts.
   phase-2:
     name: Operational Memory Substrate (QDS-MEM-003)   # additive epic — NOT in the 4-week window; gates on P0.7 + P1.6 + P1.15
-    status: ready-for-dev   # 13 stories authored; atomicity PASS; adversarial review converged (HIGH 41->0, MED 63->0 over 3 iterations)
+    # DISPOSITIONED 2026-10-02 per DD-15 (v6 register): FOLD P2.4 → Z2 observe artifacts + A5 KPI
+    # join (mechanism only; P2.4 sat BLOCKED-BY SPIKE-10, never run); FOLD P2.8 → M1.2 (mechanism
+    # only: dated documentId + updateMode:"replace" — NOT its routing surface); SUPERSEDE
+    # P2.0–P2.3, P2.5–P2.7, P2.12 (successors per row below; P2.1's supersession is two-souled:
+    # store half → DF1.4 trace store, recall half → the Hindsight KG per D-2); PARK P2.9–P2.11
+    # with Layer-B (DD-23, dated trigger). Entry-gate premises P0.7/P1.6/P1.15/P1.11 all retired
+    # (DD-15). Rows retained as historical record; no P2 story will be built.
+    status: superseded-per-dd15   # 13 stories authored 2026-06-19; atomicity PASS; adversarial review converged (HIGH 41->0, MED 63->0 over 3 iterations); dispositioned by v6 DD-15 2026-10-02
     points: 44
     stories_dir: sprint-artifacts/phase-2/stories
     atomicity_audit: sprint-artifacts/phase-2/atomicity-audit-2026-06-19.md
     stories:
-      P2.0:  { title: "Toolchain bootstrap (vendor pi-mem substrate + pin dual-runtime)", points: 3, status: ready-for-dev, deps: [P0.7] }
-      P2.1:  { title: "Event store (SQLite + sqlite-vec) + recall",        points: 4, status: ready-for-dev, deps: [P2.0] }  # SPIKE-11 informs
-      P2.2:  { title: "Schema migration runner",                          points: 3, status: ready-for-dev, deps: [P2.0] }
-      P2.3:  { title: "Tool-call capture (pi-mono ExtensionAPI)",         points: 3, status: ready-for-dev, deps: [P2.1] }
-      P2.4:  { title: "DAG-node capture (swarmclaw seam)",                points: 4, status: ready-for-dev, deps: [P2.1] }  # BLOCKED-BY SPIKE-10 (live tap + E2E)
-      P2.5:  { title: "Reasoning + agent-context capture",                points: 3, status: ready-for-dev, deps: [P2.1, P2.3] }
-      P2.6:  { title: "Outcome capture",                                   points: 3, status: ready-for-dev, deps: [P2.1, P2.3] }
-      P2.7:  { title: "Nightly promotion cron",                           points: 4, status: ready-for-dev, deps: [P2.3, P2.5, P2.6] }
-      P2.8:  { title: "Hindsight retain bridge",                          points: 3, status: ready-for-dev, deps: [P2.7, P1.11] }  # resolves SPIKE-9
-      P2.9:  { title: "Experiment propose + human gate",                  points: 3, status: ready-for-dev, deps: [P2.1, P2.8] }
-      P2.10: { title: "A/B execution + deploy",                           points: 5, status: ready-for-dev, deps: [P2.9] }  # BLOCKED-BY SPIKE-10 (E2E)
-      P2.11: { title: "Confirm cron (30-day auto-rollback)",              points: 3, status: ready-for-dev, deps: [P2.10] }
-      P2.12: { title: "Replay + retention policy",                        points: 3, status: ready-for-dev, deps: [P2.1] }
+      P2.0:  { title: "Toolchain bootstrap (vendor pi-mem substrate + pin dual-runtime)", points: 3, status: superseded, deps: [P0.7] }  # superseded-by: dedicated Hindsight 0.10.0 client (D-2/M1.1) — the vendored dual-runtime substrate is not built
+      P2.1:  { title: "Event store (SQLite + sqlite-vec) + recall",        points: 4, status: superseded, deps: [P2.0] }  # superseded-by (two-souled): store half → .sandbox SQLite trace store (DF1.4, shipped); recall half → Hindsight KG (D-2/M1.2)
+      P2.2:  { title: "Schema migration runner",                          points: 3, status: superseded, deps: [P2.0] }  # superseded-by: run-record/ledger shipped schemas — no migration runner exists or is owed
+      P2.3:  { title: "Tool-call capture (pi-mono ExtensionAPI)",         points: 3, status: superseded, deps: [P2.1] }  # superseded-by: phase-engine SQLite trace + harvest (DF1.x, shipped)
+      P2.4:  { title: "DAG-node capture (swarmclaw seam)",                points: 4, status: folded, deps: [P2.1] }  # FOLDED per DD-15 → Z2 observe artifacts + A5 KPI join; its ProtocolRunEvent vocabulary = ADR-1 external_job artifact family; sat BLOCKED-BY SPIKE-10, never run
+      P2.5:  { title: "Reasoning + agent-context capture",                points: 3, status: superseded, deps: [P2.1, P2.3] }  # superseded-by: run records + steering/log surfaces (shipped)
+      P2.6:  { title: "Outcome capture",                                   points: 3, status: superseded, deps: [P2.1, P2.3] }  # superseded-by: run records + audit chain (DF5.3, shipped)
+      P2.7:  { title: "Nightly promotion cron",                           points: 4, status: superseded, deps: [P2.3, P2.5, P2.6] }  # superseded-by: M3.1 (L3 nightly consolidate)
+      P2.8:  { title: "Hindsight retain bridge",                          points: 3, status: folded, deps: [P2.7, P1.11] }  # FOLDED per DD-15 → M1.2 idempotent retain (mechanism only: dated documentId + updateMode:"replace"); routing surface NOT folded; P1.11 premise dead (DD-17)
+      P2.9:  { title: "Experiment propose + human gate",                  points: 3, status: parked, deps: [P2.1, P2.8] }  # PARKED per DD-15/DD-23 with Layer-B — dated trigger: >=30 M1 cycles + 4 weeks outcome records
+      P2.10: { title: "A/B execution + deploy",                           points: 5, status: parked, deps: [P2.9] }  # PARKED per DD-15/DD-23 with Layer-B
+      P2.11: { title: "Confirm cron (30-day auto-rollback)",              points: 3, status: parked, deps: [P2.10] }  # PARKED per DD-15/DD-23 with Layer-B
+      P2.12: { title: "Replay + retention policy",                        points: 3, status: superseded, deps: [P2.1] }  # superseded-by: run-record retention + M3.1 meta banks
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Dark Factory v6 — derived 2026-10-02 from the 2026-10-01 program charter.
+  # Decisions: docs/superpowers/specs/2026-10-02-v6-story-derivation-decisions.md (DD-14+).
+  # Index: implementation-artifacts/epics-and-stories-dark-factory-v6.md (no arithmetic here-only:
+  # this file is the numbers authority). Cross-repo contract: docs/planning/v6-crossrepo-contract.md.
+  # ADR-2 (PROPOSED): docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md — decided via G1.
+  #
+  # V6 ROWS: 23 stories / 81 pts — recomputed from the rows below (DD-14a; the charter's §3 epic
+  # table read 76 and is stale by +5: M 26→29, A 16→18).
+  # Per-epic: z 16 (5 stories) · m 29 (8) · a 18 (5) · j 16 (4) · g 2 (1) = 23 / 81. ✓
+  # Per-sprint: v6a 36 (11 stories: Z1,Z2,Z4,Z5,M1.1,M1.2,M1.3,M2.1,J1,A6,G1) ·
+  #             v6b 45 (12 stories: Z3,A1,A2,A3,A5,M2.2,M2.3,M3.1,M3.2,J2,J3,J4). ✓
+  # Sprints: v6a "Foundation" — THE next sprint, zero E21 gates, ships standalone (D-1).
+  #          v6b "Autonomy" — E21-gated sprint; external gate classes (R5): ops VPS G1–G7,
+  #          E21 S02b/S03b, J2 corpus milestones. Gated rows carry `status: gated` + the gate
+  #          named; dep-only-v6 rows are ready-for-dev normally (v6b sprint membership ≠ gate).
+  # Named flex-cuts (DD-26): v6a #1 = M1.3 report leg slips (trigger: v6a >40 pts post-review),
+  #   #2 = A6 fired half rides ops (trigger >42); v6b = J4-L9 leg first (trigger >50),
+  #   then J3 → v7 (trigger >52).
+  # Atomicity audit: sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md (23 rows: 22 PASS / 1 WARN accepted [M2.2] / 0 BLOCK).
+  # Adversarial review: tracker + verdicts under _bmad-output/workflow-state/qds-sprint-planning/v6/
+  #   (per-batch pipeline verdicts + cross-story pass) + the qds-story-review campaign tracker in
+  #   sprint-artifacts/dark-factory-v6/ (charter §9.4).
+  # Ops dependency register (operator-gated, zero agent spend until GO): register §5 — image
+  #   re-pin ritual (blocks ALL T2; M2.2 carries the spec; note M1.2 and J3 also move deriveBuildId
+  #   so the ritual runs on a tree containing them), VPS G1–G9 + Z4-fired, G5 pairing (DF3.6b gate,
+  #   NOT runbook certbot), P0.5/P0.9 closure legs (ride M1.1; transport re-homed per DD-17),
+  #   GHCR publish ownership (E01-S06/G9; M2-gateway image publish = same gate), #380 spend-booking
+  #   closure (zeropoint-side follow-up, DD-20), factory-stack VPS backup (unowned — surfaced by Z4).
+  # ═══════════════════════════════════════════════════════════════════════════
+  v6-z:
+    name: Zeropoint macro-host
+    status: ready-for-dev
+    points: 16
+    stories_dir: sprint-artifacts/dark-factory-v6/stories
+    stories:
+      Z1: { title: "Adapter contract v2 (factory_observe surface + SWARMCLAW_FORK_REV pin + drift alarm)", points: 3, status: ready-for-dev, deps: [] }  # v6a — live tier none; read-only status/result contract, fork pin in scripts/ (box COPY-set constraint), no status version marker (recorded debt — rides a grammar bump + re-pin)
+      Z2: { title: "BUILD-IN-FORK: factory_observe step kind + triggers + notify leg", points: 5, status: ready-for-dev, deps: [Z1] }  # v6a — fake-CLI journal; fork worktree work + 1 factory test file; normalizeStep carry + round-trip per new field; durable triggers = schedule/watch-job repositories (NOT enqueueSystemEvent — in-memory, DD-25)
+      Z3: { title: "Cross-repo live exit round (the v6 SC2.7 analog)", points: 3, status: gated, deps: [A2, Z2, M2.1] }  # v6b — GATED on A2 (→E21) + Z2 + M2.1; live T2 cross-repo; exactly-one-box; approval park + human decide; memory legs via M2.1 agent tokens
+      Z4: { title: "Factory VPS deploy profile (dedicated Hindsight 0.10.0 + M2 gateway + fleet CLI wrapper)", points: 3, status: ready-for-dev, deps: [] }  # v6a — authored ACs dep-free; FIRED ACs gate on operator VPS-day (runbook G1–G7; zero agent spend); compose adds factory services (template has none); wrapper owns --driver exedev
+      Z5: { title: "Chassis fate (utilities → src/lib; server surface dormant-retained)", points: 2, status: ready-for-dev, deps: [] }  # v6a — pure move, no re-pin owed; dormancy load-bearing twice (P0.10 gate probe + ADR-2 question); DD-18
+  v6-m:
+    name: Memory ladder
+    status: ready-for-dev
+    points: 29
+    stories_dir: sprint-artifacts/dark-factory-v6/stories
+    stories:
+      M1.1: { title: "Dedicated Hindsight 0.10.0 on VPS + qds- banks + round-trip + no-auth retired-check", points: 3, status: ready-for-dev, deps: [Z4] }  # v6a — Z4 edge = authored-early (fired on VPS-day); carries P0.5/P0.9 closure legs (transport re-homed per DD-17); operator-gated VPS spend
+      M1.2: { title: "Host-side memory cycle (dispatch recall → kg_context brief + harvest idempotent retain)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — T2 live round; mock-first dev; P2.8 mechanism fold; moves deriveBuildId (kgContext brief field) — re-pin ritual runs on a tree containing M1.2; P2.8's documentId vocabulary = runId
+      M1.3: { title: "Recall measurement harness (probe set, hit-rate@k, DD-22 checkpoint)", points: 3, status: ready-for-dev, deps: [M1.2] }  # v6a — probe set early (risk §7.3); report leg = flex-cut #1; checkpoint ~30 cycles, DATED not sprint-bound
+      M2.1: { title: "Memory gateway (per-run recall-only keys + agent tokens; D8 amendment impl)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — unit/mock; M1.1 edge ACCEPTANCE-ONLY (dev-first sanctioned, DD-26); mirrors credentials.ts ordering exactly; module root src/memgate/
+      M2.2: { title: "In-box kg_recall pi extension + roster grant + full image re-pin ritual", points: 5, status: ready-for-dev, deps: [M2.1] }  # v6b — recall-only/sanitized/char-budgeted/F10-treated; re-pin ritual = operator GO (blocks ALL T2; batched with M1.2/J3 pin moves)
+      M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: ready-for-dev, deps: [M2.2, M1.2] }  # v6b — T2; adversarial negative probes; digest-stable audit rows
+      M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: ready-for-dev, deps: [M2.1] }  # v6b — ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
+      M3.2: { title: "L4 weekly reflect → PROPOSE (never auto-apply)", points: 3, status: ready-for-dev, deps: [M3.1, A5] }  # v6b — FR-LEARN-30 shape; proposals to meta bank + operator; M3.1 edge satisfiable via fallback leg
+  v6-a:
+    name: Autonomy (E21-gated)
+    status: ready-for-dev
+    points: 18
+    stories_dir: sprint-artifacts/dark-factory-v6/stories
+    stories:
+      A1: { title: "Department managers as E21 Home bots + heartbeat digests + per-bot spend ceilings", points: 5, status: gated, deps: [Z2] }  # v6b — GATED on E21 S02b + S03b (S02a DONE per DD-25); owner = operator-as-user (org policy-refused, DD-25); absorbs fix-loop runner additively; spend join DD-20
+      A2: { title: "QA department F3 (post-merge hunter-pack → w:qa-* fleet runs → shared-bank retain + issues)", points: 5, status: gated, deps: [A1, M1.2, Z2] }  # v6b — GATED (via A1); QA boxes carry the original single provider secret — DD-16's second credential applies only where in-box recall lands (M2.2+); QA_LENS roster fixed in code
+      A3: { title: "Maintenance sweeps F4 (weekly wake → hotspot briefs → fleet runs → park at gate)", points: 3, status: gated, deps: [A1, A6, Z2] }  # v6b — GATED (via A1); parks at approve gate — nothing auto-merges (ADR-2 PROPOSED); stale graph >8h = counted refusal, sweep proceeds audit-only
+      A5: { title: "Yield KPIs L5 + Goodhart counter-metrics (TDI-proxy, cost/story, first-pass-accept, retry)", points: 3, status: ready-for-dev, deps: [M1.2] }  # v6b — .sandbox SQLite + BOTH spend ledgers (DD-20 join; #380 gap surfaces as counted unmatched rows); visualizer render optional
+      A6: { title: "GitNexus 4–6h graph-refresh cron on VPS + staleness alarm", points: 2, status: ready-for-dev, deps: [Z4] }  # v6a — Epic A's sole pre-E21 member (the charter's §3 Epic-A row text omits it — stale row, DD-25-consistent); host cron 7 */5 * * *, staleness ceiling 8h; canonical reindex script only (never bare analyze); FIRED half = v6a flex-cut #2
+  v6-j:
+    name: Judgment tier
+    status: ready-for-dev
+    points: 16
+    stories_dir: sprint-artifacts/dark-factory-v6/stories
+    stories:
+      J1: { title: "JudgmentProvider seam (jev/mock registered adapters + neutral-layer policy + contract tests)", points: 3, status: ready-for-dev, deps: [] }  # v6a — mock + Jev-live probe; closed registry; TYPESAFE_MODEL literal stays THE alarm; LOCKED#3 superseded-refined (DD-21)
+      J2: { title: "Measured arm-thresholds / confidence gating (S1 routing ARMED)", points: 3, status: gated, deps: [J1] }  # v6b — GATED on corpus milestones (200 outcome-confirmed records, Wilson 95% LB ≥0.90 on OUTCOME agreement) + explicit operator sign-off; writer-proposed values — operator may amend at review (DD-28)
+      J3: { title: "Model-router decision layer (L3 weights-in-code picks tier; Jev recommendation recorded-only)", points: 5, status: ready-for-dev, deps: [J1, M1.2] }  # v6b — flex-cut #2 (→ v7); moves deriveBuildId (dispatch hook) — re-pin batched with M2.2's; .sandbox/routing-log.jsonl is the M3.2/A5 read-side contract
+      J4: { title: "Host-side judgment pack (L7 compact-signal + L8 pre-filter + sanity + L9 sweep triage)", points: 5, status: ready-for-dev, deps: [J1] }  # v6b — PACK_SIGNALS_ARMED=false (recording-only holds); steering-union adds-only `compact` member amends DF1.11 (moves deriveBuildId — re-pin owed); L9 = flex-cut #1 (v6b); L6 PARKED (DD-21)
+  v6-g:
+    name: Governance
+    status: ready-for-dev
+    points: 2
+    stories_dir: sprint-artifacts/dark-factory-v6/stories
+    stories:
+      G1: { title: "ADR-2 decision workflow + Tier reconciliation (draft exists, PROPOSED)", points: 2, status: ready-for-dev, deps: [] }  # v6a — input artifact docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md; operator verdict → implement decided shape or record rejection (both valid completions); REJECTED ⇒ DD-18 query-surface question closes

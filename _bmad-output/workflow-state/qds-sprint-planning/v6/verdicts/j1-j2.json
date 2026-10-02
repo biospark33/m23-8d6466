@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "story": "J1+J2",
+  "owned": ["J1", "J2"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 1 },
+  "applied": [
+    {
+      "file": "j1-judgmentprovider-seam.md",
+      "severity": "HIGH",
+      "finding": "Boundary shape under-specified: `ask(request)` single-arg interface cannot reproduce the moved `post()` verbatim — post() puts the seam-minted requestId on the wire (client.ts:240 x-request-id) and in every JudgmentHttpError, and per-instance baseUrl/timeoutMs/retryDelayMs (client.test.ts no-wall-clock backoff tests) had no path to a module-constant adapter.",
+      "fix": "Specified adapter MAKERS in the closed registry; `ask(request, requestId)` carries the seam-minted correlation id; per-instance transport overrides bind from the client's unchanged options; key read-once flows only into the jev maker, mock maker takes no config (INV-J1 'no key path' becomes a type fact). Edited Overview, E2E, AC1, AC2, new TN bullet, INV-J1."
+    },
+    {
+      "file": "j1-judgmentprovider-seam.md",
+      "severity": "MEDIUM",
+      "finding": "Rogue-transport negative controls (AC1/E2E 'for every adapter including mock') had no legal injection path under a closed registry — risk of an implementer adding a test-only registerProvider() hole.",
+      "fix": "New TN bullet: garbage bodies reach the strict parse only via registered jev transport + stubbed baseUrl (existing client.test.ts mechanism); mock divergence caught by validating canned bodies against the live schema; no test-only registry injection — closure stays absolute."
+    },
+    {
+      "file": "j2-measured-arm-thresholds.md",
+      "severity": "MEDIUM",
+      "finding": "Threshold authority dangled: AC2/DOD claimed values are 'recorded in DD-21' but the DD-21 register entry (same PR) records milestone categories, not 200/0.90 nor the outcome-vs-lead resolution; MIN_ROUTE_CONFIDENCE=0.90 was absent from AC2's code-pinned constants list though thresholds-in-code is LOCKED.",
+      "fix": "AC2 now names all four constants (adds MIN_ROUTE_CONFIDENCE) and states values are the writer-proposal pinned in code, confirmed-or-amended by the operator's DD-21 milestone review (the pre-arm precondition already in Dev Agent Record); DOD 'Contract' item reworded to match; TN lines 70/72 aligned."
+    },
+    {
+      "file": "j2-measured-arm-thresholds.md",
+      "severity": "MEDIUM",
+      "finding": "Three mis-directed references: (1) AC5 called (pr,round,finding_id,labeler) 'the key the ab-report join uses' — ab-report's byJoinKey is the 3-tuple; the 4-tuple is corpus recordKey; (2) TN cited 'handoff §8: subagents never arm' — §8 contains no such sentence; (3) DOD Security 'zero changed lines in scripts/corpus/* (schema adds-only)' was self-contradictory.",
+      "fix": "AC5 now cites recordKey as the idempotence authority and notes the 3-tuple coincidence; §8 cite replaced with the real idiom extended to arming; DOD Security split into byte-identical / adds-only / untouched clauses."
+    },
+    {
+      "file": "j2-measured-arm-thresholds.md",
+      "severity": "LOW",
+      "finding": "arm-gate.ts sits inside the two-import fence (fence.test.ts:18 ALLOWED_REPO_IMPORTS is a fixed set; a scripts/corpus import from src/judgment/ fails it) but the story left corpus-read/join placement unstated.",
+      "fix": "TN Region-ownership gains a fence note: arm-gate is a pure evaluator + chain verifier (node:fs for arm-state.jsonl only, fence-legal); corpus reading and the outcome join live in scripts/judgment/arm-thresholds.ts."
+    },
+    {
+      "file": "j1-judgmentprovider-seam.md",
+      "severity": "MEDIUM",
+      "finding": "Secrets-invariants checklist: rotation cadence for TYPESAFE_API_KEY stated nowhere (handoff §8 owns containment only); silence on a non-conditional checklist item.",
+      "fix": "INV-J1 gains one clause: rotation is operator-owned (gitignored .env), unchanged by this story."
+    }
+  ],
+  "surviving": [
+    {
+      "file": "both",
+      "severity": "LOW",
+      "finding": "Line-number citations (13 sites) vs handoff §0.5's 'cite by SYMBOL, never by line number' repo rule. Left as-is: all 13 verified exact against the working tree today (client.ts:98-279, :286-315, :164-171; schemas.ts:21; observe-round.ts :49/:57-72/:95-97; ab-report.ts :180/:228-230/:242-308; schema.ts :58-65/:122-124) and the charter/DD register themselves use line cites — sibling convention. Drift risk only."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "auth-invariants"],
+  "checklists_na": {
+    "migration-invariants": "no DB migration, schema store, or data backfill in either story (J2's outcomes.jsonl is an append-only JSONL artifact, not a migration)"
+  },
+  "verification_notes": {
+    "policy_bypass": "none — neutral-layer policy (choke/ceiling/strict-parse/envelope/emit) stays in client.ts ahead of every ask(); adapters expose transport only; AC1 negative control pins the bypass path",
+    "silent_arming": "none — J2 gate fail-closed by construction (AC1 pre-write refusals, AC3 hash-chained log with absent/broken-chain = recording-only, AC4 not-armed refusal); arming's re-adjudication of ab-report's 'p>0.5, no gating use' is surfaced and routed to the DD-21 milestone review, never silent",
+    "lead_agreement_ambiguity": "resolved — J2 TN explicitly implements OUTCOME agreement (outcomeAgrees) and flags lead-agreement as a one-constant operator amendment at the DD-21 milestone review",
+    "drift_alarm": "TYPESAFE_MODEL literal remains THE alarm; AC3 adds the second-literal grep test; contract.test.ts pin-throw verified in source",
+    "scope_carve_outs": "L6 parked (DD-21) stated; confirm-outcome CLI carve-out from parked P2.9-P2.11 (DD-15/DD-23) stated in Trigger Surface",
+    "facts_verified": "charter :81/:102/:55/:155/§6, DD-21/DD-15/DD-23 register text, handoff §3/§4/§8/§9, client.ts, schemas.ts, egress.ts DEFAULT_MAX_EGRESS_CLASS, observe-round.ts, ab-report.ts, corpus/schema.ts, fence.test.ts (non-recursive today — J1's recursive upgrade correctly anticipated), contract.test.ts, log.ts (index signature — provider log field needs no owned-file addition), commit c82ede44 exists, ADR 0001 + JEV-1/2 paths exist"
+  }
+}

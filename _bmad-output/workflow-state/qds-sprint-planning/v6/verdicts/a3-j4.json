@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "story": "A3+J4",
+  "owned": ["A3", "J4"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    {
+      "file": "j4-host-side-judgment-pack.md",
+      "severity": "HIGH",
+      "finding": "The `compact` union member amends DF1.11's already-landed closed `SteeringDirectiveSchema` (docblock: 'guidance text, a roster choice, or an abort — and nothing else') with no register ratification stated anywhere — a silent closed-union amendment.",
+      "fix": "AC2 now requires the story to land a one-line DD-register amendment entry alongside the code (same discipline as the L9 cut note)."
+    },
+    {
+      "file": "j4-host-side-judgment-pack.md",
+      "severity": "MEDIUM",
+      "finding": "roster-adapter path wrong: cited `roster-adapter.ts:44-47` under `src/phase-engine/roster/` in Spec Reference, AC3, and Technical Notes; actual file is `src/phase-engine/phases/roster-adapter.ts` with the `--compact-*` mapping at :46-48. AC3's byte-identical claim named a file that does not exist at the stated path.",
+      "fix": "All three citations corrected to `src/phase-engine/phases/roster-adapter.ts:46-48`."
+    },
+    {
+      "file": "j4-host-side-judgment-pack.md",
+      "severity": "MEDIUM",
+      "finding": "E2E Slice and Trigger Surface name 'M2.3/A3' as the venue for the live in-box compact application, contradicting A3's explicit 'Not an edge — J4' / 'ships no Jev call at all' disposition.",
+      "fix": "Both spots now name M2.3 only, with an explicit 'not A3: A3 consumes no J4 leg' note in the E2E Slice."
+    },
+    {
+      "file": "a3-maintenance-sweeps-f4.md",
+      "severity": "MEDIUM",
+      "finding": "AC2 cited `schedule-repository.ts`/`watch-job-repository.ts` as if in-repo symbols; they are fork-side stores (`fork:src/lib/server/...`, unresolvable in this repo by design — Z2 prefixes them `fork:`, A3 did not).",
+      "fix": "AC2 now cites `fork:src/lib/server/schedules/schedule-repository.ts` and `fork:src/lib/server/runtime/watch-job-repository.ts` with the fork-side note."
+    },
+    {
+      "file": "a3-maintenance-sweeps-f4.md",
+      "severity": "LOW",
+      "finding": "ADR-2 labeled 'DRAFT' (three spots); the ADR document's own status line is 'PROPOSED — operator decides'.",
+      "fix": "All three labels aligned to PROPOSED (G1 carries the reconciliation)."
+    },
+    {
+      "file": "j4-host-side-judgment-pack.md",
+      "severity": "LOW",
+      "finding": "Line drift: 'there is no fourth' comment is at `steering.ts:101`, story cited :103.",
+      "fix": "Corrected to :101."
+    }
+  ],
+  "surviving": [],
+  "checklists_fired": {
+    "a3": ["auth-invariants.md", "secrets-invariants.md"],
+    "j4": ["secrets-invariants.md", "auth-invariants.md"]
+  },
+  "verification_notes": [
+    "Steering union verified live: 4 members (proceed/retry/select_roster/abort), member-level .strict() + INV-RES-2 at src/phase-engine/steering.ts:111-136, POINT_ALLOWLIST at :151 (run_start: proceed/abort/select_roster; post_gate_failure: proceed/retry/abort; run_end: proceed) — J4's adds-only claim and 'compact = fifth member' (DoD) and 'run_end stays proceed-only' all confirmed; compact at run_start+post_gate_failure is the minimal sound extension.",
+    "Re-pin pricing verified: src/phase-engine/ is in the box COPY set (R3 binding 8), scripts/fleet.ts is not; J4 AC4's deriveBuildId consequence and A3's no-re-pin claim both correct.",
+    "A3 durability negative control verified against R4 fact 5: enqueueSystemEvent = hmrSingleton Map, cap 20/session, in-memory; persisted stores = schedule-repository + watch-job-repository.",
+    "A3 gate facts verified vs R3 bindings 2/4: exit 5 fleet-busy/no-headroom, exit 3 setup gate, scrypt/stdin/human-only approval policy channel-independent.",
+    "A3 PRD quotes verbatim: F4 at prd:112, FR-MEM-6 at :380, NFR-OBS-5 at :734 (8h staleness, last COMPLETED analyze).",
+    "A6 consumption verified: scripts/gitnexus-staleness.ts stamp with indexedAt is A6's deliverable and A3's named input ('A3 consumes the same stamp').",
+    "A1 vocabulary match: TURN_REFUSALS ['initiator_missing','initiator_mismatch','no_owner'] identical in A1 and A3 AC2.",
+    "J1 seam citations verified live: src/judgment/schemas.ts:21 TYPESAFE_MODEL literal, egress closed list + ac-prose default, 1M ceiling, tests/judgment/{contract,fence}.test.ts + typesafe-api-contract.json all exist; INV-J3/INV-J5 double gate names match J1.",
+    "J4 roster facts verified live: compaction {soft_at, at, buffer} at src/phase-engine/roster/schema.ts:71-72, >90% refusal (HARD_CAP_FRACTION 0.9, fail-early) ~:137-145, argv mapping in phases/roster-adapter.ts:46-48.",
+    "redactSecrets confirmed real (src/providers/step-log.ts, pattern redactor) — J4's 'not a diff scrubber' warning is grounded.",
+    "Copy-set claim verified: A3 adds src/maintenance/ + scripts/maintenance-sweep.ts, neither in oci/exedev/Dockerfile COPY set — no image pin owed; J4's steering.ts edit does move deriveBuildId and AC4 prices it.",
+    "L9 cut contract consistent with A3 both directions (optional seam, deterministic fallback default, v7 seam for A3 consumption)."
+  ]
+}

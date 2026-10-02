@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "story": "cross-story",
+  "owned_story_ids": [],
+  "iterations": 1,
+  "converged": true,
+  "final": {
+    "high": 2,
+    "medium": 4,
+    "low": 0
+  },
+  "applied": [
+    {
+      "severity": "high",
+      "line": "z4-factory-vps-deploy-profile.md:40",
+      "summary": "Queue 1: Z4/M1.1 host-leg reach adjudicated and applied \u2014 hindsight-qds binds 127.0.0.1:18890:8888 as its ONE host publish (port 18890, never the tenant's 18889); origin split stated (compose-side http://hindsight-qds:8888 via factory.env; host-side HINDSIGHT_BASE_URL=http://127.0.0.1:18890 carried by hindsight-qds.env, runbook G3 pattern); firewall stays 22/80/443; Z4 AC1/AC6/AC8/INV-Z4-1/Files updated (open-item note replaced with the decision); M1.1 AC1/AC6/E2E/Infra/INV-MEM-2/DoD now read the env by name, never hardcode a host:port, and probe :18890 externally-fail alongside 18889/8888.",
+      "owned_story_ids": [
+        "M1.1"
+      ],
+      "affected_story_ids": [
+        "Z4",
+        "M1.1"
+      ],
+      "owner_story_id": "M1.1",
+      "cross_boundary": true
+    },
+    {
+      "severity": "high",
+      "line": "m2-2-in-box-kg-recall.md:70",
+      "summary": "Queue 2: M2.1\u2194M2.2\u2194M2.3 concurrent-edit seam single-named \u2014 per-run key QDS_KG_RECALL_KEY + gateway URL QDS_KG_GATEWAY_URL everywhere (M2.1 deliverRunKey already writes them); surviving QDS_MEMORY_RECALL_KEY removed from M2.2's Deviation 1 / checklist and M2.3's sibling-contracts line, replaced by one-line provenance notes; stale register-flagged reconciliation hedges dropped, Deviation 2's no-auth flag kept.",
+      "owned_story_ids": [
+        "M2.2",
+        "M2.3"
+      ],
+      "affected_story_ids": [
+        "M2.1",
+        "M2.2",
+        "M2.3"
+      ],
+      "owner_story_id": "M2.1",
+      "cross_boundary": true
+    },
+    {
+      "severity": "medium",
+      "line": "a1-department-managers-home-bots.md:20",
+      "summary": "Queue 3: ADR-2 status sweep \u2014 all residual 'ADR-2 DRAFT'/'(DRAFT)' normalized to PROPOSED (operator decides via G1) in A1 (5 sites incl. both CHANNEL\u2260POLICY verbatim lines), M3.1 (2), Z1 (2), Z2 (1), index A3 entry, and sprint-status.yaml A3 comment; every load-bearing 'not decided' claim preserved; G1's artifact-reference 'draft' phrasings (draft exists / ADR-2 draft scope) left intact.",
+      "owned_story_ids": [
+        "G1"
+      ],
+      "affected_story_ids": [
+        "A1",
+        "M3.1",
+        "Z1",
+        "Z2",
+        "A3",
+        "G1"
+      ],
+      "owner_story_id": "G1",
+      "cross_boundary": true
+    },
+    {
+      "severity": "medium",
+      "line": "epics-and-stories-dark-factory-v6.md:148",
+      "summary": "Queue 7: index M2.2 title said '(gated: M2.1 + image re-pin)' against yaml status ready-for-dev and the story's own 'un-gated second lane' header \u2014 retitled to dep + operator-GO re-pin framing.",
+      "owned_story_ids": [
+        "M2.2"
+      ],
+      "affected_story_ids": [
+        "M2.2"
+      ],
+      "owner_story_id": "M2.2",
+      "cross_boundary": false
+    },
+    {
+      "severity": "medium",
+      "line": "epics-and-stories-dark-factory-v6.md:229",
+      "summary": "Queue 7: A6 had NO index entry at all (referenced only as A3's dep) \u2014 added the missing story entry (title/points/status/deps/flex-cut #2 per yaml + a6 story header, v6a) and named A6 as Epic A's sole pre-E21 member in the epic bullet.",
+      "owned_story_ids": [
+        "A6"
+      ],
+      "affected_story_ids": [
+        "A6"
+      ],
+      "owner_story_id": "A6",
+      "cross_boundary": false
+    },
+    {
+      "severity": "medium",
+      "line": "a1-department-managers-home-bots.md:45",
+      "summary": "Queue 6 (DD-20 join keys): A1's not-an-edge note claimed 'A2 adds the [botId] emission with the first one' but A2's landed contract registers exactly one adds-only run-record field (workKey) and asserts the join needs no further schema change \u2014 A1 rewritten to match the owner's contract (botId rides A1's digest lines + the brief; A3's per-brief records carry all three names).",
+      "owned_story_ids": [
+        "A1"
+      ],
+      "affected_story_ids": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "owner_story_id": "A2",
+      "cross_boundary": true
+    },
+    {
+      "severity": "low",
+      "line": null,
+      "summary": "Queue 4/5/6 verify-only \u2014 no defect, no edit: documentId(=substrate memoryId, src/hindsight/schemas.ts) used consistently in M1.2/M1.3/A2/J3/A5/M3.2 with no third name; Z1 AC7 (sc2-harness writeEvidence stamps swarmclawForkRev, live-harness stamps nothing) and Z3 (v6-z3 leg drivers stamp per leg, live-harness extended unmodified) state one coherent complementary mechanism; bank family (-dev-meta/-qa-meta/-maint-meta, {baseId}-dev-meta, no qds-*-meta globs) consistent across M1.1/M1.2/M1.3/M3.1/M3.2/J3/A5/A2; memgate constants + KG_RECALL_CHAR_CEILING=8_000/KG_RECALL_TIMEOUT_MS=10_000 spelled identically in M2.1/M2.2/M2.3; judgment tokens (TYPESAFE_MODEL, PACK_SIGNALS_ARMED=false, QA_LENS, MIN_OUTCOME_CONFIRMED_JEV_RECORDS/MIN_WILSON_LOWER_AGREEMENT/MIN_ROUTE_CONFIDENCE) consistent J1-J4/A2; DD-20 w:+runId+botId present in A1/A2/A3/A5; gate set (Z3/M3.1/A1/A2/A3/J2 gated, rest ready-for-dev) and all 23 Sprint headers match yaml; file ownership (brief-schema.ts=M1.2, run-completion.ts=G1 adds-only consult with A3/M2.3 not-modified, scripts/fleet.ts M1.2 seams + J3/J4 named adds-only regions, link-store.ts=M1.2 vocabulary only) conflict-free.",
+      "owned_story_ids": [],
+      "affected_story_ids": [],
+      "owner_story_id": null,
+      "cross_boundary": false
+    }
+  ],
+  "surviving": [],
+  "checklists_fired": [
+    "cross-story-queue"
+  ]
+}

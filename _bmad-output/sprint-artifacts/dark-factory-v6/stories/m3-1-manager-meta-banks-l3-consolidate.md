@@ -1,0 +1,112 @@
+# M3.1: Manager Meta Banks + L3 Nightly Consolidate — Platform Schedule with Documented Crontab Fallback
+
+**Story Points:** 3
+**Sprint:** v6b (memory-ladder arc — the factory's first scheduled write, and a server-side one)
+**Status:** GATED-WITH-FALLBACK — **M2.1 is the hard gate** (long-lived agent tokens + the gateway verb machinery). **A1 gates the platform-schedule leg only**: the documented crontab fallback ships the same consolidate without A1 or any E21 lane, because the gateway is driver-agnostic (charter M3.1 row). Neither leg requires E21 code in the factory import graph.
+
+## Spec Reference
+
+- Charter M3.1 row: "Manager `*-meta` banks + L3 nightly consolidate + mental-model refresh (platform schedule → manager bot via agent token; documented crontab fallback if E21 slips — gateway is driver-agnostic)".
+- v4 grounding verbatim — `_bmad-output/planning-artifacts/prd-qds-factory-v4.md:564`: "The nightly L3 loop's 'consolidate' and 'mental-model refresh' are **real first-class operations**, not invented: `POST …/consolidate` produces **observations** (deduplicated, evidence-grounded beliefs), and `POST …/mental-models/{id}/refresh` re-runs a mental model's `source_query`" — with the L3 row (:574: per-bank memories accumulated that day + Mulch session records → consolidate → refresh) and the authority note (:578): consolidation and refresh are **bank-deduped server-side** — "concurrent nightly triggers against the same bank coalesce into one job, so the cron routine may fire idempotently without stacking." *Provenance: this dedup claim is **docs-derived** (the v4 PRD records it; no instance has been probed) — the infra-tier live round verifies it before merge (AC2/DoD), with a named fallback if it fails.*
+- **D-2** (charter §0): dedicated factory Hindsight 0.10.0; **the M2 memory gateway is the only front door** — both trigger legs go through it; raw 8888/18889 is addressed by neither. Surfaces are REST `/v1/default/banks…` on the pinned instance (R4 Topic 4 — the bank-scoped MCP lane is `/mcp/{bank_id}/`, 27 tools, and is not the factory's front door).
+- M1.1's `qds-` bank scheme (`src/hindsight/bank-provisioner.ts` — `{baseId}-dev-meta` exists today per CC-6; this story extends the manager family); M2.1's **long-lived agent tokens (bank/verb-scoped)** — a distinct credential class from M2.2's per-run recall-only keys.
+- **DD-16 (D8 amendment) fence:** "no WRITE credential ever enters a box." The manager bot's agent token is verb-scoped to `{consolidate}` on its own bank (DD-28.26 item 1 — the bot-held class; the mental-model refresh rides the consolidation-trigger, not a token verb) and can never retain content; consolidation is a **server-side** Hindsight operation over memories M1.2 already retained host-side — never an in-box write-back (sketch-M3's in-box write-back stays PARKED per the charter's Epic-M note).
+- CHANNEL ≠ POLICY: `fleet approve` stays scrypt/stdin/human-only (ADR-1 §3), channel change captured in ADR-2 PROPOSED (operator decides via G1), not decided. A scheduled memory verb is not an approval surface and touches no gate.
+
+## User Story
+
+As the factory operator,
+I want each department manager's meta bank consolidated nightly into observations with a refreshed mental model — triggered by the platform schedule through a scoped agent token, or by a documented crontab through the same gateway if E21 slips —
+so that durable beliefs stay current without any in-box write capability ever existing.
+
+## Overview
+
+Each manager bot (A1's Dev/QA/Maintenance) gets a `*-meta` bank under M1.1's `qds-` scheme (`-dev-meta` exists; `-qa-meta` and `-maint-meta` join it), and a bounded host-side job consolidates each bank nightly: `consolidate` → observations, then the mental-model refresh, with machine-checkable receipts. The preferred trigger is the platform schedule waking the manager bot, whose turn calls the gateway with its long-lived bank/verb-scoped agent token; the **documented crontab fallback** fires the SAME job through the SAME gateway directly. Both legs are gateway-fronted (D-2), both idempotent (server-side bank-dedup — no factory lock is added), and the consolidation work itself never leaves the trusted server tier.
+
+**What this does NOT deliver, stated before an AC implies otherwise.** No in-box write-back (sketch-M3 stays PARKED — sanitized write-back via review harvester is the later shape). No L4 weekly reflect (M3.2). No retention changes (M1.2 owns harvest-time retain; this job only consumes what is already retained). No recall-surface changes (M2.2 owns in-box `kg_recall`). No router tuning (M3.2 consumes these banks' observations, not this story). No new gateway route (M2.1 owns the token/verb machinery; this story consumes `{consolidate}` on it — one verb, DD-28.26 item 1, the refresh riding the consolidation-trigger).
+
+## E2E Slice
+
+**Demonstrable behavior:** Given the dedicated Hindsight (mock-first, then the VPS instance), When the nightly job fires — once via the crontab fallback and once via the gateway fake carrying an agent token — Then each manager `*-meta` bank receives exactly one consolidate whose operation receipt is recorded, the refresh rides the consolidation-trigger mechanism (DD-28.26 item 1) with its own receipt naming which mechanism ran, a re-fire inside the dedup window coalesces rather than stacks (receipt count unchanged, a counted `coalesced` success shape), and the evidence JSON carries per-bank `{bankId, consolidate_ms, operationId, refreshReceipt}`.
+
+**Wiring closed:** On completion of this story, the nightly consolidate runs end-to-end through the gateway with only code merged by this story plus M1.1's provisioning/client and M2.1's token machinery. **No stub, no `TODO: wire later`.** The platform-schedule leg is consumed at the gateway seam (fake) until A1's fork-side delivery lands; the fallback leg has **no** such seam.
+
+**Dependency edges (predecessors):** M2.1 — *direct* (agent tokens + gateway verbs; the hard gate). M1.1 — *direct* (the bank family this story extends, and the client whose adds-only method it gains). A1 — *direct for the platform-schedule leg only* (the bots whose turns carry the token); the fallback leg does not inherit it, which is what "gated-with-fallback" buys.
+
+> **Not an edge — M1.2:** this job reads whatever the harvest-time retain already stored and changes nothing about how content arrives. **Not an edge — M3.2:** reflect/proposals are a separate cadence on these banks. **Not an edge — M2.2:** `kg_recall` is a recall surface for boxes; this story adds a trigger leg for a server-side write and the two share only the gateway origin.
+
+## Acceptance Criteria
+
+1. **(make-or-break — the meta-bank family)** Given M1.1's provisioning, When extended, Then the three manager meta banks exist as members of the family `{resolvedRepoId}-{dev,qa,maint}-meta` — `{resolvedRepoId}-dev-meta` (existing), `{resolvedRepoId}-qa-meta`, `{resolvedRepoId}-maint-meta`, where `{resolvedRepoId}` is `resolveRepoBankId`'s collision-safe output per the bank-provisioner suffix discipline — each within the 64-char `BankIdSchema` cap **including the collision-suffix corner**: the extension retunes the provisioner's base-length reservation for the LONGEST family suffix before adding the new names (`MAX_BASE_LEN` moves from `64 − len("-11") − len("-dev-meta") = 52` to `64 − len("-11") − len("-maint-meta") = 50`, and the listBanks-failed truncation reservation follows it), so a repo bank resolved with its worst-case collision suffix (`-11`) still leaves room: `50 + 3 + 11 = 64`, never 65. Provisioning is idempotent (PUT upsert), with `scripts/provision-hindsight-banks.ts` creating all three in one run. *Negative controls, all MUST fail: a manager meta bank named outside the `qds-` scheme; a 65-char bankId accepted; and a family constant extended WITHOUT the reservation retune — a long base id colliding to `-N` would resolve `-maint-meta` past the cap and fail inside `createBankIdempotent`, exactly the overflow the existing `-dev-meta` comment guards against.*
+2. **Consolidate + refresh, HOST-side, receipt-carrying, idempotent.** Given a manager meta bank with retained content, When the nightly job runs, Then it calls `HindsightClient.consolidate(bankId)` and the mental-model refresh rides the consolidation-trigger mechanism (`trigger.refresh_after_consolidation`, pinned in `client.ts` as an adds-only method after the impl-time OpenAPI check) — the v4 `POST …/mental-models/{id}/refresh` path is NOT usable by this token, because the bot-held class is `{consolidate}` only and endpoint-mode `{consolidate, refresh}` returns solely via a register amendment (DD-28.26 item 1) — records both receipts, and treats a re-fire that lands while one is in flight as the server's coalescing success, never a failure (the v4 authority note — no factory-side lock is minted to duplicate what the bank already does). *Negative control: **consolidate writing in-box** — any implementation where a bot fetches bank content, composes observations in-box, or holds any retain-class credential MUST fail this one; the agent token's verb vocabulary contains no content-write verb, and a test asserts it.*
+3. **Preferred trigger: platform schedule → manager bot → gateway.** Given A1's manager bots, When the platform schedule wakes a manager, Then the bot's turn calls the gateway with its long-lived agent token — bank-scoped to its OWN `*-meta` bank, verb-scoped to `{consolidate}` (DD-28.26 item 1; the refresh rides the consolidation-trigger, so the token needs no second verb) — delivered into the Home by provisioning (INV-7 posture: a provisioning act, not hand-config), never present in argv, env dumps, or logs; a token aimed at another bank or another verb refuses at the gateway.
+4. **Fallback trigger: documented crontab, zero E21.** Given E21 unavailable, When the documented crontab line fires (`scripts/memory-nightly.ts`), Then the same job module runs the same consolidate through the same gateway with an agent token — injected env-only from operator-provisioned secret material on the host (never a crontab `VAR=` line, never a repo file, never argv; INV-MEM-3 binds both legs) — and the module imports no fork, Home-bot, or E21 symbol of any kind. *Negative control: **fallback requiring E21** — a crontab leg that imports any Home-bot symbol, needs any E21 lane, or addresses raw 8888/18889 instead of the gateway MUST fail this one.*
+5. **No gate touched; evidence scrubbed.** Given both legs, Then neither writes anything the approval gate reads, the live infra-tier round prints worst-case spend before firing (Hindsight consolidation calls its configured LLM — real, if small, spend), runs only on explicit operator GO, and scrubs receipts into `_bmad-output/evidence/`. CHANNEL ≠ POLICY holds by construction.
+
+## Trigger Surface
+
+| Trigger | Status | E2E Test | Follow-Up |
+|---------|--------|----------|-----------|
+| crontab fallback → job → gateway → consolidate + refresh | in-scope | `tests/hindsight/nightly-consolidate.test.ts` | — |
+| platform schedule → manager bot turn → gateway (agent token) | in-scope (seam-fake until A1's fork-side delivery lands) | `tests/hindsight/nightly-consolidate.test.ts` | — |
+| meta-bank provisioning (`-qa-meta`, `-maint-meta`) | in-scope | `tests/hindsight/meta-bank-provisioning.test.ts` | — |
+| token scoping (wrong bank / wrong verb refuses) | in-scope | same suite, via the M2.1 gateway fake | — |
+| in-box write-back of sanitized memory | out-of-scope — sketch-M3 PARKED (F10/INV-7); later shape = review harvester | — | park register |
+| L4 weekly reflect → PROPOSE | out-of-scope — M3.2 | — | M3.2 |
+| harvest-time retain changes | out-of-scope — M1.2 owns retention; this job consumes only | — | none |
+| new gateway route/verb definitions | out-of-scope — M2.1 owns the machinery; this story adds no route | — | M2.1 |
+
+## Infra Prerequisites
+
+| Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
+|-----------|-------------------------------|-------------------------|
+| gateway + agent tokens | M2.1 (gateway surface, token mint/revoke) | `bun test tests/memory/` green before this story starts |
+| bank family + client | M1.1 (`src/hindsight/bank-provisioner.ts`, `client.ts`) | `bun test tests/hindsight/` green; provisioning idempotency suite green |
+| dedicated Hindsight 0.10.0 | Z4/M1.1 compose on the VPS — live round only | instance health probe green; OpenAPI enumerated for the refresh path before the client method pins it |
+| run locks | `scripts/lib/run-lock.ts` — **deliberately not taken** | n/a — a factory lock here would duplicate the bank's own coalescing (AC2); byte-identical after |
+
+> No exedev box and no fleet run are prerequisites of this story. The live round is infra-tier: VPS + dedicated Hindsight + gateway, no box, operator GO.
+
+## Technical Notes
+
+- **"HOST-side" means the trusted server tier, and the trigger is not the executor.** The manager bot triggers; the gateway authorizes; Hindsight consolidates server-side over content M1.2 already retained host-side. No bank content is ever fetched into a box, and no box ever holds a content-write credential (DD-16). This is the line between M3.1 and the PARKED sketch-M3 — the distinction the negative controls police.
+- **Idempotency is borrowed, not built — and the borrow is docs-derived until proven.** The v4 authority note (:578) records that consolidation is bank-deduped server-side — concurrent nightly triggers coalesce. The job therefore adds no lock, no cursor, no "already ran today" file; it records receipts so an operator can see what fired, and counts a coalesced re-fire as a success shape. The infra-tier live round fires **two concurrent consolidates against one bank and counts the operations**: coalescing observed = the :578 claim instance-verified; no coalescing = the named fallback is adopted before merge (`scripts/lib/run-lock.ts`, or operations-polling against the instance's operation list).
+- **The refresh path is pinned against the instance, not the doc.** The v4 grounding names `POST …/mental-models/{id}/refresh` (or `trigger.refresh_after_consolidation`); R4's enumerated 0.10.0 REST list does not include a mental-models path. The client method is therefore pinned at impl time against the instance's own OpenAPI, with the consolidation-trigger mechanism as the fallback — and the receipt names which ran. If neither exists on the pinned build, the story's DoD fails loudly rather than shipping a silent no-op refresh.
+- **Guards/limits (named):** one consolidate per manager bank per firing — three calls, never one fan-out "all banks" verb, because per-bank receipts need per-bank operations; `NIGHTLY_WALL_CLOCK_BUDGET_MS` bounds the job above the client's own 60 s CONSOLIDATE timeout; receipts respect the 8 KiB detail discipline.
+- **Region ownership on shared files:** `src/hindsight/client.ts` and `src/hindsight/bank-provisioner.ts` are M1.1/M2-owned and take **adds-only** edits (one new method; two new bank names in the family constant **plus the base-length reservation retune sized for the longest suffix `-maint-meta`, AC1**); `scripts/provision-hindsight-banks.ts` adds the new banks to its existing sequence. **No re-pin is owed:** `src/hindsight/` is not in the box COPY set (R3 §5) and gains no engine-reachable file.
+- **Considered and rejected: bot-side orchestration** (the bot schedules and plans its own bank work unassisted). The schedule wake carries no payload the bot could trust for bank state, and giving the bot bank-read authority to plan consolidation widens the token class this story deliberately keeps at one verb (`{consolidate}` — DD-28.26 item 1). The job module stays the single orchestrator on both legs.
+
+## Observability Contract
+
+- Events: `nightly-fire` (`{requestId, leg: crontab | schedule, banks: [...]}`), per bank `consolidate-op` (`{bankId, operationId, consolidate_ms}`) and `refresh-op` (`{bankId, mechanism: refresh-endpoint | consolidation-trigger, receipt}`), `coalesced` (a server-deduped re-fire — a counted success shape, never an error), `nightly-complete` (`{banks_ok, banks_failed, total_ms}`). Errors carry `{code, message, remediation}`.
+- Tokens appear only as names/scopes, never values (M2.1's masking idiom). Live-round spend is printed before firing and carried in the evidence JSON; `consolidate_ms` is absent, not `0`, when a bank was skipped as coalescing.
+
+## Files to Modify
+
+- `src/hindsight/bank-provisioner.ts` (M1.1-owned — **adds only** `-qa-meta` and `-maint-meta` to the manager family beside the existing `-dev-meta`)
+- `scripts/provision-hindsight-banks.ts` (adds only: provision the two new banks in sequence)
+- `src/hindsight/client.ts` (adds only: the refresh method + its response schema, pinned to the instance-documented path)
+- `src/hindsight/nightly-consolidate.ts` (new — the job: per-bank consolidate + refresh + receipts; the single orchestrator both legs call)
+- `scripts/memory-nightly.ts` (new — bounded CLI with the documented crontab line; the fallback driver; imports no E21 symbol)
+- `tests/hindsight/meta-bank-provisioning.test.ts` (new)
+- `tests/hindsight/nightly-consolidate.test.ts` (new — both legs, receipts, coalescing, token scoping, both negative controls)
+
+## Security Invariants
+
+- **INV-MEM-1 (no in-box write, ever — DD-16 fence):** the agent token's verb vocabulary is exactly `{consolidate}` on one `*-meta` bank (DD-28.26 item 1 — the closed set is not widened; the mental-model refresh rides the consolidation-trigger, and endpoint-mode `{consolidate, refresh}` returns only if a register amendment adds it). **The predicate, stated:** a content-write verb is retain-class — a verb that lands holder-authored arbitrary content; `consolidate` is a bounded server-side operation over already-retained memories and is not one. This invariant asserts no retain-class verb on THIS story's tokens — a claim about these grants, not a class-wide claim about `AGENT_TOKEN_VERBS`. Bank content is never fetched into any box. What this does not fence, plainly: the gateway itself — a compromised gateway could do anything, and M2.1's authz is the trusted tier this story widens by one verb, not by an owner.
+- **INV-MEM-2 (gateway-only front door — D-2):** neither leg addresses 8888/18889 directly; the gateway origin is the only egress for bank operations.
+- **INV-MEM-3 (token hygiene):** agent tokens are provisioning-delivered, long-lived but bank/verb-scoped, revocable via M2.1's machinery, and never logged, argv'd, or echoed — on either leg: the fallback leg's token is injected env-only from operator-provisioned secret material, never a crontab `VAR=` line, repo file, or argv.
+- **INV-MEM-4 (channel ≠ policy, verbatim):** CHANNEL ≠ POLICY: `fleet approve` stays scrypt/stdin/human-only (ADR-1 §3), channel change captured in ADR-2 PROPOSED (operator decides via G1), not decided — a scheduled memory verb shares no surface with the approval gate.
+
+## Definition of Done
+
+- [ ] **Impl:** three manager meta banks provisioned idempotently under the `qds-` scheme via the extended family constant (AC1).
+- [ ] **Impl:** `nightly-consolidate.ts` runs per-bank consolidate + refresh with receipts; a coalesced re-fire is a counted success shape (AC2).
+- [ ] **Impl:** `memory-nightly.ts` fallback CLI with the documented crontab line; the module imports zero E21/fork symbols — asserted by a test, not a comment (AC4).
+- [ ] **Contract:** `client.ts`/`bank-provisioner.ts` diffs are adds-only; no existing method, schema, or bank name changes (M1.1/M2 ownership).
+- [ ] **Test (fence):** the agent-token vocabulary contains no content-write verb; an in-box write-back shape refuses; a token aimed at another bank/verb refuses at the fake gateway (AC2, AC3).
+- [ ] **Test (fallback, AC4):** the crontab leg runs green with the E21 seam fakes deleted from the module graph — an implementation needing them MUST fail.
+- [ ] **Test (idempotency):** a re-fire inside the dedup window coalesces; receipts show one operation per bank per night, never stacked (AC2).
+- [ ] **Security:** no token value in any log/fixture/argv; the refresh receipt names which mechanism ran (INV-MEM-2/3).
+- [ ] **Integration (AC5):** worst-case spend printed before the live round; operator GO recorded; evidence scrubbed into `_bmad-output/evidence/`.
+- [ ] **Test (e2e demo — MANDATORY):** one infra-tier live round on the VPS — the crontab fallback drives one real consolidate + refresh through the gateway against the dedicated 0.10.0 instance with receipts landing in evidence; the platform-schedule leg demonstrated at the gateway seam with an agent token. The round also **verifies the docs-derived dedup claim**: two concurrent consolidates fired against one bank, operations counted — no coalescing means the named fallback (`scripts/lib/run-lock.ts` or operations-polling) is adopted before merge.

@@ -1,0 +1,110 @@
+# A3: Maintenance Sweeps F4 — Weekly Manager Wake, Briefs Parked at the Approve Gate
+
+**Story Points:** 3
+**Sprint:** v6b-Autonomy (A-epic, story 3 of 4 — the autonomy round that must end at a parked gate, never a merged PR)
+**Status:** gated — **Gated on A1** (which carries the E21 S02b + S03b lane gate), **A6** (v6a), **Z2** (v6a). Factory CI stays green before/during/after E21 lands via spec-seam fixtures (charter §5.2); the live round fires only after every gate lands.
+
+## Spec Reference
+
+- **v4 F4 verbatim (PRD:112):** *"A Paperclip cron routine (`routine_triggers.cron_expression`) wakes the **Hermes Maintenance manager**; an **Archon** sweep sub-DAG runs **Pi** agents (+ **pi-lens**) and opens a refactor/dep-bump PR."* Disposition of record: Paperclip cron routine → **E21 durable schedule** on the factory Home (persisted schedule store, AC2); Hermes Maintenance manager → the **Maintenance manager Home bot** (A1's, one factory Home, owner = operator); Archon sweep sub-DAG of Pi agents → **fleet runs** (D6's in-box engine is the execution substrate — not a second DAG system); "opens a refactor/dep-bump PR" → host-side PR creation post-approval per D8, which means **until a human approves, no PR exists to merge**; pi-lens's orthogonal lens → **deterministic hotspot signals** (A6's GitNexus graph + the DF5.3 audit chain) per the autonomy-horizon standing rule ("code decides a run is warranted; the LLM only investigates or executes against a pre-verified signal", `docs/superpowers/specs/2026-08-14-df-v5-autonomy-horizon-review.md` §3–4).
+- **Charter:** story row A3 (deps A1, A6, Z2), D-3 (bots-as-profiles; approvals channel may move to E21-S05b — **channel ≠ policy**), DD-14 (namespace), DD-20 (spend join: bot turns via zeropoint LLM-gateway ledger E08 + fleet runs via factory cost-ledger; join keys workKey + runId + botId).
+- **ADR-1 (ACCEPTED, `docs/decisions/2026-09-30-adr-1-swarmclaw-macro-host.md`) §2/§3:** the fleet stays the only way code changes enter; the sweep's macro process ends at the gate and **"`fleet approve` stays scrypt-gated, allowlisted, token-on-stdin, human-only."** **ADR-2 is PROPOSED (G1 carries the reconciliation) and this story consumes NOTHING from it** — no auto-merge, no bot-owned verdicts, no scripted approve path.
+- **Consumed unchanged:** DF3.7 `observeAndDriveChain` (`src/fleet/run-completion.ts`) — the one chain, gate pre-registered BEFORE teardown closes the record (#383); DF3.8's exiting-pass idiom (`src/fleet/observe.ts` — counted skips, pass exits 0, no daemon); DF5.3 `walkAuditChain` (`src/audit/chain.ts:726`) + `chainVerdict` — **read-only consumer; `AUDIT_HOPS` untouched**; A6's staleness signal (FR-MEM-6/NFR-OBS-5, PRD:380/:734 — staleness = time since last *completed* analyze, ≤ 8h); Z2's schedule→protocol trigger wiring.
+- **DD-28.21 (partial-consumer reading, operator sign-off pending):** on a stale graph, the sweep proceeds as a *partial* consumer — the graph leg is refused and counted, the sweep itself continues on the audit chain alone. AC3(a) implements this reading; it holds unless the operator rules otherwise at sign-off.
+- **Terminology (R2 §5 trap):** this story is about the **Maintenance department manager (Home bot)**. The proactive/cron memory agents (Synthesizer et al.) are a different population, PARKED DD-23.
+
+## User Story
+
+As the factory operator,
+I want a weekly schedule to wake the Maintenance manager bot, which assembles dep-bump/refactor briefs from deterministic hotspot signals and runs them through the fleet to an approvable pause,
+so that maintenance work is continuously proposed and executed exactly as far as the same human approve gate every other run faces — and never one step further.
+
+## Overview
+
+The sweep is a deterministic pipeline with an E21 hat on: the platform's persisted scheduler wakes the Maintenance manager bot weekly (the bot is the **trigger and report carrier** — never the executor: B3 deny-lists `cli.exec`, so a Home bot cannot run factory scripts; the A1 host-composed precedent applies); the wake drives a HOST-side **exiting pass** — `scripts/maintenance-sweep.ts`, run by the deploy user's host runner on the box (the same authorized runner as A1's documented crontab line, delivered via Z2's schedule→protocol path) — that (1) reads hotspots from A6's GitNexus graph (staleness-aware) and walks the audit chain over the recent window, (2) assembles at most `MAX_BRIEFS_PER_SWEEP` dep-bump/refactor briefs, (3) dispatches each brief as a fleet run (`--driver exedev`), and (4) reports, with the report leg delivered back through the bot's turn. Every code-affecting run walks DF3.7's chain and parks at `awaiting-approval`. The 24/7 residency lives in the E21 bot; the factory side ships only bounded, exiting invocations.
+
+**What this does NOT deliver.** No merge, no auto-approval, no second approval path (AC1's whole point). No Jev — brief selection and ordering are deterministic (A3's charter deps exclude J4; L9 triage as a brief-ranker is a v7 seam, not this story's). No denser cadence, no on-host daemon, no GitNexus refresh (A6's), no QA hunter-pack (A2's).
+
+## E2E Slice
+
+**Demonstrable behavior:** Given a persisted weekly schedule on the factory Home, When the scheduler tick fires the wake (durable, recorded `initiatorPrincipal` = operator, E21 ADR run-2 D1 (DD-28.15)), Then the wake reaches the Maintenance manager bot (trigger + report carrier — a Home bot cannot exec factory scripts, B3) and the authorized HOST-side runner (the deploy user on the box, via Z2's schedule→protocol delivery — the same runner A1's documented crontab line uses) executes `bun scripts/maintenance-sweep.ts`, which emits one `{ event: "sweep-plan", hotspots, briefs, graph_age_ms, graph_stale }` line, assembles ≤ `MAX_BRIEFS_PER_SWEEP` briefs, and per brief `fleet dispatch --driver exedev` reaches DF3.7's chain — ending with `extensions.approval.state = "awaiting-approval"`, `closedAt` set, bundle present, zero PRs merged, one `{ event: "sweep-complete", briefs_planned, briefs_dispatched, briefs_skipped, graph_stale, chain_refused }` line, exit 0.
+
+**Wiring closed:** On completion of this story, a scheduled weekly wake produces parked, approvable maintenance runs end-to-end — using only code merged by this story plus A1's bots and wake surface, Z2's trigger wiring, A6's graph + staleness signal, DF3.7/DF3.8/DF5.3, and the 16-verb registry. **No stub, no `TODO: wire later`.** The schedule row itself is E21 platform config (A1's surface), documented here, coded nowhere in this repo.
+
+**Dependency edges (predecessors):** A1 (*direct* — bots, wake invocation, the S02b/S03b gate), A6 (*direct* — graph freshness + staleness signal), Z2 (*direct* — schedule→protocol trigger path). DF3.7/DF3.8/DF5.3 are transitive through v5's merged code, not story edges of this sprint.
+
+> **Not an edge — J4:** the charter's dep columns for A3 and J4 are disjoint. When L9 survives its flex-cut it may rank briefs; that consumption is a v7 seam. Building the edge now would couple A3's gate to a Jev calibration gate.
+
+## Acceptance Criteria
+
+1. **(make-or-break — the sweep stops at the gate, and the gate is the one gate)** Given a sweep-produced run, When it settles, Then it reaches `awaiting-approval` through **DF3.7's `observeAndDriveChain`** (gate pre-registered before teardown closes the record, #383) and this story adds no second approval path: no approver-file write, no token handling, no auto-yes, no bypass verb. The unattended round's terminal state is **parked**, provably: `fleet status` shows `awaiting-approval` and `git log` shows zero merge commits from the sweep. *Negative controls, all MUST fail: a sweep that merges, opens-and-merges, or auto-approves its own PR — ADR-1 §3 says the gate stays scrypt-gated, allowlisted, token-on-stdin, human-only, and ADR-2 (PROPOSED, G1) is consumed by nothing here; an implementation that ships a scripted approver token or an unlabeled scripted approver — scripted approvers exist only labeled, SC2.7 precedent; and one that inlines its own harvest→teardown→reverify beside the chain — DF3.8's fence discipline applies, this story is a caller, never a second chain.*
+2. **The weekly wake is durable, and durability comes from the persisted store.** Given a scheduler restart between schedule creation and fire, When the next tick runs, Then the wake fires from the persisted schedule row (`fork:src/lib/server/schedules/schedule-repository.ts` `loadSchedules`/`upsertSchedule` — fork-side, per Z2's substrate facts) via Z2's schedule→protocol path; the persisted watch-job store (`fork:src/lib/server/runtime/watch-job-repository.ts`) is the sibling durable mechanism (post-merge triggers), not this wake's — and the turn carries a legitimate recorded `initiatorPrincipal` (the schedule owner = operator; INV-8 + E21 ADR run-2 D1 (DD-28.15) — a turn with `initiator_missing`/`initiator_mismatch`/`no_owner` is refused by S02b's machinery, never satisfied by a fallback). *Negative controls, both MUST fail: a wake delivered only via `enqueueSystemEvent` — an in-memory `hmrSingleton` Map capped at 20/session — evaporates on session restart and passes only the happy-path test; and a wake whose turn forges or defaults an initiator principal.*
+3. **Hotspots are deterministic, staleness-aware, and never silently degraded.** <br />**(a)** (DD-28.21 — partial-consumer reading pending operator sign-off) The graph leg reads A6's freshness signal: last-completed-analyze age ≤ 8h → graph hotspots join the plan with `graph_age_ms` recorded. Age > 8h → the graph leg is **refused, counted `graph-stale`**, the plan proceeds on the audit chain alone, and the A6 alarm is named in the output — never a silent stale-graph traversal (NFR-OBS-5: "0 agent runs against a graph whose last completed analyze is >8h old"). <br />**(b)** While a GitNexus refresh is mid-run for the repo, the sweep does not read the graph (FR-MEM-6's refresh-vs-consumer clause), and the mechanism is A6's own lock, not a second one: the sweep takes a **non-blocking SHARED (`flock -s -n`) acquisition on the graph directory — the same flock A6's wrapper holds exclusive** — and holds it through BOTH the freshness check and the graph read; a failed acquisition (the refresh's exclusive lock is held) is the counted `refresh-in-progress` skip, retried next sweep. No marker file, no second lock vocabulary — one flock, two modes, is the whole contention contract. <br />**(c)** Audit-chain hotspots come from `walkAuditChain` + `chainVerdict` over the recent window (broken hops from `walkAuditChain`/`chainVerdict`; exit-6 outcomes from run records / `dispatch-log.jsonl`; fixloop escalations from record extensions) — read-only; `src/audit/link-store.ts` byte-identical. *Negative controls, all MUST fail: an implementation that consumes the graph without checking staleness, or folds `graph-stale` into a benign zero-hotspot outcome; one that reads a mid-refresh graph; and one that writes any audit hop.*
+4. **The pass is bounded and exiting, and per-brief refusals never fail the pass.** ≤ `MAX_BRIEFS_PER_SWEEP` briefs per sweep; each dispatch honors existing admission (exit 5 fleet-busy/no-headroom, exit 3 setup-gate) as a **counted `briefs_skipped`/`chain_refused` outcome inside a pass that exits 0**; only a failure of the pass itself exits non-zero; no PID file, no loop flag, no resident factory-side process (INV-IBOX-16 doctrine — the bot is the only resident, and it is E21's). An empty sweep (zero hotspots) exits 0 with `briefs_planned: 0`. *Negative controls, all MUST fail: an implementation that lets one busy fleet abort the sweep, or exits non-zero on an empty sweep (a weekly cron that mails on every quiet tick is a cron the operator disables); and one that ships any always-on host supervision.*
+5. **Bot spend and fleet spend are joinable per DD-20.** The sweep records, per brief, `workKey` (`w:` namespace), `runId`, and `botId`, so the factory cost-ledger (fleet runs) joins the zeropoint LLM-gateway ledger (bot turns). Fleet spend stays under the existing per-run caps (DF2.3 ordering — consumed, not re-implemented). *Negative control: an implementation that mints a second spend ledger or drops the join keys — A5 consumes this join, and a row that cannot join is a row that lies.*
+
+## Trigger Surface
+
+| Trigger | Status | E2E Test | Follow-Up |
+| --- | --- | --- | --- |
+| Weekly persisted schedule → wake → sweep pass → parked runs | in-scope | `tests/fleet/e2e/tier2-maintenance-sweep.live.test.ts` | — |
+| On-demand sweep pass (`bun scripts/maintenance-sweep.ts`) | in-scope | `tests/maintenance/sweep-plan.test.ts` | — |
+| Stale-graph degradation + refresh-in-progress contention | in-scope | `tests/maintenance/sweep-plan.test.ts` | — |
+| Live first-firing round (1 box + bots; single wake; briefs parked) | in-scope — the mandatory e2e | `tests/fleet/e2e/tier2-maintenance-sweep.live.test.ts` | — |
+| Approval, rejection, unlock of a parked brief | out-of-scope — DF3.4's verbs, human-invoked, unchanged | — | none |
+| Jev/L9 ranking of briefs | out-of-scope — A3 consumes no judgment; deterministic ordering | — | v7 seam |
+| GitNexus refresh cadence + alarm | out-of-scope — A6's | — | A6 |
+| Denser cadence (daily/on-event sweeps) | out-of-scope — weekly only; revisit at v7 derivation with yield data | — | none in v6 |
+| QA findings priming (F3) | out-of-scope — A2's | — | A2 |
+
+## Infra Prerequisites
+
+| Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
+| --- | --- | --- |
+| Maintenance manager bot + wake surface | A1 (E21 S02b/S03b seam fixtures) | A1's spec-seam fixture suites green before this story starts; a failing fixture means the wake would fire at a bot that cannot prove its initiator |
+| Schedule→protocol trigger path | Z2 (fake-CLI journal) | `bun test` over Z2's journal suites green |
+| Graph freshness + staleness signal | A6 | A6's staleness-alarm suite green; the signal readable by `scripts/maintenance-sweep.ts` |
+| Chain + audit walk | DF3.7 / DF5.3 | `bun test tests/fleet/run-completion.test.ts` + audit suites green; `src/audit/` **byte-identical after** |
+
+> Not a prerequisite: a live E21 Home (spec-seam fixtures keep CI green), an LLM key for the bot (spend only under the live round's operator GO), and any ADR-2 artifact (PROPOSED; consumed by nothing).
+
+## Technical Notes
+
+- **Jev §8 guardrails verbatim (binding):** "`TYPESAFE_API_KEY` never hardcoded, never logged, never enters a box… No diff hunks or third-party bot prose shipped to the API in stage 1… Never edit: `AUDIT_HOPS`, `gate-runner.ts` verdict logic, `classifyRunExit`, `classifyDiffScope`, provider layer… No real API spend without explicit steve go in chat; mock mode is the default everywhere… Corpus records containing finding text stay in-repo under `_bmad-output/`." This story ships no Jev call at all — the binding is inherited via the fleet paths it reuses.
+- **Guards/limits (named, not implied):** `MAX_BRIEFS_PER_SWEEP = 5` — derived from operator approval burden (five parked PRs/week is reviewable; fifty is a rubber stamp) and box headroom (one-box live tier); `GRAPH_STALENESS_BUDGET_MS = 8h` — NFR-OBS-5's threshold verbatim, not re-tuned; the sweep window is the trailing 7 days of chain activity (weekly cadence, no overlap with the previous sweep's window claim made or needed).
+- **Region ownership on shared files:** `src/fleet/run-completion.ts`, `src/fleet/observe.ts`, `src/audit/**`, `src/fleet/verbs.ts`, `src/providers/**` are all **not modified**. The 16-verb registry is consumed as-is (`dispatch --driver exedev`; `fanout` is the wrong verb — it races candidates for one slot, and maintenance briefs are independent work items). No verb is added: a sweep is a script over existing verbs, not a seventeenth verb (skill-contract surface untouched). No image pin is owed: every touched path is host-side and outside the box COPY set (`oci/exedev/Dockerfile` copies `scripts/pipeline-run.ts`, `scripts/lib/`, `src/fleet/`, `src/lib/`, `src/phase-engine/`, `src/swarmclaw/` — nothing this story adds).
+- **Ordering against A6:** the sweep reads the freshness signal before the graph leg and never triggers a refresh itself; refresh-triggering is A6's cron, contention handled by AC3(b).
+- **Considered and rejected: letting the manager bot pick briefs itself.** The bot is an LLM; charter §6 forbids a bot gating code entry, and the standing rule demands a deterministic signal before any LLM investigates. The host-side pass orchestrates and the bot triggers and reports; the hotspot math is code. Revisit never — this is the story's identity, not a tuning choice.
+
+## Observability Contract
+
+- Pass lines: `{ event: "sweep-plan" | "sweep-complete", requestId, sweep_ms, … }`; per-brief lines `{ event: "brief-dispatched" | "brief-skipped", briefId, workKey, runId?, botId, code? }`. Skips carry their typed reason (`fleet-busy`, `setup-gate`, `graph-stale`, `refresh-in-progress`) — a skip is a counted outcome, never silence. `runId` is **absent, not `0`**, on an undispatched brief.
+- Every line names its inputs' provenance: `graph_age_ms` (A6 signal), `chain_window` (audit walk bounds). Errors carry `{ code, message, remediation }`. No credential material is read or logged; evidence lands scrubbed in `_bmad-output/evidence/`.
+
+## Files to Modify
+
+- `src/maintenance/sweep-plan.ts` (new — hotspot collection: staleness-aware graph read + `walkAuditChain` window walk + brief assembly)
+- `scripts/maintenance-sweep.ts` (new — the exiting pass; emits sweep-plan/sweep-complete lines; `import.meta.main`-guarded)
+- `tests/maintenance/sweep-plan.test.ts` (new — AC2 durability/fixture side lives with A1's fixtures; this file owns staleness, contention, bounds, ordering)
+- `tests/fleet/e2e/tier2-maintenance-sweep.live.test.ts` (new — mandatory live first-firing; **Tier 2 deliberately**: one box, one wake, one parked round — the cheapest autonomy round; tier selection drives real spend)
+- A1's spec-seam fixtures (`tests/` under A1's ownership) — **consumed, not modified**
+- `src/audit/link-store.ts`, `src/fleet/run-completion.ts` — **not modified** (listed to make the read-only claim checkable)
+
+## Security Invariants
+
+- **INV-A3-GATE (inherited verbatim, ADR-1 §3):** `fleet approve` stays scrypt-gated, allowlisted, token-on-stdin, human-only. What this invariant deliberately does not fence: the operator choosing to approve via whatever notification channel ADR-2 someday legalizes — channel ≠ policy, and policy is unchanged here.
+- **INV-A3-RESIDENT:** no factory-side resident process; the pass exits. The 24/7 surface is the E21 bot, governed by E21's own invariants (INV-1 no provider key in Home; INV-8 initiator proof), which this story asserts via fixtures and never re-implements.
+- **INV-A3-SIGNAL-FIRST:** hotspots are code-computed from the graph and the chain; neither the bot nor any Jev answer invents a candidate or gates code entry (charter §6; autonomy-horizon standing rule). What it does not fence: a *human* operator overriding the plan — that is the approve gate working.
+- **INV-A3-STALENESS:** no sweep leg traverses a >8h-stale graph or a mid-refresh graph without a counted, named refusal (AC3). Inherited untouched: `AUDIT_HOPS` frozen; DF3.4's scrypt/stdin posture; DD-9 integer micro-USD.
+
+## Definition of Done
+
+- [ ] **Impl:** `src/maintenance/sweep-plan.ts` + `scripts/maintenance-sweep.ts` implement AC2–AC5; DF3.7's chain, DF5.3's store, and the verb registry are consumed unchanged (AC1).
+- [ ] **Contract:** the sweep's only terminal states for code-affecting work are `awaiting-approval` or a counted refusal; zero merge/PR-approval code paths exist in the diff (AC1).
+- [ ] **Test (durability):** restart-mid-window fixture proves the wake refires from the persisted store; the `enqueueSystemEvent`-only shape MUST fail AC2.
+- [ ] **Test (staleness):** >8h graph → `graph-stale` counted + audit-chain-only plan; mid-refresh → skipped; stale never silent (AC3).
+- [ ] **Test (bounds):** 6 hotspots → ≤5 briefs + counted remainder; busy fleet → exit 0 pass with counted skips; empty sweep → exit 0 (AC4).
+- [ ] **Security:** diff shows zero changed lines in `src/audit/**`, `src/fleet/run-completion.ts`, approval modules, provider layer; no approver-file or token handling anywhere in the new code (INV-A3-GATE).
+- [ ] **Integration:** DD-20 join keys (`workKey`, `runId`, `botId`) present on every dispatched brief (AC5).
+- [ ] **Ops:** live round gated on operator GO (worst-case spend printed before fire; keys/boxes cleaned in `finally`); evidence scrubbed to `_bmad-output/evidence/`; no spend of any kind before all four gates land.
+- [ ] **Test (e2e demo — MANDATORY):** one live Tier-2 round — real wake on the factory Home's schedule store, real sweep pass, one real box, run parks at `awaiting-approval` with zero PRs merged and the sweep-complete counters green.

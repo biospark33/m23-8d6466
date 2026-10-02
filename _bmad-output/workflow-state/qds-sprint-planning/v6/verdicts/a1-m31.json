@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "story": "A1+M3.1",
+  "owned": ["A1", "M3.1"],
+  "iterations": 1,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 1 },
+  "applied": [
+    {
+      "file": "a1-department-managers-home-bots.md",
+      "severity": "high",
+      "finding": "AC2's static import fence named `harvest` among 'mutating fleet modules' — no `src/fleet/harvest` module exists (verified: src/fleet listing; harvest is a thin front door in scripts/fleet.ts over `harvestRun`/`teardownSandbox` in src/providers/harvest.ts/teardown.ts per src/fleet/index.ts:3-4). A fence test targeting a phantom module cannot implement the make-or-break AC.",
+      "fix": "Fence list rewritten to real symbols: `src/fleet/approval-gate`, `src/fleet/approvers`, `src/fleet/dispatch`, the harvest/teardown mutating cores `harvestRun`/`teardownSandbox` in `src/providers/`, fixloop's dispatch leg."
+    },
+    {
+      "file": "a1-department-managers-home-bots.md",
+      "severity": "medium",
+      "finding": "'fixloop disposition counters' (Overview, E2E Slice, AC3) matches zero symbols in src/fixloop/ (grep: 0 hits for 'disposition'); the real read surfaces are the `EscalationClass` taxonomy, `deriveAttemptLadder`, and the `fixOutcome` codec in src/fixloop/escalation.ts.",
+      "fix": "All three occurrences renamed to 'fixloop escalation-state counts (`EscalationClass` tally + attempt ladder — `src/fixloop/escalation.ts`'s `deriveAttemptLadder`/`fixOutcome`, read-only)'."
+    },
+    {
+      "file": "m3-1-manager-meta-banks-l3-consolidate.md",
+      "severity": "high",
+      "finding": "The crontab fallback leg's agent-token injection channel was unspecified (secrets-invariants checklist: env-only injection must be answerable from the spec). AC3 pinned the platform leg ('delivered into the Home by provisioning, never argv/env-dumps/logs') but AC4's fallback never said how the token reaches the process — a crontab `VAR=` line (on-disk plaintext) passed every named AC while violating INV-MEM-3's intent.",
+      "fix": "AC4 now requires the fallback token injected env-only from operator-provisioned secret material on the host (never a crontab `VAR=` line, repo file, or argv; INV-MEM-3 binds both legs); INV-MEM-3 extended with the same clause."
+    }
+  ],
+  "surviving": [
+    {
+      "file": "a1-department-managers-home-bots.md",
+      "severity": "low",
+      "finding": "AC5 'every per-run line names all three join keys' reads literally as requiring a `botId` value on every line, while the Not-an-edge note + Observability Contract pin `botId` absent-not-null until A2 produces manager-originated runs. Left as-is: the DoD line ('botId absent-not-null on fleet-only lines, AC5') and the digest-run schema (`botId?`) anchor the schema-vs-value reading three times; rewording alone would diverge from the fleet-wide DD-20 phrasing."
+    },
+    {
+      "file": "a1-department-managers-home-bots.md + m3-1-manager-meta-banks-l3-consolidate.md",
+      "severity": "low",
+      "finding": "Both stories say 'ADR-2 DRAFT' where the ADR file's formal status is PROPOSED. Verified fleet-wide convention: G1, Z3, and A3 all use 'ADR-2 DRAFT'; the load-bearing claim ('not decided', nothing implemented while undecided) is present in both. Left as-is for cross-story consistency."
+    }
+  ],
+  "checklists_fired": [
+    "secrets-invariants (HIGH fired on M3.1 fallback-leg token injection; A1 checked — profile tokens are names-never-values in all observability lines, no provider key in the Home per INV-MGR-3)",
+    "auth-invariants (both stories: capability = verb/bank-scoped agent token checked at the gateway before any side effect; A1's digest is read-only, no capability; M3.1 wrong-bank/wrong-verb refusal AC3)",
+    "migration-invariants (N/A — no schema migration in either story; M3.1 bank provisioning is PUT upsert adds-only, ownership adds-only pinned)"
+  ],
+  "verification_notes": {
+    "seam_fidelity_vs_R4": "A1's TURN_REFUSALS (3 values), isHomeBackedAgent boundary (S02B-owned, never referenced by home-principal.ts), writeProfileTokens four SOLSTICE_*_TOKEN names, home_gateway_url_mismatch refusal, B3 cli.exec deny-list, D1 bot- prefix, INV-8 initiator posture — all match R4-external-facts.md lines 22-100 verbatim. E21 status matches DD-25 (S02a DONE, S02b in-flight, seams spec-only).",
+    "code_facts_vs_R3": "exit-6 semantics (Q11 ruling), 8 KiB audit detail discipline (:94), 24h DEFAULT approval timeout (:852), buildEscalationComment egress claim (:17), fixloop absorption endorsement (R3 feedback-run.ts entry), box COPY set exclusion for src/managers, src/hindsight — all verified. fleet status --driver-required / result driver-absent matches AC2's shell list.",
+    "m31_code_facts": "-dev-meta exists (CC-6), BankIdSchema 64-char cap, HindsightClient.consolidate(bankId) on /v1/default/banks/..., CONSOLIDATE_TIMEOUT_MS=60_000, scripts/provision-hindsight-banks.ts and scripts/lib/run-lock.ts exist, run-lock deliberately-not-taken consistent with v4 :578 bank-dedup authority note (citations :327/:564/:574/:578 verified verbatim).",
+    "pattern_checks": "channel≠policy verbatim in both (A1 INV-MGR-2, M3.1 INV-MEM-4); no channel-policy conflation (digest/memory verbs carry zero approval authority, negative controls present); no write-token-in-bot (A1 presentation-only + import fence + cli.exec; M3.1 trigger-class token {consolidate, refresh}, retain never, DD-16 box-vs-Home distinction stated at lines 13/41/72); both Status lines carry gates (A1: S02b+S03b+Z2 = charter row; M3.1: M2.1 hard, A1 platform-leg-only, crontab fallback E21-free per charter's own driver-agnostic clause); sketch-M3 write-back stays PARKED in M3.1 (4 mentions); digest absorption additive with src/fixloop byte-identical contract; DD-20 join keys on per-run lines with botId absent-not-null."
+  }
+}

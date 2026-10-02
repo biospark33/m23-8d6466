@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "story": "M1.2+M1.3",
+  "owned": ["M1.2", "M1.3"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    "M1.2 HIGH-adjacent/M1 (both stories): 'documentId' never exists in the substrate — schemas carry memoryId (src/hindsight/schemas.ts RetainResponseSchema:102, RecallResponseSchema:109-118). Added term-mapping lines to both stories (M1.2 Spec Reference; M1.3 M1.2-contract bullet).",
+    "M1.3 HIGH (AC1): label-integrity mechanism infeasible as written — no client primitive enumerates bank membership by id (listBanks lists banks; recall is semantic, and existence-via-recall is exactly the quality/integrity confound the negative control forbids). AC1 rewritten: bank existence via listBanks + label provenance against factory mint records (M1.2 memory-retain-receipt rows for run outcomes; P0.9 import manifest for seeded Mulch docs); labelIntegrity 'pass' = provenance-verified, not upstream-verified; upstream-side deletion explicitly not fenced in v6.0. Negative control reworded to match ('absent from the mint records').",
+    "M1.3 HIGH (wiring): 'against the mock client (deterministic) in CI' unsatisfiable — HindsightClient mockBody is stateless (recall -> {results: []}, listBanks -> {}, src/hindsight/client.ts:58-73), so hit-rate math and a passing integrity gate cannot be exercised; fixing mockBody would modify an M1.2-owned file. Fixed: injectable structural-typed recall surface defaulting to HindsightClient, citing the ProvisionClient precedent (src/hindsight/bank-provisioner.ts:43-50); Wiring-closed sentence, Infra Prerequisites row, DoD unit-test line, and DoD e2e-demo line all updated.",
+    "M1.2 MEDIUM: ladder-(b) side-channel/log behavior unpinned (M1.3's cyclesToDate counts side-channel rows; ambiguity = cycle undercount). Observability Contract now pins: timeout/error writes the row {primed: false, directive: 'none'} + the kg-recall line; unconfigured env writes neither (matches AC2(a) and the directive:'none' vocab entry).",
+    "M1.3 MEDIUM: probe-set growth was in-scope (Overview + trigger table) with no owner/mechanism/gate. Technical Notes bullet added: priming-report.ts invocation appends candidates (recent cycle outcome-document ids + new P0.9 import ids) through the same probe-schema integrity gate; probe-set.json append-only, failing candidates append nothing.",
+    "M1.2 LOW: zeropoint divergence (directive on empty-result ONLY; timeout/error -> v5 silence) implied by the ladder but never STATED as a divergence — now stated on the zeropoint-grammar line.",
+    "M1.2 LOW: -dev-meta exclusion from the dispatch fan-out unexplained — Technical Notes bullet added naming the fan-out set as exactly {resolveBankId(repoSlug), qds-collective}, M1.3 seeds probes from -dev-meta, consumption/consolidation unnamed in v6a."
+  ],
+  "surviving": [],
+  "checklists_fired": {
+    "auth-invariants": "FIRED (M1.2 touches auth posture: INV-HM1 host token, recall/retain boundary, DD-16). Capability-gating/scope-binding items N/A documented: host-side only, no new endpoint/tool, D-2 states no tenant machinery; no box credential added (DD-16 explicit).",
+    "secrets-invariants": "FIRED (M1.2 env-token handling). No-secrets-in-logs/errors inherited and cited (INV-HM1 never-logged, INV-HM5 safe error narrowing, maskEnv diagnostics); evidence scrubbed per AC7. Rotation-cadence items N/A documented: story adds NO credential — host env token is existing M1.1/D-2 infra; second recall-only credential is M2.2 (DD-16).",
+    "migration-invariants": "N/A documented for both: no Alembic/DDL/schema migration — M1.2 BriefSchema change is a zod strictObject ADDITIVE optional field (verified :310) with 'no run-record schema change' stated; audit-store change is an adds-only code-constant vocabulary row (AUDIT_HOPS untouched); M1.3 is read-only over existing stores."
+  },
+  "verification_notes": {
+    "verified_against_substrate": [
+      "src/hindsight/client.ts: retain :166, recall :192 (RECALL_TIMEOUT_MS 10_000 :45), mock mode :94-106/:311 network-only short-circuit, INV-HM1 env-only auth",
+      "src/hindsight/bank-provisioner.ts: COLLECTIVE_BANK_ID :40, ProvisionClient DI precedent :43-50",
+      "src/hindsight/schemas.ts: RetainResponse/RecallResponse carry memoryId (not documentId); resolveBankId; retain limit k=5 default",
+      "src/audit/link-store.ts: AUDIT_HOPS :52-63 (memory-retain-receipt present), HOP_EVENT_VOCABULARY :77-88 (empty [] for memory-retain-receipt = the refusal), 8 KiB detail cap, coalesce subject_key dedup",
+      "scripts/fleet.ts: single brief-ingestion entry ingestBriefJson :1308 with exactly three call sites — runDispatch :2609, runSubmit :2912, runFanout :3100 (AC1 'ONE seam' verified; negative control grounded)",
+      "src/fleet/brief-schema.ts: BriefSchema z.strictObject :310, no prose field (M1.2 'considered and rejected' claim accurate)",
+      "COPY set (R3-code-facts): scripts/pipeline-run.ts + src/fleet/ copied; src/hindsight/, src/audit/, scripts/fleet.ts NOT copied — M1.2 pin-move claim and 'every other file outside COPY set' verified; no hindsight import added to engine-reachable code",
+      "src/phase-engine/steering.ts:25 PROMPT_CHAR_CEILING = 16_000 (KG_CONTEXT_MAX_CHARS = half-ceiling claim)",
+      "src/hindsight/round-trip-verifier.ts:188 SLOW_QUERY_THRESHOLD_MS = 5_000 (M1.3 median bar)",
+      "scripts/corpus/merge.ts:34 CORPUS_LOCK_ID = 'corpus-writer' + acquireRunLock precedent (scripts/lib/run-lock.ts)",
+      "src/providers/cost-ledger.ts read-only open never creates (R3 :1351); integer micro-USD SUM doctrine",
+      "scripts/judgment/ab-report.ts JEV-4 wording discipline",
+      "charter: rows M1.2 :78 (5 pts, T2) / M1.3 :79 (3 pts, none), §2.2 :50 KG-pattern copy/skip/keep line, D-2, :42 four live env vars exact match to AC7",
+      "register: DD-15 (P2.8 fold mechanism-only), DD-16 (recall-only second credential with M2.2), DD-22 (probe set before deep dep; ~30-cycle DATED checkpoint), DD-26 (M1.3 report leg = first named flex-cut), writer ground rules ('M1.2 may WRITE it, nobody adds hops' — Deviation 1 framing exact)",
+      "crosswalk-p2.md: P2.8 fold resolves verbatim (documentId + updateMode:'replace'); routing surface correctly NOT carried"
+    ],
+    "deviation_1_status": "Carried as explicit surfaced deviation per shared_pattern_note 4 and register ground rules: AUDIT_HOPS untouched, HOP_EVENT_VOCABULARY['memory-retain-receipt'] gains exactly ['retain'], register amendment pending ratification, fallback = retain leg ships unaudited (stated, not silent)."
+  }
+}

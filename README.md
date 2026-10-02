@@ -5,6 +5,17 @@ work: it admits a unit of work, runs it on a rented machine under a hard money
 cap, re-verifies the result and opens the PR. Everything runs on
 [Bun](https://bun.sh).
 
+**Program status (2026-10-02):** Dark Factory **v5 CLOSED 2026-10-01** — 42/42
+stories / 169/169 pts; finish-line PR #399 (squash-merged `5feaeec6`), close-out
+PRs #400 (plans-docs sync) and #401 (close-out audit); `dev` @ `3346fe41`
+(the #401 merge; the merge-day close itself landed at `1b51777d`). The
+next program is the **v6 pivot** — factory/OpenRig pieces fired by
+zeropoint/swarmclaw DAGs via the CLI/adapter (broadening the live ADR-1/SC2
+`external_job` narrow form) — chartered in
+`_bmad-output/sprint-artifacts/dark-factory-v6/2026-10-01-v6-derivation-session-INPUT.md`,
+decided in `docs/superpowers/specs/2026-10-02-v6-story-derivation-decisions.md`
+(DD-14+), two sprints: v6a "Foundation" then v6b "Autonomy".
+
 ## Modules
 
 Two layers live in this tree. The **Dark Factory v5 control plane** is the
@@ -19,9 +30,9 @@ sits the **Phase-0 scaffolding** — `src/gate/`, `src/swarmclaw/`,
 `src/hindsight/`, `scripts/*-verify.ts`, `cli-anything/` and
 `pi-vs-claude-code-vendor/` — which was the whole product in July and is now the
 harness underneath it. That layer's exit gate is still
-`gate-red-not-exitable`, while 23 of 31 Dark Factory stories have shipped on top
-of it as of 2026-08-28; read a Phase-0 module as scaffolding unless you are working on the gate
-itself.
+`gate-red-not-exitable`, while the Dark Factory v5 slate has fully shipped on
+top of it (42/42 stories closed 2026-10-01 — see Program status above); read a
+Phase-0 module as scaffolding unless you are working on the gate itself.
 
 ### Dark Factory v5 control plane
 

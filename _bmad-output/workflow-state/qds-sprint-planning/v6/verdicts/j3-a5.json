@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "story": "J3+A5",
+  "owned": ["J3", "A5"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 0 },
+  "applied": [
+    {
+      "story": "J3",
+      "severity": "HIGH",
+      "finding": "Files-to-Modify named src/providers/harvest.ts as the M1.2-owned retain site, but M1.2's landed harvest-retain seam is scripts/fleet.ts (host-side, outside the box COPY set); src/providers/harvest.ts is a box COPY-set file (oci/exedev/Dockerfile:344) whose adds-only edit would have silently moved deriveBuildId while the re-pin Technical Note and INV-JR-1 negative space attributed the image move to the dispatch.ts edit alone.",
+      "fix": "Swapped the Files-to-Modify entry to scripts/fleet.ts (adds-only at M1.2's landed seam, no image move; harvest.ts explicitly NOT touched); Technical Notes re-pin bullet and INV-JR-1 negative space now state the harvest-side add is COPY-set-free."
+    },
+    {
+      "story": "J3",
+      "severity": "MEDIUM",
+      "finding": "AC2 mandated 'exactly one log line per dispatch' appended 'crash-safe (temp+rename idiom)' to .sandbox/routing-log.jsonl with no single-writer posture — whole-file temp+rename on a JSONL append loses lines under concurrent dispatches.",
+      "fix": "AC2 now mandates a single-writer posture via the corpus-lock idiom (acquireRunLock on the log dir, CORPUS_LOCK_ID precedent) and explicitly rules out whole-file temp+rename as the append idiom."
+    },
+    {
+      "story": "J3",
+      "severity": "MEDIUM",
+      "finding": "Retain target bank written as the unresolved glob 'qds-*-meta' (Overview, E2E, AC5, Infra Prerequisites) while DD-15 retires P2.8's qds-meta routing and M3.1 defines the family as {baseId}-dev-meta/-qa-meta/-maint-meta — an implementer would have to guess the bank.",
+      "fix": "Pinned {baseId}-dev-meta (M3.1's family; the dev lane is the router's consumer, v4 :575) in all four mentions."
+    },
+    {
+      "story": "J3",
+      "severity": "MEDIUM",
+      "finding": "Observability enumerated a 'router-disabled' routing-skip reason, but no runtime disable switch is scoped anywhere in the story (trigger surface refuses new flags; the flex-cut revert point is the dispatch hook itself) — an observability state with no mechanism.",
+      "fix": "Reason enum reduced to features-unavailable with an explicit note that a compiled-out hook emits no line (correct, not a skip)."
+    },
+    {
+      "story": "A5",
+      "severity": "HIGH",
+      "finding": "documentId = 'kpi-snapshot-' + <windowId> left windowId undefined; if derived from the bare --window label ('7d'), every later invocation under the same label reuses one documentId with changed content — tripping M1.2's divergent-tamper alarm (same id, mutated content) by construction, the exact P2.8 stable-DATED-documentId doctrine.",
+      "fix": "AC5 pins windowId = the UTC window-bounds slug, dated by construction (same bounds → byte-identical → idempotent replace; distinct windows → distinct documents), with a negative control on the bare-label derivation MUST-failing."
+    },
+    {
+      "story": "A5",
+      "severity": "HIGH",
+      "finding": "FR-LEARN-33 is cited 'verbatim in R1' while 1 of the 4 pairs was silently substituted: v4 pairs TDI with 'pi-lens warning count', A5 pairs TDI-proxy with 'unattributed-signal count' — the pi-lens absence justifies the swap but the deviation was unstated (decision (2) covered only the KPI rename).",
+      "fix": "Decision (2) now states the counter substitution as a STATED deviation (same provenance as the KPI rename) and, same deviation class, that v4's retry-count is computed as a rate for window comparability; Technical Notes gaming-vector bullet cross-references decision (2)."
+    },
+    {
+      "story": "A5",
+      "severity": "MEDIUM",
+      "finding": "Same unresolved 'qds-*-meta' glob as J3 for the snapshot-summary retain target.",
+      "fix": "Pinned {baseId}-dev-meta (M3.1's family) in Overview, E2E, AC5, sibling-contracts line, and Infra Prerequisites."
+    }
+  ],
+  "surviving": [],
+  "checklists_fired": {
+    "J3": ["secrets-invariants"],
+    "A5": ["secrets-invariants"]
+  },
+  "verification_notes": {
+    "citations_checked": [
+      "J3: charter :106 flex-cut (verified verbatim, R5 :136 corroborates); Jev handoff §3 LOCKED #1/#5/#7/#9/#10 (verified against handoff.md:36-60); prd-v4:420 FR-LEARN-30 (R1 verbatim); resolveSlug schema.ts:243 within cited :226-258; dispatch.ts:83 parseRoster import; roster/validate.ts exists; ceiling 1M = DEFAULT_STAGE_CEILING_INPUT_TOKENS; egress ac-prose default, diff-hunk ZDR-gated; provenance dir emit.ts:30; TYPESAFE_MODEL drift alarm",
+      "A5: charter §5.4 (import-graph invariant) and §5.5 (counterpart stories BUILD-IN-FORK) verified at :133-134; DD-20 join keys; DD-15 P2.4/P2.8 folds; FR-LEARN-33 PRD:423 + directions :865 + NFR-OBS-6(b) :735 (R1 verbatim); cost-ledger :579/:7-11/:1351 read-only-never-creates; walkAuditChain :726 / chainVerdict :560; DISPATCH_FAILURE_LOG dispatch.ts:103; run-record 0600 O_EXCL idiom; R5 §4.3 live-round list excludes both stories (Z3/A2/A3/M2.3 only); R5 lane-2 confirms both"
+    ],
+    "atomicity": "J3 128 lines / 5 SP / 10 DoD; A5 135 lines / 3 SP / 9 DoD — all within charter gate (≤185 target, ≤10 DoD, ≤8 SP, ≤10 files: J3=7, A5=5)",
+    "shared_pattern_note": "all 4 items verified present post-edit (J3: deterministic-applied + recorded-only + J1 seam + routing-log contract + never-fail-dispatch + batched re-pin + flex-cut seam; A5: 4/4 paired counters + integer µ$ + DD-20 both-ledger join with spend_incomplete/unmatched accounting + append-only 0600 snapshots + typed-absent read-side dimensions with no A2/J3 dep edges + optional render; fleet-only code entry; approve doctrine untouched; ADR-2 PROPOSED; TDI-proxy rename + escaped-defect absent-not-0)"
+  }
+}

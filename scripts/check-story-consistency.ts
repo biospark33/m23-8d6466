@@ -28,6 +28,11 @@ const ROOT = resolve(import.meta.dir, "..");
 const YAML = join(ROOT, "_bmad-output/sprint-artifacts/sprint-status.yaml");
 const STORIES = join(ROOT, "_bmad-output/sprint-artifacts/dark-factory-v5/stories");
 const EPICS = join(ROOT, "_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md");
+// v6 slate (DD-27): same checks, second directory + second index. A v6 row invisible to
+// this gate would make the charter's "rows must reconcile" discipline honor-system — the
+// exact failure this file exists to prevent.
+const V6_STORIES = join(ROOT, "_bmad-output/sprint-artifacts/dark-factory-v6/stories");
+const V6_EPICS = join(ROOT, "_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v6.md");
 
 type Finding = { check: string; where: string; problem: string; fix: string; info?: boolean };
 const findings: Finding[] = [];
@@ -39,7 +44,7 @@ function bail(msg: string): never {
   process.exit(2);
 }
 
-for (const p of [YAML, STORIES, EPICS]) if (!existsSync(p)) bail(`missing ${p}`);
+for (const p of [YAML, STORIES, EPICS, V6_STORIES, V6_EPICS]) if (!existsSync(p)) bail(`missing ${p}`);
 
 // ── The repo's file index, for citation resolution ────────────────────────────
 // Built once. Keyed by basename so we can detect the dangerous case: a bare
@@ -66,8 +71,10 @@ const lineCount = (rel: string): number =>
   readFileSync(join(ROOT, rel), "utf8").split("\n").length;
 
 // ── Parse the per-story rows (the authoritative slate) ────────────────────────
+// v5 `DF{n}[.{n}]` + v6 `Z1 / M1.1 / A6 / J1 / G1` (DD-27). The P-prefix phase rows are
+// a retired slate and stay outside this gate.
 const yamlText = readFileSync(YAML, "utf8");
-const ROW = /^\s{6}(DF[0-9]+\.[0-9]+[a-z]?):\s*\{([^}]*)\}/gm;
+const ROW = /^\s{6}((?:DF|Z|M|A|J|G)[0-9]+(?:\.[0-9]+)?[a-z]?):\s*\{([^}]*)\}/gm;
 type Row = { id: string; points: number; status: string; deps: string[]; raw: string };
 const rows: Row[] = [];
 for (const m of yamlText.matchAll(ROW)) {
@@ -105,24 +112,46 @@ if (rows.length === 0) bail("parsed zero DF story rows from sprint-status.yaml (
       `cross-check asserts ${xc[1]} not-done pts of ${xc[2]}; rows give ${ndPts} of ${total}`,
       `the paragraph claims it was "recomputed from the per-story entries" — make that true`);
   }
+  // v6 slate claim (DD-14a): the v6 meta note states the row-derived totals. The claim
+  // must exist EXACTLY ONCE and parse — a missing/malformed/duplicated claim would make
+  // this loop silently green (the honor-system failure the gate exists to prevent).
+  const v6Rows = rows.filter((r) => /^(Z|M|A|J|G)/.test(r.id));
+  const v6Total = v6Rows.reduce((n, r) => n + r.points, 0);
+  const v6Claims = [...yamlText.matchAll(/V6 ROWS: (\d+) stories \/ (\d+) pts/g)];
+  if (v6Claims.length !== 1) {
+    add("slate", "sprint-status.yaml v6 meta",
+      `expected exactly one parseable "V6 ROWS: <n> stories / <n> pts" claim, found ${v6Claims.length}`,
+      "write one claim in the v6 meta block — the gate cannot reconcile what it cannot parse");
+  }
+  for (const c of v6Claims) {
+    if (Number(c[1]) !== v6Rows.length || Number(c[2]) !== v6Total) {
+      add("slate", "sprint-status.yaml v6 meta",
+        `v6 meta claims ${c[1]} stories / ${c[2]} pts; the v6 rows sum to ${v6Rows.length} / ${v6Total}`,
+        "recompute — never increment. Rows are authoritative (DD-14a).");
+    }
+  }
 }
 
 // ── CHECK 2 — every story row has a spec file, and its header agrees ───────────
-const specFiles = readdirSync(STORIES).filter((f) => f.endsWith(".md"));
-const specFor = (id: string): string | undefined => {
+const specFiles = [
+  ...readdirSync(STORIES).map((f) => ({ f, dir: STORIES })),
+  ...readdirSync(V6_STORIES).map((f) => ({ f, dir: V6_STORIES })),
+].filter((e) => e.f.endsWith(".md"));
+const specFor = (id: string): { f: string; dir: string } | undefined => {
   const slug = id.toLowerCase().replace(/\./g, "-");
-  return specFiles.find((f) => f === `${slug}-` || f.startsWith(`${slug}-`));
+  return specFiles.find((e) => e.f === `${slug}-` || e.f.startsWith(`${slug}-`));
 };
 for (const r of rows) {
-  const f = specFor(r.id);
-  if (!f) {
+  const spec = specFor(r.id);
+  if (!spec) {
     if (r.status !== "done") {
-      add("spec-file", r.id, `no spec file in ${STORIES.slice(ROOT.length + 1)}`,
+      add("spec-file", r.id, `no spec file in a stories directory`,
         "author it, or mark the row done if it shipped before the story convention");
     }
     continue;
   }
-  const head = readFileSync(join(STORIES, f), "utf8").slice(0, 4000);
+  const f = spec.f;
+  const head = readFileSync(join(spec.dir, f), "utf8").slice(0, 4000);
   const pts = head.match(/\*\*Points:\*\*\s*(\d+)|Points:\s*(\d+)/);
   const p = Number(pts?.[1] ?? pts?.[2] ?? Number.NaN);
   if (Number.isFinite(p) && p !== r.points) {
@@ -139,11 +168,11 @@ for (const r of rows) {
 // ── CHECK 3 — every not-done story appears in the epics index ─────────────────
 // DF2.13 was authored after the index was last resynced and had zero hits.
 {
-  const epics = readFileSync(EPICS, "utf8");
+  const epics = readFileSync(EPICS, "utf8") + readFileSync(V6_EPICS, "utf8");
   for (const r of rows) {
     if (r.status === "done") continue;
     if (!epics.includes(r.id)) {
-      add("epics-index", r.id, `absent from ${EPICS.slice(ROOT.length + 1)}`,
+      add("epics-index", r.id, `absent from the epics index`,
         "add its section — the index is a marker-grep participant and silently under-counts");
     }
   }
@@ -183,12 +212,19 @@ for (const r of rows) {
     const id = [...statusOf.keys()].find((k) => f.startsWith(`${k.toLowerCase().replace(/\./g, "-")}-`));
     return id ? statusOf.get(id) !== "done" : false;
   };
-  const CITE = /([A-Za-z0-9_./-]+\.(?:ts|tsx|sh|json|yaml|yml|md)):(\d+)/g;
-  for (const f of specFiles) {
-    const text = readFileSync(join(STORIES, f), "utf8");
+  const CITE = /((?:fork:|solstice:)?[A-Za-z0-9_./-]+\.(?:ts|tsx|sh|json|yaml|yml|md)):(\d+)/g;
+  for (const spec of specFiles) {
+    const f = spec.f;
+    const text = readFileSync(join(spec.dir, f), "utf8");
     const isInfo = !gated(f);
     for (const m of text.matchAll(CITE)) {
-      const [, p, nStr] = m as unknown as [string, string, string];
+      const [, pRaw, nStr] = m as unknown as [string, string, string];
+      // fork:/solstice:-prefixed cites point OUTSIDE this repo by contract (v6-crossrepo-contract
+      // §0: zeropoint code is never in the factory import graph, so the factory walker cannot
+      // and must not resolve them). The prefix is the reviewer's marker that the citation is
+      // cross-repo and was verified against the OTHER checkout.
+      if (pRaw.startsWith("fork:") || pRaw.startsWith("solstice:")) continue;
+      const p = pRaw;
       const n = Number(nStr);
       let cands: string[];
       if (existsSync(join(ROOT, p))) cands = [p];
