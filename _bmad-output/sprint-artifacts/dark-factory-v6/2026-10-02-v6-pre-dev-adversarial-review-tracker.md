@@ -318,7 +318,8 @@ silently harness-blocking, dead `refresh-endpoint` enum member). All 5 applied
 parent-direct (fixers stood down; recipes exact). Gates re-run green: checker OK 65/250,
 tests 7/0.
 
-**Campaign total stands at 76 findings (1 BLOCKER / 14 HIGH / 30 MEDIUM / 31 LOW), all
-resolved. This was the last verification wave** — finding rate 51 → 20 → 5 across
+**Campaign total stands at 76 findings (2 BLOCKER / 14 HIGH / 31 MEDIUM / 29 LOW), all
+resolved** — Round-3's closed 71 (1B/14H/28M/28L) plus R3-FINAL's 5 (1B/3M/1L). This was
+the last verification wave — finding rate 51 → 20 → 5 across
 verification rounds, all five final findings within the re-fix delta; a further wave
 would be LOW-only polish at cost > value.

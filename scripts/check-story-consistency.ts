@@ -188,8 +188,11 @@ for (const r of rows) {
   const ids = new Set(rows.map((r) => r.id));
   for (const r of rows) {
     for (const d of r.deps) {
-      // Phase-0/1/2 KEEP ids (P0.x / P1.x / P2.x) live in a retired slate; not our business.
-      if (/^P/.test(d)) continue;
+      // Retired-slate KEEP ids (P0.x / P1.x / P2.x) are not our business. The exemption is
+      // scoped to exactly those three forms: a later-phase P id (`P3.1`) is NOT a retired
+      // slate id — it falls through to the grammar check and fails there, like any other
+      // unknown id, instead of silently skipping the gate.
+      if (/^P[012]\./.test(d)) continue;
       // Both active slate grammars resolve (v5 `DF{n}[.n][a-z]`, v6 `Z|M|A|J|G{n}[.n][a-z]` —
       // DD-27). Filtering on DF alone left every v6 dep edge silently unresolved.
       if (!/^(?:DF|Z|M|A|J|G)\d/.test(d)) {

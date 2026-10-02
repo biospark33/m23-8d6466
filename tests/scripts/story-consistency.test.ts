@@ -138,4 +138,14 @@ describe("the checker's findings fire on fixtures (real findings, not just exit 
     expect(r.code).toBe(1);
     expect(r.out).toContain("matches no active slate id grammar");
   });
+
+  test("a P-prefixed dep OUTSIDE the retired P0.x/P1.x/P2.x forms reaches the grammar check and fails (P3.1)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1, `Z2: { title: "t", points: 2, status: ready-for-dev, deps: [P3.1] }`], 2, 5),
+      stories: { "z1-fixture.md": story("3", "ready-for-dev"), "z2-fixture.md": story("2", "ready-for-dev") },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('deps names "P3.1"');
+    expect(r.out).toContain("matches no active slate id grammar");
+  });
 });
