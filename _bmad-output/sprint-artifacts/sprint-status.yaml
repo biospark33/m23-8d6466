@@ -54,7 +54,10 @@ meta:
   # Post-merge operator-gated: G5 pairing round (DEFERRED by operator arrangement —
   # .unlazy/df3-6b/GATES.md carries the disposition) and the Vultr VPS deploy
   # (_bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md + companion
-  # 2026-09-30-p0-5-p0-9-closure-plan.md). Next sprint shape: operator-defined (v6).
+  # 2026-09-30-p0-5-p0-9-closure-plan.md). Next program (operator ruling 2026-10-01): the
+  # v6 pivot — factory/OpenRig pieces fired by zeropoint/swarmclaw DAGs via the CLI/adapter
+  # (broadens the live ADR-1/SC2 external_job narrow form); Solstice vultr-deploy becomes
+  # the deployment template once integration lands. Ops items above are DEFERRED, not dropped.
   # (2026-09-08 status audit: DF1.10 PR #216 +8, DF1.11 PRs #232/233/234/236/237 +5, DF3.5 PR #185
   # +2 — all three verified MERGED against git history, not against story prose; recomputed from
   # the per-story entries below, not incremented by hand.

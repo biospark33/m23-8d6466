@@ -3,7 +3,45 @@
 > Written 2026-09-17 after the SwarmClaw-drop investigation session. Paste the body below
 > into a fresh session to resume. Re-sync live state before acting — waves move fast.
 
-## STATUS UPDATE 2026-09-30 — read FIRST; the 2026-09-14 snapshot and the plan below are 13 days stale in five places
+## STATUS UPDATE 2026-10-01 — read FIRST; operator ruling: v5 closed, ops deferred, pivot to swarmclaw integration
+
+**v5 is CLOSED** — 42/42 stories / 169/169 pts (PR #399 → 5feaeec6; close-out recorded in
+`sprint-status.yaml`'s dated header block).
+
+**OPERATOR RULING 2026-10-01 (evening): all remaining ops are DEFERRED, documented, not
+abandoned. Zero agent spend on any of these until the operator re-opens them:**
+
+1. **Image-pin CI red** (two conditions, both gathered 2026-10-01):
+   - `base-drift` job: pinned exeuntu base `ea6c3f5c…` vs upstream `c811379e…` — fires BY
+     DESIGN on upstream's weekly no-cache rebuild; the job's own output says NOT an incident.
+   - `verify (default)` job: `DEFAULT_IMAGE_REF` `ee802669…` is MANIFEST_UNKNOWN on GHCR —
+     measured in CI (#397) but not visible/published; no provenance, no exception-register
+     entry. Real red on every dev push until the full re-pin ritual (re-pin base → rebuild →
+     re-sweep → publish via publish-exedev-image.yml → adopt in driver.ts) or a documented
+     exception. `scripts/adopt-image-pin.ts` + the #396–#398 precedent are the adoption path.
+2. **Vultr VPS deploy** (swarmclaw platform + Hindsight + factory host CLI) — plan of record
+   stays `_bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md` + companion closure
+   plan. No provisioning by agents; box state and every `[OPERATOR-GO]` gate await the
+   operator.
+3. **G5 pairing round** — DEFERRED-by-operator-arrangement per `.unlazy/df3-6b/GATES.md`
+   (env needed from operator: `QDS_E2E_FIX_PR` + records dir + `fix-scope.json`).
+
+**THE PIVOT: next program = factory ↔ zeropoint/swarmclaw integration** — the
+factory/OpenRig pieces fired off by swarmclaw DAGs via the CLI/adapter. This BROADENS the
+already-live narrow form rather than starting from zero: ADR-1 (PR #387, operator-signed)
+approved the SwarmClaw `external_job` adapter driving `factory_run` over the fleet CLI
+substrate, and SC2.6/SC2.7 proved it live end-to-end (evidence
+`_bmad-output/evidence/openrig-sc2/`). The v6 derivation session (Phase 3 below) is the
+entry point — its Epic S re-derivation writes against this exact substrate reality.
+
+**Deployment template note (operator):** once the integration lands, the Solstice
+vultr-deploy deployment (`/Users/steve/Solstice/.claude/worktrees/vultr-deploy` @ d0c513fa,
+`deploy/control-plane/{Caddyfile,docker-compose.yml,backup.sh}`) is the intended TEMPLATE
+for the real-infra deployment of the integrated stack. It informs the deferred VPS work —
+do not treat the QDS runbook and that template as independent deployables when the pivot
+lands.
+
+## STATUS UPDATE 2026-09-30 — read SECOND; the 2026-09-14 snapshot and the plan below are 13 days stale in five places
 
 **Stale flags (this doc says → what is now true):**
 
