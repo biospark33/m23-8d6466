@@ -22,7 +22,12 @@ story cannot be built under that rule, the story is wrong — fix the story.
 **Citation marker (DD-28.8/28.26):** cross-repo file citations carry a `fork:` or
 `solstice:` prefix — the reviewer's marker that the citation was verified against the OTHER
 checkout and is unresolvable (by design) in this repo. Bare cross-repo cites are
-checker findings (`scripts/check-story-consistency.ts` exempts prefixed cites only).
+checker findings when they are line-numbered code cites (`path.ext:N`, ext ∈ {ts, tsx, sh,
+json, yaml, yml, md} — the checker's extension set and the only form it resolves;
+`scripts/check-story-consistency.ts` exempts prefixed cites only). A path mention without a
+line number carries nothing the checker can decide and stays on review. A bare `:N` (a
+`(:119)`-style parenthetical) is not a cite form of its own — it is a continuation riding
+its antecedent cite's path.
 
 ## 1. Contract-as-code (the Q1 discipline, extended)
 

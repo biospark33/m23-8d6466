@@ -152,13 +152,18 @@ for (const r of rows) {
   }
   const f = spec.f;
   const head = readFileSync(join(spec.dir, f), "utf8").slice(0, 4000);
-  const pts = head.match(/\*\*Points:\*\*\s*(\d+)|Points:\s*(\d+)/);
-  const p = Number(pts?.[1] ?? pts?.[2] ?? Number.NaN);
+  // Both header spellings live in the wild (`**Story Points:**` v5-late/v6, `**Points:**` v5)
+  // — a spelling the regex misses parses as NaN and the row is silently skipped, which is a
+  // green check that checked nothing.
+  const pts = head.match(/\*\*Story Points:\*\*\s*(\d+)|\*\*Points:\*\*\s*(\d+)|Points:\s*(\d+)/);
+  const p = Number(pts?.[1] ?? pts?.[2] ?? pts?.[3] ?? Number.NaN);
   if (Number.isFinite(p) && p !== r.points) {
     add("header", `${r.id} (${f})`, `story header says ${p} points; yaml row says ${r.points}`,
       `make them equal — the yaml row is the slate's source of truth`);
   }
-  const st = head.match(/\*\*Status:\*\*\s*([a-z-]+)/)?.[1];
+  // The value itself may be bold-wrapped (`**Status:** **gated**` — Z3) — `\*{0,2}` around
+  // the capture keeps an unparsed status from reading as "no header status to compare".
+  const st = head.match(/\*\*Status:\*\*\s*\*{0,2}([a-z-]+)\*{0,2}/)?.[1];
   if (st && st !== r.status) {
     add("header", `${r.id} (${f})`, `story header status "${st}"; yaml row "${r.status}"`,
       `correct against git history, not against either document's prose`);
@@ -183,8 +188,15 @@ for (const r of rows) {
   const ids = new Set(rows.map((r) => r.id));
   for (const r of rows) {
     for (const d of r.deps) {
-      // Phase-0/1 KEEP ids (P0.x / P1.x) live in a different slate; not our business.
-      if (!/^DF/.test(d)) continue;
+      // Phase-0/1/2 KEEP ids (P0.x / P1.x / P2.x) live in a retired slate; not our business.
+      if (/^P/.test(d)) continue;
+      // Both active slate grammars resolve (v5 `DF{n}[.n][a-z]`, v6 `Z|M|A|J|G{n}[.n][a-z]` —
+      // DD-27). Filtering on DF alone left every v6 dep edge silently unresolved.
+      if (!/^(?:DF|Z|M|A|J|G)\d/.test(d)) {
+        add("deps", r.id, `deps names "${d}", which matches no active slate id grammar (v5 DF{n}, v6 Z|M|A|J|G{n})`,
+          "re-point it — deps must name a story id from an active slate");
+        continue;
+      }
       if (!ids.has(d)) {
         add("deps", r.id, `deps names "${d}", which is not a story id in this slate`,
           "re-point it — a split (DF6.1 -> DF6.1a/b) retires the old id");

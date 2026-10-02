@@ -82,6 +82,7 @@ The round fires A2's scheduled protocol once: QA hunter-pack legs run and retain
 - `scripts/z3/round-plan.ts` — new (round composition, cap constants, worst-case spend print, GO gate)
 - `scripts/z3/leg-drivers.ts` — new (one driver per leg; each writes its own leg JSON)
 - `_bmad-output/evidence/v6-z3/` — new (committed scrubbed evidence, `openrig-sc2/` naming)
+- `_bmad-output/evidence/openrig-sc2/fork-rev-manifest.json` — **adds only**: the `v6-z3/` rows this round's evidence needs for Z1's alarm (authored by this round per z1 AC5 — Z1 authors `openrig-sc2/` rows only)
 - `docs/planning/v6-crossrepo-contract.md` — adds only (Z3 round record; any contract deltas observed during the round enter as findings, never as quiet edits)
 - Counterpart (solstice repo, not a factory file): scheduled-protocol round harness + schedule definition, BUILD-IN-FORK, same contract text.
 
@@ -98,7 +99,7 @@ The round fires A2's scheduled protocol once: QA hunter-pack legs run and retain
 
 - [ ] **Impl:** round plan + leg drivers; tsc/biome clean; `detect_changes()` 0 unexpected affected symbols.
 - [ ] **Integration:** worst-case spend printed and operator GO recorded before the first fire.
-- [ ] **Integration:** full round green — all 11 legs present, each JSON written by its own driver and stamped `swarmclawForkRev` (Z1's alarm covers the `v6-z3/` corpus).
+- [ ] **Integration:** full round green — all 11 legs present, each JSON written by its own driver and stamped `swarmclawForkRev` (Z1's alarm covers the `v6-z3/` corpus — the manifest rows for it are authored by this round, per z1 AC5's per-directory growth rule).
 - [ ] **Security:** AC2/AC3/AC5 negative controls demonstrated failing (fixture-tier dry runs where live spend is not warranted).
 - [ ] **Integration:** crash-window leg live — mid-submit kill + re-drive, zero stranded boxes, zero double spend.
 - [ ] **Integration:** priming round-trip proven — the code-affecting run's `<kg_context>` contains a retained finding with citation token.

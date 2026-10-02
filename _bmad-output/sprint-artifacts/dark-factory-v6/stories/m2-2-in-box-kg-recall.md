@@ -85,7 +85,7 @@ This story builds the in-box half of the memory lane: a pi extension registering
 - `src/fleet/run-completion.ts` — **adds only** (the teardown chain's revoke-verify call site: the `runMemoryKeyLifecycle` mirror invoked beside the chain's existing credential teardown ordering, per DD-28.26(5))
 - `src/providers/exedev/driver.ts` — **adopt-image-pin-owned** (adopt-only) + **comment-only** (:466-467 stale pairing prose)
 - `docs/superpowers/specs/` ritual runbook — **new** (re-pin ritual procedure + CI expectations; the AC5 artifact)
-- `tests/memory/kg-recall-extension.test.ts` — **new** (tool surface, grant filtering, sanitization passthrough, ceiling, refusal surfacing)
+- `tests/memory/kg-recall-extension.test.ts` — **new** (tool surface, grant filtering, sanitization passthrough, ceiling, refusal surfacing, and the permission-independence escalation-payload test: a recall payload carrying escalation text asserts tool surface/permissions unchanged and the payload lands only as quoted data — INV-M2-2/AC3's load-bearing fence, named in DoD)
 - `tests/memory/kg-recall-teardown.test.ts` — **new** (deliver→revoke→verify ordering + failed-delivery compensation, mock tier)
 
 ## Security Invariants
@@ -104,7 +104,7 @@ This story builds the in-box half of the memory lane: a pi extension registering
 - [ ] **Test (extension):** `tests/memory/kg-recall-extension.test.ts` green — exact tool surface, un-granted role sees nothing, write-tool registration refused.
 - [ ] **Test (teardown):** `tests/memory/kg-recall-teardown.test.ts` green — revoke→verify precedes destroy; failed-delivery compensation path covered.
 - [ ] **Contract:** `QDS_KG_RECALL_KEY` / `QDS_KG_GATEWAY_URL` + char ceiling registered (flagged to the DD register — Deviation 1's seam is single-named; the `no-auth` refusal token per Deviation 2 stands flagged); roster grant documented in the roster header.
-- [ ] **Security:** audit of the extension source shows zero write-verb paths; the extension's sanitize pass + ceiling asserted end-to-end at mock tier.
+- [ ] **Security:** audit of the extension source shows zero write-verb paths; the extension's sanitize pass + ceiling asserted end-to-end at mock tier; the permission-independence escalation-payload test green in `kg-recall-extension.test.ts` — a recall payload carrying escalation text leaves tool surface/permissions unchanged and lands only as quoted data (INV-M2-2/AC3, the load-bearing fence).
 - [ ] **Ritual (operator-gated):** runbook written; after GO — rebuild, publish, adopt, `verify-image-pin` verify leg green, base-drift-by-design documented, evidence file recorded.
 - [ ] **Integration:** GitNexus `impact()` before editing any shared symbol; `detect_changes()` before commit (repo CLAUDE.md).
 - [ ] **Test (e2e demo — MANDATORY):** mock-tier chained demo — granted-role spawn → `-e` pair present → recall → truncate → teardown revoke-verify, using only this story's code plus M2.1.
