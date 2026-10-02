@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Epic Z — adapter-contract arc, story 1 of 2; Wave 1, zero E21 gates, Live tier: none)
-**Status:** ready-for-dev
+**Status:** done
 
 ## Spec Reference
 

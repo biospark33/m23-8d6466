@@ -10,6 +10,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { SWARMCLAW_FORK_REV } from "../../../scripts/swarmclaw-fork-pin.ts";
 
 export const QDS_ROOT = path.resolve(import.meta.dir, "..", "..", "..");
 export const SWARM_WORKTREE = process.env.SC2_SWARM_WORKTREE ?? "/Users/steve/swarmclaw-worktrees/sc2-live";
@@ -357,10 +358,50 @@ function assertNoSecrets(obj: unknown): void {
   if (s.includes("sc27tok-")) throw new Error("evidence scrub: sc27tok- (approver token) survived");
 }
 
+/** Depth-limited scan mirroring the alarm's recursive finder (cap guards cyclic payloads). */
+function hasSwarmclawForkRevDeep(value: object, depth = 0): boolean {
+  if ("swarmclawForkRev" in value) return true;
+  if (depth >= 10) return false;
+  return Object.values(value).some((v) => typeof v === "object" && v !== null && hasSwarmclawForkRevDeep(v, depth + 1));
+}
+
 export function writeEvidence(tag: string, name: string, payload: unknown): void {
+  // swarmclawForkRev arms the AC7 drift alarm — every post-pin openrig-sc2
+  // round is alarmable; factory-only df3-e2e rounds (live-harness) stamp
+  // nothing by design. Stamped on a copy: the caller's payload stays
+  // unmutated and the scrub still gates the exact bytes that land on disk.
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new Error(
+      `evidence payload must be a plain object — got ${payload === null ? "null" : Array.isArray(payload) ? "Array" : typeof payload}`,
+    );
+  }
+  // The writer owns the stamp: a caller-supplied swarmclawForkRev would launder
+  // a recorded rev; 'wx' below fails loud on a same-millisecond name collision.
+  if ("swarmclawForkRev" in payload) {
+    throw new Error(
+      `payload already carries swarmclawForkRev=${JSON.stringify(payload.swarmclawForkRev)} — the writer owns the stamp; a caller-supplied stamp would launder a recorded rev`,
+    );
+  }
+  // The alarm's finder is fully recursive, so the guard must be too: a nested
+  // swarmclawForkRev would land on disk and false-fire drift.
+  if (hasSwarmclawForkRevDeep(payload)) {
+    throw new Error(
+      `payload carries a nested swarmclawForkRev — the writer owns the stamp at any depth; a caller-supplied stamp would launder a recorded rev and false-fire the drift finder`,
+    );
+  }
+  // This stamp records the pin at write time only: if the fork advanced without a bump PR, the manifest row's rev (which must equal the pin post-pin) forces the bump — stamp freshness is enforced by the alarm's row check, not here.
+  payload = { ...payload, swarmclawForkRev: SWARMCLAW_FORK_REV };
   assertNoSecrets(payload);
   const dir = path.join(QDS_ROOT, "_bmad-output", "evidence", "openrig-sc2");
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  fs.writeFileSync(path.join(dir, `${stamp}-${tag}-${name}.json`), JSON.stringify(payload, null, 2));
+  const file = path.join(dir, `${stamp}-${tag}-${name}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify(payload, null, 2), { flag: "wx" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`evidence write collision: ${file} already exists (same-millisecond same-name write)`);
+    }
+    throw e;
+  }
 }
