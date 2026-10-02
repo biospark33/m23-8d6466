@@ -112,10 +112,18 @@ if (rows.length === 0) bail("parsed zero DF story rows from sprint-status.yaml (
       `cross-check asserts ${xc[1]} not-done pts of ${xc[2]}; rows give ${ndPts} of ${total}`,
       `the paragraph claims it was "recomputed from the per-story entries" — make that true`);
   }
-  // v6 slate claim (DD-14a): the v6 meta note states the row-derived totals.
+  // v6 slate claim (DD-14a): the v6 meta note states the row-derived totals. The claim
+  // must exist EXACTLY ONCE and parse — a missing/malformed/duplicated claim would make
+  // this loop silently green (the honor-system failure the gate exists to prevent).
   const v6Rows = rows.filter((r) => /^(Z|M|A|J|G)/.test(r.id));
   const v6Total = v6Rows.reduce((n, r) => n + r.points, 0);
-  for (const c of yamlText.matchAll(/V6 ROWS: (\d+) stories \/ (\d+) pts/g)) {
+  const v6Claims = [...yamlText.matchAll(/V6 ROWS: (\d+) stories \/ (\d+) pts/g)];
+  if (v6Claims.length !== 1) {
+    add("slate", "sprint-status.yaml v6 meta",
+      `expected exactly one parseable "V6 ROWS: <n> stories / <n> pts" claim, found ${v6Claims.length}`,
+      "write one claim in the v6 meta block — the gate cannot reconcile what it cannot parse");
+  }
+  for (const c of v6Claims) {
     if (Number(c[1]) !== v6Rows.length || Number(c[2]) !== v6Total) {
       add("slate", "sprint-status.yaml v6 meta",
         `v6 meta claims ${c[1]} stories / ${c[2]} pts; the v6 rows sum to ${v6Rows.length} / ${v6Total}`,

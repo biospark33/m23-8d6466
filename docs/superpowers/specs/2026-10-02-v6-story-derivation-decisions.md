@@ -30,8 +30,13 @@ R4 zeropoint/E21/external facts · R5 dependency/sizing), each fact symbol- or l
 ## 2. Slate, arithmetic, horizon
 
 **23 stories / 81 points, two sprints** — v6a "Foundation" (11 stories / 36 pts, THE next
-sprint, zero E21 gates, ships standalone) + v6b "Autonomy" (12 / 45, everything needing
-E21 Home bots). Physical cut line: *does the story need Home bots* (D-1).
+sprint, zero E21 gates, ships standalone) + v6b "Autonomy" (12 / 45: the E21-gated autonomy
+stories **plus** the E21-independent second lane — in-box memory, judgment tier, KPIs — that
+consumes only v6a's substrate). Cut line restated (2026-10-02, supersedes D-1's one-liner):
+*v6a ships with no E21 dependency at all; v6b holds everything sequenced after v6a's
+substrate — the E21-gated stories AND the E21-independent lane, which proceeds without
+waiting on E21.* The charter's "everything requiring E21 Home bots" phrasing is its closed
+input and is not edited; the row-derived slate is authoritative here.
 
 > **DD-14a — slate arithmetic re-baseline.** The charter's §3 epic table (Z16 M26 A16 J16 G2
 > = 76) is stale against its own story rows, which sum Z=16, M=29, A=18, J=16, G=2 = **81**
@@ -46,13 +51,13 @@ E21 Home bots). Physical cut line: *does the story need Home bots* (D-1).
 
 | ID | Decision |
 |---|---|
-| **DD-14** | **Namespace + split ratified** per §1–§2 above: epics Z/M/A/J/G; S→Z rename; v6a/v6b cut line = "needs Home bots"; v6a ships standalone with zero E21 gates; story paths per §1. |
+| **DD-14** | **Namespace + split ratified** per §1–§2 above: epics Z/M/A/J/G; S→Z rename; v6a/v6b cut line restated 2026-10-02 (v6a = zero E21 dependency, ships standalone; v6b = E21-gated stories + the E21-independent second lane, which proceeds without E21) — supersedes the charter D-1 one-liner "needs Home bots", which under-counts v6b's independent lane; story paths per §1. |
 | **DD-14a** | **Arithmetic re-baseline**: M 26→29, A 16→18, program total 76→81, from the story rows (R5). Rows authoritative. |
 | **DD-15** | **P2 fold/supersede register** (13 stories / 44 pts, `_bmad-output/sprint-artifacts/phase-2/README.md`, never scheduled; arithmetic verified exact). Crosswalk-precise (R1 `crosswalk-p2.md`): **FOLD P2.8 → M1.2** — the *mechanism only* (stable dated `documentId` + `updateMode:"replace"`, verbatim p2-8); its Daily-Learnings/qds-product/qds-meta routing surface is NOT folded and dies with its premise. **FOLD P2.4 → Z2 observe artifacts + A5 KPI join** — P2.4's "run tree" was the P2.1 event store (it sat BLOCKED-BY SPIKE-10, never run — the fold retires an unstarted dependency); its `ProtocolRunEvent` vocabulary is the same family ADR-1's `external_job` artifacts speak. **SUPERSEDE** P2.0–P2.3, P2.5–P2.7, P2.12 by named successors: store half of P2.1 → `.sandbox` SQLite trace store (DF1.4, shipped); *recall* half of P2.1 (FTS5/KNN) → the Hindsight KG per D-2's own boundary (the supersession is two-souled and both halves are named); P2.2 → run records; P2.3 → audit chain (DF5.3, shipped); P2.5–P2.7, P2.12 → M3.1 (manager meta banks) and run-record/ledger surfaces as cited per-story. **PARK P2.9–P2.11** (A/B + confirm machinery) with Layer-B — its own park entry in DD-23 (different population from the QDS-MEM agents). **Entry-gate premises superseded**: the P2 entries gate on phase-0/1 plan IDs P0.7, P1.6, P1.15, P1.11 — all four retired premises named here (P1.11's "KEEP" is itself killed by DD-17's transport ruling). |
 | **DD-16** | **D8 amendment** (architecture `2026-08-11-dark-factory-v5-architecture-design.md` D8, ~:305): per-box credential set = (1) one provider secret (unchanged) + (2) one per-run **recall-only** memory key — gateway-issued, runId + bank-allowlist + TTL bound, revoked-and-verified before destroy mirroring `src/providers/credentials.ts` ordering (mint→deliver→capture→revoke→verify + revoke-verify compensation on delivery failure; non-POST-only retries). **No WRITE credential ever enters a box** (F10/INV-7 — writes are host-side from harvested evidence); egress scoped to the gateway origin. Implemented by M2.1; consumed in-box by M2.2. |
 | **DD-17** | **DD-5 (v5 register) fixed, superseded-form**: the stdio premise dies. The dedicated instance's bank-scoped REST (`src/hindsight/client.ts` — listBanks/createBank/retain/recall/reflect/consolidate) + the M2 gateway replace the local-MCP surface entirely. Side effect recorded by the crosswalk: P2.8's P1.11 "KEEP" premise dies with it. Related transport correction: the P0.9 evidence legs assumed shared-platform Hindsight via MCP `/invoke`; M1.1 re-homes leg transport to the dedicated instance (annotate, don't re-litigate). |
 | **DD-18** | **Chassis fate** (`src/swarmclaw/`): utilities `log`/`newRequestId`/`maskEnv` are load-bearing (~50 importers; `maskEnv` in `mcp/tool-bridge.ts`) → extracted to `src/lib/` (Z5), pure move. Server surface (`createServer`/routes/store) is orphan (only `src/index.ts` re-export + tests) → **dormant-retained behind a fixture** pending ADR-2's outcome (an ADR-2 ACCEPT re-opens the query-surface question; REJECT closes it). Z5 implements; a deletion without a named restoration path is refused. |
-| **DD-19** | **Tier C vs ADR-1 reconciliation note**: the Tier A/B/C labels previously existed only in the integration HANDOFF — defined now in [ADR-2](../../decisions/2026-10-02-adr-2-autonomy-approval-surface.md) so the terms have one home. v6 adopts: macro hosting (Tier A, already ACCEPTED), schedules, bot residency, and *partial Tier B* — approval/notification surfaces move to platform channels (`factory_result` artifacts + chat digests + the S05b inbox as override surface) while **policy does not move**. **D6 stays unreversed** (in-box engine, host authority, fleet front door). Full Tier C drift remains out. ADR-2 (auto-merge default + QA-owned verdicts + S05b override) is **PROPOSED** — operator decides via G1; nothing here implements it pre-verdict. | |
+| **DD-19** | **Tier C vs ADR-1 reconciliation note**: the Tier A/B/C labels previously existed only in the integration HANDOFF — defined now in [ADR-2](../../decisions/2026-10-02-adr-2-autonomy-approval-surface.md) so the terms have one home. v6 adopts: macro hosting (Tier A, already ACCEPTED), schedules, bot residency, and *partial Tier B* — approval/notification surfaces move to platform channels (`factory_result` artifacts + chat digests + the S05b inbox as override surface) while **policy does not move**. **D6 stays unreversed** (in-box engine, host authority, fleet front door). Full Tier C drift remains out. ADR-2 (auto-merge default + QA-owned verdicts + S05b override) is **PROPOSED** — operator decides via G1; nothing here implements it pre-verdict. |
 | **DD-20** | **Bot-spend source of truth**: zeropoint LLM-gateway ledger (E08 budgets) for Home-bot turns; factory cost-ledger (integer micro-USD, DD-9 doctrine) for fleet runs. Join keys = workKey (`w:` namespace) + runId + botId; A5 consumes both. **#380 gap statement**: ADR-1 records headless `workId` briefs NOT booking spend as an accepted gap — v6 does NOT silently close it; the zeropoint side owns booking closure as a follow-up, and until it closes, `w:`-keyed fleet legs print spend from the factory cost-ledger (Z3's live-round evidence does this regardless). |
 | **DD-21** | **Jev register**: **L6 in-box tool hooks PARKED** (conflicts the LOCKED host-side placement; re-adjudication = new D-number + evidence of need). D-4 supersedes-refines Jev-handoff LOCKED #3 ("no SDK") — still no SDK, now behind the named `JudgmentProvider` seam; every other LOCKED decision holds verbatim (host-side placement, recording-only until measured, no severity calibration, thresholds-in-code, stage-2 diff-hunk egress ZDR-gated, ceiling + bill alarm; §4 vendor facts binding: noul returns NUMBER, 64k/req limits, input-token billing, jev-1.13.0 pin; `TYPESAFE_MODEL="jev-1.13.0"` literal stays THE drift alarm). **J2 unlock milestones written into its gate**: arm-thresholds unlock requires (a) outcome-confirmed record count threshold, (b) agreement CI, (c) explicit operator sign-off — Goodhart guard against arming on ~3 positives. |
 | **DD-22** | **Graphiti successor bar, set NOW**: labeled probe set + hit-rate@k target defined before deep KG dependency (M1.3); decision checkpoint after ~30 M1 cycles — **dated, not sprint-bound** (continues into v6b). The bar pre-agreed so the post-re-pin recall-quality question (0.8.6→0.10.0) is answered by measurement, not vibes. |
@@ -60,7 +65,7 @@ E21 Home bots). Physical cut line: *does the story need Home bots* (D-1).
 | **DD-24** | **Telegram / OQ-3 unchanged** (v5 register DD-1 stands): channel intake stays parked, BLOCKED-on-creds. Writers must not assume Telegram intake anywhere. |
 | **DD-25** | **Substrate-status erratum** (research-corrected facts writers build on; charter file not edited): (1) **E21 S02a is DONE** (fork #699 + parent #531) — only S02b in-flight; S01/S10a story headers stale vs EPIC Wave A (EPIC is authority). (2) **Hindsight MCP = 27 tools per bank at `/mcp/{bank_id}/`** — the charter's "28 tools at POST :18889/mcp" is wrong on count and shape; no bare `/mcp` exists in fork code. (3) **The vultr-deploy control-plane compose holds only control-plane + caddy** — hindsight/postgres live in the fork's tenant compose; Z4 *adds* factory services, inherits none. (4) **`enqueueSystemEvent` is in-memory (cap 20/session)** — durable wake = schedule-repository + watch-job-repository. (5) **E21 D1 `Owner {kind:'org'}` is policy-refused** until company-bot ships — A1 adjudicates the factory Home as owner=operator-as-user. (6) `src/fleet/verbs.ts` registry now ~:87-663 (charter's :73-431 stale); the box image file is `oci/exedev/Dockerfile` (COPY set ~:277-355); verify-image-pin.yml's header prose about a registered exception is stale (register EMPTY — no cushion for the current pin red); driver.ts:466-467 comment cites a superseded buildId. (7) **"G5" is overloaded**: runbook-G5 = certbot; "G5 pairing" = the DF3.6b gate (`.unlazy/df3-6b/GATES.md`) — writers disambiguate. |
 | **DD-26** | **Wave-edge adjudications + named flex-cuts** (R5): (1) **M2.1 dev-first is sanctioned** — unit/mock tier; its M1.1 dep is an **acceptance-only edge** (acceptance evidence waits for the VPS; code does not). (2) **Z4 authored/fired split** — "authored" ACs (compose, Caddy allowlist, env templates) have no VPS dep and run early; "fired" ACs (deployed + healthy) gate on the operator's VPS-day GO. This resolves Z4's wave-3 slot vs M1.1's wave-2 dep on it. (3) **v6a named flex-cuts** (v6a had none; two added): first cut = M1.3's *report leg* slips to v6b (the probe set itself stays — DD-22 requires it early); second cut = A6's *fired half* rides ops into v6b. (4) v6b cuts per charter, restated: J4-L9 leg first, then J3 → v7. (5) Ops-gate citations pinned: v6a Z4/M1.1 depend on runbook **G1–G7**; the register tracks the full **G1–G9** + GHCR publish ownership (E01-S06/G9) in §5 below. |
-| **DD-27** | **Consistency-gate extension**: `scripts/check-story-consistency.ts` generalized to parse v6 rows (`(DF|Z|M|A|J|G)\d+(\.\d+)?[a-z]?`) and check the v6 story directory + v6 index alongside the v5 slate; the gate test's positive control updates with the combined row count. Without this, DD-14a's reconciliation discipline is honor-system — the exact failure the checker exists to prevent. Implementation rides this derivation PR. |
+| **DD-27** | **Consistency-gate extension**: `scripts/check-story-consistency.ts` generalized to parse v6 rows (`(DF\|Z\|M\|A\|J\|G)\d+(\.\d+)?[a-z]?`) and check the v6 story directory + v6 index alongside the v5 slate; the gate test's positive control updates with the combined row count. Without this, DD-14a's reconciliation discipline is honor-system — the exact failure the checker exists to prevent. Implementation rides this derivation PR. |
 
 ## 4. Writer ground rules (binding on every v6 story)
 
@@ -189,8 +194,13 @@ The pre-dev campaign may amend values; the decision-level record is this entry.
   ceiling, strict parse, envelope, provenance) is **non-delegable** — no adapter may bypass it.
 - **DD-28.12 (J2 gate values — writer-proposed, operator may amend at review):** 200
   outcome-confirmed jev-arm records; Wilson 95% lower bound ≥ 0.90 on **OUTCOME agreement**
-  (not lead-agreement — lead-agreement is circular at the measured 88%); the
-  lead-vs-outcome choice is flagged for operator pin; `MIN_ROUTE_CONFIDENCE = 0.90`,
+  (not lead-agreement — lead-agreement is circular at the measured 88%) — the interval is
+  computed over **independent units, not raw finding records** (amended 2026-10-02): the
+  unit is the `(pr, round)` cluster; a cluster agrees iff every confirmed finding in it
+  agrees; the Wilson interval and a minimum confirmed-cluster count gate on clusters, the
+  200-record count stays the volume floor. Findings within one round share code and
+  reviewer dynamics — treating them as independent overstates the effective n; the
+  lead-vs-outcome choice remains flagged for operator pin; `MIN_ROUTE_CONFIDENCE = 0.90`,
   DISMISS lane only; arming re-adjudicates `ab-report.ts`'s "no gating use" reading (gated
   use of recorded probabilities above the threshold only); armed authority = review-finding
   routing manifest ONLY — never dispatch/gate/code-entry; `confirm-outcome.ts` is
@@ -239,7 +249,9 @@ The pre-dev campaign may amend values; the decision-level record is this entry.
   hop; label home as amended by DD-28.26(2) — the approval state, not a hop emitter)
   hop); `approval-gate.ts` byte-identical; ADR-2 clause 5's veto-window queue is
   **accepted-not-yet-built** in v6a (unreachable until A2 makes runs eligible — the
-  AMENDED verdict block must name it); REJECTED is a valid completion (verdict + DD-18
+  AMENDED verdict block must name it); accepted-not-yet-built does NOT satisfy clause 5 —
+  while the queue is absent, auto-merge stays OFF (fail-closed) unless the verdict amends
+  clause 5 itself; REJECTED is a valid completion (verdict + DD-18
   closure + zero src/ lines).
 - **DD-28.20 (A5):** the gateway-ledger join is mechanical — a strict-schema JSONL import
   artifact at `.sandbox/imports/` (respects the no-zeropoint-import-graph rule); **its
@@ -323,6 +335,13 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     >8h) BEFORE reindex — post-reindex ordering made the alarm structurally inert.
 12. **DD-18 erratum (V12-L3):** the chassis importer census is 74 files / 78 import lines
     (greppable); DD-18's "~50" was a pre-census approximation, superseded by Z5's count.
+13. **`no-auth` refusal token (CodeRabbit round, 2026-10-02):** RATIFIED — `no-auth` joins
+    M2.1's `memgate-refused` reason set as the named refusal for a request carrying no auth
+    header (the 0.8.6 danger shape). M2.2 Deviation 2 and M2.3 Deviation 2's register flags
+    resolve as ACCEPTED: the M2.3 adversarial battery asserts the named token; M2.1's
+    observability vocabulary gains the token (its verify-time refusal already exists — only
+    the name is new). No other verb or scope change; the closed refusal set gains exactly
+    one member.
 
 ## 9. Sources
 

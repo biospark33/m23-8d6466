@@ -37,7 +37,7 @@ the reconciliation note (DD-19) and this draft share one vocabulary:
 | Tier | Meaning | Status |
 |---|---|---|
 | **Tier A** | ADR-1's approved narrow form: swarmclaw hosts macro processes via `external_job`; the fleet CLI stays the substrate; D6 intact; the front door gains a protocol-shaped opening and nothing more. | **ACCEPTED** (ADR-1, 2026-09-30). |
-| **Tier B** | Observability/notification drift: run events surface into the platform (zeropoint UI/inbox/chat) rather than only the factory's own surfaces — approval/notification surfaces move, policy does not. Partially covered already: the DF4.x SSSF visualizer renders run views; v6 adds chat digests (A1) and the S05b inbox as an override surface (this ADR). | **PARTIAL, proposed to widen** (this ADR + DD-19). |
+| **Tier B** | Observability/notification drift: run events surface into the platform (zeropoint UI/inbox/chat) rather than only the factory's own surfaces — approval/notification surfaces move, policy does not. Partially covered already: the DF4.x SSSF visualizer renders run views; v6 adds chat digests (A1) and the S05b inbox as an override surface (this ADR). Tier B is a *surface* classification only: the auto-merge default this ADR's Decision 1 proposes is a **policy change, not Tier B drift** — it is decided on its own terms by this ADR's verdict and never rides Tier B's partial adoption. | **PARTIAL, proposed to widen** (this ADR + DD-19); Decision 1 classified separately as policy. |
 | **Tier C** | Engine drift: the factory itself becomes "just" swarmclaw protocol runs — events → platform UI as the primary surface, reversing D6 (in-box engine, host authority, fleet front door). | **OUT.** Nothing in v6 or this ADR adopts it. |
 
 ## Decision (PROPOSED)

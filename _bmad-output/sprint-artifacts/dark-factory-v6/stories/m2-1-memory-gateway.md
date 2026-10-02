@@ -78,7 +78,7 @@ As the factory, I want a memory gateway that issues per-run recall-only keys and
 
 ## Observability Contract
 
-- Events: `memgate-mint | memgate-deliver | memgate-capture | memgate-revoke | memgate-verify-revoked | memgate-compensate | memgate-refused` — `memgate-refused` carries `reason ∈ {scope-bank, scope-verb, expired, revoked, admin-auth, ledger-unreadable, mint-invalid-ttl}`; lifecycle lines carry the caller's `runId`, token lines its `tokenId`; every line carries `requestId`; durations `mint_ms`/`verify_ms` ride their own events.
+- Events: `memgate-mint | memgate-deliver | memgate-capture | memgate-revoke | memgate-verify-revoked | memgate-compensate | memgate-refused` — `memgate-refused` carries `reason ∈ {scope-bank, scope-verb, expired, revoked, no-auth, admin-auth, ledger-unreadable, mint-invalid-ttl}` (`no-auth` = request with no auth header — the 0.8.6 danger shape, ratified into the set by DD-28.26(13); the verify-time refusal pre-existed it, only the name is new); lifecycle lines carry the caller's `runId`, token lines its `tokenId`; every line carries `requestId`; durations `mint_ms`/`verify_ms` ride their own events.
 - Key material, signature material, and admin keys appear in NO log line, NO argv, NO error message. A refusal reason names the failed CHECK, never the failed credential's contents. `ttlRemainingMs` is **absent, not `0`**, when TTL was not the refusing check.
 
 ## Files to Modify

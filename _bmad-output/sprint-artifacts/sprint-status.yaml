@@ -351,7 +351,7 @@ epics:
       M2.1: { title: "Memory gateway (per-run recall-only keys + agent tokens; D8 amendment impl)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — unit/mock; M1.1 edge ACCEPTANCE-ONLY (dev-first sanctioned, DD-26); mirrors credentials.ts ordering exactly; module root src/memgate/
       M2.2: { title: "In-box kg_recall pi extension + roster grant + full image re-pin ritual", points: 5, status: ready-for-dev, deps: [M2.1] }  # v6b — recall-only/sanitized/char-budgeted/F10-treated; re-pin ritual = operator GO (blocks ALL T2; batched with M1.2/J3 pin moves)
       M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: ready-for-dev, deps: [M2.2, M1.2] }  # v6b — T2; adversarial negative probes; digest-stable audit rows
-      M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: gated, deps: [M2.1, A1] }  # v6b — GATED-WITH-FALLBACK: M2.1 hard; A1 gates ONLY the platform-schedule leg — the documented crontab fallback is E21-free (gateway driver-agnostic)
+      M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: ready-for-dev, deps: [M2.1] }  # v6b — ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
       M3.2: { title: "L4 weekly reflect → PROPOSE (never auto-apply)", points: 3, status: ready-for-dev, deps: [M3.1, A5] }  # v6b — FR-LEARN-30 shape; proposals to meta bank + operator; M3.1 edge satisfiable via fallback leg
   v6-a:
     name: Autonomy (E21-gated)

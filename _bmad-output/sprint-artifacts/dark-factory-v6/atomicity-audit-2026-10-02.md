@@ -12,7 +12,8 @@
 > because each guards a distinct make-or-break behavior).
 
 Mechanical scan (all per `.claude/skills/qds-sprint-planning/steps/phase-2-5-atomicity-audit.md`):
-total lines 103–130 (target ≤185, cap 200/400) · SP 2–5 (≤8) · DOD 7–10 (≤10) · blocker
+total lines 103–130 (target ≤185, cap 200/400) · SP 2–5 (≤8) · DOD 7–12 (≤10; J3 at 12 = the
+WARN below) · blocker
 markers 0 · `## Files to Modify` present ×23, owned files 4–10 (≤10) · `## Security
 Invariants` present ×23 (substantive — every story triggers security keywords).
 
@@ -28,7 +29,7 @@ Invariants` present ×23 (substantive — every story triggers security keywords
 | G1 | 124 | 2 | 9 | 1 | 0 | 7 | ✓ | PASS |
 | J1 | 121 | 3 | 8 | 0 | 0 | 10 | ✓ | PASS |
 | J2 | 120 | 3 | 9 | 0 | 0 | 9 | ✓ | PASS |
-| J3 | 128 | 5 | 10 | 0 | 0 | 7 | ✓ | PASS |
+| J3 | 128 | 5 | **12** | 0 | 0 | 7 | ✓ | **WARN** |
 | J4 | 113 | 5 | 8 | 0 | 0 | 8 | ✓ | PASS |
 | M1.1 | 118 | 3 | 10 | 0 | 0 | 10 | ✓ | PASS |
 | M1.2 | 130 | 5 | 8 | 0 | 0 | 10 | ✓ | PASS |
@@ -54,6 +55,10 @@ Invariants` present ×23 (substantive — every story triggers security keywords
   roster grant, and the box-image change those cause is what forces the re-pin ritual; a
   split would separate the pin trigger from the pin cause. If review surfaces the ritual as
   its own work unit, the split seam is "AC5 (re-pin) → own story".
+- WARN (check 4, DOD ≤10 high-signal): **J3** DOD = 12 — the pre-dev campaign added the
+  concurrency-integrity and import-closure-fence arms; both are high-signal story-specific
+  tests, not CI invariants, and each guards a distinct make-or-break behavior (AC2's
+  single-writer log posture; the no-judgment-import fence). **Accepted rather than merged.**
 
 ## Override log (operator)
 

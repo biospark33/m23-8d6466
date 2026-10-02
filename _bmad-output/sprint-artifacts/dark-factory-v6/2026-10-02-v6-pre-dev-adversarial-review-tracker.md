@@ -35,7 +35,7 @@ shared_pattern_note) + 1 cross-story agent (7-item structured queue). Verdicts:
 | Z5 | 2 | ✓ | 1/2/2 |
 | cross-story | 1 | ✓ | 2/4/0 (queue 7/7) |
 
-Layer-1 totals: **23 HIGH / 34 MEDIUM / 15 LOW applied in place.** All converged.
+Layer-1 totals: **26 HIGH / 40 MEDIUM / 15 LOW applied in place.** All converged.
 
 ### Layer 2 — Wave-5 fresh-eyes verification (13 uncoupled verifiers)
 
@@ -90,8 +90,8 @@ the fix-touched files. Result: recorded in the session log below.
 - 2026-10-02 Wave 5b/5c: 11 fix agents applied ~103 findings; 4 citation drifts caught by the
   consistency gate and fixed; gate green (65 stories / 250 pts; test 2/2).
 - 2026-10-02 Wave-5 round 2 dispatched (vr1/vr2/vr3, regression-scoped).
-- 2026-10-02 Round-2 results: 10 regression findings (1H/8M... precise: R1 1H/2M/2L +
-  R2 2M/3L + R3 1M/3L), ALL applied same-session (orchestrator-direct for the small ones;
+- 2026-10-02 Round-2 results: 14 regression findings (R1 1H/2M/2L + R2 2M/3L + R3 1M/3L =
+  1 HIGH / 5 MEDIUM / 8 LOW), ALL applied same-session (orchestrator-direct for the small ones;
   register amend DD-28.6 two-union accounting, DD-28.19 supersession marker, DD-28.4 gains
   QDS_MEMGATE_SIGNING_KEY, A6/J4/M3.2/J3/A2/M2.3/M1.1 story edits). Gate caught + fixed 5
   citation drifts across the two fix rounds (ambiguous basenames ×3, past-EOF ×1, dup ×1).

@@ -172,7 +172,7 @@ As a **department manager bot**, I want a `*-meta` bank and a nightly consolidat
 refresh, So that each department's memory compounds — via platform schedule, or the documented
 crontab fallback if E21 slips (the gateway is driver-agnostic).
 
-**Sprint:** v6b · deps: M2.1 + A1
+**Sprint:** v6b · deps: M2.1 (hard gate) · A1 gates only the platform-schedule leg — the crontab fallback proceeds without it
 
 ### Story M3.2: L4 weekly reflect → PROPOSE
 
