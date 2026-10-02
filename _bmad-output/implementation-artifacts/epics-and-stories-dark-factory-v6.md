@@ -24,8 +24,9 @@
 | G | Governance — ADR-2 decision workflow + reconciliation note |
 
 **Sprints:** **v6a "Foundation"** — the stories below tagged v6a; zero E21 gates; ships
-standalone. **v6b "Autonomy"** — tagged v6b; every story that needs E21 Home bots; gated rows
-are spec-complete, dev blocked until their named gates clear (status in sprint-status.yaml).
+standalone. **v6b "Autonomy"** — tagged v6b; v6b = E21-gated stories + the E21-independent
+lane (DD-14); gated rows are spec-complete, dev blocked until their named gates clear
+(status in sprint-status.yaml).
 
 ---
 

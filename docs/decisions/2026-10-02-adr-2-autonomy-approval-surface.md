@@ -37,7 +37,7 @@ the reconciliation note (DD-19) and this draft share one vocabulary:
 | Tier | Meaning | Status |
 |---|---|---|
 | **Tier A** | ADR-1's approved narrow form: swarmclaw hosts macro processes via `external_job`; the fleet CLI stays the substrate; D6 intact; the front door gains a protocol-shaped opening and nothing more. | **ACCEPTED** (ADR-1, 2026-09-30). |
-| **Tier B** | Observability/notification drift: run events surface into the platform (zeropoint UI/inbox/chat) rather than only the factory's own surfaces — approval/notification surfaces move, policy does not. Partially covered already: the DF4.x SSSF visualizer renders run views; v6 adds chat digests (A1) and the S05b inbox as an override surface (this ADR). Tier B is a *surface* classification only: the auto-merge default this ADR's Decision 1 proposes is a **policy change, not Tier B drift** — it is decided on its own terms by this ADR's verdict and never rides Tier B's partial adoption. | **PARTIAL, proposed to widen** (this ADR + DD-19); Decision 1 classified separately as policy. |
+| **Tier B** | Observability/notification drift: run events surface into the platform (zeropoint UI/inbox/chat) rather than only the factory's own surfaces — approval/notification surfaces move, policy does not. Partially covered already: the DF4.x SSSF visualizer renders run views; v6 adds chat digests (A1) and proposes the S05b inbox as an override surface (this ADR). Tier B is a *surface* classification only: the auto-merge default this ADR's Decision 1 proposes is a **policy change, not Tier B drift** — it is decided on its own terms by this ADR's verdict and never rides Tier B's partial adoption. | **PARTIAL, proposed to widen** (this ADR + DD-19); Decision 1 classified separately as policy. |
 | **Tier C** | Engine drift: the factory itself becomes "just" swarmclaw protocol runs — events → platform UI as the primary surface, reversing D6 (in-box engine, host authority, fleet front door). | **OUT.** Nothing in v6 or this ADR adopts it. |
 
 ## Decision (PROPOSED)
@@ -77,6 +77,10 @@ the reconciliation note (DD-19) and this draft share one vocabulary:
   the policy.
 - **The gate does not move.** Every clause above composes with ADR-1 §3: the mechanics of
   `fleet approve` are unchanged; only which runs *reach* it changes.
+- **Clause 5's carrier travels with any ACCEPT:** the veto-window queue is clause 5's
+  precondition — auto-merge ON before the queue exists violates clause 5, and the implementing
+  story's consistency test must be able to see that state (a clause-5 carrier in the named
+  setting, or the verdict block's explicit clause-5 disposition).
 - **ADR-1 gaps carry forward:** the #380 spend-booking gap for headless `workId` briefs is
   unaffected here; DD-20 records which side owns closing it.
 - **Reversal path:** if auto-merge produces a bad merge, the operator flips the default back

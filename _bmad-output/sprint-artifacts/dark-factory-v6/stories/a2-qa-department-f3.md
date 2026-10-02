@@ -18,7 +18,7 @@ As the operator, I want a merged PR to wake a QA department manager (Home bot) t
 ## Overview
 
 Factory scope: the host-side legs (findings normalization, idempotent retain, issue filing), `w:qa-*` workKey stamping on run records, and the spec-seam fixtures that keep factory CI green with zero E21 code. The protocol definition and trigger config are zeropoint-side work filed in the solstice repo from this same contract text (BUILD-IN-FORK per charter §5.5); factory points cover factory-repo work plus the joint live round.
-**What this does NOT deliver:** no in-box `kg_recall` during QA runs (M2.2's lane — the QA box carries no memory key; provider secret only, Deviation 2); no schedule→protocol trigger (Z2's schedule leg / A3); no auto-applied fixes and no approval-gate traffic (A2's outputs are issues + bank entries, nothing else).
+**What this does NOT deliver:** no in-box `kg_recall` during QA runs (M2.2's lane — the QA box carries no memory key; provider secret only, Deviation 2); no schedule→protocol trigger (Z2's schedule leg / A3); no auto-applied fixes and no approval-gate traffic (A2's outputs are issues + bank entries, nothing else). If G1's verdict accepts ADR-2 clause 2, a2 additionally emits the structured verdict per G1 AC4 — adds-only to this story's contract.
 
 ## E2E Slice
 

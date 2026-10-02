@@ -311,7 +311,7 @@ epics:
   # Per-sprint: v6a 36 (11 stories: Z1,Z2,Z4,Z5,M1.1,M1.2,M1.3,M2.1,J1,A6,G1) ·
   #             v6b 45 (12 stories: Z3,A1,A2,A3,A5,M2.2,M2.3,M3.1,M3.2,J2,J3,J4). ✓
   # Sprints: v6a "Foundation" — THE next sprint, zero E21 gates, ships standalone (D-1).
-  #          v6b "Autonomy" — E21-gated sprint; external gate classes (R5): ops VPS G1–G7,
+  #          v6b "Autonomy" — E21-gated stories + the E21-independent lane (DD-14); external gate classes (R5): ops VPS G1–G7,
   #          E21 S02b/S03b, J2 corpus milestones. Gated rows carry `status: gated` + the gate
   #          named; dep-only-v6 rows are ready-for-dev normally (v6b sprint membership ≠ gate).
   # Named flex-cuts (DD-26): v6a #1 = M1.3 report leg slips (trigger: v6a >40 pts post-review),
@@ -351,7 +351,7 @@ epics:
       M2.1: { title: "Memory gateway (per-run recall-only keys + agent tokens; D8 amendment impl)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — unit/mock; M1.1 edge ACCEPTANCE-ONLY (dev-first sanctioned, DD-26); mirrors credentials.ts ordering exactly; module root src/memgate/
       M2.2: { title: "In-box kg_recall pi extension + roster grant + full image re-pin ritual", points: 5, status: ready-for-dev, deps: [M2.1] }  # v6b — recall-only/sanitized/char-budgeted/F10-treated; re-pin ritual = operator GO (blocks ALL T2; batched with M1.2/J3 pin moves)
       M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: ready-for-dev, deps: [M2.2, M1.2] }  # v6b — T2; adversarial negative probes; digest-stable audit rows
-      M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: ready-for-dev, deps: [M2.1] }  # v6b — ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
+      M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: ready-for-dev, deps: [M2.1, M1.1] }  # v6b — ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
       M3.2: { title: "L4 weekly reflect → PROPOSE (never auto-apply)", points: 3, status: ready-for-dev, deps: [M3.1, A5] }  # v6b — FR-LEARN-30 shape; proposals to meta bank + operator; M3.1 edge satisfiable via fallback leg
   v6-a:
     name: Autonomy (E21-gated)

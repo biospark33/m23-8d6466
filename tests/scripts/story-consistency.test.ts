@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const CHECKER = resolve(ROOT, "scripts/check-story-consistency.ts");
@@ -47,5 +49,103 @@ describe("planning artifacts are self-consistent", () => {
     // because it found nothing to check. 65 = 42 DF rows + 23 v6 rows (DD-27).
     expect(r.exitCode).toBe(0);
     expect(`${r.stdout.toString()}`).toContain("65 stories");
+  });
+});
+
+/**
+ * Fixture tier: the checks above run the checker against the REAL repo, so they can only
+ * assert it exits 0 — they cannot prove a specific finding fires. These tests scaffold a
+ * minimal fake repo in a temp dir, copy the checker in (its ROOT is import.meta.dir-based,
+ * so a copied checker is fully isolated), and run it there. Each fixture yaml must satisfy
+ * the checker's own meta-parse preconditions (exactly one `V6 ROWS:` claim matching the
+ * rows) or the slate check would fire instead of the one under test.
+ */
+describe("the checker's findings fire on fixtures (real findings, not just exit 0)", () => {
+  const story = (points: string, status: string): string =>
+    `# Z1: fixture\n\n**Story Points:** ${points}\n**Status:** ${status}\n\nBody with no line-numbered cites.\n`;
+  const yaml = (rows: string[], v6Count: number, v6Pts: number): string =>
+    `stories:\n  v6:\n${rows.map((r) => `      ${r}`).join("\n")}\n  # V6 ROWS: ${v6Count} stories / ${v6Pts} pts\n`;
+  const Z1 = `Z1: { title: "t", points: 3, status: ready-for-dev, deps: [] }`;
+
+  function runFixture(opts: { yaml: string; stories: Record<string, string> }): { code: number; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), "story-consistency-"));
+    try {
+      mkdirSync(join(dir, "scripts"), { recursive: true });
+      copyFileSync(CHECKER, join(dir, "scripts", "check-story-consistency.ts"));
+      for (const d of [
+        "_bmad-output/sprint-artifacts/dark-factory-v5/stories",
+        "_bmad-output/sprint-artifacts/dark-factory-v6/stories",
+        "_bmad-output/implementation-artifacts",
+      ]) mkdirSync(join(dir, d), { recursive: true });
+      writeFileSync(join(dir, "_bmad-output/sprint-artifacts/sprint-status.yaml"), opts.yaml);
+      writeFileSync(join(dir, "_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md"), "");
+      writeFileSync(
+        join(dir, "_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v6.md"),
+        Object.keys(opts.stories).map((f) => f.replace(/-.*/, "").toUpperCase()).join("\n"),
+      );
+      for (const [name, body] of Object.entries(opts.stories))
+        writeFileSync(join(dir, "_bmad-output/sprint-artifacts/dark-factory-v6/stories", name), body);
+      const r = Bun.spawnSync(["bun", join(dir, "scripts", "check-story-consistency.ts")], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return { code: r.exitCode, out: `${r.stdout.toString()}${r.stderr.toString()}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a header/yaml points mismatch is flagged — including the `**Story Points:**` spelling (M2)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1], 1, 3),
+      stories: { "z1-fixture.md": story("5", "ready-for-dev") },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("header says 5 points; yaml row says 3");
+  });
+
+  test("control: agreeing `**Story Points:**` + plain status exits 0 (the spelling parses)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1], 1, 3),
+      stories: { "z1-fixture.md": story("3", "ready-for-dev") },
+    });
+    expect(r.code, r.out).toBe(0);
+  });
+
+  test("a bold-wrapped header status (`**Status:** **gated**`) is parsed and compared (M3)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1], 1, 3),
+      stories: { "z1-fixture.md": story("3", "**gated**") },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('story header status "gated"; yaml row "ready-for-dev"');
+  });
+
+  test("a v6 dep naming a nonexistent v6 id is flagged — v6 dep edges resolve (M4)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1, `Z2: { title: "t", points: 2, status: ready-for-dev, deps: [Z9] }`], 2, 5),
+      stories: { "z1-fixture.md": story("3", "ready-for-dev"), "z2-fixture.md": story("2", "ready-for-dev") },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('deps names "Z9"');
+  });
+
+  test("a v6 dep matching no active slate id grammar is flagged — the grammar branch fires (R3-VR4-L4)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1, `Z2: { title: "t", points: 2, status: ready-for-dev, deps: [Q7] }`], 2, 5),
+      stories: { "z1-fixture.md": story("3", "ready-for-dev"), "z2-fixture.md": story("2", "ready-for-dev") },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("matches no active slate id grammar");
+  });
+
+  test("a P-prefixed dep OUTSIDE the retired P0.x/P1.x/P2.x forms reaches the grammar check and fails (P3.1)", () => {
+    const r = runFixture({
+      yaml: yaml([Z1, `Z2: { title: "t", points: 2, status: ready-for-dev, deps: [P3.1] }`], 2, 5),
+      stories: { "z1-fixture.md": story("3", "ready-for-dev"), "z2-fixture.md": story("2", "ready-for-dev") },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('deps names "P3.1"');
+    expect(r.out).toContain("matches no active slate id grammar");
   });
 });
