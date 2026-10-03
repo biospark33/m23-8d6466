@@ -386,18 +386,18 @@ export function writeEvidence(tag: string, name: string, payload: unknown): void
   // swarmclawForkRev would land on disk and false-fire drift.
   if (hasSwarmclawForkRevDeep(payload)) {
     throw new Error(
-      `payload carries a nested swarmclawForkRev — the writer owns the stamp at any depth; a caller-supplied stamp would launder a recorded rev and false-fire the drift finder`,
+      "payload carries a nested swarmclawForkRev — the writer owns the stamp at any depth; a caller-supplied stamp would launder a recorded rev and false-fire the drift finder",
     );
   }
   // This stamp records the pin at write time only: if the fork advanced without a bump PR, the manifest row's rev (which must equal the pin post-pin) forces the bump — stamp freshness is enforced by the alarm's row check, not here.
-  payload = { ...payload, swarmclawForkRev: SWARMCLAW_FORK_REV };
-  assertNoSecrets(payload);
+  const stamped = { ...payload, swarmclawForkRev: SWARMCLAW_FORK_REV };
+  assertNoSecrets(stamped);
   const dir = path.join(QDS_ROOT, "_bmad-output", "evidence", "openrig-sc2");
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const file = path.join(dir, `${stamp}-${tag}-${name}.json`);
   try {
-    fs.writeFileSync(file, JSON.stringify(payload, null, 2), { flag: "wx" });
+    fs.writeFileSync(file, JSON.stringify(stamped, null, 2), { flag: "wx" });
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") {
       throw new Error(`evidence write collision: ${file} already exists (same-millisecond same-name write)`);
