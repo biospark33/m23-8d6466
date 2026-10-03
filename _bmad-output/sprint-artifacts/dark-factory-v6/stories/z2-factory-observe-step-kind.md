@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6a (Epic Z — adapter-contract arc, story 2 of 2; Wave 3; BUILD-IN-FORK, Live tier: fake-CLI journal)
-**Status:** in-progress
+**Status:** done — counterpart swarmclaw PR #703 merged to fork dev 2026-10-03 (factory_observe step kind, durable triggers, notify leg). Factory PR #405 merged to `dev` 2026-10-03 (merge 34d24a29): the fork-observe-consumer harness + tests, plus branch-gate hardening from CodeRabbit review (bun exit-status captured fail-closed — a crashed runner can no longer report FACTORY_FULL_OK; vendor exemption narrowed to the documented self-compact cluster; pre-existing retry-loop bug fixed — the parser kept bun's trailing colon so `bun test "path:"` matched zero files and every non-exempt flake was marked persistent); the http TEST-NET budget tests were de-flaked onto a local hang server (2-of-3 standalone failure measured on fast-refusing networks), letting their exemption be removed. 2 CodeRabbit rounds: 4 findings — 3 fixed as filed, 1 pushback with measured evidence then root-cause fixed; zero outstanding.
 
 > **Cross-repo charter (§5.5):** this story's normative work lives in the swarmclaw fork (`/Users/steve/Solstice/.worktrees/hermes-agent/external/swarmclaw` — the fresh worktree; the main Solstice checkout's submodule is stale). Fork PRs merge on fork dev. Factory points cover factory-repo work + joint rounds only. Factory CI must stay green with **no fork checkout** (§5.2).
 
