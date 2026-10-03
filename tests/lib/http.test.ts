@@ -171,27 +171,49 @@ describe("httpRequest", () => {
   });
 
   test("a timeout is NOT retried unless the policy opts in — one budget, not two", async () => {
-    // 192.0.2.1 is TEST-NET-1: a black hole, so the connect never completes
-    // and the wrapper's own deadline is the only thing that ends the call.
-    const started = Date.now();
-    await expect(
-      httpRequest("http://192.0.2.1:9/x", { method: "GET" }, { timeoutMs: 50, maxAttempts: 2 }),
-    ).rejects.toThrow();
-    const elapsed = Date.now() - started;
-    // ~50ms (one attempt), not ~100ms (two). Generous ceiling for CI jitter,
-    // still far below the two-attempt budget.
-    expect(elapsed).toBeLessThan(120);
+    // A local hang server, not TEST-NET-1: the response never arrives, so the
+    // wrapper's own deadline — not the network — ends each attempt. A real
+    // black-hole address is env-dependent: some networks refuse the connect
+    // instantly, collapsing the budget to single-digit millis and making the
+    // one-vs-two-attempt discrimination meaningless.
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Bun.sleep(1_000).then(() => new Response("late")),
+    });
+    try {
+      const started = Date.now();
+      await expect(
+        httpRequest(`http://127.0.0.1:${server.port}/x`, { method: "GET" }, { timeoutMs: 50, maxAttempts: 2 }),
+      ).rejects.toThrow();
+      const elapsed = Date.now() - started;
+      // ~50ms (one attempt), not ~100ms (two). Generous ceiling for CI jitter,
+      // still far below the two-attempt budget.
+      expect(elapsed).toBeLessThan(120);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("retryTransport: true spends the whole budget", async () => {
-    const started = Date.now();
-    await expect(
-      httpRequest(
-        "http://192.0.2.1:9/x",
-        { method: "GET" },
-        { timeoutMs: 50, maxAttempts: 2, retryTransport: true },
-      ),
-    ).rejects.toThrow();
-    expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+    // Same hang server: each attempt ends on the wrapper's in-process 50ms
+    // deadline, so two attempts are deterministically ~100ms. The old
+    // TEST-NET floor collapsed on networks that refuse the connect fast.
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Bun.sleep(1_000).then(() => new Response("late")),
+    });
+    try {
+      const started = Date.now();
+      await expect(
+        httpRequest(
+          `http://127.0.0.1:${server.port}/x`,
+          { method: "GET" },
+          { timeoutMs: 50, maxAttempts: 2, retryTransport: true },
+        ),
+      ).rejects.toThrow();
+      expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+    } finally {
+      server.stop(true);
+    }
   });
 });
