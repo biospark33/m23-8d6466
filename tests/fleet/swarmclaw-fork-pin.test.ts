@@ -117,7 +117,11 @@ function stageFixture(files: Record<string, unknown>, rounds: ManifestRow[], met
   const root = mkdtempSync(join(tmpdir(), "fork-pin-alarm-"));
   stagedRoots.push(root);
   const evidenceDir = join(root, "evidence");
-  const stampedDir = join(evidenceDir, STAMPED_EVIDENCE_DIRS[0]);
+  const stamped = STAMPED_EVIDENCE_DIRS[0];
+  if (stamped === undefined) {
+    throw new Error("STAMPED_EVIDENCE_DIRS is empty — the fixture cannot stage a stamped dir");
+  }
+  const stampedDir = join(evidenceDir, stamped);
   mkdirSync(stampedDir, { recursive: true });
   for (const [name, content] of Object.entries(files)) {
     const full = join(stampedDir, name);
@@ -784,7 +788,7 @@ describe("swarmclaw fork-rev drift alarm", () => {
       expect(SWARMCLAW_FORK_REV_PINNED_AT).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
       const manifest = JSON.parse(readFileSync(REAL_MANIFEST_PATH, "utf8")) as {
         meta?: { pinRev?: string; pinnedAt?: string };
-        rounds?: Array<{ rev?: string; citing?: { timestamp?: string } }>;
+        rounds?: Array<{ file?: string; rev?: string; citing?: { timestamp?: string } }>;
       };
       // the manifest is the record: its meta must agree with the exported pin,
       // or the corpus and the pin have already drifted apart at authorship
@@ -834,12 +838,12 @@ describe("swarmclaw fork-rev drift alarm", () => {
       // throw that disappears would first surface as a live E2E failure
       // (behavioral tests would pollute the real corpus), so the lint pins
       // the guard code, not just its message
-      const missing = [
+      const missing = ([
         ["plain-object guard", "evidence payload must be a plain object"],
         ["caller-stamp guard", '"swarmclawForkRev" in payload'],
         ["nested-stamp deep guard", "hasSwarmclawForkRevDeep(payload)"],
         ["exclusive 'wx' write", 'flag: "wx"'],
-      ].filter(([, needle]) => !body.includes(needle));
+      ] as const).filter(([, needle]) => !body.includes(needle));
       if (missing.length > 0) {
         throw new Error(
           `sc2-harness writeEvidence guard contract broken — missing: ${missing.map(([label]) => label).join(", ")}`,

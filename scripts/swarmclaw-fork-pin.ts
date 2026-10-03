@@ -154,7 +154,7 @@ export function validateEvidenceForkRevs(opts: {
   // exports, or the two records have diverged (F-013)
   const meta = manifest.meta;
   if (meta === null || typeof meta !== "object") {
-    failures.push(`manifest meta missing — pinRev/pinnedAt coherence is part of the record`);
+    failures.push("manifest meta missing — pinRev/pinnedAt coherence is part of the record");
   } else {
     const m = meta as { pinRev?: unknown; pinnedAt?: unknown };
     if (m.pinRev !== pin) {
@@ -193,9 +193,10 @@ export function validateEvidenceForkRevs(opts: {
 
   for (const dir of stampedDirs) {
     const dirPath = path.join(evidenceDir, dir);
-    let dirents: fs.Dirent[];
     try {
-      dirents = fs.readdirSync(dirPath, { withFileTypes: true });
+      // existence probe only — walkJsons re-reads the dir; the try/catch is
+      // what turns a missing stamped dir into the loud failure below
+      fs.readdirSync(dirPath, { withFileTypes: true });
     } catch {
       missingDirs.add(dir);
       failures.push(
@@ -220,7 +221,10 @@ export function validateEvidenceForkRevs(opts: {
         );
         continue;
       }
-      const citing = row.citing?.timestamp ?? "";
+      // rows come from JSON.parse — a non-string timestamp takes the ""
+      // branch and fails the ISO-Z shape gate below (the malformed-row path),
+      // never feeds a coercive regex.test
+      const citing = typeof row.citing?.timestamp === "string" ? row.citing.timestamp : "";
       if (!ISO_Z.test(citing)) {
         failures.push(
           `malformed manifest row for ${rel}: citing.timestamp missing or not ISO-Z — the file carries swarmclawForkRev but its row cannot be bracketed, and a missing bracket is never assumed`,

@@ -346,19 +346,14 @@ describe("Q1.8 contract: the observe consumption surface (factory_observe)", () 
     repoRoot: dir,
   });
 
-  test("fleet result's exit 0 covers a RUNNING run — the payload line is exactly the pinned ResultPayload field set with schemaVersion the literal 1, requestId null-never-absent, and `terminal` the field a poller branches on", async () => {
+  // ONE full-sweep test per verb (CodeRabbit r1): the helper asserts the
+  // entire surface per call, so a second same-verb call reran identical
+  // fixtures and assertions — the claims those titles carried are merged here.
+  test("fleet result: exit 0 covers a RUNNING run — the payload line is exactly the pinned ResultPayload field set with schemaVersion the literal 1, requestId null-never-absent, and `terminal` the field a poller branches on; the missing-record answer is exit 4 with run-not-found on stderr, per the registry exit row [0, 2, 4, 6], whose row carries no --driver flag (driver-free, box-free, lock-free by construction)", async () => {
     await assertObserveSurface(run, outLines, errLines, observeDeps(), { verb: "result" });
   });
 
-  test("fleet result's missing-record answer is exit 4 with run-not-found on stderr — per the registry exit row [0, 2, 4, 6], whose row carries no --driver flag (driver-free, box-free, lock-free by construction)", async () => {
-    await assertObserveSurface(run, outLines, errLines, observeDeps(), { verb: "result" });
-  });
-
-  test("fleet status emits exactly the StatusRow field set with state words from the closed vocabulary — exit 0 on an empty store, FLEET_ROW_ID on the fleet-level row, the registry exit row [0, 1, 2, 4, 5, 6], and no schema-version marker anywhere on the wire", async () => {
-    await assertObserveSurface(run, outLines, errLines, observeDeps(), { verb: "status" });
-  });
-
-  test("both observe verbs are present in the registry with status's --driver owned by the deployed wrapper — result's driver-freedom is pinned by the result sweep above, and the fork-side fence is Z2's module allowlist, not this suite (INV-Z1-2)", async () => {
+  test("fleet status: emits exactly the StatusRow field set with state words from the closed vocabulary — exit 0 on an empty store, FLEET_ROW_ID on the fleet-level row, the registry exit row [0, 1, 2, 4, 5, 6], and no schema-version marker anywhere on the wire; both observe verbs are present in the registry with status's --driver owned by the deployed wrapper (the fork-side fence is Z2's module allowlist, not this suite — INV-Z1-2)", async () => {
     await assertObserveSurface(run, outLines, errLines, observeDeps(), { verb: "status" });
   });
 

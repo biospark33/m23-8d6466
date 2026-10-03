@@ -270,7 +270,7 @@ export async function assertObserveSurface(
       list: async () => {
         throw new Error("provider outage (probe)");
       },
-    } as unknown as Partial<FleetDeps>,
+    } as unknown as FleetDeps["driver"],
   });
   expect(outage.code).toBe(1);
   const fleetRows = outage.lines
