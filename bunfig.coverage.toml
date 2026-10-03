@@ -92,6 +92,10 @@
 #     `main`/`diffEnvelope` were private and its main exited on the gate, so
 #     the module now exports them for the probe-gate suite, which drives main
 #     under TYPESAFE_MOCK=1: in-process for the scorer, and off the wire.
+#     (Round-2 review of the same PR then replaced the hold barrier's fixed
+#     park with a parent-to-child acknowledgment sent only after the host's
+#     own withRunLock had synchronously executed its acquire -- see
+#     tests/providers/df2-11-teardown-race.test.ts.)
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 

@@ -25,7 +25,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -270,23 +270,27 @@ function loserScript(runsDirPath: string, runId: string, gitCwd: string, linkLog
  * The CONTENTIOUS racer: identical shape to the loser above, but after its
  * imports land it announces "RACER AT THE DOOR" (cold-start diagnostic), then
  * attempts `withRunLock`. On ACQUIRING the claim it announces "RACER HOLDS THE
- * CLAIM" and parks INSIDE the callback — holding the lock — for a bounded
- * 500 ms before running the teardown. That park is the host's barrier (see the
- * contention test below): the host does not attempt its own claim until it has
- * SEEN this line, so the two attempts cannot be consecutive, which is the
- * failure mode that outlived the door barrier. On a lost race it prints the
- * refusal's code and exits 1; on a won race it runs the FULL teardown and says
- * so on stdout.
+ * CLAIM" and then HOLDS the lock — inside the callback — until the ack FILE
+ * appears, which the parent creates only after its own `withRunLock` has
+ * SYNCHRONOUSLY executed `acquireRunLock` (see the contention test below for
+ * why the acknowledgment, not a timer, is the barrier). On a lost race it
+ * prints the refusal's code and exits 1; on a won race it runs the FULL
+ * teardown and says so on stdout.
+ *
+ * The ack rides a FILE rather than stdin: bun -e children spawned with a
+ * stdin pipe did not deliver `readable` events reliably enough to build on,
+ * and a 5 ms poll of one tmpdir path is boring, portable, and bounded by the
+ * child's own 30 s deadline.
  *
  * Carries the same appending `recordAuditLink` as `loserScript`, for the reason
  * given there — and it matters more here, because this child is the one that
  * actually REACHES the teardown when it wins, and is therefore the only side
  * that can emit a SECOND `run-box.teardown` row for one box.
  */
-function racerScript(runsDirPath: string, runId: string, gitCwd: string, linkLog: string): string {
+function racerScript(runsDirPath: string, runId: string, gitCwd: string, linkLog: string, ackPath: string): string {
   return `(async () => {
   try {
-    const { appendFileSync } = await import("node:fs");
+    const { appendFileSync, existsSync } = await import("node:fs");
     const { withRunLock } = await import(${JSON.stringify(join(REPO_ROOT, "scripts", "lib", "run-lock.ts"))});
     const { teardownSandbox } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "teardown.ts"))});
     const { RunRecordStore } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "run-record.ts"))});
@@ -296,7 +300,13 @@ function racerScript(runsDirPath: string, runId: string, gitCwd: string, linkLog
     console.log("RACER AT THE DOOR");
     await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-child", async (h) => {
       console.log("RACER HOLDS THE CLAIM");
-      await Bun.sleep(500);
+      const ackDeadline = Date.now() + 30_000;
+      for (;;) {
+        if (existsSync(${JSON.stringify(ackPath)})) break;
+        if (Date.now() > ackDeadline)
+          throw new Error("host acknowledgment never landed within 30s — the host attempt did not run");
+        await Bun.sleep(5);
+      }
       await teardownSandbox(
         { driver: racerDriver, store: racerStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)}, recordAuditLink: (l) => appendFileSync(${JSON.stringify(linkLog)}, JSON.stringify(l) + "\\n") },
         ${JSON.stringify(runId)},
@@ -479,8 +489,16 @@ describe("DF2.11 e2e teardown race", () => {
       // overlapped in time, not that the host's claim landed while the child
       // HELD. So the barrier moved to the hold itself: the child announces
       // "RACER HOLDS THE CLAIM" from inside its `withRunLock` callback and
-      // parks there for 500 ms, and the HOST does not attempt its claim until
-      // it has read that line. The refusal is then a genuine cross-process
+      // keeps holding until the parent proves the host's attempt has landed.
+      // The first cut of that barrier was a fixed 500 ms park, and the
+      // round-2 review rightly named it the same bet again — a host stalled
+      // past the park between reading the line and entering `withRunLock`
+      // would find the lock already released. The ack removes the timer: the
+      // parent signals the child only AFTER its own `withRunLock` invocation
+      // has synchronously executed `acquireRunLock` (run-lock.ts runs the
+      // acquire before its first await), so the refusal — or, under a lock
+      // regression, the acquisition — is already a settled fact when the
+      // child may release. The refusal is then a genuine cross-process
       // link(2) contention — the host really attempts, the child really holds
       // — and the direction is deterministic: child wins, host refused.
       // (The host-wins direction is the serialized test above, where the
@@ -488,10 +506,11 @@ describe("DF2.11 e2e teardown race", () => {
       // stays as a tripwire: a lock that let the host through mid-hold would
       // fail it here rather than downstream at the count assertions.
       const counting = countingRecording();
-      const child = Bun.spawn(["bun", "-e", racerScript(runsDir, RUN_ID, repoDir, childLinkLog)], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const hostAckPath = join(runsDir, "host-attempt-ack");
+      const child = Bun.spawn(
+        ["bun", "-e", racerScript(runsDir, RUN_ID, repoDir, childLinkLog, hostAckPath)],
+        { stdout: "pipe", stderr: "pipe" },
+      );
       children.push(child);
 
       // Read the child's stream incrementally for the barrier; the SAME reader
@@ -527,13 +546,21 @@ describe("DF2.11 e2e teardown race", () => {
           `child racer never printed "RACER HOLDS THE CLAIM" — its cold start failed or its claim was refused: ${childOut.trim() || "(no stdout)"}`,
         );
 
-      // The child holds for a bounded 500 ms (racerScript); the host attempts
-      // immediately, so its claim lands mid-hold and is refused run-locked.
+      // The ack is the barrier, and its placement is the whole point: the
+      // `withRunLock(...)` CALL below executes `acquireRunLock` synchronously
+      // (before the promise's first await), so by the time the ack file is
+      // created the host's attempt has either taken the claim or been refused
+      // by the child's live hold. Signaling before the call would prove
+      // nothing; the child would be releasing on faith. A host that throws
+      // before creating the file leaves the child on its 30s deadline, and
+      // the XOR fails as both-lost with both diagnostics on the log.
       let hostErr: unknown;
       const hostGo = (async () => {
-        await withRunLock(runsDir, RUN_ID, "df2-11-race-host", (h) =>
+        const attempted = withRunLock(runsDir, RUN_ID, "df2-11-race-host", (h) =>
           teardownSandbox(deps(counting.driver, repoDir), RUN_ID, h),
         );
+        writeFileSync(hostAckPath, "1", { mode: 0o600 });
+        await attempted;
       })().catch((e) => {
         hostErr = e;
       });
