@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6a (Epic Z — adapter-contract arc, story 2 of 2; Wave 3; BUILD-IN-FORK, Live tier: fake-CLI journal)
-**Status:** ready-for-dev
+**Status:** in-progress
 
 > **Cross-repo charter (§5.5):** this story's normative work lives in the swarmclaw fork (`/Users/steve/Solstice/.worktrees/hermes-agent/external/swarmclaw` — the fresh worktree; the main Solstice checkout's submodule is stale). Fork PRs merge on fork dev. Factory points cover factory-repo work + joint rounds only. Factory CI must stay green with **no fork checkout** (§5.2).
 
@@ -70,7 +70,7 @@ Adds the read-only sibling to SC2's `external_job`: a step kind that consumes `f
 
 ## Technical Notes
 
-- **One invocation, one attempt leg — and the durable wake is named:** the observe step is a verb-call-and-settle, not a watcher process — no daemon, no interval timer inside the step. A step that PARKS (`awaiting-approval`, AC4) is awakened by the same durable wake that drives `external_job` today: the fork's daemon poller `pollFactoryRuns` (`fork:src/lib/server/protocols/protocol-factory.ts:230` — heartbeat-scheduled, single-flight per F-007, deadline per F-008), whose step loop currently skips anything that is not `kind: 'external_job'` (`fork:src/lib/server/protocols/protocol-factory.ts` inner loop). Z2 EXTENDS that filter to include parked `factory_observe` steps — the poller re-drives a parked observe through the same settle path to terminal completion, and `sweepTerminalFactoryRuns`'s existing stranding sweep covers observe entries identically. The no-daemon/no-interval constraint is untouched: it binds the STEP (one invocation = one verb call + settle), and the wake is the fork's pre-existing durable surface, not a new loop this story invents. Written out so a dev does not re-derive it into a poller — in either direction.
+- **One invocation, one attempt leg — and the durable wake is named:** the observe step is a verb-call-and-settle, not a watcher process — no daemon, no interval timer inside the step. A step that PARKS (`awaiting-approval`, AC4) is awakened by the same durable wake that drives `external_job` today: the fork's daemon poller `pollFactoryRuns` (`fork:src/lib/server/protocols/protocol-factory.ts:230` — heartbeat-scheduled, single-flight per F-007, deadline per F-008), whose step loop currently skips anything that is not `kind: 'external_job'` (`fork:src/lib/server/protocols/protocol-factory.ts` inner loop). Z2 EXTENDS that filter to include parked `factory_observe` steps — the poller re-drives a parked observe through the same settle path to terminal completion, and `sweepTerminalFactoryRuns`'s existing stranding sweep covers observe entries identically — with one INV-Z2-1 carve-out: the sweep's mark stops the polling, but its best-effort `fleet cancel` is refused for `factory_observe` entries (a watching step must not abort foreign factory work). The no-daemon/no-interval constraint is untouched: it binds the STEP (one invocation = one verb call + settle), and the wake is the fork's pre-existing durable surface, not a new loop this story invents. Written out so a dev does not re-derive it into a poller — in either direction.
 - **Post-merge trigger substrate (DD-28.26(6)):** configuration of the existing `type:'http'` watch job, not new machinery — no new `WatchJobType` member, no Z1 contract bump. Auth rides an operator-provisioned GitHub PAT from the fork's encrypted credential store (`credential-service.ts`; no GitHub App surface exists in the fork), carried in the job's request headers — the one evaluator touch this needs. The trigger suite fakes the GitHub leg with a local `http.createServer` PR-endpoint stub.
 - **Region ownership:** fork `protocol-factory.ts` is a re-export barrel at its 500-line budget — the observe work lands in a **new** `protocol-factory-observe.ts`, never as growth of the exec/lifecycle modules. Factory repo: tests only.
 - **Guards:** observe exec inherits `FLEET_EXEC_TIMEOUT_MS = 300_000` and `FLEET_EXEC_MAX_BUFFER = 16MiB` unchanged; `pollTimeoutMs` (default 1h) bounds the observe settle exactly as it bounds the submit park (F-008's deadline-owns-both-phases doctrine, mirrored).
@@ -99,6 +99,12 @@ Every observe invocation journals one line: verb, argv (driver-absence provable)
 - `src/lib/server/protocols/protocol-triggers.test.ts` — **new**: restart-safety + dedup proofs (AC5, AC6)
 - `src/lib/server/protocols/protocol-run-outcome-notify.ts` — **extends**: eligibility for trigger-sourced runs (AC7)
 - `src/lib/server/protocols/protocol-run-outcome-notify.test.ts` — **extends**: double-notify negative control (AC7)
+- `src/lib/server/protocols/protocol-z2-e2e.test.ts` — **new**: the DOD e2e demo round (schedule fire → submit → observe → terminal → notify)
+- `src/lib/server/protocols/protocol-factory.ts` — **extends**: pollFactoryRuns step-loop filter + routing arm for parked `factory_observe` entries; re-export block (Technical Notes: the durable wake)
+- `src/lib/server/protocols/protocol-step-processors.ts` — **extends**: the one dispatch arm for `factory_observe`
+- `src/lib/server/protocols/protocol-run-lifecycle.ts` — **extends**: the skip action's read-only local-mark arm (`markFactoryObserveSkipped`; the external_job arm fleet-cancels, observe must not)
+- `src/lib/server/runtime/watch-jobs.ts` — **extends**: optional credential headers in `evaluateHttpLikeJob` (AC5's PAT-in-headers) + the post-merge fired-branch hook in `processDueWatchJobs`
+- `src/lib/server/protocols/step-dag-validation.ts` — **extends**: the F-003 repeat-body refusal now covers `factory_observe` (iterations 2+ would silently re-observe nothing — same keyed-state hazard as the `external_job` twin)
 
 ## Security Invariants
 
@@ -110,12 +116,12 @@ Every observe invocation journals one line: verb, argv (driver-absence provable)
 
 ## Definition of Done
 
-- [ ] **Impl:** step kind + config + `normalizeStep` carry landed in fork `protocol.ts`/`protocol-normalization.ts`.
-- [ ] **Test (normalizeStep round-trip):** config survives persist → load → persist byte-identical; the bug-0 erase class named in the test.
-- [ ] **Contract:** observe processor refuses every verb outside `{status, result}`; argv journal shows zero `--driver` occurrences from fork code.
-- [ ] **Test (fork):** `protocol-factory-observe.test.ts` green via fake-CLI journal — `external_job → factory_observe` chain, `awaiting-approval` park, `factory_observe` artifact written.
-- [ ] **Integration:** post-merge watch job and schedule→protocol fire are restart-safe — test kills the process and reloads from the persisted stores (AC5/AC6 negative controls exercised).
-- [ ] **Test (notify):** two-stage durable markers hold for trigger-sourced runs; no double notify on fail → resume → complete.
-- [ ] **Integration (factory):** `tests/fleet/factory-observe-consumer.test.ts` green against real verbs via fake driver — factory CI green with no fork checkout.
-- [ ] **Register:** the `factory_observe` artifact-kind fork-grammar extension recorded in the DD register entry.
-- [ ] **Test (e2e demo — MANDATORY):** one fake-journal round end to end: schedule fires protocol → `external_job` submits (fake) → `factory_observe` polls (fake) → terminal → notify lands on the target session.
+- [x] **Impl:** step kind + config + `normalizeStep` carry landed in fork `protocol.ts`/`protocol-normalization.ts`. — landed + review-round-hardened (r1–r3): step kind, config field + interface, artifact kind, the normalizeStep carry entry, and normalizeFactoryObserveConfig (all in the fork's type + normalization modules).
+- [x] **Test (normalizeStep round-trip):** config survives persist → load → persist byte-identical; the bug-0 erase class named in the test. — normalizeProtocolRun full-run literal + a SECOND normalize pass (the persist choke-point semantics; byte-stability via deepEqual of the canonical shape); bug-0 named in test title.
+- [x] **Contract:** observe processor refuses every verb outside `{status, result}`; argv journal shows zero `--driver` occurrences from fork code. — OBSERVE_VERBS module allowlist + runObserveVerb pre-exec throw; journal scans assert verbs ⊆ {status,result} and zero --driver across all rounds.
+- [x] **Test (fork):** `protocol-factory-observe.test.ts` green via fake-CLI journal — `external_job → factory_observe` chain, `awaiting-approval` park, `factory_observe` artifact written. — 8/8; two-phase park proven again inside the e2e demo.
+- [x] **Integration:** post-merge watch job and schedule→protocol fire are restart-safe — test kills the process and reloads from the persisted stores (AC5/AC6 negative controls exercised). — persisted-store reload proofs (fresh repository reads) + the e2e's genuine two-process leg over a shared DATA_DIR; both negative controls named (in-memory enqueueSystemEvent / authoring-time enqueue would strand — INV-Z2-4). Letter note: the watch-job fire leg's process boundary is covered by store-reload semantics (PLAN A18).
+- [x] **Test (notify):** two-stage durable markers hold for trigger-sourced runs; no double notify on fail → resume → complete. — named controls: schedule fail→resume→complete exactly-once, crash-window sweep exactly-once, restart-drop (target moved A→B delivers B), vanished-target unmark.
+- [x] **Integration (factory):** `tests/fleet/factory-observe-consumer.test.ts` green against real verbs via fake driver — factory CI green with no fork checkout. — 4/4 through assertObserveSurface only; no fork refs; factory full suite green (14 pre-existing vendor fails only).
+- [x] **Register:** the `factory_observe` artifact-kind fork-grammar extension recorded in the DD register entry. — DD-28.6 already carried the two-union record (round-2 amend); landed shape verified conformant (leaf-1.5.1, G1+G2).
+- [x] **Test (e2e demo — MANDATORY):** one fake-journal round end to end: schedule fires protocol → `external_job` submits (fake) → `factory_observe` polls (fake) → terminal → notify lands on the target session. — protocol-z2-e2e.test.ts 4/4: journal trace ['submit','result','result'], one outcome on sess-notify, both markers, two-process persistence, poll honesty.
