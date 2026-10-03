@@ -145,7 +145,7 @@ for (const r of rows) {
   const spec = specFor(r.id);
   if (!spec) {
     if (r.status !== "done") {
-      add("spec-file", r.id, `no spec file in a stories directory`,
+      add("spec-file", r.id, "no spec file in a stories directory",
         "author it, or mark the row done if it shipped before the story convention");
     }
     continue;
@@ -177,7 +177,7 @@ for (const r of rows) {
   for (const r of rows) {
     if (r.status === "done") continue;
     if (!epics.includes(r.id)) {
-      add("epics-index", r.id, `absent from the epics index`,
+      add("epics-index", r.id, "absent from the epics index",
         "add its section — the index is a marker-grep participant and silently under-counts");
     }
   }

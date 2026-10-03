@@ -62,6 +62,21 @@ The `tr`/`perl` step is not optional: bun writes progress with carriage returns 
 ANSI colour, so a plain `grep '(fail)'` over the raw log silently matches nothing and
 reads as "no failures".
 
+## Static gates (ALWAYS before declaring a round/branch green)
+
+`bun test` does NOT typecheck or lint. CI's `check` job runs `bun run typecheck`
+(`tsc --noEmit`) and `bun run lint` (biome, repo-wide) on every PR — a bun-green
+branch gate is not merge-green (PR #404 shipped 7 tsc errors + 4 lint errors past
+three review rounds that only ran `bun test`). Before any commit you call final:
+
+```bash
+bunx tsc --noEmit                                    # 0 errors
+bun run lint                                         # exit 0 (repo-wide, matches CI)
+```
+
+Scope short-cut only when iterating: `bunx @biomejs/biome check <touched files>` —
+but run the full `bun run lint` once before pushing.
+
 ## Reindexing (canonical)
 
 `bash scripts/install-gitnexus-plus.sh` — never a bare `gitnexus analyze`. (#46, #47)

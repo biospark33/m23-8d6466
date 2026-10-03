@@ -11,7 +11,8 @@
 # gated wholesale, so the gate is its own run:
 #
 #   bun run check:coverage
-#   = bun --config=bunfig.coverage.toml test tests/scripts tests/providers tests/lib
+#   = bun --config=bunfig.coverage.toml test tests/scripts tests/scripts/corpus \
+#       tests/providers tests/lib tests/judgment tests/reverify/report.test.ts
 #
 # FLAG POSITION IS LOAD-BEARING. `--config` is a bun GLOBAL flag and must come
 # BEFORE the `test` subcommand. Written the natural-looking way round —
@@ -40,14 +41,19 @@
 # strictly stronger than an aggregate, and it means a single new uncovered file
 # turns the gate red rather than being averaged away.
 #
-# THE NUMBER IS MEASURED, NOT ASPIRATIONAL. Re-measured 2026-09-02 after
-# `tests/lib` joined the run (see below); the weakest files in scope are:
-#   src/providers/exedev/setup-gate.ts   95.83 funcs / 85.56 lines
-#   src/lib/http.ts                      75.00 funcs / 81.13 lines
-#   scripts/lib/run-lock.ts              75.00 funcs / 63.25 lines  <- the floor
-# 0.60 sits just under run-lock's 63.25 with a little headroom (the race test in
-# tests/scripts/cost-ledger-opts.test.ts spawns real subprocesses whose
-# migrate/fallback split varies run to run).
+# THE NUMBER IS MEASURED, NOT ASPIRATIONAL. Re-measured 2026-10-02, after the
+# four hidden-file widenings described below landed (so the numbers below are
+# the whole run's, with every suite in it); the weakest files in scope are:
+#   scripts/lib/cli-args.ts              66.67 funcs / 93.55 lines  <- the floor
+#   scripts/corpus/validate.ts           75.00 funcs / 91.67 lines
+#   scripts/lib/mcp-stdio-client.ts      75.00 funcs / 93.71 lines
+#   scripts/lib/run-lock.ts              89.66 funcs / 75.79 lines
+# 0.60 sits under cli-args' 66.67 with real headroom (its uncovered pair is the
+# help/unknown-flag gate arms; the race test in
+# tests/scripts/cost-ledger-opts.test.ts still spawns real subprocesses whose
+# migrate/fallback split varies run to run). The old floor -- run-lock at
+# 63.25 lines -- no longer exists: its suite's own run now scores the file at
+# 75.79.
 #
 # WHY `tests/lib` IS IN THE RUN. It was not, and that made the gate lie. bun
 # measures every file the run DRAGS IN, but only runs the test dirs named on the
@@ -62,6 +68,34 @@
 # Fixed by widening the RUN, never by widening the ignore list below -- the
 # distinction matters: ignoring the file would have hidden a real 0%, whereas
 # running its test measures what was always there.
+#
+# THE SAME ARTIFACT, THREE MORE TIMES (2026-10-02, PR #404 closeout). The same
+# run-vs-measured split hid four more files, and the gate named only the loudest:
+#   - `src/reverify/report.ts` (33.33 funcs / 44.20 lines): `tests/reverify/`
+#     sat outside the run, but `src/fleet/attach.ts` drags the file in, so it
+#     scored on transitive import execution alone while its own suite,
+#     `tests/reverify/report.test.ts`, sat unrun. Named the file directly in
+#     the script (a path positional, not a dir) rather than moving the suite --
+#     its home is with its siblings.
+#   - `src/judgment/client.ts` (45.45 / 63.06) and `src/judgment/envelope.ts`
+#     (0.00 / 100.00): `tests/judgment/` held eight passing suites for these
+#     files and the run never executed them. Widened with the whole dir.
+#   - `scripts/corpus/validate.ts` (50.00 / 61.22): its suite lives at
+#     `tests/scripts/corpus/validate.test.ts` and the `tests/scripts`
+#     positional DID run its sibling `corpus/backfill.test.ts` -- but not this
+#     one, so the dir positionals are not reliable below one level. Named
+#     `tests/scripts/corpus` explicitly. Its main() was covered only through
+#     CHILD processes (which coverage cannot score); the success path is now
+#     also pinned in-process.
+#   - `scripts/judgment/live-probe.ts` (33.33 / 37.31): surfaced only once
+#     `tests/judgment` joined the run -- the drag set grew with it. Its
+#     `main`/`diffEnvelope` were private and its main exited on the gate, so
+#     the module now exports them for the probe-gate suite, which drives main
+#     under TYPESAFE_MOCK=1: in-process for the scorer, and off the wire.
+#     (Round-2 review of the same PR then replaced the hold barrier's fixed
+#     park with a parent-to-child acknowledgment sent only after the host's
+#     own withRunLock had synchronously executed its acquire -- see
+#     tests/providers/df2-11-teardown-race.test.ts.)
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 

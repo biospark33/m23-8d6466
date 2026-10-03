@@ -361,6 +361,25 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     probes `createServer` in `src/swarmclaw/index.ts` (NET-NEW vs R3, flagged by Z5), so the
     retained surface is load-bearing twice (ADR-2 restoration path + this probe).
 
+## 8b. DD-29 — SWARMCLAW_FORK_REV adoption ritual (Z1, 2026-10-02)
+
+**DD-29 (fork-rev pin adoption):** `SWARMCLAW_FORK_REV` lives at
+`scripts/swarmclaw-fork-pin.ts` (at `scripts/` root — **outside the box COPY set** per
+DD-28.2, so adopting or bumping it never moves `deriveBuildId`). The pin advances **ONLY
+by a deliberate bump PR naming the evidence round that proves the new rev**
+(charter §5.3 — the pin tracks evidence, never fork HEAD; factory-only `df3-e2e` rounds
+never move it). The pin instant (`SWARMCLAW_FORK_REV_PINNED_AT`) and every manifest row's
+`citing.timestamp` are **ISO-8601 UTC `Z`-suffixed** datetimes — a story-internal
+discipline, noted as such (repo-wide convention is unchanged; the drift alarm's
+post-pin boundary is a plain string compare over this fixed form, inclusive at the pin).
+The drift alarm is **provenance-scoped, not blindly global**: a stamped rev from a
+post-pin round must equal the pin; a pre-pin stamped rev validates against its own
+manifest row's rev — legitimate older revisions pass. **No adopter script**: the fork
+rev is one literal plus one manifest row (unlike the image-pin ritual's five literals
+across four files); revisit trigger — the ritual grows a second pinned fork constant.
+**Z2 is the consumer, never the editor**: drift found by Z2's fork-side work is fixed by
+a Z1 bump PR first (§5.5 — one contract text, both sides).
+
 ## 9. Sources
 
 Charter (input, closed) · R1–R5 research reports (paths in header) · ADR-1 + ADR-2 ·

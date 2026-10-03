@@ -36,6 +36,7 @@ import {
   type ResultPayload,
   type ResultStatus,
 } from "../../src/fleet/result.ts";
+import { assertObserveSurface, expectExactFields } from "./observe-contract.ts";
 
 const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "q1-contract-")));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
@@ -80,18 +81,10 @@ async function runCli(argv: string[], depsOverrides: Record<string, unknown> = {
   );
 }
 
-/** The exact field-set pin: missing AND extra fields both fail, naming them. */
-function expectExactFields(obj: object, required: string[], optional: string[] = []): void {
-  const keys = new Set(Object.keys(obj));
-  const allowed = new Set([...required, ...optional]);
-  const missing = required.filter((k) => !keys.has(k));
-  const unexpected = [...keys].filter((k) => !allowed.has(k));
-  expect({
-    missing,
-    unexpected,
-    hint: `the Q1 contract changed: required=${JSON.stringify(required)} optional=${JSON.stringify(optional)} got=${JSON.stringify([...keys].sort())}`,
-  }).toEqual({ missing: [], unexpected: [], hint: expect.any(String) });
-}
+// expectExactFields — the exact field-set pin (missing AND extra fields both
+// fail, naming them) — lives as THE canonical copy in observe-contract.ts,
+// shared with the observe surface below; the refusal mechanism is
+// demonstrated by the meta-test in the observe describe.
 
 describe("Q1.8 contract: fleet submit's ack", () => {
   test("schemaVersion is the literal 1 the module exports", () => {
@@ -339,5 +332,38 @@ describe("Q1.8 contract: the DAG identity (Q1.7)", () => {
     expect(await runCli(["result", ack.runId])).toBe(0);
     const payload = JSON.parse(outLines[0] as string) as ResultPayload;
     expect(payload.requestId).toBe(requestId);
+  });
+});
+
+describe("Q1.8 contract: the observe consumption surface (factory_observe)", () => {
+  // The SAME deps runCli builds — the helper drives run() exactly the way the
+  // DAG adapter consumes the surface: argv in, JSON lines out.
+  const observeDeps = () => ({
+    driver: new FakeDriver(join(dir, "boxes")),
+    keyApi: new FakeKeyApi(),
+    store,
+    ledgerFactory: () => goodLedger(),
+    repoRoot: dir,
+  });
+
+  // ONE full-sweep test per verb (CodeRabbit r1): the helper asserts the
+  // entire surface per call, so a second same-verb call reran identical
+  // fixtures and assertions — the claims those titles carried are merged here.
+  test("fleet result: exit 0 covers a RUNNING run — the payload line is exactly the pinned ResultPayload field set with schemaVersion the literal 1, requestId null-never-absent, and `terminal` the field a poller branches on; the missing-record answer is exit 4 with run-not-found on stderr, per the registry exit row [0, 2, 4, 6], whose row carries no --driver flag (driver-free, box-free, lock-free by construction)", async () => {
+    await assertObserveSurface(run, outLines, errLines, observeDeps(), { verb: "result" });
+  });
+
+  test("fleet status: emits exactly the StatusRow field set with state words from the closed vocabulary — exit 0 on an empty store, FLEET_ROW_ID on the fleet-level row, the registry exit row [0, 1, 2, 4, 5, 6], and no schema-version marker anywhere on the wire; both observe verbs are present in the registry with status's --driver owned by the deployed wrapper (the fork-side fence is Z2's module allowlist, not this suite — INV-Z1-2)", async () => {
+    await assertObserveSurface(run, outLines, errLines, observeDeps(), { verb: "status" });
+  });
+
+  test("expectExactFields — the suite's own refusal mechanism — throws naming the field on BOTH a fat payload (extra key) and a short one (missing key)", () => {
+    // The meta-demonstration behind every "exactly the contract fields" pin
+    // above: a drifted payload cannot slip through quietly in either
+    // direction — the failure message names the offending field.
+    const fat = { runId: "qds-20260928-meta1", state: "ok", schemaVersion: 1 };
+    expect(() => expectExactFields(fat, ["runId", "state"])).toThrow("schemaVersion");
+    const short = { runId: "qds-20260928-meta1" };
+    expect(() => expectExactFields(short, ["runId", "state"])).toThrow("state");
   });
 });

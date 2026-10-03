@@ -1,0 +1,12 @@
+{
+  "pr": 0,
+  "round": 3,
+  "duration_ms": 240000,
+  "findings": [
+    { "finding_id": "R3-01", "finding_text": "Committed manifest indexes evidence files the branch does not carry — clean checkout ghosts red (third identification of R2-02).", "diff_context_ref": "_bmad-output/evidence/openrig-sc2/@untracked-6", "label": "HIGH", "disposition": "PATCH", "rationale": "Already-tracked driver action: stage the 6 untracked sc2-7 evidence JSONs with the branch commit (lands before PR).", "created_at": "2026-10-02T17:00:00Z" },
+    { "finding_id": "R3-02", "finding_text": "Harness guard depth cap (10) vs alarm finder (unbounded) — two scans documented as mirrors terminate by different rules; an 11-deep caller stamp passes the writer and false-fires the alarm.", "diff_context_ref": "scripts/swarmclaw-fork-pin.ts@findStampedRevs", "label": "MED", "disposition": "PATCH", "rationale": "Fixed by driver: finder now carries the identical depth-10 cap + mirroring docblock — symmetric termination.", "created_at": "2026-10-02T17:00:00Z" },
+    { "finding_id": "R3-03", "finding_text": "q1 observe status tests assert empty fleet from a store the result branch populated — order-dependent (fourth identification of the F-026 premise).", "diff_context_ref": "tests/fleet/q1-contract.test.ts@observe-describe", "label": "MED", "disposition": "DISMISS", "rationale": "Same dismissed premise, now fourth raise: store is the beforeEach-fresh file-scope let (new tmpdir per test, q1-contract.test.ts:54-57); verified thrice by drivers/auditors and by the acceptance r2 source citation. Diff-only blindness cannot see beforeEach.", "created_at": "2026-10-02T17:00:00Z" },
+    { "finding_id": "R3-04", "finding_text": "walkJsons nested readdirSync uncaught — an EACCES/EIO subdirectory throws raw out of the alarm, breaking the {ok}|{ok,failures} return contract.", "diff_context_ref": "scripts/swarmclaw-fork-pin.ts@walkJsons-recursion", "label": "LOW", "disposition": "PATCH", "rationale": "Fixed by driver: recursive call wrapped, failure line 'unreadable evidence directory ... the alarm never skips silently (F-001)'.", "created_at": "2026-10-02T17:00:00Z" },
+    { "finding_id": "R3-05", "finding_text": "Closure test title promises 'result driver-free' but its body runs only the status branch.", "diff_context_ref": "tests/fleet/q1-contract.test.ts@361", "label": "LOW", "disposition": "PATCH", "rationale": "Fixed by driver: title now scopes result's driver-freedom to the result sweep above.", "created_at": "2026-10-02T17:00:00Z" }
+  ]
+}

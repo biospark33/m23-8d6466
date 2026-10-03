@@ -1,0 +1,19 @@
+{
+  "protocolRunId": "a0cd79a6",
+  "fleetRunId": "qds-20260930-de77a9",
+  "verdictStatus": "approved",
+  "branchSummary": "Branch \"Verdict gate\" selected case approved-case.",
+  "eventTypes": [
+    "created",
+    "step_started",
+    "step_waiting",
+    "step_completed",
+    "step_started",
+    "branch_taken",
+    "step_completed",
+    "step_started",
+    "step_completed",
+    "completed"
+  ],
+  "runStatus": "completed"
+}

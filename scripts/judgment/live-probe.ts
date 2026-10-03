@@ -12,8 +12,11 @@
  *
  * The env var is the go flag (chosen over an argv flag for the same idiom as
  * TYPESAFE_MOCK; documented here). Nothing else in the repo invokes this
- * script, and no test runs it against the network — only the pure gate is
- * unit-tested (tests/judgment/probe-gate.test.ts).
+ * script, and no test runs it against the network — the pure gate, the
+ * contract diff and the mock-mode main are unit-tested
+ * (tests/judgment/probe-gate.test.ts); `main` is exported so the coverage
+ * gate's per-file floor can score the wire-adjacent assembly in-process,
+ * with TYPESAFE_MOCK=1 keeping every one of those tests off the wire.
  *
  * Usage:  TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts
  *
@@ -71,7 +74,9 @@ function drift(message: string): never {
   process.exit(2);
 }
 
-function diffEnvelope(env: JudgmentEnvelope): void {
+/** Exported for tests/judgment/probe-gate.test.ts — the diff is pure, so the
+ * contract's drift arms are pin-able without a wire. */
+export function diffEnvelope(env: JudgmentEnvelope): void {
   if (env.model !== contract.model) drift(`model is "${env.model}", contract pins "${contract.model}"`);
   if (Object.keys(env.questions).join(",") !== Object.keys(canonicalRequest().questions).join(",")) {
     drift("question ids were not echoed as asked");
@@ -85,7 +90,8 @@ function diffEnvelope(env: JudgmentEnvelope): void {
   }
 }
 
-async function main(): Promise<void> {
+/** Exported for tests/judgment/probe-gate.test.ts (run under TYPESAFE_MOCK=1). */
+export async function main(): Promise<void> {
   const gate = probeGate();
   if (!gate.ok) {
     console.error(`[live-probe] refusing to run: ${gate.reason}`);

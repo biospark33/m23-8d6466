@@ -1,0 +1,6 @@
+{
+  "box": "qds-20260930-de77a9",
+  "probeStdout": "/home/exedev/src\nsbx/qds-20260930-de77a9\n425bcd8c test(e2e): SC2 live harness survives PR worktree cleanup — named precondition + one-command bootstrap\n8a240011 fix(fleet): #382 — chain pre-registers the approval gate before its teardown closes the record\nf068911e Merge pull request #381 from Quantum-Digital-Solutions/feature/sc2-6-lease-kill-live\nCOUNT=0\n",
+  "probeStderr": "",
+  "probeExit": 0
+}

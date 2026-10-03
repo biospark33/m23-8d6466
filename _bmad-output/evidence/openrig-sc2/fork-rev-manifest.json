@@ -1,0 +1,407 @@
+{
+  "meta": {
+    "story": "Z1",
+    "pinRev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+    "pinnedAt": "2026-10-02T15:08:06Z",
+    "sourceRule": "git-log bracket per DD-28.26(9): pre-pin rows are timeline-bracketed inferences",
+    "boundaryRule": "post-pin iff citing.timestamp >= SWARMCLAW_FORK_REV_PINNED_AT (ISO-Z string compare, inclusive at the pin)"
+  },
+  "rounds": [
+    {
+      "file": "2026-09-28-sc2-1-5-code.json",
+      "rev": "a05b502c6b728482c1f1887f7854981da61c2aff",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "a05b502c6b728482c1f1887f7854981da61c2aff"
+        ],
+        "timestamp": "2026-09-28T00:00:00Z"
+      }
+    },
+    {
+      "file": "2026-09-30T01-08-26-305Z-sc2-6-window-a.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T01:08:26Z"
+      }
+    },
+    {
+      "file": "2026-09-30T01-08-41-167Z-sc2-6-window-a-teardown.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T01:08:41Z"
+      }
+    },
+    {
+      "file": "2026-09-30T01-09-59-850Z-sc2-6-window-b.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T01:09:59Z"
+      }
+    },
+    {
+      "file": "2026-09-30T01-10-15-276Z-sc2-6-window-b-teardown.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T01:10:15Z"
+      }
+    },
+    {
+      "file": "2026-09-30T01-58-22-256Z-sc2-7-kill-and-provision.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T01:58:22Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-15-32-914Z-sc2-7-kill-and-provision.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:15:32Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-15-33-136Z-sc2-7-box-forensics.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:15:33Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-15-56-678Z-sc2-7-observe.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:15:56Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-21-15-438Z-sc2-7-kill-and-provision.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:21:15Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-21-16-765Z-sc2-7-box-forensics.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:21:16Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-23-46-619Z-sc2-7-observe.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:23:46Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-28-37-001Z-sc2-7-kill-and-provision.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:28:37Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-28-38-050Z-sc2-7-box-forensics.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:28:38Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-29-19-432Z-sc2-7-observe.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:29:19Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-32-39-638Z-sc2-7-kill-and-provision.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:32:39Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-32-41-879Z-sc2-7-box-forensics.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:32:41Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-36-06-890Z-sc2-7-observe.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:36:06Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-36-08-700Z-sc2-7-approve.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:36:08Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-50-27-005Z-sc2-7-kill-and-provision.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:50:27Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-50-28-002Z-sc2-7-box-forensics.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:50:28Z"
+      }
+    },
+    {
+      "file": "2026-09-30T02-53-36-901Z-sc2-7-observe.json",
+      "rev": "c5fe606187f062eb8d54351eb00425640c0000a6",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "c5fe606187f062eb8d54351eb00425640c0000a6"
+        ],
+        "timestamp": "2026-09-30T02:53:36Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-27-14-581Z-sc2-7-kill-and-provision.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:27:14Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-27-15-650Z-sc2-7-box-forensics.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:27:15Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-32-50-547Z-sc2-7-observe.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:32:50Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-37-09-338Z-sc2-7-kill-and-provision.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:37:09Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-37-10-504Z-sc2-7-box-forensics.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:37:10Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-37-48-312Z-sc2-7-observe.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:37:48Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-37-50-475Z-sc2-7-approve.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:37:50Z"
+      }
+    },
+    {
+      "file": "2026-09-30T03-37-55-868Z-sc2-7-branch-and-complete.json",
+      "rev": "472523b6f0fdc8778545d3b3ae20e42fb7361a80",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "472523b6f0fdc8778545d3b3ae20e42fb7361a80"
+        ],
+        "timestamp": "2026-09-30T03:37:55Z"
+      }
+    },
+    {
+      "file": "2026-09-30T15-19-10-429Z-sc2-7-kill-and-provision.json",
+      "rev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58"
+        ],
+        "timestamp": "2026-09-30T15:19:10Z"
+      }
+    },
+    {
+      "file": "2026-09-30T15-19-13-229Z-sc2-7-box-forensics.json",
+      "rev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58"
+        ],
+        "timestamp": "2026-09-30T15:19:13Z"
+      }
+    },
+    {
+      "file": "2026-09-30T15-20-32-951Z-sc2-7-observe.json",
+      "rev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58"
+        ],
+        "timestamp": "2026-09-30T15:20:32Z"
+      }
+    },
+    {
+      "file": "2026-09-30T15-20-33-785Z-sc2-7-race-window-closed.json",
+      "rev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58"
+        ],
+        "timestamp": "2026-09-30T15:20:33Z"
+      }
+    },
+    {
+      "file": "2026-09-30T15-20-37-791Z-sc2-7-approve.json",
+      "rev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58"
+        ],
+        "timestamp": "2026-09-30T15:20:37Z"
+      }
+    },
+    {
+      "file": "2026-09-30T15-20-38-997Z-sc2-7-branch-and-complete.json",
+      "rev": "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58",
+      "source": "git-log bracket",
+      "citing": {
+        "merges": [
+          "cb2e1ca3eac0d80f40de764ab91f17fd29b47c58"
+        ],
+        "timestamp": "2026-09-30T15:20:38Z"
+      }
+    }
+  ]
+}
