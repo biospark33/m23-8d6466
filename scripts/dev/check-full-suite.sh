@@ -4,27 +4,35 @@
 # failing on clean dev via a stash baseline — they are not this branch's
 # regressions:
 #   pi-vs-claude-code-vendor/self-compact/**  — env-dependent cluster (PR #404 CI-debt history)
-#   tests/lib/http.test.ts                    — retry-budget wall-clock assert assumes 192.0.2.1:9
-#                                               times out at 50ms/attempt; this network refuses fast,
-#                                               so the >=90ms assert fails intermittently (1-in-2..3 runs)
+# tests/lib/http.test.ts used to sit here too (a >=90ms wall-clock floor
+# against TEST-NET-1 collapsed on fast-refusing networks); those tests now
+# hang a local Bun.serve instead and are deterministic.
 # bun test path args are substring filters (the vendor tree contains
 # "tests"), so the run is unfiltered and this script checks the parsed
 # fail-set. Non-exempt failing files get TWO reruns with a settle delay:
-# timing-sensitive suites (the 91-test stdio spawn suite, the http asserts)
-# fail inside a loaded full-suite marathon and pass standalone; a genuine
-# regression fails every pass.
+# timing-sensitive suites (the 91-test stdio spawn suite) fail inside a
+# loaded full-suite marathon and pass standalone; a genuine regression
+# fails every pass.
 LOG=$(mktemp)
 LOG_FAILS="$LOG.fails"
 trap 'rm -f "$LOG" "$LOG_FAILS"' EXIT
 
 bun test > "$LOG" 2>&1
+RC=$?
 tr '\r' '\n' < "$LOG" | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' | awk '
-  /\.test\.(ts|tsx|js|mjs|jsx):$/ { file = $0 }
+  /\.test\.(ts|tsx|js|mjs|jsx):$/ { file = $0; sub(/:$/, "", file) }
   /\(fail\)/ { print file }
 ' | sort -u > "$LOG_FAILS"
 
-EXEMPT_RE='^(pi-vs-claude-code-vendor/|tests/lib/http\.test\.ts)'
+EXEMPT_RE='^pi-vs-claude-code-vendor/self-compact/'
 TOTAL=$(wc -l < "$LOG_FAILS" | tr -d ' ')
+# A non-zero bun exit with zero parsed failing files means the run died
+# before/during collection (config error, crash, OOM) — never a green.
+if [ "$RC" -ne 0 ] && [ "$TOTAL" = "0" ]; then
+  echo "FAIL: bun test exited $RC with no failing files parsed (run died before completing); last lines:"
+  tail -20 "$LOG"
+  exit 1
+fi
 UNDOCUMENTED=$(grep -vc "$EXEMPT_RE" "$LOG_FAILS" || true)
 echo "failing files: $TOTAL (documented-exempt: $((TOTAL - UNDOCUMENTED)), undocumented: $UNDOCUMENTED)"
 if [ "$UNDOCUMENTED" = "0" ]; then
