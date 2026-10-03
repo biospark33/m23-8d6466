@@ -178,7 +178,7 @@ describe("httpRequest", () => {
     // one-vs-two-attempt discrimination meaningless.
     const server = Bun.serve({
       port: 0,
-      fetch: () => Bun.sleep(5_000).then(() => new Response("late")),
+      fetch: () => Bun.sleep(1_000).then(() => new Response("late")),
     });
     try {
       const started = Date.now();
@@ -200,7 +200,7 @@ describe("httpRequest", () => {
     // TEST-NET floor collapsed on networks that refuse the connect fast.
     const server = Bun.serve({
       port: 0,
-      fetch: () => Bun.sleep(5_000).then(() => new Response("late")),
+      fetch: () => Bun.sleep(1_000).then(() => new Response("late")),
     });
     try {
       const started = Date.now();
