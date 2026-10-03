@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Epic Z — adapter-contract arc, story 1 of 2; Wave 1, zero E21 gates, Live tier: none)
-**Status:** done
+**Status:** done — PR #404 merged to `dev` 2026-10-03 (merge 306f0640; CI check/tests/image green on tip 16e09300). Closeout fixed two in-PR CI debts: the coverage floor now runs the reverify/judgment/corpus suites (four sub-floor files the run-vs-measured artifact had hidden), and the two runner-flake causes were repaired at root (the EMFILE fd-hoard test moved out of the bun test process; the df2-11 contention barrier rebuilt as an attempt-ack after CR round 2 rejected the fixed-park cut). CodeRabbit findings: zero outstanding.
 
 ## Spec Reference
 
