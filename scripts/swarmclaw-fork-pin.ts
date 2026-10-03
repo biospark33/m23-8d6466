@@ -208,7 +208,17 @@ export function validateEvidenceForkRevs(opts: {
       walkedFiles.add(entry.file);
       const rel = `${dir}/${entry.file}`;
       const row = rowsByFile.get(entry.file)?.[0]?.row;
-      const { stamps, nonStrings } = findStampedRevs(entry.parsed);
+      let stamps: string[];
+      let nonStrings: number;
+      try {
+        ({ stamps, nonStrings } = findStampedRevs(entry.parsed));
+      } catch {
+        // Fail closed (round-2 review): a scan that hit its depth cap cannot
+        // promise it saw every stamp, so the file fails validation by name
+        // instead of passing with an unverifiable silence.
+        failures.push(`evidence JSON ${rel} exceeds the supported stamp-scan depth`);
+        continue;
+      }
       for (let i = 0; i < nonStrings; i++) {
         failures.push(
           `stamp at ${rel} is not a string — structured stamp shapes are not part of the contract (F-021)`,
@@ -336,10 +346,16 @@ function walkJsons(
  *
  * Depth is capped at 10, mirroring the writer's `hasSwarmclawForkRevDeep`
  * guard: the two scans must terminate by the same rule, or a stamp one of
- * them can see becomes a stamp the other cannot (asymmetric blindness).
+ * them can see becomes a stamp the other cannot (asymmetric blindness). The
+ * cap FAILS CLOSED (round-2 review): a scan that silently stopped at the cap
+ * let a stamp nested deeper than it pass validation unseen, and the contract
+ * sets no nesting exception — the caller turns the throw into a named
+ * validation failure. Inputs are JSON.parse output, so they are acyclic; a
+ * payload deep enough to reach the cap is pathological, not merely large.
  */
 function findStampedRevs(value: unknown, depth = 0): { stamps: string[]; nonStrings: number } {
-  if (depth >= 10 || value === null || typeof value !== "object") return { stamps: [], nonStrings: 0 };
+  if (value === null || typeof value !== "object") return { stamps: [], nonStrings: 0 };
+  if (depth >= 10) throw new Error("evidence exceeds the supported stamp-scan depth");
   if (Array.isArray(value)) {
     return value
       .map((v) => findStampedRevs(v, depth + 1))

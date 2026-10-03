@@ -780,6 +780,46 @@ describe("swarmclaw fork-rev drift alarm", () => {
       expect(result.failures[0]).toContain("stamped dir openrig-sc2 missing");
       expect(result.failures.join("\n")).not.toContain("no evidence file");
     });
+
+    // Round-2 review: the stamp scan fails CLOSED at its depth cap. A scan
+    // that silently stopped at depth 10 would let a stamp nested deeper than
+    // it pass validation unseen — the contract sets no nesting exception —
+    // so the cap is a named validation failure, and one level BELOW the cap
+    // must still validate normally (the guard is a floor, not a widening of
+    // what the alarm refuses).
+    test("a stamp nested past the scan cap fails validation by name, not silence (round-2)", () => {
+      const name = "2026-10-02T23-00-00-000Z-sc2-postpin-toodeep.json";
+      const wrap = (node: Record<string, unknown>, times: number): Record<string, unknown> => {
+        let out = node;
+        for (let i = 0; i < times; i++) out = { nested: out };
+        return out;
+      };
+      const { evidenceDir, manifestPath } = stageFixture(
+        { [name]: wrap({ swarmclawForkRev: PIN }, 10) },
+        [{ file: name, rev: PIN, citing: { timestamp: SWARMCLAW_FORK_REV_PINNED_AT } }],
+      );
+      const result = runAlarm(evidenceDir, manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failures).toEqual([
+        `evidence JSON openrig-sc2/${name} exceeds the supported stamp-scan depth`,
+      ]);
+    });
+
+    test("a stamp at one level below the cap still validates — the cap is not a refusal window (round-2)", () => {
+      const name = "2026-10-02T23-10-00-000Z-sc2-postpin-deep-ok.json";
+      const wrap = (node: Record<string, unknown>, times: number): Record<string, unknown> => {
+        let out = node;
+        for (let i = 0; i < times; i++) out = { nested: out };
+        return out;
+      };
+      const { evidenceDir, manifestPath } = stageFixture(
+        { [name]: wrap({ swarmclawForkRev: PIN }, 9) },
+        [{ file: name, rev: PIN, citing: { timestamp: SWARMCLAW_FORK_REV_PINNED_AT } }],
+      );
+      const result = runAlarm(evidenceDir, manifestPath);
+      expect(result.ok).toBe(true);
+    });
   });
 
   describe("authorship invariants (the exports themselves)", () => {
@@ -849,6 +889,14 @@ describe("swarmclaw fork-rev drift alarm", () => {
           `sc2-harness writeEvidence guard contract broken — missing: ${missing.map(([label]) => label).join(", ")}`,
         );
       }
+      // Round-2 review: the deep guard FAILS CLOSED at its cap — a scan that
+      // silently returned false past depth 10 would let a caller-supplied
+      // nested stamp land on disk and ride under the alarm's identically
+      // capped scan. Pin the throw, not the absence of a return.
+      const guardStart = stripped.indexOf("function hasSwarmclawForkRevDeep");
+      expect(guardStart).toBeGreaterThanOrEqual(0);
+      const guardBody = stripped.slice(guardStart, stripped.indexOf("\n}", guardStart));
+      expect(guardBody).toContain('throw new Error("evidence payload exceeds the supported stamp-scan depth")');
     });
   });
 });

@@ -358,10 +358,14 @@ function assertNoSecrets(obj: unknown): void {
   if (s.includes("sc27tok-")) throw new Error("evidence scrub: sc27tok- (approver token) survived");
 }
 
-/** Depth-limited scan mirroring the alarm's recursive finder (cap guards cyclic payloads). */
+/** Depth-limited scan mirroring the alarm's recursive finder. The cap fails
+ * CLOSED (round-2 review): silently returning false past depth 10 would let a
+ * caller-supplied nested stamp slip past the guard, land on disk, and ride
+ * under the alarm's own identically-capped scan. Any payload that deep is
+ * pathological — writeEvidence stringifies it anyway, so cycles die there. */
 function hasSwarmclawForkRevDeep(value: object, depth = 0): boolean {
   if ("swarmclawForkRev" in value) return true;
-  if (depth >= 10) return false;
+  if (depth >= 10) throw new Error("evidence payload exceeds the supported stamp-scan depth");
   return Object.values(value).some((v) => typeof v === "object" && v !== null && hasSwarmclawForkRevDeep(v, depth + 1));
 }
 
