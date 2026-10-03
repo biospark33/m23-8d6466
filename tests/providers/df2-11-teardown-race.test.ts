@@ -268,9 +268,13 @@ function loserScript(runsDirPath: string, runId: string, gitCwd: string, linkLog
 
 /**
  * The CONTENTIOUS racer: identical shape to the loser above, but after its
- * imports land it announces "RACER AT THE DOOR" (F8's startup barrier — the
- * host waits for this line before starting its own attempt), sleeps a short
- * pre-lock timer, then attempts `withRunLock`. On a lost race it prints the
+ * imports land it announces "RACER AT THE DOOR" (cold-start diagnostic), then
+ * attempts `withRunLock`. On ACQUIRING the claim it announces "RACER HOLDS THE
+ * CLAIM" and parks INSIDE the callback — holding the lock — for a bounded
+ * 500 ms before running the teardown. That park is the host's barrier (see the
+ * contention test below): the host does not attempt its own claim until it has
+ * SEEN this line, so the two attempts cannot be consecutive, which is the
+ * failure mode that outlived the door barrier. On a lost race it prints the
  * refusal's code and exits 1; on a won race it runs the FULL teardown and says
  * so on stdout.
  *
@@ -290,14 +294,15 @@ function racerScript(runsDirPath: string, runId: string, gitCwd: string, linkLog
     const racerStore = new RunRecordStore(${JSON.stringify(runsDirPath)});
     const racerDriver = new FakeDriver(${JSON.stringify(boxesRoot)});
     console.log("RACER AT THE DOOR");
-    await Bun.sleep(15);
-    await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-child", (h) =>
-      teardownSandbox(
+    await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-child", async (h) => {
+      console.log("RACER HOLDS THE CLAIM");
+      await Bun.sleep(500);
+      await teardownSandbox(
         { driver: racerDriver, store: racerStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)}, recordAuditLink: (l) => appendFileSync(${JSON.stringify(linkLog)}, JSON.stringify(l) + "\\n") },
         ${JSON.stringify(runId)},
         h,
-      ),
-    );
+      );
+    });
     console.log("RACER WON — the child ran the teardown");
   } catch (e) {
     console.error("code=" + e.code);
@@ -446,7 +451,7 @@ describe("DF2.11 e2e teardown race", () => {
   );
 
   test(
-    "e2e TRUE contention: the child racer and the in-process racer hit the lock claim off overlapping timers — exactly one wins, exactly one harvest, whichever side it is",
+    "e2e TRUE contention: the child racer claims and HOLDS the lock while the in-process racer attempts — the host attempt is refused run-locked mid-hold, and the child harvests the 3-commit box exactly once",
     async () => {
       // Same pre-teardown world as the marquee test, minus the key: the
       // child racer runs in its own process and cannot see this one's
@@ -464,19 +469,24 @@ describe("DF2.11 e2e teardown race", () => {
       // zero — the exact vacuousness the child's no-op sink used to guarantee.
       store.set(RUN_ID, { requestId: "req-df211-race", extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
 
-      // Both racers run the full withRunLock → teardownSandbox. F8: a startup
-      // barrier replaces the old overlap-by-luck window — the child announces
-      // "RACER AT THE DOOR" (imports loaded, one 15 ms timer from its acquire)
-      // and the HOST waits for that line before starting its own random
-      // 0–120 ms timer. The attempts are therefore guaranteed to overlap; the
-      // ordering still stays genuinely undetermined (the child spends its 15 ms
-      // pre-lock sleep inside the host's timer range), and every assertion
-      // below holds for either winner. (This is the property the serialized
-      // test above cannot show — two acquirers landing on the same link(2)
-      // claim, one of them refused, never two.) The old shape bet the overlap
-      // on the child winning its cold start against a whole teardown; a child
-      // that started slow made the attempts CONSECUTIVE, which the lock
-      // legitimately allows, and the XOR below failed as a flake.
+      // Both racers run the full withRunLock → teardownSandbox. F8's door
+      // barrier made the ATTEMPT windows overlap, and that was not enough:
+      // run 37081488819 (2026-10-03) lost the XOR because the child claimed at
+      // door+15 ms, finished its WHOLE teardown, released — and the host's
+      // random timer (drawn past 15 ms + a loaded teardown) then claimed the
+      // FREED lock and harvested a second time. Consecutive attempts are
+      // legitimate lock behavior; the door barrier only guaranteed they
+      // overlapped in time, not that the host's claim landed while the child
+      // HELD. So the barrier moved to the hold itself: the child announces
+      // "RACER HOLDS THE CLAIM" from inside its `withRunLock` callback and
+      // parks there for 500 ms, and the HOST does not attempt its claim until
+      // it has read that line. The refusal is then a genuine cross-process
+      // link(2) contention — the host really attempts, the child really holds
+      // — and the direction is deterministic: child wins, host refused.
+      // (The host-wins direction is the serialized test above, where the
+      // in-process side holds before the child is even spawned.) The XOR below
+      // stays as a tripwire: a lock that let the host through mid-hold would
+      // fail it here rather than downstream at the count assertions.
       const counting = countingRecording();
       const child = Bun.spawn(["bun", "-e", racerScript(runsDir, RUN_ID, repoDir, childLinkLog)], {
         stdout: "pipe",
@@ -489,33 +499,38 @@ describe("DF2.11 e2e teardown race", () => {
       const reader = child.stdout.getReader();
       const decoder = new TextDecoder();
       let childOut = "";
-      let atDoor = false;
-      const doorDeadline = Date.now() + 10_000;
+      let holds = false;
+      const holdsDeadline = Date.now() + 10_000;
       // The deadline must bound the READ, not just the loop condition: a child
       // that hangs BEFORE its first byte would otherwise park `reader.read()`
       // forever and the while-condition would never get a turn to expire. The
       // timeout arm RESOLVES (never rejects) so a read that wins the race
       // cannot leave an unhandled rejection behind; the loop throws the named
       // diagnostic instead.
-      while (!atDoor && Date.now() < doorDeadline) {
+      while (!holds && Date.now() < holdsDeadline) {
         const chunk = await Promise.race([
           reader.read(),
-          Bun.sleep(Math.max(0, doorDeadline - Date.now())).then(() => null),
+          Bun.sleep(Math.max(0, holdsDeadline - Date.now())).then(() => null),
         ]);
         if (chunk === null)
           throw new Error("child racer stdout read hung past the 10s barrier deadline — its cold start failed or hung");
         if (chunk.done) break;
         childOut += decoder.decode(chunk.value, { stream: true });
-        atDoor = childOut.includes("RACER AT THE DOOR");
+        holds = childOut.includes("RACER HOLDS THE CLAIM");
       }
-      // A child that never reached the door has a broken cold start — that is
-      // not a lost race, and measuring a race only one side entered would be
-      // the vacuous green the barrier exists to prevent.
-      if (!atDoor) throw new Error("child racer never reached the door (no barrier line) — its cold start failed or hung");
+      // A child that never printed the hold line never acquired the lock — a
+      // broken cold start or an unexpected refusal, not a race this test can
+      // measure. Attempting the host claim without it would race a lock nobody
+      // holds: the vacuous green the barrier exists to prevent.
+      if (!holds)
+        throw new Error(
+          `child racer never printed "RACER HOLDS THE CLAIM" — its cold start failed or its claim was refused: ${childOut.trim() || "(no stdout)"}`,
+        );
 
+      // The child holds for a bounded 500 ms (racerScript); the host attempts
+      // immediately, so its claim lands mid-hold and is refused run-locked.
       let hostErr: unknown;
       const hostGo = (async () => {
-        await Bun.sleep(Math.floor(Math.random() * 120));
         await withRunLock(runsDir, RUN_ID, "df2-11-race-host", (h) =>
           teardownSandbox(deps(counting.driver, repoDir), RUN_ID, h),
         );
@@ -543,8 +558,12 @@ describe("DF2.11 e2e teardown race", () => {
       }
 
       // The XOR is the marquee property: exactly one of the two concurrent
-      // acquirers held the claim, so exactly one of them completed — and the
-      // booleans must therefore DIFFER, whichever way the race fell.
+      // acquirers held the claim, so exactly one of them completed. Under the
+      // hold barrier the direction is deterministic (child won, host refused),
+      // but the assertion stays a two-sided tripwire: a lock that let the host
+      // through mid-hold — or lost the child's claim entirely — fails HERE,
+      // as both-won or both-lost, before the count assertions get a chance to
+      // misattribute it.
       const hostWon = hostErr === undefined;
       const childWon = childExit === 0;
       expect(hostWon).not.toBe(childWon);
@@ -553,6 +572,10 @@ describe("DF2.11 e2e teardown race", () => {
       // and the rm remediation naming the lock path — from whichever side lost.
       const lockPath = join(runsDir, `${RUN_ID}.lock`);
       if (hostWon) {
+        // Unreachable while the hold barrier holds — reached only if the lock
+        // regressed and let the host steal a live hold. Asserted anyway so a
+        // regression exercises the same payload checks the serialized test
+        // pins, from the two-process side.
         // The barrier line legitimately sits in the child's stdout (F8), so
         // "ran nothing" is asserted on the OUTCOME line, not on an empty
         // stream: what must be absent is any completed teardown.

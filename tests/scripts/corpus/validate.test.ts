@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, validateSidecarText } from "../../../scripts/corpus/validate.ts";
+import { main, parseArgs, validateSidecarText } from "../../../scripts/corpus/validate.ts";
 
 const FIXTURE = join(import.meta.dir, "fixtures", "sidecar", "triage.json");
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
@@ -107,5 +107,17 @@ describe("main — through the real CLI boundary", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("main", () => {
+  test("resolves 0 on the valid fixture — pinned in-process, because a child process's execution is invisible to the coverage run", async () => {
+    // The child-process cases in the `main()` describe below exercise the
+    // exitWithFailure arms for real, but coverage instruments only the run's
+    // OWN process — a child that exits 2 scores as `main` never called. The
+    // success path returns instead of exiting, so it is callable here, and
+    // pinning it keeps the gate's per-file floor measuring the CLI assembly
+    // rather than a hole shaped like one.
+    expect(await main([FIXTURE])).toBe(0);
   });
 });

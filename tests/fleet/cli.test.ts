@@ -26,13 +26,11 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
   chmodSync,
-  closeSync,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -1315,33 +1313,80 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // in this CLI (RETRYABLE_ERRNOS / asUsage) — so they must surface as exit
     // 1 `transient`, not tell automation to never retry a condition that is
     // gone as soon as one fd closes.
+    //
+    // The exhaustion runs in a CHILD process. The original spelling hoarded
+    // fds until EMFILE in THIS bun test process, which starves bun's own
+    // runtime — it needs fds for its event loop (the same
+    // `us_create_timer`/`eventfd()` class as #250) — and on the GitHub
+    // runner's 65 536-fd table the parent aborted (SIGABRT, exit=null) ~60 s
+    // later, mid-suite, with no failing test to name it (run 37081488819,
+    // batch 24). The mechanism under test is unchanged: the child loads `run`
+    // FIRST (module loading needs fds), THEN hoards, then invokes the CLI
+    // against a real brief — so the open still EMFILEs and the envelope still
+    // has to say exit 1 `transient` — but the starvation now kills a
+    // disposable process, and a child that dies on it fails THIS test with
+    // attribution instead of the whole suite.
     const briefPath = join(dir, "transient-brief.json");
     writeFileSync(briefPath, validBriefJson(dir), { mode: 0o600 });
-    const hoard: number[] = [];
+    const probe = join(dir, "emfile-probe.ts");
+    writeFileSync(
+      probe,
+      `import { openSync, closeSync } from "node:fs";
+const { run } = await import(${JSON.stringify(join(import.meta.dir, "../../scripts/fleet.ts"))});
+const hoard: number[] = [];
+let hoardErr: unknown;
+try {
+  // Exhaust the fd table until the OS refuses. The soft limit here is
+  // six figures, so the bound is a DEADLINE (a platform that never
+  // refuses fails loudly) rather than an fd count.
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    if (Date.now() > deadline) throw new Error("could not provoke EMFILE within 30s of hoarding");
     try {
-      // Exhaust the fd table until the OS refuses. The soft limit here is
-      // six figures, so the bound is a DEADLINE (a platform that never
-      // refuses fails THIS test loudly) rather than an fd count.
-      const deadline = Date.now() + 30_000;
-      for (;;) {
-        if (Date.now() > deadline) throw new Error("could not provoke EMFILE within 30s of hoarding");
-        try {
-          hoard.push(openSync("/dev/null", "r"));
-        } catch (e) {
-          expect((e as NodeJS.ErrnoException).code).toBe("EMFILE");
-          break;
-        }
-      }
-      // The path itself stats fine (path-based syscall, no fd); it is the OPEN
-      // that hits the exhausted table and must now rethrow raw.
-      const code = await runCli(["dispatch", "--driver", "fake", "--brief", briefPath], {});
-      expect(code).toBe(1);
-      const envelope = JSON.parse(errCaptured.find((l) => l.includes("EMFILE")) as string) as { code: string };
-      expect(envelope.code).toBe("EMFILE");
-      expect(errCaptured.join("")).not.toContain("brief-unreadable");
-    } finally {
-      for (const fd of hoard) closeSync(fd);
+      hoard.push(openSync("/dev/null", "r"));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EMFILE") throw e;
+      hoardErr = e;
+      break;
     }
+  }
+  // The path itself stats fine (path-based syscall, no fd); it is the OPEN
+  // that hits the exhausted table and must now rethrow raw. Deps stay
+  // UNINJECTED so the real readBriefFile is the site under test.
+  const out: string[] = [];
+  const errLines: string[] = [];
+  const cliExit = await run(
+    ["dispatch", "--driver", "fake", "--brief", ${JSON.stringify(briefPath)}],
+    (s: string) => out.push(s),
+    undefined,
+    (s: string) => errLines.push(s),
+  );
+  process.stdout.write(JSON.stringify({ cliExit, stderr: errLines.join(""), sawEmfile: hoardErr !== undefined, hoarded: hoard.length }));
+} finally {
+  for (const fd of hoard) closeSync(fd);
+}
+`,
+    );
+    const child = Bun.spawn(["bun", probe], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+    const [probeOut, probeErr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const childExit = await child.exited;
+    // The probe itself must come back clean: a non-zero exit or a thrown
+    // hoard is the probe's failure, not the classification's answer — and
+    // the JSON.parse below would otherwise misattribute it.
+    expect([childExit, probeErr]).toEqual([0, ""]);
+    const probeResult = JSON.parse(probeOut) as { cliExit: number; stderr: string; sawEmfile: boolean; hoarded: number };
+    // The hoard must have genuinely exhausted the table — a probe that never
+    // provoked EMFILE proves nothing about the classification.
+    expect(probeResult.sawEmfile).toBeTrue();
+    expect(probeResult.cliExit).toBe(1);
+    const envelope = JSON.parse(
+      probeResult.stderr.split("\n").find((l) => l.includes("EMFILE")) as string,
+    ) as { code: string };
+    expect(envelope.code).toBe("EMFILE");
+    expect(probeResult.stderr).not.toContain("brief-unreadable");
   });
 
   test("--brief AND a brief redirected onto stdin is refused; /dev/null stdin is not", async () => {

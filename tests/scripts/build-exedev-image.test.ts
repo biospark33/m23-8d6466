@@ -1965,7 +1965,15 @@ describe("buildIdFileInputs", () => {
       // post-repair tree; the rebuild adopting THIS value is SC2's
       // prerequisite (the baked engine must match the delivered surface
       // before a live round).
-            "16d15fc18c290f2f47ed4c8dcbef9e588f1487934b5c6b3df674b2b581294708",
+      //
+      // c4db474b: the PR #404 CI-debt closeout (2026-10-02) — walked inputs
+      // touched were `package.json` (check:coverage run widened: the four
+      // hidden-file suites of the reverify/judgment/corpus trees joined it)
+      // and `scripts/judgment/live-probe.ts` (main/diffEnvelope exported for
+      // the probe-gate suite). The bunfig.coverage.toml and tests/ edits of
+      // the same round are NOT walked COPY inputs. Received from this test's
+      // own failing run on the final tree, per the re-pin-last ritual above.
+            "c4db474b616a4d57a5792a2d15cd8a31784af95f86e5e42ca052115e88fbc93e",
     );
   });
 });
