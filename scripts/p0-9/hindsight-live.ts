@@ -330,7 +330,10 @@ async function rawShapeProbe(
           items: [
             {
               content: "p0-9 hindsight-live disposable shape probe (raw unparsed path, story M1.1 AC1)",
-              metadata: { source: "manual", kind: "observation", tags: ["p0-9-shape-probe"] },
+              // 0.10.0 MemoryItem: metadata is Dict[str, str]; tags are item-level
+              // (an array under metadata.tags is a 422 — measured live 2026-10-04).
+              metadata: { source: "manual", kind: "observation" },
+              tags: ["p0-9-shape-probe"],
             },
           ],
           async: false,

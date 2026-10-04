@@ -1003,6 +1003,51 @@ describe("hindsight-live", () => {
   );
 
   test.skipIf(!hasDriver("hindsight-live"))(
+    "RAW retain request conforms to 0.10.0 MemoryItem: metadata is string-valued, tags ride at item level",
+    async () => {
+      const runLeg = await loadDriver("hindsight-live");
+      const served: ServedCall[] = [];
+      // 0.10.0 MemoryItem.metadata is Dict[str, str]; tags are an item-level
+      // string array. Measured live on qds-alpha 2026-10-04: an array under
+      // metadata.tags is a 422 (string_type at body.items[0].metadata.tags).
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: (c) => c.method === "POST" && /qds-probe-shape-.*\/memories$/.test(c.url),
+            respond: (c) => {
+              const items = (JSON.parse(c.body ?? "{}") as { items?: Array<Record<string, unknown>> }).items ?? [];
+              const conforms = items.every(
+                (it) =>
+                  Object.values((it.metadata as Record<string, unknown> | undefined) ?? {}).every(
+                    (v) => typeof v === "string",
+                  ) &&
+                  (it.tags === undefined || (Array.isArray(it.tags) && it.tags.every((t) => typeof t === "string"))),
+              );
+              return conforms
+                ? new Response('{"success":true,"bank_id":"x","items_count":1,"async":false}', { status: 200 })
+                : new Response('{"detail":[{"type":"string_type"}]}', { status: 422 });
+            },
+          },
+          { match: () => true, respond: () => new Response("{}", { status: 200 }) },
+        ],
+        served,
+      );
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        fetchImpl,
+        client: makeProbeClient(),
+        outDir: tmpDir,
+      });
+      const retain = ev.steps.find((s) => s.step === "retain");
+      expect(retain?.outcome).toBe("ok");
+      const sent = served.find((x) => x.call.method === "POST" && /\/memories$/.test(x.call.url));
+      const item = (JSON.parse(sent?.call.body ?? "{}") as { items: Array<Record<string, unknown>> }).items[0];
+      expect(item?.tags).toEqual(["p0-9-shape-probe"]);
+    },
+  );
+
+  test.skipIf(!hasDriver("hindsight-live"))(
     "RAW shape probe: disposable qds-probe-shape- bank, raw bodies recorded verbatim BEFORE any schema parse",
     async () => {
       const runLeg = await loadDriver("hindsight-live");
