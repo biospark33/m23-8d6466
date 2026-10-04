@@ -78,7 +78,7 @@ systemctl enable --now docker
 
 1. `docker compose logs -f hindsight` — model init can take up to the committed 1320 s healthcheck
    start_period; `HINDSIGHT_API_MODEL_INIT_TIMEOUT=1200`.
-2. Assert: `curl -s http://127.0.0.1:18889/` answers; `docker compose ps` shows healthy.
+2. Assert: `curl -s http://127.0.0.1:18889/health` answers 200 (0.10.0 has no root route — `/` is a 404; measured 2026-10-04); `docker compose ps` shows healthy.
 3. `[CONFIRMS OQ-4]` The arm64-mac libpq/openssl wall does not exist on x86_64 Linux — record the
    boot evidence (timestamped JSON into `_bmad-output/evidence/p0-9-closure/`, see the closure plan).
 

@@ -401,7 +401,11 @@ export async function runLeg(deps: LegDeps): Promise<LegEvidence> {
     return finalize(steps, logLines, { mode, origin: baseUrl, ok: false, outcome: "fatal-forbidden-origin", fatal: true, ext });
   }
 
-  // (b) health probe — raw GET ${baseUrl}/, auth header when one is configured.
+  // (b) health probe — raw GET ${baseUrl}/health, auth header when one is configured.
+  // 0.10.0 serves no root route (measured live 2026-10-04: GET / → 404 on both the
+  // dedicated and the tenant instance; its OpenAPI lists /health, /health/ready,
+  // /health/live). /health also reports database connectivity, so it is the
+  // stricter probe, not a looser one.
   // R2-003: the fetch default is LIVE-ONLY — a mock rehearsal without an
   // injected fetchImpl records skipped-hermetic steps (unmeasured, no network)
   // instead of issuing real requests off env.
@@ -420,7 +424,7 @@ export async function runLeg(deps: LegDeps): Promise<LegEvidence> {
     const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
     try {
       const t0 = Date.now();
-      const res = await fetchImpl(`${baseUrl}/`, {
+      const res = await fetchImpl(`${baseUrl}/health`, {
         method: "GET",
         signal: controller.signal,
         ...(auth !== undefined ? { headers: { Authorization: auth } } : {}),

@@ -964,6 +964,45 @@ describe("hindsight-live", () => {
   );
 
   test.skipIf(!hasDriver("hindsight-live"))(
+    "health probe targets GET /health — 0.10.0 serves no root route (measured live on qds-alpha 2026-10-04: / 404, /health 200)",
+    async () => {
+      const runLeg = await loadDriver("hindsight-live");
+      const served: ServedCall[] = [];
+      // Route table mirrors the live 0.10.0 instance: only /health answers;
+      // the root path is a 404 there, so a probe of "/" must fail this leg.
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: (c) => c.method === "GET" && new URL(c.url).pathname === "/health",
+            respond: () => new Response('{"status":"healthy","database":"connected"}', { status: 200 }),
+          },
+          { match: (c) => c.method === "GET", respond: () => new Response('{"detail":"Not Found"}', { status: 404 }) },
+        ],
+        served,
+      );
+      const hadFork = "QDS_FORK_CHECKOUT" in process.env;
+      const prevFork = process.env.QDS_FORK_CHECKOUT;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_FORK_CHECKOUT;
+      try {
+        const ev = await runLeg({ mode: "live", baseUrl: "http://127.0.0.1:18890", fetchImpl, outDir: tmpDir });
+        assertEvidenceContract(ev);
+        const health = ev.steps.find((s) => s.step === "health-probe");
+        expect(health?.outcome).toBe("ok");
+        const healthCalls = served.filter((x) => x.call.method === "GET");
+        expect(healthCalls.length).toBe(1);
+        expect(new URL(healthCalls[0]?.call.url ?? "http://x/").pathname).toBe("/health");
+      } finally {
+        if (hadFork) process.env.QDS_FORK_CHECKOUT = prevFork;
+        else {
+          // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+          delete process.env.QDS_FORK_CHECKOUT;
+        }
+      }
+    },
+  );
+
+  test.skipIf(!hasDriver("hindsight-live"))(
     "RAW shape probe: disposable qds-probe-shape- bank, raw bodies recorded verbatim BEFORE any schema parse",
     async () => {
       const runLeg = await loadDriver("hindsight-live");
