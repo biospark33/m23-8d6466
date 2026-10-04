@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Epic Z — deploy-profile arc; Wave 1 authored, VPS-day fired, Live tier: infra)
-**Status:** ready-for-dev — no in-table gates; fired half rides ops VPS G1–G7 + operator GO (charter §6)
+**Status:** done (authored half) — PR #406 merged to dev 2026-10-04 (merge commit 14705e6a). Authored DoD complete: 5 `deploy/vps/` artifacts + 89 contract tests (all AC negative controls fixture-refused by name; DoD e2e = run()+FakeDriver acceptance legs through the real CLI) + adds-only runbook annotation with both UNOWNED ops-register rows. 3 bmad-code-review rounds (147 raw findings → 74 patches, all fixed incl. LOWs; triage/reports in `_bmad-output/reviews/z4-round{1,2,3}/`); unlazy scope `z4` ALL MET 20/20; detect_changes risk LOW / 0 affected processes. **AC8 (fired leg) remains open by design** — operator-executed on VPS day after runbook G1–G7 GO, zero agent spend; the m2-gateway image-publish and factory-backup ownerships are surfaced UNOWNED in the annotation's ops register.
 
 > **AUTHORED vs FIRED (DD-26):** every AC is tagged **[authored]** — no VPS; repo tests are the only gate; lands Wave 1 — or **[fired]** — deployed and healthy on the VPS; gated on the operator's VPS-day GO through runbook G1–G7; zero agent spend. The charter's Wave-3 line "Z4 if VPS landed late" means only the fired leg (R5-F2 resolution, registered DD-26).
 
