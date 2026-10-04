@@ -1,0 +1,237 @@
+# Z4 (authored) — QDS factory deploy profile: docker-compose.factory.yml.
+#
+# ONE DEPLOYABLE, NOT TWO (Z4 AC7 / charter §2.2). This profile is an
+# EXTENSION of the runbook + vultr-deploy template perimeter — NOT an
+# independent deployment:
+#   * runbook of record: _bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md
+#   * template: deploy/control-plane/{Caddyfile,docker-compose.yml} in the
+#     vultr-deploy worktree (consumed, never edited — story Spec Reference)
+#   * same box, SAME firewall (runbook §1: allow 22 + 80 + 443 ONLY — never
+#     18889), SAME front door (the existing control-plane Caddy; the factory
+#     perimeter rows are spliced into ITS Caddyfile by the OPERATOR on VPS
+#     day — see Caddyfile.factory.allowlist). This compose ships NO second
+#     proxy, TLS, or firewall stack, and NO 443 listener.
+#   * fires under runbook G1–G7 EXACTLY (G8 backup timer + G9 GHCR publish
+#     are out of the fired leg — R5-F5 pin).
+#
+# INSTALLED BY HAND, NEVER AUTOMATION (template discipline, verbatim): the
+# host copy is installed from this file by an OPERATOR, never by automation;
+# automation may touch the compose project .env only. Verify the two copies
+# match with (relative paths resolve against CWD — cd first, or go absolute):
+#   cd <repo-root> && diff deploy/vps/docker-compose.factory.yml <host-dir>/docker-compose.factory.yml
+#
+# Seeded-once variables (QDS_FACTORY_OWNER, M2_GATEWAY_TAG,
+# FACTORY_FRONT_DOOR_NETWORK) resolve from the compose project .env — invoke
+# every command as (a relative -f resolves against CWD, NOT
+# --project-directory, so this fails from any other directory):
+#   cd <host-dir> && docker compose -f docker-compose.factory.yml ...
+# or, from anywhere, go absolute on -f:
+#   docker compose --project-directory <host-dir> -f <abs-path>/docker-compose.factory.yml ...
+# They are OPERATOR-SEEDED ONCE and never rewritten by a redeploy
+# (FORK_IMAGE_TAG precedent — the template's own comments document the defect
+# class: a deploy that rewrites a seeded tag silently retargets the image).
+# deploy/vps/env/factory.env.example names them with empty values.
+
+services:
+  hindsight-qds:
+    # AC2: byte-exact copy of the fork's pin — sole pin source is the
+    # swarmclaw fork's config/hindsight-version.txt on the fork's INTEGRATION
+    # lineage (the branch G6 clones on the box; local checkouts on older
+    # branches carry stale pins — e.g. 0.8.6 — and are NOT the pin source):
+    #   ghcr.io/vectorize-io/hindsight:0.10.0@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b
+    # This MUST stay the multi-arch INDEX digest, never a per-platform child
+    # manifest: a child digest pins one architecture for every host and can
+    # pull fine on a dev Mac yet break first boot on the x86_64 VPS under
+    # QEMU (the 0.8.6 linux/amd64-child incident the fork's compose
+    # documents). Advance only by a deliberate bump PR re-copied from the
+    # fork's pin file (story Technical Notes).
+    image: ghcr.io/vectorize-io/hindsight:0.10.0@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b
+    restart: unless-stopped
+    # AC1 / INV-Z4-1: EXACTLY ONE host publish — the loopback map. The
+    # dedicated factory instance's host-side port is 18890, NEVER 18889
+    # (on a both-stacks box 18889 is the platform tenant stack's host map —
+    # an on-box 18889 reach would resolve the TENANT instance, the
+    # wrong-instance shape M1.1's AC1 forbids). Loopback-only means the
+    # firewall never sees it (runbook §1's 22/80/443-only stands; a loopback
+    # bind is not a public port). Compose-network addressing stays primary:
+    # in-compose consumers use http://hindsight-qds:8888, never this map.
+    ports:
+      - "127.0.0.1:18890:8888"
+    env_file:
+      # AC6/INV-Z4-3: operator-placed, mode 0600 (runbook G3) — carries the
+      # secret names (HINDSIGHT_API_TENANT_API_KEY, HINDSIGHT_API_LLM_API_KEY)
+      # and the host-side HINDSIGHT_BASE_URL origin; template at
+      # env/hindsight-qds.env.example.
+      # Committed `environment:` beats env_file per compose precedence
+      # (runbook §0), so the provider/model pins below win over anything an
+      # operator's file could set.
+      - hindsight-qds.env
+    environment:
+      # F-004: the env_file's HINDSIGHT_BASE_URL=http://127.0.0.1:18890 is the
+      # HOST-leg origin and is DEAD inside this container (nothing listens on
+      # container-loopback 18890). This committed override — committed
+      # `environment:` beats env_file per compose precedence — gives any
+      # self-reference a resolvable in-network origin, and makes the runbook's
+      # "hindsight-qds takes the compose value" sentence true.
+      - HINDSIGHT_BASE_URL=http://hindsight-qds:8888
+      # Committed provider/model/reranker pins — mirrored VERBATIM from the
+      # swarmclaw fork repo's docker-compose.yml (the fork compose's tenant
+      # hindsight environment block — a file in the fork repo, not a path in
+      # this checkout).
+      # These are story-normative: do NOT "fix" or retune them
+      # here (runbook §0: "do not 'fix' provider/reranker pins in
+      # hindsight.env") — a pin change is a deliberate bump PR, same as the
+      # image digest above.
+      - HINDSIGHT_API_LLM_PROVIDER=openrouter
+      - HINDSIGHT_API_LLM_MODEL=${SOLSTICE_MODEL_MEMORY_EXTRACTION:-google/gemini-3.7-flash}
+      # First boot downloads embedding+reranker models and runs all pg0
+      # migrations; the default 300s timeout fires mid-download (the fork's
+      # model-init timeout default). 1200s gives a cold start room; the
+      # healthcheck start_period below is sized to cover it.
+      - HINDSIGHT_API_MODEL_INIT_TIMEOUT=1200
+      # RRF reranker: the default cross-encoder costs 15–16s per recall on a
+      # CPU-only host; RRF brings recall to ~3–4.5s without a rerank model
+      # (the fork's reranker notes). `environment` wins over env_file,
+      # so this committed default holds even if hindsight-qds.env sets it.
+      - HINDSIGHT_API_RERANKER_PROVIDER=rrf
+    volumes:
+      # Volume strategy adapted to a DEDICATED instance: FRESH named volumes
+      # owned by this compose project — deliberately NOT the tenant stack's
+      # hindsight_data / hindsight_pg0 / hindsight_hf_cache (two instances
+      # sharing one Postgres data dir is corruption, not sharing). Postgres+
+      # pgvector data and the embedded pg0 state survive restart + `down`
+      # (ADR-STOR-1 / NFR-R4; the fork block's pg0 notes — 0.10.0 embeds pg0
+      # at /home/hindsight/.pg0).
+      - hindsight-qds-data:/var/lib/postgresql/data
+      - hindsight-qds-pg0:/home/hindsight/.pg0
+      # Persist the HF embedding/reranker model cache so the ~130MB+80MB
+      # models download once, not on every fresh container (the fork's
+      # HF-cache volume notes).
+      - hindsight-qds-hf-cache:/home/hindsight/.cache/huggingface
+    # Postgres parallel-query workers allocate dynamic shared memory under
+    # /dev/shm; Docker's default 64MB cap is far below one big parallel-hash
+    # segment (the fork's /dev/shm sizing notes — live-measured 533MB demand).
+    shm_size: 2g
+    healthcheck:
+      # TCP-connect liveness, mirrored from the fork healthcheck block:
+      # endpoint-agnostic port-open check, `nc`
+      # with a bash /dev/tcp fallback so the probe depends on no Python.
+      test: ["CMD-SHELL", "nc -z localhost 8888 >/dev/null 2>&1 || nc -w 1 localhost 8888 < /dev/null >/dev/null 2>&1 || bash -c 'exec 3<>/dev/tcp/127.0.0.1/8888' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # Cold start runs pg0 migrations + model downloads (~10 min). Honest
+      # mechanics (runbook §5, the fork healthcheck block): Docker
+      # NEVER kills a container for failing healthchecks — it only marks it
+      # unhealthy, and nothing here keys a lifecycle decision on that mark.
+      # start_period + retries×interval (1320s + 120s = 1440s) merely keeps
+      # the probe from flapping "unhealthy" during the slow boot. The REAL
+      # init boundary is HINDSIGHT_API_MODEL_INIT_TIMEOUT=1200 above: on
+      # expiry the Hindsight process EXITS itself, and this service's
+      # `restart: unless-stopped` then brings it back up MID-MIGRATION —
+      # the residual risk the pg0 volume + the persisted HF model caches
+      # exist to mitigate (an interrupted pg0 migration is exactly the
+      # corrupt-on-ungraceful-shutdown case).
+      start_period: 1320s
+
+  m2-gateway:
+    # M2 deploy SLOT (story M2 boundary): compose service, healthcheck, env
+    # contract, perimeter rows — NOT the gateway's authz internals (recall-
+    # only keys, revoke-verify) which are M2.1's and are deliberately not
+    # specified here.
+    #
+    # Seeded-once image ref (FORK_IMAGE_TAG precedent): the operator seeds
+    # QDS_FACTORY_OWNER + M2_GATEWAY_TAG once in the compose project .env;
+    # redeploys NEVER rewrite them. F-006, the true fail-late stage: UNSEEDED,
+    # compose v2 WARNS and interpolates EMPTY — it does NOT refuse at config
+    # time. The invalid `ghcr.io//qds-m2-gateway:` ref FAILS AT PULL TIME —
+    # still fail-closed for a slot that has nothing lawfully to pull yet.
+    # Deliberately NOT `:?` syntax: refusing config would break the documented
+    # scoped `up -d hindsight-qds` pre-image path.
+    image: ghcr.io/${QDS_FACTORY_OWNER}/qds-m2-gateway:${M2_GATEWAY_TAG}
+    # SLOT CONTRACT (documented for M2.1): the image must listen on 8080
+    # in-container — both the healthcheck below and the Caddy perimeter rows
+    # (Caddyfile.factory.allowlist) forward to m2-gateway:8080 — and must
+    # ship `nc` for the loopback healthcheck probe.
+    #
+    # AC8 awaiting-image honesty: before M2.1's image is published to GHCR
+    # (ownership UNOWNED — surfaced to the ops dependency register in the
+    # runbook Z4 annotation, never silently assigned), this service CANNOT
+    # come up. OPERATIONAL PATH pre-image: a project-wide
+    # `docker compose up -d` ABORTS the whole project on the missing-image
+    # pull — neither service starts. Bring up ONLY the service that has an
+    # image:
+    #   docker compose up -d hindsight-qds
+    # then `docker compose ps` shows NO m2-gateway row at all pre-image (no
+    # container is ever created); the smoke evidence file records
+    # {"status":"awaiting-image"} — that string is the EVIDENCE-FILE
+    # CONVENTION the operator records, not a compose state. NEVER
+    # green-by-default.
+    # `restart: "no"` is the honest choice for a not-yet-published image:
+    # unless-stopped would crash-loop it forever against a ref GHCR has
+    # never served. M2.1 flips this to unless-stopped when the image lands.
+    restart: "no"
+    env_file:
+      # AC6/INV-Z4-3: the SAME operator-placed secrets file hindsight-qds
+      # consumes (mode 0600, runbook G3). The gateway consumes
+      # HINDSIGHT_API_TENANT_API_KEY from it — the tenant key the dedicated
+      # instance requires; without it the first compose-side consumer would
+      # 401. The gateway's OWN authz internals (recall-only keys,
+      # revoke-verify) stay M2.1's and are deliberately not specified here.
+      - hindsight-qds.env
+    environment:
+      # F-005, least privilege: the gateway consumes ONLY
+      # HINDSIGHT_API_TENANT_API_KEY from the shared env file. The OpenRouter
+      # provider key (HINDSIGHT_API_LLM_API_KEY) must not sit readable in the
+      # INTERNET-FACING container's environ (/proc/1/environ, docker inspect).
+      # Committed `environment:` beats env_file per compose precedence, so
+      # this override EMPTIES it inside this container; hindsight-qds keeps
+      # the real value.
+      HINDSIGHT_API_LLM_API_KEY: ""
+      # The gateway is the FIRST compose-side consumer of the dedicated
+      # instance: compose-network service name (Z4 origin split — runbook Z4
+      # annotation: compose-side http://hindsight-qds:8888, host-side
+      # http://127.0.0.1:18890). Never a loopback host:port here — the
+      # gateway has no host network. Committed `environment:` BEATS
+      # env_file per compose precedence, so this value intentionally
+      # overrides the env file's host-side HINDSIGHT_BASE_URL
+      # (http://127.0.0.1:18890): the env file's value is for HOST legs,
+      # this one is the in-compose origin.
+      HINDSIGHT_BASE_URL: http://hindsight-qds:8888
+    healthcheck:
+      # Loopback-only probe INSIDE the container (127.0.0.1 target) — the
+      # gateway publishes NO ports at all; its only public reach is through
+      # the existing control-plane Caddy over the front-door network.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      # BOTH networks, explicitly: a service that names any network joins
+      # ONLY those named, so `default` must be listed here or the gateway
+      # could not reach hindsight-qds:8888 across the project's internal
+      # network. front-door adds the perimeter reach (Caddy → gateway only);
+      # hindsight-qds stays off it (INV-Z4-1).
+      - default
+      - front-door
+
+# AC7 / INV-Z4-1: the perimeter (control-plane Caddy) reaches the GATEWAY
+# only. hindsight-qds is deliberately NOT attached to front-door — no
+# perimeter row may ever forward to it (AC1's negative control: a Caddy row
+# whose upstream is a hindsight service refuses).
+networks:
+  # The EXISTING control-plane compose's network — the one front door. The
+  # name is operator-seeded once in the compose project .env; verify with
+  # `docker network ls` on the box before first up (default below matches
+  # the control-plane compose project's derived network name). external:
+  # true means this compose creates nothing — it JOINs what already fronts
+  # the box.
+  front-door:
+    external: true
+    name: ${FACTORY_FRONT_DOOR_NETWORK:-control-plane_default}
+
+volumes:
+  hindsight-qds-data:
+  hindsight-qds-pg0:
+  hindsight-qds-hf-cache:
