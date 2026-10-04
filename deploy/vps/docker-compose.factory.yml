@@ -65,6 +65,13 @@ services:
       # operator's file could set.
       - hindsight-qds.env
     environment:
+      # F-004: the env_file's HINDSIGHT_BASE_URL=http://127.0.0.1:18890 is the
+      # HOST-leg origin and is DEAD inside this container (nothing listens on
+      # container-loopback 18890). This committed override — committed
+      # `environment:` beats env_file per compose precedence — gives any
+      # self-reference a resolvable in-network origin, and makes the runbook's
+      # "hindsight-qds takes the compose value" sentence true.
+      - HINDSIGHT_BASE_URL=http://hindsight-qds:8888
       # Committed provider/model/reranker pins — mirrored VERBATIM from the
       # swarmclaw fork repo's docker-compose.yml (tenant hindsight block,
       # :397–428 — a file in the fork repo, not a path in this checkout).
@@ -132,9 +139,12 @@ services:
     #
     # Seeded-once image ref (FORK_IMAGE_TAG precedent): the operator seeds
     # QDS_FACTORY_OWNER + M2_GATEWAY_TAG once in the compose project .env;
-    # redeploys NEVER rewrite them. Unseeded renders an invalid untagged ref
-    # and compose refuses — correct fail-closed for a slot that has nothing
-    # lawfully to pull yet.
+    # redeploys NEVER rewrite them. F-006, the true fail-late stage: UNSEEDED,
+    # compose v2 WARNS and interpolates EMPTY — it does NOT refuse at config
+    # time. The invalid `ghcr.io//qds-m2-gateway:` ref FAILS AT PULL TIME —
+    # still fail-closed for a slot that has nothing lawfully to pull yet.
+    # Deliberately NOT `:?` syntax: refusing config would break the documented
+    # scoped `up -d hindsight-qds` pre-image path.
     image: ghcr.io/${QDS_FACTORY_OWNER}/qds-m2-gateway:${M2_GATEWAY_TAG}
     # SLOT CONTRACT (documented for M2.1): the image must listen on 8080
     # in-container — both the healthcheck below and the Caddy perimeter rows
@@ -146,11 +156,13 @@ services:
     # runbook Z4 annotation, never silently assigned), this service CANNOT
     # come up. OPERATIONAL PATH pre-image: a project-wide
     # `docker compose up -d` ABORTS the whole project on the missing-image
-    # pull — neither service starts and ps can never show anything. Bring up
-    # ONLY the service that has an image:
+    # pull — neither service starts. Bring up ONLY the service that has an
+    # image:
     #   docker compose up -d hindsight-qds
-    # then `docker compose ps` honestly shows m2-gateway created/exited and
-    # smoke evidence records {"status":"awaiting-image"} — NEVER
+    # then `docker compose ps` shows NO m2-gateway row at all pre-image (no
+    # container is ever created); the smoke evidence file records
+    # {"status":"awaiting-image"} — that string is the EVIDENCE-FILE
+    # CONVENTION the operator records, not a compose state. NEVER
     # green-by-default.
     # `restart: "no"` is the honest choice for a not-yet-published image:
     # unless-stopped would crash-loop it forever against a ref GHCR has
@@ -165,6 +177,14 @@ services:
       # revoke-verify) stay M2.1's and are deliberately not specified here.
       - hindsight-qds.env
     environment:
+      # F-005, least privilege: the gateway consumes ONLY
+      # HINDSIGHT_API_TENANT_API_KEY from the shared env file. The OpenRouter
+      # provider key (HINDSIGHT_API_LLM_API_KEY) must not sit readable in the
+      # INTERNET-FACING container's environ (/proc/1/environ, docker inspect).
+      # Committed `environment:` beats env_file per compose precedence, so
+      # this override EMPTIES it inside this container; hindsight-qds keeps
+      # the real value.
+      HINDSIGHT_API_LLM_API_KEY: ""
       # The gateway is the FIRST compose-side consumer of the dedicated
       # instance: compose-network service name (Z4 origin split — runbook Z4
       # annotation: compose-side http://hindsight-qds:8888, host-side

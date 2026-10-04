@@ -22,6 +22,8 @@ const COMPOSE = readFileSync(join(vpsDir, "docker-compose.factory.yml"), "utf8")
 const CADDY = readFileSync(join(vpsDir, "Caddyfile.factory.allowlist"), "utf8");
 const HINDSIGHT_ENV = readFileSync(join(vpsDir, "env", "hindsight-qds.env.example"), "utf8");
 const FACTORY_ENV = readFileSync(join(vpsDir, "env", "factory.env.example"), "utf8");
+// F-002: the runbook joins the positive AC5 scan map (repo-root-relative).
+const RUNBOOK_PATH = "_bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md";
 
 const PIN =
 	"ghcr.io/vectorize-io/hindsight:0.10.0@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b";
@@ -34,14 +36,15 @@ const GATEWAY_UPSTREAM = "m2-gateway:8080";
 // values truncated legitimate data — false refusals, or worse, false
 // cleanliness in the leak scan.
 
-/** sh grammar: full-line `#`/`//` comments AND trailing unquoted ` #`. */
+/** sh grammar: full-line `#`/`//` comments AND trailing unquoted ` #` (F-015:
+ * `\s#` — a TAB-# comment strips too, not just space-#). */
 function stripShComments(text: string): string {
 	return text
 		.split("\n")
 		.map((line) => {
 			const trimmed = line.trimStart();
 			if (trimmed.startsWith("#") || trimmed.startsWith("//")) return "";
-			const hash = line.indexOf(" #");
+			const hash = line.search(/\s#/);
 			return hash === -1 ? line : line.slice(0, hash);
 		})
 		.join("\n");
@@ -64,30 +67,49 @@ function lineOf(text: string, needle: string): number {
 	return idx === -1 ? 0 : text.slice(0, idx).split("\n").length;
 }
 
-/** `(file:line)` refusal suffix; line omitted when no offending line is identifiable. */
+/** `(file:line)` refusal suffix; line omitted when no offending line is
+ * identifiable. F-003: the line is computed from the GRAMMAR-STRIPPED text
+ * (stripByGrammar, hoisted) — the same text the check ran on — so a comment
+ * mentioning the key can never outrank the offending key line. */
 function at(file: string, text: string, needle?: string): string {
-	const line = needle === undefined ? 0 : lineOf(text, needle);
+	const line = needle === undefined ? 0 : lineOf(stripByGrammar(file, text), needle);
 	return ` (${file}${line > 0 ? `:${line}` : ""})`;
 }
 
 // ── AC1/AC2/AC7: compose validator ───────────────────────────────────────────
 
 type Compose = {
-	services?: Record<string, { image?: string; ports?: unknown[]; networks?: unknown; restart?: string; env_file?: unknown }>;
+	services?: Record<string, { image?: string; ports?: unknown; networks?: unknown; restart?: string; env_file?: unknown }>;
 	networks?: Record<string, { external?: boolean; name?: string }>;
 };
 
-/** Short-syntax port string or long-syntax object → host mapping info, or null (no host side). */
-function asHostMap(entry: unknown): { text: string; hostIp: string; hostPort: string } | null {
+type HostMap = { text: string; hostIp: string; hostPort: string };
+
+/** Short-syntax port string or long-syntax object → host mapping info, a named
+ * refusal for an unparseable shape (F-014: bare-IPv6 4/5-part splits are never
+ * silently dropped), or null (no host side). */
+function asHostMap(entry: unknown): HostMap | { refusal: string } | null {
 	if (typeof entry === "string") {
+		// F-014: bracket form `[::1]:18890:8888` — the IPv6 literal's own
+		// colons must not feed the naive split; peel the bracket first.
+		const bracket = /^\[([^\]]+)\]:(\d+):(\d+)$/.exec(entry);
+		if (bracket) return { text: entry, hostIp: bracket[1]!, hostPort: bracket[2]! };
 		const parts = entry.split(":");
 		if (parts.length === 1) return { text: entry, hostIp: "0.0.0.0", hostPort: parts[0]! };
 		if (parts.length === 2) {
 			// `host:container` with no host IP — docker defaults the bind to 0.0.0.0.
 			return { text: entry, hostIp: "0.0.0.0", hostPort: parts[0]! };
 		}
-		if (parts.length === 3) return { text: entry, hostIp: parts[0]!, hostPort: parts[1]! };
-		return null;
+		if (parts.length === 3) {
+			// F-014: `[::1]:18890:8888` bracket form — strip the brackets so the
+			// loopback check sees the bare IPv6 literal.
+			const hostIp =
+				parts[0]!.startsWith("[") && parts[0]!.endsWith("]") ? parts[0]!.slice(1, -1) : parts[0]!;
+			return { text: entry, hostIp, hostPort: parts[1]! };
+		}
+		// F-014: a 4-or-5-part colon split is a bare-IPv6 publish (or a mangled
+		// 4-field entry) — refused BY NAME, never filtered as null.
+		return { refusal: `AC1: unparseable ports entry (possible bare IPv6) — use the exact ${HOST_PUBLISH} map, got ${entry}` };
 	}
 	if (entry && typeof entry === "object") {
 		const e = entry as Record<string, unknown>;
@@ -127,19 +149,42 @@ function validateCompose(text: string): string[] {
 		refusals.push(`AC1: compose must define exactly the two services ${expected.join(" + ")}, got ${names.join(", ") || "<none>"}${at(file, text)}`);
 	}
 
-	for (const [name, svc] of Object.entries(services)) {
+	for (const [name, svcRaw] of Object.entries(services)) {
+		// F-018: malformed shapes produce NAMED refusals, never TypeErrors —
+		// a null/missing service body is `{}`, ports normalize (array kept,
+		// scalar wrapped, null/absent → []).
+		const svc = svcRaw ?? {};
+		let ports: unknown[];
+		if (Array.isArray(svc.ports)) ports = svc.ports;
+		else if (svc.ports == null) ports = [];
+		else {
+			refusals.push(`AC1: service ${name} ports must be a list, got ${JSON.stringify(svc.ports)}${at(file, text)}`);
+			ports = [svc.ports];
+		}
+
 		// AC2: pin discipline on every image ref.
 		const image = svc.image ?? "";
 		if (!image) refusals.push(`AC2: service ${name} has no image ref${at(file, text)}`);
 		if (image.includes(":latest")) refusals.push(`AC2: service ${name} image ref uses :latest — ${image}${at(file, text, image)}`);
-		const archSuffixed = /(?:-|:)(?:amd64|arm64|x86_64|aarch64)(?:@sha256:[0-9a-f]{64})?$/.test(image);
+		// F-016: `_`-separated and UPPERCASE arch tokens are the same QEMU
+		// incident class as `-`/`:`-separated lowercase ones.
+		const archSuffixed = /(?:-|:|_)(?:amd64|arm64|x86_64|aarch64)(?:@sha256:[0-9a-f]{64})?$/i.test(image);
 		if (archSuffixed) refusals.push(`AC2: service ${name} image ref is arch-suffixed (QEMU incident class) — ${image}${at(file, text, image)}`);
 		if (name === "hindsight-qds" && image !== PIN) {
 			refusals.push(`AC2: hindsight-qds image must be the fork pin byte-exact (${PIN}), got ${image || "<missing>"}${at(file, text, image)}`);
 		}
 
 		// AC1: ports discipline.
-		const maps = (svc.ports ?? []).map(asHostMap).filter((m): m is NonNullable<typeof m> => m !== null);
+		const maps: HostMap[] = [];
+		for (const entry of ports) {
+			const m = asHostMap(entry);
+			if (m === null) continue; // long-syntax entry with no host side
+			if ("refusal" in m) {
+				refusals.push(`${m.refusal}${at(file, text, String(entry))}`);
+				continue;
+			}
+			maps.push(m);
+		}
 		if (name === "hindsight-qds") {
 			if (maps.length !== 1) {
 				refusals.push(`AC1: hindsight-qds must have exactly one host publish, got ${maps.length}${at(file, text)}`);
@@ -148,6 +193,7 @@ function validateCompose(text: string): string[] {
 				if (m.text !== HOST_PUBLISH) {
 					refusals.push(`AC1: host publish must be exactly ${HOST_PUBLISH}, got ${m.text}${at(file, text, m.text)}`);
 				}
+				// "::1" is LIVE, not dead (F-014): the bracket form `[::1]:host:ct` feeds it.
 				if (m.hostIp !== "127.0.0.1" && m.hostIp !== "::1") {
 					refusals.push(`AC1/INV-Z4-1: host publish must bind loopback, got non-loopback host IP ${m.hostIp} in ${m.text}${at(file, text, m.text)}`);
 				}
@@ -156,7 +202,7 @@ function validateCompose(text: string): string[] {
 				}
 			}
 		}
-		if (name === "m2-gateway" && (svc.ports ?? []).length > 0) {
+		if (name === "m2-gateway" && ports.length > 0) {
 			refusals.push(`AC1: m2-gateway publishes NO ports (its only public reach is the existing Caddy front door), got ${JSON.stringify(svc.ports)}${at(file, text, String(svc.ports))}`);
 		}
 		if (name === "m2-gateway" && svc.restart !== "no") {
@@ -214,9 +260,25 @@ function validateCaddy(text: string): string[] {
 	const file = "deploy/vps/Caddyfile.factory.allowlist";
 	const code = stripCaddyComments(text);
 
-	// AC3: exactly one host block; AC7: no second listener — a site address
-	// naming :443/:80 or a global-options block would be a deployment, not a fragment.
-	const blockLabels = [...code.matchAll(/^([^{}\s#][^{}]*)\{\s*$/gm)].map((m) => m[1]!.trim());
+	// F-009 (SR-1): forwarding is airtight at the TARGET level — ONE global
+	// scan over the whole stripped fragment, UNANCHORED: nested-block /
+	// one-line / mid-line shapes all match, no body parsing needed. (The
+	// per-handle body walk below stays only for the catch-all-404 rule,
+	// which is canonical-shape best-effort; the target invariant is the
+	// guarantee.)
+	for (const target of [...code.matchAll(/reverse_proxy\s+(\S+)/g)].map((m) => m[1]!)) {
+		if (target !== GATEWAY_UPSTREAM) {
+			refusals.push(`AC3/INV-Z4-1: ${file} forwards to ${target} — every reverse_proxy must target ${GATEWAY_UPSTREAM}; the perimeter reaches the gateway only, never a hindsight service${at(file, text, target)}`);
+		}
+	}
+
+	// AC3: exactly one host block (F-009: one-line blocks counted too);
+	// AC7: no second listener — a site address naming :443/:80 or a
+	// global-options block would be a deployment, not a fragment.
+	const blockLabels = [
+		...[...code.matchAll(/^([^\s#][^{}]*)\{\s*$/gm)].map((m) => m[1]!.trim()),
+		...[...code.matchAll(/^([^\s#][^{}]*)\{[^{}]*\}\s*$/gm)].map((m) => m[1]!.trim()),
+	];
 	const hostBlocks = blockLabels.filter((l) => !l.startsWith("@") && !l.startsWith("("));
 	if (hostBlocks.length !== 1) {
 		refusals.push(`AC3: ${file} must carry exactly ONE host block, got ${hostBlocks.length}: ${hostBlocks.join(", ") || "<none>"}${at(file, text)}`);
@@ -238,18 +300,10 @@ function validateCaddy(text: string): string[] {
 	}
 	const handleBodies = [...code.matchAll(/^[ \t]*handle(?:\s+@(\w[\w-]*))?\s*\{\s*$([\s\S]*?)[ \t]*\}\s*$/gm)];
 	for (const [, named, handleBody] of handleBodies) {
-		const body = handleBody ?? "";
-		const proxies = [...body.matchAll(/^[ \t]*reverse_proxy\s+(\S+)/gm)].map((m) => m[1]!);
-		for (const target of proxies) {
-			if (target !== GATEWAY_UPSTREAM) {
-				refusals.push(`AC1/AC3/INV-Z4-1: handle ${named ? `@${named}` : "(catch-all)"} forwards to ${target} — only ${GATEWAY_UPSTREAM} may be forwarded, never a hindsight service${at(file, text, target)}`);
-			}
-		}
-		if (!named) {
-			// The terminal default-404 tail: everything not listed is 404, not forwarded.
-			if (proxies.length > 0 || !/^[ \t]*respond\s+404\s*$/m.test(body)) {
-				refusals.push(`AC3: catch-all handle must \`respond 404\`, never proxy — the route table is NOT exhaustive by design; that is the point${at(file, text, proxies[0])}`);
-			}
+		if (named) continue; // forwarding already covered by the global target scan
+		// The terminal default-404 tail: everything not listed is 404, not forwarded.
+		if (!/^[ \t]*respond\s+404\s*$/m.test(handleBody ?? "")) {
+			refusals.push(`AC3: catch-all handle must \`respond 404\`, never proxy — the route table is NOT exhaustive by design; that is the point${at(file, text)}`);
 		}
 	}
 	if (!/^[ \t]*handle\s*\{\s*$/m.test(code)) {
@@ -264,8 +318,11 @@ type EnvEntry = { key: string; value: string };
 function parseEnv(text: string): EnvEntry[] {
 	// F-025: env grammar strips FULL-LINE comments only — a ` #` inside a
 	// value is data, never a comment (dotenv/compose env_file rules).
-	return [...stripEnvComments(text).matchAll(/^\s*([A-Z_][A-Z0-9_]*)=(.*)$/gm)].map((m) => ({
-		key: m[1]!,
+	// F-015: `export KEY=` and lowercase keys parse too (a literal credential
+	// must not evade the scan by spelling); keys normalize UPPERCASE so every
+	// downstream key check is spelling-proof.
+	return [...stripEnvComments(text).matchAll(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/gm)].map((m) => ({
+		key: m[1]!.toUpperCase(),
 		value: (m[2] ?? "").trim(),
 	}));
 }
@@ -275,7 +332,8 @@ function isPlaceholder(value: string): boolean {
 	return value === "" || /^<.*>$/.test(value);
 }
 
-const SECRET_NAME = /HINDSIGHT_API_|BEARER_TOKEN|HINDSIGHT_API_KEY/;
+// F-015: case-insensitive (parseEnv also normalizes, belt and suspenders).
+const SECRET_NAME = /HINDSIGHT_API_|BEARER_TOKEN|HINDSIGHT_API_KEY/i;
 
 /** Every AC6 refusal for an env template; `expectedBase` pins its HINDSIGHT_BASE_URL origin. */
 function validateEnvTemplate(text: string, file: string, expectedBase: string): string[] {
@@ -293,8 +351,15 @@ function validateEnvTemplate(text: string, file: string, expectedBase: string): 
 			refusals.push(`AC6: ${file} HINDSIGHT_BASE_URL must be exactly ${expectedBase}, got ${value}${at(file, text, key)}`);
 		}
 	}
-	// The annotation may NAME the fence item in a comment; a non-comment occurrence is templating.
-	if (/(^|[^#\n])SOLSTICE_TENANT_ID/.test(stripEnvComments(text)) && !entries.some((e) => e.key === "SOLSTICE_TENANT_ID")) {
+	// The annotation may NAME the fence item in a comment; a non-comment
+	// occurrence is templating. F-019: trailing ` # …` inline comments strip
+	// too (full-line comments already gone via stripEnvComments), so an
+	// inline-comment mention is not a false positive.
+	const nonComment = stripEnvComments(text)
+		.split("\n")
+		.map((line) => line.replace(/\s#.*$/, ""))
+		.join("\n");
+	if (/(^|[^#\n])SOLSTICE_TENANT_ID/.test(nonComment) && !entries.some((e) => e.key === "SOLSTICE_TENANT_ID")) {
 		// occurrence outside comments but not as a KEY= line (e.g. a bare value) — still a leak
 		refusals.push(`AC6/G3-G6: ${file} mentions SOLSTICE_TENANT_ID outside a comment${at(file, text)}`);
 	}
@@ -319,11 +384,6 @@ function stripByGrammar(path: string, text: string): string {
 	return stripShComments(text); // sh / YAML: a trailing ` #` IS a comment
 }
 
-/** `--driver exedev` occurrences in non-comment text, per file. */
-function driverGrammarCounts(path: string, text: string): number {
-	return stripByGrammar(path, text).split("--driver exedev").length - 1;
-}
-
 function walkTree(dir: string): string[] {
 	const out: string[] = [];
 	for (const name of readdirSync(dir, { withFileTypes: true })) {
@@ -338,8 +398,10 @@ function walkTree(dir: string): string[] {
 function scanDriverGrammar(files: Record<string, string>): string[] {
 	const refusals: string[] = [];
 	for (const [path, content] of Object.entries(files)) {
-		const count = driverGrammarCounts(path, content);
-		const line = lineOf(content, "--driver exedev");
+		const stripped = stripByGrammar(path, content);
+		const count = stripped.split("--driver exedev").length - 1;
+		// F-003: the cited line comes from the SAME stripped text the count ran on.
+		const line = lineOf(stripped, "--driver exedev");
 		const loc = line > 0 ? `:${line}` : "";
 		if (path === "deploy/vps/fleet-wrapper.sh") {
 			if (count !== 1) refusals.push(`AC5/INV-Z4-2: ${path}${loc} must hold --driver exedev exactly once (non-comment), got ${count}`);
@@ -450,13 +512,18 @@ describe("Z4 env templates (AC6)", () => {
 });
 
 describe("AC5: driver-grammar tree scan", () => {
-	it("the whole deploy/vps tree holds --driver exedev exactly once — in fleet-wrapper.sh", () => {
+	it("the whole deploy/vps tree + the runbook hold --driver exedev exactly once — in fleet-wrapper.sh (F-002)", () => {
 		const files: Record<string, string> = {};
 		for (const abs of walkTree(vpsDir)) {
 			files[abs.slice(repoRoot.length + 1)] = readFileSync(abs, "utf8");
 		}
-		expect(Object.keys(files).length).toBeGreaterThanOrEqual(5);
+		// F-002: the runbook is IN the scanned map (the F-016 doc-leak negative
+		// control names exactly this path — the positive scan must check it).
+		// .md grammar: no comment stripping, every literal counts.
+		files[RUNBOOK_PATH] = readFileSync(join(repoRoot, RUNBOOK_PATH), "utf8");
+		expect(Object.keys(files).length).toBeGreaterThanOrEqual(6);
 		expect(Object.keys(files)).toContain("deploy/vps/fleet-wrapper.sh");
+		expect(Object.keys(files)).toContain(RUNBOOK_PATH);
 		expect(scanDriverGrammar(files)).toEqual([]);
 	});
 
@@ -485,7 +552,7 @@ describe("AC5: driver-grammar tree scan", () => {
 
 	it("AC5 negative control (F-016): a doc-text leak (runbook annotation path) is refused by name", () => {
 		const leaks = scanDriverGrammar({
-			"_bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md": "Run every fleet verb with --driver exedev appended.\n",
+			[RUNBOOK_PATH]: "Run every fleet verb with --driver exedev appended.\n",
 		});
 		expect(leaks).toHaveLength(1);
 		expect(leaks[0]).toContain("2026-09-30-vultr-vps-deploy-runbook.md:1");
@@ -536,6 +603,33 @@ describe("AC1 negative controls (compose fixtures)", () => {
 		expect(r.some((x) => x.includes("non-loopback host IP 0.0.0.0"))).toBe(true);
 		expect(r.some((x) => x.includes("host port 18889 is forbidden"))).toBe(true);
 		expect(r.some((x) => x.startsWith("AC1: host publish must be exactly"))).toBe(true);
+	});
+
+	it("F-014: bracket-form IPv6 loopback parses (hostIp ::1, loopback-legal); a bare-IPv6 5-part split is refused BY NAME", () => {
+		expect(asHostMap("[::1]:18890:8888")).toEqual({ text: "[::1]:18890:8888", hostIp: "::1", hostPort: "18890" });
+		const bracket = validateCompose(baseCompose('      - "[::1]:18890:8888"'));
+		expect(bracket.some((x) => x.includes("must bind loopback"))).toBe(false); // ::1 is loopback-legal
+		const bare = validateCompose(baseCompose('      - "::1:18890:8888"'));
+		expect(bare.some((x) => x.startsWith("AC1: unparseable ports entry (possible bare IPv6)"))).toBe(true);
+	});
+
+	it("F-018: malformed YAML shapes produce NAMED refusals, never TypeErrors", () => {
+		const r = validateCompose(
+			[
+				"services:",
+				"  hindsight-qds:", // null service body
+				"  m2-gateway:",
+				"    image: ghcr.io/o/qds-m2-gateway:t",
+				'    restart: "no"',
+				"    ports: 127.0.0.1:8443:8080", // scalar ports, not a list
+				"networks:",
+				"  front-door:",
+				"    external: true",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC1: hindsight-qds must have exactly one host publish, got 0"))).toBe(true);
+		expect(r.some((x) => x.startsWith("AC1: service m2-gateway ports must be a list"))).toBe(true);
+		expect(r.some((x) => x.startsWith("AC2: service hindsight-qds has no image ref"))).toBe(true);
 	});
 });
 
@@ -592,6 +686,22 @@ describe("AC2 negative controls (pin fixtures)", () => {
 		].join("\n"));
 		expect(r.some((x) => x.includes("AC2") && x.includes("arch-suffixed") && x.includes("qds-m2-gateway:amd64"))).toBe(true);
 	});
+
+	it("refuses underscore-form arch tags (:v1_arm64) — same QEMU incident class (F-016)", () => {
+		const r = validateCompose([
+			"services:",
+			"  hindsight-qds:",
+			`    image: ${PIN}`,
+			`    ports: ["${HOST_PUBLISH}"]`,
+			"  m2-gateway:",
+			"    image: ghcr.io/o/qds-m2-gateway:v1_arm64",
+			'    restart: "no"',
+			"networks:",
+			"  front-door:",
+			"    external: true",
+		].join("\n"));
+		expect(r.some((x) => x.includes("AC2") && x.includes("arch-suffixed") && x.includes("qds-m2-gateway:v1_arm64"))).toBe(true);
+	});
 });
 
 describe("AC3 negative controls (Caddy fixtures)", () => {
@@ -612,7 +722,63 @@ describe("AC3 negative controls (Caddy fixtures)", () => {
 				"}",
 			].join("\n"),
 		);
-		expect(r.some((x) => x.startsWith("AC1/AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
+		expect(r.some((x) => x.startsWith("AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
+	});
+
+	it("F-009 (SR-1): a reverse_proxy AFTER a nested header block inside handle @recall is still refused", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	@recall {",
+				"		method POST",
+				"		path /v1/recall",
+				"	}",
+				"	handle @recall {",
+				"		header {",
+				"			X-Factory true",
+				"		}",
+				"		reverse_proxy hindsight-qds:8888",
+				"	}",
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
+	});
+
+	it("F-009 (SR-1): a ONE-LINE handle forwarding a hindsight service is refused", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	handle @recall { reverse_proxy hindsight-qds:8888 }",
+				"	handle { respond 404 }",
+				"}",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
+	});
+
+	it("F-009 (SR-1): a ONE-LINE second host block makes the count 2 — refused by name", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	@recall {",
+				"		method POST",
+				"		path /v1/recall",
+				"	}",
+				"	handle @recall {",
+				`		reverse_proxy ${GATEWAY_UPSTREAM}`,
+				"	}",
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+				"other.example.com { respond 404 }",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC3:") && x.includes("exactly ONE host block, got 2"))).toBe(true);
 	});
 
 	it("refuses a catch-all handle that proxies instead of 404ing", () => {
@@ -686,6 +852,14 @@ describe("AC6 negative controls (env fixtures)", () => {
 		expect(parseEnv(text)).toEqual([{ key: "SWARMCLAW_ARG_POLICY", value: "deny #fragment-style suffix" }]);
 		// no false refusal
 		expect(validateEnvTemplate(text, "fixture.env", "http://hindsight-qds:8888")).toEqual([]);
+	});
+
+	it("F-015: export-prefixed and lowercase spellings of a secret are refused; tab-# comments strip", () => {
+		for (const line of ["export HINDSIGHT_API_LLM_API_KEY=sk-real\n", "hindsight_api_llm_api_key=sk-real\n"]) {
+			const r = validateEnvTemplate(line, "fixture.env", "http://127.0.0.1:18890");
+			expect(r.some((x) => x.includes("literal credential value")), line).toBe(true);
+		}
+		expect(stripShComments("\t# tab-indented comment\nKEY=value\n")).toBe("\nKEY=value\n");
 	});
 });
 
@@ -768,7 +942,7 @@ describe("Observability contract (F-014): refusals name file + line + rule", () 
 				"}",
 			].join("\n"),
 		);
-		const fwd = r.find((x) => x.startsWith("AC1/AC3/INV-Z4-1"));
+		const fwd = r.find((x) => x.startsWith("AC3/INV-Z4-1"));
 		expect(fwd).toMatch(/\(deploy\/vps\/Caddyfile\.factory\.allowlist:7\)$/); // the reverse_proxy row
 	});
 
@@ -786,9 +960,12 @@ describe("Observability contract (F-014): refusals name file + line + rule", () 
 // forever). The fork checkout exists only on dev machines, so this test is
 // gated on the QDS_FORK_CHECKOUT env var (ABSOLUTE path to a local swarmclaw
 // fork checkout root). Unset ⇒ SKIPPED, and CI without the checkout stays
-// green. There is deliberately NO default path. To run it locally:
+// green. F-017: SET-BUT-EMPTY counts as unset too — an empty path can never
+// satisfy the byte-compare, so it must not masquerade as an enabled check;
+// the skip reason is exactly that empty-string = unset. There is deliberately
+// NO default path. To run it locally:
 //   QDS_FORK_CHECKOUT=/path/to/swarmclaw bun test tests/deploy/vps-profile.test.ts
-const FORK_CHECKOUT = process.env.QDS_FORK_CHECKOUT;
+const FORK_CHECKOUT = process.env.QDS_FORK_CHECKOUT || undefined;
 
 describe("AC2: fork sole-pin-source byte-compare (F-006)", () => {
 	it.skipIf(!FORK_CHECKOUT)("compose image equals <QDS_FORK_CHECKOUT>/config/hindsight-version.txt byte-exact", () => {

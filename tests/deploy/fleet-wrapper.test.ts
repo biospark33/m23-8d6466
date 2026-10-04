@@ -48,13 +48,15 @@ mkdirSync(foreignDir);
 // Shim `bun`: writes the argv it received to argv.txt in ITS cwd, one arg per
 // line — shell-internal $PWD, so no env beyond the allowlist is needed — and
 // copies its stdin to stdin.txt so the wrapper's passthrough is observable.
-// `read` is a builtin (nothing else resolves on the shim-only PATH); the loop
-// is byte-identical for newline-terminated text, which is the shape of the
-// fork's real stdin payload (the approve token).
+// `read` is a builtin (nothing else resolves on the shim-only PATH). The
+// post-loop flush catches an UNTERMINATED final line (read returns failure
+// but still assigns it); the flush re-adds the newline, so stdin is
+// byte-identical for newline-terminated input — the fork's real payload
+// shape — and normalized to a trailing newline for unterminated input.
 const shimPath = join(shimDir, "bun");
 writeFileSync(
   shimPath,
-  "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/argv.txt\"\n: > \"$PWD/stdin.txt\"\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$PWD/stdin.txt\"; done\n",
+  "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/argv.txt\"\n: > \"$PWD/stdin.txt\"\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$PWD/stdin.txt\"; done\nif [ -n \"$line\" ]; then printf '%s\\n' \"$line\" >> \"$PWD/stdin.txt\"; fi\n",
 );
 chmodSync(shimPath, 0o755);
 
@@ -164,7 +166,38 @@ describe("fleet-wrapper (Z4, DF5.5 Amendment D)", () => {
     expect(stderr).toContain("verb= driver_injected=false\n");
   });
 
-  it("reads no environment variable at all — no QDS_* fallback, no env knob selects the driver", () => {
+  it("verb containing a newline is refused exit 2 BEFORE the provenance line (exactly one stderr line guard)", async () => {
+    // A newline in $verb would split `verb=<v> driver_injected=<bool>` across
+    // several stderr lines; the wrapper refuses such a verb before printing
+    // provenance, so this exact-equality also proves no provenance line ran.
+    const { code, stderr } = await runWrapper(wrapperPath, ["sta\ntus"]);
+    expect(code).toBe(2);
+    expect(stderr).toBe("fleet-wrapper: verb must not contain a newline\n");
+  });
+
+  it("bun missing from PATH exits 127 with a bun diagnostic (the fork's broken-install shape)", async () => {
+    // Fork env allowlist intact, but PATH points at an EMPTY dir — no bun
+    // anywhere. The wrapper must diagnose before exec, not die with bun's
+    // own silent "command not found".
+    const emptyPath = join(tmp, "empty-path");
+    mkdirSync(emptyPath);
+    const proc = Bun.spawn([wrapperPath, "status"], {
+      cwd: foreignDir,
+      env: { ...forkEnv, PATH: emptyPath },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited).toBe(127);
+    expect(stderr).toMatch(/bun/);
+  });
+
+  it("reads no environment beyond the implicit PATH probe exec requires — no QDS_* fallback, no env knob selects the driver", () => {
+    // Two env-touch classes are deliberately distinct: CONFIG-env reads (any
+    // ${VAR} expansion or named variable reference) are forbidden — the regex
+    // below enforces zero of them; the `command -v bun` PATH probe is NOT a
+    // config read — it is the minimum resolution work exec itself requires.
     // Positional/expansion params are $0..$9 and $@ — digits and '@', never an
     // uppercase NAME, so ANY match here would be an env read.
     expect(wrapperSource.match(/\$\{?[A-Z_][A-Z0-9_]*\}?/g) ?? []).toEqual([]);
@@ -216,6 +249,26 @@ describe("fleet-wrapper (Z4, DF5.5 Amendment D)", () => {
     proc.stdin.end();
     await proc.exited;
     expect(readFileSync(join(foreignDir, "stdin.txt"), "utf8")).toBe(token);
+  });
+
+  it("piped stdin: an UNTERMINATED final line survives the shim (byte-identical modulo the shim's added trailing newline)", async () => {
+    // Same production shape as above minus the trailing newline. `read`
+    // returns failure on EOF-without-newline but still assigns the partial
+    // line, so the loop drops it unless the shim flushes it afterwards — the
+    // flush does, and its printf re-adds the newline the payload lacked.
+    // That one-byte normalization is the shim's, asserted honestly here.
+    const token = "ghp_z4-wrapper-stdin-unterminated";
+    const proc = Bun.spawn([wrapperPath, "approve", ...PASSTHROUGH_ARGS], {
+      cwd: foreignDir,
+      env: forkEnv,
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    proc.stdin.write(token);
+    proc.stdin.end();
+    await proc.exited;
+    expect(readFileSync(join(foreignDir, "stdin.txt"), "utf8")).toBe(`${token}\n`);
   });
 });
 
@@ -277,5 +330,18 @@ describe("fleet-wrapper argv accepted by the real CLI (run() + injected FakeDriv
     expect(code).toBe(2);
     expect(errs.join("")).toContain("does not take --driver");
     expect(errs.join("")).not.toContain("requires --approver");
+  });
+
+  it(`refuses --driver on "result" with exit 2 before the record read (not a record-not-found 4)`, async () => {
+    // The second leg of the AC4 negative: `result` also takes no --driver,
+    // and the same unconditional-append argv must die at PARSE time. The
+    // injected store holds NO record for this id, so a 4 here would prove
+    // the record read ran first — 2 is the parse-order proof.
+    const errs: string[] = [];
+    const code = await run(["result", "qds-20990101-000000", "--driver", "exedev"], outSink, e2eDeps, (s) =>
+      errs.push(s),
+    );
+    expect(code).toBe(2);
+    expect(errs.join("")).toContain("does not take --driver");
   });
 });

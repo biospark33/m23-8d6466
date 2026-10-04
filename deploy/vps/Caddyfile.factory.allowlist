@@ -16,11 +16,15 @@
 # HTTP-01 over port 80 — unchanged; this fragment adds no listener.
 #
 # If the real hostname ALREADY appears as a site address in the live
-# Caddyfile, do NOT add this as a second block — splice the ROWS (the
-# @recall matcher and both handles) into that existing block instead:
-# duplicate site addresses refuse `caddy reload`, and a later restart with
-# the duplicate still on disk downs the box's only front door. `caddy
-# validate` catches the reload case; only the restart makes it fatal.
+# Caddyfile, do NOT add this as a second block — splice ONLY the @recall
+# matcher + its `handle @recall` rows into that existing block instead
+# (duplicate site addresses refuse `caddy reload`, and a later restart with
+# the duplicate still on disk downs the box's only front door; `caddy
+# validate` catches the reload case, only the restart makes it fatal).
+# F-007: do NOT splice a second no-matcher catch-all handle — Caddy resolves
+# multiple no-matcher handles by SOURCE ORDER, so a spliced one can shadow
+# the host block's own terminal behavior. RECONCILE the 404 tail with the
+# block's EXISTING terminal handle instead of duplicating it.
 #
 # Idiom (copied verbatim from the template's E09-GAP-01b/01c/01d
 # ops-token-gated precedent): named matchers `@name { method …, path … }` +
@@ -33,6 +37,9 @@
 # publishes NO host ports; see docker-compose.factory.yml). M2.1 WIDENS the
 # row set in this same idiom — authz internals (recall-only keys,
 # revoke-verify) are M2.1's; this fragment authors the slot's perimeter only.
+# F-025: the perimeter authn/token gate for these rows (the idiom is
+# ops-token-gated) lands with that same M2.1 row-widening — this fragment
+# authors the slot's rows pre-authz.
 # NO row may ever forward to a hindsight service (hindsight-qds:8888 /
 # 127.0.0.1:18890) — the perimeter reaches the gateway only (INV-Z4-1).
 

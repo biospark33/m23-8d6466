@@ -6,11 +6,12 @@
 # stripped child env (PATH, HOME, TMPDIR, LANG only) and never learns QDS's
 # driver grammar — the driver name is fixed HERE, in the verb table below,
 # and is NOT a config surface: no environment knob may ever select it. This
-# script reads no environment at all, and resolves the factory checkout from
-# its own script location — an env-var fallback could never work under the
-# fork's allowlist, so none exists. It uses shell builtins and parameter
-# expansion ONLY for that resolution: no external command (not even dirname)
-# may sit between this script and `exec bun` on a stripped PATH.
+# script reads no config environment — its only env touch is the implicit
+# `command -v bun` PATH probe exec requires — and resolves the factory
+# checkout from its own script location — an env-var fallback could never
+# work under the fork's allowlist, so none exists. It uses shell builtins
+# and parameter expansion ONLY for that resolution: no external command (not
+# even dirname) may sit between this script and `exec bun` on a stripped PATH.
 #
 # Per invocation: exactly ONE provenance line to STDERR — `verb=<v>
 # driver_injected=<bool>` — never stdout (stdout is the verb's JSON contract).
@@ -45,6 +46,14 @@ for v in $no_driver_verbs; do
   [ "$v" = "$verb" ] && known=true
 done
 
+# A newline inside $verb would split the provenance line across several
+# stderr lines — refuse BEFORE the provenance printf so the one-line
+# contract holds on every path that logs (round-2 F-011).
+case $verb in
+*"
+"*) printf 'fleet-wrapper: verb must not contain a newline\n' >&2; exit 2 ;;
+esac
+
 printf 'verb=%s driver_injected=%s\n' "$verb" "$inject" >&2
 
 if [ "$known" = false ]; then
@@ -64,6 +73,11 @@ case $0 in
   *) printf 'fleet-wrapper: $0 must be an absolute path (the fork execFile contract passes one); got: %s\n' "$0" >&2
      exit 2 ;;
 esac
+# A root-level install ($0=/fleet-wrapper.sh) leaves ${0%/*} empty; refuse
+# with a diagnostic BEFORE `cd ""` — that call's success/failure is
+# implementation-defined (bash-as-sh and dash succeed and adopt the caller's
+# cwd, busybox fails bare), so the guard must precede it (round-2 F-010).
+[ -n "$here" ] || { printf 'fleet-wrapper: cannot resolve the checkout directory from $0=%s\n' "$0" >&2; exit 1; }
 here=$(CDPATH= cd "$here" && pwd -P) || exit 1
 # Up two levels: <checkout>/deploy/vps → <checkout>/deploy → <checkout>.
 repo_root=${here%/*}
