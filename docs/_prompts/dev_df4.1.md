@@ -62,7 +62,7 @@ file has to survive that re-run — design for it up front, don't discover it at
   blast radius; stop and surface HIGH/CRITICAL before proceeding.
 - `query({query:"<concept>"})` / `context({name:"<symbol>"})` to find the DF1.4 trace-store API
   instead of grepping.
-- `detect_changes({scope:"compare", base_ref:"main"})` before every commit — blast radius must
+- `detect_changes({scope:"compare", base_ref:"dev"})` before every commit — blast radius must
   stay inside DF4.1's own modules.
 - `rename` for renames. Never find-and-replace.
 

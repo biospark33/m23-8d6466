@@ -11,20 +11,12 @@ This project is indexed by GitNexus as **QDS-Factory**. Use the GitNexus MCP too
 > so GitNexus's `DEFAULT_IGNORE_LIST` filters out `tests/gitnexus/fixtures/` and
 > `tests/gitnexus/graph-queries.test.ts` degrades to `(skip)`.
 
-## Always Do
+## Before editing and committing
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level). If it returns HIGH or CRITICAL, warn the user before editing.
+- Before committing, run `detect_changes({scope: "compare", base_ref: "dev"})` to confirm the change touches only the expected symbols and flows (`dev` is the integration base; see the branch convention below).
+- Rename symbols with `rename`, which follows the call graph; find-and-replace misses or over-matches references.
+- When exploring unfamiliar code, `query({query: "concept"})` returns process-grouped execution flows ranked by relevance; `context({name: "symbolName"})` gives one symbol's callers, callees, and flows.
 
 ## Resources
 
@@ -39,12 +31,12 @@ This project is indexed by GitNexus as **QDS-Factory**. Use the GitNexus MCP too
 
 | Task | Read this skill file |
 |------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
 
@@ -97,6 +89,8 @@ Upgrade ritual (in order):
 1. Upgrade the CLI, then reindex via the canonical script (above). The script stamps
    `.gitnexus/cli-version.json` (installed version, pinned version, index time, HEAD) and
    warns when installed ≠ pinned.
+   It also refreshes `.claude/skills/gitnexus-*/SKILL.md` from the new CLI's bundled
+   templates and re-applies this repo's reindex rule to them; commit those files.
 2. Run `bun test tests/gitnexus/` — expect the contract suite to fail on real drift.
 3. Review the failure: it names every drifted field. Confirm intent against upstream's
    changelog/source; if a drop looks unintentional, file it upstream before adopting.
@@ -112,9 +106,8 @@ block regenerates with the wrong reindex command. This section sits outside the
 markers, which every gitnexus version preserves unconditionally; it is the
 backstop if `gitnexus:keep` ever stops being honoured.
 
-qds-dev branch convention: prefix=feature/ base=dev target=dev (2026-08-28: `dev` is the
-integration base — ALL feature/fix PRs merge into `dev`; `dev` → `main` is a periodic
-promote/sync PR only)
+qds-dev branch convention: prefix=feature/ base=dev target=dev. Every PR targets `dev`;
+the only PR that targets `main` is the periodic `dev` → `main` promote/sync PR.
 
 Live E2E rounds: use the `qds-live-e2e` skill (`.claude/skills/qds-live-e2e/`) whenever
 running or building live/no-fakes end-to-end tests (QDS_E2E_LIVE tiers, real boxes,

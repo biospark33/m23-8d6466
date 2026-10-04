@@ -17,7 +17,7 @@
  * The CLI ships no importable output schema (checked dist/**; only
  * group/cross-impact types exist), so this file is hand-maintained — that is
  * precisely why the strict/lenient split and the version pin exist. Field
- * inventories verified live against 1.6.9 on 2026-08-28 (every tool the suites
+ * inventories verified live against 1.6.9 on 2026-08-28 and re-verified against 1.6.12 on 2026-10-03 (every tool the suites
  * exercise: query, context found/not-found, impact resolved/ambiguous, cypher,
  * list, detect-changes).
  */
@@ -208,7 +208,15 @@ export const ContextFoundStrict = z
       .strict(),
     epistemic: z.string(),
     incoming: z.object({ calls: z.array(RefStrict).optional() }).strict(),
-    outgoing: z.object({ calls: z.array(RefStrict).optional() }).strict(),
+    // ADOPTED 1.6.12: `uses` (type references) and `accesses` (property
+    // reads/writes) join `calls` as outgoing edge classes, same ref shape.
+    outgoing: z
+      .object({
+        calls: z.array(RefStrict).optional(),
+        uses: z.array(RefStrict).optional(),
+        accesses: z.array(RefStrict).optional(),
+      })
+      .strict(),
     processes: z.array(z.unknown()),
   })
   .strict();
@@ -218,6 +226,22 @@ export const ContextNotFoundStrict = z.object({ error: z.string() }).strict();
 
 const RiskLevel = z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]);
 const ImpactDirection = z.enum(["upstream", "downstream"]);
+
+/** ADOPTED 1.6.12 (upstream #3075, shared-axis risk): every impact verdict
+ * also reports the risk computed on the axes all symbol kinds share, which axes
+ * were not used and why, and — when no caller resolved — a note that an empty
+ * edge set is not proof the symbol is unused. */
+const RiskScaleStrict = z
+  .object({
+    comparableAcrossKinds: z.boolean(),
+    unusedAxes: z.array(z.object({ axis: z.string(), reason: z.string() }).strict()),
+  })
+  .strict();
+const SharedRiskFields = {
+  riskSharedAxes: RiskLevel,
+  riskScale: RiskScaleStrict,
+  riskNote: z.string().optional(),
+};
 
 const ImpactNodeStrict = z
   .object({
@@ -254,6 +278,7 @@ export const ImpactResolvedStrict = z
     direction: ImpactDirection,
     impactedCount: z.number(),
     risk: RiskLevel,
+    ...SharedRiskFields,
     epistemic: z.string(),
     summary: z
       .object({
@@ -296,10 +321,16 @@ export const ImpactAmbiguousStrict = z
     target: z.object({ name: z.string() }).strict(),
     direction: ImpactDirection,
     totalCandidates: z.number(),
-    impactedCount: z.number(),
+    // ADOPTED 1.6.12: true when `candidates` shows fewer than totalCandidates.
+    candidatesTruncated: z.boolean(),
+    // ADOPTED 1.6.12: null when any candidate could not be walked — upstream
+    // stopped reporting an unmeasured blast radius as a measured count.
+    impactedCount: z.number().nullable(),
     risk: RiskLevel,
     maxImpactedCount: z.number(),
     maxRisk: RiskLevel,
+    // ADOPTED 1.6.12: the max risk over only the candidates that resolved.
+    knownMaxRisk: RiskLevel,
     candidates: z.array(
       z
         .object({
@@ -311,6 +342,7 @@ export const ImpactAmbiguousStrict = z
           score: z.number(),
           impactedCount: z.number(),
           risk: RiskLevel,
+          ...SharedRiskFields,
           direct: z.number(),
         })
         .strict(),

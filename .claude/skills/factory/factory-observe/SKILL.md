@@ -1,6 +1,6 @@
 ---
 name: factory-observe
-description: "Observe and steer factory fleet runs: read run state with status, steer a live run with attach, and route an awaiting-approval run to approve or reject with the approver token the operator supplies on stdin. Use when asked about a run's progress, state, steering, or gate approval."
+description: "Observe and steer factory fleet runs: read run state with status, steer a live run with attach, drive a finished run through the observe verb (harvest→teardown→reverify→gate, operator-authorized), and route an awaiting-approval run to approve or reject with the approver token the operator supplies on stdin. Use when asked about a run's progress, state, steering, completion, or gate approval."
 ---
 
 # factory-observe
@@ -93,15 +93,36 @@ bun scripts/fleet.ts reject <runId> --approver <approverId>
   `--reason`, and neither takes `--driver` — they read and write run records
   and touch no box, so never add one.
 
+## Drive a finished run — `observe`
+
+`observe` watches a dispatched run's terminal marker and, when the run ends,
+drives the harvest → teardown → reverify → gate chain itself. The operator has
+authorized it: run it without asking first, including the teardown it chains.
+
+```bash
+bun scripts/fleet.ts observe <runId> --driver <driver>
+bun scripts/fleet.ts observe --all --driver <driver>   # one bounded sweep of every open record
+```
+
+`--driver` is required. Exit 1 (`run-completion-unobserved`, `box-unreachable`)
+is transient with the box left alive: re-invoke and the poll starts over. Exit 5
+is a refusal before anything mutated (run already closed, engine dead, run
+locked) and repeats on retry; report it. Exit 6 means the chain landed and a
+later step failed (re-verification vetoed, approval leg failed, chain step
+threw); report it verbatim and stop.
+
+The consent covers `observe` only. A standalone `teardown` is still the
+operator's explicit decision (factory-harvest).
+
 ## Reading results and errors
 
 - Exit 0: the verb did what it says. Exit 1: run or provider failure — the
   substrate, not your invocation. Exit 2: usage — your invocation, not the
   run; fix the flags against the registry. Exit 4: no such run. Exit 5:
   refused before anything mutated. Exit 6: the work landed and the CLI's own
-  output or cleanup failed after it — not retryable. `status` declares only
-  0, 1, 2, 4 — a 5 or 6 from `status` is outside contract; report it, do not
-  interpret it. And on a `--no-harvest` teardown, exit 6 with a
+  output or cleanup failed after it — not retryable. From `status`, exit 5
+  means a run record was skipped or unreadable (an integrity alarm: report it)
+  and exit 6 means the rows were computed but the output failed. And on a `--no-harvest` teardown, exit 6 with a
   `teardown.harvest_waived` stdout line means success — the exit code alone
   does not distinguish; parse stdout for the line.
 - On any failure, report the CLI's `{ code, message, remediation }` verbatim
@@ -116,7 +137,7 @@ bun scripts/fleet.ts --help
 
 ## Hard rules
 
-1. **Observation never mutates.** `status` reads; that is all. If the operator
+1. **Observation never mutates, except `observe`'s authorized chain.** `status` reads; that is all. If the operator
    wants the run changed, that is a decision for approve, reject, or attach,
    routed through those verbs — never improvised through another channel.
 2. **Report and stop on failure.** A refused verb, a missing prerequisite, or

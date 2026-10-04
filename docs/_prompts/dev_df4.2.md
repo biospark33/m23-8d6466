@@ -220,7 +220,7 @@ INV-1…INV-5 in the story are load-bearing. In particular:
   stop and surface HIGH/CRITICAL to me before proceeding.
 - `query({query:"<concept>"})` / `context({name:"<symbol>"})` to find DF1.4's trace API and DF2.2's
   driver surface instead of grepping.
-- `detect_changes({scope:"compare", base_ref:"main"})` before every commit — the blast radius must
+- `detect_changes({scope:"compare", base_ref:"dev"})` before every commit — the blast radius must
   stay inside DF4.2's own modules plus the two DF2.5-owned files the story explicitly claims.
 - `rename` for renames. Never find-and-replace.
 

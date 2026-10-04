@@ -3,7 +3,7 @@
 > **Triggered by:** `encryption`, `secret`, `secrets`, `KMS`, `vault`
 > in story or epic text.
 > **Loaded by:** Phase 3 wrap-up step (`steps/phase-3-wrap-up.md` §3.0).
-> **Used as:** `also_consider` input to `bmad-review-adversarial-general`.
+> **Used as:** `also_consider` input to the Phase 3 adversarial review.
 
 When a story handles secrets, encryption keys, or KMS/Vault material,
 every one of the items below must be addressable from the story spec

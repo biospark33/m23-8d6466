@@ -33,7 +33,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gn-embed-"));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 
 // A throwaway git repo so the script's `git rev-parse --show-toplevel` resolves
-// to a temp root — the transient `.gitnexusignore` / `.claude/skills/gitnexus`
+// to a temp root — the transient `.gitnexusignore` / `.claude/skills/gitnexus-*`
 // it writes and cleans up never touch the real working tree.
 const repoDir = path.join(tmpRoot, "repo");
 fs.mkdirSync(repoDir, { recursive: true });

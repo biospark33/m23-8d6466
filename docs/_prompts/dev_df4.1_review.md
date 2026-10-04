@@ -40,7 +40,7 @@ GitHub identity: **all** git/gh operations run as `i3creations`. `gh pr create` 
    subagents on the 5492-line round-5 diff. The chunked wave in §3 replaces it.
 2. `~/.claude/skills/qds-dev/SKILL.md` §"Definition of Done" — the gates DF4.1 must still pass
    after the fixes land, so the final gate in §6 matches what the dev skill demanded.
-3. `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` — required by repo `CLAUDE.md`
+3. `.claude/skills/gitnexus-impact-analysis/SKILL.md` — required by repo `CLAUDE.md`
    before any symbol edit.
 
 **Reference repos (cloned locally — read, never modify):**
@@ -209,7 +209,7 @@ Then:
   `VENDOR_VISUALIZER_SHA=de31374882e7a4e3e5b7bb9bd09e69dc2f779356`) into a **temp dir** and confirm
   AC0's no-op-diff claim still holds against our hardening. If it cannot hold, that is a reported
   finding, not a silent fix.
-- `detect_changes({scope:"compare", base_ref:"main"})` — blast radius must stay inside DF4.1's own
+- `detect_changes({scope:"compare", base_ref:"dev"})` — blast radius must stay inside DF4.1's own
   modules. Any out-of-scope symbol is fallout: fix it or explain it in the report.
 - If behavior changed, regenerate `_bmad-output/evidence/df4-1/e2e-demo.json` and re-run the E2E
   slice from the story (token gate → 401 on no credential → loopback bind → phase detail renders).

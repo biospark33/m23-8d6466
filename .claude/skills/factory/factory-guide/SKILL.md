@@ -36,12 +36,12 @@ the preflight command, report, and stop — never guess the nearest verb.
 - **factory-dispatch** — reach for it when work starts: `dispatch` a single run, `fanout`
   N variants from a pattern. Owns run-start judgment and the runId handoff.
 - **factory-observe** — reach for it while a run is live: `status` to read a run, `attach`
-  to steer it with guidance text, and the approval routing (`approve` / `reject`) when a run
-  sits in `awaiting-approval`. Note: `factory-observe` is a skill name, distinct from any
-  future fleet verb of a similar name.
+  to steer it with guidance text, `observe` to drive a finished run's harvest→teardown→
+  reverify→gate chain (operator-authorized, no per-run consent), and the approval routing
+  (`approve` / `reject`) when a run sits in `awaiting-approval`.
 - **factory-harvest** — reach for it when a run ends: `harvest` the results early and freely
-  (non-destructive), then `teardown` only on an explicit human decision — it is the one
-  destructive verb and is never chained off dispatch.
+  (non-destructive), then a standalone `teardown` only on an explicit human decision. The only
+  pre-authorized teardown is the one the `observe` verb chains (factory-observe).
 
 `fleet rank` scores a completed best-of-N fan-out. It is a registry verb no Tier-1
 skill wraps: it takes the fanoutId (not a runId) and declares no `--driver` — read

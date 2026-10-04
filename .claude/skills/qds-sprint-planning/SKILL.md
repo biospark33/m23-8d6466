@@ -1,15 +1,15 @@
 ---
 name: qds-sprint-planning-resources
-description: Phase 3 wrap-up step + pluggable domain-invariant checklists used by the qds-sprint-planning skill. Loaded as references — NOT invoked directly. See `.claude/commands/skills/qds-sprint-planning.md` for the canonical skill definition.
-version: 1.3.0
+description: Phase 2.5 atomicity-audit and Phase 3 wrap-up steps + pluggable domain-invariant checklists used by the qds-sprint-planning skill. Loaded as references — NOT invoked directly. See `.claude/commands/skills/qds-sprint-planning.md` for the canonical skill definition.
+version: 1.5.0
 author: biospark33
-last_updated: 2026-06-19
+last_updated: 2026-10-03
 ---
 
 # qds-sprint-planning — Reference Resources
 
 This directory holds the resources that the canonical qds-sprint-planning
-skill loads during Phase 3. The skill itself lives at
+skill loads during Phases 2.5 and 3. The skill itself lives at
 `.claude/commands/skills/qds-sprint-planning.md`.
 
 ## Contents
@@ -18,6 +18,7 @@ skill loads during Phase 3. The skill itself lives at
 .claude/skills/qds-sprint-planning/
 ├── SKILL.md                 # this file (index)
 ├── steps/
+│   ├── phase-2-5-atomicity-audit.md  # story atomicity gate (before Phase 3)
 │   └── phase-3-wrap-up.md   # adversarial auto-iteration loop spec
 └── checklists/
     ├── rls-invariants.md
@@ -35,7 +36,8 @@ iteration loop that runs BEFORE any commit / PR step in Phase 3. It:
 
 - Scans story files + epic definition for domain-trigger keywords.
 - Loads matching checklists from `checklists/` as `also_consider` input
-  to `bmad-review-adversarial-general`.
+  to the adversarial review (a reviewer that assumes the spec is wrong
+  and hunts for gaps, contradictions and unstated assumptions).
 - Iterates up to 3 times until findings converge
   (`HIGH == 0 AND MEDIUM <= 3`).
 - Surfaces a disposition table to the operator if convergence fails.
@@ -66,13 +68,9 @@ in `steps/phase-3-wrap-up.md` §3.0.
 4. Run `/reflect` to record the new SPL learning so
    `.claude/learnings/qds-sprint-planning/patterns.yml` is updated
    via the learnings workflow (preserving provenance/metadata).
-   Reference the new checklist + the incident that motivated it in
-   the reflection.
+   Reference the new checklist + the reason for it in the reflection.
 
 ## Related
 
 - Canonical skill: `.claude/commands/skills/qds-sprint-planning.md`
-- Adversarial review skill: `.claude/skills/bmad-review-adversarial-general/SKILL.md`
 - Patterns: `.claude/learnings/qds-sprint-planning/patterns.yml` (see SPL-024)
-- Origin issue: GitHub #1432
-- Source incident: `_bmad-output/sprint-artifacts/sprint-62/epic-rbac-1-retro-skill-audit-2026-05-13.md` §4.5

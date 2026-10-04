@@ -38,7 +38,8 @@ stays joined.
 `teardown` is the destructive verb, and it is irreversible. It is ALWAYS an
 explicit, separate operator decision: never chain it onto a dispatch, a status
 check, or a harvest, and never offer it as a workaround when something else
-failed. When the operator has decided, run it as written:
+failed. (Exception: the `observe` verb's chained teardown is operator-authorized —
+see factory-observe.) When the operator has decided, run it as written:
 
 ```bash
 bun scripts/fleet.ts teardown <runId> --driver <driver>
@@ -83,7 +84,8 @@ not itself offer.
 ## Hard rules
 
 1. **Harvest freely, teardown deliberately.** Harvest early and as often as
-   useful; teardown only on the operator's explicit say-so, as its own step.
+   useful; a standalone teardown only on the operator's explicit say-so, as its own step
+   (the `observe` verb's chained teardown is pre-authorized).
    The one exception is a `dispatch` exit 6 (live box whose ack could not be
    written): the registry itself names teardown as the required next step to
    stop billing. Even there, obtain explicit operator confirmation first — do

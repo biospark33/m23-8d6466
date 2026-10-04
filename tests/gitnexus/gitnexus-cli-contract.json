@@ -1,4 +1,4 @@
 {
-  "expectedCliVersion": "1.6.9",
+  "expectedCliVersion": "1.6.12",
   "notes": "Single source of truth for the gitnexus CLI contract version. Upgrades go through scripts/install-gitnexus-plus.sh and the ritual in AGENTS.md: bump this version, reindex, run tests/gitnexus/, review the contract diff."
 }
