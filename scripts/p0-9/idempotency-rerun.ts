@@ -243,26 +243,34 @@ async function idempotencyWindow(
   const attempt1 = await provisionOnce(deps, client, repoSlug, pre, rec, "1");
   const post = await snapshot(client, rec, "post");
   if (post === null) {
-    // R2-019: banks the first attempt reported creating are stranded with no
-    // compensation — name them as unconfirmed-delete residue, never a clean [].
-    ext.residue = attempt1.createdInAttempt;
-    if (attempt1.createdInAttempt.length > 0) {
-      ext.residueReason =
-        "unconfirmed-delete: post-snapshot failure stranded the first attempt's creations with no delete attempted";
-    }
+    // R2-019 + PR-review: the residue statement must never imply clean when
+    // attribution is merely unknown. Known creations (the status figure —
+    // claimable, a superset of the helper's createdInAttempt under failure)
+    // are named; an attempt without an attributable figure (failed fresh
+    // envelope without banks / failed rerun lane) records unknown-attribution.
+    ext.residue = attempt1.claimable;
+    ext.residueReason =
+      attempt1.claimable.length > 0
+        ? "unconfirmed-delete: post-snapshot failure stranded the first attempt's creations with no delete attempted"
+        : attempt1.ok
+          ? "post-snapshot failure: this attempt claimed no creations — nothing of ours is known stranded; unattributed window writes, if any, are not visible"
+          : "unknown-attribution: the first attempt failed without a status figure and the post-snapshot also failed — whether its provisioning created banks cannot be determined from this evidence; inspect the instance before the next run";
     return false;
   }
   const attempt2 = await provisionOnce(deps, client, repoSlug, post, rec, "2");
   const post2 = await snapshot(client, rec, "post2");
   if (post2 === null) {
-    // R2-019: same honesty for the rerun edge — everything the two attempts
-    // reported creating is unconfirmed-delete residue.
-    const stranded = [...attempt1.createdInAttempt, ...attempt2.createdInAttempt];
+    // R2-019 + PR-review: same honesty for the rerun edge — known creations
+    // are named; a failed attempt without a status figure records
+    // unknown-attribution, never a clean [].
+    const stranded = [...attempt1.claimable, ...attempt2.claimable];
     ext.residue = stranded;
-    if (stranded.length > 0) {
-      ext.residueReason =
-        "unconfirmed-delete: post2-snapshot failure stranded the attempts' creations with no delete attempted";
-    }
+    ext.residueReason =
+      stranded.length > 0
+        ? "unconfirmed-delete: post2-snapshot failure stranded the attempts' creations with no delete attempted"
+        : !attempt1.ok || !attempt2.ok
+          ? "unknown-attribution: an attempt failed without a status figure and the post2-snapshot also failed — whether provisioning created banks cannot be determined from this evidence; inspect the instance before the next run"
+          : "post2-snapshot failure: both attempts claimed no creations — nothing of ours is known stranded; unattributed window writes, if any, are not visible";
     return false;
   }
   const ok1 = attempt1.ok;

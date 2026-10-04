@@ -479,17 +479,20 @@ async function provisionWindow(
     rec("snapshot-post", "failed", {
       detail: `listBanks failed; diff unavailable, no compensation attempted: ${(e as Error).message}`,
     });
-    // R2-019: a post-snapshot failure mid-window abandons compensation while
-    // the attempt's creates may have landed — the banks the attempt reported
-    // creating are named as unconfirmed-delete residue, never a clean []. (On
-    // a FAILED attempt the helper reports [] — under failure the caller's
-    // post∖pre diff is the authority and there is none, so nothing is
-    // claimed.)
-    ext.residue = attempt.createdInAttempt;
-    if (attempt.createdInAttempt.length > 0) {
-      ext.residueReason =
-        "unconfirmed-delete: post-snapshot failure stranded the attempt's creations with no delete attempted";
-    }
+    // R2-019 + PR-review: a post-snapshot failure mid-window abandons
+    // compensation while the attempt's creates may have landed — the residue
+    // statement must never imply clean when attribution is merely unknown.
+    // Known creations (the status figure — claimable, a superset of the
+    // helper's createdInAttempt under failure) are named; an attempt without
+    // an attributable figure records unknown-attribution, never a bare [].
+    const known = attempt.claimable;
+    ext.residue = known;
+    ext.residueReason =
+      known.length > 0
+        ? "unconfirmed-delete: post-snapshot failure stranded the attempt's creations with no delete attempted"
+        : attempt.ok
+          ? "post-snapshot failure: this attempt claimed no creations — nothing of ours is known stranded; unattributed window writes, if any, are not visible"
+          : "unknown-attribution: the attempt failed without a status figure and the post-snapshot also failed — whether its provisioning created banks cannot be determined from this evidence; inspect the instance before the next run";
     return false;
   }
 

@@ -233,6 +233,10 @@ function makeProvisionClient(
     listBanks: string[][];
     request: Array<{ method: string; path: string; body?: unknown }>;
   };
+  listBanks: () => Promise<{ banks: { bank_id: string }[] }>;
+  createBank: (bankId: string) => Promise<unknown>;
+  deleteBank: (bankId: string) => Promise<unknown>;
+  request: (method: string, p: string, body?: unknown) => Promise<unknown>;
 } & Record<string, unknown> {
   const banks = new Set(cfg.existing ?? []);
   const calls = {
@@ -1188,6 +1192,67 @@ describe("provision-and-import", () => {
   );
 
   test.skipIf(!hasDriver("provision-and-import"))(
+    "PR-review residue honesty: post-snapshot failure names KNOWN creations (claimable superset) as unconfirmed-delete residue, and a banks-less failure records unknown-attribution — never a clean []",
+    async () => {
+      const runLeg = await loadDriver("provision-and-import");
+      // KNOWN case: the fixture's banks-shaped failure envelope carries the
+      // statuses; the post-snapshot dies → residue = the claimable set
+      // (claim1+claim2 statuses), reasoned unconfirmed-delete.
+      const knownBase = makeProvisionClient({ deleteFailsOn: ["qds-factory-dev-meta"] });
+      const knownList = knownBase.listBanks.bind(knownBase);
+      let knownCalls = 0;
+      const knownClient = {
+        ...knownBase,
+        listBanks: async () => {
+          knownCalls += 1;
+          if (knownCalls >= 2) throw new HindsightHttpError(500, "listBanks boom", "req-list");
+          return knownList();
+        },
+      };
+      const evKnown = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client: knownClient,
+        provisionImpl: failingThirdCreateImpl(knownBase),
+        lockPath: join(tmpDir, "leg.lock"),
+        outDir: tmpDir,
+        expertiseDir: makeTmpCorpus(),
+      });
+      assertEvidenceContract(evKnown);
+      expect(evKnown.ok).toBe(false);
+      const knownResidue = evKnown.residue as string[];
+      expect(knownResidue).toContain("qds-factory-dev-meta");
+      expect(String(evKnown.residueReason)).toMatch(/unconfirmed-delete/);
+      // UNKNOWN case: the real ProvisionErr shape (no statuses) + post-snapshot
+      // failure → unknown-attribution, never a bare clean [].
+      const unknownBase = makeProvisionClient();
+      const unknownList = unknownBase.listBanks.bind(unknownBase);
+      let unknownCalls = 0;
+      const unknownClient = {
+        ...unknownBase,
+        listBanks: async () => {
+          unknownCalls += 1;
+          if (unknownCalls >= 2) throw new HindsightHttpError(500, "listBanks boom", "req-list");
+          return unknownList();
+        },
+      };
+      const evUnknown = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client: unknownClient,
+        provisionImpl: realShapePartialFailureImpl(unknownBase),
+        lockPath: join(tmpDir, "leg2.lock"),
+        outDir: tmpDir,
+        expertiseDir: makeTmpCorpus(),
+      });
+      assertEvidenceContract(evUnknown);
+      expect(evUnknown.ok).toBe(false);
+      expect((evUnknown.residue as string[]).length).toBe(0);
+      expect(String(evUnknown.residueReason)).toMatch(/unknown-attribution/);
+    },
+  );
+
+  test.skipIf(!hasDriver("provision-and-import"))(
     "happy-path compensation (R3-005): created-in-attempt is the CLAIM set (status:created ∩ diff); deletes touch exactly claimed banks — never pre-existing, never a collective that pre-existed, never an unclaimed probe bank",
     async () => {
       const runLeg = await loadDriver("provision-and-import");
@@ -1321,6 +1386,42 @@ describe("provision-and-import", () => {
 // ---------------------------------------------------------------------------
 
 describe("idempotency-rerun", () => {
+  test.skipIf(!hasDriver("idempotency-rerun"))(
+    "PR-review residue honesty: real-shape fresh failure + post-snapshot failure records unknown-attribution — never a clean [] implying nothing stranded",
+    async () => {
+      const runLeg = await loadDriver("idempotency-rerun");
+      // the real ProvisionErr shape (creates land as listBanks-visible side
+      // effects, envelope carries no banks) + a listBanks that dies on the
+      // POST-snapshot: the diff is unknowable, so the evidence must say
+      // unknown-attribution, not residue:[] = clean.
+      const base = makeProvisionClient();
+      const baseList = base.listBanks.bind(base);
+      let listCalls = 0;
+      const client = {
+        ...base,
+        listBanks: async () => {
+          listCalls += 1;
+          if (listCalls >= 2) throw new HindsightHttpError(500, "listBanks boom", "req-list");
+          return baseList();
+        },
+      };
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        provisionImpl: realShapePartialFailureImpl(base),
+        lockPath: join(tmpDir, "idem.lock"),
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(false);
+      expect(ev.exitCode).toBe(1);
+      expect(Array.isArray(ev.residue)).toBe(true);
+      expect((ev.residue as string[]).length).toBe(0);
+      expect(String(ev.residueReason)).toMatch(/unknown-attribution/);
+    },
+  );
+
   test.skipIf(!hasDriver("idempotency-rerun"))(
     "two runs: roster identical across three snapshots, second run's diff empty, rosters recorded in evidence",
     async () => {
