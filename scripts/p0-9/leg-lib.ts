@@ -613,6 +613,31 @@ export function safeRepoBase(repoSlug: string): string {
 }
 
 /**
+ * The attempt's own roster SHAPE, matched against candidate bank ids: base,
+ * base-2..-11 (the collision discipline), and their -dev-meta forms. This is
+ * the fallback ATTRIBUTION for a FAILED fresh provision whose failure
+ * envelope is the provisioner's ProvisionErr — which carries NO banks (the
+ * partial roster is dropped, bank-provisioner.ts:459-468), so the
+ * status:"created" claim set is unavailable exactly when compensation is
+ * needed. Within the serialized diff window (family lock held), a diff bank
+ * matching the attempt's own roster shape is attributable to the attempt
+ * with high confidence: family writers are serialized, probe banks are
+ * `qds-probe-*`, and the collision discipline exists precisely to name these
+ * ids. Collective is NOT claimable by pattern (canonical, pre-existing).
+ * Callers intersect with the diff (claim ∩ diff stays the rule) and record
+ * whatever falls outside both the claim and the pattern as unclaimedCreated.
+ */
+export function rosterPatternClaim(repoSlug: string, candidates: string[]): string[] {
+  const base = safeRepoBase(repoSlug);
+  const shapes = new Set<string>([base, `${base}-dev-meta`]);
+  for (let n = 2; n <= 11; n++) {
+    shapes.add(`${base}-${n}`);
+    shapes.add(`${base}-${n}-dev-meta`);
+  }
+  return candidates.filter((id) => shapes.has(id));
+}
+
+/**
  * INV-MEM-1 prefix gate for every bank-creating leg driver (F-004): the CLI's
  * checkBankPrefix refused non-qds- slugs, the drivers fed QDS_REPO_SLUG / cwd
  * basename straight into bank creation. Throws an Error whose message carries

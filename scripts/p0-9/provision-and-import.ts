@@ -72,6 +72,7 @@ import {
   rerunAwareProvision,
   requireBaseUrl,
   resolveRepoSlug,
+  rosterPatternClaim,
   sanitizeOrigin,
   scanLiveShapePrereq,
   writeEvidenceOrStderr,
@@ -388,7 +389,7 @@ async function provisionAttempt(
   repoSlug: string,
   existingBankIds: string[],
   rec: Rec,
-): Promise<{ ok: boolean; roster: string[]; createdInAttempt: string[]; claimable: string[] }> {
+): Promise<{ ok: boolean; mode: string; roster: string[]; createdInAttempt: string[]; claimable: string[] }> {
   const t0 = Date.now();
   const withElapsed = (step: string, outcome: string, detail?: unknown): void =>
     rec(step, outcome, { durationMs: Date.now() - t0, detail });
@@ -410,12 +411,26 @@ async function provisionAttempt(
         }
       : {}),
   });
+  // The mint roster: the provisioner's ACTUAL bank list on the fresh lane
+  // (raw.banks bankIds — includes "exists" members, so a pre-existing
+  // collective still receives the corpus; createdInAttempt alone would
+  // under-import to only the created members), the canonical upsert roster on
+  // the rerun lane.
+  const freshBanks = (result.raw as { banks?: unknown } | undefined)?.banks;
   const roster =
     result.mode === "reupsert-existing"
       ? ((result.raw as { roster?: string[] }).roster ?? [])
-      : result.createdInAttempt;
+      : Array.isArray(freshBanks)
+        ? freshBanks
+            .filter(
+              (b): b is { bankId: string } =>
+                b !== null && typeof b === "object" && typeof (b as { bankId?: unknown }).bankId === "string",
+            )
+            .map((b) => b.bankId)
+        : result.createdInAttempt;
   return {
     ok: result.ok,
+    mode: result.mode,
     roster,
     createdInAttempt: result.createdInAttempt,
     claimable: claimableCreates(result),
@@ -480,8 +495,19 @@ async function provisionWindow(
 
   // R3-005: the diff is OBSERVATION, the claim is ATTRIBUTION — compensation
   // deletes only the intersection; the rest of the diff is recorded and left.
+  // PR-review fallback: a FAILED fresh provision's real envelope (ProvisionErr)
+  // carries NO banks, so claimableCreates has no status figure exactly when
+  // compensation matters — the attempt's own roster SHAPE (base, collision
+  // suffixes, -dev-meta) matched against the diff is the honest fallback claim
+  // (family writers are lock-serialized; probe banks cannot match the shape).
+  // A GREEN attempt keeps its (possibly empty) claim: pre-existing members
+  // were never creations, and an empty claim is then the truth.
   const diff = post.filter((id) => !pre.includes(id));
-  const createdInAttempt = attempt.claimable.filter((id) => diff.includes(id));
+  const claimable =
+    !attempt.ok && attempt.mode === "resolved-fresh" && attempt.claimable.length === 0
+      ? rosterPatternClaim(repoSlug, diff)
+      : attempt.claimable;
+  const createdInAttempt = claimable.filter((id) => diff.includes(id));
   const unclaimedCreated = diff.filter((id) => !createdInAttempt.includes(id));
   ext.createdInAttempt = createdInAttempt;
   ext.unclaimedCreated = unclaimedCreated;

@@ -66,6 +66,7 @@ import {
   requireBaseUrl,
   resolveEvidenceDir,
   resolveRepoSlug,
+  rosterPatternClaim,
   sanitizeOrigin,
   scanLiveShapePrereq,
   writeLegEvidence,
@@ -319,6 +320,39 @@ function failingThirdCreateImpl(
       requestId: "req-r3-005-fixture",
     };
   };
+}
+
+/**
+ * PR-review fixture: the REAL provisionBanks failure shape — the partial
+ * roster is DROPPED (ProvisionErr: {ok:false, error, requestId}, no banks),
+ * while the creates themselves landed as side effects visible to listBanks.
+ * The roster-pattern fallback claim must compensate these without any
+ * fixture-supplied statuses.
+ */
+function realShapePartialFailureImpl(client: unknown): (opts: unknown) => Promise<unknown> {
+  const create = (client as { createBank: (bankId: string) => Promise<unknown> }).createBank;
+  return async () => {
+    await create("qds-factory");
+    await create("qds-factory-dev-meta");
+    return {
+      ok: false,
+      error: { code: -32005, message: "bank provisioning failed: create boom" },
+      requestId: "req-real-shape",
+    };
+  };
+}
+
+/** PR-review fixture: fresh SUCCESS where the collective already existed (status "exists") — the mint roster must still cover all three banks. */
+function freshWithPreexistingCollectiveImpl(): (opts: unknown) => Promise<unknown> {
+  return async () => ({
+    ok: true,
+    banks: [
+      { bankId: "qds-factory", status: "created" },
+      { bankId: "qds-factory-dev-meta", status: "created" },
+      { bankId: COLLECTIVE_BANK_ID, status: "exists" },
+    ],
+    requestId: "req-fresh-partial-preexisting",
+  });
 }
 
 /** Fake client for negative-probes: recall scriptable, listBanks snapshots recorded. */
@@ -1090,6 +1124,70 @@ describe("provision-and-import", () => {
   );
 
   test.skipIf(!hasDriver("provision-and-import"))(
+    "PR-review fallback claim: REAL-shape fresh failure (ProvisionErr drops the partial roster — no banks in the envelope, none fixture-added) still compensates the roster-shaped creates via the roster-pattern claim",
+    async () => {
+      const runLeg = await loadDriver("provision-and-import");
+      // The injected provisionImpl replicates the REAL provisioner's failure:
+      // b1+b2 land as listBanks-visible side effects, then the envelope is
+      // the bare ProvisionErr ({ok:false, error, requestId}) — no banks field
+      // anywhere. Without the roster-pattern fallback the claim would be []
+      // and both banks would strand as unclaimedCreated.
+      const client = makeProvisionClient();
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        provisionImpl: realShapePartialFailureImpl(client),
+        lockPath: join(tmpDir, "leg.lock"),
+        outDir: tmpDir,
+        expertiseDir: makeTmpCorpus(),
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(false);
+      expect(ev.exitCode).toBe(1);
+      // the pattern claim compensated exactly the roster-shaped creates
+      expect(client.calls.deleteBank).toContain("qds-factory");
+      expect(client.calls.deleteBank).toContain("qds-factory-dev-meta");
+      const deleteOutcomes = ev.deleteOutcomes as Record<string, string> | undefined;
+      expect(deleteOutcomes?.["qds-factory"]).toBe("deleted");
+      expect(deleteOutcomes?.["qds-factory-dev-meta"]).toBe("deleted");
+      // nothing stranded unclaimed: the diff was fully attributable
+      expect(ev.unclaimedCreated).toEqual([]);
+      expect(ev.residue).toEqual([]);
+    },
+  );
+
+  test.skipIf(!hasDriver("provision-and-import"))(
+    "PR-review mint roster: fresh success with a PRE-EXISTING collective (status exists) imports the corpus into ALL THREE banks — createdInAttempt alone would under-import to the created members",
+    async () => {
+      const runLeg = await loadDriver("provision-and-import");
+      const client = makeProvisionClient({ existing: [COLLECTIVE_BANK_ID] });
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        provisionImpl: freshWithPreexistingCollectiveImpl(),
+        lockPath: join(tmpDir, "leg.lock"),
+        outDir: tmpDir,
+        expertiseDir: makeTmpCorpus(),
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(true);
+      // mint retain call sites cover every roster bank — including the
+      // pre-existing collective (3 entries x 3 banks = 9 POSTs)
+      const mintPaths = client.calls.request.filter((r) => r.method === "POST").map((r) => r.path);
+      for (const bankId of ["qds-factory", "qds-factory-dev-meta", COLLECTIVE_BANK_ID]) {
+        expect(mintPaths.some((p) => p === `/v1/default/banks/${bankId}/memories`)).toBe(true);
+      }
+      expect(mintPaths.length).toBe(9);
+      // the mint record carries all three banks with the derived ids
+      const mint = ev.mintRecord as Record<string, { documentIds: string[] }>;
+      expect(Object.keys(mint).sort()).toEqual(["qds-collective", "qds-factory", "qds-factory-dev-meta"]);
+      for (const bankId of Object.keys(mint)) expect(mint[bankId]!.documentIds.length).toBe(3);
+    },
+  );
+
+  test.skipIf(!hasDriver("provision-and-import"))(
     "happy-path compensation (R3-005): created-in-attempt is the CLAIM set (status:created ∩ diff); deletes touch exactly claimed banks — never pre-existing, never a collective that pre-existed, never an unclaimed probe bank",
     async () => {
       const runLeg = await loadDriver("provision-and-import");
@@ -1844,4 +1942,45 @@ describe("auth-retired-check", () => {
       expect(typeof ev.containmentStatement).toBe("string");
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// rosterPatternClaim (leg-lib) — the PR-review fallback-claim pattern
+// ---------------------------------------------------------------------------
+
+describe("rosterPatternClaim (leg-lib)", () => {
+  test("matches the attempt's own roster shape: base, collision suffixes -2..-11, and their -dev-meta forms", () => {
+    const candidates = [
+      "qds-factory",
+      "qds-factory-dev-meta",
+      "qds-factory-2",
+      "qds-factory-7-dev-meta",
+      "qds-factory-11",
+      "qds-probe-shape-1700000000000",
+      "qds-probe-1700000000001",
+      "qds-collective",
+      "qds-otherrepo",
+      "qds-factory-12",
+      "qds-factory-1",
+      "qds-factory-dev",
+    ];
+    expect(rosterPatternClaim("QDS-Factory", candidates)).toEqual([
+      "qds-factory",
+      "qds-factory-dev-meta",
+      "qds-factory-2",
+      "qds-factory-7-dev-meta",
+      "qds-factory-11",
+    ]);
+  });
+
+  test("never claims the collective as a candidate; slug validation is assertQdsRepoSlug's job (shape-only function)", () => {
+    // the collective id never matches a repo base's shape...
+    expect(rosterPatternClaim("qds-factory", ["qds-collective", "qds-collective-dev-meta"])).toEqual([]);
+    expect(rosterPatternClaim("qds-factory", [])).toEqual([]);
+    // ...and a collective SLUG never reaches here: assertQdsRepoSlug refuses
+    // it upstream (collective_id_slug) before any pattern call
+    expect(() => assertQdsRepoSlug("qds-collective")).toThrow(/collective_id_slug/);
+    // suffix-12 / singular -1 are outside the -2..-11 discipline
+    expect(rosterPatternClaim("qds-factory", ["qds-factory-12", "qds-factory-1"])).toEqual([]);
+  });
 });

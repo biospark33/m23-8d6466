@@ -93,12 +93,17 @@ resolving; the driver is `scripts/p0-9/round-trip-dedicated.ts`. This records th
 own decision — "annotate the AC rather than re-litigate DD-5".
 
 **Refusal vocabulary superseded on the REST transport.** The AC text's MCP-era `-3200x` codes
-resolve on this transport as: the `-32001`-class (non-existent bank) → `HindsightHttpError` 404;
-the `-32002`-class (unavailable instance) → 502 / `fetch_failed` / 408 timeout
-(`src/hindsight/client.ts:79` shapes). The `-3200x` WIRE refusal codes are superseded here, with
-ONE carve-out: the provisioner's internal all-collide envelope (`ERR_BANK_COLLISION`, `-32005`,
-`src/hindsight/schemas.ts:165`, emitted at `src/hindsight/bank-provisioner.ts:437`/`:461`) remains
-authoritative for the idempotency leg's collision-exhaustion shape.
+resolve on this transport as follows. `-32001` is `ERR_MCP_BRIDGE_NOT_REGISTERED`
+(`src/hindsight/schemas.ts:161`) — the SwarmClaw bridge-registration gate the AC4 probe exercised;
+on this transport the bridge itself is gone (DD-17), so that gate resolves as direct instance
+availability (the negative-probes health/`listBanks` reach), never as a wire code. A REST 404 for
+a non-existent bank (profile/stats reads; recall answers 200-empty — 0.10.0 has no
+bank-existence check on the recall path) is recorded as its own REST observation, NOT as a
+`-32001` resolution. The `-32002`-class (unavailable instance) → 502 / `fetch_failed` / 408
+timeout (`src/hindsight/client.ts:79` shapes). The `-3200x` WIRE refusal codes are superseded
+here, with ONE carve-out: the provisioner's internal all-collide envelope (`ERR_BANK_COLLISION`,
+`-32005`, `src/hindsight/schemas.ts:165`, emitted at `src/hindsight/bank-provisioner.ts:437`/`:461`)
+remains authoritative for the idempotency leg's collision-exhaustion shape.
 
 **§6.3 origin supersession (recorded, not re-edited).** The runbook §6.3
 `HINDSIGHT_BASE_URL=http://127.0.0.1:8888` line is superseded by Z4's runbook annotation +

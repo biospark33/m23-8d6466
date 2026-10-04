@@ -60,6 +60,7 @@ import {
   rerunAwareProvision,
   requireBaseUrl,
   resolveRepoSlug,
+  rosterPatternClaim,
   sanitizeOrigin,
   scanLiveShapePrereq,
   writeEvidenceOrStderr,
@@ -201,7 +202,7 @@ async function provisionOnce(
   existingBankIds: string[],
   rec: Rec,
   label: string,
-): Promise<{ ok: boolean; createdInAttempt: string[]; claimable: string[] }> {
+): Promise<{ ok: boolean; mode: string; createdInAttempt: string[]; claimable: string[] }> {
   const t0 = Date.now();
   const result = await rerunAwareProvision(client, repoSlug, {
     existingBankIds,
@@ -221,7 +222,13 @@ async function provisionOnce(
         }
       : {}),
   });
-  return { ok: result.ok, createdInAttempt: result.createdInAttempt, claimable: claimableCreates(result) };
+  // PR-review fallback (mirrors provision-and-import): a FAILED fresh
+  // provision's real ProvisionErr envelope carries NO banks, so the
+  // status:"created" claim is unavailable exactly when compensation matters —
+  // the attempt's own roster shape matched against the diff is the fallback
+  // claim. The diff arrives at the call site (idempotencyWindow), so the
+  // fallback is applied there via attempt.mode.
+  return { ok: result.ok, mode: result.mode, createdInAttempt: result.createdInAttempt, claimable: claimableCreates(result) };
 }
 
 async function idempotencyWindow(
@@ -264,11 +271,23 @@ async function idempotencyWindow(
   // R3-005: the diffs are OBSERVATION (createdInRerun stays the raw diff — it
   // is the idempotency violation detector), the claims are ATTRIBUTION —
   // compensation deletes only claim ∩ diff; the rest is recorded and left.
+  // PR-review fallback (mirrors provision-and-import): a FAILED fresh attempt
+  // whose envelope carries no banks (the real ProvisionErr shape) claims its
+  // own roster shape out of the diff — family writers are lock-serialized and
+  // probe banks cannot match the shape.
   const diff1 = post.filter((id) => !pre.includes(id));
   const createdInRerun = post2.filter((id) => !post.includes(id));
+  const claim1 =
+    !attempt1.ok && attempt1.mode === "resolved-fresh" && attempt1.claimable.length === 0
+      ? rosterPatternClaim(repoSlug, diff1)
+      : attempt1.claimable;
+  const claim2 =
+    !attempt2.ok && attempt2.mode === "resolved-fresh" && attempt2.claimable.length === 0
+      ? rosterPatternClaim(repoSlug, createdInRerun)
+      : attempt2.claimable;
   const claimed = [
-    ...attempt1.claimable.filter((id) => diff1.includes(id)),
-    ...attempt2.claimable.filter((id) => createdInRerun.includes(id)),
+    ...claim1.filter((id) => diff1.includes(id)),
+    ...claim2.filter((id) => createdInRerun.includes(id)),
   ];
   const claimedSet = new Set(claimed);
   const createdInAttempt = [...claimedSet];
