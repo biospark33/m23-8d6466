@@ -40,6 +40,10 @@
 # F-025: the perimeter authn/token gate for these rows (the idiom is
 # ops-token-gated) lands with that same M2.1 row-widening — this fragment
 # authors the slot's rows pre-authz.
+# SEQUENCING (R3): do NOT splice these rows — and do NOT pull or bring up the
+# gateway image — until M2.1's authz is live. The image publish is UNOWNED
+# (ops dependency register, runbook Z4 annotation): an early splice would
+# serve an unauthenticated POST /v1/recall from the box's public front door.
 # NO row may ever forward to a hindsight service (hindsight-qds:8888 /
 # 127.0.0.1:18890) — the perimeter reaches the gateway only (INV-Z4-1).
 

@@ -30,20 +30,21 @@
 # They are OPERATOR-SEEDED ONCE and never rewritten by a redeploy
 # (FORK_IMAGE_TAG precedent — the template's own comments document the defect
 # class: a deploy that rewrites a seeded tag silently retargets the image).
-# Deploy-vps/.env.example (env/factory.env.example) names them with empty
-# values; see deploy/vps/env/factory.env.example.
+# deploy/vps/env/factory.env.example names them with empty values.
 
 services:
   hindsight-qds:
     # AC2: byte-exact copy of the fork's pin — sole pin source is the
-    # swarmclaw fork's config/hindsight-version.txt:
+    # swarmclaw fork's config/hindsight-version.txt on the fork's INTEGRATION
+    # lineage (the branch G6 clones on the box; local checkouts on older
+    # branches carry stale pins — e.g. 0.8.6 — and are NOT the pin source):
     #   ghcr.io/vectorize-io/hindsight:0.10.0@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b
     # This MUST stay the multi-arch INDEX digest, never a per-platform child
     # manifest: a child digest pins one architecture for every host and can
     # pull fine on a dev Mac yet break first boot on the x86_64 VPS under
     # QEMU (the 0.8.6 linux/amd64-child incident the fork's compose
-    # documents at docker-compose.yml:346–353). Advance only by a deliberate
-    # bump PR re-copied from the fork's pin file (story Technical Notes).
+    # documents). Advance only by a deliberate bump PR re-copied from the
+    # fork's pin file (story Technical Notes).
     image: ghcr.io/vectorize-io/hindsight:0.10.0@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b
     restart: unless-stopped
     # AC1 / INV-Z4-1: EXACTLY ONE host publish — the loopback map. The
@@ -58,8 +59,9 @@ services:
       - "127.0.0.1:18890:8888"
     env_file:
       # AC6/INV-Z4-3: operator-placed, mode 0600 (runbook G3) — carries the
-      # SECRET names only (HINDSIGHT_API_TENANT_API_KEY,
-      # HINDSIGHT_API_LLM_API_KEY); template at env/hindsight-qds.env.example.
+      # secret names (HINDSIGHT_API_TENANT_API_KEY, HINDSIGHT_API_LLM_API_KEY)
+      # and the host-side HINDSIGHT_BASE_URL origin; template at
+      # env/hindsight-qds.env.example.
       # Committed `environment:` beats env_file per compose precedence
       # (runbook §0), so the provider/model pins below win over anything an
       # operator's file could set.
@@ -73,8 +75,9 @@ services:
       # "hindsight-qds takes the compose value" sentence true.
       - HINDSIGHT_BASE_URL=http://hindsight-qds:8888
       # Committed provider/model/reranker pins — mirrored VERBATIM from the
-      # swarmclaw fork repo's docker-compose.yml (tenant hindsight block,
-      # :397–428 — a file in the fork repo, not a path in this checkout).
+      # swarmclaw fork repo's docker-compose.yml (the fork compose's tenant
+      # hindsight environment block — a file in the fork repo, not a path in
+      # this checkout).
       # These are story-normative: do NOT "fix" or retune them
       # here (runbook §0: "do not 'fix' provider/reranker pins in
       # hindsight.env") — a pin change is a deliberate bump PR, same as the
@@ -82,13 +85,13 @@ services:
       - HINDSIGHT_API_LLM_PROVIDER=openrouter
       - HINDSIGHT_API_LLM_MODEL=${SOLSTICE_MODEL_MEMORY_EXTRACTION:-google/gemini-3.7-flash}
       # First boot downloads embedding+reranker models and runs all pg0
-      # migrations; the default 300s timeout fires mid-download (fork
-      # docker-compose.yml:403–407). 1200s gives a cold start room; the
+      # migrations; the default 300s timeout fires mid-download (the fork's
+      # model-init timeout default). 1200s gives a cold start room; the
       # healthcheck start_period below is sized to cover it.
       - HINDSIGHT_API_MODEL_INIT_TIMEOUT=1200
       # RRF reranker: the default cross-encoder costs 15–16s per recall on a
       # CPU-only host; RRF brings recall to ~3–4.5s without a rerank model
-      # (fork docker-compose.yml:408–416). `environment` wins over env_file,
+      # (the fork's reranker notes). `environment` wins over env_file,
       # so this committed default holds even if hindsight-qds.env sets it.
       - HINDSIGHT_API_RERANKER_PROVIDER=rrf
     volumes:
@@ -97,28 +100,28 @@ services:
       # hindsight_data / hindsight_pg0 / hindsight_hf_cache (two instances
       # sharing one Postgres data dir is corruption, not sharing). Postgres+
       # pgvector data and the embedded pg0 state survive restart + `down`
-      # (ADR-STOR-1 / NFR-R4; the fork block's pg0 notes at
-      # docker-compose.yml:369–378 — 0.10.0 embeds pg0 at /home/hindsight/.pg0).
+      # (ADR-STOR-1 / NFR-R4; the fork block's pg0 notes — 0.10.0 embeds pg0
+      # at /home/hindsight/.pg0).
       - hindsight-qds-data:/var/lib/postgresql/data
       - hindsight-qds-pg0:/home/hindsight/.pg0
       # Persist the HF embedding/reranker model cache so the ~130MB+80MB
-      # models download once, not on every fresh container (fork
-      # docker-compose.yml:379–381).
+      # models download once, not on every fresh container (the fork's
+      # HF-cache volume notes).
       - hindsight-qds-hf-cache:/home/hindsight/.cache/huggingface
     # Postgres parallel-query workers allocate dynamic shared memory under
     # /dev/shm; Docker's default 64MB cap is far below one big parallel-hash
-    # segment (fork docker-compose.yml:432–439 — live-measured 533MB demand).
+    # segment (the fork's /dev/shm sizing notes — live-measured 533MB demand).
     shm_size: 2g
     healthcheck:
-      # TCP-connect liveness, mirrored from the fork block
-      # (docker-compose.yml:451–458): endpoint-agnostic port-open check, `nc`
+      # TCP-connect liveness, mirrored from the fork healthcheck block:
+      # endpoint-agnostic port-open check, `nc`
       # with a bash /dev/tcp fallback so the probe depends on no Python.
       test: ["CMD-SHELL", "nc -z localhost 8888 >/dev/null 2>&1 || nc -w 1 localhost 8888 < /dev/null >/dev/null 2>&1 || bash -c 'exec 3<>/dev/tcp/127.0.0.1/8888' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
       # Cold start runs pg0 migrations + model downloads (~10 min). Honest
-      # mechanics (runbook §5, fork docker-compose.yml:462–470): Docker
+      # mechanics (runbook §5, the fork healthcheck block): Docker
       # NEVER kills a container for failing healthchecks — it only marks it
       # unhealthy, and nothing here keys a lifecycle decision on that mark.
       # start_period + retries×interval (1320s + 120s = 1440s) merely keeps

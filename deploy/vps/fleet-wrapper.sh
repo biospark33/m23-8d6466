@@ -16,7 +16,9 @@
 # Per invocation: exactly ONE provenance line to STDERR — `verb=<v>
 # driver_injected=<bool>` — never stdout (stdout is the verb's JSON contract).
 # The line precedes every exit path below, so even an early refusal (unknown
-# verb, unresolvable checkout) logs it. stdin/stdout/stderr pass through
+# verb, unresolvable checkout) logs it — the sole exceptions are the two
+# malformed-verb guards, which refuse before printing rather than log a
+# corrupt line. stdin/stdout/stderr pass through
 # untouched and `exec` hands the fork the CLI's own exit code.
 #
 # Install discipline: the HOST copy is diff-verified against this repo copy on
@@ -33,7 +35,9 @@ set -u
 # without it as exit 2): the wrapper satisfies the requirement on the fork's
 # behalf, appending the flag exactly once, at the end of argv.
 driver_verbs='dispatch status harvest teardown fanout attach run observe submit cancel'
-# The six verbs that take NO --driver at all: passed through byte-untouched.
+# The six verbs that take NO --driver at all: passed through byte-untouched
+# (an argv that already carries --driver is refused by the guard below — the
+# wrapper never forwards the flag either).
 no_driver_verbs='rank approve reject enrol unlock result'
 
 verb=${1:-}
@@ -54,6 +58,16 @@ case $verb in
 "*) printf 'fleet-wrapper: verb must not contain a newline\n' >&2; exit 2 ;;
 esac
 
+# Same for a carriage return: a CR in $verb would embed a CR in the provenance
+# line, and CR-sensitive log consumers would read that one line as two
+# (round-3 F-13). Refuse BEFORE the printf — printing the line "once" would
+# still embed the very CR this guard keeps out. The CR is built via printf (a
+# builtin, safe on the stripped PATH) to stay POSIX-portable.
+cr=$(printf '\r')
+case $verb in
+*"$cr"*) printf 'fleet-wrapper: verb must not contain a carriage return\n' >&2; exit 2 ;;
+esac
+
 printf 'verb=%s driver_injected=%s\n' "$verb" "$inject" >&2
 
 if [ "$known" = false ]; then
@@ -61,6 +75,17 @@ if [ "$known" = false ]; then
   printf 'usage: fleet-wrapper.sh <verb> [args...]\nverbs: %s %s\n' "$driver_verbs" "$no_driver_verbs" >&2
   exit 2
 fi
+
+# The CLI's flag map is last-wins (scripts/lib/cli-args.ts), so a silent
+# append would OVERRIDE an operator's explicit `--driver fake` dry run
+# (scripts/fleet.ts:393) with real exedev action — spend where a dry run
+# was requested. Refuse loudly instead (round-3 F-03); the provenance line
+# above already logged this exit, so the F-007 ordering property holds.
+case " $* " in
+*" --driver "*)
+  printf 'fleet-wrapper: argv already carries --driver — the wrapper injects it; drop the flag (dry-run spell: run scripts/fleet.ts directly for --driver fake)\n' >&2
+  exit 2 ;;
+esac
 
 # The wrapper lives at <checkout>/deploy/vps/, so the checkout is
 # dirname(dirname($0)) — computed with parameter expansion and cd/pwd builtins

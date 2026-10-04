@@ -65,17 +65,17 @@ const forkEnv = { PATH: shimDir, HOME: tmp, TMPDIR: tmp, LANG: "C" };
 
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
-/** Run a wrapper script in the fork's exec shape; return its exit code and stderr. */
-async function runWrapper(wrapper: string, args: string[]): Promise<{ code: number; stderr: string }> {
+/** Run a wrapper script in the fork's exec shape; return its exit code and streams. */
+async function runWrapper(wrapper: string, args: string[]): Promise<{ code: number; stderr: string; stdout: string }> {
   const proc = Bun.spawn([wrapper, ...args], {
     cwd: foreignDir,
     env: forkEnv,
     stdin: "ignore",
-    stdout: "ignore",
+    stdout: "pipe",
     stderr: "pipe",
   });
-  const stderr = await new Response(proc.stderr).text();
-  return { code: await proc.exited, stderr };
+  const [stderr, stdout] = await Promise.all([new Response(proc.stderr).text(), new Response(proc.stdout).text()]);
+  return { code: await proc.exited, stderr, stdout };
 }
 
 /** The argv the shim captured, as the wrapper handed it to `bun`. */
@@ -154,6 +154,20 @@ describe("fleet-wrapper (Z4, DF5.5 Amendment D)", () => {
     expect(approveEntry?.flags.some((f) => f.name === "--driver")).toBe(false);
   });
 
+  it("an argv that already carries --driver is refused exit 2 — last-wins would let the append override the operator's explicit --driver fake dry run", async () => {
+    // Round-3 F-03: the CLI's flag map is last-wins (scripts/lib/cli-args.ts),
+    // so appending --driver exedev after a caller's `--driver fake` (the
+    // documented dry-run spell, scripts/fleet.ts:393) would silently flip a
+    // requested dry run into real exedev action. The wrapper refuses loudly
+    // instead — after the known-verb gate, so provenance has already printed
+    // (F-007 ordering, asserted below) — and execs nothing.
+    const { code, stderr } = await runWrapper(wrapperPath, ["status", "--driver", "fake", ...PASSTHROUGH_ARGS]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("verb=status driver_injected=true\n");
+    expect(stderr).toContain("--driver");
+    expect(stderr.indexOf("verb=status driver_injected=true")).toBeLessThan(stderr.indexOf("argv already carries --driver"));
+  });
+
   it("unknown verb exits 2 (fleet's usage code) and still logs one provenance line", async () => {
     const { code, stderr } = await runWrapper(wrapperPath, ["frobnicate"]);
     expect(code).toBe(2);
@@ -173,6 +187,20 @@ describe("fleet-wrapper (Z4, DF5.5 Amendment D)", () => {
     const { code, stderr } = await runWrapper(wrapperPath, ["sta\ntus"]);
     expect(code).toBe(2);
     expect(stderr).toBe("fleet-wrapper: verb must not contain a newline\n");
+  });
+
+  it("verb containing a carriage return is refused exit 2 BEFORE the provenance line (a CR can never embed in provenance)", async () => {
+    // Round-3 F-13: the newline guard's twin. The guard fires BEFORE the
+    // provenance printf, so the exact-equality below proves stderr is exactly
+    // ONE line — the refusal — and no provenance line ever carries a CR.
+    // Printing provenance "once" on this path would still embed the CR inside
+    // it, which is precisely the corruption CR-sensitive log consumers see as
+    // a second line; refusing pre-print is the stronger (and correct) shape.
+    // stdout stays empty: the refusal never touches the verb's JSON channel.
+    const { code, stderr, stdout } = await runWrapper(wrapperPath, ["sta\rtus"]);
+    expect(code).toBe(2);
+    expect(stderr).toBe("fleet-wrapper: verb must not contain a carriage return\n");
+    expect(stdout).toBe("");
   });
 
   it("bun missing from PATH exits 127 with a bun diagnostic (the fork's broken-install shape)", async () => {
@@ -301,6 +329,16 @@ describe("fleet-wrapper argv accepted by the real CLI (run() + injected FakeDriv
     // real substrate.
     const code = await run(["status", "--driver", "exedev"], outSink, e2eDeps);
     expect(code).toBe(0); // empty fleet is a state, not an error
+  });
+
+  it(`accepts the documented dry-run spell directly ("status", "--driver", "fake") — the path the wrapper refuses exists OUTSIDE it`, async () => {
+    // The F-03 refusal is a WRAPPER policy, not a CLI one: running
+    // scripts/fleet.ts directly with an operator-chosen driver remains the
+    // documented dry-run route (scripts/fleet.ts:393). "fake" is a registry
+    // driver (src/providers/index.ts registerDriver("fake", ...)) and
+    // deps.driver short-circuits resolution — zero network, zero spend.
+    const code = await run(["status", "--driver", "fake"], outSink, e2eDeps);
+    expect(code).toBe(0);
   });
 
   it(`accepts the byte-untouched passthrough for "approve" (refusal is post-parse)`, async () => {

@@ -165,11 +165,12 @@ pairing" gate (`.unlazy/df3-6b/GATES.md`) — the two share a label, nothing els
 **§7 smoke correction — bare `status` exits 2.** §7's `bun scripts/fleet.ts status` line predates the
 driver mandate: `assertDriverChosen` refuses every driver verb without one (`status requires
 --driver <name>`, exit 2 — `scripts/fleet.ts:392`). On the box, invoke through the wrapper —
-`$SWARMCLAW_FACTORY_FLEET_CLI status` (the wrapper injects what the verb registry requires; its
-sole holder is `deploy/vps/fleet-wrapper.sh`). Bypassing the wrapper means appending the driver
-flag by hand per `src/fleet/verbs.ts` — exactly what the wrapper exists to avoid. (This runbook is
-in the AC5 tree scan; the driver grammar stays in one file — `src/fleet/verbs.ts` — per DF5.5
-Amendment D.)
+`$SWARMCLAW_FACTORY_FLEET_CLI status` (the wrapper injects the driver literal itself).
+Bypassing the wrapper means appending the driver flag by hand — the requirement lives in
+`src/fleet/verbs.ts`, the literal only in the wrapper. (This runbook is in the AC5 tree scan; the
+driver grammar LITERAL is held solely by `deploy/vps/fleet-wrapper.sh` per DF5.5 Amendment D —
+its exact spell appears nowhere in this runbook by design; `src/fleet/verbs.ts` holds only the
+flag-requirement RULES — which verbs refuse without the flag — never the literal.)
 
 **§6.4 trap — the bank provisioner's built-in default is the TENANT base URL.**
 `scripts/provision-hindsight-banks.ts` reaches Hindsight through `src/hindsight/client.ts`, whose
@@ -187,8 +188,8 @@ and the fork's exec child need bun reachable: the fork child runs under a least-
 allowlist (PATH/HOME/TMPDIR/LANG — nothing else is inherited), so a HOME-relative bun invisible to
 its PATH fails as a bare exit-127. Install bun for the deploy user (or symlink the binary into a
 system PATH dir such as `/usr/local/bin`), and make sure the fork service's PATH includes it. G7
-verify ritual: run `$SWARMCLAW_FACTORY_FLEET_CLI status` under a stripped env — as the fork would
-see it — BEFORE depending on the wrapper from a real leg.
+verify ritual: run `$SWARMCLAW_FACTORY_FLEET_CLI status` from the FORK's cwd under a stripped env —
+as the fork would see it — BEFORE depending on the wrapper from a real leg.
 
 **Env-file sourcing rule.** The two files in `deploy/vps/env/` map to two different compose-side
 destinations, and the factory checkout's own `.env` is a third — the three must never be swapped:
@@ -198,9 +199,21 @@ destinations, and the factory checkout's own `.env` is a third — the three mus
 - `hindsight-qds.env.example` → `hindsight-qds.env`, placed beside `docker-compose.factory.yml` as
   that service's `env_file`: it carries the secrets AND the host-side origin
   `http://127.0.0.1:18890`.
-- The factory CHECKOUT's `.env` (what the fleet CLI legs read, §6.3) takes the HOST-side values:
+- The factory CHECKOUT's `.env` (§6.3) takes the HOST-side values:
   `HINDSIGHT_BASE_URL=http://127.0.0.1:18890`, `HINDSIGHT_BEARER_TOKEN`/`HINDSIGHT_API_KEY`, the
   `SWARMCLAW_*` allowlists, `QDS_RUNS_DIR` — names mirrored from the repo root `.env.example`.
+
+**The checkout `.env` is read ONLY by legs that run FROM the checkout (CWD condition).** Bun
+auto-loads `.env` from the PROCESS CWD, nothing else. Operator-invoked legs — `cd` into the
+checkout first — get it. FORK-invoked legs (the wrapper's `exec bun` under
+`$SWARMCLAW_FACTORY_FLEET_CLI`) keep the FORK's cwd and NEVER read the checkout `.env`: they see
+only the fork child's allowlisted environment, so the operator must ensure the fork's SERVICE
+environment carries the factory vars the fork-facing verbs need (`HINDSIGHT_BASE_URL=
+http://127.0.0.1:18890` first among them). Left unset on a fork-invoked leg, the client falls back
+to the tenant hazard above (`DEFAULT_BASE_URL = http://127.0.0.1:8888` — the wrong instance) and
+`QDS_RUNS_DIR`/`SWARMCLAW_*` are simply absent. This is what the G7 ritual (above) now proves:
+`$SWARMCLAW_FACTORY_FLEET_CLI status` from the FORK's cwd under a stripped env shows what
+fork-invoked legs actually see, not what your operator shell has.
 
 HOST-side legs (fleet CLI, bank provisioner) resolve Hindsight at the 18890 origin; COMPOSE-side
 consumers (`hindsight-qds` itself, `m2-gateway`) take the compose `environment:` value —
@@ -213,8 +226,11 @@ process can reach it; there is no per-instance auth. Containment is box access (
 G6/G7); the standing fix is the M2 gateway's authz (M2.1), not a firewall change.
 
 **§7 smoke count — "all 7 services healthy" counts the zeropoint stack only.** With the factory
-stack up, the count is 9: the §7 seven plus `hindsight-qds` and `m2-gateway`, and `m2-gateway`
-records `awaiting-image` until its image is published (see the ops dependency register above).
+stack up, the pre-image fired leg sees 8 healthy rows: the §7 seven plus `hindsight-qds`.
+`m2-gateway` is NOT counted — its evidence row reads `{"status":"awaiting-image"}` until the image
+is published (see the ops dependency register above); the count reaches 9 only post-publish. Prove
+the loopback bind the way §7 proves 18889: the EXTERNAL probe must also fail — `curl -m 3
+http://<box-ip>:18890` refuses from outside — the loopback bind is exactly what makes it refuse.
 
 **Fired-leg evidence — `caddyRoute` is never absent (round 2, R2-F24 / AC8).** The story contract
 requires fired-leg evidence to record a `caddyRoute` field: `"spliced"` (after the Caddyfile

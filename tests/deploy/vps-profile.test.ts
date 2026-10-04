@@ -61,25 +61,41 @@ function stripEnvComments(text: string): string {
 		.join("\n");
 }
 
+/** 1-based first line of `text` containing `needle` at/after `fromIndex`
+ * (R3-F12: duplicate offenders cite THEIR occurrence), else 0. */
+function lineOfFrom(text: string, needle: string, fromIndex: number): number {
+	const idx = text.indexOf(needle, fromIndex);
+	return idx === -1 ? 0 : text.slice(0, idx).split("\n").length;
+}
+
 /** 1-based first line of `text` containing `needle`, else 0 (F-014). */
 function lineOf(text: string, needle: string): number {
-	const idx = text.indexOf(needle);
-	return idx === -1 ? 0 : text.slice(0, idx).split("\n").length;
+	return lineOfFrom(text, needle, 0);
 }
 
 /** `(file:line)` refusal suffix; line omitted when no offending line is
  * identifiable. F-003: the line is computed from the GRAMMAR-STRIPPED text
  * (stripByGrammar, hoisted) — the same text the check ran on — so a comment
- * mentioning the key can never outrank the offending key line. */
-function at(file: string, text: string, needle?: string): string {
-	const line = needle === undefined ? 0 : lineOf(stripByGrammar(file, text), needle);
+ * mentioning the key can never outrank the offending key line. R3-F12: `from`
+ * is an index into that SAME stripped text, threaded by callers that iterate
+ * occurrences, so a repeated needle cites its own line, not the first's. */
+function at(file: string, text: string, needle?: string, from = 0): string {
+	const line = needle === undefined ? 0 : lineOfFrom(stripByGrammar(file, text), needle, from);
 	return ` (${file}${line > 0 ? `:${line}` : ""})`;
 }
 
 // ── AC1/AC2/AC7: compose validator ───────────────────────────────────────────
 
 type Compose = {
-	services?: Record<string, { image?: string; ports?: unknown; networks?: unknown; restart?: string; env_file?: unknown }>;
+	services?: Record<string, {
+		image?: string;
+		ports?: unknown;
+		networks?: unknown;
+		restart?: string;
+		env_file?: unknown;
+		network_mode?: unknown;
+		environment?: unknown;
+	}>;
 	networks?: Record<string, { external?: boolean; name?: string }>;
 };
 
@@ -123,10 +139,16 @@ function asHostMap(entry: unknown): HostMap | { refusal: string } | null {
 
 const PERIMETER_SERVICE_NAMES = /^(caddy|nginx|traefik|haproxy|envoy|certbot|tls-)/i;
 
-/** env_file entries, short (string) or list syntax. */
+/** env_file entries, short (string) or list syntax. R3-F14: long-syntax
+ * objects (`{path: ...}`, compose v2.24+) normalize to their path — a legal
+ * spelling of the required wiring must not stringify to "[object Object]". */
 function envFileNames(v: unknown): string[] {
 	if (typeof v === "string") return [v];
-	if (Array.isArray(v)) return v.map(String);
+	if (Array.isArray(v)) {
+		return v.map((e) =>
+			e && typeof e === "object" && "path" in e ? String((e as { path: unknown }).path) : String(e),
+		);
+	}
 	return [];
 }
 
@@ -149,6 +171,13 @@ function validateCompose(text: string): string[] {
 		refusals.push(`AC1: compose must define exactly the two services ${expected.join(" + ")}, got ${names.join(", ") || "<none>"}${at(file, text)}`);
 	}
 
+	// R3-F12: occurrence cursors over the same stripped text at() measures
+	// lines on — a repeated needle (duplicate port entry, shared image ref)
+	// cites its OWN line, not the first occurrence's.
+	const stripped = stripByGrammar(file, text);
+	let imageFrom = 0;
+	let portsFrom = 0;
+
 	for (const [name, svcRaw] of Object.entries(services)) {
 		// F-018: malformed shapes produce NAMED refusals, never TypeErrors —
 		// a null/missing service body is `{}`, ports normalize (array kept,
@@ -162,43 +191,71 @@ function validateCompose(text: string): string[] {
 			ports = [svc.ports];
 		}
 
-		// AC2: pin discipline on every image ref.
+		// R3-F02: network_mode bypasses the ports discipline entirely — host
+		// networking reaches every container port through all host interfaces
+		// with no publish entry to refuse, and none/service:/container: drop
+		// the composed network discipline too. Only compose's documented
+		// internal default (bridge) is tolerated, on EITHER service.
+		const networkMode = svc.network_mode;
+		if (networkMode != null && String(networkMode).trim() !== "") {
+			const nm = String(networkMode).trim();
+			if (nm !== "bridge") {
+				refusals.push(`AC1/AC7: service ${name} sets network_mode "${nm}" — host networking bypasses the ports discipline (container ports reach all host interfaces with no publish entry to refuse); only compose's internal default "bridge" is tolerated${at(file, text)}`);
+			}
+		}
+
+		// AC2: pin discipline on every image ref. R3-F12: each occurrence of a
+		// repeated image string cites its own line.
 		const image = svc.image ?? "";
+		let imageLoc = at(file, text); // bare (file) — upgraded when locatable
+		if (image) {
+			let idx = stripped.indexOf(image, imageFrom);
+			if (idx === -1) idx = stripped.indexOf(image);
+			if (idx !== -1) {
+				imageFrom = idx + 1;
+				imageLoc = at(file, text, image, idx);
+			}
+		}
 		if (!image) refusals.push(`AC2: service ${name} has no image ref${at(file, text)}`);
-		if (image.includes(":latest")) refusals.push(`AC2: service ${name} image ref uses :latest — ${image}${at(file, text, image)}`);
+		if (image.includes(":latest")) refusals.push(`AC2: service ${name} image ref uses :latest — ${image}${imageLoc}`);
 		// F-016: `_`-separated and UPPERCASE arch tokens are the same QEMU
 		// incident class as `-`/`:`-separated lowercase ones.
 		const archSuffixed = /(?:-|:|_)(?:amd64|arm64|x86_64|aarch64)(?:@sha256:[0-9a-f]{64})?$/i.test(image);
-		if (archSuffixed) refusals.push(`AC2: service ${name} image ref is arch-suffixed (QEMU incident class) — ${image}${at(file, text, image)}`);
+		if (archSuffixed) refusals.push(`AC2: service ${name} image ref is arch-suffixed (QEMU incident class) — ${image}${imageLoc}`);
 		if (name === "hindsight-qds" && image !== PIN) {
-			refusals.push(`AC2: hindsight-qds image must be the fork pin byte-exact (${PIN}), got ${image || "<missing>"}${at(file, text, image)}`);
+			refusals.push(`AC2: hindsight-qds image must be the fork pin byte-exact (${PIN}), got ${image || "<missing>"}${imageLoc}`);
 		}
 
 		// AC1: ports discipline.
-		const maps: HostMap[] = [];
+		const maps: { m: HostMap; loc: string }[] = [];
 		for (const entry of ports) {
+			const needle = typeof entry === "string" ? entry : JSON.stringify(entry);
+			let idx = stripped.indexOf(needle, portsFrom);
+			if (idx === -1) idx = stripped.indexOf(needle);
+			if (idx !== -1) portsFrom = idx + 1;
+			const loc = at(file, text, needle, idx === -1 ? 0 : idx);
 			const m = asHostMap(entry);
 			if (m === null) continue; // long-syntax entry with no host side
 			if ("refusal" in m) {
-				refusals.push(`${m.refusal}${at(file, text, String(entry))}`);
+				refusals.push(`${m.refusal}${loc}`);
 				continue;
 			}
-			maps.push(m);
+			maps.push({ m, loc });
 		}
 		if (name === "hindsight-qds") {
 			if (maps.length !== 1) {
 				refusals.push(`AC1: hindsight-qds must have exactly one host publish, got ${maps.length}${at(file, text)}`);
 			}
-			for (const m of maps) {
+			for (const { m, loc } of maps) {
 				if (m.text !== HOST_PUBLISH) {
-					refusals.push(`AC1: host publish must be exactly ${HOST_PUBLISH}, got ${m.text}${at(file, text, m.text)}`);
+					refusals.push(`AC1: host publish must be exactly ${HOST_PUBLISH}, got ${m.text}${loc}`);
 				}
 				// "::1" is LIVE, not dead (F-014): the bracket form `[::1]:host:ct` feeds it.
 				if (m.hostIp !== "127.0.0.1" && m.hostIp !== "::1") {
-					refusals.push(`AC1/INV-Z4-1: host publish must bind loopback, got non-loopback host IP ${m.hostIp} in ${m.text}${at(file, text, m.text)}`);
+					refusals.push(`AC1/INV-Z4-1: host publish must bind loopback, got non-loopback host IP ${m.hostIp} in ${m.text}${loc}`);
 				}
 				if (m.hostPort === "8888" || m.hostPort === "18889") {
-					refusals.push(`AC1/INV-Z4-1: host port ${m.hostPort} is forbidden (8888 collides with Hindsight's default; 18889 is the platform tenant stack's map) in ${m.text}${at(file, text, m.text)}`);
+					refusals.push(`AC1/INV-Z4-1: host port ${m.hostPort} is forbidden (8888 collides with Hindsight's default; 18889 is the platform tenant stack's map) in ${m.text}${loc}`);
 				}
 			}
 		}
@@ -207,6 +264,30 @@ function validateCompose(text: string): string[] {
 		}
 		if (name === "m2-gateway" && svc.restart !== "no") {
 			refusals.push(`AC8: m2-gateway restart must be "no" until M2.1's image is published (never green-by-default), got ${String(svc.restart)}${at(file, text)}`);
+		}
+		if (name === "m2-gateway") {
+			// R3-F10 / F-005 least-privilege contract: the provider key must
+			// not ride into the internet-facing container — the committed
+			// empty override is the containment property, so its absence is
+			// itself a refusal.
+			const env = svc.environment;
+			const flat: Record<string, string> = {};
+			if (Array.isArray(env)) {
+				for (const e of env) {
+					if (typeof e === "string") {
+						const eq = e.indexOf("=");
+						flat[eq === -1 ? e.trim() : e.slice(0, eq).trim()] = eq === -1 ? "" : e.slice(eq + 1);
+					} else if (e && typeof e === "object") {
+						const o = e as { name?: unknown; value?: unknown };
+						flat[String(o.name)] = o.value == null ? "" : String(o.value);
+					}
+				}
+			} else if (env && typeof env === "object") {
+				for (const [k, v] of Object.entries(env as Record<string, unknown>)) flat[k] = v == null ? "" : String(v);
+			}
+			if (flat.HINDSIGHT_API_LLM_API_KEY !== "") {
+				refusals.push(`AC6/INV-Z4-3 (least-privilege): m2-gateway must commit the empty override HINDSIGHT_API_LLM_API_KEY: "" — the provider key must not ride into the internet-facing container (/proc/1/environ, docker inspect), got ${JSON.stringify(env ?? null)}${at(file, text)}`);
+			}
 		}
 
 		// AC6/INV-Z4-3: BOTH services wire the operator secrets file
@@ -219,9 +300,9 @@ function validateCompose(text: string): string[] {
 		if (PERIMETER_SERVICE_NAMES.test(name)) {
 			refusals.push(`AC7: compose ships a second perimeter service "${name}" — extension of the existing front door, never its own proxy/TLS stack (charter §2.2)${at(file, text, name)}`);
 		}
-		for (const m of maps) {
+		for (const { m, loc } of maps) {
 			if (m.hostPort === "443" || m.hostPort === "80") {
-				refusals.push(`AC7: service ${name} publishes perimeter port ${m.hostPort} (${m.text}) — 80/443 belong to the existing control-plane Caddy only${at(file, text, m.text)}`);
+				refusals.push(`AC7: service ${name} publishes perimeter port ${m.hostPort} (${m.text}) — 80/443 belong to the existing control-plane Caddy only${loc}`);
 			}
 		}
 
@@ -265,21 +346,41 @@ function validateCaddy(text: string): string[] {
 	// one-line / mid-line shapes all match, no body parsing needed. (The
 	// per-handle body walk below stays only for the catch-all-404 rule,
 	// which is canonical-shape best-effort; the target invariant is the
-	// guarantee.)
-	for (const target of [...code.matchAll(/reverse_proxy\s+(\S+)/g)].map((m) => m[1]!)) {
+	// guarantee.) R3-F01: the capture is the WHOLE argument row (to
+	// end-of-line/brace), split on whitespace — EVERY upstream of a legal
+	// Caddy load-balance row must equal the gateway, not just the first.
+	for (const target of [...code.matchAll(/reverse_proxy\s+([^\n{}]+)/g)].flatMap((m) =>
+		m[1]!.trim().split(/\s+/),
+	)) {
 		if (target !== GATEWAY_UPSTREAM) {
 			refusals.push(`AC3/INV-Z4-1: ${file} forwards to ${target} — every reverse_proxy must target ${GATEWAY_UPSTREAM}; the perimeter reaches the gateway only, never a hindsight service${at(file, text, target)}`);
 		}
 	}
 
-	// AC3: exactly one host block (F-009: one-line blocks counted too);
-	// AC7: no second listener — a site address naming :443/:80 or a
-	// global-options block would be a deployment, not a fragment.
-	const blockLabels = [
-		...[...code.matchAll(/^([^\s#][^{}]*)\{\s*$/gm)].map((m) => m[1]!.trim()),
-		...[...code.matchAll(/^([^\s#][^{}]*)\{[^{}]*\}\s*$/gm)].map((m) => m[1]!.trim()),
-	];
-	const hostBlocks = blockLabels.filter((l) => !l.startsWith("@") && !l.startsWith("("));
+	// AC3: exactly one host block; AC7: no second listener — a site address
+	// naming :443/:80 or a global-options block would be a deployment, not a
+	// fragment. R3-F05: the count is a brace-depth walk, not line-shape
+	// regexes — every depth 0→1 `{` whose preceding label is neither
+	// `@matcher` nor `(snippet)` is a host block, so NESTED one-liners
+	// (`other.com { handle { respond 404 } }`) and INDENTED openers
+	// (`  other.com {`) count too (neither regex could see them).
+	const hostBlocks: string[] = [];
+	let depth = 0;
+	let lineStart = 0;
+	for (let i = 0; i < code.length; i++) {
+		const ch = code[i]!;
+		if (ch === "\n") {
+			lineStart = i + 1;
+		} else if (ch === "{") {
+			if (depth === 0) {
+				const label = code.slice(lineStart, i).trim();
+				if (label !== "" && !label.startsWith("@") && !label.startsWith("(")) hostBlocks.push(label);
+			}
+			depth++;
+		} else if (ch === "}") {
+			depth = Math.max(0, depth - 1);
+		}
+	}
 	if (hostBlocks.length !== 1) {
 		refusals.push(`AC3: ${file} must carry exactly ONE host block, got ${hostBlocks.length}: ${hostBlocks.join(", ") || "<none>"}${at(file, text)}`);
 	}
@@ -290,9 +391,17 @@ function validateCaddy(text: string): string[] {
 	}
 
 	// Named matcher rows (AC3 idiom) + the handles that consume them.
-	const namedHandles = [...code.matchAll(/^[ \t]*handle\s+@(\w[\w-]*)\s*\{\s*$/gm)].map((m) => m[1]!);
+	// R3-F06: one-line `handle @x { … }` rows join the set — the explicit
+	// method+path gate must not be evadable by line shape.
+	const namedHandles = [
+		...[...code.matchAll(/^[ \t]*handle\s+@(\w[\w-]*)\s*\{\s*$/gm)].map((m) => m[1]!),
+		...[...code.matchAll(/^[ \t]*handle\s+@(\w[\w-]*)\s*\{[^{}]*\}[ \t]*$/gm)].map((m) => m[1]!),
+	];
 	for (const h of namedHandles) {
-		const matcher = new RegExp(`^[ \\t]*@${h}\\s*\\{[\\s\\S]*?^[ \\t]*\\}`, "m").exec(code);
+		// The @definition is looked up multi-line first, one-line second —
+		// both spellings are legal Caddy.
+		const matcher = new RegExp(`^[ \\t]*@${h}\\s*\\{[\\s\\S]*?^[ \\t]*\\}`, "m").exec(code)
+			?? new RegExp(`^[ \\t]*@${h}\\s*\\{([^}]*)\\}`, "m").exec(code);
 		const body = matcher?.[0] ?? "";
 		if (!matcher || !/^[ \t]*method\s+\S+/m.test(body) || !/[ \t]path\s+\S+/.test(body)) {
 			refusals.push(`AC3: row @${h} must gate on an explicit method+path matcher (E09-GAP-01b/01c/01d idiom)${at(file, text, `@${h}`)}`);
@@ -333,7 +442,13 @@ function isPlaceholder(value: string): boolean {
 }
 
 // F-015: case-insensitive (parseEnv also normalizes, belt and suspenders).
-const SECRET_NAME = /HINDSIGHT_API_|BEARER_TOKEN|HINDSIGHT_API_KEY/i;
+// R3-F07: the SOLSTICE adjudicator/pseudonym credentials are the same
+// .env.local class as the tenant key — literal values are refused too.
+const SECRET_NAME = /HINDSIGHT_API_|BEARER_TOKEN|HINDSIGHT_API_KEY|SOLSTICE_ADJUDICATOR_BEARER|SOLSTICE_PSEUDONYM_KEY/i;
+
+// R3-F07: the swarmclaw stack's .env.local credential keys — never a key in
+// any deploy/vps/env template (the G3-G6 fence, alongside SOLSTICE_TENANT_ID).
+const FORK_ENV_LOCAL_KEYS = new Set(["SOLSTICE_TENANT_ID", "SOLSTICE_ADJUDICATOR_BEARER", "SOLSTICE_PSEUDONYM_KEY"]);
 
 /** Every AC6 refusal for an env template; `expectedBase` pins its HINDSIGHT_BASE_URL origin. */
 function validateEnvTemplate(text: string, file: string, expectedBase: string): string[] {
@@ -344,8 +459,8 @@ function validateEnvTemplate(text: string, file: string, expectedBase: string): 
 		if (SECRET_NAME.test(key) && !isPlaceholder(value)) {
 			refusals.push(`AC6/INV-Z4-3: ${file} carries a literal credential value for ${key} — templates carry names, never values${at(file, text, key)}`);
 		}
-		if (key === "SOLSTICE_TENANT_ID") {
-			refusals.push(`AC6/G3-G6: ${file} templates SOLSTICE_TENANT_ID — it stays the swarmclaw stack's .env.local item, never a key here${at(file, text, key)}`);
+		if (FORK_ENV_LOCAL_KEYS.has(key)) {
+			refusals.push(`AC6/G3-G6: ${file} templates ${key} — it stays the swarmclaw stack's .env.local item, never a key here${at(file, text, key)}`);
 		}
 		if (key === "HINDSIGHT_BASE_URL" && value !== expectedBase) {
 			refusals.push(`AC6: ${file} HINDSIGHT_BASE_URL must be exactly ${expectedBase}, got ${value}${at(file, text, key)}`);
@@ -440,6 +555,12 @@ describe("Z4 compose profile (AC1/AC2/AC7)", () => {
 		for (const name of ["hindsight-qds", "m2-gateway"]) {
 			expect(envFileNames(doc.services?.[name]?.env_file)).toContain("hindsight-qds.env");
 		}
+	});
+
+	it("AC6/INV-Z4-3 (R3-F10/F-005): the gateway's committed environment empties the provider key — least privilege", () => {
+		const doc = YAML.parse(COMPOSE) as Compose;
+		const env = doc.services?.["m2-gateway"]?.environment as Record<string, string> | undefined;
+		expect(env?.HINDSIGHT_API_LLM_API_KEY).toBe("");
 	});
 
 	it("AC7: front-door network is an external join; hindsight-qds is not attached to it", () => {
@@ -631,6 +752,42 @@ describe("AC1 negative controls (compose fixtures)", () => {
 		expect(r.some((x) => x.startsWith("AC1: service m2-gateway ports must be a list"))).toBe(true);
 		expect(r.some((x) => x.startsWith("AC2: service hindsight-qds has no image ref"))).toBe(true);
 	});
+
+	it("R3-F02: network_mode host is refused on EITHER service — even beside the exact loopback publish", () => {
+		const r = validateCompose(
+			[
+				"services:",
+				"  hindsight-qds:",
+				`    image: ${PIN}`,
+				`    ports: ["${HOST_PUBLISH}"]`,
+				"    network_mode: host",
+				"  m2-gateway:",
+				"    image: ghcr.io/o/qds-m2-gateway:t",
+				'    restart: "no"',
+				"networks:",
+				"  front-door:",
+				"    external: true",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC1/AC7") && x.includes("hindsight-qds") && x.includes("host networking bypasses the ports discipline"))).toBe(true);
+
+		const r2 = validateCompose(
+			[
+				"services:",
+				"  hindsight-qds:",
+				`    image: ${PIN}`,
+				`    ports: ["${HOST_PUBLISH}"]`,
+				"  m2-gateway:",
+				"    image: ghcr.io/o/qds-m2-gateway:t",
+				'    restart: "no"',
+				"    network_mode: host",
+				"networks:",
+				"  front-door:",
+				"    external: true",
+			].join("\n"),
+		);
+		expect(r2.some((x) => x.startsWith("AC1/AC7") && x.includes("m2-gateway") && x.includes("host networking bypasses the ports discipline"))).toBe(true);
+	});
 });
 
 describe("AC2 negative controls (pin fixtures)", () => {
@@ -701,6 +858,29 @@ describe("AC2 negative controls (pin fixtures)", () => {
 			"    external: true",
 		].join("\n"));
 		expect(r.some((x) => x.includes("AC2") && x.includes("arch-suffixed") && x.includes("qds-m2-gateway:v1_arm64"))).toBe(true);
+	});
+
+	it("R3-F12: two services sharing one bad image each cite THEIR line, not the first occurrence's", () => {
+		const BAD = "ghcr.io/o/qds-m2-gateway:latest";
+		const r = validateCompose([
+			"services:",
+			"  hindsight-qds:",
+			`    image: ${PIN}`,
+			`    ports: ["${HOST_PUBLISH}"]`,
+			"  m2-gateway:",
+			`    image: ${BAD}`,
+			'    restart: "no"',
+			"  m2-gateway-2:",
+			`    image: ${BAD}`,
+			'    restart: "no"',
+			"networks:",
+			"  front-door:",
+			"    external: true",
+		].join("\n"));
+		const latest = r.filter((x) => x.includes("uses :latest"));
+		expect(latest).toHaveLength(2);
+		expect(latest[0]).toMatch(/docker-compose\.factory\.yml:6\)$/);
+		expect(latest[1]).toMatch(/docker-compose\.factory\.yml:9\)$/);
 	});
 });
 
@@ -781,6 +961,80 @@ describe("AC3 negative controls (Caddy fixtures)", () => {
 		expect(r.some((x) => x.startsWith("AC3:") && x.includes("exactly ONE host block, got 2"))).toBe(true);
 	});
 
+	it("R3-F01: a multi-upstream load-balance row is refused — EVERY token must be the gateway", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	@recall {",
+				"		method POST",
+				"		path /v1/recall",
+				"	}",
+				"	handle @recall {",
+				`		reverse_proxy ${GATEWAY_UPSTREAM} hindsight-qds:8888`,
+				"	}",
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
+	});
+
+	it("R3-F05: a NESTED one-line second host block counts — the exactly-one rule survives brace nesting", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+				"other.com { handle { respond 404 } }",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC3:") && x.includes("exactly ONE host block, got 2"))).toBe(true);
+	});
+
+	it("R3-F05: an INDENTED one-line second host block counts", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	@recall {",
+				"		method POST",
+				"		path /v1/recall",
+				"	}",
+				"	handle @recall {",
+				`		reverse_proxy ${GATEWAY_UPSTREAM}`,
+				"	}",
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+				"  other.com {",
+				"	respond 404",
+				"  }",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC3:") && x.includes("exactly ONE host block, got 2"))).toBe(true);
+	});
+
+	it("R3-F06: a ONE-LINE handle row joins the method+path gate — path-only @x is refused for the missing method", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	@x {",
+				"		path /v1/recall",
+				"	}",
+				`	handle @x { reverse_proxy ${GATEWAY_UPSTREAM} }`,
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.includes("row @x must gate on an explicit method+path matcher"))).toBe(true);
+	});
+
 	it("refuses a catch-all handle that proxies instead of 404ing", () => {
 		const r = validateCaddy(
 			[
@@ -832,6 +1086,18 @@ describe("AC6 negative controls (env fixtures)", () => {
 		const r = validateEnvTemplate("SOLSTICE_TENANT_ID=t-123\n", "fixture.env", "http://hindsight-qds:8888");
 		expect(r[0]).toContain("AC6/G3-G6");
 		expect(r[0]).toContain("SOLSTICE_TENANT_ID");
+	});
+
+	it("R3-F07: SOLSTICE_ADJUDICATOR_BEARER / SOLSTICE_PSEUDONYM_KEY literals are refused (scan + fence)", () => {
+		for (const line of [
+			"SOLSTICE_ADJUDICATOR_BEARER=real-bearer-value\n",
+			"SOLSTICE_PSEUDONYM_KEY=real-key-value\n",
+			"solstice_pseudonym_key=real-key-value\n",
+		]) {
+			const r = validateEnvTemplate(line, "fixture.env", "http://hindsight-qds:8888");
+			expect(r.some((x) => x.includes("AC6/INV-Z4-3") && x.includes("literal credential value")), line).toBe(true);
+			expect(r.some((x) => x.includes("AC6/G3-G6")), line).toBe(true);
+		}
 	});
 
 	it("refuses a host-side origin of anything but http://127.0.0.1:18890 — 18889 and 127.0.0.1:8888 included", () => {
@@ -909,10 +1175,52 @@ describe("AC7 negative controls (one-perimeter fixtures)", () => {
 
 	it("AC6/INV-Z4-3 (F-027): a compose dropping the secrets env_file is refused, per service", () => {
 		const r = validateCompose(baseCompose(`      - "${HOST_PUBLISH}"`));
-		const dropped = r.filter((x) => x.startsWith("AC6/INV-Z4-3"));
+		const dropped = r.filter((x) => x.startsWith("AC6/INV-Z4-3") && !x.includes("least-privilege"));
 		expect(dropped).toHaveLength(2); // hindsight-qds AND m2-gateway both flagged
 		expect(dropped[0]).toContain("env_file: hindsight-qds.env");
 		expect(dropped[0]).toMatch(/docker-compose\.factory\.yml\)$/); // file named
+	});
+
+	it("R3-F14: long-syntax env_file ({path: ...}) passes the AC6 wiring check — no [object Object] false refusal", () => {
+		const r = validateCompose(
+			[
+				"services:",
+				"  hindsight-qds:",
+				`    image: ${PIN}`,
+				`    ports: ["${HOST_PUBLISH}"]`,
+				"    env_file:",
+				"      - path: hindsight-qds.env",
+				"  m2-gateway:",
+				"    image: ghcr.io/o/qds-m2-gateway:t",
+				'    restart: "no"',
+				"    env_file:",
+				"      - path: hindsight-qds.env",
+				"    environment:",
+				'      HINDSIGHT_API_LLM_API_KEY: ""',
+				"networks:",
+				"  front-door:",
+				"    external: true",
+			].join("\n"),
+		);
+		expect(r.filter((x) => x.startsWith("AC6/INV-Z4-3"))).toEqual([]);
+	});
+
+	it("R3-F10: a compose deleting the provider-key empty override is refused (least-privilege contract)", () => {
+		const r = validateCompose(
+			[
+				"services:",
+				"  hindsight-qds:",
+				`    image: ${PIN}`,
+				`    ports: ["${HOST_PUBLISH}"]`,
+				"  m2-gateway:",
+				"    image: ghcr.io/o/qds-m2-gateway:t",
+				'    restart: "no"',
+				"networks:",
+				"  front-door:",
+				"    external: true",
+			].join("\n"),
+		);
+		expect(r.some((x) => x.startsWith("AC6/INV-Z4-3 (least-privilege)") && x.includes("HINDSIGHT_API_LLM_API_KEY"))).toBe(true);
 	});
 });
 
@@ -965,6 +1273,11 @@ describe("Observability contract (F-014): refusals name file + line + rule", () 
 // the skip reason is exactly that empty-string = unset. There is deliberately
 // NO default path. To run it locally:
 //   QDS_FORK_CHECKOUT=/path/to/swarmclaw bun test tests/deploy/vps-profile.test.ts
+// R3-F11: the fork of record is the swarmclaw fork's INTEGRATION lineage —
+// the branch G6 clones on the box. Local checkouts on older branches carry
+// stale pins (e.g. 0.8.6) and are NOT the pin source; point QDS_FORK_CHECKOUT
+// at an integration-lineage checkout or the byte-compare reds on the stale
+// pin.
 const FORK_CHECKOUT = process.env.QDS_FORK_CHECKOUT || undefined;
 
 describe("AC2: fork sole-pin-source byte-compare (F-006)", () => {
