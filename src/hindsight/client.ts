@@ -105,6 +105,20 @@ export interface HindsightClientOptions {
   mode?: "live" | "mock";
 }
 
+/**
+ * Result of {@link HindsightClient.deleteBank} — story M1.1 AC3 rollback
+ * compensation + AC4 disposable-probe cleanup distinguish "deleted now" from
+ * "was already gone" so compensation can record per-bank outcomes without a
+ * pre-flight existence check.
+ */
+export interface DeleteBankResult {
+  deleted: boolean;
+  alreadyGone: boolean;
+  bankId: string;
+  /** Wire `deleted_count` — present only when the 2xx body carried a number. */
+  deletedCount?: number;
+}
+
 // ---------------------------------------------------------------------------
 // HindsightClient
 // ---------------------------------------------------------------------------
@@ -161,6 +175,73 @@ export class HindsightClient {
       bankId,
       requestId,
     );
+  }
+
+  /**
+   * Delete a bank. DELETE /v1/default/banks/{bank_id} — path build mirrors
+   * createBank. Endpoint confirmed against the 0.10.0 generated client
+   * (`ghcr.io/vectorize-io/hindsight:0.10.0` → hindsight-clients/go/
+   * api_banks.go, DeleteBank; DeleteResponse = {success, message?,
+   * deleted_count?}).
+   *
+   * Story M1.1 ownership: AC3 rollback compensation + AC4 disposable-probe
+   * cleanup. A 404 HindsightHttpError resolves as already-gone — idempotent
+   * like createBank's PUT upsert (story AC3). Track A source correction
+   * (0.10.0 delete_bank handler): no existence check, so a missing bank is
+   * 200 with deleted_count:0, mapped to already-gone; the 404 catch is
+   * future-drift armor. Any other error is rethrown unchanged.
+   *
+   * Round-1 review F-015 (defensive): a 2xx body carrying success:false is a
+   * server-side refusal, not a deletion — the 0.10.0 wire never does this
+   * (Track A: DeleteResponse.success is true on 200), but the narrowing
+   * below already concedes the body's shape is unknown, and reporting a
+   * refused delete as {deleted:true} would poison AC3's compensation
+   * accounting. Surfaced as HindsightHttpError 502 (the body contradicts
+   * the status); the catch below rethrows it (502 ≠ 404). deleted_count
+   * semantics are unchanged: numeric 0 → already-gone; non-numeric
+   * (including the string "0") → field absent.
+   */
+  async deleteBank(bankId: string): Promise<DeleteBankResult> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
+    try {
+      const raw = await this.request(
+        "DELETE",
+        `/v1/default/banks/${bankId}`,
+        undefined,
+        RETAIN_TIMEOUT_MS,
+        "deleteBank",
+        bankId,
+        requestId,
+      );
+      // F-015: 2xx + body success:false → the server refused the delete.
+      // Missing `success` key (undefined !== false) and non-object bodies
+      // fall through — only an explicit false refuses.
+      const refused =
+        raw !== null && typeof raw === "object" && (raw as { success?: unknown }).success === false;
+      if (refused) {
+        throw new HindsightHttpError(502, "delete refused by server", requestId);
+      }
+      // INV-HM5: body is `unknown` — narrow before field access.
+      const count =
+        raw !== null && typeof raw === "object" && "deleted_count" in raw
+          ? (raw as { deleted_count: unknown }).deleted_count
+          : undefined;
+      if (count === 0) {
+        return { deleted: false, alreadyGone: true, bankId, deletedCount: 0 };
+      }
+      return {
+        deleted: true,
+        alreadyGone: false,
+        bankId,
+        ...(typeof count === "number" ? { deletedCount: count } : {}),
+      };
+    } catch (e) {
+      if (e instanceof HindsightHttpError && e.status === 404) {
+        return { deleted: false, alreadyGone: true, bankId };
+      }
+      throw e;
+    }
   }
 
   async retain(

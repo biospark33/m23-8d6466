@@ -460,3 +460,119 @@ describe("HindsightClient mock mode", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// HindsightClient.deleteBank — M1.1 AC3 rollback / AC4 probe cleanup.
+// 404 resolves as already-gone (idempotent, like createBank's PUT upsert).
+// ---------------------------------------------------------------------------
+
+describe("HindsightClient.deleteBank", () => {
+  test("success → {deleted:true, alreadyGone:false}; DELETE + Bearer header", async () => {
+    process.env.HINDSIGHT_BEARER_TOKEN = "del-token";
+    try {
+      installMock({ body: { success: true, deleted_count: 2 } });
+      const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+      const r = await client.deleteBank("qds-factory");
+      expect(r).toEqual({
+        deleted: true,
+        alreadyGone: false,
+        bankId: "qds-factory",
+        deletedCount: 2,
+      });
+      expect(lastCall?.url).toBe("http://hindsight.test/v1/default/banks/qds-factory");
+      expect(lastCall?.init?.method).toBe("DELETE");
+      const headers = new Headers(lastCall?.init?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer del-token");
+    } finally {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.HINDSIGHT_BEARER_TOKEN;
+    }
+  });
+
+  test("200 with deleted_count:0 → already-gone (Track A: no existence check)", async () => {
+    installMock({ body: { success: true, deleted_count: 0 } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.deleteBank("qds-factory");
+    expect(r).toEqual({
+      deleted: false,
+      alreadyGone: true,
+      bankId: "qds-factory",
+      deletedCount: 0,
+    });
+  });
+
+  test("2xx body success:false → HindsightHttpError 502 'delete refused by server' [F-015]", async () => {
+    // Defensive arm: the 0.10.0 wire never answers 200 + success:false, but a
+    // refused delete reported as {deleted:true} would poison AC3's
+    // compensation accounting — refuse loudly instead.
+    installMock({ body: { success: false, message: "refused" } });
+    const client = new HindsightClient({
+      baseUrl: "http://hindsight.test",
+      requestId: "req-del-refused",
+    });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.deleteBank("qds-factory");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(502);
+    expect(caught?.message).toBe("delete refused by server");
+    expect(caught?.requestId).toBe("req-del-refused");
+  });
+
+  test('2xx deleted_count:"0" (string) → non-numeric → field absent, deleted:true [F-015 pin]', async () => {
+    // Pin the kept semantics: only a NUMERIC 0 means already-gone; a string
+    // "0" is a shape variance and lands in the absent branch.
+    installMock({ body: { success: true, deleted_count: "0" } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.deleteBank("qds-factory");
+    expect(r).toEqual({ deleted: true, alreadyGone: false, bankId: "qds-factory" });
+  });
+
+  test("404 → {deleted:false, alreadyGone:true} — no throw (AC3 idempotent)", async () => {
+    installMock({ status: 404, body: { error: "bank not found" } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.deleteBank("qds-factory");
+    expect(r).toEqual({ deleted: false, alreadyGone: true, bankId: "qds-factory" });
+  });
+
+  test("other non-2xx (500) → HindsightHttpError rethrown unchanged", async () => {
+    installMock({ status: 500, body: { error: "boom" } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.deleteBank("qds-factory");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(500);
+  });
+
+  test("invalid bankId → 422 before any fetch (INV-HM2)", async () => {
+    installMock({ body: {} });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.deleteBank("../../etc");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(422);
+    // Guard runs before request: no fetch should have been issued.
+    expect(lastCall).toBeUndefined();
+  });
+
+  test("mock mode → {deleted:true, alreadyGone:false} with no fetch", async () => {
+    // Sentinel: any fetch call here fails the test.
+    globalThis.fetch = (async () => {
+      throw new Error("mock mode MUST NOT call fetch");
+    }) as unknown as typeof globalThis.fetch;
+    const c = new HindsightClient({ mode: "mock" });
+    const r = await c.deleteBank("qds-factory");
+    expect(r).toEqual({ deleted: true, alreadyGone: false, bankId: "qds-factory" });
+  });
+});
+

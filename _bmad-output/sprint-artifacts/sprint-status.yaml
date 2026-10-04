@@ -345,7 +345,7 @@ epics:
     points: 29
     stories_dir: sprint-artifacts/dark-factory-v6/stories
     stories:
-      M1.1: { title: "Dedicated Hindsight 0.10.0 on VPS + qds- banks + round-trip + no-auth retired-check", points: 3, status: ready-for-dev, deps: [Z4] }  # v6a — Z4 edge = authored-early (fired on VPS-day); carries P0.5/P0.9 closure legs (transport re-homed per DD-17); operator-gated VPS spend
+      M1.1: { title: "Dedicated Hindsight 0.10.0 on VPS + qds- banks + round-trip + no-auth retired-check", points: 3, status: in-progress, deps: [Z4] }  # v6a — Z4 edge = authored-early (fired on VPS-day); carries P0.5/P0.9 closure legs (transport re-homed per DD-17); operator-gated VPS spend
       M1.2: { title: "Host-side memory cycle (dispatch recall → kg_context brief + harvest idempotent retain)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — T2 live round; mock-first dev; P2.8 mechanism fold; moves deriveBuildId (kgContext brief field) — re-pin ritual runs on a tree containing M1.2; P2.8's documentId vocabulary = runId
       M1.3: { title: "Recall measurement harness (probe set, hit-rate@k, DD-22 checkpoint)", points: 3, status: ready-for-dev, deps: [M1.2] }  # v6a — probe set early (risk §7.3); report leg = flex-cut #1; checkpoint ~30 cycles, DATED not sprint-bound
       M2.1: { title: "Memory gateway (per-run recall-only keys + agent tokens; D8 amendment impl)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — unit/mock; M1.1 edge ACCEPTANCE-ONLY (dev-first sanctioned, DD-26); mirrors credentials.ts ordering exactly; module root src/memgate/
