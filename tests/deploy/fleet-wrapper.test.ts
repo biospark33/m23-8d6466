@@ -22,6 +22,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { listVerbs } from "../../src/fleet/verbs.ts";
+import { run } from "../../scripts/fleet.ts";
+import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { RunRecordStore } from "../../src/providers/run-record.ts";
 
 const repoRoot = realpathSync(join(import.meta.dir, "..", ".."));
 const wrapperPath = join(repoRoot, "deploy", "vps", "fleet-wrapper.sh");
@@ -43,9 +46,16 @@ mkdirSync(shimDir);
 mkdirSync(foreignDir);
 
 // Shim `bun`: writes the argv it received to argv.txt in ITS cwd, one arg per
-// line — shell-internal $PWD, so no env beyond the allowlist is needed.
+// line — shell-internal $PWD, so no env beyond the allowlist is needed — and
+// copies its stdin to stdin.txt so the wrapper's passthrough is observable.
+// `read` is a builtin (nothing else resolves on the shim-only PATH); the loop
+// is byte-identical for newline-terminated text, which is the shape of the
+// fork's real stdin payload (the approve token).
 const shimPath = join(shimDir, "bun");
-writeFileSync(shimPath, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/argv.txt\"\n");
+writeFileSync(
+  shimPath,
+  "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/argv.txt\"\n: > \"$PWD/stdin.txt\"\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$PWD/stdin.txt\"; done\n",
+);
 chmodSync(shimPath, 0o755);
 
 // Exactly the fork's ALLOWED_ENV_KEYS (protocol-factory-exec.ts).
@@ -166,7 +176,7 @@ describe("fleet-wrapper (Z4, DF5.5 Amendment D)", () => {
       .filter((line) => !line.trimStart().startsWith("#"))
       .join("\n");
     expect(code.split("--driver exedev").length - 1).toBe(1);
-    // Provenance must name its owner (G5).
+    // Provenance must name its owner (story Z4 / DF5.5 Amendment D).
     expect(wrapperSource).toContain("Z4");
     expect(wrapperSource).toContain("DF5.5");
   });
@@ -188,5 +198,84 @@ describe("fleet-wrapper (Z4, DF5.5 Amendment D)", () => {
     expect(code).toBe(4); // no such run record — the CLI's code, through the wrapper
     // stdout stays the verb's JSON contract: the provenance line never touches it.
     expect(stdout).toBe("");
+  });
+
+  it("piped stdin reaches the child byte-identically (the approve token path)", async () => {
+    // The fork pipes the approver token on stdin for approve; a wrapper that
+    // consumed or buffered stdin would drop it. Spawned under the fork's exact
+    // env allowlist, foreign cwd — the production shape plus a piped fd 0.
+    const token = "ghp_z4-wrapper-stdin-token\n";
+    const proc = Bun.spawn([wrapperPath, "approve", ...PASSTHROUGH_ARGS], {
+      cwd: foreignDir,
+      env: forkEnv,
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    proc.stdin.write(token);
+    proc.stdin.end();
+    await proc.exited;
+    expect(readFileSync(join(foreignDir, "stdin.txt"), "utf8")).toBe(token);
+  });
+});
+
+/**
+ * The DoD's mandatory real-CLI acceptance leg (round-1 F-009): the shim above
+ * proves argv SHAPE; only scripts/fleet.ts's exported run() proves the CLI
+ * ACCEPTS the wrapper's argv. These tests call run() with exactly the argv the
+ * wrapper hands `bun` for each verb class, with deps INJECTED (FakeDriver +
+ * read-mode store) — never the real exedev driver, zero network, zero spend.
+ */
+describe("fleet-wrapper argv accepted by the real CLI (run() + injected FakeDriver)", () => {
+  const e2eDir = mkdtempSync(join(tmpdir(), "z4-wrapper-e2e-"));
+  const boxesDir = join(e2eDir, "boxes");
+  const runsDir = join(e2eDir, "runs");
+  // The read-mode store asserts the directory EXISTS (it never creates one).
+  mkdirSync(runsDir);
+  const e2eDeps = {
+    driver: new FakeDriver(boxesDir),
+    store: new RunRecordStore({ dir: runsDir, create: false }),
+  };
+  const outSink = (): void => {};
+
+  afterAll(() => rmSync(e2eDir, { recursive: true, force: true }));
+
+  it(`accepts a driver verb with the wrapper-appended argv ("status", "--driver", "exedev")`, async () => {
+    // Exactly the argv the wrapper appends for a driver-required verb — the
+    // flag spelling and trailing position are the acceptance under test, so
+    // they are passed verbatim rather than satisfied by deps alone.
+    // deps.driver short-circuits driver resolution, so "exedev" never names a
+    // real substrate.
+    const code = await run(["status", "--driver", "exedev"], outSink, e2eDeps);
+    expect(code).toBe(0); // empty fleet is a state, not an error
+  });
+
+  it(`accepts the byte-untouched passthrough for "approve" (refusal is post-parse)`, async () => {
+    // approve's full happy path needs an existing record, an allowlist entry
+    // and a stdin token, so the honest acceptance claim here is: the
+    // passthrough argv parses clean — the usage refusal is about the MISSING
+    // --approver, never about an unknown flag and never about a missing
+    // --driver (approve takes none by registry).
+    const errs: string[] = [];
+    const code = await run(["approve", "qds-20990101-000000"], outSink, e2eDeps, (s) => errs.push(s));
+    expect(code).toBe(2);
+    expect(errs.join("")).toContain("requires --approver");
+    expect(errs.join("")).not.toContain("unknown flag");
+  });
+
+  it(`refuses the unconditional-append shape on "approve" with exit 2 ("approve does not take --driver")`, async () => {
+    // The AC4 negative control, EXECUTED against the real CLI rather than
+    // grounded in registry metadata: the argv the buggy unconditional-append
+    // wrapper would hand `bun` for a no-driver verb is refused by the
+    // parser — same verb, same positionals as the accepted passthrough above,
+    // only the appended flag differs, and the refusal switches from the
+    // approver usage error to the flag refusal (exit 2, usage envelope).
+    const errs: string[] = [];
+    const code = await run(["approve", "qds-20990101-000000", "--driver", "exedev"], outSink, e2eDeps, (s) =>
+      errs.push(s),
+    );
+    expect(code).toBe(2);
+    expect(errs.join("")).toContain("does not take --driver");
+    expect(errs.join("")).not.toContain("requires --approver");
   });
 });

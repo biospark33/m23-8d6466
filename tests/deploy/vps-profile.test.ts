@@ -2,11 +2,12 @@
  * Z4 deploy-profile contract tests (AC1/AC2/AC3/AC5/AC6/AC7).
  *
  * Parses the REAL deploy/vps/ artifacts from disk and refuses every forbidden
- * shape BY NAME (file + rule — the tests/gitnexus/cli-contract.ts naming
- * discipline). Every negative control is FIXTURE-BASED: violating variants are
- * built as in-test strings/objects and asserted refused — no real
- * deploy/vps/** artifact is ever mutated by any test. No docker daemon, no
- * network, no spend — pure file parsing.
+ * shape BY NAME (file + line + rule — the tests/gitnexus/cli-contract.ts
+ * naming discipline; the story's Observability Contract). Every negative
+ * control is FIXTURE-BASED: violating variants are built as in-test
+ * strings/objects and asserted refused — no real deploy/vps/** artifact is
+ * ever mutated by any test. No docker daemon, no network, no spend — pure
+ * file parsing.
  */
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
@@ -27,8 +28,14 @@ const PIN =
 const HOST_PUBLISH = "127.0.0.1:18890:8888";
 const GATEWAY_UPSTREAM = "m2-gateway:8080";
 
-/** Drop comment lines and trailing unquoted ` #` comments — the non-code text of a file. */
-function stripComments(text: string): string {
+// ── per-grammar comment stripping (F-025) ────────────────────────────────────
+// Docker env_file / compose env_file values do NOT support inline comments
+// (full-line `#` only), while sh and Caddyfile do. Stripping ` #` from env
+// values truncated legitimate data — false refusals, or worse, false
+// cleanliness in the leak scan.
+
+/** sh grammar: full-line `#`/`//` comments AND trailing unquoted ` #`. */
+function stripShComments(text: string): string {
 	return text
 		.split("\n")
 		.map((line) => {
@@ -40,10 +47,33 @@ function stripComments(text: string): string {
 		.join("\n");
 }
 
+/** Caddy grammar: the same comment rules as sh (leading `#`, trailing ` #`). */
+const stripCaddyComments = stripShComments;
+
+/** env_file grammar: full-line `#` ONLY — a ` #` inside a VALUE is data. */
+function stripEnvComments(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => (line.trimStart().startsWith("#") ? "" : line))
+		.join("\n");
+}
+
+/** 1-based first line of `text` containing `needle`, else 0 (F-014). */
+function lineOf(text: string, needle: string): number {
+	const idx = text.indexOf(needle);
+	return idx === -1 ? 0 : text.slice(0, idx).split("\n").length;
+}
+
+/** `(file:line)` refusal suffix; line omitted when no offending line is identifiable. */
+function at(file: string, text: string, needle?: string): string {
+	const line = needle === undefined ? 0 : lineOf(text, needle);
+	return ` (${file}${line > 0 ? `:${line}` : ""})`;
+}
+
 // ── AC1/AC2/AC7: compose validator ───────────────────────────────────────────
 
 type Compose = {
-	services?: Record<string, { image?: string; ports?: unknown[]; networks?: unknown; restart?: string }>;
+	services?: Record<string, { image?: string; ports?: unknown[]; networks?: unknown; restart?: string; env_file?: unknown }>;
 	networks?: Record<string, { external?: boolean; name?: string }>;
 };
 
@@ -71,7 +101,14 @@ function asHostMap(entry: unknown): { text: string; hostIp: string; hostPort: st
 
 const PERIMETER_SERVICE_NAMES = /^(caddy|nginx|traefik|haproxy|envoy|certbot|tls-)/i;
 
-/** Every AC1/AC2/AC7 refusal for a compose document, each naming file + rule. */
+/** env_file entries, short (string) or list syntax. */
+function envFileNames(v: unknown): string[] {
+	if (typeof v === "string") return [v];
+	if (Array.isArray(v)) return v.map(String);
+	return [];
+}
+
+/** Every AC1/AC2/AC6/AC7/AC8 refusal for a compose document, each naming file + line + rule. */
 function validateCompose(text: string): string[] {
 	const refusals: string[] = [];
 	const file = "deploy/vps/docker-compose.factory.yml";
@@ -87,52 +124,58 @@ function validateCompose(text: string): string[] {
 	// AC1: exactly two services, exactly these names.
 	const expected = ["hindsight-qds", "m2-gateway"];
 	if (names.length !== 2 || names.join(",") !== expected.join(",")) {
-		refusals.push(`AC1: compose must define exactly the two services ${expected.join(" + ")}, got ${names.join(", ") || "<none>"}`);
+		refusals.push(`AC1: compose must define exactly the two services ${expected.join(" + ")}, got ${names.join(", ") || "<none>"}${at(file, text)}`);
 	}
 
 	for (const [name, svc] of Object.entries(services)) {
 		// AC2: pin discipline on every image ref.
 		const image = svc.image ?? "";
-		if (!image) refusals.push(`AC2: service ${name} has no image ref`);
-		if (image.includes(":latest")) refusals.push(`AC2: service ${name} image ref uses :latest — ${image}`);
-		const archSuffixed = /-(?:amd64|arm64|x86_64|aarch64)(?:@sha256:[0-9a-f]{64})?$/.test(image);
-		if (archSuffixed) refusals.push(`AC2: service ${name} image ref is arch-suffixed (QEMU incident class) — ${image}`);
+		if (!image) refusals.push(`AC2: service ${name} has no image ref${at(file, text)}`);
+		if (image.includes(":latest")) refusals.push(`AC2: service ${name} image ref uses :latest — ${image}${at(file, text, image)}`);
+		const archSuffixed = /(?:-|:)(?:amd64|arm64|x86_64|aarch64)(?:@sha256:[0-9a-f]{64})?$/.test(image);
+		if (archSuffixed) refusals.push(`AC2: service ${name} image ref is arch-suffixed (QEMU incident class) — ${image}${at(file, text, image)}`);
 		if (name === "hindsight-qds" && image !== PIN) {
-			refusals.push(`AC2: hindsight-qds image must be the fork pin byte-exact (${PIN}), got ${image || "<missing>"}`);
+			refusals.push(`AC2: hindsight-qds image must be the fork pin byte-exact (${PIN}), got ${image || "<missing>"}${at(file, text, image)}`);
 		}
 
 		// AC1: ports discipline.
 		const maps = (svc.ports ?? []).map(asHostMap).filter((m): m is NonNullable<typeof m> => m !== null);
 		if (name === "hindsight-qds") {
 			if (maps.length !== 1) {
-				refusals.push(`AC1: hindsight-qds must have exactly one host publish, got ${maps.length}`);
+				refusals.push(`AC1: hindsight-qds must have exactly one host publish, got ${maps.length}${at(file, text)}`);
 			}
 			for (const m of maps) {
 				if (m.text !== HOST_PUBLISH) {
-					refusals.push(`AC1: host publish must be exactly ${HOST_PUBLISH}, got ${m.text}`);
+					refusals.push(`AC1: host publish must be exactly ${HOST_PUBLISH}, got ${m.text}${at(file, text, m.text)}`);
 				}
 				if (m.hostIp !== "127.0.0.1" && m.hostIp !== "::1") {
-					refusals.push(`AC1/INV-Z4-1: host publish must bind loopback, got non-loopback host IP ${m.hostIp} in ${m.text}`);
+					refusals.push(`AC1/INV-Z4-1: host publish must bind loopback, got non-loopback host IP ${m.hostIp} in ${m.text}${at(file, text, m.text)}`);
 				}
 				if (m.hostPort === "8888" || m.hostPort === "18889") {
-					refusals.push(`AC1/INV-Z4-1: host port ${m.hostPort} is forbidden (8888 collides with Hindsight's default; 18889 is the platform tenant stack's map) in ${m.text}`);
+					refusals.push(`AC1/INV-Z4-1: host port ${m.hostPort} is forbidden (8888 collides with Hindsight's default; 18889 is the platform tenant stack's map) in ${m.text}${at(file, text, m.text)}`);
 				}
 			}
 		}
 		if (name === "m2-gateway" && (svc.ports ?? []).length > 0) {
-			refusals.push(`AC1: m2-gateway publishes NO ports (its only public reach is the existing Caddy front door), got ${JSON.stringify(svc.ports)}`);
+			refusals.push(`AC1: m2-gateway publishes NO ports (its only public reach is the existing Caddy front door), got ${JSON.stringify(svc.ports)}${at(file, text, String(svc.ports))}`);
 		}
 		if (name === "m2-gateway" && svc.restart !== "no") {
-			refusals.push(`AC8: m2-gateway restart must be "no" until M2.1's image is published (never green-by-default), got ${String(svc.restart)}`);
+			refusals.push(`AC8: m2-gateway restart must be "no" until M2.1's image is published (never green-by-default), got ${String(svc.restart)}${at(file, text)}`);
+		}
+
+		// AC6/INV-Z4-3: BOTH services wire the operator secrets file
+		// (hindsight-qds consumes the provider key, m2-gateway the tenant key — F-003).
+		if (!envFileNames(svc.env_file).includes("hindsight-qds.env")) {
+			refusals.push(`AC6/INV-Z4-3: service ${name} must wire env_file: hindsight-qds.env (operator-placed secrets, mode 0600, runbook G3), got ${JSON.stringify(svc.env_file ?? null)}${at(file, text)}`);
 		}
 
 		// AC7: no second perimeter — no proxy/TLS service of any name.
 		if (PERIMETER_SERVICE_NAMES.test(name)) {
-			refusals.push(`AC7: compose ships a second perimeter service "${name}" — extension of the existing front door, never its own proxy/TLS stack (charter §2.2)`);
+			refusals.push(`AC7: compose ships a second perimeter service "${name}" — extension of the existing front door, never its own proxy/TLS stack (charter §2.2)${at(file, text, name)}`);
 		}
 		for (const m of maps) {
 			if (m.hostPort === "443" || m.hostPort === "80") {
-				refusals.push(`AC7: service ${name} publishes perimeter port ${m.hostPort} (${m.text}) — 80/443 belong to the existing control-plane Caddy only`);
+				refusals.push(`AC7: service ${name} publishes perimeter port ${m.hostPort} (${m.text}) — 80/443 belong to the existing control-plane Caddy only${at(file, text, m.text)}`);
 			}
 		}
 
@@ -145,7 +188,7 @@ function validateCompose(text: string): string[] {
 					? Object.keys(nets)
 					: [];
 			if (attached.includes("front-door")) {
-				refusals.push("AC7/INV-Z4-1: hindsight-qds must stay OFF the front-door network — the perimeter reaches the gateway only");
+				refusals.push(`AC7/INV-Z4-1: hindsight-qds must stay OFF the front-door network — the perimeter reaches the gateway only${at(file, text)}`);
 			}
 		}
 	}
@@ -153,10 +196,10 @@ function validateCompose(text: string): string[] {
 	// AC7: the front-door network must be a declared EXTERNAL join, never created.
 	const frontDoor = doc.networks?.["front-door"];
 	if (!frontDoor) {
-		refusals.push("AC7: compose must declare the front-door network (m2-gateway joins the existing control-plane perimeter)");
+		refusals.push(`AC7: compose must declare the front-door network (m2-gateway joins the existing control-plane perimeter)${at(file, text)}`);
 	} else {
 		if (frontDoor.external !== true) {
-			refusals.push("AC7: front-door network must be external: true — this compose creates nothing, it JOINs the existing perimeter");
+			refusals.push(`AC7: front-door network must be external: true — this compose creates nothing, it JOINs the existing perimeter${at(file, text)}`);
 		}
 	}
 
@@ -165,22 +208,22 @@ function validateCompose(text: string): string[] {
 
 // ── AC3: Caddy fragment validator (line/regex level) ─────────────────────────
 
-/** Every AC3/AC7 refusal for a Caddy fragment, each naming file + rule. */
+/** Every AC3/AC7 refusal for a Caddy fragment, each naming file + line + rule. */
 function validateCaddy(text: string): string[] {
 	const refusals: string[] = [];
 	const file = "deploy/vps/Caddyfile.factory.allowlist";
-	const code = stripComments(text);
+	const code = stripCaddyComments(text);
 
 	// AC3: exactly one host block; AC7: no second listener — a site address
 	// naming :443/:80 or a global-options block would be a deployment, not a fragment.
 	const blockLabels = [...code.matchAll(/^([^{}\s#][^{}]*)\{\s*$/gm)].map((m) => m[1]!.trim());
 	const hostBlocks = blockLabels.filter((l) => !l.startsWith("@") && !l.startsWith("("));
 	if (hostBlocks.length !== 1) {
-		refusals.push(`AC3: ${file} must carry exactly ONE host block, got ${hostBlocks.length}: ${hostBlocks.join(", ") || "<none>"}`);
+		refusals.push(`AC3: ${file} must carry exactly ONE host block, got ${hostBlocks.length}: ${hostBlocks.join(", ") || "<none>"}${at(file, text)}`);
 	}
 	for (const label of hostBlocks) {
 		if (/:(?:443|80)\b/.test(label)) {
-			refusals.push(`AC7: host block "${label}" names a listener port — fragments add no listener; 80/443 stay the existing front door's`);
+			refusals.push(`AC7: host block "${label}" names a listener port — fragments add no listener; 80/443 stay the existing front door's${at(file, text, label)}`);
 		}
 	}
 
@@ -190,7 +233,7 @@ function validateCaddy(text: string): string[] {
 		const matcher = new RegExp(`^[ \\t]*@${h}\\s*\\{[\\s\\S]*?^[ \\t]*\\}`, "m").exec(code);
 		const body = matcher?.[0] ?? "";
 		if (!matcher || !/^[ \t]*method\s+\S+/m.test(body) || !/[ \t]path\s+\S+/.test(body)) {
-			refusals.push(`AC3: ${file} row @${h} must gate on an explicit method+path matcher (E09-GAP-01b/01c/01d idiom)`);
+			refusals.push(`AC3: row @${h} must gate on an explicit method+path matcher (E09-GAP-01b/01c/01d idiom)${at(file, text, `@${h}`)}`);
 		}
 	}
 	const handleBodies = [...code.matchAll(/^[ \t]*handle(?:\s+@(\w[\w-]*))?\s*\{\s*$([\s\S]*?)[ \t]*\}\s*$/gm)];
@@ -199,13 +242,13 @@ function validateCaddy(text: string): string[] {
 		const proxies = [...body.matchAll(/^[ \t]*reverse_proxy\s+(\S+)/gm)].map((m) => m[1]!);
 		for (const target of proxies) {
 			if (target !== GATEWAY_UPSTREAM) {
-				refusals.push(`AC3/INV-Z4-1: handle ${named ? `@${named}` : "(catch-all)"} forwards to ${target} — only ${GATEWAY_UPSTREAM} may be forwarded, never a hindsight service`);
+				refusals.push(`AC1/AC3/INV-Z4-1: handle ${named ? `@${named}` : "(catch-all)"} forwards to ${target} — only ${GATEWAY_UPSTREAM} may be forwarded, never a hindsight service${at(file, text, target)}`);
 			}
 		}
 		if (!named) {
 			// The terminal default-404 tail: everything not listed is 404, not forwarded.
 			if (proxies.length > 0 || !/^[ \t]*respond\s+404\s*$/m.test(body)) {
-				refusals.push(`AC3: ${file} catch-all handle must \`respond 404\`, never proxy — the route table is NOT exhaustive by design; that is the point`);
+				refusals.push(`AC3: catch-all handle must \`respond 404\`, never proxy — the route table is NOT exhaustive by design; that is the point${at(file, text, proxies[0])}`);
 			}
 		}
 	}
@@ -219,7 +262,9 @@ function validateCaddy(text: string): string[] {
 
 type EnvEntry = { key: string; value: string };
 function parseEnv(text: string): EnvEntry[] {
-	return [...stripComments(text).matchAll(/^\s*([A-Z_][A-Z0-9_]*)=(.*)$/gm)].map((m) => ({
+	// F-025: env grammar strips FULL-LINE comments only — a ` #` inside a
+	// value is data, never a comment (dotenv/compose env_file rules).
+	return [...stripEnvComments(text).matchAll(/^\s*([A-Z_][A-Z0-9_]*)=(.*)$/gm)].map((m) => ({
 		key: m[1]!,
 		value: (m[2] ?? "").trim(),
 	}));
@@ -239,19 +284,19 @@ function validateEnvTemplate(text: string, file: string, expectedBase: string): 
 
 	for (const { key, value } of entries) {
 		if (SECRET_NAME.test(key) && !isPlaceholder(value)) {
-			refusals.push(`AC6/INV-Z4-3: ${file} carries a literal credential value for ${key} — templates carry names, never values`);
+			refusals.push(`AC6/INV-Z4-3: ${file} carries a literal credential value for ${key} — templates carry names, never values${at(file, text, key)}`);
 		}
 		if (key === "SOLSTICE_TENANT_ID") {
-			refusals.push(`AC6/G3-G6: ${file} templates SOLSTICE_TENANT_ID — it stays the swarmclaw stack's .env.local item, never a key here`);
+			refusals.push(`AC6/G3-G6: ${file} templates SOLSTICE_TENANT_ID — it stays the swarmclaw stack's .env.local item, never a key here${at(file, text, key)}`);
 		}
 		if (key === "HINDSIGHT_BASE_URL" && value !== expectedBase) {
-			refusals.push(`AC6: ${file} HINDSIGHT_BASE_URL must be exactly ${expectedBase}, got ${value}`);
+			refusals.push(`AC6: ${file} HINDSIGHT_BASE_URL must be exactly ${expectedBase}, got ${value}${at(file, text, key)}`);
 		}
 	}
 	// The annotation may NAME the fence item in a comment; a non-comment occurrence is templating.
-	if (/(^|[^#\n])SOLSTICE_TENANT_ID/.test(stripComments(text)) && !entries.some((e) => e.key === "SOLSTICE_TENANT_ID")) {
+	if (/(^|[^#\n])SOLSTICE_TENANT_ID/.test(stripEnvComments(text)) && !entries.some((e) => e.key === "SOLSTICE_TENANT_ID")) {
 		// occurrence outside comments but not as a KEY= line (e.g. a bare value) — still a leak
-		refusals.push(`AC6/G3-G6: ${file} mentions SOLSTICE_TENANT_ID outside a comment`);
+		refusals.push(`AC6/G3-G6: ${file} mentions SOLSTICE_TENANT_ID outside a comment${at(file, text)}`);
 	}
 	return refusals;
 }
@@ -265,9 +310,18 @@ function requireKeys(text: string, file: string, keys: string[]): string[] {
 
 // ── AC5: whole-tree driver-grammar scan ──────────────────────────────────────
 
+/** Per-grammar comment stripping for the tree scan (F-025): env values keep
+ * their ` #` (data, not a comment); docs have no comment grammar at all. */
+function stripByGrammar(path: string, text: string): string {
+	if (path.endsWith(".md")) return text;
+	if (path.includes(".env")) return stripEnvComments(text);
+	if (path.includes("Caddyfile")) return stripCaddyComments(text);
+	return stripShComments(text); // sh / YAML: a trailing ` #` IS a comment
+}
+
 /** `--driver exedev` occurrences in non-comment text, per file. */
-function driverGrammarCounts(text: string): number {
-	return stripComments(text).split("--driver exedev").length - 1;
+function driverGrammarCounts(path: string, text: string): number {
+	return stripByGrammar(path, text).split("--driver exedev").length - 1;
 }
 
 function walkTree(dir: string): string[] {
@@ -284,11 +338,13 @@ function walkTree(dir: string): string[] {
 function scanDriverGrammar(files: Record<string, string>): string[] {
 	const refusals: string[] = [];
 	for (const [path, content] of Object.entries(files)) {
-		const count = driverGrammarCounts(content);
+		const count = driverGrammarCounts(path, content);
+		const line = lineOf(content, "--driver exedev");
+		const loc = line > 0 ? `:${line}` : "";
 		if (path === "deploy/vps/fleet-wrapper.sh") {
-			if (count !== 1) refusals.push(`AC5/INV-Z4-2: fleet-wrapper.sh must hold --driver exedev exactly once (non-comment), got ${count}`);
+			if (count !== 1) refusals.push(`AC5/INV-Z4-2: ${path}${loc} must hold --driver exedev exactly once (non-comment), got ${count}`);
 		} else if (count > 0) {
-			refusals.push(`AC5/INV-Z4-2: ${path} carries the --driver exedev grammar — the wrapper is the SOLE holder; swarmclaw never learns QDS's driver grammar (DF5.5 Amendment D)`);
+			refusals.push(`AC5/INV-Z4-2: ${path}${loc} carries the --driver exedev grammar — the wrapper is the SOLE holder; swarmclaw never learns QDS's driver grammar (DF5.5 Amendment D)`);
 		}
 	}
 	return refusals;
@@ -315,6 +371,13 @@ describe("Z4 compose profile (AC1/AC2/AC7)", () => {
 	it("AC1: hindsight-qds has exactly one host publish, the loopback map", () => {
 		const svc = (YAML.parse(COMPOSE) as Compose).services?.["hindsight-qds"];
 		expect(svc?.ports).toEqual([HOST_PUBLISH]);
+	});
+
+	it("AC6/INV-Z4-3: BOTH services wire the operator secrets file hindsight-qds.env", () => {
+		const doc = YAML.parse(COMPOSE) as Compose;
+		for (const name of ["hindsight-qds", "m2-gateway"]) {
+			expect(envFileNames(doc.services?.[name]?.env_file)).toContain("hindsight-qds.env");
+		}
 	});
 
 	it("AC7: front-door network is an external join; hindsight-qds is not attached to it", () => {
@@ -381,7 +444,7 @@ describe("Z4 env templates (AC6)", () => {
 		expect(FACTORY_ENV).toMatch(/HINDSIGHT_BASE_URL=http:\/\/hindsight-qds:8888\b/);
 		// The §6.3 shared-sidecar value never appears; the host-side 18890 origin
 		// is annotation-only (comments), never a templated value.
-		expect(stripComments(FACTORY_ENV)).not.toContain("127.0.0.1:8888");
+		expect(stripEnvComments(FACTORY_ENV)).not.toContain("127.0.0.1:8888");
 		expect(parseEnv(FACTORY_ENV).filter((e) => e.value.includes("18890") || e.value.includes("18889"))).toEqual([]);
 	});
 });
@@ -402,7 +465,30 @@ describe("AC5: driver-grammar tree scan", () => {
 			"deploy/vps/env/factory.env.example": "SWARMCLAW_FACTORY_FLEET_FLAGS=--driver exedev\n",
 		});
 		expect(leaks).toHaveLength(1);
-		expect(leaks[0]).toContain("deploy/vps/env/factory.env.example");
+		expect(leaks[0]).toContain("deploy/vps/env/factory.env.example:1");
+		expect(leaks[0]).toContain("AC5/INV-Z4-2");
+	});
+
+	it("AC5 negative control (F-016): a compose VALUE exporting the flag is refused by name", () => {
+		const leaks = scanDriverGrammar({
+			"deploy/vps/docker-compose.factory.yml": [
+				"services:",
+				"  m2-gateway:",
+				"    environment:",
+				"      SWARMCLAW_FACTORY_FLEET_FLAGS: --driver exedev",
+			].join("\n"),
+		});
+		expect(leaks).toHaveLength(1);
+		expect(leaks[0]).toContain("deploy/vps/docker-compose.factory.yml:4");
+		expect(leaks[0]).toContain("AC5/INV-Z4-2");
+	});
+
+	it("AC5 negative control (F-016): a doc-text leak (runbook annotation path) is refused by name", () => {
+		const leaks = scanDriverGrammar({
+			"_bmad-output/plans/2026-09-30-vultr-vps-deploy-runbook.md": "Run every fleet verb with --driver exedev appended.\n",
+		});
+		expect(leaks).toHaveLength(1);
+		expect(leaks[0]).toContain("2026-09-30-vultr-vps-deploy-runbook.md:1");
 		expect(leaks[0]).toContain("AC5/INV-Z4-2");
 	});
 });
@@ -490,6 +576,22 @@ describe("AC2 negative controls (pin fixtures)", () => {
 		].join("\n"));
 		expect(r.some((x) => x.includes("m2-gateway image ref uses :latest"))).toBe(true);
 	});
+
+	it("refuses colon-form bare arch tags (:amd64) — same QEMU incident class (F-020)", () => {
+		const r = validateCompose([
+			"services:",
+			"  hindsight-qds:",
+			`    image: ${PIN}`,
+			`    ports: ["${HOST_PUBLISH}"]`,
+			"  m2-gateway:",
+			"    image: ghcr.io/o/qds-m2-gateway:amd64",
+			'    restart: "no"',
+			"networks:",
+			"  front-door:",
+			"    external: true",
+		].join("\n"));
+		expect(r.some((x) => x.includes("AC2") && x.includes("arch-suffixed") && x.includes("qds-m2-gateway:amd64"))).toBe(true);
+	});
 });
 
 describe("AC3 negative controls (Caddy fixtures)", () => {
@@ -510,7 +612,7 @@ describe("AC3 negative controls (Caddy fixtures)", () => {
 				"}",
 			].join("\n"),
 		);
-		expect(r.some((x) => x.startsWith("AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
+		expect(r.some((x) => x.startsWith("AC1/AC3/INV-Z4-1") && x.includes("hindsight-qds:8888"))).toBe(true);
 	});
 
 	it("refuses a catch-all handle that proxies instead of 404ing", () => {
@@ -577,6 +679,14 @@ describe("AC6 negative controls (env fixtures)", () => {
 		const r = validateEnvTemplate("HINDSIGHT_BASE_URL=http://127.0.0.1:8888\n", "fixture.env", "http://hindsight-qds:8888");
 		expect(r[0]).toContain("must be exactly http://hindsight-qds:8888");
 	});
+
+	it("F-025: a ` #` inside an env value is DATA, not a comment — parsed intact, no false refusal", () => {
+		const text = "SWARMCLAW_ARG_POLICY=deny #fragment-style suffix\n";
+		// no false cleanliness: the full value survives (sh-style stripping would truncate at " #")
+		expect(parseEnv(text)).toEqual([{ key: "SWARMCLAW_ARG_POLICY", value: "deny #fragment-style suffix" }]);
+		// no false refusal
+		expect(validateEnvTemplate(text, "fixture.env", "http://hindsight-qds:8888")).toEqual([]);
+	});
 });
 
 describe("AC7 negative controls (one-perimeter fixtures)", () => {
@@ -621,5 +731,71 @@ describe("AC7 negative controls (one-perimeter fixtures)", () => {
 			].join("\n"),
 		);
 		expect(r.some((x) => x.startsWith("AC1") && x.includes("publishes NO ports"))).toBe(true);
+	});
+
+	it("AC6/INV-Z4-3 (F-027): a compose dropping the secrets env_file is refused, per service", () => {
+		const r = validateCompose(baseCompose(`      - "${HOST_PUBLISH}"`));
+		const dropped = r.filter((x) => x.startsWith("AC6/INV-Z4-3"));
+		expect(dropped).toHaveLength(2); // hindsight-qds AND m2-gateway both flagged
+		expect(dropped[0]).toContain("env_file: hindsight-qds.env");
+		expect(dropped[0]).toMatch(/docker-compose\.factory\.yml\)$/); // file named
+	});
+});
+
+describe("Observability contract (F-014): refusals name file + line + rule", () => {
+	it("compose refusals carry a (file:line) suffix wherever the offending line is identifiable", () => {
+		const r = validateCompose(baseCompose('      - "0.0.0.0:18890:8888"'));
+		const loopback = r.find((x) => x.startsWith("AC1/INV-Z4-1: host publish must bind loopback"));
+		expect(loopback).toMatch(/\(deploy\/vps\/docker-compose\.factory\.yml:\d+\)$/);
+		const wrongMap = r.find((x) => x.startsWith("AC1: host publish must be exactly"));
+		expect(wrongMap).toMatch(/\(deploy\/vps\/docker-compose\.factory\.yml:\d+\)$/);
+	});
+
+	it("Caddy refusals carry a (file:line) suffix pointing at the offending row", () => {
+		const r = validateCaddy(
+			[
+				"factory.example.com {",
+				"	@memories {",
+				"		method POST",
+				"		path /v1/memories",
+				"	}",
+				"	handle @memories {",
+				"		reverse_proxy hindsight-qds:8888",
+				"	}",
+				"	handle {",
+				"		respond 404",
+				"	}",
+				"}",
+			].join("\n"),
+		);
+		const fwd = r.find((x) => x.startsWith("AC1/AC3/INV-Z4-1"));
+		expect(fwd).toMatch(/\(deploy\/vps\/Caddyfile\.factory\.allowlist:7\)$/); // the reverse_proxy row
+	});
+
+	it("env refusals carry a (file:line) suffix pointing at the offending key", () => {
+		const r = validateEnvTemplate("HINDSIGHT_BEARER_TOKEN=real-secret-value\n", "fixture.env", "http://hindsight-qds:8888");
+		expect(r[0]).toContain("literal credential value for HINDSIGHT_BEARER_TOKEN");
+		expect(r[0]).toContain("(fixture.env:1)");
+	});
+});
+
+// ── AC2/F-006: the fork pin file is the SOLE pin source ──────────────────────
+// The compose image must equal <QDS_FORK_CHECKOUT>/config/hindsight-version.txt
+// BYTE-EXACT — this is the check that catches a fork pin bump going stale in
+// docker-compose.factory.yml (a hardcoded digest agrees with a stale fork
+// forever). The fork checkout exists only on dev machines, so this test is
+// gated on the QDS_FORK_CHECKOUT env var (ABSOLUTE path to a local swarmclaw
+// fork checkout root). Unset ⇒ SKIPPED, and CI without the checkout stays
+// green. There is deliberately NO default path. To run it locally:
+//   QDS_FORK_CHECKOUT=/path/to/swarmclaw bun test tests/deploy/vps-profile.test.ts
+const FORK_CHECKOUT = process.env.QDS_FORK_CHECKOUT;
+
+describe("AC2: fork sole-pin-source byte-compare (F-006)", () => {
+	it.skipIf(!FORK_CHECKOUT)("compose image equals <QDS_FORK_CHECKOUT>/config/hindsight-version.txt byte-exact", () => {
+		const forkPin = readFileSync(join(FORK_CHECKOUT as string, "config", "hindsight-version.txt"), "utf8").trim();
+		const composeImage = (YAML.parse(COMPOSE) as Compose).services?.["hindsight-qds"]?.image;
+		expect(composeImage).toBe(forkPin);
+		// and the fork pin is still the pin the in-file fixtures assert
+		expect(forkPin).toBe(PIN);
 	});
 });

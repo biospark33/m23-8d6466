@@ -14,28 +14,19 @@
 #
 # Per invocation: exactly ONE provenance line to STDERR — `verb=<v>
 # driver_injected=<bool>` — never stdout (stdout is the verb's JSON contract).
-# stdin/stdout/stderr pass through untouched and `exec` hands the fork the
-# CLI's own exit code.
+# The line precedes every exit path below, so even an early refusal (unknown
+# verb, unresolvable checkout) logs it. stdin/stdout/stderr pass through
+# untouched and `exec` hands the fork the CLI's own exit code.
+#
+# Install discipline: the HOST copy is diff-verified against this repo copy on
+# every deploy (the same compose discipline); the registry drift alarms guard
+# the repo copy only.
 #
 # tests/deploy/fleet-wrapper.test.ts validates the two verb sets below against
 # src/fleet/verbs.ts listVerbs() — registry drift fails CI, so edit both
 # together or not at all.
 
 set -u
-
-# The wrapper lives at <checkout>/deploy/vps/, so the checkout is
-# dirname(dirname($0)) — computed with parameter expansion and cd/pwd builtins
-# only. The fork always passes an absolute path, so the strip below removes a
-# real directory component; the no-slash fallback is for a bare relative name.
-case $0 in
-  */*) here=${0%/*} ;;
-  *) here=. ;;
-esac
-here=$(CDPATH= cd "$here" && pwd) || exit 1
-# Up two levels: <checkout>/deploy/vps → <checkout>/deploy → <checkout>.
-repo_root=${here%/*}
-repo_root=${repo_root%/*}
-[ -n "$repo_root" ] || exit 1
 
 # The ten verbs on which --driver is REQUIRED (assertDriverChosen refuses
 # without it as exit 2): the wrapper satisfies the requirement on the fork's
@@ -62,6 +53,34 @@ if [ "$known" = false ]; then
   exit 2
 fi
 
+# The wrapper lives at <checkout>/deploy/vps/, so the checkout is
+# dirname(dirname($0)) — computed with parameter expansion and cd/pwd builtins
+# only. $0 must be ABSOLUTE — the fork's execFile contract always passes one —
+# and a relative name is refused (exit 2) rather than resolved against the
+# caller's cwd, where a bare-name invocation would silently adopt a wrong
+# checkout; pwd -P keeps a symlinked install from doing the same.
+case $0 in
+  /*) here=${0%/*} ;;
+  *) printf 'fleet-wrapper: $0 must be an absolute path (the fork execFile contract passes one); got: %s\n' "$0" >&2
+     exit 2 ;;
+esac
+here=$(CDPATH= cd "$here" && pwd -P) || exit 1
+# Up two levels: <checkout>/deploy/vps → <checkout>/deploy → <checkout>.
+repo_root=${here%/*}
+repo_root=${repo_root%/*}
+[ -n "$repo_root" ] || exit 1
+# Diagnose the expected entrypoint before exec — bun's bare module-not-found
+# says nothing about where the wrapper looked.
+[ -f "$repo_root/scripts/fleet.ts" ] ||
+  { printf 'fleet-wrapper: resolved checkout %s has no scripts/fleet.ts — the install is wrong or the host copy diverged from the repo copy\n' "$repo_root" >&2; exit 1; }
+
 [ "$inject" = true ] && set -- "$@" --driver exedev
+
+# `command` is a POSIX builtin — safe to probe a stripped PATH where no
+# external tool resolves.
+command -v bun >/dev/null 2>&1 || {
+  printf 'fleet-wrapper: bun not on PATH (fork env allowlist passes PATH; install bun and ensure the fork child PATH includes it, runbook §2/§6)\n' >&2
+  exit 127
+}
 
 exec bun "$repo_root/scripts/fleet.ts" "$@"

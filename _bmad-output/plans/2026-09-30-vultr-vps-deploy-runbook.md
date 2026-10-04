@@ -159,3 +159,43 @@ pairing" gate (`.unlazy/df3-6b/GATES.md`) — the two share a label, nothing els
 | --- | --- | --- |
 | m2-gateway image publish (GHCR) | UNOWNED | A G9 analog: M2.1 is dev-first/mock-tier per DD-26(1) and ships no GHCR publish; ops register §5 row 5 covers the exedev image only. Until the image is published, the `m2-gateway` compose service shows its documented awaiting-image state and smoke evidence records it `{"status":"awaiting-image"}` — never green-by-default. |
 | factory-stack data backup policy | UNOWNED | G8's backup is the zeropoint swarmclaw stack's; no story or register entry covers factory data backup. |
+
+**Round-1 review additions (2026-10-03, code-review round 1; findings F-001, F-002, F-022, F-023).**
+
+**§7 smoke correction — bare `status` exits 2.** §7's `bun scripts/fleet.ts status` line predates the
+--driver mandate: `assertDriverChosen` refuses every driver verb without one (`status requires
+--driver <name>`, exit 2 — `scripts/fleet.ts:392`). On the box, invoke through the wrapper
+(`$SWARMCLAW_FACTORY_FLEET_CLI status` — the wrapper appends the driver) or append it by hand:
+`bun scripts/fleet.ts status --driver exedev`.
+
+**§6.4 trap — the bank provisioner's built-in default is the TENANT base URL.**
+`scripts/provision-hindsight-banks.ts` reaches Hindsight through `src/hindsight/client.ts`, whose
+fallback default is `DEFAULT_BASE_URL = http://127.0.0.1:8888` (`src/hindsight/client.ts:49`) — the
+shared-sidecar/tenant origin, NOT the factory instance. §6.4 MUST export
+`HINDSIGHT_BASE_URL=http://127.0.0.1:18890` (the value from `deploy/vps/env/hindsight-qds.env`)
+before running the provisioner, or it provisions banks against the wrong (or no) instance.
+
+**bun PATH — §2 installs bun under the installer's HOME.** §2's `curl … | bash` installer lands
+bun in the installing user's HOME (root install → `/root/.bun/bin/bun`). BOTH the §6 deploy user
+and the fork's exec child need bun reachable: the fork child runs under a least-privilege env
+allowlist (PATH/HOME/TMPDIR/LANG — nothing else is inherited), so a HOME-relative bun invisible to
+its PATH fails as a bare exit-127. Install bun for the deploy user (or symlink the binary into a
+system PATH dir such as `/usr/local/bin`), and make sure the fork service's PATH includes it. G7
+verify ritual: run `$SWARMCLAW_FACTORY_FLEET_CLI status` under a stripped env — as the fork would
+see it — BEFORE depending on the wrapper from a real leg.
+
+**Env-file sourcing rule.** Factory HOST-side legs (fleet CLI, bank provisioner) read
+`HINDSIGHT_BASE_URL` from the factory checkout's `.env` — the 18890 origin. COMPOSE-side consumers
+(`hindsight-qds` itself, `m2-gateway`) take the compose `environment:` value —
+`http://hindsight-qds:8888`. The two files in `deploy/vps/env/` correspond to these two sides
+(`factory.env.example` → factory checkout `.env`; `hindsight-qds.env.example` → compose
+`env_file`) and must never be swapped.
+
+**Inherited /mcp exposure on 18890.** The dedicated instance inherits Hindsight's unauthenticated
+`/mcp` surface on loopback 18890 exactly as the tenant stack does on 18889 (§0) — any box-local
+process can reach it; there is no per-instance auth. Containment is box access (§1 firewall +
+G6/G7); the standing fix is the M2 gateway's authz (M2.1), not a firewall change.
+
+**§7 smoke count — "all 7 services healthy" counts the zeropoint stack only.** With the factory
+stack up, the count is 9: the §7 seven plus `hindsight-qds` and `m2-gateway`, and `m2-gateway`
+records `awaiting-image` until its image is published (see the ops dependency register above).

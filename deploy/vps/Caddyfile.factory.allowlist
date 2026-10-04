@@ -6,13 +6,21 @@
 # vultr-deploy template's deploy/control-plane/Caddyfile — the box's one
 # front door, already terminating TLS on 443 and serving ACME over 80) on
 # VPS day, then reloads:
-#   caddy reload --config /etc/caddy/Caddyfile   (or the host's reload path)
+#   caddy validate --config /etc/caddy/Caddyfile   (or the host's config path)
+#   caddy reload --config /etc/caddy/Caddyfile     — validate BEFORE reload, ALWAYS
 # Never install this file as a standalone Caddyfile; never run a second
 # Caddy container. The firewall stays runbook §1's 22/80/443-only.
 #
 # Replace <factory.example.com> with the real, DNS-resolvable hostname
 # BEFORE splicing. ACME issuance/renewal is the existing front door's
 # HTTP-01 over port 80 — unchanged; this fragment adds no listener.
+#
+# If the real hostname ALREADY appears as a site address in the live
+# Caddyfile, do NOT add this as a second block — splice the ROWS (the
+# @recall matcher and both handles) into that existing block instead:
+# duplicate site addresses refuse `caddy reload`, and a later restart with
+# the duplicate still on disk downs the box's only front door. `caddy
+# validate` catches the reload case; only the restart makes it fatal.
 #
 # Idiom (copied verbatim from the template's E09-GAP-01b/01c/01d
 # ops-token-gated precedent): named matchers `@name { method …, path … }` +
