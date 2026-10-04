@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (M-arc, story 1 of 4 — the memory ladder's substrate; the story whose legs carry the P0.5/P0.9 closure evidence)
-**Status:** in-progress — dev-half complete (2026-10-04: six leg drivers + adds-only client/CLI changes + closure-plan annotation + 3 bmad-code-review rounds; see Review Findings + closeout record below). Open by design: VPS-day live legs (AC2/AC5/AC6/AC7 evidence runs), the measurement-gated `schemas.ts` conformance amendment (C8), P0.5 legs (C7) — all awaiting runbook G1–G7 operator GO (charter §6).
+**Status:** done — dev-half merged (PR #407, merge commit 9f3caca5, 2026-10-04: six leg drivers + adds-only client/CLI changes + closure-plan annotation + 3 bmad-code-review rounds, 74 findings triaged / 64 patched; see Review Findings + closeout record below). The operator-gated remainder (VPS-day live legs, measurement-gated `schemas.ts` amendment, P0.5 legs, Z4-region compose item) is tracked in issue **#408** — the story closes with the substrate built and verified mock-side, the live evidence pending GO per charter §6.
 
 > **Operator-gated story.** Charter §6: "Ops stays operator-gated — zero agent spend on re-pin / VPS / G5 until explicit GO." Every leg that touches the box runs only inside the sanctioned VPS-day window, after the runbook's `[OPERATOR-GO]` gates. The story's dev-side work (leg drivers in mock mode, the plan annotation) is not gated and lands first.
 
@@ -127,33 +127,33 @@ The factory KG becomes a first-class substrate: Z4's compose fires the dedicated
 
 **Verdict: 30 triaged findings — 27 PATCH (all applied this round), 1 DEFER, 2 DISMISS/recorded.** Full detail: `_bmad-output/reviews/m1-1-round1/reports/{blind-hunter,edge-case-hunter,acceptance-auditor}.md`.
 
-- [ ] [Review][Patch] F-001 forbiddenOrigin suffix-match bypassed by trailing slash/path/whitespace [scripts/p0-9/leg-lib.ts]
-- [ ] [Review][Patch] F-002 three drivers construct HindsightClient without the trap-checked baseUrl [scripts/p0-9/hindsight-live.ts]
-- [ ] [Review][Patch] F-003 CLI base-URL guard misses explicitly-set trap origins (127.0.0.1:8888) [scripts/provision-hindsight-banks.ts]
-- [ ] [Review][Patch] F-004 qds- prefix guard absent from all bank-creating drivers [scripts/p0-9/provision-and-import.ts]
-- [ ] [Review][Patch] F-005 leg lock ≠ provisioner lock (leg-vs-CLI interleaving) + 300s staleness overrun [scripts/p0-9/provision-and-import.ts]
-- [ ] [Review][Patch] F-006 negative-probes extractBankIds weaker than siblings — vacuously-green zero-banks proof [scripts/p0-9/negative-probes.ts]
-- [ ] [Review][Patch] F-007 auth-retired probe bank never created + refusal-class conflation can fake dangerRetired [scripts/p0-9/auth-retired-check.ts]
-- [ ] [Review][Patch] F-008 hermetic all-skipped auth run exits 0 with no measured-count signal [scripts/p0-9/auth-retired-check.ts]
-- [ ] [Review][Patch] F-009 mock-in-closure-dir refusal exact-path-only (subdirs escape) [scripts/p0-9/leg-lib.ts]
-- [ ] [Review][Patch] F-010 partial-mint memory residue unrecorded on rerun-path failure [scripts/p0-9/provision-and-import.ts]
-- [ ] [Review][Patch] F-011 driver mint drops the importer's per-entry 100KB guard [scripts/p0-9/provision-and-import.ts]
-- [ ] [Review][Patch] F-012 expertiseDir cwd-relative — wrong cwd = green leg, hollow mint [scripts/p0-9/provision-and-import.ts]
-- [ ] [Review][Patch] F-013 CLI guard accepts whitespace-only base URL; checked value discarded [scripts/provision-hindsight-banks.ts]
-- [ ] [Review][Patch] F-014 parseArgs mutates caller argv in place [scripts/provision-hindsight-banks.ts]
-- [ ] [Review][Patch] F-015 deleteBank ignores success field; string-'0' count falls through [src/hindsight/client.ts]
-- [ ] [Review][Patch] F-016 verify fetch/env restore hygiene in client/provision tests [tests/hindsight/client.test.ts]
-- [ ] [Review][Patch] F-017 test writes live-stamped fixture into real closure dir [tests/p0-9/legs.test.ts]
-- [ ] [Review][Patch] F-018 duplicated helper copies with visible drift (extractBankIds/LIVE_EVIDENCE_DIR/safeRepoBase/makeRecorder/rand6) [scripts/p0-9/*]
-- [ ] [Review][Patch] F-019 maskTail covers three credential shapes only [scripts/p0-9/leg-lib.ts]
-- [ ] [Review][Patch] F-021 probe-down host:port literal violates AC1 letter [scripts/p0-9/negative-probes.ts]
-- [ ] [Review][Patch] F-022 shape-check prereq machine-enforced only on round-trip leg [scripts/p0-9/leg-lib.ts]
-- [ ] [Review][Patch] F-024 three drivers record stderrTail:"" despite emitting legLog lines [scripts/p0-9/round-trip-dedicated.ts]
-- [ ] [Review][Patch] F-025 AC3 letter: bare CLI run-twice mints qds-factory-2 junk (rerun-aware roster helper needed CLI-side) [scripts/provision-hindsight-banks.ts]
-- [ ] [Review][Patch] F-026 idempotency-rerun block lacks the AC3 rollback fixture [tests/p0-9/legs.test.ts]
-- [ ] [Review][Patch] F-028 raw probe bodies stored unmasked [scripts/p0-9/hindsight-live.ts]
-- [ ] [Review][Patch] F-029 deps.baseUrl:"" accepted by three drivers [scripts/p0-9/round-trip-dedicated.ts]
-- [ ] [Review][Patch] F-030 evidence-write failure after instance mutation loses all outcomes [scripts/p0-9/leg-lib.ts]
+- [x] [Review][Patch] F-001 forbiddenOrigin suffix-match bypassed by trailing slash/path/whitespace [scripts/p0-9/leg-lib.ts]
+- [x] [Review][Patch] F-002 three drivers construct HindsightClient without the trap-checked baseUrl [scripts/p0-9/hindsight-live.ts]
+- [x] [Review][Patch] F-003 CLI base-URL guard misses explicitly-set trap origins (127.0.0.1:8888) [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] F-004 qds- prefix guard absent from all bank-creating drivers [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] F-005 leg lock ≠ provisioner lock (leg-vs-CLI interleaving) + 300s staleness overrun [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] F-006 negative-probes extractBankIds weaker than siblings — vacuously-green zero-banks proof [scripts/p0-9/negative-probes.ts]
+- [x] [Review][Patch] F-007 auth-retired probe bank never created + refusal-class conflation can fake dangerRetired [scripts/p0-9/auth-retired-check.ts]
+- [x] [Review][Patch] F-008 hermetic all-skipped auth run exits 0 with no measured-count signal [scripts/p0-9/auth-retired-check.ts]
+- [x] [Review][Patch] F-009 mock-in-closure-dir refusal exact-path-only (subdirs escape) [scripts/p0-9/leg-lib.ts]
+- [x] [Review][Patch] F-010 partial-mint memory residue unrecorded on rerun-path failure [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] F-011 driver mint drops the importer's per-entry 100KB guard [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] F-012 expertiseDir cwd-relative — wrong cwd = green leg, hollow mint [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] F-013 CLI guard accepts whitespace-only base URL; checked value discarded [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] F-014 parseArgs mutates caller argv in place [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] F-015 deleteBank ignores success field; string-'0' count falls through [src/hindsight/client.ts]
+- [x] [Review][Patch] F-016 verify fetch/env restore hygiene in client/provision tests [tests/hindsight/client.test.ts]
+- [x] [Review][Patch] F-017 test writes live-stamped fixture into real closure dir [tests/p0-9/legs.test.ts]
+- [x] [Review][Patch] F-018 duplicated helper copies with visible drift (extractBankIds/LIVE_EVIDENCE_DIR/safeRepoBase/makeRecorder/rand6) [scripts/p0-9/*]
+- [x] [Review][Patch] F-019 maskTail covers three credential shapes only [scripts/p0-9/leg-lib.ts]
+- [x] [Review][Patch] F-021 probe-down host:port literal violates AC1 letter [scripts/p0-9/negative-probes.ts]
+- [x] [Review][Patch] F-022 shape-check prereq machine-enforced only on round-trip leg [scripts/p0-9/leg-lib.ts]
+- [x] [Review][Patch] F-024 three drivers record stderrTail:"" despite emitting legLog lines [scripts/p0-9/round-trip-dedicated.ts]
+- [x] [Review][Patch] F-025 AC3 letter: bare CLI run-twice mints qds-factory-2 junk (rerun-aware roster helper needed CLI-side) [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] F-026 idempotency-rerun block lacks the AC3 rollback fixture [tests/p0-9/legs.test.ts]
+- [x] [Review][Patch] F-028 raw probe bodies stored unmasked [scripts/p0-9/hindsight-live.ts]
+- [x] [Review][Patch] F-029 deps.baseUrl:"" accepted by three drivers [scripts/p0-9/round-trip-dedicated.ts]
+- [x] [Review][Patch] F-030 evidence-write failure after instance mutation loses all outcomes [scripts/p0-9/leg-lib.ts]
 - [x] [Review][Defer] F-027 document_id upsert semantics unverified on 0.10.0 — one live retain-twice probe on VPS day [scripts/p0-9/provision-and-import.ts] — deferred, on the C15 VPS-day checklist
 - [x] [Review][Defer] F-020 rerun path treats same-named base bank as ours — recorded assumption (mode field) + F-004 narrows the id space [scripts/p0-9/provision-and-import.ts] — dismissed after triage
 - [x] [Review][Defer] F-023 base_url_required guard exceeds C10's letter — recorded as contract row C17 + deviation record [scripts/provision-hindsight-banks.ts] — dismissed after triage
