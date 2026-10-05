@@ -23,6 +23,7 @@ Expected host keys (check these on first connect):
 
 1. **Both private keys present, mode 0600:** `~/.ssh/solstice_control_plane` and `~/.ssh/solstice_fleet`.<br />
    If either is missing, both are stored as **SSH-key items** in Proton Pass vault **Operating**. The item titles are the fingerprints listed in §1. Restore them from there, or serve them with `pass-cli ssh-agent`.
+   If you serve them with `pass-cli ssh-agent` instead of restoring the private-key files, the matching **public** key must exist as `~/.ssh/solstice_control_plane.pub` and `~/.ssh/solstice_fleet.pub` (public keys are not secret). With `IdentitiesOnly yes`, ssh offers an agent key only when it matches a configured identity. When the private-key file is absent, ssh reads that identity from the `.pub` file beside it. If neither file is present, the agent key is never offered and authentication fails.
 2. **`ssh` with ProxyJump support:** OpenSSH ≥ 7.3 (stock macOS is fine).
 3. **Vultr API access (optional; only for instance and firewall inspection):** Proton Pass → Operating → **"Vultr — API Keys"** → field `VULTR_API_KEY`.<br />
    The other field, `VULTR_API_KEY_QDS`, is IP-allowlisted and returns `401 Unauthorized IP address` from this workstation.<br />
