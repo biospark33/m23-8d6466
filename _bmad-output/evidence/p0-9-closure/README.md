@@ -16,3 +16,12 @@ The driver fix (probe a supported endpoint and treat a 410 as inconclusive) belo
 ## document-id-retain-twice (`…-document-id-retain-twice.json`)
 
 The record sets `upsertObserved: true`, which overstates what was measured. Both retains sent the same `document_id` with **identical content**. The second retain used 0 tokens, and the document and node counts stayed at 1. That shows an identical re-retain is a no-op that creates no duplicate. It does not show that a retain with **changed** content updates the existing document. Read this record as a **no-duplicate check**. Proving the update path needs a second retain with different content and a read-back. That probe belongs to work item 2.
+
+## negative-probes (`…-negative-probes-pisa2e.json`)
+
+Two of the recorded refusals are mislabelled:
+
+- `recall-missing-bank` is recorded as `http_502`, but Hindsight answered **HTTP 200** with empty results. The client's `RecallResponseSchema` then rejected that body because `durationMs` is missing, and `requestJSON` in `src/hindsight/client.ts` rethrows that local schema-validation failure as `HindsightHttpError(502, …)`. Read it as **local schema validation**. It is not a server refusal. It is the same 0.10.0 response drift that fails round-trip.
+- `missing-bank-profile-read` (`http_410`) hit the removed bank-profile endpoint, like the auth-retired probes above. It is inconclusive.
+
+Fixing the driver (a separate classification for schema-validation failures and a supported endpoint for the profile probe) belongs to work item 2 in issue #408.

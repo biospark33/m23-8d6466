@@ -1003,6 +1003,37 @@ describe("hindsight-live", () => {
   );
 
   test.skipIf(!hasDriver("hindsight-live"))(
+    "health probe requires exactly 200 — another 2xx (204) is not the runbook's healthy answer",
+    async () => {
+      const runLeg = await loadDriver("hindsight-live");
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: (c) => c.method === "GET" && new URL(c.url).pathname === "/health",
+            respond: () => new Response(null, { status: 204 }),
+          },
+        ],
+        [],
+      );
+      const hadFork = "QDS_FORK_CHECKOUT" in process.env;
+      const prevFork = process.env.QDS_FORK_CHECKOUT;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_FORK_CHECKOUT;
+      try {
+        const ev = await runLeg({ mode: "live", baseUrl: "http://127.0.0.1:18890", fetchImpl, outDir: tmpDir });
+        assertEvidenceContract(ev);
+        expect(ev.steps.find((s) => s.step === "health-probe")?.outcome).toBe("failed-http-204");
+      } finally {
+        if (hadFork) process.env.QDS_FORK_CHECKOUT = prevFork;
+        else {
+          // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+          delete process.env.QDS_FORK_CHECKOUT;
+        }
+      }
+    },
+  );
+
+  test.skipIf(!hasDriver("hindsight-live"))(
     "RAW retain request conforms to 0.10.0 MemoryItem: metadata is string-valued, tags ride at item level",
     async () => {
       const runLeg = await loadDriver("hindsight-live");

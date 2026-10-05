@@ -433,11 +433,12 @@ export async function runLeg(deps: LegDeps): Promise<LegEvidence> {
         ...(auth !== undefined ? { headers: { Authorization: auth } } : {}),
       });
       const body = await res.text();
-      rec("health-probe", res.ok ? "ok" : `failed-http-${res.status}`, {
+      // Exactly 200, matching the runbook's first-boot assert; another 2xx is not healthy.
+      healthOk = res.status === 200;
+      rec("health-probe", healthOk ? "ok" : `failed-http-${res.status}`, {
         durationMs: Date.now() - t0,
         detail: { status: res.status, bodyTail: maskTail(body, { maxLen: 300 }) },
       });
-      healthOk = res.ok;
     } catch (e) {
       rec("health-probe", isAbort(e) ? "failed-timeout" : "failed-transport", {
         detail: (e as Error).message,
