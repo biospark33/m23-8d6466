@@ -86,7 +86,7 @@ These items are needed **beyond a shell** before the M1.1 legs can fire on this 
 | 3 | `HINDSIGHT_API_LLM_API_KEY` (OpenRouter; spends on first-boot model init and on every retain) | Proton Pass → Operating → **"OpenRouter — API Keys"** | G3 |
 | 4 | Read access from the box to `Quantum-Digital-Solutions/QDS-Factory` for the clone: a deploy key or a short-lived token over stdin, never env or argv | GitHub (account with repo read access) | G7 |
 | 5 | `bun` installed system-wide (`/usr/local/bin`), not only under `/root` (see the runbook Z4 "bun PATH" note) | Box setup | §2 |
-| 6 | Decision on the front door: nginx location rows instead of the Caddy splice, or `caddyRoute: "deferred-to-M2.3"` in evidence | Operator | Z4 AC8 |
+| 6 | Decision on the front door: nginx location rows instead of the Caddy splice, or no front-door route at all. Either way, fired-leg evidence must still record `caddyRoute: "deferred-to-M2.3"`, because `"spliced"` means the Caddyfile splice and nothing was spliced. | Operator | Z4 AC8 |
 | 7 | Worst-case spend acknowledged: box already running (no new hours), plus OpenRouter tokens for model init and the 8 KB Mulch corpus × 3 banks | Operator | handoff hard gate 3 |
 
 ## 7. Hygiene rules
