@@ -1,0 +1,160 @@
+{
+  "leg": "p0-9-provision-and-import",
+  "mode": "live",
+  "ok": false,
+  "outcome": "leg-failure",
+  "steps": [
+    {
+      "step": "prereq",
+      "outcome": "ok",
+      "detail": {
+        "file": "2026-10-04T20-17-45-645Z-p0-9-hindsight-live-lbghxg.json"
+      }
+    },
+    {
+      "step": "snapshot-pre",
+      "outcome": "ok",
+      "detail": {
+        "count": 0
+      }
+    },
+    {
+      "step": "provision",
+      "outcome": "ok",
+      "durationMs": 33,
+      "detail": {
+        "banks": [
+          {
+            "bankId": "qds-factory",
+            "status": "created"
+          },
+          {
+            "bankId": "qds-factory-dev-meta",
+            "status": "created"
+          },
+          {
+            "bankId": "qds-collective",
+            "status": "created"
+          }
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "resolved-fresh"
+      }
+    },
+    {
+      "step": "snapshot-post",
+      "outcome": "ok",
+      "detail": {
+        "count": 3
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "failed",
+      "detail": {
+        "expertiseDir": "/opt/qds-factory/checkout/.mulch/expertise",
+        "retained": 0
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "failed",
+      "detail": {
+        "expertiseDir": "/opt/qds-factory/checkout/.mulch/expertise",
+        "retained": 0
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "failed",
+      "detail": {
+        "expertiseDir": "/opt/qds-factory/checkout/.mulch/expertise",
+        "retained": 0
+      }
+    },
+    {
+      "step": "compensate-delete",
+      "outcome": "already-gone"
+    },
+    {
+      "step": "compensate-delete",
+      "outcome": "already-gone"
+    },
+    {
+      "step": "compensate-delete",
+      "outcome": "already-gone"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"snapshot-pre\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"provision\",\"outcome\":\"ok\",\"durationMs\":33}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"snapshot-post\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"failed\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"failed\",\"bankId\":\"qds-factory-dev-meta\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"failed\",\"bankId\":\"qds-collective\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"compensate-delete\",\"outcome\":\"already-gone\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"compensate-delete\",\"outcome\":\"already-gone\",\"bankId\":\"qds-factory-dev-meta\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"compensate-delete\",\"outcome\":\"already-gone\",\"bankId\":\"qds-collective\"}",
+  "writtenAt": "2026-10-04T20:17:51.546Z",
+  "createdInAttempt": [
+    "qds-factory",
+    "qds-factory-dev-meta",
+    "qds-collective"
+  ],
+  "unclaimedCreated": [],
+  "residue": [],
+  "deleteOutcomes": {
+    "qds-factory": "already-gone",
+    "qds-factory-dev-meta": "already-gone",
+    "qds-collective": "already-gone"
+  },
+  "mintRecord": {
+    "qds-factory": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    },
+    "qds-factory-dev-meta": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    },
+    "qds-collective": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    }
+  },
+  "repoSlug": "QDS-Factory",
+  "mintFailures": [
+    "qds-factory mulch-5f5e31c6ff8ada4d: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"sparc\",\"methodology\",\"tdd\"]}]}",
+    "qds-factory mulch-4e3dee5b901fd88e: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"swarmclaw\",\"mcp\",\"bridge\"]}]}",
+    "qds-factory mulch-62743a4396d30fd1: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"trunk-based\",\"branching\",\"git\"]}]}",
+    "qds-factory mulch-f1b8dc3aec89f96c: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"bun\",\"typescript\",\"zod\",\"biome\"]}]}",
+    "qds-factory mulch-04acf7ccc921ae65: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"hindsight\",\"memory\",\"banks\"]}]}",
+    "qds-factory mulch-8ff7a752dd1c326b: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"mcp\",\"tool-bridge\",\"retry\"]}]}",
+    "qds-factory mulch-5b85755bfd6842d6: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"maskenv\",\"redaction\",\"security\"]}]}",
+    "qds-factory mulch-631f98ad36517bec: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"npx\",\"allowlist\",\"command-validation\"]}]}",
+    "qds-factory-dev-meta mulch-5f5e31c6ff8ada4d: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"sparc\",\"methodology\",\"tdd\"]}]}",
+    "qds-factory-dev-meta mulch-4e3dee5b901fd88e: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"swarmclaw\",\"mcp\",\"bridge\"]}]}",
+    "qds-factory-dev-meta mulch-62743a4396d30fd1: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"trunk-based\",\"branching\",\"git\"]}]}",
+    "qds-factory-dev-meta mulch-f1b8dc3aec89f96c: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"bun\",\"typescript\",\"zod\",\"biome\"]}]}",
+    "qds-factory-dev-meta mulch-04acf7ccc921ae65: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"hindsight\",\"memory\",\"banks\"]}]}",
+    "qds-factory-dev-meta mulch-8ff7a752dd1c326b: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"mcp\",\"tool-bridge\",\"retry\"]}]}",
+    "qds-factory-dev-meta mulch-5b85755bfd6842d6: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"maskenv\",\"redaction\",\"security\"]}]}",
+    "qds-factory-dev-meta mulch-631f98ad36517bec: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"npx\",\"allowlist\",\"command-validation\"]}]}",
+    "qds-collective mulch-5f5e31c6ff8ada4d: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"sparc\",\"methodology\",\"tdd\"]}]}",
+    "qds-collective mulch-4e3dee5b901fd88e: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"swarmclaw\",\"mcp\",\"bridge\"]}]}",
+    "qds-collective mulch-62743a4396d30fd1: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"trunk-based\",\"branching\",\"git\"]}]}",
+    "qds-collective mulch-f1b8dc3aec89f96c: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"bun\",\"typescript\",\"zod\",\"biome\"]}]}",
+    "qds-collective mulch-04acf7ccc921ae65: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"hindsight\",\"memory\",\"banks\"]}]}",
+    "qds-collective mulch-8ff7a752dd1c326b: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"mcp\",\"tool-bridge\",\"retry\"]}]}",
+    "qds-collective mulch-5b85755bfd6842d6: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"maskenv\",\"redaction\",\"security\"]}]}",
+    "qds-collective mulch-631f98ad36517bec: HTTP 422: {\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"npx\",\"allowlist\",\"command-validation\"]}]}"
+  ],
+  "memoryResidue": {
+    "qds-factory": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    },
+    "qds-factory-dev-meta": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    },
+    "qds-collective": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    }
+  }
+}

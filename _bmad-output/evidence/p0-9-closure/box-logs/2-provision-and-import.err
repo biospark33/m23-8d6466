@@ -1,0 +1,11 @@
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"prereq","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"snapshot-pre","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"provision","outcome":"ok","durationMs":33}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"snapshot-post","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"mulch-import","outcome":"failed","bankId":"qds-factory"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"mulch-import","outcome":"failed","bankId":"qds-factory-dev-meta"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"mulch-import","outcome":"failed","bankId":"qds-collective"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"compensate-delete","outcome":"already-gone","bankId":"qds-factory"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"compensate-delete","outcome":"already-gone","bankId":"qds-factory-dev-meta"}
+{"event":"p0-9-leg","leg":"p0-9-provision-and-import","step":"compensate-delete","outcome":"already-gone","bankId":"qds-collective"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-17-51-546Z-p0-9-provision-and-import-fzncfc.json

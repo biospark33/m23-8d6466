@@ -1,0 +1,98 @@
+{
+  "leg": "p0-9-hindsight-live",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass",
+  "steps": [
+    {
+      "step": "health-probe",
+      "outcome": "ok",
+      "durationMs": 4,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"status\":\"healthy\",\"database\":\"connected\",\"db_acquire_ms\":1.1,\"db_pool_waiting\":0,\"db_pool_in_use\":0,\"db_pool_max\":100,\"db_pool_idle\":5}"
+      }
+    },
+    {
+      "step": "digest-identity",
+      "outcome": "ok",
+      "detail": {
+        "pin": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+        "running": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+        "container": "qds-factory-hindsight-qds-1",
+        "matched": true
+      }
+    },
+    {
+      "step": "probe-create",
+      "outcome": "ok"
+    },
+    {
+      "step": "retain",
+      "outcome": "ok",
+      "durationMs": 4697,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"success\":true,\"bank_id\":\"qds-probe-shape-1791145060848\",\"items_count\":1,\"async\":false,\"operation_id\":null,\"operation_ids\":null,\"usage\":{\"input_tokens\":3394,\"output_tokens\":255,\"total_tokens\":3649,\"c..."
+      }
+    },
+    {
+      "step": "recall",
+      "outcome": "ok",
+      "durationMs": 69,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"results\":[{\"id\":\"cdc5e2a5-9f83-44e0-90a4-fe2497197927\",\"text\":\"Observed p0-9 hindsight-live disposable shape probe for raw unparsed path under story M1.1 AC1. | When: Sunday, October 04, 2026\",\"type..."
+      }
+    },
+    {
+      "step": "probe-cleanup",
+      "outcome": "deleted"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"health-probe\",\"outcome\":\"ok\",\"durationMs\":4}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"digest-identity\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"probe-create\",\"outcome\":\"ok\",\"bankId\":\"qds-probe-shape-1791145060848\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"retain\",\"outcome\":\"ok\",\"bankId\":\"qds-probe-shape-1791145060848\",\"durationMs\":4697}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"recall\",\"outcome\":\"ok\",\"bankId\":\"qds-probe-shape-1791145060848\",\"durationMs\":69}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"probe-cleanup\",\"outcome\":\"deleted\",\"bankId\":\"qds-probe-shape-1791145060848\"}",
+  "writtenAt": "2026-10-04T20:17:45.645Z",
+  "pinDigest": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+  "runningDigest": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+  "probeBankId": "qds-probe-shape-1791145060848",
+  "rawRetainBody": "{\"success\":true,\"bank_id\":\"qds-probe-shape-1791145060848\",\"items_count\":1,\"async\":false,\"operation_id\":null,\"operation_ids\":null,\"usage\":{\"input_tokens\":3394,\"output_tokens\":255,\"total_tokens\":3649,\"cached_tokens\":0,\"thoughts_tokens\":0}}",
+  "rawRecallBody": "{\"results\":[{\"id\":\"cdc5e2a5-9f83-44e0-90a4-fe2497197927\",\"text\":\"Observed p0-9 hindsight-live disposable shape probe for raw unparsed path under story M1.1 AC1. | When: Sunday, October 04, 2026\",\"type\":\"world\",\"entities\":[\"story M1.1 AC1\",\"shape probe\",\"hindsight-live\"],\"context\":\"\",\"occurred_start\":\"2026-10-04T20:17:40.889311+00:00\",\"occurred_end\":\"2026-10-04T20:17:40.889311+00:00\",\"mentioned_at\":\"2026-10-04T20:17:40.889311+00:00\",\"document_id\":\"7bba5e62-956c-4087-af77-2b390604004b\",\"metadata\":{\"kind\":\"observation\",\"source\":\"manual\"},\"chunk_id\":\"qds-probe-shape-1791145060848_7bba5e62-956c-4087-af77-2b390604004b_0\",\"tags\":[\"p0-9-shape-probe\"],\"source_fact_ids\":null,\"scores\":{\"final\":1.0999999699841387,\"reranker\":null,\"semantic\":0.7551108148628001,\"keyword\":0.5},\"attachments\":null}],\"trace\":null,\"entities\":{\"story M1.1 AC1\":{\"entity_id\":\"fd81e7db-dcf0-46a6-8265-74978f9f0331\",\"canonical_name\":\"story M1.1 AC1\",\"observations\":[]},\"shape probe\":{\"entity_id\":\"81a589a1-3c9b-445b-bee6-f7c060413ac8\",\"canonical_name\":\"shape probe\",\"observations\":[]},\"hindsight-live\":{\"entity_id\":\"fe09c86d-f98c-4937-b16b-55aa12bf435c\",\"canonical_name\":\"hindsight-live\",\"observations\":[]}},\"chunks\":null,\"source_facts\":null,\"source_facts_truncated\":null}",
+  "hasRetainMemoryId": false,
+  "retainTopLevelKeys": [
+    "success",
+    "bank_id",
+    "items_count",
+    "async",
+    "operation_id",
+    "operation_ids",
+    "usage"
+  ],
+  "recallTopLevelKeys": [
+    "results",
+    "trace",
+    "entities",
+    "chunks",
+    "source_facts",
+    "source_facts_truncated"
+  ],
+  "recallResultKeys": [
+    "id",
+    "text",
+    "type",
+    "entities",
+    "context",
+    "occurred_start",
+    "occurred_end",
+    "mentioned_at",
+    "document_id",
+    "metadata",
+    "chunk_id",
+    "tags",
+    "source_fact_ids",
+    "scores",
+    "attachments"
+  ]
+}

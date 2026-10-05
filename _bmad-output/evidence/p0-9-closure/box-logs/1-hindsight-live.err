@@ -1,0 +1,4 @@
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"health-probe","outcome":"failed-http-404","durationMs":9}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"digest-identity","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"shape-probe","outcome":"skipped-health-down"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-14-11-942Z-p0-9-hindsight-live-h0yxjv.json

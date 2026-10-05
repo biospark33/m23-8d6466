@@ -1,0 +1,156 @@
+{
+  "leg": "p0-9-idempotency-rerun",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass",
+  "steps": [
+    {
+      "step": "prereq",
+      "outcome": "ok",
+      "detail": {
+        "file": "2026-10-04T20-17-45-645Z-p0-9-hindsight-live-lbghxg.json"
+      }
+    },
+    {
+      "step": "snapshot-pre",
+      "outcome": "ok",
+      "detail": {
+        "count": 1
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 4,
+      "detail": {
+        "bankId": "qds-factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 10,
+      "detail": {
+        "bankId": "qds-factory-dev-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 15,
+      "detail": {
+        "bankId": "qds-collective",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 15,
+      "detail": {
+        "roster": [
+          "qds-factory",
+          "qds-factory-dev-meta",
+          "qds-collective"
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "snapshot-post",
+      "outcome": "ok",
+      "detail": {
+        "count": 3
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 3,
+      "detail": {
+        "bankId": "qds-factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 5,
+      "detail": {
+        "bankId": "qds-factory-dev-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 8,
+      "detail": {
+        "bankId": "qds-collective",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 8,
+      "detail": {
+        "roster": [
+          "qds-factory",
+          "qds-factory-dev-meta",
+          "qds-collective"
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "snapshot-post2",
+      "outcome": "ok",
+      "detail": {
+        "count": 3
+      }
+    },
+    {
+      "step": "idempotency",
+      "outcome": "ok",
+      "detail": {
+        "rosterSize": 3,
+        "createdInAttempt": 2,
+        "createdInRerun": 0
+      }
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"snapshot-pre\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":4}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":10}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":15}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":15}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"snapshot-post\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":3}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":5}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":8}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":8}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"snapshot-post2\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"idempotency\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-10-04T20:18:15.533Z",
+  "createdInAttempt": [
+    "qds-factory-dev-meta",
+    "qds-collective"
+  ],
+  "unclaimedCreated": [],
+  "residue": [],
+  "deleteOutcomes": {},
+  "rosters": {
+    "pre": [
+      "qds-factory"
+    ],
+    "post": [
+      "qds-collective",
+      "qds-factory-dev-meta",
+      "qds-factory"
+    ],
+    "post2": [
+      "qds-collective",
+      "qds-factory-dev-meta",
+      "qds-factory"
+    ]
+  },
+  "repoSlug": "QDS-Factory",
+  "createdInRerun": []
+}

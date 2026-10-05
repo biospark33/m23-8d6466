@@ -1,0 +1,9 @@
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","step":"prereq","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","outcome":"start","bankId":"qds-does-not-exist-i5yewu"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","step":"listBanks","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","step":"recall","outcome":"recorded"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","step":"bank-profile-read","outcome":"recorded"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","step":"down-instance-probe","outcome":"refused"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","step":"listBanks","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-negative-probes","outcome":"fail"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-18-15-449Z-p0-9-negative-probes-pisa2e.json

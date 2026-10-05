@@ -1,0 +1,5 @@
+{"event":"p0-9-leg","leg":"p0-9-round-trip-via-bridge","step":"prereq","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-round-trip-via-bridge","outcome":"start","bankId":"qds-factory"}
+{"event":"p0-9-leg","leg":"p0-9-round-trip-via-bridge","step":"retain","bankId":"qds-factory","outcome":"fail"}
+{"event":"p0-9-leg","leg":"p0-9-round-trip-via-bridge","outcome":"fail"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-18-15-330Z-p0-9-round-trip-via-bridge-euvtm2.json

@@ -1,0 +1,12 @@
+{
+  "leg": "p0-9-foreign-same-id-check",
+  "mode": "live",
+  "origin": "http://127.0.0.1:18890",
+  "httpStatus": 200,
+  "bankCount": 0,
+  "qdsPrefixedIds": [],
+  "ok": true,
+  "outcome": "fresh-instance",
+  "writtenAt": "2026-10-04T20-14-05Z",
+  "note": "VPS-day checklist (a)/R2-025: run BEFORE first provision; QDS_REPO_SLUG explicit in checkout .env"
+}

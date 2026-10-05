@@ -1,0 +1,76 @@
+{
+  "leg": "p0-9-hindsight-live",
+  "mode": "live",
+  "ok": false,
+  "outcome": "leg-failure",
+  "steps": [
+    {
+      "step": "health-probe",
+      "outcome": "ok",
+      "durationMs": 4,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"status\":\"healthy\",\"database\":\"connected\",\"db_acquire_ms\":0.7,\"db_pool_waiting\":0,\"db_pool_in_use\":0,\"db_pool_max\":100,\"db_pool_idle\":5}"
+      }
+    },
+    {
+      "step": "digest-identity",
+      "outcome": "ok",
+      "detail": {
+        "pin": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+        "running": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+        "container": "qds-factory-hindsight-qds-1",
+        "matched": true
+      }
+    },
+    {
+      "step": "probe-create",
+      "outcome": "ok"
+    },
+    {
+      "step": "retain",
+      "outcome": "failed-http-422",
+      "durationMs": 6,
+      "detail": {
+        "status": 422,
+        "bodyTail": "{\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"p0-9-shape-probe\"]}]}"
+      }
+    },
+    {
+      "step": "recall",
+      "outcome": "ok",
+      "durationMs": 110,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"results\":[],\"trace\":null,\"entities\":null,\"chunks\":null,\"source_facts\":null,\"source_facts_truncated\":null}"
+      }
+    },
+    {
+      "step": "probe-cleanup",
+      "outcome": "deleted"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"health-probe\",\"outcome\":\"ok\",\"durationMs\":4}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"digest-identity\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"probe-create\",\"outcome\":\"ok\",\"bankId\":\"qds-probe-shape-1791144979488\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"retain\",\"outcome\":\"failed-http-422\",\"bankId\":\"qds-probe-shape-1791144979488\",\"durationMs\":6}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"recall\",\"outcome\":\"ok\",\"bankId\":\"qds-probe-shape-1791144979488\",\"durationMs\":110}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"probe-cleanup\",\"outcome\":\"deleted\",\"bankId\":\"qds-probe-shape-1791144979488\"}",
+  "writtenAt": "2026-10-04T20:16:19.645Z",
+  "pinDigest": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+  "runningDigest": "@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b",
+  "probeBankId": "qds-probe-shape-1791144979488",
+  "rawRetainBody": "{\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"items\",0,\"metadata\",\"tags\"],\"msg\":\"Input should be a valid string\",\"input\":[\"p0-9-shape-probe\"]}]}",
+  "rawRecallBody": "{\"results\":[],\"trace\":null,\"entities\":null,\"chunks\":null,\"source_facts\":null,\"source_facts_truncated\":null}",
+  "hasRetainMemoryId": false,
+  "retainTopLevelKeys": [
+    "detail"
+  ],
+  "recallTopLevelKeys": [
+    "results",
+    "trace",
+    "entities",
+    "chunks",
+    "source_facts",
+    "source_facts_truncated"
+  ],
+  "recallResultKeys": null
+}
