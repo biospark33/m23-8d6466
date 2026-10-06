@@ -21,7 +21,7 @@ The record sets `upsertObserved: true`, which overstates what was measured. Both
 
 Two of the recorded refusals are mislabelled:
 
-- `recall-missing-bank` is recorded as `http_502`, but Hindsight answered **HTTP 200** with empty results. The client's `RecallResponseSchema` then rejected that body because `durationMs` is missing, and `requestJSON` in `src/hindsight/client.ts` rethrows that local schema-validation failure as `HindsightHttpError(502, …)`. Read it as **local schema validation**. It is not a server refusal. It is the same 0.10.0 response drift that fails round-trip.
+- `recall-missing-bank` is recorded as `http_502`, but the recorded detail proves the client logged a successful 2xx response: `requestJSON` in `src/hindsight/client.ts` only reaches `RecallResponseSchema` validation after a 2xx, and it rethrew that local validation failure (`durationMs` missing) as `HindsightHttpError(502, …)`. The saved artifacts record neither the upstream status nor the recall body — HTTP 200 with empty results is an inference, not an observation. Read it as **local schema validation**. It is not a server refusal. It is the same 0.10.0 response drift that fails round-trip.
 - `missing-bank-profile-read` (`http_410`) hit the removed bank-profile endpoint, like the auth-retired probes above. It is inconclusive.
 
 Fixing the driver (a separate classification for schema-validation failures and a supported endpoint for the profile probe) belongs to work item 2 in issue #408.
