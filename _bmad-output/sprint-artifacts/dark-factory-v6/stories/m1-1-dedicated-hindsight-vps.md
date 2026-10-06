@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (M-arc, story 1 of 4 — the memory ladder's substrate; the story whose legs carry the P0.5/P0.9 closure evidence)
-**Status:** done — dev-half merged (PR #407, merge commit 9f3caca5, 2026-10-04: six leg drivers + adds-only client/CLI changes + closure-plan annotation + 3 bmad-code-review rounds, 74 findings triaged / 64 patched; see Review Findings + closeout record below). The operator-gated remainder (VPS-day live legs, measurement-gated `schemas.ts` amendment, P0.5 legs, Z4-region compose item) is tracked in issue **#408** — the story closes with the substrate built and verified mock-side, the live evidence pending GO per charter §6.
+**Status:** done — dev-half merged (PR #407, merge commit 9f3caca5, 2026-10-04: six leg drivers + adds-only client/CLI changes + closure-plan annotation + 3 bmad-code-review rounds, 74 findings triaged / 64 patched; see Review Findings + closeout record below). The operator GO came and the VPS-day P0.9 live legs ran (2026-10-04 on qds-alpha): evidence + reading notes merged via PR #410 (merge commit 8c2ef0be) in `_bmad-output/evidence/p0-9-closure/`. Still open in issue **#408**: the measurement-gated `schemas.ts` conformance amendment (driver fixes for the 410/schema-drift misreadings the evidence records), the P0.5 legs, and the Z4-region compose item.
 
 > **Operator-gated story.** Charter §6: "Ops stays operator-gated — zero agent spend on re-pin / VPS / G5 until explicit GO." Every leg that touches the box runs only inside the sanctioned VPS-day window, after the runbook's `[OPERATOR-GO]` gates. The story's dev-side work (leg drivers in mock mode, the plan annotation) is not gated and lands first.
 
