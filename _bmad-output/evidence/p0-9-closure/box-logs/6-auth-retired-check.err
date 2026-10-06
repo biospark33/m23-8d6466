@@ -1,0 +1,10 @@
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"prereq","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","outcome":"start","bankId":"qds-probe-1791145095575"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"probe-create","bankId":"qds-probe-1791145095575","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"recall","bankId":"qds-probe-1791145095575","outcome":"answered"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"auth-proof","outcome":"answered"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"cross-bank","bankId":"qds-probe-1791145095575","outcome":"refused"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"unknown-key","outcome":"refused"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","step":"cleanup","bankId":"qds-probe-1791145095575","outcome":"deleted"}
+{"event":"p0-9-leg","leg":"p0-9-auth-retired-check","outcome":"ok"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-18-18-024Z-p0-9-auth-retired-check-tb6g2k.json

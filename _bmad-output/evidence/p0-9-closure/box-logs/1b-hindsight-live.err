@@ -1,0 +1,7 @@
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"health-probe","outcome":"ok","durationMs":4}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"digest-identity","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"probe-create","outcome":"ok","bankId":"qds-probe-shape-1791144979488"}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"retain","outcome":"failed-http-422","bankId":"qds-probe-shape-1791144979488","durationMs":6}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"recall","outcome":"ok","bankId":"qds-probe-shape-1791144979488","durationMs":110}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"probe-cleanup","outcome":"deleted","bankId":"qds-probe-shape-1791144979488"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-16-19-645Z-p0-9-hindsight-live-emz6ph.json

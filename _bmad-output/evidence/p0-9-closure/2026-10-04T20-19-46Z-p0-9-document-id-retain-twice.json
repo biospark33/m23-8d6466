@@ -1,0 +1,70 @@
+{
+  "leg": "p0-9-document-id-retain-twice",
+  "mode": "live",
+  "origin": "http://127.0.0.1:18890",
+  "bankId": "qds-probe-docid-1791145183",
+  "documentId": "p0-9-docid-probe",
+  "steps": [
+    {
+      "step": "retain-1",
+      "status": 200,
+      "body": {
+        "success": true,
+        "items_count": 1,
+        "async": false,
+        "usage": {
+          "input_tokens": 3392,
+          "output_tokens": 155,
+          "total_tokens": 3547,
+          "cached_tokens": 0,
+          "thoughts_tokens": 0
+        }
+      },
+      "after": {
+        "status": 200,
+        "total_documents": 1,
+        "total_nodes": 1
+      }
+    },
+    {
+      "step": "retain-2",
+      "status": 200,
+      "body": {
+        "success": true,
+        "items_count": 1,
+        "async": false,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "thoughts_tokens": 0
+        }
+      },
+      "after": {
+        "status": 200,
+        "total_documents": 1,
+        "total_nodes": 1
+      }
+    },
+    {
+      "step": "cleanup-delete",
+      "status": 200,
+      "body": {
+        "success": true,
+        "message": "Bank 'qds-probe-docid-1791145183' and all associated data deleted successfully",
+        "deleted_count": 4
+      }
+    }
+  ],
+  "bankGoneAfterCleanup": true,
+  "documentsAfter1": 1,
+  "documentsAfter2": 1,
+  "nodesAfter1": 1,
+  "nodesAfter2": 1,
+  "upsertObserved": true,
+  "ok": true,
+  "outcome": "measured",
+  "writtenAt": "2026-10-04T20:19:46.641970Z",
+  "note": "VPS-day checklist (b) R2-026/F-027: same document_id retained twice; documents count compared. Raw probe (provision-and-import cannot measure it: its retains 422 on metadata.tags)."
+}

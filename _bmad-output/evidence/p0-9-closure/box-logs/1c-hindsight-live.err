@@ -1,0 +1,7 @@
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"health-probe","outcome":"ok","durationMs":4}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"digest-identity","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"probe-create","outcome":"ok","bankId":"qds-probe-shape-1791145060848"}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"retain","outcome":"ok","bankId":"qds-probe-shape-1791145060848","durationMs":4697}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"recall","outcome":"ok","bankId":"qds-probe-shape-1791145060848","durationMs":69}
+{"event":"p0-9-leg","leg":"p0-9-hindsight-live","step":"probe-cleanup","outcome":"deleted","bankId":"qds-probe-shape-1791145060848"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-17-45-645Z-p0-9-hindsight-live-lbghxg.json

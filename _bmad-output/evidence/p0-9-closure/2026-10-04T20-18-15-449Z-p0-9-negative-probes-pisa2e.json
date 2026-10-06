@@ -1,0 +1,61 @@
+{
+  "leg": "p0-9-negative-probes",
+  "mode": "live",
+  "ok": false,
+  "outcome": "fail: nonexistent-bank probe did not refuse with 404",
+  "steps": [
+    {
+      "step": "listBanks",
+      "outcome": "ok",
+      "detail": "1 bank(s)"
+    },
+    {
+      "step": "recall",
+      "outcome": "refused http_502"
+    },
+    {
+      "step": "bank-profile-read",
+      "outcome": "refused http_410"
+    },
+    {
+      "step": "down-instance-probe",
+      "outcome": "refused transport-error"
+    },
+    {
+      "step": "listBanks",
+      "outcome": "ok",
+      "detail": "1 bank(s)"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"outcome\":\"start\",\"bankId\":\"qds-does-not-exist-i5yewu\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"listBanks\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"recall\",\"outcome\":\"recorded\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"bank-profile-read\",\"outcome\":\"recorded\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"down-instance-probe\",\"outcome\":\"refused\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"listBanks\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"outcome\":\"fail\"}",
+  "writtenAt": "2026-10-04T20:18:15.449Z",
+  "missingBankId": "qds-does-not-exist-i5yewu",
+  "downOrigin": "http://127.0.0.1:9/",
+  "banksBefore": [
+    "qds-factory"
+  ],
+  "banksAfter": [
+    "qds-factory"
+  ],
+  "banksCreated": [],
+  "refusals": [
+    {
+      "name": "recall-missing-bank",
+      "class": "http_502",
+      "detail": "Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]"
+    },
+    {
+      "name": "missing-bank-profile-read",
+      "class": "http_410",
+      "detail": "HTTP 410: The bank profile endpoints have been removed. Disposition traits and the reflect mission are bank configuration: read them from GET /v1/default/banks/{bank_id}/config as `disposition_skepticism`, `disposition_literalism`, `disposition_empathy` and `reflect_mission`, and write them with PATCH /v1/default/banks/{bank_id}/config. The `name` field this endpoint also returned was a display-only label; read it from GET /v1/default/banks."
+    },
+    {
+      "name": "unavailable-instance",
+      "class": "transport-error",
+      "detail": "Unable to connect. Is the computer able to access the url?"
+    }
+  ]
+}

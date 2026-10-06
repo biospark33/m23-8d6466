@@ -1,0 +1,27 @@
+{
+  "leg": "p0-9-round-trip-via-bridge",
+  "mode": "live",
+  "ok": false,
+  "outcome": "fail: round trip failed at step \"retain\": bad_gateway — Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"memoryId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"bankId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"expected\": \"'created' | 'updated'\",\n    \"received\": \"undefined\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"status\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]",
+  "steps": [
+    {
+      "step": "retain",
+      "outcome": "fail bad_gateway: Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"memoryId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"bankId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"expected\": \"'created' | 'updated'\",\n    \"received\": \"undefined\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"status\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"outcome\":\"start\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"retain\",\"bankId\":\"qds-factory\",\"outcome\":\"fail\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"outcome\":\"fail\"}",
+  "writtenAt": "2026-10-04T20:18:15.330Z",
+  "bankId": "qds-factory",
+  "roundTrip": {
+    "ok": false,
+    "step": "retain",
+    "error": {
+      "code": "bad_gateway",
+      "message": "Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"memoryId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"bankId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"expected\": \"'created' | 'updated'\",\n    \"received\": \"undefined\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"status\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]"
+    },
+    "requestId": "7929d8c2-b670-4604-af50-b4a5a0e7c49e"
+  }
+}

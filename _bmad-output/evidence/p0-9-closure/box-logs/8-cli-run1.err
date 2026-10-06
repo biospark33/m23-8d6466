@@ -1,0 +1,8 @@
+{"requestId":"3cda4b8b-e381-4adc-b391-25fbb237b79c","operation":"listBanks","agentId":null,"timestamp":"2026-10-04T20:19:26.962Z","duration":7,"status":"ok","bankId":""}
+{"requestId":"3612b52d-83c4-4722-aa95-ec3052565301","operation":"createBank","agentId":null,"timestamp":"2026-10-04T20:19:26.972Z","duration":5,"status":"ok","bankId":"qds-factory"}
+{"event":"provision-step","label":"provision","mode":"reupsert-existing","ok":true,"detail":{"bankId":"qds-factory","mode":"reupsert-existing"}}
+{"requestId":"5a777b43-24d9-493b-bf33-d235d60f246c","operation":"createBank","agentId":null,"timestamp":"2026-10-04T20:19:26.976Z","duration":4,"status":"ok","bankId":"qds-factory-dev-meta"}
+{"event":"provision-step","label":"provision","mode":"reupsert-existing","ok":true,"detail":{"bankId":"qds-factory-dev-meta","mode":"reupsert-existing"}}
+{"requestId":"dbfbb4b4-1dfe-4105-a6a3-ced57b3d9b22","operation":"createBank","agentId":null,"timestamp":"2026-10-04T20:19:26.980Z","duration":4,"status":"ok","bankId":"qds-collective"}
+{"event":"provision-step","label":"provision","mode":"reupsert-existing","ok":true,"detail":{"bankId":"qds-collective","mode":"reupsert-existing"}}
+{"event":"provision-step","label":"provision","mode":"reupsert-existing","ok":true,"detail":{"roster":["qds-factory","qds-factory-dev-meta","qds-collective"],"repoSlug":"QDS-Factory","mode":"reupsert-existing"}}

@@ -1,0 +1,14 @@
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"prereq","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"snapshot-pre","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-1","outcome":"ok","durationMs":4}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-1","outcome":"ok","durationMs":10}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-1","outcome":"ok","durationMs":15}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-1","outcome":"ok","durationMs":15}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"snapshot-post","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-2","outcome":"ok","durationMs":3}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-2","outcome":"ok","durationMs":5}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-2","outcome":"ok","durationMs":8}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"provision-2","outcome":"ok","durationMs":8}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"snapshot-post2","outcome":"ok"}
+{"event":"p0-9-leg","leg":"p0-9-idempotency-rerun","step":"idempotency","outcome":"ok"}
+/opt/qds-factory/checkout/_bmad-output/evidence/p0-9-closure/2026-10-04T20-18-15-533Z-p0-9-idempotency-rerun-hddo6j.json

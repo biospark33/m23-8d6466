@@ -964,6 +964,121 @@ describe("hindsight-live", () => {
   );
 
   test.skipIf(!hasDriver("hindsight-live"))(
+    "health probe targets GET /health — 0.10.0 serves no root route (measured live on qds-alpha 2026-10-04: / 404, /health 200)",
+    async () => {
+      const runLeg = await loadDriver("hindsight-live");
+      const served: ServedCall[] = [];
+      // Route table mirrors the live 0.10.0 instance: only /health answers;
+      // the root path is a 404 there, so a probe of "/" must fail this leg.
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: (c) => c.method === "GET" && new URL(c.url).pathname === "/health",
+            respond: () => new Response('{"status":"healthy","database":"connected"}', { status: 200 }),
+          },
+          { match: (c) => c.method === "GET", respond: () => new Response('{"detail":"Not Found"}', { status: 404 }) },
+        ],
+        served,
+      );
+      const hadFork = "QDS_FORK_CHECKOUT" in process.env;
+      const prevFork = process.env.QDS_FORK_CHECKOUT;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_FORK_CHECKOUT;
+      try {
+        const ev = await runLeg({ mode: "live", baseUrl: "http://127.0.0.1:18890", fetchImpl, outDir: tmpDir });
+        assertEvidenceContract(ev);
+        const health = ev.steps.find((s) => s.step === "health-probe");
+        expect(health?.outcome).toBe("ok");
+        const healthCalls = served.filter((x) => x.call.method === "GET");
+        expect(healthCalls.length).toBe(1);
+        expect(new URL(healthCalls[0]?.call.url ?? "http://x/").pathname).toBe("/health");
+      } finally {
+        if (hadFork) process.env.QDS_FORK_CHECKOUT = prevFork;
+        else {
+          // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+          delete process.env.QDS_FORK_CHECKOUT;
+        }
+      }
+    },
+  );
+
+  test.skipIf(!hasDriver("hindsight-live"))(
+    "health probe requires exactly 200 — another 2xx (204) is not the runbook's healthy answer",
+    async () => {
+      const runLeg = await loadDriver("hindsight-live");
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: (c) => c.method === "GET" && new URL(c.url).pathname === "/health",
+            respond: () => new Response(null, { status: 204 }),
+          },
+        ],
+        [],
+      );
+      const hadFork = "QDS_FORK_CHECKOUT" in process.env;
+      const prevFork = process.env.QDS_FORK_CHECKOUT;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_FORK_CHECKOUT;
+      try {
+        const ev = await runLeg({ mode: "live", baseUrl: "http://127.0.0.1:18890", fetchImpl, outDir: tmpDir });
+        assertEvidenceContract(ev);
+        expect(ev.steps.find((s) => s.step === "health-probe")?.outcome).toBe("failed-http-204");
+      } finally {
+        if (hadFork) process.env.QDS_FORK_CHECKOUT = prevFork;
+        else {
+          // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+          delete process.env.QDS_FORK_CHECKOUT;
+        }
+      }
+    },
+  );
+
+  test.skipIf(!hasDriver("hindsight-live"))(
+    "RAW retain request conforms to 0.10.0 MemoryItem: metadata is string-valued, tags ride at item level",
+    async () => {
+      const runLeg = await loadDriver("hindsight-live");
+      const served: ServedCall[] = [];
+      // 0.10.0 MemoryItem.metadata is Dict[str, str]; tags are an item-level
+      // string array. Measured live on qds-alpha 2026-10-04: an array under
+      // metadata.tags is a 422 (string_type at body.items[0].metadata.tags).
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: (c) => c.method === "POST" && /qds-probe-shape-.*\/memories$/.test(c.url),
+            respond: (c) => {
+              const items = (JSON.parse(c.body ?? "{}") as { items?: Array<Record<string, unknown>> }).items ?? [];
+              const conforms = items.every(
+                (it) =>
+                  Object.values((it.metadata as Record<string, unknown> | undefined) ?? {}).every(
+                    (v) => typeof v === "string",
+                  ) &&
+                  (it.tags === undefined || (Array.isArray(it.tags) && it.tags.every((t) => typeof t === "string"))),
+              );
+              return conforms
+                ? new Response('{"success":true,"bank_id":"x","items_count":1,"async":false}', { status: 200 })
+                : new Response('{"detail":[{"type":"string_type"}]}', { status: 422 });
+            },
+          },
+          { match: () => true, respond: () => new Response("{}", { status: 200 }) },
+        ],
+        served,
+      );
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        fetchImpl,
+        client: makeProbeClient(),
+        outDir: tmpDir,
+      });
+      const retain = ev.steps.find((s) => s.step === "retain");
+      expect(retain?.outcome).toBe("ok");
+      const sent = served.find((x) => x.call.method === "POST" && /\/memories$/.test(x.call.url));
+      const item = (JSON.parse(sent?.call.body ?? "{}") as { items: Array<Record<string, unknown>> }).items[0];
+      expect(item?.tags).toEqual(["p0-9-shape-probe"]);
+    },
+  );
+
+  test.skipIf(!hasDriver("hindsight-live"))(
     "RAW shape probe: disposable qds-probe-shape- bank, raw bodies recorded verbatim BEFORE any schema parse",
     async () => {
       const runLeg = await loadDriver("hindsight-live");

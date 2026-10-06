@@ -330,7 +330,10 @@ async function rawShapeProbe(
           items: [
             {
               content: "p0-9 hindsight-live disposable shape probe (raw unparsed path, story M1.1 AC1)",
-              metadata: { source: "manual", kind: "observation", tags: ["p0-9-shape-probe"] },
+              // 0.10.0 MemoryItem: metadata is Dict[str, str]; tags are item-level
+              // (an array under metadata.tags is a 422 — measured live 2026-10-04).
+              metadata: { source: "manual", kind: "observation" },
+              tags: ["p0-9-shape-probe"],
             },
           ],
           async: false,
@@ -401,7 +404,11 @@ export async function runLeg(deps: LegDeps): Promise<LegEvidence> {
     return finalize(steps, logLines, { mode, origin: baseUrl, ok: false, outcome: "fatal-forbidden-origin", fatal: true, ext });
   }
 
-  // (b) health probe — raw GET ${baseUrl}/, auth header when one is configured.
+  // (b) health probe — raw GET ${baseUrl}/health, auth header when one is configured.
+  // 0.10.0 serves no root route (measured live 2026-10-04: GET / → 404 on both the
+  // dedicated and the tenant instance; its OpenAPI lists /health, /health/ready,
+  // /health/live). /health also reports database connectivity, so it is the
+  // stricter probe, not a looser one.
   // R2-003: the fetch default is LIVE-ONLY — a mock rehearsal without an
   // injected fetchImpl records skipped-hermetic steps (unmeasured, no network)
   // instead of issuing real requests off env.
@@ -420,17 +427,18 @@ export async function runLeg(deps: LegDeps): Promise<LegEvidence> {
     const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
     try {
       const t0 = Date.now();
-      const res = await fetchImpl(`${baseUrl}/`, {
+      const res = await fetchImpl(`${baseUrl}/health`, {
         method: "GET",
         signal: controller.signal,
         ...(auth !== undefined ? { headers: { Authorization: auth } } : {}),
       });
       const body = await res.text();
-      rec("health-probe", res.ok ? "ok" : `failed-http-${res.status}`, {
+      // Exactly 200, matching the runbook's first-boot assert; another 2xx is not healthy.
+      healthOk = res.status === 200;
+      rec("health-probe", healthOk ? "ok" : `failed-http-${res.status}`, {
         durationMs: Date.now() - t0,
         detail: { status: res.status, bodyTail: maskTail(body, { maxLen: 300 }) },
       });
-      healthOk = res.ok;
     } catch (e) {
       rec("health-probe", isAbort(e) ? "failed-timeout" : "failed-transport", {
         detail: (e as Error).message,
