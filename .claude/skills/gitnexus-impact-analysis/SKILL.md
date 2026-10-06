@@ -45,9 +45,11 @@ Repository: <name> (<path>)   Worktree: <path>   Index: <commit>, <n> behind HEA
 ## Workflow
 
 ```
-0. list_repos {}                                           → Bind repo (and worktree)
+0. list_repos {} or `node .gitnexus/run.cjs list`          → Bind repo (and worktree)
 1. impact({target: "X", direction: "upstream"}) or `node .gitnexus/run.cjs impact "X" --direction upstream --repo .`
 2. READ gitnexus://repo/{name}/processes                   → Check affected execution flows
+   (MCP-only; without MCP, read the affected_processes / affected_modules
+   sections of the step-1 `impact` output instead)
 3. detect_changes({scope: "all"}) or `node .gitnexus/run.cjs detect-changes --scope all --repo .`
 4. Assess risk and report to user, echoing repo/worktree/index identity
 ```

@@ -92,8 +92,10 @@ this one.
 `liveGate` accepts only `"1"` or `"2"`, so "tier 3/4/5" is a label, never an env
 value (`QDS_E2E_TIER=5` THROWS). A file can call it with a tier its prefix does
 not suggest (`tier3-reaper` calls both `"1"` and `"2"`), and `liveTodoOff()` keys
-only on `QDS_E2E_LIVE`, so a tier glob runs every matched file and a mismatched
-one throws `QDS_E2E_TIER is "1", not "2"` at the end of a paid round. Before
+only on `QDS_E2E_LIVE`, so a tier glob runs every matched file. A mismatched
+test throws `QDS_E2E_TIER is "1", not "2"` at its own `liveGate()` call —
+before that test reaches billable work, but only after any earlier test in
+the same invocation has already spent. Before
 running an unfamiliar file, grep the FILE (an operand-less `grep -n 'liveGate('`
 reads stdin and hangs, which reads as "no match"):
 

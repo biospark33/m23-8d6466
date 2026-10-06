@@ -33,7 +33,7 @@ holds story text or re-writes artifacts itself.
 
 Phase 3 is entered with these artifacts in hand:
 
-- All story files written in Phase 2 (`_bmad-output/sprint-artifacts/sprint-{N}/stories/*.md`)
+- All story files written in Phase 2 (`_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/*.md`)
 - Brief epic summaries staged for insertion into the epic index (`{EPIC_INDEX}`, resolved in Phase 0 — e.g. `_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v6.md`)
 - Sprint-status entries staged for `_bmad-output/sprint-artifacts/sprint-status.yaml`
 - Epic definition block targeted in `{EPIC_INDEX}`
@@ -91,7 +91,7 @@ Step 3.1a passes each per-story subagent a `shared_pattern_note` — a ≤10-lin
 
 **Procedure:**
 
-1. **Scan the epic definition block** — the project's epic index file (`{EPIC_INDEX}`: the `index:` key in `sprint-status.yaml`, else the matching `_bmad-output/implementation-artifacts/epics-and-stories-*.md`) — for the cross-cutting mandates every story inherits — the auth/capability model, the tenant-binding column, naming conventions, and the audit-event vocabulary. These are epic-level and apply to every story.
+1. **Scan the epic definition block** — the project's epic index file (`{EPIC_INDEX}`: the `index:` key in `sprint-status.yaml` only if that file contains the requested epic, else the matching `_bmad-output/implementation-artifacts/epics-and-stories-*.md` file that contains it) — for the cross-cutting mandates every story inherits — the auth/capability model, the tenant-binding column, naming conventions, and the audit-event vocabulary. These are epic-level and apply to every story.
 2. **Scan each story file's load-bearing headers** for the tokens that must not drift between stories:
    - **Technical Notes → Contracts/Schema**: primary-key convention, tenant-binding column, table names, enum values.
    - **Integration points**: `event_type` vocabulary, `run_id` format, queue/topic names.
@@ -319,7 +319,7 @@ The operator's choice is recorded in the session transcript so
 After the loop converges (or the operator selects `[a]`), proceed with
 the existing Phase 3 sequence already documented in the flat skill file:
 
-1. Individual story files finalized in `sprint-{N}/stories/`
+1. Individual story files finalized in `{STORY_FOLDER}/stories/`
 2. Epic index (`{EPIC_INDEX}`) brief summaries inserted/updated
 3. `sprint-status.yaml` entries written (epic + story status =
    `ready-for-dev`)

@@ -96,8 +96,11 @@ bun scripts/fleet.ts reject <runId> --approver <approverId>
 ## Drive a finished run — `observe`
 
 `observe` watches a dispatched run's terminal marker and, when the run ends,
-drives the harvest → teardown → reverify → gate chain itself. The operator has
-authorized it: run it without asking first, including the teardown it chains.
+drives the harvest → teardown → reverify → gate chain itself. That chain is
+authorized only by the operator explicitly requesting `observe` — a run id, or
+the `--all` sweep. After that request, run it without per-run confirmation,
+including the teardown it chains. A progress or status request alone
+authorizes `status`, never this chain.
 
 ```bash
 bun scripts/fleet.ts observe <runId> --driver <driver>
@@ -111,7 +114,7 @@ locked) and repeats on retry; report it. Exit 6 means the chain landed and a
 later step failed (re-verification vetoed, approval leg failed, chain step
 threw); report it verbatim and stop.
 
-The consent covers `observe` only. A standalone `teardown` is still the
+The request authorizes `observe` only. A standalone `teardown` is still the
 operator's explicit decision (factory-harvest).
 
 ## Reading results and errors
@@ -137,14 +140,17 @@ bun scripts/fleet.ts --help
 
 ## Hard rules
 
-1. **Observation never mutates, except `observe`'s authorized chain.** `status` reads; that is all. If the operator
-   wants the run changed, that is a decision for approve, reject, or attach,
-   routed through those verbs — never improvised through another channel.
+1. **`status` never mutates, and `observe`'s chain needs its explicit request.**
+   `status` reads; that is all. Run `observe`'s chain only after the operator
+   explicitly requested it. If the operator wants the run changed, that is a
+   decision for approve, reject, or attach, routed through those verbs — never
+   improvised through another channel.
 2. **Report and stop on failure.** A refused verb, a missing prerequisite, or
    an unknown command ends in report-and-stop with the CLI's own remediation
    line. No workaround path, no fallback command.
-3. **Never volunteer state.** Observe when observing is the task — a run the
-   operator launched or asked about — never to look prepared.
+3. **Never volunteer state.** Answer progress or state questions with
+   `status`; run `observe`'s chain only after the explicit request above —
+   never to look prepared.
 4. **Attach is guidance, not authority.** It cannot raise a ceiling, override
    the gate, or stand in for an approval decision.
 5. **The token is never yours.** It arrives from the operator over stdin at
@@ -154,8 +160,9 @@ bun scripts/fleet.ts --help
 
 Stop observing when the question changes from "what is the run doing" to "what
 do we keep". Collecting a finished run's bundle and artifacts, and any
-teardown decision, belong to the **factory-harvest** skill — load it rather
-than fencing those verbs here. Observation's job ends with a plain report:
+standalone teardown decision, belong to the **factory-harvest** skill — load it
+rather than fencing those verbs here. Run the `observe` chain only after the
+explicit request above. Otherwise, observation's job ends with a plain report:
 state, outcome, error if any, and the decision routed to its verb.
 
 ---

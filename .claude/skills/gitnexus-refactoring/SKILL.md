@@ -39,11 +39,15 @@ checkout and reports nothing changed, which reads as a verified refactor.
 
 ```
 0. list_repos {}                                  → Bind repo (and worktree)
-1. impact({target: "X", direction: "upstream"})  → Map all dependents
-2. query({search_query: "X"})                            → Find execution flows involving X
-3. context({name: "X"})                           → See all incoming/outgoing refs
+1. impact({target: "X", direction: "upstream", repo})  → Map all dependents
+2. query({search_query: "X", repo})               → Find execution flows involving X
+3. context({name: "X", repo})                     → See all incoming/outgoing refs
 4. Plan update order: interfaces → implementations → callers → tests
 ```
+
+`repo` in the calls above is the bound repository — required on every call
+whenever more than one repository is indexed. The same applies to the
+checklist calls below.
 
 > If "Index is stale" → run `bash scripts/install-gitnexus-plus.sh` from the project root (never a bare `analyze`).
 
@@ -53,10 +57,10 @@ checkout and reports nothing changed, which reads as a verified refactor.
 
 ```
 - [ ] list_repos {} — bind repo; explicit repo when >1 indexed, ask if ambiguous
-- [ ] rename({symbol_name: "oldName", new_name: "newName", dry_run: true}) — preview all edits
+- [ ] rename({symbol_name: "oldName", new_name: "newName", repo, dry_run: true}) — preview all edits
 - [ ] Confirm the previewed file paths are in the bound repository/worktree
 - [ ] Review graph edits (high confidence) and text_search edits (review carefully)
-- [ ] If satisfied: rename({..., dry_run: false}) — apply edits
+- [ ] If satisfied: rename({..., repo, dry_run: false}) — apply edits
 - [ ] detect_changes() — verify only expected files changed
 - [ ] Run tests for affected processes
 ```
@@ -65,8 +69,8 @@ checkout and reports nothing changed, which reads as a verified refactor.
 
 ```
 - [ ] list_repos {} — bind repo; explicit repo when >1 indexed, ask if ambiguous
-- [ ] context({name: target}) — see all incoming/outgoing refs
-- [ ] impact({target, direction: "upstream"}) — find all external callers
+- [ ] context({name: target, repo}) — see all incoming/outgoing refs
+- [ ] impact({target, direction: "upstream", repo}) — find all external callers
 - [ ] Define new module interface
 - [ ] Extract code, update imports
 - [ ] detect_changes() — verify affected scope
@@ -77,9 +81,9 @@ checkout and reports nothing changed, which reads as a verified refactor.
 
 ```
 - [ ] list_repos {} — bind repo; explicit repo when >1 indexed, ask if ambiguous
-- [ ] context({name: target}) — understand all callees
+- [ ] context({name: target, repo}) — understand all callees
 - [ ] Group callees by responsibility
-- [ ] impact({target, direction: "upstream"}) — map callers to update
+- [ ] impact({target, direction: "upstream", repo}) — map callers to update
 - [ ] Create new functions/services
 - [ ] Update callers
 - [ ] detect_changes() — verify affected scope

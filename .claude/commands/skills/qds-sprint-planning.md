@@ -35,7 +35,7 @@ This skill provides a **2-phase core workflow with pre/post phases** whose DoD b
 
 **One track at a time only.** This prevents context overflow and keeps stories inside the Phase 2.5 gate.
 
-A track is the epic prefix. Resolve the epic index from `.qds-config.yml` (`qds.paths.bmad_dir`, default `_bmad-output`): the `index:` key in `{bmad_dir}/sprint-artifacts/sprint-status.yaml`, else the matching `{bmad_dir}/implementation-artifacts/epics-and-stories-*.md` (e.g. `epics-and-stories-dark-factory-v6.md` for DF/v6 epics, `epics-and-stories-v4.md` for P0/P1). This resolved file is called the **epic index** (`{EPIC_INDEX}`) below.
+A track is the epic prefix. Resolve the epic index from `.qds-config.yml` (`qds.paths.bmad_dir`, default `_bmad-output`): use the `index:` key in `{bmad_dir}/sprint-artifacts/sprint-status.yaml` only if the file it references contains the requested epic; otherwise use the matching `{bmad_dir}/implementation-artifacts/epics-and-stories-*.md` file that contains it (e.g. `epics-and-stories-dark-factory-v6.md` for DF/v6 epics, `epics-and-stories-v4.md` for P0/P1). This resolved file is called the **epic index** (`{EPIC_INDEX}`) below.
 
 ## Dynamic Learnings
 
@@ -262,11 +262,11 @@ trusted.
 After research completes:
 
 1. **Resolve the story folder** for the epic (see "Story Folder Resolution" below)
-2. **Use its stories directory**: `_bmad-output/sprint-artifacts/sprint-{N}/stories/`
+2. **Use its stories directory**: `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
 3. **Determine wave strategy** based on Agent 5's dependency analysis
 4. **Launch writing agents** with max 2 stories each (context quality degrades beyond that)
 5. **Each writing agent produces TWO outputs:**
-   - **Output 1 (Detailed)**: Full enterprise-grade story file → `sprint-{N}/stories/{story-slug}.md`
+   - **Output 1 (Detailed)**: Full enterprise-grade story file → `{STORY_FOLDER}/stories/{story-slug}.md`
    - **Output 2 (Brief)**: Epic summary with link → for insertion into `{EPIC_INDEX}`
 
 **Example wave pattern:**
@@ -276,9 +276,12 @@ After research completes:
 
 ### Story Folder Resolution
 
-Throughout this skill, `sprint-{N}` is a placeholder for the epic's folder under
+Throughout this skill, `{STORY_FOLDER}` is a placeholder for the epic's folder under
 `_bmad-output/sprint-artifacts/` — in QDS-Factory these are named per phase/program
 (`phase-0`, `phase-1`, `phase-2`, `dark-factory-v5`, `dark-factory-v6`, …), not by sprint number.
+Use the resolved folder name directly in every path below — never re-prefix it with `sprint-`
+(a folder named `dark-factory-v6` writes to `sprint-artifacts/dark-factory-v6/stories/`,
+not `sprint-artifacts/sprint-dark-factory-v6/stories/`).
 
 Resolve it deterministically, in order:
 
@@ -315,7 +318,7 @@ file produced by this run is audited against eight atomicity checks:
    - tenant / multi-tenancy / cross-tenant
    - upload / file handling / deserialization / parse
 
-**Output:** `_bmad-output/sprint-artifacts/sprint-{N}/atomicity-audit-{YYYY-MM-DD}.md`
+**Output:** `_bmad-output/sprint-artifacts/{STORY_FOLDER}/atomicity-audit-{YYYY-MM-DD}.md`
 
 **HALT behavior:** If any BLOCK-severity finding lacks an operator
 override entry in the report's "Override log" section, the workflow
@@ -375,10 +378,10 @@ body so reviewers see what was caught pre-CR.
 > findings stabilize catches them before commit. See pattern SPL-024 in
 > `.claude/learnings/qds-sprint-planning/patterns.yml`.
 
-1. **Create individual story files** in `sprint-{N}/stories/` directory:
+1. **Create individual story files** in `{STORY_FOLDER}/stories/` directory:
    - Each story file contains FULL enterprise-grade detail
    - File naming: `{story-slug}.md` (e.g., `df1-1-phase-abstraction-lifecycle.md`)
-   - Use `Write` tool to create files at `_bmad-output/sprint-artifacts/sprint-{N}/stories/{story-slug}.md`
+   - Use `Write` tool to create files at `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md`
 
 2. **Update the epic index (`{EPIC_INDEX}`)** with BRIEF summaries:
    - Each story entry includes `**Story File:**` link to individual story file
@@ -430,7 +433,7 @@ body so reviewers see what was caught pre-CR.
 
 ```
 You are analyzing existing story patterns for Epic {EPIC} from {EPIC_INDEX} and the
-story files already in the epic's `_bmad-output/sprint-artifacts/sprint-{N}/stories/` dir.
+story files already in the epic's `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/` dir.
 
 Extract the story template structure including:
 - Story title format (### Story {EPIC}.X: [Title])
@@ -564,8 +567,8 @@ You will write {STORY_COUNT} stories in this batch:
 
 ## Sprint Context
 
-- **Story Folder**: {SPRINT_NUM} (the epic's folder under `sprint-artifacts/`, e.g. `dark-factory-v6`)
-- **Story Directory**: `_bmad-output/sprint-artifacts/sprint-{SPRINT_NUM}/stories/`
+- **Story Folder**: {STORY_FOLDER} (the epic's folder under `sprint-artifacts/`, e.g. `dark-factory-v6`)
+- **Story Directory**: `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
 - **Story File Pattern**: `{story-slug}.md`
 
 The `{story-slug}` is derived from the story ID and title:
@@ -627,7 +630,7 @@ Each story produces two outputs:
 
 ### Output 1: Individual Story File (Detailed)
 
-Create a standalone file at `_bmad-output/sprint-artifacts/sprint-{SPRINT_NUM}/stories/{story-slug}.md` containing:
+Create a standalone file at `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md` containing:
 
 - Full enterprise-grade story with all details
 - Complete Acceptance Criteria with Given/When/Then scenarios
@@ -644,7 +647,7 @@ For insertion into `{EPIC_INDEX}`, produce a brief summary:
 ```markdown
 ### Story {EPIC}.{NUM}: {Title}
 
-**Story File:** [`sprint-artifacts/sprint-{SPRINT_NUM}/stories/{story-slug}.md`](./sprint-artifacts/sprint-{SPRINT_NUM}/stories/{story-slug}.md)
+**Story File:** [`sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md`](./sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md)
 
 As a **[Role]**,
 I want [Feature],
@@ -703,10 +706,10 @@ After all stories complete:
 - [ ] **Domain checklists logged** (which `checklists/<domain>.md` files
       fired, which trigger words matched, which artifacts they were
       applied to).
-- [ ] **Individual story files created** in `_bmad-output/sprint-artifacts/sprint-{N}/stories/`
+- [ ] **Individual story files created** in `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
   - Each file contains FULL enterprise-grade detail
   - File naming follows `{story-slug}.md` pattern
-  - Verify: `ls _bmad-output/sprint-artifacts/sprint-{N}/stories/`
+  - Verify: `ls _bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
 - [ ] **Epic index (`{EPIC_INDEX}`) updated** with BRIEF summaries only
   - Each story has `**Story File:**` link to individual story file
   - AC summaries are bulleted, not full Given/When/Then
@@ -727,8 +730,9 @@ After all stories complete:
 After the skill completes, run these checks to verify the fix:
 
 ```bash
-# Set to the epic index resolved in Phase 0
-EPIC_INDEX=_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v6.md
+# Set to the epic index resolved in Phase 0 ({EPIC_INDEX}) — the epics-and-stories
+# file that CONTAINS the epic just planned, not a hardcoded program
+EPIC_INDEX=_bmad-output/implementation-artifacts/epics-and-stories-<program>.md
 
 # Rule 1: Story files are in <epic-folder>/stories/ (not generic /stories)
 # Check if any stories exist in top-level stories folder (should be empty)
