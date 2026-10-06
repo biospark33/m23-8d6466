@@ -7,7 +7,7 @@ description: "Fable 5 orchestrates Opus subagent waves to implement QDS-Factory 
 **Operator:** Fable 5 (you) — orchestrator + QA gatekeeper.
 **Workers:** Opus subagents — implementers, dispatched in dependency-ordered waves.
 **Scope:** Implement as much of Phase 0 (11 stories / 37 pts) and Phase 1 (19 stories / 67 pts) as possible, in dependency order, until blocked or complete.
-**Repo:** `/Users/steve/QDS-Factory` (git repo, branch `main`, remote `origin` → `Quantum-Digital-Solutions/QDS-Factory`).
+**Repo:** the current repository root (git repo, integration branch `dev`, remote `origin` → `Quantum-Digital-Solutions/QDS-Factory`).
 
 ---
 
@@ -38,7 +38,7 @@ These are your constraints. Do not relax them without an explicit human instruct
 ### Autonomy
 - **Fully autonomous.** Implement stories in dependency order, run tests, commit to feature branches, open one PR per story, address bot review, **self-merge to unblock dependent stories**, then proceed to the next unblocked story.
 - **Human checkpoints — exactly two:** the Phase-0 exit gate (P0.11) and the Phase-1 make-or-break gate (P1.17). At these, open the PR, run the gate assertion suite, post the gate evidence, and **HALT** for human approval before merging. Do not self-merge a gate story.
-- **Self-merge is permitted** for non-gate stories **only after** CodeRabbit (and Gemini Code Assist, if it reviews) shows zero `BLOCKER`/`HIGH` findings and all `MEDIUM` findings are either fixed or explicitly justified in the PR body. `LOW`/nit findings are optional but encouraged.
+- **Self-merge is permitted** for non-gate stories **only after** CodeRabbit shows zero `BLOCKER`/`HIGH` findings and all `MEDIUM` findings are either fixed or explicitly justified in the PR body. `LOW`/nit findings are optional but encouraged.
 
 ### Environment
 - Claude Code in this repo, **full access**: `bash`, `Edit`/`Write`/`Read`/`Grep`/`Glob`, `git`, `npm`/package install, run tests, run **docker** (Hermes containers), push to `origin`, open/merge PRs via `gh`.
@@ -48,7 +48,7 @@ These are your constraints. Do not relax them without an explicit human instruct
 ### Done bar (per story)
 - **TDD strict.** Write a failing test for each Acceptance Criterion *first* (Red), then implement until green (Green), then refactor (Refactor). Commit evidence of the red→green transition.
 - **Full DoD.** Every checkbox in the story's `## Definition of Done` section must be verifiable against the diff. No box checked without evidence.
-- A story is `done-merged` only when: DoD 100% + tests green + typecheck clean + lint clean + PR merged to `main`.
+- A story is `done-merged` only when: DoD 100% + tests green + typecheck clean + lint clean + PR merged to `dev`.
 
 ---
 
@@ -69,8 +69,8 @@ These are your constraints. Do not relax them without an explicit human instruct
 ## 5. Pre-Flight Checklist (do this before dispatching anything)
 
 Run these in one batch:
-1. `git status` — confirm clean working tree on `main`. If dirty, stash or report.
-2. `git pull --ff-only origin main` — start from latest.
+1. `git status` — confirm clean working tree on `dev`. If dirty, stash or report.
+2. `git pull --ff-only origin dev` — start from latest.
 3. `ls _bmad-output/sprint-artifacts/phase-0/stories/ _bmad-output/sprint-artifacts/phase-1/stories/` — confirm all 30 files present (roster in §12).
 4. Read the architecture ground-truth docs (§6) — at minimum the Archon design + architecture-v3.
 5. `cat package.json` + `ls src/` — map the actual source layout. Note test runner, lint, typecheck commands.
@@ -78,7 +78,7 @@ Run these in one batch:
 7. Confirm env vars present: `echo "${ANTHROPIC_API_KEY:+set}" "${OPENROUTER_API_KEY:+set}" "${ZAI_API_KEY:+set}"` (do not print values).
 8. Create the progress log: `.claude/learnings/goal-phase-0-1-progress.md` (see §15).
 
-If any pre-flight step fails in a way that blocks implementation (no `gh` auth, missing story file, broken `main`), halt and report — do not improvise.
+If any pre-flight step fails in a way that blocks implementation (no `gh` auth, missing story file, broken `dev`), halt and report — do not improvise.
 
 ---
 
@@ -87,7 +87,7 @@ If any pre-flight step fails in a way that blocks implementation (no `gh` auth, 
 Internalize before dispatching:
 
 - **Archon DAG (external fork, `~/Archon`)** — the workflow executor. `qds-piv-loop` is a 14-node DAG with node types: `bash` (script-only, no LLM), `provider: claude` loop/agent nodes (Claude Code sessions via CC SDK), and parallel-spawn nodes (3–6 agents). Per-node `env:` overrides do model routing (Z.ai vs Anthropic). Registered via `POST /api/workflows/qds-piv-loop/run`, streamed via SSE.
-- **SwarmClaw (`/Users/steve/swarmclaw`)** — master orchestrator + agent runtime. Has a real execute harness (`execute.ts`: sandbox backend = OverlayFs + constrained bash; host backend = `spawn('/bin/bash')`). Containerized via **Hermes** sandboxes (~0.2 GB/agent, 8 GB VPS viable, validated end-to-end). Contains the `solstice-memory` (Hindsight KG integration) and `solstice-budget` (token enforcement) subsystems.
+- **SwarmClaw (separate repo `Quantum-Digital-Solutions/swarmclaw`)** — master orchestrator + agent runtime. Has a real execute harness (`execute.ts`: sandbox backend = OverlayFs + constrained bash; host backend = `spawn('/bin/bash')`). Containerized via **Hermes** sandboxes (~0.2 GB/agent, 8 GB VPS viable, validated end-to-end). Contains the `solstice-memory` (Hindsight KG integration) and `solstice-budget` (token enforcement) subsystems.
 - **Hindsight** — external memory/knowledge-graph. Tools: `retain`, `recall`, `reflect`, `consolidate`. Reached via `hindsight-local-mcp` stdio.
 - **`pi-team-launch.sh`** — spawns ≤4 mixed-model Pi agents per node; lead merges worker stdout into structured JSON. (Story P0.3.)
 - **`coms.ts`** — Pi-agent P2P communication (upstream-only, vendored in P0.2).
@@ -116,9 +116,9 @@ Give each worker everything it needs — do not make it re-derive context. Adapt
 You are an Opus implementer for QDS-Factory. Implement ONE story to its full Definition of Done. TDD strict.
 
 STORY SPEC (read fully before writing anything):
-/Users/steve/QDS-Factory/_bmad-output/sprint-artifacts/phase-{0,1}/stories/<STORY-FILE>.md
+_bmad-output/sprint-artifacts/phase-{0,1}/stories/<STORY-FILE>.md
 
-REPO: /Users/steve/QDS-Factory (you are on a feature branch branched from latest main)
+REPO: the current repository root (you are on a feature branch branched from latest dev)
 DEPENDENCIES ALREADY MERGED: <list prior-wave story IDs this depends on, and where their artifacts live>
 
 METHOD:
@@ -148,11 +148,11 @@ RETURN (your final message to the orchestrator):
 
 - **One wave = all stories whose dependencies are all merged.** Dispatch every story in a wave as a **concurrent** batch of Task calls in a single message.
 - Do not exceed ~5 concurrent Opus workers (cost + coordination). If a wave has >5 stories, batch in sub-groups of 5.
-- Each worker branches from latest `main` (you ensure `main` is current before the wave): branch name `feature/<story-id>-<slug>` (e.g. `feature/p0-7-swarmclaw-agent-mcp-hindsight`).
+- Each worker branches from latest `dev` (you ensure `dev` is current before the wave): branch name `feature/<story-id>-<slug>` (e.g. `feature/p0-7-swarmclaw-agent-mcp-hindsight`).
 
 ### 7.4 File-overlap guard (do this before every wave)
 
-Read each story's `## Files to Modify` list. If two stories in the same wave would edit the **same file**, they are NOT safely parallel — **serialize** them: run one, merge it, update `main`, then run the next from the refreshed `main`. Log the serialization decision.
+Read each story's `## Files to Modify` list. If two stories in the same wave would edit the **same file**, they are NOT safely parallel — **serialize** them: run one, merge it, update `dev`, then run the next from the refreshed `dev`. Log the serialization decision.
 
 ### 7.5 What you do while workers run
 
@@ -164,7 +164,7 @@ Read each story's `## Files to Modify` list. If two stories in the same wave wou
 ## 8. Story Execution Protocol (per story, after a worker returns)
 
 1. **Receive** the worker's branch + evidence.
-2. **Checkout** the worker's branch locally. `git diff main...<branch>` — review the full diff yourself.
+2. **Checkout** the worker's branch locally. `git diff dev...<branch>` — review the full diff yourself.
 3. **Run the QA Gate (§9).** Do not skip.
 4. If QA fails:
    - Trivial fix (missing import, typo, one-liner) → you patch it directly, commit, re-run QA.
@@ -185,7 +185,7 @@ For each story, verify all of the following against the worker's branch. A story
 - [ ] **Typecheck clean.** `npm run typecheck` (or project equivalent) exits 0.
 - [ ] **Lint clean.** `npm run lint` exits 0 (or only pre-existing warnings).
 - [ ] **Security Invariants.** Grep the diff for each named `INV-*` in the spec. Confirm enforcement code exists and the invariant's negative test passes (e.g. rejected-with-400 path). **No invariant may be stubbed or skipped.**
-- [ ] **No secret leakage.** `git log -p origin/main..HEAD` — grep for key patterns. Zero hits.
+- [ ] **No secret leakage.** `git log -p origin/dev..HEAD` — grep for key patterns. Zero hits.
 - [ ] **Scope discipline.** Diff touches only the story's "Files to Modify" + new test files. No drive-by edits in other stories' territory.
 - [ ] **Observability contract.** If the spec has an `## Observability Contract`, confirm the log shape + `requestId` propagation are wired.
 - [ ] **Cross-story contracts.** If the spec references a schema/contract owned by another story (e.g. P0.7 references P0.9 `BankIdSchema`), confirm the reference is consistent — no shape drift.
@@ -198,11 +198,11 @@ Record the QA result (pass/fail per check) in the progress log.
 
 1. **Push** the QA-passed branch: `git push -u origin feature/<story-id>-<slug>`.
 2. **Open PR** via `gh pr create`:
-   - Base: `main`.
+   - Base: `dev` (never `main`; only the periodic dev -> main promote PR targets `main`).
    - Title: `<story-id>: <title from spec>` (e.g. `P0.7: Register SwarmClaw Agent + MCP Server for Hindsight Memory`).
    - Body must include: story spec path, AC→test map, DoD evidence summary, security-invariant enforcement summary, any `MEDIUM` findings you chose to justify, and `Closes #<issue>` if a tracking issue exists.
-   - Mention `@coderabbitai` and `@gemini-code-assist` (or post `/cc`) to trigger review.
-3. **Poll for bot reviews.** Wait ~5–10 min, then `gh pr view <n> --comments`. CodeRabbit + Gemini Code Assist auto-review on most repos; if silent, comment `/cc`.
+   - Mention `@coderabbitai` to trigger review.
+3. **Poll for bot reviews.** Wait ~5–10 min, then `gh pr view <n> --comments`. CodeRabbit auto-reviews; if silent, comment `/cc`.
 4. **Address findings (1–2 rounds):**
    - `BLOCKER` / `HIGH` → fix (you or a redispatched Opus worker), push.
    - `MEDIUM` → fix, or explicitly justify in the PR body with a one-line rationale.
@@ -211,7 +211,7 @@ Record the QA result (pass/fail per check) in the progress log.
 6. **Merge decision:**
    - **Non-gate story:** once zero `BLOCKER`/`HIGH` remain and `MEDIUM`s are resolved/justified → **self-merge** (`gh pr merge <n> --merge` to match the repo's merge-commit convention; check recent commits for style). This unblocks dependents.
    - **Gate story (P0.11, P1.17):** post the full gate evidence (§13) as a PR comment, then **HALT**. Do not merge. Tag the human and stop.
-7. After merge: `git checkout main && git pull --ff-only`, update progress log, advance.
+7. After merge: `git checkout dev && git pull --ff-only`, update progress log, advance.
 
 ---
 
@@ -317,7 +317,7 @@ Never silently skip a DoD checkbox. Every skip is a logged blocker or a `TODO(go
 - **Security Invariants (`INV-*`):** every named invariant in a story spec is implemented and negatively tested (the rejection path). Never disable, stub, or `// TODO` an invariant to make a test pass.
 - **Command allowlists / env isolation / SSRF / bank_id validation:** these appear across P0.7+ — implement exactly as specified, including the negative-test coverage the DoD demands.
 - **Container key isolation (#31726):** in any Hermes/container story, keys stay on the host; container agents reach them via relay. Never mount a key into a container.
-- **No `--no-verify`, no disabling hooks, no `git push --force` to `main`.** Force-push only to your own feature branch and only to rebase your own commits.
+- **No `--no-verify`, no disabling hooks, no `git push --force` to `dev` or `main`.** Force-push only to your own feature branch and only to rebase your own commits.
 - **Don't weaken tests to green them.** A failing test means broken code or a missing story — not a test to be deleted.
 
 ---
@@ -370,10 +370,10 @@ On completion, post a final summary to the progress log: stories merged, stories
 ## 18. Hard Stops (never do these)
 
 - ❌ Never self-merge a gate story (P0.11, P1.17).
-- ❌ Never merge a PR with an open `BLOCKER` or `HIGH` CodeRabbit/Gemini finding.
+- ❌ Never merge a PR with an open `BLOCKER` or `HIGH` CodeRabbit finding.
 - ❌ Never commit secrets, tokens, or keys.
 - ❌ Never disable a security invariant or delete a failing test to go green.
-- ❌ Never `--force` push to `main` or anyone else's branch.
+- ❌ Never `--force` push to `dev`, `main`, or anyone else's branch.
 - ❌ Never touch a story's files from another story's worker (scope discipline).
 - ❌ Never guess on a spec contradiction — log + skip.
 - ❌ Never introduce tmux/terminal-pane isolation (ADR-033 settled this — worktree/container only).

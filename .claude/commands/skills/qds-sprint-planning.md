@@ -1,18 +1,18 @@
 ---
 name: qds-sprint-planning
-description: Enterprise-grade story planning workflow with parallel research and parallel writing. Use when planning new epic stories for a single track (A or B). Executes 2-phase core workflow with pre/post phases: Phase 0 (preparation), Phase 1 (parallel research with 5 agents), Phase 2 (parallel story writing with DUAL OUTPUT), and Phase 3 (wrap-up with status updates and PR creation).
-version: 1.4.0
+description: Enterprise-grade story planning workflow with parallel research and parallel writing. Use when planning new epic stories for a single track (one epic family — the track scheme is project-defined; in QDS-Factory it is the epic prefix, e.g. P0, P1, DF*, SC*). Executes 2-phase core workflow with pre/post phases: Phase 0 (preparation), Phase 1 (parallel research with 5 agents), Phase 2 (parallel story writing with DUAL OUTPUT), and Phase 3 (wrap-up with status updates and PR creation).
+version: 1.5.0
 author: biospark33
-last_updated: 2026-08-12
+last_updated: 2026-10-03
 ---
 
 # QDS Sprint Story Planning Skill
 
-A rigorous, guardrailed workflow that orchestrates enterprise-grade story planning through parallel research and parallel writing. Designed for **single-track execution** (either Track A: Backend or Track B: Frontend) to prevent context overflow and ensure story quality.
+A rigorous, guardrailed workflow that orchestrates enterprise-grade story planning through parallel research and parallel writing. Designed for **single-track execution** (one epic family at a time) to prevent context overflow and ensure story quality. The track scheme is project-defined: in QDS-Factory a track is the epic prefix (P0, P1, DF*, SC*, or the v6 codes Z/M/A/J/G), resolved from `.qds-config.yml` (`qds.paths.bmad_dir`) and the epic index.
 
 ## Overview
 
-This skill provides a **2-phase core workflow with pre/post phases** that produces stories matching the A6 quality standard:
+This skill provides a **2-phase core workflow with pre/post phases** whose DoD bar is the Phase 2.5 atomicity gate:
 
 | Phase | Purpose | Agents |
 |-------|---------|--------|
@@ -24,21 +24,18 @@ This skill provides a **2-phase core workflow with pre/post phases** that produc
 
 ### What This Skill Does
 
-- **Accepts epic identifier and track** (e.g., "A7" for Track A, "B3" for Track B)
-- **Launches 5 parallel research agents** tailored to track (backend vs frontend)
+- **Accepts epic identifier** (e.g., "DF4", "P1"); the track is the epic prefix
+- **Launches 5 parallel research agents** (backend variant by default; frontend variant for epics targeting `visualizer/`)
 - **Analyzes dependencies** and recommends wave/batch strategy
 - **Launches writing agents** (max 2 stories each) with research context
-- **Updates all status files** (epics.md, sprint-status.yaml, CLAUDE.md)
+- **Updates all status files** (epic index, sprint-status.yaml)
 - **Creates PR to dev branch** with commit message
 
 ### Single-Track Constraint
 
-**One track at a time only.** This prevents context overflow and ensures the A6 quality bar is met.
+**One track at a time only.** This prevents context overflow and keeps stories inside the Phase 2.5 gate.
 
-| Track | Focus | Epic Examples |
-|-------|-------|---------------|
-| **Track A** | Backend/Intelligence | A1-A10 (API, agents, database, infrastructure) |
-| **Track B** | Frontend/Integration | B1-B10 (UI, components, UX, state) |
+A track is the epic prefix. Resolve the epic index from `.qds-config.yml` (`qds.paths.bmad_dir`, default `_bmad-output`): use the `index:` key in `{bmad_dir}/sprint-artifacts/sprint-status.yaml` only if the file it references contains the requested epic; otherwise use the matching `{bmad_dir}/implementation-artifacts/epics-and-stories-*.md` file that contains it (e.g. `epics-and-stories-dark-factory-v6.md` for DF/v6 epics, `epics-and-stories-v4.md` for P0/P1). This resolved file is called the **epic index** (`{EPIC_INDEX}`) below.
 
 ## Dynamic Learnings
 
@@ -83,19 +80,18 @@ If `.claude/learnings/qds-sprint-planning/` does not exist, the skill will auto-
 
 ## Quick Start
 
-**Note:** Epic IDs and track tokens are case-insensitive (e.g., `A7`/`a7`, `A`/`a`, `B`/`b`). You may use either uppercase or lowercase.
+**Note:** Epic IDs and track tokens are case-insensitive (e.g., `DF4`/`df4`, `P1`/`p1`). You may use either uppercase or lowercase.
 
 ```bash
-# Interactive mode (prompts for epic ID and track)
+# Interactive mode (prompts for epic ID)
 /skills:qds-sprint-planning
 
-# Specify epic, prompts for track
-/skills:qds-sprint-planning a7
-/skills:qds-sprint-planning b3
+# Specify epic; track is detected from its prefix
+/skills:qds-sprint-planning df4
+/skills:qds-sprint-planning p1
 
-# Specify epic and track directly (fastest)
-/skills:qds-sprint-planning a7 a
-/skills:qds-sprint-planning b3 b
+# Specify epic and track explicitly (when the prefix is ambiguous)
+/skills:qds-sprint-planning df4 df
 
 # Resume interrupted workflow
 /skills:qds-sprint-planning resume
@@ -109,7 +105,7 @@ When you run `/skills:qds-sprint-planning` without flags, you get `--standard` m
 
 - **5 parallel research agents** with track-specific prompts
 - **Wave-based writing strategy** based on dependency analysis
-- **Full post-writing updates** (epics.md, sprint-status.yaml, CLAUDE.md)
+- **Full post-writing updates** (epic index, sprint-status.yaml)
 - **Automated PR creation** to dev branch
 
 ### Presets
@@ -175,22 +171,22 @@ confidence = (completeness * 0.30) + (reliability * 0.25) + (consistency * 0.20)
 2. **Loads applicable learnings** from `.claude/learnings/qds-sprint-planning/`
    - High-confidence patterns applied automatically
    - Medium-confidence preferences shown for confirmation
-3. **No epic provided**: Prompts for epic ID (e.g., "A7", "B3")
-4. **No track provided**: Prompts for track ("a" or "b")
-5. Validates epic exists in `_bmad-output/epics.md`
-6. Detects track from epic prefix or prompts if ambiguous
+3. **No epic provided**: Prompts for epic ID (e.g., "DF4", "P1")
+4. **No track provided**: Uses the epic prefix (e.g. `DF`, `P1`, `SC`)
+5. Validates epic exists in the epic index (`{EPIC_INDEX}`, resolved as in "Single-Track Constraint")
+6. Prompts if the prefix is ambiguous
 
 **HITL Interaction:**
 
 ```
-🎯 QDS Sprint Story Planning v1.3.0
+🎯 QDS Sprint Story Planning
 
-Epic ID: A7
-Track: A (Backend/Intelligence)
+Epic ID: DF4
+Track: DF
 Status: Ready for Planning
 
-Stories to plan: [A7.1, A7.2, A7.3, A7.4, A7.5] (5 stories)
-Quality Standard: A6 (20-36 DOD checkboxes, Pydantic schemas, 12-Factor compliance)
+Stories to plan: [DF4.1, DF4.2] (2 stories)
+Quality Standard: Phase 2.5 atomicity gate (≤10 DoD items, ≤8 SP, ≤200 normative lines)
 
 [p] Proceed with planning
 [q] Quit
@@ -200,27 +196,27 @@ Quality Standard: A6 (20-36 DOD checkboxes, Pydantic schemas, 12-Factor complian
 
 **5 Research Tracks (executed in parallel via Claude Code Task tool for concurrent agent execution):**
 
-#### Track A (Backend) Research Agents
+#### Backend Research Agents (default)
 
 | Agent | Purpose | Research Focus |
 |-------|---------|----------------|
-| **Agent 1** | Story Pattern Analysis | Existing A* story templates from epics.md (A5→A6 pattern) |
-| **Agent 2** | Tool Specifications | agent-tool-specification.md sections for the epic |
-| **Agent 3** | Entity & Database Models | DATABASE_SCHEMA_SPECIFICATION.md, entity patterns from `/services/api-gateway/src/knowledge/entities/` |
-| **Agent 4** | External Dependencies | Context7 MCP for latest Python/SDK docs (Claude SDK, FastAPI, etc.) |
-| **Agent 5** | Dependency Analysis | Story sequencing, wave/batch strategy from epics.md |
+| **Agent 1** | Story Pattern Analysis | Existing story files in the epic's `stories/` dir and sibling epics in `{EPIC_INDEX}` |
+| **Agent 2** | Specifications | Spec paths named in the PRD / epic |
+| **Agent 3** | Data & Contract Models | Schemas, types and storage named in the spec / epic, and the `src/` modules they live in |
+| **Agent 4** | External Dependencies | Context7 MCP for libraries named in the epic and in `package.json` |
+| **Agent 5** | Dependency Analysis | Story sequencing, wave/batch strategy from `{EPIC_INDEX}` and `sprint-status.yaml` |
 
-#### Track B (Frontend) Research Agents
+#### Frontend Research Agents (epics targeting `visualizer/`)
 
 | Agent | Purpose | Research Focus |
 |-------|---------|----------------|
-| **Agent 1** | Story Pattern Analysis | Existing B* story templates from epics.md (B5→B6 pattern) |
-| **Agent 2** | UX/UI Specifications | ux-design-specification.md sections for the epic |
-| **Agent 3** | shadcn Component Research | **shadcn MCP server** for latest/tested components, blocks, themes |
-| **Agent 4** | React/Next.js Patterns | Context7 MCP for React, Next.js, CopilotKit, TailwindCSS patterns |
-| **Agent 5** | Dependency Analysis | Story sequencing, wave/batch strategy from epics.md |
+| **Agent 1** | Story Pattern Analysis | Existing story files in the epic's `stories/` dir and sibling epics in `{EPIC_INDEX}` |
+| **Agent 2** | UX/UI Specifications | UX spec paths named in the PRD / epic |
+| **Agent 3** | Component Research | Components already in `visualizer/src/` + the component library named in the epic |
+| **Agent 4** | Frontend Patterns | Context7 MCP for libraries named in the epic and in `visualizer/package.json` |
+| **Agent 5** | Dependency Analysis | Story sequencing, wave/batch strategy from `{EPIC_INDEX}` and `sprint-status.yaml` |
 
-**Each research agent produces (v1.3.0 — write-to-file, return path):**
+**Each research agent produces (write-to-file, return path):**
 
 - **Writes** its structured report to
   `_bmad-output/workflow-state/qds-sprint-planning/{epic}-{track}/research/R{n}-{slug}.md`
@@ -235,7 +231,7 @@ Quality Standard: A6 (20-36 DOD checkboxes, Pydantic schemas, 12-Factor complian
   bodies)" in the Writing Agent Template), so each writer prompt carries
   five concrete file paths — not five report bodies.
 - Writers `Read` the report paths they need. Reports stay specific to
-  track (backend vs frontend) and **incorporate learned patterns** from
+  variant (backend vs frontend) and **incorporate learned patterns** from
   previous sessions (story estimation, wave strategy, research sources).
 
 **Conditional crosswalk agent (SPL-025 — MANDATORY when applicable).**
@@ -257,55 +253,43 @@ Writers consume ONLY the crosswalk, never the audit table directly. Clauses the 
 resolve to source text are marked **NET-NEW** in the crosswalk and
 authored fresh under normal adversarial review — never pasted under a
 "survives verbatim, do not re-litigate" banner (that launders unreviewed
-requirements past the review loop). Origin: 2026-08-12 DF-v5 derivation,
-where 28 phantom clauses, one 10,000× unit contradiction, and one
-inverted security doctrine were caught by exactly this agent.
+requirements past the review loop). Audit tables cite clauses that often do
+not exist or say something else in the source, so only extracted text is
+trusted.
 
 ### Phase 2: Parallel Story Writing (Waves, Max 2 Stories Per Agent)
 
 After research completes:
 
-1. **Extract sprint number** from epic context (e.g., Epic A6 → Sprint 7, Epic B6 → Sprint 7)
-2. **Create sprint-specific directory**: `_bmad-output/sprint-artifacts/sprint-{N}/stories/`
+1. **Resolve the story folder** for the epic (see "Story Folder Resolution" below)
+2. **Use its stories directory**: `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
 3. **Determine wave strategy** based on Agent 5's dependency analysis
 4. **Launch writing agents** with max 2 stories each (context quality degrades beyond that)
 5. **Each writing agent produces TWO outputs:**
-   - **Output 1 (Detailed)**: Full enterprise-grade story file → `sprint-{N}/stories/{story-slug}.md`
-   - **Output 2 (Brief)**: Epic summary with link → for insertion into `epics.md`
+   - **Output 1 (Detailed)**: Full enterprise-grade story file → `{STORY_FOLDER}/stories/{story-slug}.md`
+   - **Output 2 (Brief)**: Epic summary with link → for insertion into `{EPIC_INDEX}`
 
 **Example wave pattern:**
-- Wave 1: Stories A7.1, A7.2 (independent) → 1 agent
-- Wave 2: Stories A7.3, A7.4 (depend on A7.1) → 1 agent
-- Wave 3: Story A7.5 (standalone) → 1 agent
+- Wave 1: Stories DF5.1, DF5.2 (independent) → 1 agent
+- Wave 2: Stories DF5.3, DF5.4 (depend on DF5.1) → 1 agent
+- Wave 3: Story DF5.5 (standalone) → 1 agent
 
-### Sprint Number Mapping
+### Story Folder Resolution
 
-Epic-to-sprint mapping is derived from `_bmad-output/epics.md`:
+Throughout this skill, `{STORY_FOLDER}` is a placeholder for the epic's folder under
+`_bmad-output/sprint-artifacts/` — in QDS-Factory these are named per phase/program
+(`phase-0`, `phase-1`, `phase-2`, `dark-factory-v5`, `dark-factory-v6`, …), not by sprint number.
+Use the resolved folder name directly in every path below — never re-prefix it with `sprint-`
+(a folder named `dark-factory-v6` writes to `sprint-artifacts/dark-factory-v6/stories/`,
+not `sprint-artifacts/sprint-dark-factory-v6/stories/`).
 
-| Epic | Sprint | Story Directory |
-|------|--------|-----------------|
-| A1-A2 | Sprint 1 | `_bmad-output/sprint-artifacts/sprint-1/stories/` |
-| B1-B2 | Sprint 2 | `_bmad-output/sprint-artifacts/sprint-2/stories/` |
-| B2.5 | Sprint 3 | `_bmad-output/sprint-artifacts/sprint-3/stories/` |
-| A3 | Sprint 4 | `_bmad-output/sprint-artifacts/sprint-4/stories/` |
-| A4 | Sprint 5 | `_bmad-output/sprint-artifacts/sprint-5/stories/` |
-| A5, B5 | Sprint 6 | `_bmad-output/sprint-artifacts/sprint-6/stories/` |
-| A6-A7, B6-B7 | Sprint 7 | `_bmad-output/sprint-artifacts/sprint-7/stories/` |
-| I1 | sprint-infra | `_bmad-output/sprint-artifacts/sprint-infra/stories/` |
+Resolve it deterministically, in order:
 
-**Extraction Pattern:**
+1. **Existing stories dir**: find the `sprint-artifacts/*/stories/` directory that already holds story files for this epic (filename prefix, e.g. `df1-1-*.md` → `dark-factory-v5`; `p1-*.md` → `phase-1`). Match whole epic codes, not partial substrings.
+2. **Epic index**: if none exist yet, use the folder that `{EPIC_INDEX}` and `sprint-status.yaml` name for the epic's program.
+3. **Ask**: if still unresolved, ask the operator for the folder name rather than inventing one.
 
-The sprint number is extracted using the following deterministic resolution steps (in order):
-
-1. **Check explicit mapping table**: Look up the epic identifier in the mapping table above (A1-A7, B1-B7, I1) and return the associated sprint.
-
-2. **Search epics.md**: If not found in the table, parse `_bmad-output/epics.md` for the epic identifier and extract sprint context from the epic header.
-
-3. **Scan sprint-artifacts directories**: If still not found, scan `_bmad-output/sprint-artifacts/` directories for matching story files (e.g., search `sprint-*/stories/` for filenames or front-matter containing the epic identifier like "A7", "B3", or "I1") and return that sprint if present. Note: Match whole epic codes (A1-A7, B1-B7, I1) rather than partial substrings.
-
-4. **Apply default rule**: For new epics without existing sprint directories, assign to the "next available sprint" by taking the highest **numeric** `sprint-{N}` directory under `_bmad-output/sprint-artifacts` (ignore `sprint-infra` and any non-numeric names) and incrementing it. If no numeric sprint directories exist (empty set), default to `sprint-1` for regular epics or `sprint-infra` for infrastructure epics.
-
-**Note:** If no sprint is found and the epic identifier fails Phase 0 validation (referencing the "Phase 0 validation" check at line 179), the system surfaces a validation error and asks the user to correct the epic rather than silently assigning a sprint. If the epic passes validation but truly has no matching artifacts in `_bmad-output/epics.md` or `_bmad-output/sprint-artifacts`, then the "next available sprint" rule (highest numbered sprint directory incremented) or `sprint-infra` fallback for infrastructure epics applies.
+**Note:** If the epic identifier fails Phase 0 step 5 (epic not in the epic index), surface a validation error and ask the user to correct the epic rather than silently assigning a folder.
 
 ### Phase 2.5: Story Atomicity Audit (Gate before Phase 3)
 
@@ -334,15 +318,14 @@ file produced by this run is audited against eight atomicity checks:
    - tenant / multi-tenancy / cross-tenant
    - upload / file handling / deserialization / parse
 
-**Output:** `_bmad-output/sprint-artifacts/sprint-{N}/atomicity-audit-{YYYY-MM-DD}.md`
+**Output:** `_bmad-output/sprint-artifacts/{STORY_FOLDER}/atomicity-audit-{YYYY-MM-DD}.md`
 
 **HALT behavior:** If any BLOCK-severity finding lacks an operator
 override entry in the report's "Override log" section, the workflow
 halts before Phase 3. WARN findings are reported but non-blocking.
 
-**Cross-skill contract:** The keyword list in check 8 must match
-`bmad-create-story` template (#1433) and
-`bmad-check-implementation-readiness` (#1431) verbatim.
+**Keyword-list contract:** The keyword list in check 8 must match
+check 8 in `steps/phase-2-5-atomicity-audit.md` verbatim.
 
 ### Phase 3: Post-Writing Updates
 
@@ -354,7 +337,7 @@ Before any of the file-write / commit / PR steps in this phase, run the
 adversarial-review iteration loop documented in
 [`.claude/skills/qds-sprint-planning/steps/phase-3-wrap-up.md`](../../skills/qds-sprint-planning/steps/phase-3-wrap-up.md).
 
-The loop (v1.3.0 — **delegated, structured**; the orchestrator never
+The loop (**delegated, structured**; the orchestrator never
 holds story bodies or re-writes artifacts inline):
 
 - Scans every Phase 2 story file + the epic definition for **domain
@@ -365,8 +348,9 @@ holds story bodies or re-writes artifacts inline):
 - Spawns **one self-contained pipeline subagent per story** (or per
   2-story writer batch), **in parallel in one message**, passing
   **file paths + the checklist payload** — not story contents. Each
-  subagent runs review→fix→verify in its **own context**, applying
-  `bmad-review-adversarial-general` + the severity heuristics, and
+  subagent runs review→fix→verify in its **own context**, applying an
+  adversarial review (assume the spec is wrong and hunt for gaps,
+  contradictions and unstated assumptions) + the severity heuristics, and
   `Edit`s its story file **in place** each round.
 - Categorizes findings into **HIGH** (structural), **MEDIUM**
   (clarity), **LOW** (nits). A subagent converges (and stops editing)
@@ -389,18 +373,17 @@ The adversarial-review log (counts per iteration, dispositions taken,
 which domain checklists fired) is appended to the wrap-up commit's PR
 body so reviewers see what was caught pre-CR.
 
-> **Why this exists.** Single-shot adversarial review left structural
-> issues on the floor in Epic RBAC-1 that took 50+ subsequent CR/Gemini
-> rounds to surface. Auto-iteration converges before commit. See
-> `_bmad-output/sprint-artifacts/sprint-62/epic-rbac-1-retro-skill-audit-2026-05-13.md`
-> §4.5 and pattern SPL-024 in `patterns.yml`.
+> **Why this exists.** A single adversarial pass leaves structural
+> issues that later surface as many PR review rounds; iterating until
+> findings stabilize catches them before commit. See pattern SPL-024 in
+> `.claude/learnings/qds-sprint-planning/patterns.yml`.
 
-1. **Create individual story files** in `sprint-{N}/stories/` directory:
+1. **Create individual story files** in `{STORY_FOLDER}/stories/` directory:
    - Each story file contains FULL enterprise-grade detail
-   - File naming: `{story-slug}.md` (e.g., `a7-1-writing-agent.md`)
-   - Use `Write` tool to create files at `_bmad-output/sprint-artifacts/sprint-{N}/stories/{story-slug}.md`
+   - File naming: `{story-slug}.md` (e.g., `df1-1-phase-abstraction-lifecycle.md`)
+   - Use `Write` tool to create files at `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md`
 
-2. **Update `_bmad-output/epics.md`** with BRIEF summaries:
+2. **Update the epic index (`{EPIC_INDEX}`)** with BRIEF summaries:
    - Each story entry includes `**Story File:**` link to individual story file
    - Brief user story (As a **Role**, I want Feature, So that Value)
    - Bulleted AC summary (not full Given/When/Then)
@@ -412,25 +395,23 @@ body so reviewers see what was caught pre-CR.
    - Epic status → `ready-for-dev`
    - Story statuses → `ready-for-dev`
 
-4. **Update `/CLAUDE.md`** current status line
+4. **Create feature branch**: `feature/epic-{EPIC}-stories`
 
-5. **Create feature branch**: `feature/epic-{EPIC}-stories`
+5. **Commit**: `feat(epic-{EPIC}): write enterprise-grade stories`
 
-6. **Commit**: `feat(epic-{EPIC}): write enterprise-grade stories`
+6. **Push** to remote
 
-7. **Push** to remote
+7. **Create PR** to `dev` branch (PR body includes the adversarial-review iteration log from Step 0)
 
-8. **Create PR** to `dev` branch (PR body includes the adversarial-review iteration log from Step 0)
-
-9. **Save session transcript** for reflection analysis (used by `/reflect` to extract learnings)
+8. **Save session transcript** for reflection analysis (used by `/reflect` to extract learnings)
 
    **Transcript Storage:**
    - **Location**: `.claude/learnings/qds-sprint-planning/transcripts/`
    - **Filename format**: `YYYY-MM-DD_HHMMSS_<session-description>.md`
    - **How to save**: Manually copy the Claude Code session conversation into a new file in the transcripts directory
-   - **Example**: `.claude/learnings/qds-sprint-planning/transcripts/2026-02-02_143000_A7-planning-session.md`
+   - **Example**: `.claude/learnings/qds-sprint-planning/transcripts/2026-02-02_143000_DF4-planning-session.md`
 
-   **⚠️ IMPORTANT REMINDER**: Don't forget to save the session transcript! Use this quick command after planning completes:
+   Quick command after planning completes:
 
    ```bash
    # Create transcript file with current timestamp
@@ -451,7 +432,8 @@ body so reviewers see what was caught pre-CR.
 ### Agent 1 - Story Pattern Research
 
 ```
-You are analyzing existing story patterns for Epic {EPIC} from _bmad-output/epics.md.
+You are analyzing existing story patterns for Epic {EPIC} from {EPIC_INDEX} and the
+story files already in the epic's `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/` dir.
 
 Extract the story template structure including:
 - Story title format (### Story {EPIC}.X: [Title])
@@ -479,106 +461,77 @@ Return the template report's file path, and — only when the crosswalk task
 applied — the crosswalk file path as well.
 ```
 
-### Agent 2 - Tool Specifications (Track A) / UX Specifications (Track B)
+### Agent 2 - Specifications (Backend) / UX Specifications (Frontend)
 
-**Track A:**
+**Backend:**
 
 ```
-Research tool specifications from _bmad-output/agent-tool-specification.md for Epic {EPIC}.
+Research the specifications for Epic {EPIC}: the spec paths named in the PRD / epic
+entry in {EPIC_INDEX}.
 
 Extract:
-- Tool names (e.g., pricing.pricing_calculator)
-- Tool descriptions
-- Input schemas (Pydantic models with Field descriptions)
-- Output schemas (Pydantic models)
+- Interfaces, commands and tool contracts the epic touches
+- Input/output schemas (TypeScript types / Zod schemas as the spec defines them)
 - Any security or validation requirements
 
-Output: Structured tool specification report with complete Pydantic schemas.
+Output: Structured specification report with spec section references.
 ```
 
-**Track B:**
+**Frontend:**
 
 ```
-Research UX/UI specifications from _bmad-output/ux-design-specification.md for Epic {EPIC}.
+Research UX/UI specifications for Epic {EPIC}: the UX spec paths named in the PRD / epic.
 
 Extract:
 - Screen layouts and component requirements
 - Design tokens (colors, typography, spacing)
 - User flows and interactions
 - Accessibility requirements
-- shadcn/ui components to use
 
 Output: Structured UX specification report with component mappings.
 ```
 
-### Agent 3 - Entity & Database (Track A) / shadcn Components (Track B)
+### Agent 3 - Data & Contract Models (Backend) / Components (Frontend)
 
-**Track A:**
+**Backend:**
 
 ```
-Research database schema and entity models for Epic {EPIC}.
+Research data and contract models for Epic {EPIC}.
 
 Read:
-- _bmad-output/specifications/DATABASE_SCHEMA_SPECIFICATION.md
-- services/api-gateway/src/knowledge/entities/ (entity models)
-- services/api-gateway/src/schemas/ (Pydantic request/response schemas, optional supplemental)
-- **services/api-gateway/src/database/models/ (ORM models — authoritative source of record for entity/table definitions)**
-- **services/api-gateway/src/database/migrations/versions/ (Alembic version migrations — authoritative source of record for schema changes and versioning)**
+- The schema / data-model spec paths named in the PRD / epic
+- The `src/` modules that define those types, stores and migrations today
 
 Extract:
-- Relevant database tables and their schemas
-- Entity models with their fields and relationships
-- Bi-temporal patterns if applicable
-- Multi-tenant isolation patterns
+- Relevant tables / stores and their schemas
+- Types and their fields and relationships
+- Multi-tenant or isolation patterns if applicable
 
-**Important:** The ORM model package (`src/database/models/`) is the canonical source of truth for table-level entity definitions and relationships. The migration artifacts (`src/database/migrations/versions/`) are the canonical source for schema evolution and versioning. Consult these alongside `DATABASE_SCHEMA_SPECIFICATION.md` to ensure research reflects the actual DB state.
+**Important:** The code in `src/` is the source of record for what exists today;
+the spec is the source for what the epic adds. Report where they disagree.
 
-Output: Database and entity patterns report with file paths and schema details.
+Output: Data and contract patterns report with file paths and schema details.
 ```
 
-**Track B:**
+**Frontend:**
 
 ```
-Use the shadcn MCP server to research the latest and most tested components for Epic {EPIC}.
+Research the components available for Epic {EPIC}.
 
-Query shadcn for:
-- Components relevant to the epic's features
-- Available blocks that match user flow requirements
-- Theme and styling patterns
-- Best practices for component composition
+Look at:
+- Existing components under `visualizer/src/`
+- The component library named in the epic (query its MCP server if one is configured)
 
-Output: shadcn component report with component names, props, and usage examples.
+Output: Component report with component names, props, and usage examples.
 ```
 
 ### Agent 4 - External Dependencies
 
-**Track A:**
-
 ```
 Use Context7 MCP to find latest documentation for libraries needed for Epic {EPIC}.
 
-Focus on:
-- Claude Agent SDK (latest version, patterns)
-- FastAPI (best practices, new features)
-- Pydantic v2 (schema patterns)
-- PostgreSQL/pgvector (query patterns)
-- Other Python dependencies relevant to the epic
-
-Output: External dependencies report with versions, API patterns, and code examples.
-```
-
-**Track B:**
-
-```
-Use Context7 MCP to find latest documentation for libraries needed for Epic {EPIC}.
-
-Focus on:
-- Next.js 15 (App Router patterns)
-- React 19 (new features, hooks)
-- CopilotKit (integration patterns)
-- TailwindCSS (utility patterns)
-- shadcn/ui (component patterns)
-- Other frontend dependencies relevant to the epic
+Focus on: the libraries named in the epic and in `package.json` (or
+`visualizer/package.json` for frontend epics), at the versions pinned there.
 
 Output: External dependencies report with versions, API patterns, and code examples.
 ```
@@ -586,7 +539,8 @@ Output: External dependencies report with versions, API patterns, and code examp
 ### Agent 5 - Dependency Analysis
 
 ```
-Analyze dependencies between stories in Epic {EPIC} from _bmad-output/epics.md.
+Analyze dependencies between stories in Epic {EPIC} from {EPIC_INDEX} and
+_bmad-output/sprint-artifacts/sprint-status.yaml.
 
 Determine:
 - Which stories are independent (can be written in parallel)
@@ -604,7 +558,7 @@ Output: Dependency analysis with:
 ## Writing Agent Template
 
 ```
-You are writing enterprise-grade user stories for Epic {EPIC} ({TRACK}: {TRACK_NAME}).
+You are writing enterprise-grade user stories for Epic {EPIC} (track {TRACK}).
 
 ## Stories to Write
 
@@ -613,14 +567,14 @@ You will write {STORY_COUNT} stories in this batch:
 
 ## Sprint Context
 
-- **Sprint Number**: {SPRINT_NUM}
-- **Story Directory**: `_bmad-output/sprint-artifacts/sprint-{SPRINT_NUM}/stories/`
+- **Story Folder**: {STORY_FOLDER} (the epic's folder under `sprint-artifacts/`, e.g. `dark-factory-v6`)
+- **Story Directory**: `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
 - **Story File Pattern**: `{story-slug}.md`
 
 The `{story-slug}` is derived from the story ID and title:
 - Format: `{epic-lower}-{num}-{title-kebab-case}.md`
-- Example: Story `A7.1` with title "Writing Agent" → `a7-1-writing-agent.md`
-- Example: Story `B3.2` with title "Question Edit Flow" → `b3-2-question-edit-flow.md`
+- Example: Story `DF1.1` with title "Phase Abstraction Lifecycle" → `df1-1-phase-abstraction-lifecycle.md`
+- Example: Story `P1.10` with title "Approve Resume Webhook" → `p1-10-approve-resume-webhook.md`
 
 To generate: (1) lowercase the epic letter/number, (2) replace the dot with a dash, (3) append a dash, (4) convert the title to kebab-case.
 
@@ -632,8 +586,8 @@ report; pull the detail yourself rather than receiving it inlined (keeps
 the orchestrator prompt small and your context scoped to what you write):
 
 - **Story Template** (Agent 1): `{R1_PATH}`
-- **Tool/UX Specifications** (Agent 2): `{R2_PATH}`
-- **Entity/Component Patterns** (Agent 3): `{R3_PATH}`
+- **Specifications / UX Specifications** (Agent 2): `{R2_PATH}`
+- **Data/Component Patterns** (Agent 3): `{R3_PATH}`
 - **External Dependencies** (Agent 4): `{R4_PATH}`
 - **Dependency Analysis** (Agent 5): `{R5_PATH}`
 - **Clause Crosswalk** (Agent 1; CONDITIONAL — present ONLY when this run
@@ -651,20 +605,18 @@ Every story MUST include:
    — plus `**Story Points:**` and `**Sprint:**` header fields (SPL-028:
    mandatory header fields live HERE in the template, not in per-wave
    writer prompts — per-prompt statements replicate inconsistently
-   across waves; 9 of 12 wave-1 DF-v5 stories shipped without a Sprint
-   header for exactly this reason)
+   across waves)
 2. **User story format**: As a **[Role]**, I want [Feature], So that [Value]
 3. **Overview section**: Technical overview with key patterns
 4. **Acceptance Criteria**: Given/When/Then scenarios
 5. **Technical Notes**: Model config, file structure, integration points
-6. **12-Factor Agent Compliance** (Track A) or UI Compliance (Track B)
+6. **12-Factor Agent Compliance** (backend) or UI Compliance (frontend)
 7. **Definition of Done**: ≤10 HIGH-SIGNAL checkboxes spanning the 6
    category concerns (Implementation, Testing, Code Quality,
    Documentation, Dependencies, Integration — one line may cover a
    category; drop project-wide CI invariants like "tests pass"/"lint
-   clean"). The historical 20-36-checkbox A6 standard is superseded by
-   the Phase 2.5 atomicity gate (check 4); if this section and the gate
-   ever disagree, the gate wins.
+   clean"). This is the Phase 2.5 atomicity gate's bar (check 4) — the
+   single DoD standard for this skill.
 
 **Size discipline (SPL-027):** target ≤185 normative lines per story.
 The 200-line cap belongs to the Phase-3 adversarial loop, which needs
@@ -672,30 +624,30 @@ The 200-line cap belongs to the Phase-3 adversarial loop, which needs
 text — writers who aim at the cap converge at 195–200 and force review
 fixes to be declined for line budget.
 
-## Dual Output Pattern (CRITICAL)
+## Dual Output Pattern
 
-You MUST produce TWO outputs for each story:
+Each story produces two outputs:
 
 ### Output 1: Individual Story File (Detailed)
 
-Create a standalone file at `_bmad-output/sprint-artifacts/sprint-{SPRINT_NUM}/stories/{story-slug}.md` containing:
+Create a standalone file at `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md` containing:
 
 - Full enterprise-grade story with all details
 - Complete Acceptance Criteria with Given/When/Then scenarios
 - Full Technical Notes section
-- Complete API contracts/Pydantic schemas (Track A) or component tables (Track B)
+- Complete API contracts / type schemas (backend) or component tables (frontend)
 - Full 12-Factor Agent Compliance or UI Compliance section
-- Complete Definition of Done with all checkboxes
+- Definition of Done (≤10 high-signal items, per Phase 2.5 check 4)
 - All subsections and details
 
 ### Output 2: Epic Summary (Brief)
 
-For insertion into `_bmad-output/epics.md`, produce a brief summary:
+For insertion into `{EPIC_INDEX}`, produce a brief summary:
 
 ```markdown
 ### Story {EPIC}.{NUM}: {Title}
 
-**Story File:** [`sprint-artifacts/sprint-{SPRINT_NUM}/stories/{story-slug}.md`](./sprint-artifacts/sprint-{SPRINT_NUM}/stories/{story-slug}.md)
+**Story File:** [`sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md`](./sprint-artifacts/{STORY_FOLDER}/stories/{story-slug}.md)
 
 As a **[Role]**,
 I want [Feature],
@@ -727,46 +679,23 @@ is in the individual story file linked above.
 ## Output Format
 
 1. First, use the `Write` tool to create the detailed story file
-2. Then, provide the brief summary for epics.md insertion
+2. Then, provide the brief summary for epic-index insertion
 3. After writing each story batch, pause for confirmation before continuing
 
-Follow the A6 story quality standard exactly.
+Stay inside the Phase 2.5 atomicity gate (≤8 SP, ≤10 DoD items, ≤200 normative lines).
 ```
 
-## Quality Bar (A6 Reference)
+## Backend vs Frontend Story Differences
 
-The A6 stories are the reference standard. All new stories must match this quality:
-
-| Story | Points | DOD Checklists | Key Features |
-|-------|--------|----------------|--------------|
-| A6.1: Pricing Agent | 8 | 31 checkboxes | Volume tiers, bundle discounts, sales escalation |
-| A6.2: Compliance Agent | 5 | 28 checkboxes | Framework mapping, Gate 3 trigger |
-| A6.3: Pricing Tools | 5 | 33 checkboxes | ToolPort abstraction, Pydantic schemas |
-| A6.4: Compliance Tools | 3 | 21 checkboxes | @tool decorator, shared tools |
-| A6.5: Workbook Ingestion | 8 | 36 checkboxes | Docling, pandas, bi-temporal storage |
-
-**Every story must have:**
-- 20-36 DOD checkboxes across 6 categories (20-30 for standard stories, up to 36 for complex stories)
-  - Treat stories with 5+ story points, multiple external integrations, cross-team impacts, or significant architectural changes as complex and target 30–36 checkboxes; otherwise target 20–30
-- Full spec references with section numbers
-- Pydantic schemas with Field descriptions (Track A) or component specs (Track B)
-- 12-Factor Agent compliance items (Track A) or UI compliance (Track B)
-- Security requirements where applicable
-- Performance targets where applicable
-- File structure with paths
-- Integration points documented
-
-## Track A vs Track B Story Differences
-
-| Aspect | Track A (Backend) | Track B (Frontend) |
+| Aspect | Backend (default) | Frontend (`visualizer/`) |
 |--------|------------------|-------------------|
-| **Spec References** | agent-tool-specification.md, DATABASE_SCHEMA_SPECIFICATION.md | ux-design-specification.md |
-| **Story Sections** | Agent Tools table with Pydantic schemas | Component table with shadcn mappings |
+| **Spec References** | Spec paths named in the PRD / epic | UX spec paths named in the PRD / epic |
+| **Story Sections** | Contracts table with TypeScript / Zod schemas | Component table |
 | **Technical Notes** | Model config, file structure, security requirements | Screen layouts, user flows, accessibility |
 | **Compliance** | 12-Factor Agent Compliance (III, VI, XI, etc.) | UI Compliance (responsive, a11y, i18n) |
-| **DOD: Testing** | Unit, integration, security, performance tests | E2E tests, Storybook, accessibility tests |
-| **DOD: Code Quality** | mypy strict, ruff, Pydantic schemas | ESLint, TypeScript, component types |
-| **DOD: Integration** | ToolPort, StatePort, orchestrator routing | AG-UI events, CopilotKit hooks, state sync |
+| **DOD: Testing** | Unit, integration, security, performance tests | Component, E2E and accessibility tests |
+| **DOD: Code Quality** | Story-specific only (CI runs `bunx tsc --noEmit` + biome) | Story-specific only (CI runs `vue-tsc` + lint) |
+| **DOD: Integration** | Integration points named in the epic | Data/API bindings named in the epic |
 
 ## Post-Writing Updates Checklist
 
@@ -777,21 +706,20 @@ After all stories complete:
 - [ ] **Domain checklists logged** (which `checklists/<domain>.md` files
       fired, which trigger words matched, which artifacts they were
       applied to).
-- [ ] **Individual story files created** in `_bmad-output/sprint-artifacts/sprint-{N}/stories/`
+- [ ] **Individual story files created** in `_bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
   - Each file contains FULL enterprise-grade detail
   - File naming follows `{story-slug}.md` pattern
-  - Verify: `ls _bmad-output/sprint-artifacts/sprint-{N}/stories/`
-- [ ] **epics.md updated** with BRIEF summaries only
+  - Verify: `ls _bmad-output/sprint-artifacts/{STORY_FOLDER}/stories/`
+- [ ] **Epic index (`{EPIC_INDEX}`) updated** with BRIEF summaries only
   - Each story has `**Story File:**` link to individual story file
   - AC summaries are bulleted, not full Given/When/Then
   - Technical notes are brief
-  - Verify: `grep -c "Story File:" _bmad-output/epics.md` shows count >= story count
+  - Verify: `grep -c "Story File:" {EPIC_INDEX}` shows count >= story count
 - [ ] **Epic header updated** with story count, points total, duration
 - [ ] **sprint-status.yaml updated**:
   - Epic status → `ready-for-dev`
   - All story statuses → `ready-for-dev`
   - Points assigned to each story
-- [ ] **CLAUDE.md updated** with new epic status in current status line
 - [ ] **Feature branch created**: `feature/epic-{EPIC}-stories`
 - [ ] **Commit created**: `feat(epic-{EPIC}): write enterprise-grade stories`
 - [ ] **Pushed to remote**
@@ -802,8 +730,11 @@ After all stories complete:
 After the skill completes, run these checks to verify the fix:
 
 ```bash
-# Rule 1: Story files are in sprint-N/stories/ (not generic /stories)
-# Note: sprint-infra is a valid location for infrastructure stories
+# Set to the epic index resolved in Phase 0 ({EPIC_INDEX}) — the epics-and-stories
+# file that CONTAINS the epic just planned, not a hardcoded program
+EPIC_INDEX=_bmad-output/implementation-artifacts/epics-and-stories-<program>.md
+
+# Rule 1: Story files are in <epic-folder>/stories/ (not generic /stories)
 # Check if any stories exist in top-level stories folder (should be empty)
 if find _bmad-output/sprint-artifacts/stories -name "*.md" -print -quit 2>/dev/null | grep -q .; then
   echo "FAIL: Stories in generic /stories folder"
@@ -811,8 +742,8 @@ else
   echo "PASS: No story markdown files in _bmad-output/sprint-artifacts/stories"
 fi
 
-# Rule 2: Each story has a "Story File:" link in epics.md
-LINK_COUNT=$(grep -c "Story File:" _bmad-output/epics.md || echo "0")
+# Rule 2: Each story has a "Story File:" link in the epic index
+LINK_COUNT=$(grep -c "Story File:" "$EPIC_INDEX" || echo "0")
 echo "Found $LINK_COUNT story file links"
 if [ "$LINK_COUNT" -lt 1 ]; then
   echo "FAIL: No story file links found"
@@ -820,93 +751,66 @@ else
   echo "PASS: Stories have file links"
 fi
 
-# Rule 3: epics.md is not bloated with full story detail
-LINE_COUNT=$(wc -l < _bmad-output/epics.md)
-echo "epics.md has $LINE_COUNT lines"
+# Rule 3: the epic index is not bloated with full story detail
+LINE_COUNT=$(wc -l < "$EPIC_INDEX")
+echo "$EPIC_INDEX has $LINE_COUNT lines"
 if [ "$LINE_COUNT" -gt 10000 ]; then
-  echo "WARN: epics.md is large: $LINE_COUNT lines"
+  echo "WARN: epic index is large: $LINE_COUNT lines"
 else
-  echo "PASS: epics.md size reasonable"
+  echo "PASS: epic index size reasonable"
 fi
 ```
 
 ## Examples
 
-### Example 1: Standard Track A Planning
+### Example 1: Backend Epic
 
 ```bash
-/skills:qds-sprint-planning a7 a
+/skills:qds-sprint-planning df4
 ```
 
 Output:
 
 ```
-🎯 QDS Sprint Story Planning v1.3.0
+🎯 QDS Sprint Story Planning
 
 Phase 0: Epic & Track Selection
-  ✅ Epic: A7 (Writing + QA Agents)
-  ✅ Track: A (Backend/Intelligence)
-  ✅ Stories: 5 stories (29 estimated points)
+  ✅ Epic: DF4
+  ✅ Track: DF
+  ✅ Epic index: _bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md
+  ✅ Stories: 2 stories (10 estimated points)
 
 Phase 1: Parallel Research (5 agents)
-  ✅ Agent 1: Story patterns extracted from A5, A6
-  ✅ Agent 2: Tool specs from agent-tool-specification.md §6-7
-  ✅ Agent 3: Entity patterns from DATABASE_SCHEMA_SPECIFICATION.md
-  ✅ Agent 4: External deps (Claude SDK, Python patterns)
-  ✅ Agent 5: Dependency analysis (2 waves recommended)
+  ✅ Agent 1: Story patterns extracted from dark-factory-v5/stories/
+  ✅ Agent 2: Specs named in the epic
+  ✅ Agent 3: Data/contract models from the spec + src/
+  ✅ Agent 4: External deps (libraries in package.json)
+  ✅ Agent 5: Dependency analysis (1 wave recommended)
 
   Confidence Score: 0.92
 
 Phase 2: Story Writing (Wave 1)
-  ✅ Writing A7.1: Writing Agent (8 pts)
-  ✅ Writing A7.2: QA Agent (5 pts)
+  ✅ Writing DF4.1 (5 pts)
+  ✅ Writing DF4.2 (5 pts)
 
-  [Detailed stories written to _bmad-output/sprint-artifacts/sprint-7/stories/]
-  [Brief summaries written to _bmad-output/epics.md with Story File links]
+  [Detailed stories written to _bmad-output/sprint-artifacts/dark-factory-v5/stories/]
+  [Brief summaries written to the epic index with Story File links]
 
 Phase 3: Updates
-  ✅ epics.md updated
+  ✅ Epic index updated
   ✅ sprint-status.yaml updated
-  ✅ CLAUDE.md updated
-  ✅ Branch: feature/epic-a7-stories
-  ✅ Commit: feat(epic-a7): write enterprise-grade stories
+  ✅ Branch: feature/epic-df4-stories
+  ✅ Commit: feat(epic-df4): write enterprise-grade stories
 
-🎯 PR Created: https://github.com/biospark33/RFP-Agents/pull/XXX
+🎯 PR Created (base: dev): https://github.com/<org>/<repo>/pull/N
 ```
 
-### Example 2: Track B with shadcn Research
+### Example 2: Frontend Epic (`visualizer/`)
 
-```bash
-/skills:qds-sprint-planning b4 b
-```
-
-Output:
-
-```
-🎯 QDS Sprint Story Planning v1.3.0
-
-Phase 0: Epic & Track Selection
-  ✅ Epic: B4 (Question Management Flow)
-  ✅ Track: B (Frontend/Integration)
-  ✅ Stories: 4 stories (22 estimated points)
-
-Phase 1: Parallel Research (5 agents)
-  ✅ Agent 1: Story patterns extracted from B2, B3
-  ✅ Agent 2: UX specs from ux-design-specification.md
-  ✅ Agent 3: shadcn components (DataTable, Dialog, Form)
-  ✅ Agent 4: React/Next.js patterns from Context7
-  ✅ Agent 5: Dependency analysis (2 waves recommended)
-
-Phase 2: Story Writing
-  ✅ Writing B4.1: Question List (5 pts)
-  ✅ Writing B4.2: Question Detail (5 pts)
-  ✅ Writing B4.3: Question Edit (6 pts)
-  ✅ Writing B4.4: Bulk Operations (6 pts)
-
-Phase 3: Updates
-  ✅ All status files updated
-  ✅ PR created to dev branch
-```
+For an epic whose stories target `visualizer/`, the frontend research variant runs:
+Agent 2 reads the UX spec paths named in the epic, Agent 3 inventories
+`visualizer/src/` components, Agent 4 queries Context7 for libraries in
+`visualizer/package.json`. Phases 2–3 are identical; the PR targets `dev`.
 
 ## State Persistence
 
@@ -928,7 +832,7 @@ This skill complements:
 
 - `qds-dev` - Story development workflow (uses stories created by this skill)
 - `qds-retro` - Sprint retrospectives (lessons feed back into planning)
-- `sc:implement` - General implementation skill (qds-sprint-planning creates stories for implementation)
+- `qds-story-review` - Adversarial pre-dev review of the stories this skill writes
 
 ## Troubleshooting
 
@@ -936,7 +840,7 @@ This skill complements:
 
 If a research agent fails:
 
-1. Check MCP server status (Context7, shadcn)
+1. Check MCP server status (Context7)
 2. Use `--verbose` to see detailed errors
 3. Re-run with `/skills:qds-sprint-planning {epic} {track}` to retry
 
@@ -948,12 +852,12 @@ If context overflow occurs:
 2. Use `--minimal` to skip spec validation
 3. Plan epic in multiple runs (subset of stories each time)
 
-### shadcn MCP Unavailable
+### Component-Library MCP Unavailable
 
-If shadcn MCP is not available for Track B:
+If the frontend epic's component-library MCP is not available:
 
-1. Agent 3 falls back to reading `_bmad-output/ux-design-specification.md`
-2. Component patterns inferred from existing B* stories
+1. Agent 3 falls back to the UX spec paths named in the epic and `visualizer/src/`
+2. Component patterns inferred from existing frontend stories
 3. Warning logged but workflow continues
 
 ### Context7 MCP Unavailable
@@ -970,10 +874,32 @@ If Context7 MCP is not available:
 - Git >= 2.30 (for branch management)
 - GitHub CLI (`gh`) >= 2.0 (for PR creation)
 - Context7 MCP server (for library research, has fallback if unavailable)
-- shadcn MCP server (for Track B component research, optional but recommended)
 - Claude Code Task tool (for parallel agent execution)
 
 ## Changelog
+
+### [1.5.0] - 2026-10-03
+
+**Project-fit cleanup for QDS-Factory (the skill was forked from an
+RFP-Agents project and still carried its content).**
+
+- **Changed:** tracks are the epic prefix (P0, P1, DF*, SC*, v6 Z/M/A/J/G),
+  not "Track A/B"; backend vs frontend is now a research variant
+  (frontend = epics targeting `visualizer/`).
+- **Changed:** the epic index is resolved from `.qds-config.yml` /
+  `sprint-status.yaml` `index:` / `implementation-artifacts/epics-and-stories-*.md`
+  (`_bmad-output/epics.md` does not exist here).
+- **Changed:** story folder is derived from the epic's existing
+  `sprint-artifacts/*/stories/` dir; the RFP-Agents sprint-number table is gone.
+- **Removed:** the A6 20-36-checkbox DoD standard and its quality table —
+  the Phase 2.5 gate (≤10 DoD items) is the single DoD bar.
+- **Removed:** RFP-Agents paths/stack (`services/api-gateway`, Alembic
+  migration dirs, RFP spec files, Next.js/React/FastAPI/Pydantic/pgvector
+  pins, RFP-Agents PR/issue links), the `/CLAUDE.md` status-line step,
+  links to non-existent `bmad-*` skills, and the `sc:implement` reference.
+- **Changed:** incident narratives in rule text replaced with one-clause
+  reasons; version numbers dropped from banners; resources index lists
+  `steps/phase-2-5-atomicity-audit.md`.
 
 ### [1.4.0] - 2026-08-12
 

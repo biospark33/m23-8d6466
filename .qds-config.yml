@@ -13,8 +13,8 @@ qds:
     frontend_lang: typescript
   commands:
     test: bun test
-    # Kept in step with root package.json:20 — `visualizer` and `oci` were
-    # missing here, so every skill-driven review silently skipped the frontend.
+    # Keep in step with the `lint` script in root package.json, so skill-driven
+    # reviews lint the same dirs as CI (including `visualizer` and `oci`).
     lint: bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor visualizer oci
     # MUST stay a single command: qds-code-review expands this unquoted
     # (`cd "$BACKEND_DIR" && $LINT_CMD && $TYPECHECK_CMD && ...`), so an
@@ -22,7 +22,7 @@ qds:
     # The SPA's .vue files are covered by frontend_dir above, not here.
     typecheck: bunx tsc --noEmit
   pr:
-    default_base: main
+    default_base: dev   # every PR targets dev; only the dev -> main promote PR targets main
     # QDS-Factory rule: PRs MUST be authored by biospark33 (CodeRabbit review
     # binding). All other git/gh ops run as i3creations. The resolver applies
     # this per-op via qds_with_pr_identity — it never mutates global gh auth.

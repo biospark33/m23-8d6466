@@ -140,7 +140,25 @@ cleanup() {
   # exit code $rc (set by the EXIT trap) with exit 1 — breaks the "safe to
   # re-run" contract. Suppress so cleanup always reaches `return 0`.
   [ "${CREATED_IGNORE:-0}" = "1" ] && { rm -f "${IGNORE_FILE:-}" 2>/dev/null || true; }
-  [ "${CREATED_SKILLS:-0}" = "1" ] && { rm -rf "${SKILLS_DIR:-}" 2>/dev/null || true; }
+  # A failed analyze leaves the standard skills moved aside: put them back so
+  # the tracked files are never lost. On success the backup is just deleted.
+  if [ -n "${SKILLS_BACKUP:-}" ] && [ -d "$SKILLS_BACKUP" ]; then
+    if [ "${ANALYZE_OK:-0}" != "1" ]; then
+      for f in "$SKILLS_BACKUP"/*/SKILL.md; do
+        [ -f "$f" ] || continue
+        name="$(basename "$(dirname "$f")")"
+        mkdir -p "$SKILLS_ROOT/$name" 2>/dev/null || true
+        mv "$f" "$SKILLS_ROOT/$name/SKILL.md" 2>/dev/null || true
+      done
+    fi
+    rm -rf "$SKILLS_BACKUP" 2>/dev/null || true
+  fi
+  # Dirs this run created are removed ONLY on a failed run (a partial template
+  # in an untracked dir); on success the generated skills stay — a first
+  # install must keep what it generated.
+  if [ "${ANALYZE_OK:-0}" != "1" ]; then
+    for d in ${CREATED_SKILL_DIRS:-}; do rm -rf "$d" 2>/dev/null || true; done
+  fi
   [ "${CREATED_LOCK:-0}" = "1" ] && { rm -rf "${LOCK_DIR:-}" 2>/dev/null || true; }
   # Without this, a `set -e` exit while the reclaim guard is held (e.g. the pid
   # write at line ~211/268 fails) leaks $RECLAIM_LOCK_DIR forever — the next
@@ -311,13 +329,54 @@ elif ! grep -qE '^!tests/?\*{0,2}\s*$' "$IGNORE_FILE" \
   echo "WARN: pre-existing $IGNORE_FILE does not negate tests/fixtures — fixture symbols may not index (AC-1 could fail)" >&2
 fi
 
-# `gitnexus analyze` auto-writes repo skill files under .claude/skills/gitnexus/.
-# The repo may already ship a tracked skills dir there, so we snapshot existence
-# before the analyze and only remove what THIS run created — never clobber a
-# pre-existing dir on every run.
-SKILLS_DIR="$REPO_ROOT/.claude/skills/gitnexus"
-CREATED_SKILLS=0
-if [ ! -d "$SKILLS_DIR" ]; then CREATED_SKILLS=1; fi
+# `gitnexus analyze` (>= 1.6.10) writes its standard skills as direct children,
+# `.claude/skills/gitnexus-<name>/SKILL.md`. The repo tracks them, localized by
+# localize_gitnexus_skills below. Two consequences handled here:
+#  - analyze PRESERVES any SKILL.md whose bytes differ from its bundled template
+#    (upstream #3124), so a localized file would never pick up a CLI upgrade's
+#    new template. Move the tracked copies aside first so analyze writes fresh
+#    templates; cleanup() restores them if analyze fails.
+#  - a run in a root that had no gitnexus-* skill dirs (tests' temp roots) must
+#    touch only the dirs THIS run created — never a pre-existing one — and keep
+#    the generated skills on success, removing them only on a failed run.
+SKILLS_ROOT="$REPO_ROOT/.claude/skills"
+GITNEXUS_SKILLS="gitnexus-cli gitnexus-debugging gitnexus-exploring gitnexus-guide gitnexus-impact-analysis gitnexus-refactoring"
+CREATED_SKILL_DIRS=""
+SKILLS_BACKUP="$LOCK_DIR/skills-backup"
+for name in $GITNEXUS_SKILLS; do
+  if [ -f "$SKILLS_ROOT/$name/SKILL.md" ]; then
+    mkdir -p "$SKILLS_BACKUP/$name"
+    mv "$SKILLS_ROOT/$name/SKILL.md" "$SKILLS_BACKUP/$name/SKILL.md"
+  elif [ ! -d "$SKILLS_ROOT/$name" ]; then
+    CREATED_SKILL_DIRS="$CREATED_SKILL_DIRS $SKILLS_ROOT/$name"
+  fi
+done
+
+# Repo-local edits to the bundled skills: upstream tells agents to run a bare
+# `analyze` on a stale index, which skips this repo's transient .gitnexusignore
+# negation (see section 2). Point them at this script instead. Idempotent.
+localize_gitnexus_skills() {
+  local f
+  for f in "$SKILLS_ROOT"/gitnexus-*/SKILL.md; do
+    [ -f "$f" ] || continue
+    perl -pi -e 's{run `node \.gitnexus/run\.cjs analyze` in (the )?terminal( first)?}{run `bash scripts/install-gitnexus-plus.sh` from the project root (never a bare `analyze`)}g' "$f"
+    # Same class of upstream instruction: the missing-runner recovery in the
+    # gitnexus-cli skill says "(Re)generate it with `npx gitnexus analyze`" — a
+    # bare analyze that drops the fixture negation. Rewrite it to this script,
+    # keeping the npx forms only as the CLI-itself-missing fallback. Guarded so
+    # the rewrite runs once per file (grep for the replacement's marker).
+    if ! grep -q 'Run the repo installer' "$f"; then
+      # The pattern is split around \Q so the `@latest` sits outside the
+      # quotemeta region (inside \Q..\E an escaped-at still fails to match —
+      # measured, not assumed).
+      perl -0pi -e 's{\Q(Re)generate it with `npx gitnexus analyze` from the project root, or `bunx gitnexus\E\@latest analyze` on a bun-only machine.}{Run the repo installer: `bash scripts/install-gitnexus-plus.sh` from the project root (analyze-only: `GITNEXUS_SKIP_INSTALL=1 bash scripts/install-gitnexus-plus.sh`). It rebuilds the index AND the runner while keeping this repo'"'"'s transient `.gitnexusignore` negation. Only when the installer reports the `gitnexus` CLI itself missing: (Re)generate the runner with `npx gitnexus analyze` from the project root, or `bunx gitnexus\@latest analyze` on a bun-only machine.}g' "$f"
+    fi
+  done
+  f="$SKILLS_ROOT/gitnexus-cli/SKILL.md"
+  if [ -f "$f" ] && ! grep -q 'QDS-Factory reindex rule' "$f"; then
+    perl -0pi -e 's{(# GitNexus CLI Commands\n)}{$1\n> **QDS-Factory reindex rule:** build or refresh this repo'"'"'s index only with `bash scripts/install-gitnexus-plus.sh` (analyze-only: `GITNEXUS_SKIP_INSTALL=1 bash scripts/install-gitnexus-plus.sh`). A bare `analyze` skips the transient `.gitnexusignore` negation and drops `tests/gitnexus/fixtures/` from the graph. The `analyze` commands below are upstream reference only.\n}' "$f"
+  fi
+}
 
 # --embeddings: the semantic query path (gitnexus_query) needs vector search to
 # return definitions for a small graph; pure BM25 misses symbol-name-only hits.
@@ -391,6 +450,11 @@ echo "Running gitnexus analyze (${EMBEDDINGS_FLAG:-no embeddings}, 300s cap) ...
 # shellcheck disable=SC2086  # intentional split: empty EMBEDDINGS_FLAG must vanish
 "${TIMEOUT[@]}" \
   "$GITNEXUS" analyze "$REPO_ROOT" --force $EMBEDDINGS_FLAG --skip-agents-md
+# ANALYZE_OK gates cleanup's restore-vs-keep decision for the skill backups, so
+# it is set only AFTER localize succeeds: a localize failure under `set -e`
+# must restore the tracked SKILL.md files, not delete their backups.
+localize_gitnexus_skills
+ANALYZE_OK=1
 
 # --- 3. Version stamp + contract pin check ----------------------------------
 # Version visibility: every reindex records which CLI built the index and
