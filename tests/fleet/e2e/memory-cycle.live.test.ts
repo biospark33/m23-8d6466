@@ -34,25 +34,40 @@
  *       failure the named fallback engages and is PROVEN on a fresh bank:
  *       host-side retain-identity ledger keyed on documentId → skip-on-replay
  *       retains exactly one document.
- *   L2  primed dispatch — the marker is seeded into the bank the dispatch
- *       seam will resolve (see SEAM MIRROR below), the real dispatch primes,
- *       the in-box engine settles, the side-channel row reads
- *       {primed:true, directive:"kg_context"}.
+ *   L2  primed dispatch — the marker is seeded into the probe FAMILY the
+ *       dispatch seam will resolve (see SEAM MIRROR below), the real
+ *       dispatch primes, the in-box engine settles, the side-channel row
+ *       reads {primed:true, directive:"kg_context"}.
  *   L3  harvest retain — the outcome document lands (documentId = runId),
  *       EXACTLY ONE memory-retain-receipt/retain row (subject = runId), the
  *       re-harvest produces NO second document and NO second receipt row;
  *       then the full cleanup verdicts (box, key, probe banks, leftovers).
  *
- * SEAM MIRROR (why L2 seeds a RESOLVER-fresh bank instead of L1's probe
- * bank): the dispatch fan-out set is exactly {<provision-time repo bank>,
- * qds-collective} (kg-context.ts recallFanOut), and BriefSchema ties
- * repoSlug to repoUrl's path — no live-round brief can resolve to a
- * `qds-probe-*` id. So L2 resolves the bank the SAME way the seam does —
- * `resolveRepoBankId(resolveBankId(repoSlug), liveBanks)` — which by
- * construction returns an id NOT in the live list; L2 creates it, seeds the
- * marker, and the fan-out deterministically recalls it. Freshness is also
- * the delete-safety guard: only banks this round created (absent from the
- * before-list) are deleted in cleanup, never a pre-existing production bank.
+ * SEAM MIRROR (why L2 seeds a PROBE-SLUG family, and how its brief still
+ * fills real code): the production seam resolves the repo bank by FAMILY
+ * SIGNATURE — `resolveProvisionedRepoBankId(resolveBankId(repoSlug), live)`
+ * returns a candidate only when BOTH it and its `-dev-meta` sibling exist,
+ * the pair only the provisioner creates (kg-context.ts primeDispatchBrief
+ * at dispatch; the scripts/fleet.ts and run-completion.ts retain twins at
+ * harvest). Seeding a CREATE-side-resolved id, or a bare base without the
+ * sibling, can never resolve: a fresh instance proceeds-unprimed, and an
+ * M1.1-provisioned instance resolves the PRODUCTION family — the fan-out
+ * recalls production memory while the round's suffixed seed goes unread,
+ * and the harvest retain writes INTO production memory. So the round
+ * dispatches a probe repo slug — `qds-probe/m12-<rand>`, REPO_SLUG_PATTERN-
+ * valid and unique per round — whose family cannot pre-exist on ANY
+ * instance state (no stale-family state, zero production-memory
+ * pollution), creates BOTH banks, and asserts the seam's own resolution
+ * over the live list BEFORE spending:
+ * `resolveProvisionedRepoBankId(base, liveAfterSeed) === base`. The brief
+ * carries that probe slug, and BriefSchema's cross-refine ties repoSlug to
+ * repoUrl's path, so the brief carries the probe path too — git's
+ * `insteadOf`, scoped to the dispatch SUBPROCESS's env (GIT_CONFIG_* env
+ * config, never ~/.gitconfig), aliases that probe URL back to ctx.repoUrl,
+ * so fill's host-side bundle-push still clones the REAL repo at ctx.sha
+ * and the box boots bytes identical to a production dispatch. Freshness is
+ * also the delete-safety guard: only banks this round created (absent from
+ * the before-list) are deleted in cleanup, never a pre-existing bank.
  *
  * EVIDENCE: scrubbed JSON per leg → _bmad-output/evidence/m1-2/ (AC7's dir;
  * timestamped like the sibling evidence files). The harness `writeEvidence`
@@ -70,7 +85,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import { openAuditStoreForWalk, sha256Hex } from "../../../src/audit/link-store.ts";
-import { extractExistingBankIds, resolveRepoBankId } from "../../../src/hindsight/bank-provisioner.ts";
+import { extractExistingBankIds, resolveProvisionedRepoBankId } from "../../../src/hindsight/bank-provisioner.ts";
 import { HindsightClient } from "../../../src/hindsight/client.ts";
 import { DEFAULT_RECALL_DIR, type RecallRow } from "../../../src/hindsight/kg-context.ts";
 import { BankIdSchema, resolveBankId, type RecallResponse } from "../../../src/hindsight/schemas.ts";
@@ -107,8 +122,6 @@ import {
 const T2_CAP_MICRO_USD = 50_000;
 /** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
 const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
-/** The brief's repoSlug — canonically tied to QDS_EXEDEV_REPO_URL's path. */
-const REPO_SLUG = "Quantum-Digital-Solutions/QDS-Factory";
 /** The probe manifest the T2 tiers dispatch: code phases only, 60 s budget. */
 const MANIFEST_PATH = "config/rosters/t2.pipeline.json";
 /** The minted-runId grammar (dispatch.ts MINTED_RUN_ID_RE) — AC4's documentId. */
@@ -127,6 +140,20 @@ function probeBankId(): string {
   const id = `qds-probe-m12-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
   expect(BankIdSchema.safeParse(id).success).toBe(true);
   return id;
+}
+
+/**
+ * A fresh probe REPO identity for L2: a REPO_SLUG_PATTERN-valid slug
+ * `qds-probe/m12-<rand>` and the bank id `resolveBankId` normalizes it to —
+ * the base of the family the dispatch seam resolves (see SEAM MIRROR).
+ * Unique per round, so the family cannot pre-exist on ANY instance state.
+ */
+function probeRepoFamily(): { slug: string; base: string } {
+  const slug = `qds-probe/m12-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+  const base = resolveBankId(slug);
+  expect(BankIdSchema.safeParse(base).success).toBe(true);
+  expect(BankIdSchema.safeParse(`${base}-dev-meta`).success).toBe(true);
+  return { slug, base };
 }
 
 /**
@@ -269,7 +296,7 @@ interface RoundState {
   vmName: string;
   repoBankId: string;
   primeDocId: string;
-  /** Banks THIS round created (resolver-fresh) — the only ones cleanup deletes. */
+  /** Banks THIS round created (the probe family pair) — the only ones cleanup deletes. */
   banksWeCreated: string[];
   /** Side-channel recall rows the round wrote INTO THE REPO TREE
    * (`REPO_ROOT/_bmad-output/memory/recall/<id>.json`) — L3's finally removes
@@ -534,7 +561,7 @@ describe("memory cycle live", () => {
 
   // ── L2: primed dispatch + in-box engine (real box, real spend) ───────────
   test.todoIf(liveTodoOff())(
-    "L2 primed dispatch: real box + capped key ≤ 50,000 µ$ — seam-mirrored bank seeded, kg_context primed, side-channel row, engine settles",
+    "L2 primed dispatch: real box + capped key ≤ 50,000 µ$ — seam-mirrored probe family seeded, kg_context primed, side-channel row, engine settles",
     async () => {
       liveGate("2");
       requireMemoryEnv(); // refuse BEFORE any spend: an unprimed dispatch would fail L2's assertions anyway
@@ -551,29 +578,52 @@ describe("memory cycle live", () => {
         // never the operator's .sandbox/audit.db.
         round.auditDb = join(round.workspace, "audit.db");
         const env = { QDS_RUNS_DIR: round.recordsDir, QDS_AUDIT_DB: round.auditDb };
+        // The cost config sits BESIDE the records dir — exactly where
+        // costLedgerOpts resolves it for every verb below ($QDS_COST_CONFIG_FILE
+        // unset → dirname(recordsDir)/cost-config.json), so the run is
+        // PRE-BOUNDED at defaultCapMicroUsd before the mint (L2's
+        // rec.limitMicroUsd assertion reads the echo back — without this file
+        // the built-in 5,000,000 default would flow) and teardown can price
+        // box hours at the operator's TIER-1 rate.
         writeFileSync(
           join(round.workspace, "cost-config.json"),
           JSON.stringify({ defaultCapMicroUsd: T2_CAP_MICRO_USD, boxHourRateMicroUsd: T2_BOX_HOUR_RATE_MICRO_USD }),
         );
         round.evidence.push({ phase: "setup", ok: true, capMicroUsd: T2_CAP_MICRO_USD, auditDb: "round-owned (under the tmp workspace)" });
 
-        // ── seed the bank the dispatch seam will fan out to (SEAM MIRROR) ──
+        // ── seed the PROBE FAMILY the dispatch seam resolves (SEAM MIRROR) ──
         const mem = new HindsightClient();
         const existing = extractExistingBankIds(await mem.listBanks());
-        const repoBankId = resolveRepoBankId(resolveBankId(REPO_SLUG), existing);
-        if (repoBankId === null) throw new Error(`resolveRepoBankId could not resolve a fresh bank id for ${REPO_SLUG} — every candidate exists`);
-        expect(existing.has(repoBankId)).toBe(false); // resolver freshness = the delete-safety guard
-        round.repoBankId = repoBankId;
-        // Armed BEFORE the await (L1's discipline): a createBank that times
+        const probe = probeRepoFamily();
+        const base = probe.base;
+        const devMeta = `${base}-dev-meta`;
+        // Fresh BY CONSTRUCTION (the slug is unique per round): neither family
+        // member may pre-exist. A hit here means the rand space collapsed, not
+        // that a foreign bank should be adopted — this is also the delete-
+        // safety guard (cleanup deletes only what this round created).
+        expect(existing.has(base)).toBe(false);
+        expect(existing.has(devMeta)).toBe(false);
+        round.repoBankId = base;
+        // Armed BEFORE the awaits (L1's discipline): a createBank that times
         // out AFTER the server-side create still gets deleted by L3's
         // cleanup — pushing after the await orphaned exactly the bank this
-        // guard exists for.
-        round.banksWeCreated.push(repoBankId);
-        await mem.createBank(repoBankId);
+        // guard exists for. BOTH family members are armed before either is
+        // created.
+        round.banksWeCreated.push(base, devMeta);
+        await mem.createBank(base);
+        await mem.createBank(devMeta);
+        // The seam's OWN resolution, over the LIVE list, BEFORE any spend:
+        // primeDispatchBrief and both retain twins resolve the brief's slug
+        // exactly like this — the pair above must carry the family signature
+        // (candidate + `-dev-meta`) or dispatch proceeds-unprimed and the leg
+        // fails later and less clearly.
+        const liveAfterSeed = extractExistingBankIds(await mem.listBanks());
+        const seamResolved = resolveProvisionedRepoBankId(base, liveAfterSeed);
+        expect(seamResolved).toBe(base);
         round.primeDocId = `m12-prime-${datedStamp()}`;
         await mem.retain(
-          repoBankId,
-          `M1.2 primed-dispatch marker (documentId ${round.primeDocId}) for ${REPO_SLUG} issue 46: the memory-cycle live round seeds this observation so the dispatch seam's fan-out recall can prime and cite it.`,
+          base,
+          `M1.2 primed-dispatch marker (documentId ${round.primeDocId}) for the ${probe.slug} probe family: the memory-cycle live round seeds this observation so the dispatch seam's fan-out recall can prime and cite it.`,
           {
             documentId: round.primeDocId,
             updateMode: "replace",
@@ -582,7 +632,31 @@ describe("memory cycle live", () => {
             tags: ["m12-primed-dispatch-probe"],
           },
         );
-        round.evidence.push({ phase: "seed-repo-bank", repoBankId, documentId: round.primeDocId, preExistingBankCount: existing.size });
+        // The brief names the PROBE repository (BriefSchema's cross-refine
+        // ties repoSlug to repoUrl's path), so fill's host-side bundle-push
+        // would otherwise fetch a repo that does not exist. Git's own URL
+        // aliasing closes that, scoped to the dispatch SUBPROCESS's env
+        // (GIT_CONFIG_* env config — never ~/.gitconfig): insteadOf rewrites
+        // the exact probe URL to ctx.repoUrl, so the host still clones the
+        // REAL repo at ctx.sha — the same host credentials scratchClone uses,
+        // the same bytes a production dispatch boots — and the alias dies
+        // with the subprocess.
+        const probeUrl = `https://github.com/${probe.slug}.git`;
+        const gitAliasEnv = {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: `url.${ctx.repoUrl}.insteadOf`,
+          GIT_CONFIG_VALUE_0: probeUrl,
+        };
+        round.evidence.push({
+          phase: "seed-probe-family",
+          repoBankId: base,
+          devMetaBankId: devMeta,
+          repoSlug: probe.slug,
+          repoUrl: probeUrl,
+          documentId: round.primeDocId,
+          preExistingBankCount: existing.size,
+          seamResolution: seamResolved,
+        });
 
         // ── SPEND PRINT, immediately before the verb that fires ────────────
         const boxHoursUsd = T2_BOX_HOUR_RATE_MICRO_USD / 1_000_000;
@@ -597,12 +671,12 @@ describe("memory cycle live", () => {
         writeFileSync(
           briefPath,
           JSON.stringify({
-            repoSlug: REPO_SLUG,
+            repoSlug: probe.slug,
             issueId: 46,
             requestId: round.requestId,
             commitSha: ctx.sha,
             manifestPath: MANIFEST_PATH,
-            repoUrl: ctx.repoUrl,
+            repoUrl: probeUrl,
           }),
         );
 
@@ -610,9 +684,12 @@ describe("memory cycle live", () => {
         round.evidence.push({ phase: "ls-before", boxes: before.filter((n) => n.startsWith("e2e-") || n.startsWith("qds-")) });
 
         // ── the dispatch verb, as a real subprocess, production path ───────
+        // The git URL alias rides ONLY this verb's env: fill's bundle-push is
+        // the one host-side git consumer of the probe URL (the run/harvest/
+        // teardown verbs never clone).
         const dispatch = await runFleet(
           ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", round.recordsDir],
-          { cwd: REPO_ROOT, env, timeoutMs: 1_200_000 },
+          { cwd: REPO_ROOT, env: { ...env, ...gitAliasEnv }, timeoutMs: 1_200_000 },
         ).catch((e: unknown) => {
           const partial = fleetPartialOutput(e);
           // F4: arm ownership from the raw partial streams BEFORE rethrowing —
@@ -661,7 +738,7 @@ describe("memory cycle live", () => {
         expect(row.runId).toBe(round.requestId);
         expect(row.primed).toBe(true);
         expect(row.directive).toBe("kg_context");
-        expect(row.banks).toContain(repoBankId);
+        expect(row.banks).toContain(base);
         expect(row.banks).toContain("qds-collective");
         expect(row.recalledDocumentIds).toContain(round.primeDocId);
         expect(row.chars).toBeGreaterThan(0);
@@ -714,21 +791,21 @@ describe("memory cycle live", () => {
       if (evidenceProblems.length > 0) throw new Error(evidenceProblems.join("; "));
     },
     //   preflight + key list + ls                              ~  260 s
-    //   listBanks + createBank + retain (30 s ceilings)        ~   90 s
+    //   listBanks ×2 + createBank ×2 + retain (30 s ceilings)  ~  150 s
     //   dispatch verb                          1_200_000       ~ 1200 s
     //   run verb                               180_000         ~  180 s
     //   settle poll  12 × (status 60 s + wait 10 s)            ~  840 s
     //   evidence + local                                       ~   10 s
-    //                                                     body ≈ 2580 s
+    //                                                     body ≈ 2640 s
     //   finally (evidence write only)                          ~   10 s
-    // Hence 2_580 s → 2_640 s. NO cleanup legs here (L3 owns the verdicts):
+    // Hence 2_640 s → 2_700 s. NO cleanup legs here (L3 owns the verdicts):
     // every failure path arms the round's ids first — the dispatch timeout
     // via recoverDispatchIds on the partial streams, later failures via the
     // ack values set before any assertion that can throw — and L3's finally
     // now ALWAYS runs (F4: its hollow-leg guard throws INSIDE L3's try) and
     // tears down every resource those ids name. Only a bun timeout abort of
     // the runner itself skips even that.
-    2_640_000,
+    2_700_000,
   );
 
   // ── L3: harvest retain + idempotent replay + full cleanup ────────────────
@@ -747,8 +824,10 @@ describe("memory cycle live", () => {
       const rowProblems: string[] = [];
       const evidence: Record<string, unknown>[] = round.evidence;
       /** Set once the body's teardown + box-gone proof both held — the
-       * finally's destroy backstop must NOT re-destroy a disposed box (a
-       * failed double-destroy would fail a green round via destroyFailures). */
+       * finally's destroy backstop must NOT re-destroy a disposed box and the
+       * teardown-verb backstop must NOT re-run over the closed run (a failed
+       * double-teardown of either kind would fail a green round via
+       * destroyFailures). */
       let bodyTeardownOk = false;
       try {
         // F4: FIRST statement INSIDE the try — the hollow-leg refusal throws
@@ -860,8 +939,12 @@ describe("memory cycle live", () => {
         // teardown verb, box destroy, key revoke — the L2/L3 shared substrate.
         // F4: each step guards on its OWN armed id (and on ctx, which only
         // exists once preflight returned), so a partial L2 cleans exactly the
-        // resources that exist and a hollow leg skips every unarmed one.
-        if (ctx !== undefined && recordsDir !== "" && runId !== "") {
+        // resources that exist and a hollow leg skips every unarmed one. The
+        // teardown-verb backstop ALSO skips a body that already tore down
+        // cleanly (bodyTeardownOk) — re-running the verb over a closed run is
+        // a second teardown round-trip that can only fail a green leg; the
+        // destroy backstop keeps the same guard.
+        if (ctx !== undefined && recordsDir !== "" && runId !== "" && !bodyTeardownOk) {
           const torn = await teardownQuietly(
             ["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"],
             { env, timeoutMs: 180_000 },
@@ -874,9 +957,9 @@ describe("memory cycle live", () => {
           const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
           if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
         }
-        // Probe-bank cleanup — ONLY banks this round created (resolver-fresh;
-        // a pre-existing production bank is never deleted). The loop is its
-        // own unarmed guard: no armed bank, no iteration.
+        // Probe-bank cleanup — ONLY banks this round created (the probe family
+        // pair; a pre-existing bank is never deleted). The loop is its own
+        // unarmed guard: no armed bank, no iteration.
         for (const bankId of round.banksWeCreated) {
           try {
             const deleted = await new HindsightClient().deleteBank(bankId);
