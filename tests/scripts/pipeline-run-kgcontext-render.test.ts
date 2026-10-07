@@ -4,12 +4,25 @@
  * ceiling and control-char refine are the host-side guard, and the renderer
  * re-applies the same predicate because the witness is workload-writable;
  * sanitizeForMessage would destroy the multi-line XML), and produces
- * byte-identical lines when absent or when the value fails the predicate.
+ * byte-identical lines when absent or when the value fails the predicate. The
+ * predicate-failing drop is observable — one line on the `warn` channel (the
+ * production default writes it to stderr) — while absent, empty, and
+ * non-string stay silent.
  */
 import { describe, expect, test } from "bun:test";
 
 import { residentContextLines } from "../../scripts/pipeline-run.ts";
 import type { PhaseSpec } from "../../src/phase-engine/index.ts";
+
+/** Collects the drop channel instead of stderr — `warn` is the seam for it. */
+const captureWarn = () => {
+  const dropped: string[] = [];
+  return { dropped, warn: (line: string) => dropped.push(line) };
+};
+
+const DROP_LINE =
+  "pipeline-run: kg_context dropped: non-well-formed (witness mutated or stale) — continuing unprimed\n";
+
 
 const RUN_ID = "qds-20261006-test01";
 const MANIFEST = {
@@ -65,7 +78,10 @@ describe("kgContext resident render", () => {
   });
 
   test("a non-well-formed kgContext is dropped, render otherwise unchanged", () => {
-    const baseline = residentContextLines(RUN_ID, MANIFEST, BRIEF);
+    // `warn` is a collector here so this render-identity test doesn't spray
+    // the default stderr sink; the emission itself is pinned two tests down.
+    const { warn } = captureWarn();
+    const baseline = residentContextLines(RUN_ID, MANIFEST, BRIEF, warn);
     // Over-ceiling: the host schema's .max refuses this shape, but the brief
     // reaches the box through run-context.json, a witness FILE the run's own
     // phases can rewrite — so the renderer re-validates and DROPS (fail-closed
@@ -73,17 +89,41 @@ describe("kgContext resident render", () => {
     const over = residentContextLines(RUN_ID, MANIFEST, {
       ...BRIEF,
       kgContext: "x".repeat(8_001),
-    });
+    }, warn);
     expect(over).toEqual(baseline);
     // Control-char-bearing: a bare CR (refused by the kgContext charset, even
     // inside the block grammar) must not reach the prompt.
     const crl = residentContextLines(RUN_ID, MANIFEST, {
       ...BRIEF,
       kgContext: "<kg_context>bad\x0brun\x7f</kg_context>",
-    });
+    }, warn);
     expect(crl).toEqual(baseline);
     // C1 (NEL U+0085) is in the refused category too.
-    const c1 = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: "a\x85b" });
+    const c1 = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: "a\x85b" }, warn);
     expect(c1).toEqual(baseline);
+  });
+
+  test("the drop is observable: one line on the warn channel, render unchanged", () => {
+    // The operator-debugging case G12 closed: a witness-mutated kgContext must
+    // leave a trace saying the run continues UNPRIMED, not silently read as
+    // "grounding was never configured".
+    const { dropped, warn } = captureWarn();
+    const lines = residentContextLines(
+      RUN_ID,
+      MANIFEST,
+      { ...BRIEF, kgContext: "<kg_context>bad\x0brun\x7f</kg_context>" },
+      warn,
+    );
+    expect(lines).toEqual(residentContextLines(RUN_ID, MANIFEST, BRIEF));
+    expect(dropped).toEqual([DROP_LINE]);
+  });
+
+  test("absent, empty, non-string, and well-formed emit nothing on the drop channel", () => {
+    const { dropped, warn } = captureWarn();
+    residentContextLines(RUN_ID, MANIFEST, BRIEF, warn);
+    residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: "" }, warn);
+    residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: 7 }, warn);
+    residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: KG_BLOCK }, warn);
+    expect(dropped).toEqual([]);
   });
 });

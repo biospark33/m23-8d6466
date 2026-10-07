@@ -1594,7 +1594,9 @@ function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[
  * a witness FILE inside the checkout that the run's own phases can rewrite
  * (the same discipline fixContext's copy assumes), so the box side re-validates
  * and a non-well-formed value is DROPPED rather than fatal — grounding is
- * best-effort and the resident proceeds unprimed.
+ * best-effort and the resident proceeds unprimed. The drop is not SILENT: one
+ * stderr line says so, so an operator debugging "why wasn't this run
+ * grounded" has a trace (`warn`, overridable so tests can pin the emission).
  * Bounded by construction; steering.ts enforces the 16,000-char prompt
  * ceiling at render, head-truncated with the directive instruction reserved.
  */
@@ -1602,6 +1604,7 @@ export function residentContextLines(
   runId: string,
   manifest: { pipelineId: string; phases: readonly PhaseSpec[] },
   brief: Record<string, unknown>,
+  warn: (line: string) => void = (line) => writeAll(2, line),
 ): string[] {
   const lines = [
     `pipeline ${sanitizeForMessage(manifest.pipelineId)} run ${sanitizeForMessage(runId)}`,
@@ -1626,10 +1629,19 @@ export function residentContextLines(
   // block's newlines into \n literals and hand the resident a dead context —
   // so the whole kgContextIsWellFormed predicate is re-checked here instead:
   // the witness is workload-writable (see the docstring), and a value that
-  // fails it is dropped, fail-closed, not thrown.
+  // fails it is dropped, fail-closed, not thrown — with one stderr line, or a
+  // witness-mutated run reads as "grounding was never configured". An empty
+  // string stays quiet: the predicate itself calls it well-formed, and its
+  // render outcome is absent's own.
   const kgContext = brief.kgContext;
-  if (typeof kgContext === "string" && kgContext.length > 0 && kgContextIsWellFormed(kgContext)) {
-    lines.push(kgContext);
+  if (typeof kgContext === "string" && kgContext.length > 0) {
+    if (kgContextIsWellFormed(kgContext)) {
+      lines.push(kgContext);
+    } else {
+      warn(
+        "pipeline-run: kg_context dropped: non-well-formed (witness mutated or stale) — continuing unprimed\n",
+      );
+    }
   }
   return lines;
 }

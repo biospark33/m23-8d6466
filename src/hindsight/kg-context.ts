@@ -33,7 +33,7 @@ import { log } from "../swarmclaw/mcp/stdio-transport.ts";
 import {
   COLLECTIVE_BANK_ID,
   extractExistingBankIds,
-  resolveRepoBankId,
+  resolveProvisionedRepoBankId,
 } from "./bank-provisioner.ts";
 import { HindsightClient } from "./client.ts";
 import { resolveBankId, type RecallResponse } from "./schemas.ts";
@@ -146,21 +146,27 @@ export async function recallFanOut(
       }
     }),
   );
-  const observations = per.flatMap((p) =>
-    p.ok
-      ? p.results
-          // Citation floor: an id outside the promised charset (or an absent
-          // one → "") cannot back a [cite:] token — drop the observation
-          // whole rather than ship an uncitable line.
-          .filter((r) => CITABLE_ID.test(r.memoryId))
-          .map((r) => ({
-            id: r.memoryId,
-            content: r.content,
-            score: r.score,
-            documentId: r.documentId,
-          }))
-      : [],
-  );
+  // Dedup by fact id (memoryId), first-seen wins — `banks` is repo bank
+  // before qds-collective and Promise.all preserves that order, so a fact
+  // fanned into both banks surfaces from the repo bank's copy.
+  const seen = new Set<string>();
+  const observations: KgObservation[] = [];
+  for (const p of per) {
+    if (!p.ok) continue;
+    for (const r of p.results) {
+      // Citation floor: an id outside the promised charset (or an absent
+      // one → "") cannot back a [cite:] token — drop the observation
+      // whole rather than ship an uncitable line.
+      if (!CITABLE_ID.test(r.memoryId) || seen.has(r.memoryId)) continue;
+      seen.add(r.memoryId);
+      observations.push({
+        id: r.memoryId,
+        content: r.content,
+        score: r.score,
+        documentId: r.documentId,
+      });
+    }
+  }
   return {
     observations,
     banks,
@@ -196,8 +202,34 @@ function observationXml(o: KgObservation): string {
   const content = kgContextSanitize(o.content);
   // documentId rides the element only when the substrate surfaced one (AC5:
   // null-tolerant — an item retained without an explicit id has none to show).
-  const doc = o.documentId !== null ? ` documentId="${escAttr(o.documentId)}"` : "";
+  // It is substrate data too and gets the SAME strip — an unsanitized control
+  // char in the attribute would re-poison the block past the schema.
+  const docId = o.documentId !== null ? kgContextSanitize(o.documentId) : null;
+  const doc = docId !== null ? ` documentId="${escAttr(docId)}"` : "";
   return `<observation id="${escAttr(o.id)}"${doc}>${escXml(content)}</observation>`;
+}
+
+const KG_HEAD = "<kg_context>\n";
+const KG_TAIL = `\n</kg_context>\n${CITATION_INSTRUCTION}`;
+
+/**
+ * The ranked observations that fit the ceiling, shared by the block and the
+ * row so `recalledDocumentIds` advertises exactly what the block includes.
+ * Whole-observation granularity: an observation that does not fit is dropped
+ * whole, never split (a split citation grounds half a fact). An EMPTY
+ * selection means ladder (c) "empty" — never a zero-observation block.
+ */
+function includedWithinCeiling(observations: KgObservation[]): KgObservation[] {
+  const ranked = [...observations].sort(byScoreDesc);
+  let used = KG_HEAD.length + KG_TAIL.length;
+  const included: KgObservation[] = [];
+  for (const o of ranked) {
+    const cost = observationXml(o).length + (included.length > 0 ? 1 : 0);
+    if (used + cost > KG_CONTEXT_MAX_CHARS) continue;
+    included.push(o);
+    used += cost;
+  }
+  return included;
 }
 
 /**
@@ -212,21 +244,8 @@ function observationXml(o: KgObservation): string {
  * schema ceiling stays a fail-loud backstop, never a routine path.
  */
 export function buildKgContextXml(observations: KgObservation[]): string {
-  const head = "<kg_context>\n";
-  const tail = `\n</kg_context>\n${CITATION_INSTRUCTION}`;
-  const ranked = [...observations].sort(byScoreDesc);
-  let used = head.length + tail.length;
-  const lines: string[] = [];
-  for (const o of ranked) {
-    const line = observationXml(o);
-    const cost = line.length + (lines.length > 0 ? 1 : 0);
-    // Whole-observation granularity: an observation that does not fit is
-    // dropped whole, never split (a split citation grounds half a fact).
-    if (used + cost > KG_CONTEXT_MAX_CHARS) continue;
-    lines.push(line);
-    used += cost;
-  }
-  return head + lines.join("\n") + tail;
+  const lines = includedWithinCeiling(observations).map(observationXml);
+  return KG_HEAD + lines.join("\n") + KG_TAIL;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,12 +364,17 @@ export async function primeDispatchBrief<T extends object>(
     const client = deps.client ?? new HindsightClient();
     const repoSlug = briefStr(briefJson, "repoSlug");
     if (repoSlug === undefined) return emitAndReturn(false, "none", undefined, []);
-    // resolveBankId is the RAW normalizer: it feeds ONLY the collision
-    // resolver, which picks the provision-time id against the LIVE bank list.
-    // The raw form can diverge from the provisioned id and is never used as
-    // the bank id itself (AC1).
+    // resolveBankId is the RAW normalizer: it feeds ONLY the read-side family
+    // resolver, which re-derives the PROVISION-TIME id against the LIVE bank
+    // list. Nothing persists the provision-time id, so the provisioned repo
+    // bank is identified by its family signature — candidate `c` with its
+    // `-dev-meta` sibling, the pair only the provisioner creates. Create-side
+    // resolvers (resolveRepoBankId) return ids NOT in the list by design; AC1
+    // pins the provision-time id, and the raw form is never used as the bank
+    // id itself (a collision would make it a foreign bank).
     const existing = extractExistingBankIds(await client.listBanks());
-    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
+    const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), existing);
+    // No provisioned family → ladder (b) proceed-unprimed.
     if (repoBankId === null) return emitAndReturn(false, "none", undefined, []);
     // BriefSchema types issueId as a NUMBER, so a string probe never engaged
     // for it — numeric-issue dispatches were recalling on repoSlug alone.
@@ -368,13 +392,18 @@ export async function primeDispatchBrief<T extends object>(
     if (fan.observations.length === 0 && !fan.anyBankOk) {
       return emitAndReturn(false, "none", undefined, []);
     }
-    if (fan.observations.length === 0) {
+    // Ceiling selection happens BEFORE the ladder decision: observations that
+    // don't fit are dropped whole, and if NOTHING fits the caller gets ladder
+    // (c) "empty" — never a directive:"kg_context" block with zero
+    // observations.
+    const included = includedWithinCeiling(fan.observations);
+    if (included.length === 0) {
       return emitAndReturn(true, "empty", EMPTY_KG_DIRECTIVE, []);
     }
-    const kgContext = buildKgContextXml(fan.observations);
-    // recalledDocumentIds in RANK order — the same comparator the block used.
-    const recalledDocumentIds = [...fan.observations]
-      .sort(byScoreDesc)
+    const kgContext = buildKgContextXml(included);
+    // recalledDocumentIds — the INCLUDED observations only, already in RANK
+    // order (the row stops advertising documents the ceiling dropped).
+    const recalledDocumentIds = included
       .map((o) => o.documentId)
       .filter((d): d is string => d !== null);
     return emitAndReturn(true, "kg_context", kgContext, recalledDocumentIds);

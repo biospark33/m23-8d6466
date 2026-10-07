@@ -271,6 +271,10 @@ interface RoundState {
   primeDocId: string;
   /** Banks THIS round created (resolver-fresh) — the only ones cleanup deletes. */
   banksWeCreated: string[];
+  /** Side-channel recall rows the round wrote INTO THE REPO TREE
+   * (`REPO_ROOT/_bmad-output/memory/recall/<id>.json`) — L3's finally removes
+   * them so the round leaves nothing behind in `git status`. */
+  recallRowPaths: string[];
   hashesBefore: ReadonlySet<string>;
   evidence: Record<string, unknown>[];
 }
@@ -285,6 +289,7 @@ const round: RoundState = {
   repoBankId: "",
   primeDocId: "",
   banksWeCreated: [],
+  recallRowPaths: [],
   hashesBefore: new Set<string>(),
   evidence: [],
 };
@@ -365,32 +370,60 @@ describe("memory cycle live", () => {
         });
         try {
           // PROVE the fallback on a fresh bank, honestly (F10 — no invented
-          // counts): 1. retain once (the identity's first sight on the
-          // substrate); 2. write the identity into the REAL host-side ledger
-          // file; 3. run a SECOND retain attempt whose gate CONSULTS the file
-          // — identity present → the network retain is SKIPPED (no retain
-          // call is made); 4. recall and assert the substrate STILL holds
-          // EXACTLY ONE document for the identity. Only then is
-          // `replaysSkipped` written into the ledger — a count naming
-          // something that actually happened. Any step that cannot be proven
-          // fails the leg (the catch below).
+          // counts). EVERY retain below goes through ONE counting gate around
+          // the REAL client — retains are FORWARDED (real network) and each
+          // forwarded one increments `networkRetainCalls`: 1. retain once
+          // (the identity's first sight; the ledger file does not exist yet,
+          // so the gate finds no identity and the network retain happens);
+          // 2. write the identity into the REAL host-side ledger file;
+          // 3. attempt the SECOND retain through the SAME gate, which now
+          // consults the file — identity present → the network retain is
+          // SKIPPED; 4. the counter itself is the proof the skip happened
+          // (it STAYS at the first retain's 1 — recording a hardcoded 0 was
+          // the fabrication this leg once shipped) and the recall is the
+          // proof the substrate STILL holds EXACTLY ONE document for the
+          // identity. Only then is `replaysSkipped` written into the ledger —
+          // a count naming something that actually happened. Any step that
+          // cannot be proven fails the leg (the catch below).
           const bankB = probeBankId();
           banks.push(bankB);
           await client.createBank(bankB);
           const firstSeenAt = new Date().toISOString();
-          await client.retain(bankB, content, retainOpts);
-          const demo = await recallPolled(client, bankB, docId, docId);
-          const oneDocument = demo.res.results.filter((r) => r.documentId === docId).length === 1;
-          evidence.push({ phase: "fallback-first-retain", bankId: bankB, oneDocument, pollCounts: demo.counts });
-          expect(oneDocument).toBe(true);
-
-          // The ledger: the round's retain-identity record, keyed on
-          // documentId, written under the round's evidence artifacts dir —
+          // The ledger file lives under the round's evidence artifacts dir —
           // L1 has no run artifacts of its own, and a tmpdir would discard
           // the one artifact the fallback exists to leave behind. The count
           // is NOT in this write: nothing has been skipped yet.
           mkdirSync(M12_EVIDENCE_DIR, { recursive: true });
           const ledgerPath = join(M12_EVIDENCE_DIR, `m12-retain-identity-ledger-${datedStamp()}-${Math.random().toString(36).slice(2, 6)}.json`);
+          // The counting gate: the ledger FILE is consulted on every attempt
+          // — the ledger's whole point is what a host-side reader sees, so
+          // the read lives INSIDE the gate, not in the test body — and a
+          // file-absent / identity-absent read FORWARDS.
+          let networkRetainCalls = 0;
+          const gatedRetain = async (bankId: string, body: string) => {
+            if (existsSync(ledgerPath)) {
+              const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+                entries: { documentId: string; contentDigest: string }[];
+              };
+              if (ledger.entries.some((e) => e.documentId === docId && e.contentDigest === sha256Hex(body))) {
+                return { skipped: true };
+              }
+            }
+            networkRetainCalls += 1;
+            return client.retain(bankId, body, retainOpts);
+          };
+          const firstRetain = await gatedRetain(bankB, content);
+          const demo = await recallPolled(client, bankB, docId, docId);
+          const oneDocument = demo.res.results.filter((r) => r.documentId === docId).length === 1;
+          evidence.push({
+            phase: "fallback-first-retain",
+            bankId: bankB,
+            forwarded: !("skipped" in firstRetain),
+            networkRetainCalls,
+            pollCounts: demo.counts,
+          });
+          expect(oneDocument).toBe(true);
+          expect(networkRetainCalls).toBe(1);
           writeFileSync(
             ledgerPath,
             `${JSON.stringify(
@@ -411,20 +444,18 @@ describe("memory cycle live", () => {
             )}\n`,
           );
 
-          // The SECOND retain attempt consults the FILE — not the in-memory
-          // object, because the ledger's whole point is what a host-side
-          // reader sees — and the identity being present is what SKIPS the
-          // network retain. This leg is the retain's only author, so zero
-          // retain calls here is a fact, not a claim; the recall below is the
-          // substrate proof.
-          const consulted = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
-            entries: { documentId: string; contentDigest: string }[];
-          };
-          const identityPresent = consulted.entries.some(
-            (entry) => entry.documentId === docId && entry.contentDigest === sha256Hex(content),
-          );
-          expect(identityPresent).toBe(true);
-          evidence.push({ phase: "fallback-replay-attempt", ledgerPath, identityPresent, networkRetainCalls: 0 });
+          // The SECOND retain attempt runs through the SAME gate, which now
+          // finds the identity in the file and SKIPS the network retain. The
+          // two asserts below ARE the gate proof: `gateSkipped` is what the
+          // gate RETURNED (not a restatement of intent) and the counter
+          // STAYING at 1 shows no second network retain fired — if either is
+          // false the fallback cannot be claimed and the leg fails. The
+          // recall below is the substrate proof.
+          const replay = await gatedRetain(bankB, content);
+          const gateSkipped = "skipped" in replay;
+          evidence.push({ phase: "fallback-replay-attempt", ledgerPath, gateSkipped, networkRetainCalls });
+          expect(gateSkipped).toBe(true);
+          expect(networkRetainCalls).toBe(1);
 
           const afterSkip = await recallPolled(client, bankB, docId, docId);
           const stillOne = afterSkip.res.results.filter((r) => r.documentId === docId).length === 1;
@@ -533,8 +564,12 @@ describe("memory cycle live", () => {
         if (repoBankId === null) throw new Error(`resolveRepoBankId could not resolve a fresh bank id for ${REPO_SLUG} — every candidate exists`);
         expect(existing.has(repoBankId)).toBe(false); // resolver freshness = the delete-safety guard
         round.repoBankId = repoBankId;
-        await mem.createBank(repoBankId);
+        // Armed BEFORE the await (L1's discipline): a createBank that times
+        // out AFTER the server-side create still gets deleted by L3's
+        // cleanup — pushing after the await orphaned exactly the bank this
+        // guard exists for.
         round.banksWeCreated.push(repoBankId);
+        await mem.createBank(repoBankId);
         round.primeDocId = `m12-prime-${datedStamp()}`;
         await mem.retain(
           repoBankId,
@@ -616,6 +651,10 @@ describe("memory cycle live", () => {
 
         // ── the side-channel row the dispatch subprocess wrote ─────────────
         const rowPath = join(REPO_ROOT, DEFAULT_RECALL_DIR, `${round.requestId}.json`);
+        // Recorded for L3's finally (repo-tree hygiene): the dispatch
+        // subprocess wrote this row into the repo — the round removes it on
+        // the way out instead of leaving it in `git status`.
+        round.recallRowPaths.push(rowPath);
         expect(existsSync(rowPath)).toBe(true);
         const row = JSON.parse(readFileSync(rowPath, "utf8")) as RecallRow;
         round.evidence.push({ phase: "side-channel-row", rowPath: rowPath.replace(REPO_ROOT, ""), row });
@@ -705,6 +744,7 @@ describe("memory cycle live", () => {
       let finalBoxes: string[] | undefined;
       let keyProblems: string[] = [];
       const bankProblems: string[] = [];
+      const rowProblems: string[] = [];
       const evidence: Record<string, unknown>[] = round.evidence;
       /** Set once the body's teardown + box-gone proof both held — the
        * finally's destroy backstop must NOT re-destroy a disposed box (a
@@ -855,6 +895,30 @@ describe("memory cycle live", () => {
           }
           keyProblems = await keyLeakProblems(round.hashesBefore, { driver: ctx.driver, store: recordStore, runIds: [runId] }, evidence);
         }
+        // Side-channel row cleanup (repo-tree hygiene): every row L2 asserted
+        // is removed here, best-effort — a failed delete never throws over
+        // the held body error, but a row that SURVIVES is a real leak into
+        // `git status`, so it is noted AND becomes a problem, like every
+        // other stranded artifact.
+        for (const rowPath of round.recallRowPaths) {
+          let removed = false;
+          let removeError = "";
+          try {
+            rmSync(rowPath, { force: true });
+            removed = !existsSync(rowPath);
+          } catch (e) {
+            removeError = e instanceof Error ? e.message : String(e);
+          }
+          evidence.push({
+            phase: "finally-delete-recall-row",
+            ok: removed,
+            rowPath: rowPath.replace(REPO_ROOT, ""),
+            ...(removeError === "" ? {} : { error: removeError }),
+          });
+          if (!removed) {
+            rowProblems.push(`the dispatch side-channel row was NOT removed from the repo tree: ${rowPath}${removeError === "" ? "" : ` (${removeError})`}`);
+          }
+        }
         writeM12EvidenceQuietly(
           "m12-l3-harvest-retain",
           {
@@ -875,8 +939,8 @@ describe("memory cycle live", () => {
         // bank could exist (preflight's only side effects are read-only), so
         // there is no fleet/key verdict to render and none is faked as clean.
         ctx === undefined
-          ? [...destroyFailures, ...bankProblems]
-          : [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...bankProblems],
+          ? [...destroyFailures, ...bankProblems, ...rowProblems]
+          : [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...bankProblems, ...rowProblems],
       );
     },
     //   scratchClone allowance                                   ~ 180 s

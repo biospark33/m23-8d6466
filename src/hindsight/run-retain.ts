@@ -22,6 +22,7 @@
 
 import { canonicalJson, sha256Hex, type AuditStoreWriter } from "../audit/link-store.ts";
 import { log } from "../swarmclaw/mcp/stdio-transport.ts";
+import { redactSecrets } from "../providers/step-log.ts";
 import type { HindsightClient } from "./client.ts";
 
 /** Story Guards/limits: the retain payload's UTF-8 byte ceiling. */
@@ -80,6 +81,13 @@ export class RunRetainError extends Error {
 /** The minted-runId shape — pinned verbatim from dispatch.ts's MINTED_RUN_ID_RE. */
 const RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
 
+/** The correlation-id shape [G14]: alnum-led, `._-` body, never `..` (a
+ * path-ellipsis channel), at most 64 chars — the "no prose channel" header
+ * holds for every string field, not only the classification. */
+const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const REQUEST_ID_MAX_LEN = 64;
+const REPO_SLUG_MAX_LEN = 200;
+
 // biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control characters IS the purpose (F8 bundlePath guard)
 const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
 
@@ -115,6 +123,21 @@ export function buildRetainPayload(input: RetainOutcome): string {
     if (typeof input[field] !== "string" || input[field].length === 0) {
       throw new RunRetainError("retain-payload-invalid", `payload field ${field} must be a non-empty string`);
     }
+  }
+  // G14: the correlation fields are bounded, printable identity — never prose
+  // channels. Same inline class style as the bundlePath guard below, refused
+  // before any network call.
+  if (input.repoSlug.length > REPO_SLUG_MAX_LEN || CONTROL_CHAR_RE.test(input.repoSlug)) {
+    throw new RunRetainError(
+      "retain-payload-invalid",
+      `payload field repoSlug must be a string of at most ${REPO_SLUG_MAX_LEN} characters with no control characters`,
+    );
+  }
+  if (input.requestId.length > REQUEST_ID_MAX_LEN || !REQUEST_ID_RE.test(input.requestId) || input.requestId.includes("..")) {
+    throw new RunRetainError(
+      "retain-payload-invalid",
+      `payload field requestId must be a string of at most ${REQUEST_ID_MAX_LEN} characters matching ${REQUEST_ID_RE.source} with no ".."`,
+    );
   }
   for (const field of ["harvestedCount", "spendMicroUsd"] as const) {
     const v = input[field];
@@ -189,18 +212,25 @@ export async function retainRunOutcome(
   });
   // The Observability Contract line: `memory-retain` {runId, documentId, bank,
   // contentDigest}. Latency rides the client's own retain log — never here.
-  log({
-    requestId: input.requestId,
-    operation: "memory-retain",
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    duration: 0,
-    status: "ok",
-    runId: input.runId,
-    documentId,
-    bank: input.repoBankId,
-    contentDigest,
-  });
+  // G5: a throwing sink must never convert a LANDED retain into a reported
+  // failure — telemetry is best-effort exactly like the receipt below, and a
+  // sink throw here would otherwise skip the receipt record entirely.
+  try {
+    log({
+      requestId: input.requestId,
+      operation: "memory-retain",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+      runId: input.runId,
+      documentId,
+      bank: input.repoBankId,
+      contentDigest,
+    });
+  } catch {
+    // The retain landed; losing the log line is not losing the retain.
+  }
   if (auditStore !== undefined) {
     try {
       const now = new Date().toISOString();
@@ -222,21 +252,29 @@ export async function retainRunOutcome(
     } catch (e) {
       // Best-effort by contract: the retain already landed. A refusal (invalid
       // link, 8 KiB, lock, drift) is one structured error line — the operator
-      // can see the receipt is missing without the harvest failing.
-      log({
-        requestId: input.requestId,
-        operation: "memory-retain-receipt",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: 0,
-        status: "error",
-        error: {
-          code: typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "receipt-refused",
-          message: (e as Error).message,
-        },
-        runId: input.runId,
-        documentId,
-      });
+      // can see the receipt is missing without the harvest failing. G5: the
+      // line itself is wrapped too — a throwing sink must never drop the
+      // landed retain's result over a refusal it is merely reporting.
+      try {
+        log({
+          requestId: input.requestId,
+          operation: "memory-retain-receipt",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          error: {
+            code: typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "receipt-refused",
+            // The twins' posture: stringified, secret-redacted, bounded — the
+            // refusal line is never a raw un-redacted prose channel.
+            message: redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200),
+          },
+          runId: input.runId,
+          documentId,
+        });
+      } catch {
+        // The receipt is already gone; refusing to report that is not a failure.
+      }
     }
   }
   return { retained: true, documentId, bank: input.repoBankId, contentDigest };

@@ -644,6 +644,26 @@ describe("M1.2 retain surface", () => {
     expect(caught?.requestId).toBe("req-retain-refused");
   });
 
+  test("2xx success:true with items_count:0 → HindsightHttpError 502 'retain stored zero items' [G8]", async () => {
+    // The mirror arm of F6: a 2xx that stored nothing must not resolve as a
+    // landed retain (a receipt would then be issued over zero stored items).
+    installMock({ body: { success: true, items_count: 0, async: false } });
+    const client = new HindsightClient({
+      baseUrl: "http://hindsight.test",
+      requestId: "req-retain-zero",
+    });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.retain("qds-factory", "outcome body");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(502);
+    expect(caught?.message).toBe("retain stored zero items");
+    expect(caught?.requestId).toBe("req-retain-zero");
+  });
+
   test("tags ride the RetainExtensionSchema parse; a non-array tags refuses before any fetch [F20]", async () => {
     // Owned: the extension validates tags so a malformed one is refused at the
     // client boundary, not drifted onto the wire.

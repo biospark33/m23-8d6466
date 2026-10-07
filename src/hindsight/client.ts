@@ -327,6 +327,15 @@ export class HindsightClient {
     if (raw !== null && typeof raw === "object" && (raw as { success?: unknown }).success === false) {
       throw new HindsightHttpError(502, "retain refused by server (success:false)", requestId);
     }
+    // G8: the mirror arm — a 2xx claiming success but storing nothing is not a
+    // landed retain either, and must never produce a receipt-backed success.
+    if (
+      raw !== null && typeof raw === "object"
+      && (raw as { success?: unknown }).success === true
+      && (raw as { items_count?: unknown }).items_count === 0
+    ) {
+      throw new HindsightHttpError(502, "retain stored zero items", requestId);
+    }
     // Same parse as requestJSON — inlined only because the raw body must be
     // inspected above before it is narrowed by the schema transform.
     const parsed = RetainResponseSchema.safeParse(raw);

@@ -339,9 +339,28 @@ const BOX_NAME_SOURCE = "(?:qds-\\d{8}-[a-f0-9]{6}|e2e-[a-z0-9](?:[a-z0-9-]*[a-z
  * {@link MINTED_RUN_ID_RE}, so they live here: a refusal envelope's debug and
  * teardown remediation lines name the box, and that is the only handle a
  * dispatch which provisioned and THEN failed ever gives the cleanup.
+ *
+ * Lines whose parsed JSON carries `operation: "kg-recall"` are dropped BEFORE
+ * either scan (the twin of {@link emittedRunId}'s F11 skip, landed there in
+ * round 1 and here in round 2): the seam's log line lands on stderr BEFORE
+ * dispatch's envelopes and carries a `runId` field of its own — the brief's
+ * pre-mint requestId — so the raw first-match armed the FAILURE-path cleanup
+ * with an id that names no run record, exactly where the cleanup has no ack to
+ * correct it with. Both scans run over what remains; nothing either matched
+ * before is lost (the envelopes and remediation prose never carry that
+ * operation).
  */
 export function recoverDispatchIds(stdout: string, stderr: string): { runId: string; vmName: string } {
-  const combined = `${stdout}\n${stderr}`;
+  const combined = `${stdout}\n${stderr}`
+    .split("\n")
+    .filter((line) => {
+      try {
+        return (JSON.parse(line) as { operation?: unknown }).operation !== "kg-recall";
+      } catch {
+        return true; // not a JSON line — never the seam
+      }
+    })
+    .join("\n");
   return {
     runId: MINTED_RUN_ID_RE.exec(combined)?.[0] ?? "",
     vmName:

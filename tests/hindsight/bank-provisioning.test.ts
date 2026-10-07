@@ -14,6 +14,7 @@ import {
   COLLECTIVE_BANK_ID,
   LOCK_STALE_MS,
   provisionBanks,
+  resolveProvisionedRepoBankId,
   type BridgeProbe,
   type ProvisionClient,
   type ProvisionResult,
@@ -820,5 +821,34 @@ describe("bank-provisioner: review R2 fixes", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe(ERR_BANK_COLLISION);
+  });
+});
+
+describe("resolveProvisionedRepoBankId (read-side family resolver)", () => {
+  test("base + -dev-meta present → base id", () => {
+    const existing = new Set(["acme-widget", "acme-widget-dev-meta", COLLECTIVE_BANK_ID]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget");
+  });
+
+  test("collision-provisioned family → the suffixed id the provisioner created", () => {
+    // acme-widget exists but is FOREIGN (no -dev-meta sibling); the provisioner
+    // created the acme-widget-2 family. Same candidate order as
+    // resolveRepoBankId, first family-signature match wins.
+    const existing = new Set([
+      "acme-widget",
+      "acme-widget-2",
+      "acme-widget-2-dev-meta",
+      COLLECTIVE_BANK_ID,
+    ]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget-2");
+  });
+
+  test("fresh state (no banks) → null", () => {
+    expect(resolveProvisionedRepoBankId("acme-widget", new Set())).toBeNull();
+  });
+
+  test("foreign base without a -dev-meta sibling → null (never the bare base)", () => {
+    const existing = new Set(["acme-widget", COLLECTIVE_BANK_ID]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
   });
 });

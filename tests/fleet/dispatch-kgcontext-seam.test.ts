@@ -80,7 +80,11 @@ describe("dispatch kg seam", () => {
         const url = new URL(req.url);
         seen.push({ method: req.method, path: url.pathname });
         if (req.method === "GET" && url.pathname === "/v1/default/banks") {
-          return Response.json({ banks: [] });
+          // The read leg resolves the PROVISION-TIME bank by family signature
+          // (candidate + `-dev-meta` sibling — the pair only the provisioner
+          // creates); no pair → proceed-unprimed, which is exactly what this
+          // stub's family is here to satisfy.
+          return Response.json({ banks: ["acme-widgets", "acme-widgets-dev-meta"] });
         }
         if (req.method === "POST" && url.pathname.endsWith("/memories/recall")) {
           return Response.json({

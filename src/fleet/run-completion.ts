@@ -33,8 +33,12 @@
  * closure wired into the approval port passes the SAME handle — never a
  * `withRunLock` wrap, which would throw on re-entry.
  */
+import { join } from "node:path";
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
-import { extractExistingBankIds } from "../hindsight/bank-provisioner.ts";
+import {
+  extractExistingBankIds,
+  resolveProvisionedRepoBankId,
+} from "../hindsight/bank-provisioner.ts";
 import { HindsightClient } from "../hindsight/client.ts";
 import { retainRunOutcome } from "../hindsight/run-retain.ts";
 import { resolveBankId } from "../hindsight/schemas.ts";
@@ -206,20 +210,22 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * `retainRunOutcomeBestEffort`. scripts/fleet.ts imports THIS module, so
  * importing its helper back would be a cycle; this small duplication is the
  * sanctioned fallback, and both twins call the SAME src/hindsight functions —
- * same env gate, same presence-based bank resolution, same `retainRunOutcome`
+ * same env gate, same family-signature bank resolution, same `retainRunOutcome`
  * seam. (The sweep's chain rides this too: observe.ts builds this module's
  * deps for every candidate, so batch and single-run retain identically.)
  *
  * Same contract as the twin: env-unconfigured memory skips entirely (no row,
  * no line, chain untouched); everything else is failure-isolated — a retain
  * refusal is one structured error line, never a chain failure, because the
- * harvest leg landed either way. The bank is resolved by PRESENCE against the
- * LIVE list (F16): the retain targets the PROVISIONED bank —
- * `resolveBankId(repoSlug)`, the id `provisionBanks` creates in the common
- * case — and a bank absent from the list was never provisioned (retaining
- * into it is an opaque 404). The CREATE-side collision resolver is
- * deliberately NOT used here: it returns ids NOT in the live list, so it can
- * never locate the provisioned bank.
+ * harvest leg landed either way. The bank is resolved by FAMILY SIGNATURE
+ * against the LIVE list (F16/G1): `resolveProvisionedRepoBankId` walks the
+ * truncation candidates (base, then -2..-11) and returns the first for which
+ * BOTH the bank and its `-dev-meta` sibling exist — a pair only
+ * `provisionBanks` creates — so the retain targets the SAME provisioned bank
+ * the write leg created and the kg-context read leg fans out over: the
+ * dispatch→harvest cycle closes against one id. Null means the banks were
+ * never provisioned for this repo, and retaining into an invented id is an
+ * opaque 404.
  */
 // F17: the retain's wall-clock cap — best-effort never dwells past it on the
 // chain's teardown critical path.
@@ -270,12 +276,13 @@ async function postHarvestRetain(
       skipLine("retain-skipped", `run ${info.runId} carries no budget.repoSlug — the retain's bank is unknown`);
       return;
     }
-    const repoBankId = resolveBankId(repoSlug);
     const client = new HindsightClient();
     const existing = extractExistingBankIds(await client.listBanks());
-    // F16: only a bank that EXISTS is retainable — see the header above.
-    if (!existing.has(repoBankId)) {
-      skipLine("retain-skipped", `run ${info.runId}'s repo memory bank is absent from the live bank list — never provisioned`);
+    // G1: only a provisioned FAMILY (bank + `-dev-meta`) is retainable — see
+    // the header above.
+    const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), existing);
+    if (repoBankId === null) {
+      skipLine("retain-skipped", `run ${info.runId}'s memory banks are not provisioned for this repo`);
       return;
     }
     await retainRunOutcome(
@@ -289,8 +296,12 @@ async function postHarvestRetain(
         requestId,
         // The harvest leg landed either way; harvested-with-commits is the
         // only green shape — a harvest that pulled nothing is unsettled.
+        // (G7: the bundle IS the harvest's record — harvest writes nothing to
+        // the run record — so its path rides along exactly when there is one.)
         exitClassification: info.outcome === "harvested" ? "green" : "unsettled",
-        ...(info.outcome === "harvested" ? { harvestedCount: info.count ?? 0 } : {}),
+        ...(info.outcome === "harvested"
+          ? { harvestedCount: info.count ?? 0, bundlePath: join(deps.store.dir, `${info.runId}.bundle`) }
+          : {}),
         tags: ["factory-run"],
         repoBankId,
       },

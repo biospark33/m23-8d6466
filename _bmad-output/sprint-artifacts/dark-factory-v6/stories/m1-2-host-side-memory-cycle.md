@@ -91,6 +91,8 @@ Two host-side legs around the existing run lifecycle, both outside the box: **di
 
 ## Observability Contract
 
+> **Amendment R7 (extends R5):** the row/record join holds only for brief requestIds dispatch accepts (strict UUID v4); a requestId that passes the row's filename guard but not the resolver leaves an orphan row — a counted cycle with no joinable receipt. Production briefs carry UUIDs; recorded for M1.3's counter.
+
 > **Amendment R5 (implementation record):** the side-channel row is keyed on the brief's `requestId` — the correlation id available at the dispatch seam, pre-mint (the minted runId does not exist there yet). Briefs without a requestId produce no row: an uncounted cycle, known to M1.3's counter. Receipts remain keyed on the minted runId; the requestId is the join between the two.
 
 - Log vocabulary (swarmclaw/log): `kg-recall` `{runId, directive: "kg_context"|"empty"|"none", banks, chars, recallMs}` on dispatch; `memory-retain` `{runId, documentId, bank, contentDigest}` on harvest. Unconfigured env emits NEITHER line (absent, not 0).

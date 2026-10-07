@@ -271,6 +271,55 @@ describe("run retain", () => {
     }
   });
 
+  test("receipt-refusal message is the twins' posture: stringified, redacted, bounded to 200 [G5]", async () => {
+    const secret = "sk-test0123456789abcdef";
+    // Prose tail (space-separated words) so it survives redaction and the
+    // 200-char bound is what actually truncates it.
+    const longTail = "word ".repeat(60);
+    const refusing: AuditStoreWriter = {
+      path: join(dir, "refusing-redact.db"),
+      record() {
+        throw new Error(`leaked ${secret} then ${longTail}`);
+      },
+      close() {},
+    };
+    const { lines, restore } = captureLog();
+    try {
+      const { client } = fakeClient();
+      await retainRunOutcome(client, refusing, runInput());
+      const refusal = lines.find((l) => l.operation === "memory-retain-receipt" && l.status === "error");
+      expect(refusal).toBeDefined();
+      const message = refusal?.error?.message;
+      expect(typeof message).toBe("string");
+      // Bounded: never the raw 300+ char tail.
+      expect((message as string).length).toBe(200);
+      // Redacted: the secret-shaped token is gone from the line entirely.
+      expect(message).not.toContain(secret);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a throwing log sink never converts a landed retain into a failure or drops the receipt [G5]", async () => {
+    const restore = setLogSink(() => {
+      throw new Error("sink exploded");
+    });
+    const p = join(dir, "throwing-sink.db");
+    const store = openAuditStore(p);
+    try {
+      const { calls, client } = fakeClient();
+      // Both contract lines (success + receipt) go to the throwing sink; neither
+      // may surface as a rejection, and the receipt row must still be recorded.
+      const result = await retainRunOutcome(client, store, runInput());
+      expect(result.retained).toBe(true);
+      expect(calls.length).toBe(1);
+      expect(storedRows(p).length).toBe(1);
+    } finally {
+      restore();
+      store.close();
+    }
+  });
+
   test("the memory-retain log line carries the Observability Contract shape", async () => {
     const { lines, restore } = captureLog();
     try {
@@ -296,22 +345,23 @@ describe("run retain", () => {
 // ---------------------------------------------------------------------------
 
 describe("run retain negative controls", () => {
-  test("oversize payload refuses BEFORE any client call", () => {
-    const { calls, client } = fakeClient();
-    // ~2x the ceiling of filler in the one field that scales: the correlation id.
-    const oversized = runInput({ requestId: "r".repeat(RETAIN_PAYLOAD_MAX_BYTES * 2) });
-    let thrown: unknown;
-    try {
-      buildRetainPayload(oversized);
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(RunRetainError);
-    expect((thrown as RunRetainError).code).toBe("retain-payload-oversize");
+  test("the G14 bounds cap the payload far under the byte ceiling — oversize is unreachable from valid input", () => {
+    const { calls } = fakeClient();
+    // Every payload string field at its G14 bound builds clean and the
+    // serialised bytes stay well under the ceiling: the shape bounds turned the
+    // 4 KiB refusal into defense-in-depth (nothing valid can reach it — the
+    // pre-G14 filler field, an unbounded correlation id, no longer exists).
+    const maxBounded = runInput({
+      repoSlug: "a".repeat(200),
+      requestId: `${"a".repeat(63)}0`,
+      bundlePath: `/${"b".repeat(511)}`,
+    });
+    const json = buildRetainPayload(maxBounded);
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(RETAIN_PAYLOAD_MAX_BYTES);
+    // Sanity: the bounds still bind — one char past either shape bound refuses
+    // (covered in detail by the [G14] bounds test below).
+    expect(() => buildRetainPayload(runInput({ repoSlug: "a".repeat(201) }))).toThrow(RunRetainError);
     expect(calls.length).toBe(0);
-    // And through the full seam, not just the builder: the oversize input
-    // refuses before the fake client's retain is ever reached.
-    return expect(retainRunOutcome(client, undefined, oversized)).rejects.toBeInstanceOf(RunRetainError);
   });
 
   test("the payload has NO prose channel: exactly the structured fields, extra input properties cannot enter", () => {
@@ -382,6 +432,33 @@ describe("run retain negative controls", () => {
     expect(thrown).toBeInstanceOf(RunRetainError);
     expect((thrown as RunRetainError).code).toBe("retain-run-id-invalid");
     expect((thrown as RunRetainError).message).toContain("123");
+  });
+
+  test("repoSlug and requestId are bounded identity, never prose channels — refused pre-network [G14]", () => {
+    const { calls, client } = fakeClient();
+    for (const bad of [
+      runInput({ repoSlug: "a".repeat(201) }), // one char past the 200 bound
+      runInput({ repoSlug: "acme/widgets\u0000evil" }), // control character
+      runInput({ requestId: "a".repeat(65) }), // one char past the 64 bound
+      runInput({ requestId: "-leading-dash" }), // must start with [A-Za-z0-9]
+      runInput({ requestId: "req..retain" }), // no '..' path-ellipsis channel
+      runInput({ requestId: "req retain" }), // space is outside the class
+      runInput({ requestId: "req/retain" }), // slash is outside the class
+    ]) {
+      let thrown: unknown;
+      try {
+        buildRetainPayload(bad);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(RunRetainError);
+      expect((thrown as RunRetainError).code).toBe("retain-payload-invalid");
+    }
+    // Both refuse inside the builder — the fake client's retain is never reached.
+    expect(calls.length).toBe(0);
+    return expect(
+      retainRunOutcome(client, undefined, runInput({ requestId: "bad id" })),
+    ).rejects.toBeInstanceOf(RunRetainError);
   });
 
   test("bundlePath, when present, must be a bounded printable string — refused pre-network [F8]", () => {

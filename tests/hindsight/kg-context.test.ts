@@ -51,9 +51,16 @@ function fakeClient(cfg: {
   listBanks?: () => Promise<unknown>;
 }): RecallClient & { calls: RecallCall[] } {
   const calls: RecallCall[] = [];
+  // Default bank list = the PROVISIONED family (repo base + its -dev-meta
+  // sibling, the pair only the provisioner creates) — the read leg resolves
+  // the provision-time id by that family signature.
   return {
     calls,
-    listBanks: cfg.listBanks ?? (async () => cfg.banks ?? { banks: [{ bank_id: "qds-demo" }] }),
+    listBanks: cfg.listBanks ??
+      (async () =>
+        cfg.banks ?? {
+          banks: [{ bank_id: REPO_BANK }, { bank_id: `${REPO_BANK}-dev-meta` }],
+        }),
     recall: async (bankId, query, limit) => {
       calls.push({ bankId, query, limit });
       const res = cfg.recall
@@ -219,14 +226,43 @@ describe("kg context assembly", () => {
     expect(client.calls[0]?.query).toBe("acme/widget M1.2");
   });
 
-  test("provision-time bank id: collision suffix resolves against the LIVE list, never the raw slug", async () => {
+  test("read leg recalls the PROVISION-TIME id via the -dev-meta family signature (collision-provisioned)", async () => {
     configEnv();
-    // acme-widget already exists → resolver must suffix (-2), the raw
-    // resolveBankId form must never be recalled directly.
-    const client = fakeClient({ banks: { banks: [{ bank_id: REPO_BANK }] } });
+    // Collision-provisioned state: acme-widget is a FOREIGN bank (no -dev-meta
+    // sibling — the provisioner never created it); the provisioner created the
+    // acme-widget-2 family. The read leg must recall acme-widget-2 and never
+    // the raw base.
+    const client = fakeClient({
+      banks: {
+        banks: [
+          { bank_id: REPO_BANK },
+          { bank_id: `${REPO_BANK}-2` },
+          { bank_id: `${REPO_BANK}-2-dev-meta` },
+        ],
+      },
+    });
     await primeDispatchBrief(brief(), { client, recallDir: dir });
     expect(client.calls.map((c) => c.bankId)).toEqual([`${REPO_BANK}-2`, COLLECTIVE]);
     expect(client.calls.some((c) => c.bankId === REPO_BANK)).toBe(false);
+  });
+
+  test("provisioned family at the base id → recalled at the base, never suffixed", async () => {
+    configEnv();
+    // Default fixture bank list = {REPO_BANK, REPO_BANK-dev-meta} family.
+    const client = fakeClient({});
+    await primeDispatchBrief(brief(), { client, recallDir: dir });
+    expect(client.calls.map((c) => c.bankId)).toEqual([REPO_BANK, COLLECTIVE]);
+    expect(client.calls.some((c) => c.bankId === `${REPO_BANK}-2`)).toBe(false);
+  });
+
+  test("bare foreign base (no -dev-meta sibling) → no provisioned family: proceed-unprimed, NOTHING recalled", async () => {
+    configEnv();
+    const client = fakeClient({ banks: { banks: [{ bank_id: REPO_BANK }] } });
+    const b = brief();
+    const primed = await primeDispatchBrief(b, { client, recallDir: dir });
+    expect(primed).toBe(b); // ladder (b) — same reference, unprimed
+    expect(client.calls.length).toBe(0); // no recall call to ANY bank
+    expect(readRow().directive).toBe("none");
   });
 
   test("per-bank partial failure contributes nothing, but partial results still count as results", async () => {
@@ -303,12 +339,65 @@ describe("kg context assembly", () => {
     expect(block).toContain("tiny fits"); // a smaller later-ranked one still fits
   });
 
+  test("ceiling-dropped observations are not advertised in recalledDocumentIds", async () => {
+    configEnv();
+    const client = fakeClient({
+      recall: async (bankId) =>
+        bankId === REPO_BANK
+          ? {
+              results: [
+                // 9000 chars + wrapper > the 8000 ceiling → dropped whole.
+                { memoryId: "big-1", content: "A".repeat(9000), score: 0.9, documentId: "doc-big" },
+                { memoryId: "small-1", content: "tiny fits", score: 0.5, documentId: "doc-small" },
+              ],
+              durationMs: 1,
+            }
+          : { results: [], durationMs: 1 },
+    });
+    await primeDispatchBrief(brief(), { client, recallDir: dir });
+    const row = readRow();
+    expect(row.directive).toBe("kg_context");
+    expect(row.recalledDocumentIds).toEqual(["doc-small"]); // doc-big dropped by the ceiling
+  });
+
+  test("every observation over the ceiling → ladder (c) 'empty', never a zero-observation kg_context block", async () => {
+    configEnv();
+    const client = fakeClient({
+      recall: async () => ({
+        results: [
+          { memoryId: "big-1", content: "A".repeat(9000), score: 0.9, documentId: "doc-big" },
+          { memoryId: "big-2", content: "B".repeat(9000), score: 0.8, documentId: "doc-big-2" },
+        ],
+        durationMs: 1,
+      }),
+    });
+    const primed = (await primeDispatchBrief(brief(), { client, recallDir: dir })) as {
+      kgContext?: string;
+    };
+    expect(primed.kgContext).toBe(EMPTY_KG_DIRECTIVE);
+    const row = readRow();
+    expect(row.directive).toBe("empty");
+    expect(row.chars).toBe(EMPTY_KG_DIRECTIVE.length);
+    expect(row.recalledDocumentIds).toEqual([]);
+  });
+
   test("content is escaped only for XML-structural safety (< > &)", () => {
     const block = buildKgContextXml([
       { id: "esc-1", content: "a <b> & c > d", score: 1, documentId: null },
     ]);
     expect(block).toContain("a &lt;b&gt; &amp; c &gt; d");
     expect(block).not.toContain("<b>");
+  });
+
+  test("documentId is charset-stripped too: control chars in the attribute cannot re-poison the block", () => {
+    // A refused control char in document_id would re-poison the block past
+    // the schema refine (same refused class as content) - the attribute
+    // strips it the same way content does.
+    const block = buildKgContextXml([
+      { id: "obs-doc", content: "fact", score: 1, documentId: "doc\vid" },
+    ]);
+    expect(block).not.toContain("\v");
+    expect(block).toContain('documentId="docid"');
   });
 
   test("recalled text is charset-stripped, not dropped: \\r and U+2028 removed, text kept", async () => {
@@ -358,6 +447,18 @@ describe("kg context assembly", () => {
     const fan = await recallFanOut(client, COLLECTIVE, "q");
     expect(client.calls.map((c) => c.bankId)).toEqual([COLLECTIVE]);
     expect(fan.banks).toEqual([COLLECTIVE]);
+  });
+
+  test("recallFanOut dedups by fact id across banks: first-seen wins (repo bank before qds-collective)", async () => {
+    const client = fakeClient({
+      recall: async (bankId) =>
+        bankId === REPO_BANK
+          ? { results: [{ memoryId: "shared-1", content: "from repo bank", score: 0.9, documentId: null }], durationMs: 1 }
+          : { results: [{ memoryId: "shared-1", content: "from collective", score: 0.99, documentId: null }], durationMs: 1 },
+    });
+    const fan = await recallFanOut(client, REPO_BANK, "q");
+    expect(fan.observations.map((o) => o.id)).toEqual(["shared-1"]);
+    expect(fan.observations[0]?.content).toBe("from repo bank");
   });
 });
 
@@ -429,8 +530,10 @@ describe("kg context ladder negative controls", () => {
     expect(readRow().directive).toBe("none");
   });
 
-  test("bank id unresolvable (every suffix collides) → proceed-unprimed, directive 'none'", async () => {
+  test("no provisioned family anywhere (bare banks, no -dev-meta siblings) → proceed-unprimed, directive 'none'", async () => {
     configEnv();
+    // Every candidate exists but NONE carries the -dev-meta sibling, so no
+    // candidate is the provisioned repo bank → ladder (b).
     const existing = [REPO_BANK, ...Array.from({ length: 10 }, (_, i) => `${REPO_BANK}-${i + 2}`)];
     const client = fakeClient({ banks: { banks: existing.map((bank_id) => ({ bank_id })) } });
     const b = brief();
@@ -438,7 +541,7 @@ describe("kg context ladder negative controls", () => {
       kgContext?: string;
     };
     expect(primed).toBe(b);
-    expect(client.calls.length).toBe(0); // never recalled — no bank id to recall
+    expect(client.calls.length).toBe(0); // never recalled — no provisioned family
     expect(readRow().directive).toBe("none");
   });
 
