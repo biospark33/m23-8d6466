@@ -64,6 +64,29 @@ export function parseProbeSet(raw: unknown): { ok: true; value: Probe[] } | { ok
 
 export type MintRecords = Map<string, Set<string>>;
 
+/** Union of mint records per bank — neither source alone is the truth. */
+export function mergeMint(a: MintRecords, b: MintRecords): MintRecords {
+  const merged: MintRecords = new Map();
+  for (const source of [a, b]) {
+    for (const [bank, ids] of source) {
+      const into = merged.get(bank) ?? new Set<string>();
+      for (const id of ids) into.add(id);
+      merged.set(bank, into);
+    }
+  }
+  return merged;
+}
+
+/**
+ * R2-007: the DEFAULT_* constants are CWD-relative, so a refusal reason naming
+ * one is unresolvable from anywhere but the repo root — append the cwd. An
+ * absolute path (caller-supplied: tests, tmpdirs, explicit args) is already
+ * unambiguous and stays bare.
+ */
+export function withCwd(p: string): string {
+  return p.startsWith("/") ? p : `${p} (cwd ${process.cwd()})`;
+}
+
 /**
  * Read mint records from P0.9 provision-and-import evidence JSONs.
  * ok:true records only; latest writtenAt wins per bank; absent dir → empty.
@@ -79,8 +102,10 @@ export function loadP09MintRecords(evidenceDir: string = DEFAULT_P09_EVIDENCE_DI
   // F-015: winner per bank = newest writtenAt by EPOCH (Date.parse — ISO stamps
   // with differing offsets misorder under lexicographic compare); an unparseable
   // stamp reads as oldest so it can never beat a real one, and ties (two files
-  // with the same stamp, or both unparseable) fall back to FILENAME order with
-  // the lexicographically-LATER filename winning (later write wins).
+  // with the same stamp, or both unparseable) resolve to the lexicographically-
+  // LATER filename. That is deterministic and stable, but the filename's
+  // variable suffix is a random token — the resolution is ARBITRARY, not
+  // chronological. No "later write wins" guarantee is claimed or provided.
   const latest = new Map<string, { ts: number; name: string }>(); // bank → winning stamp+file
   for (const name of files) {
     let data: unknown;

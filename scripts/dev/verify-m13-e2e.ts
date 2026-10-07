@@ -30,11 +30,10 @@ let failure = "";
 try {
   dir = mkdtempSync(join(tmpdir(), "qds-m13-e2e-"));
   const recalls = join(dir, "recall");
-  const runs = join(dir, "runs");
   const reports = join(dir, "reports");
   const evidence = join(dir, "evidence");
   const probes = join(dir, "probes");
-  for (const d of [recalls, runs, reports, evidence, probes]) mkdirSync(d, { recursive: true });
+  for (const d of [recalls, reports, evidence, probes]) mkdirSync(d, { recursive: true });
 
   // --- fixture side-channel rows: 5 unique runs (3 primed, 2 unprimed; one dup file) ---
   const row = (runId: string, primed: boolean, latencyMs: number) =>
@@ -76,14 +75,19 @@ try {
   {
     const ledger = new CostLedger({
       path: ledgerPath,
-      runsDir: runs,
-      // INV-COST-5: token rows refuse without a resolvable key hash — a stub
-      // record supplies the fixture credential the real runs would carry.
+      // R2-016: run-record integration is stubbed, not exercised — CostLedger
+      // requires a resolvable key record for token rows, so this stub mints
+      // the fixture credential; there is no runs/ directory to read.
       readRunRecord: (runId) => ({ createdAt: new Date().toISOString(), keyHash: `e2e-${runId.slice(-4)}`, limitMicroUsd: 10_000_000 }),
     });
     const seeded = [
       { runId: "0f0e1d2c-0000-4000-8000-000000000001", costUsd: 1500 / 1_000_000 },
       { runId: "0f0e1d2c-0000-4000-8000-000000000002", costUsd: 500 / 1_000_000 },
+      // R2-001: every observed cycle priced, so the costTable stays emitted —
+      // primed 1500+500+100 = 2100 µ$, unprimed 100+100 = 200 µ$.
+      { runId: "0f0e1d2c-0000-4000-8000-000000000003", costUsd: 100 / 1_000_000 },
+      { runId: "0f0e1d2c-0000-4000-8000-000000000004", costUsd: 100 / 1_000_000 },
+      { runId: "0f0e1d2c-0000-4000-8000-000000000005", costUsd: 100 / 1_000_000 },
     ];
     for (const s of seeded) {
       ledger.ingestCostEvent({
@@ -168,7 +172,13 @@ try {
   const hitRate = JSON.parse(readFileSync(recallRes.artifactPath, "utf8"));
   if (hitRate.labelIntegrity !== "pass") fail("labelIntegrity not pass");
   if (hitRate.aggregate.probes !== 3 || hitRate.aggregate.hits !== 2) fail(`aggregate math: ${JSON.stringify(hitRate.aggregate)}`);
-  if (Math.abs(hitRate.aggregate.hitRateAt5 - 2 / 3) > 1e-9) fail("hitRateAt5 wrong");
+  // R2-002: the 3-probe fixture is below the 20-probe floor, so hitRateAt5 is
+  // WITHHELD (absent, not NaN-compared — the old Math.abs check was vacuous).
+  if ("hitRateAt5" in hitRate.aggregate) fail("hitRateAt5 emitted below the 20-probe floor");
+  if (hitRate.aggregate.belowFloor !== true) fail("belowFloor not set below the floor");
+  // hits === 2 verified through the perProbe rows, not just the aggregate.
+  const perProbeHits = hitRate.perProbe.filter((p: { hit: boolean }) => p.hit).length;
+  if (perProbeHits !== 2) fail(`perProbe hits ${perProbeHits} != 2`);
   if (!hitRate.canary || hitRate.canary.documentId !== "qds-canary" || hitRate.canary.hit !== true) fail("canary record wrong");
   // Every issued recall query is either the canary self-hit or a probe-set
   // query — no empty/unknown query ever reaches the bank (real canary guard;
@@ -198,7 +208,7 @@ try {
   if (!report.metrics.correlationNote.includes("correlation")) fail("correlation note missing");
   if (!existsSync(report.jsonPath) || !existsSync(report.mdPath)) fail("report artifacts missing");
   const metricsJson = JSON.parse(readFileSync(report.jsonPath, "utf8"));
-  if (metricsJson.costTable?.primed?.totalMicroUsd !== 2000) fail(`cost join wrong: ${JSON.stringify(metricsJson.costTable)}`);
+  if (metricsJson.costTable?.primed?.totalMicroUsd !== 2100) fail(`cost join wrong: ${JSON.stringify(metricsJson.costTable)}`);
   if (metricsJson.receiptCoverage?.withReceipt !== 1 || metricsJson.receiptCoverage?.withoutReceipt !== 4) fail("receipt coverage wrong");
   // F-020: per-cycle rows present at 5 cycles, receipt presence per row.
   if (!Array.isArray(metricsJson.cycles) || metricsJson.cycles.length !== 5) fail(`cycles wrong: ${JSON.stringify(metricsJson.cycles)}`);

@@ -9,3 +9,4 @@
 - \[Review\]\[Defer\] **D5 (MED): evidence gaps from the live rounds** — no observed key count behind SC2.6's "one key", no SC2.7 fleet-empty artifact, notify leg witnessed only by the `branch_taken` event. Needs a dedicated evidence round (real spend); annotated honestly in the roadmap this round.
 ## Deferred from: code review of m1-3-recall-measurement-harness (2026-10-07)
 - Failed-leg P0.9 evidence records deleteOutcomes "already-gone" for banks the same record says were created this attempt (residue empty) — the leg driver's compensation-classification logic (scripts/p0-9/leg-lib.ts) predates M1.3; file a follow-up to reconcile the classification or document the local instance's delete response shape.
+- R2: vrf9ks evidence memoryResidue field byte-mirrors the mint list while residue:[] claims none survived — same leg-driver compensation-classification family as the round-1 defer (scripts/p0-9/leg-lib.ts), pre-existing before M1.3.

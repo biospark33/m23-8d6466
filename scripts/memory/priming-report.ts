@@ -24,7 +24,7 @@ import { DEFAULT_RECALL_DIR } from "../../src/hindsight/kg-context.ts";
 import { DISPATCH_FAILURE_LOG } from "../../src/fleet/dispatch.ts";
 import { atomicReplaceFile } from "../../src/providers/fs-atomic.ts";
 import { CostLedger, DEFAULT_COST_LEDGER_FILE } from "../../src/providers/cost-ledger.ts";
-import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError, type RunLockHandle } from "../lib/run-lock.ts";
+import { acquireRunLock, releaseRunLock, RunLockedError, type RunLockHandle } from "../lib/run-lock.ts";
 import { CORRELATION_NOTE, renderReportMd, type CostGroup, type ReportMetrics } from "./report-render.ts";
 import {
   DEFAULT_AUDIT_DB_FILE,
@@ -35,8 +35,10 @@ import {
   SEED_PROBE_BANK,
   loadP09MintRecords,
   loadReceiptMintRecords,
+  mergeMint,
   mintMembershipViolations,
   parseProbeSet,
+  withCwd,
   type Probe,
 } from "./probe-schema.ts";
 
@@ -51,24 +53,40 @@ export interface PrimingReportDeps {
   now?: () => Date;
 }
 
-/** Loosely shape-checked side-channel row (the 7 RecallRow keys, read defensively). */
+/**
+ * Loosely shape-checked side-channel row. R2-14: exactly what the reader
+ * VALIDATES is runId (string), primed (boolean), and latencyMs (finite,
+ * non-negative). The remaining RecallRow keys — directive, banks, chars,
+ * recalledDocumentIds — are NOT consulted by the validator; downstream
+ * consumers read them defensively (growth credits row.banks[0] only when it
+ * is a non-empty string, else SEED_PROBE_BANK).
+ */
 interface SideRow {
   runId: string;
   primed: boolean;
   latencyMs: number;
+  banks?: string[];
   recalledDocumentIds?: string[];
 }
 
 /**
  * Read `<dir>/*.json` side-channel rows; malformed rows are skipped (data,
  * not code). Dedupe on runId — last write wins by file mtime.
+ * R2-005: ENOENT stays absent (zero cycles, no note); any other readdir
+ * failure (EACCES, ENOTDIR, …) surfaces as readError so the report can say
+ * WHY it counted zero cycles instead of collapsing real data behind the
+ * failure into a silent fresh-factory report.
  */
-function readSideChannel(recallDir: string): Map<string, SideRow> {
+function readSideChannel(recallDir: string): { winners: Map<string, SideRow>; readError?: string } {
   let names: string[];
   try {
     names = readdirSync(recallDir).filter((n) => n.endsWith(".json"));
-  } catch {
-    return new Map(); // absent dir → zero cycles counted, never a crash
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { winners: new Map() };
+    return {
+      winners: new Map(),
+      readError: (e as NodeJS.ErrnoException).code ?? (e as Error).message,
+    };
   }
   const stamped: { row: SideRow; mtimeMs: number; name: string }[] = [];
   for (const name of names) {
@@ -103,7 +121,7 @@ function readSideChannel(recallDir: string): Map<string, SideRow> {
   stamped.sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
   const winners = new Map<string, SideRow>();
   for (const s of stamped) winners.set(s.row.runId, s.row);
-  return winners;
+  return { winners };
 }
 
 /** DISTINCT receipt runIds (subject_id) — a LEFT-JOIN key set, never a filter. */
@@ -130,7 +148,7 @@ function readReceiptRunIds(auditPath?: string): Set<string> {
   return ids;
 }
 
-/** Exact integer micro-usd per group; a run absent from the ledger reads 0. */
+/** Exact integer micro-usd per group (R2-001: emitted only when every counted cycle is fully priced — see joinCost). */
 function costGroup(rows: SideRow[], ledger: CostLedger): CostGroup {
   let total = 0;
   for (const r of rows) total += ledger.readRunCost(r.runId).totalMicroUsd;
@@ -138,6 +156,42 @@ function costGroup(rows: SideRow[], ledger: CostLedger): CostGroup {
     runs: rows.length,
     totalMicroUsd: total,
     meanMicroUsd: rows.length === 0 ? 0 : total / rows.length,
+  };
+}
+
+/**
+ * R2-001: the cost join branches on the CostView fields the ledger already
+ * provides, per run — hasEvents === false → that cycle's cost is ABSENT
+ * (excluded from any printed total, counted for the note); hasTokenRows ===
+ * false || unpricedRows > 0 → PARTIAL (total included, flagged); otherwise
+ * the cycle is fully priced and its figure may print as a number.
+ */
+function joinCost(
+  primedRows: SideRow[],
+  unprimedRows: SideRow[],
+  ledger: CostLedger,
+): {
+  primed: CostGroup;
+  unprimed: CostGroup;
+  pricedCycles: number;
+  absentCycles: number;
+  partialCycles: number;
+} {
+  let pricedCycles = 0;
+  let absentCycles = 0;
+  let partialCycles = 0;
+  for (const r of [...primedRows, ...unprimedRows]) {
+    const view = ledger.readRunCost(r.runId);
+    if (!view.hasEvents) absentCycles += 1;
+    else if (!view.hasTokenRows || view.unpricedRows > 0) partialCycles += 1;
+    else pricedCycles += 1;
+  }
+  return {
+    primed: costGroup(primedRows, ledger),
+    unprimed: costGroup(unprimedRows, ledger),
+    pricedCycles,
+    absentCycles,
+    partialCycles,
   };
 }
 
@@ -168,31 +222,46 @@ function slugOf(docId: string): string {
 
 /**
  * Append-only probe growth: candidate ids from side-channel recalledDocumentIds
- * (banked as SEED_PROBE_BANK) plus P0.9 mint ids for banks already in the probe
- * set — each candidate labeled with the bank that actually minted it and
+ * (R2-014: credited to row.banks[0] when it is a non-empty string, else
+ * SEED_PROBE_BANK) plus P0.9 mint ids for banks already in the probe set —
+ * each candidate labeled with the bank that actually minted it and
  * origin:"cycle" (F-012), minus ids the existing probes already reference.
  * Membership is gated through the SAME probe-schema integrity path as the
  * run-time label-integrity check (mintMembershipViolations, F-021) — one
- * shared definition of "this label is real". A candidate failing the gate
- * appends nothing; existing rows are never rewritten.
+ * shared definition of "this label is real", so a mislabeled candidate is
+ * refused, never appended. A candidate failing the gate appends nothing;
+ * existing rows are never rewritten.
+ *
+ * R2-011: the three silent skip paths (pre-lock parse fail, pre-lock read
+ * throw, under-lock re-read fail) return a note so the report can carry a
+ * dataNote instead of an unexplained appendedProbes 0. An ABSENT probe set is
+ * a fresh factory, not a failure — silent 0, no note.
  */
 async function growProbeSet(args: {
   probeSetPath: string;
   auditPath?: string;
   p09EvidenceDir: string;
   winners: Map<string, SideRow>;
-}): Promise<number> {
+}): Promise<{ count: number; note?: string; byOrigin?: { seed: number; cycle: number } }> {
   const probeSetPath = args.probeSetPath;
-  if (!existsSync(probeSetPath)) return 0;
+  const unreadableNote = (): { count: 0; note: string } => ({
+    count: 0,
+    note: `probe growth skipped: probe set unreadable at ${withCwd(probeSetPath)}`,
+  });
+  if (!existsSync(probeSetPath)) return { count: 0 };
   let existing: Probe[];
   try {
     const parsed = parseProbeSet(JSON.parse(readFileSync(probeSetPath, "utf8")));
-    if (!parsed.ok) return 0; // cannot append into an unreadable set; leave it untouched
+    if (!parsed.ok) return unreadableNote(); // cannot append into an unreadable set; leave it untouched
     existing = parsed.value;
   } catch {
-    return 0;
+    return unreadableNote();
   }
 
+  const byOrigin = {
+    seed: existing.filter((p) => p.origin === "seed").length,
+    cycle: existing.filter((p) => p.origin === "cycle").length,
+  };
   const coveredIds = new Set(existing.flatMap((p) => p.expectedDocumentIds));
   const coveredProbeIds = new Set(existing.map((p) => p.probeId));
   const existingBanks = new Set(existing.map((p) => p.bank));
@@ -211,7 +280,14 @@ async function growProbeSet(args: {
     });
   };
   for (const row of args.winners.values()) {
-    for (const id of row.recalledDocumentIds ?? []) if (typeof id === "string") add(id, SEED_PROBE_BANK);
+    // R2-014: banks is NOT a validated field (see SideRow) — credit the first
+    // entry only when it reads as a non-empty string, else the seed bank. The
+    // mint gate below still validates membership, so a mislabeled candidate
+    // refuses rather than appending.
+    const rowBank = row.banks?.[0];
+    const bank: Probe["bank"] =
+      typeof rowBank === "string" && rowBank.length > 0 ? (rowBank as Probe["bank"]) : SEED_PROBE_BANK;
+    for (const id of row.recalledDocumentIds ?? []) if (typeof id === "string") add(id, bank);
   }
   for (const [bank, ids] of loadP09MintRecords(args.p09EvidenceDir)) {
     if (!existingBanks.has(bank)) continue;
@@ -229,11 +305,13 @@ async function growProbeSet(args: {
     seenProbeIds.add(c.probeId);
     return true;
   });
-  if (survivors.length === 0) return 0;
+  if (survivors.length === 0) return { count: 0, byOrigin };
 
   // Single-writer discipline on the probes dir (the corpus-writer precedent).
-  // Not re-entrant and contention-refusing, so poll with backoff until the
-  // holder releases (bounded, ~5s).
+  // Not re-entrant and contention-refusing, so poll until the holder releases
+  // (bounded, ~5s). R2-015: only RunLockedError is retryable — a
+  // RunLockReentrantError is a nesting bug in THIS process, and spinning on it
+  // forever would hide exactly the bug it exists to surface.
   const lockDir = dirname(probeSetPath);
   const deadline = Date.now() + 5_000;
   let lock: RunLockHandle | undefined;
@@ -242,21 +320,21 @@ async function growProbeSet(args: {
       lock = acquireRunLock(lockDir, PROBE_WRITER_LOCK_ID, "priming-report growth");
       break;
     } catch (e) {
-      const retryable = e instanceof RunLockedError || e instanceof RunLockReentrantError;
-      if (!retryable || Date.now() > deadline) throw e;
+      if (!(e instanceof RunLockedError) || Date.now() > deadline) throw e;
       await Bun.sleep(25);
     }
   }
   try {
     // Re-read under the lock: another writer may have appended while we waited.
-    // F-005: same guard as the pre-lock read — an unreadable set appends nothing.
+    // F-005/R2-011: same guard as the pre-lock read — an unreadable set appends
+    // nothing, and says so.
     let fresh: ReturnType<typeof parseProbeSet>;
     try {
       fresh = parseProbeSet(JSON.parse(readFileSync(probeSetPath, "utf8")));
     } catch {
-      return 0;
+      return { ...unreadableNote(), byOrigin };
     }
-    if (!fresh.ok) return 0;
+    if (!fresh.ok) return { ...unreadableNote(), byOrigin };
     const haveIds = new Set(fresh.value.flatMap((p) => p.expectedDocumentIds));
     const haveProbeIds = new Set(fresh.value.map((p) => p.probeId));
     // F-006: dedupe on probeId as well as docId — within-batch slugOf
@@ -268,26 +346,13 @@ async function growProbeSet(args: {
       seen.add(c.probeId);
       return true;
     });
-    if (toAppend.length === 0) return 0;
+    if (toAppend.length === 0) return { count: 0, byOrigin };
     mkdirSync(lockDir, { recursive: true });
     atomicReplaceFile(probeSetPath, `${JSON.stringify([...fresh.value, ...toAppend], null, 2)}\n`);
-    return toAppend.length;
+    return { count: toAppend.length, byOrigin };
   } finally {
     if (lock !== undefined) releaseRunLock(lock);
   }
-}
-
-/** Union of mint records per bank — neither source alone is the truth. */
-function mergeMint(a: Map<string, Set<string>>, b: Map<string, Set<string>>): Map<string, Set<string>> {
-  const merged: Map<string, Set<string>> = new Map();
-  for (const source of [a, b]) {
-    for (const [bank, ids] of source) {
-      const into = merged.get(bank) ?? new Set<string>();
-      for (const id of ids) into.add(id);
-      merged.set(bank, into);
-    }
-  }
-  return merged;
 }
 
 export { renderReportMd };
@@ -309,7 +374,8 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
   // no env/deps required to surface it.
   const dispatchLogPath = deps.dispatchLogPath ?? DISPATCH_FAILURE_LOG;
 
-  const winners = readSideChannel(recallDir);
+  const side = readSideChannel(recallDir);
+  const winners = side.winners;
   const cyclesToDate = winners.size;
   const rows = [...winners.values()];
   const primedCount = rows.filter((r) => r.primed).length;
@@ -322,39 +388,46 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
   for (const r of rows) if (receiptRunIds.has(r.runId)) withReceipt += 1;
 
   const dataNotes: string[] = [];
+  // R2-005: a recallDir that exists but cannot be read (EACCES, a file where
+  // the dir should be, …) collapses to zero cycles — say so instead of
+  // printing a fresh-factory report over real data hidden behind the failure.
+  if (side.readError !== undefined) {
+    dataNotes.push(`side-channel dir unreadable at ${withCwd(recallDir)} (${side.readError}); cycles counted as 0`);
+  }
   const primedRows = rows.filter((r) => r.primed);
   const unprimedRows = rows.filter((r) => !r.primed);
 
-  // Cost join — exact integer micro-usd. F-004: a PRESENT-but-unreadable
-  // ledger is absent data too (costTable undefined + note), never fatal.
+  // Cost join — R2-001: per-run branch on the CostView fields; only a
+  // fully-priced figure may print as a number. costTable emits ONLY when at
+  // least one observed cycle is fully priced AND none is absent; absent and
+  // partial cycles carry aggregate dataNotes instead.
+  // F-004: a PRESENT-but-unreadable ledger is absent data too (costTable
+  // undefined + note), never fatal.
   let costTable: ReportMetrics["costTable"];
   if (existsSync(ledgerPath)) {
     try {
       const ledger = CostLedger.openReadOnly({ path: ledgerPath });
       try {
-        costTable = { primed: costGroup(primedRows, ledger), unprimed: costGroup(unprimedRows, ledger) };
+        const join = joinCost(primedRows, unprimedRows, ledger);
+        if (join.absentCycles > 0) {
+          dataNotes.push(`cost absent for ${join.absentCycles} of ${cyclesToDate} observed cycles (no ledger events)`);
+        }
+        if (join.partialCycles > 0) {
+          dataNotes.push(`cost partial for ${join.partialCycles} cycles (unpriced rows present — tokens-not-harvested)`);
+        }
+        if (join.pricedCycles > 0 && join.absentCycles === 0) {
+          costTable = { primed: join.primed, unprimed: join.unprimed };
+        }
       } finally {
         ledger.close();
       }
     } catch (e) {
-      dataNotes.push(`cost ledger unreadable at ${ledgerPath} (${(e as Error).message}); costTable omitted`);
+      dataNotes.push(`cost ledger unreadable at ${withCwd(ledgerPath)} (${(e as Error).message}); costTable omitted`);
     }
   } else {
     dataNotes.push(
-      `cost ledger not found at ${ledgerPath}; costTable omitted — an absent source stays absent, never zero-filled`,
+      `cost ledger not found at ${withCwd(ledgerPath)}; costTable omitted — an absent source stays absent, never zero-filled`,
     );
-  }
-  // F-009: a ledger that exists but carries no events for any observed cycle
-  // would print as all-zeros — omit it with a note instead (absent, not 0).
-  if (
-    costTable !== undefined &&
-    costTable.primed.runs === 0 &&
-    costTable.unprimed.runs === 0 &&
-    costTable.primed.totalMicroUsd === 0 &&
-    costTable.unprimed.totalMicroUsd === 0
-  ) {
-    costTable = undefined;
-    dataNotes.push("cost ledger has no events for the observed cycles; costTable omitted — absent, not 0");
   }
 
   dataNotes.push(
@@ -368,14 +441,23 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
 
   // F-007: growth is auxiliary — a lock deadline or any other throw degrades
   // to appendedProbes 0 + a dataNote; the report itself always completes.
+  // R2-011: an unreadable probe set degrades the same way, with its own note.
   let appendedProbes = 0;
+  let byOrigin: ReportMetrics["byOrigin"];
   try {
-    appendedProbes = await growProbeSet({
+    const growth = await growProbeSet({
       probeSetPath,
       auditPath: deps.auditPath,
       p09EvidenceDir: deps.p09EvidenceDir ?? DEFAULT_P09_EVIDENCE_DIR,
       winners,
     });
+    appendedProbes = growth.count;
+    if (growth.note !== undefined) dataNotes.push(growth.note);
+    // R2-004: the md surfaces the probe-set origin split so the id-anchored
+    // caveat can be printed beside it whenever cycle probes exist.
+    if (growth.byOrigin !== undefined) {
+      byOrigin = { seed: { probes: growth.byOrigin.seed }, cycle: { probes: growth.byOrigin.cycle } };
+    }
   } catch (e) {
     dataNotes.push(`probe growth skipped: ${(e as Error).message}`);
   }
@@ -408,13 +490,14 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
     correlationNote: CORRELATION_NOTE,
     dataNotes,
     appendedProbes,
+    ...(byOrigin !== undefined ? { byOrigin } : {}),
   };
   // F-010: counted only when the log exists; a present-but-unreadable log is
   // a dataNote, never a comforting silent 0.
   if (existsSync(dispatchLogPath)) {
     const dispatchFailures = countDispatchFailures(dispatchLogPath);
     if (dispatchFailures === undefined) {
-      dataNotes.push(`dispatch failure log unreadable at ${dispatchLogPath}; dispatchFailures omitted`);
+      dataNotes.push(`dispatch failure log unreadable at ${withCwd(dispatchLogPath)}; dispatchFailures omitted`);
     } else {
       metrics.dispatchFailures = dispatchFailures;
     }
@@ -424,8 +507,28 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
   mkdirSync(reportsDir, { recursive: true });
   const jsonPath = join(reportsDir, `${day}-interim.json`);
   const mdPath = join(reportsDir, `${day}-interim.md`);
-  atomicReplaceFile(jsonPath, `${JSON.stringify(metrics, null, 2)}\n`);
-  atomicReplaceFile(mdPath, renderReportMd(metrics));
+  // R2-010: the json+md pair is the publication unit — a reader must never
+  // observe run A's json beside run B's md (AC5's "the md is re-derivable from
+  // the metrics JSON" holds at the pair level). Each file is still
+  // individually atomic-replaced; the lock only serializes the pair.
+  const pairDeadline = Date.now() + 5_000;
+  let pairLock: RunLockHandle | undefined;
+  for (;;) {
+    try {
+      pairLock = acquireRunLock(reportsDir, PROBE_WRITER_LOCK_ID, "interim report pair");
+      break;
+    } catch (e) {
+      // R2-015: RunLockReentrantError is fatal — only contention retries.
+      if (!(e instanceof RunLockedError) || Date.now() > pairDeadline) throw e;
+      await Bun.sleep(25);
+    }
+  }
+  try {
+    atomicReplaceFile(jsonPath, `${JSON.stringify(metrics, null, 2)}\n`);
+    atomicReplaceFile(mdPath, renderReportMd(metrics));
+  } finally {
+    releaseRunLock(pairLock);
+  }
   return { metrics, jsonPath, mdPath, appendedProbes };
 }
 

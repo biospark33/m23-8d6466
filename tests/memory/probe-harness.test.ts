@@ -133,13 +133,12 @@ function writeProbeSet(path: string, probes: Probe[]): void {
 function writeP09(
   target: string,
   banks: Record<string, string[]>,
-  at: string,
+  stamp: string,
   ok = true,
 ): void {
   mkdirSync(target, { recursive: true });
-  const stamp = at.replaceAll(":", "-").replaceAll(".", "-");
   writeFileSync(
-    join(target, `${stamp}-p0-9-provision-and-import-fixture.json`),
+    join(target, `${stamp.replaceAll(":", "-").replaceAll(".", "-")}-p0-9-provision-and-import-fixture.json`),
     JSON.stringify({
       leg: "p0-9-provision-and-import",
       mode: "fixture",
@@ -199,7 +198,7 @@ function seedReceipt(path: string, runIdValue: string, bank = SEED_PROBE_BANK): 
 }
 
 /** Seed exact cost_events rows via a writable open, then leave it closed. */
-function seedLedger(path: string, rows: { runId: string; microUsd: number }[]): void {
+function seedLedger(path: string, rows: { runId: string; microUsd: number; unpriced?: number }[]): void {
   const writer = new CostLedger({ path, readRunRecord: () => undefined });
   writer.close();
   const db = new Database(path);
@@ -229,7 +228,7 @@ function seedLedger(path: string, rows: { runId: string; microUsd: number }[]): 
         0,
         1,
         r.microUsd,
-        0,
+        r.unpriced ?? 0,
         null,
         null,
         "2026-10-07T00:00:00.000Z",
@@ -275,6 +274,8 @@ function fakeProbeClient(
     banks?: unknown;
     canned?: Map<string, { results: CannedResult[]; durationMs?: number }>;
     canaryHits?: boolean;
+    /** R2-006: the canary recall RESOLVES with this (possibly malformed) payload. */
+    canaryResults?: unknown;
     /** F-002: listBanks itself rejects (endpoint down). */
     listBanksThrows?: string;
     /** F-001: recall rejects only for this query — mid-scoring traffic failure. */
@@ -297,16 +298,18 @@ function fakeProbeClient(
       if (hit) return { results: hit.results, durationMs: hit.durationMs ?? 5 };
       return {
         results:
-          opts.canaryHits === false
-            ? []
-            : [
-                {
-                  memoryId: "canary-1",
-                  content: "canary self-hit",
-                  score: 1,
-                  documentId: CANARY_DOCUMENT_ID,
-                },
-              ],
+          opts.canaryResults !== undefined
+            ? opts.canaryResults
+            : opts.canaryHits === false
+              ? []
+              : [
+                  {
+                    memoryId: "canary-1",
+                    content: "canary self-hit",
+                    score: 1,
+                    documentId: CANARY_DOCUMENT_ID,
+                  },
+                ],
         durationMs: 2,
       };
     },
@@ -661,8 +664,40 @@ describe("probe-recall", () => {
     expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeUndefined();
   });
 
-  test("canary miss refuses: stage canary, hit-rate withheld, canary-failure diagnostic written", async () => {
+  test("a malformed canary RESOLVE (results not an array) refuses at the canary stage, inside the try (R2-006)", async () => {
     const probes = [probe(0)];
+    writeProbeSet(probeSetPath(), probes);
+    writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-0"] }, "2026-10-07T10:00:00.000Z");
+    const { client } = fakeProbeClient({ canaryResults: 5 }); // resolves malformed, does not reject
+
+    const res = await runProbeRecall(baseRecallDeps(client));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.stage).toBe("canary");
+    expect(/malformed canary recall envelope: results not an array/.test(res.reason)).toBe(true);
+    expect(/-canary-failure-[a-z0-9]{6}\.json$/.test(res.diagnosticPath ?? "")).toBe(true);
+    const diagName = readArtifact(evidenceDir(), "-canary-failure-");
+    expect(diagName).toBeDefined();
+    const diag = JSON.parse(readFileSync(join(evidenceDir(), diagName ?? ""), "utf8")) as Record<string, unknown>;
+    expect(/malformed canary recall envelope/.test(String(diag.error))).toBe(true);
+    expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeUndefined();
+  });
+
+  test("canary results with null/primitive elements: non-matching noise, not a crash — the real hit still gates open (R2-006)", async () => {
+    const probes = [probe(0)];
+    writeProbeSet(probeSetPath(), probes);
+    writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-0"] }, "2026-10-07T10:00:00.000Z");
+    const { client } = fakeProbeClient({
+      canaryResults: [null, "junk", { memoryId: "m", content: "c", score: 1, documentId: CANARY_DOCUMENT_ID }],
+    });
+
+    const res = await runProbeRecall(baseRecallDeps(client));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.metrics.canary.hit).toBe(true);
+  });
+
+  test("canary miss refuses: stage canary, hit-rate withheld, canary-failure diagnostic written", async () => {    const probes = [probe(0)];
     writeProbeSet(probeSetPath(), probes);
     writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-0"] }, "2026-10-07T10:00:00.000Z");
     const cannedMap = new Map<string, { results: CannedResult[] }>();
@@ -904,24 +939,89 @@ describe("priming-report", () => {
     });
   });
 
-  test("cost join: exact integer micro-usd per run; a run absent from the ledger reads 0", async () => {
+  test("cost join: exact integer micro-usd per group when every observed cycle is fully priced", async () => {
     writeProbeSet(probeSetPath(), []);
     writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1), { primed: true }));
     writeRecallRow(recallDir(), `${runId(2)}.json`, rowOf(runId(2), { primed: false }));
     seedLedger(ledgerPath(), [
       { runId: runId(1), microUsd: 700 },
       { runId: runId(1), microUsd: 50 },
+      { runId: runId(2), microUsd: 0 }, // fully-cached free turn: priced, prints 0
     ]);
 
     const res = await runPrimingReport(baseReportDeps());
     const cost = res.metrics.costTable;
-    if (!cost) throw new Error("costTable must be present when the ledger exists");
+    if (!cost) throw new Error("costTable must be present when every cycle is priced");
     expect(cost.primed.runs).toBe(1);
     expect(cost.primed.totalMicroUsd).toBe(750);
     expect(cost.primed.meanMicroUsd).toBe(750);
     expect(cost.unprimed.runs).toBe(1);
     expect(cost.unprimed.totalMicroUsd).toBe(0);
     expect(cost.unprimed.meanMicroUsd).toBe(0);
+    // R2-001: fully-priced-only → no cost notes at all.
+    expect(res.metrics.dataNotes.some((n) => /cost absent|cost partial/.test(n))).toBe(false);
+  });
+
+  test("cost join: a cycle with no ledger events is ABSENT cost — costTable withheld + note, never $0 (R2-001)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1), { primed: true }));
+    // Ledger exists but holds events only for an UNOBSERVED runId.
+    seedLedger(ledgerPath(), [{ runId: runId(99), microUsd: 42 }]);
+
+    const res = await runPrimingReport(baseReportDeps());
+    expect("costTable" in res.metrics).toBe(false);
+    expect(res.metrics.dataNotes.some((n) => /cost absent for 1 of 1 observed cycles \(no ledger events\)/.test(n))).toBe(
+      true,
+    );
+  });
+
+  test("cost join: unpriced rows flag PARTIAL (total included); all-partial omits the table (R2-001)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1), { primed: true }));
+    writeRecallRow(recallDir(), `${runId(2)}.json`, rowOf(runId(2), { primed: false }));
+    // Run 1: an unpriced token row → PARTIAL; run 2: priced → the table prints.
+    seedLedger(ledgerPath(), [
+      { runId: runId(1), microUsd: 30, unpriced: 1 },
+      { runId: runId(2), microUsd: 250 },
+    ]);
+
+    const mixed = await runPrimingReport(baseReportDeps());
+    const cost = mixed.metrics.costTable;
+    if (!cost) throw new Error("costTable must be present when at least one cycle is fully priced and none absent");
+    // The ledger never prices an unpriced row, so the partial cycle's total is
+    // its priced portion (0 here) — still printed, but flagged by the note.
+    expect(cost.primed.totalMicroUsd).toBe(0);
+    expect(cost.unprimed.totalMicroUsd).toBe(250);
+    expect(mixed.metrics.dataNotes.some((n) => /cost partial for 1 cycles \(unpriced rows present/.test(n))).toBe(true);
+
+    // All-partial: no fully-priced cycle → no table, only the partial note.
+    const onlyRun1 = join(dir, "recall-only-1");
+    writeRecallRow(onlyRun1, `${runId(1)}.json`, rowOf(runId(1), { primed: true }));
+    const allPartial = await runPrimingReport({
+      ...baseReportDeps(),
+      recallDir: onlyRun1,
+      reportsDir: join(dir, "reports-2"),
+    });
+    expect("costTable" in allPartial.metrics).toBe(false);
+    expect(allPartial.metrics.dataNotes.some((n) => /cost partial for 1 cycles/.test(n))).toBe(true);
+  });
+
+  test("side-channel dir present as a FILE (non-ENOENT): dataNote + zero cycles, not a silent fresh factory (R2-005)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    const fileDir = join(dir, "recall-as-file");
+    writeFileSync(fileDir, "{}\n"); // a file where recallDir should be → ENOTDIR
+
+    const res = await runPrimingReport({ ...baseReportDeps(), recallDir: fileDir });
+    expect(res.metrics.cyclesToDate).toBe(0);
+    expect(res.metrics.dataNotes.some((n) => /side-channel dir unreadable at .*cycles counted as 0/.test(n))).toBe(true);
+    // ENOENT (absent dir) stays silent-absent — the note is for unreadable, not missing.
+    const absentRes = await runPrimingReport({
+      ...baseReportDeps(),
+      recallDir: join(dir, "recall-never-created"),
+      reportsDir: join(dir, "reports-3"),
+    });
+    expect(absentRes.metrics.cyclesToDate).toBe(0);
+    expect(absentRes.metrics.dataNotes.some((n) => /side-channel dir unreadable/.test(n))).toBe(false);
   });
 
   test("absent ledger file: costTable omitted + dataNote, file stays absent (readonly posture)", async () => {
@@ -1105,7 +1205,26 @@ describe("priming-report", () => {
     expect(readFileSync(probeSetPath(), "utf8")).toBe(before);
   });
 
-  test("append runs under the probe-writer lock: blocks while held, no interleave", async () => {
+  test("growth on an unreadable probe set: appendedProbes 0 + dataNote, matching the lock-degradation pattern (R2-011)", async () => {
+    mkdirSync(dirname(probeSetPath()), { recursive: true });
+    writeFileSync(probeSetPath(), "{ not json at all");
+    // Candidates exist and would pass the mint gate — growth skips ONLY
+    // because the set cannot be parsed, and the report must say so.
+    writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-200"] }, "2026-10-07T10:00:00.000Z");
+    writeRecallRow(
+      recallDir(),
+      `${runId(1)}.json`,
+      rowOf(runId(1), { recalledDocumentIds: ["mulch-doc-200"] }),
+    );
+
+    const res = await runPrimingReport(baseReportDeps());
+    expect(res.appendedProbes).toBe(0);
+    expect(res.metrics.dataNotes.some((n) => /probe growth skipped: probe set unreadable at /.test(n))).toBe(true);
+    // The corrupt set is left untouched.
+    expect(readFileSync(probeSetPath(), "utf8")).toBe("{ not json at all");
+  });
+
+  test("append runs under the probe-writer lock: genuine contention blocks, release lets the append land", async () => {
     const seed = [probe(100)];
     writeProbeSet(probeSetPath(), seed);
     writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-200"] }, "2026-10-07T10:00:00.000Z");
@@ -1117,8 +1236,10 @@ describe("priming-report", () => {
 
     const probesDir = dirname(probeSetPath());
     const lockFile = join(probesDir, `${PROBE_WRITER_LOCK_ID}.lock`);
-    // Hold the probe-writer lock first: the report must WAIT to append.
-    const mine = acquireRunLock(probesDir, PROBE_WRITER_LOCK_ID, "leaf-t lock test");
+    // A FOREIGN holder (another process's body: pid not ours, host not ours) —
+    // growth must WAIT on genuine contention, not spin on a reentrant refusal.
+    // (R2-015: an in-process reentrant acquire is now fatal — pinned below.)
+    writeFileSync(lockFile, "424242 some-other-host 2026-10-07T10:00:00.000Z deadbeef\n");
     let done = false;
     const pending = runPrimingReport(baseReportDeps()).then((r) => {
       done = true;
@@ -1127,13 +1248,35 @@ describe("priming-report", () => {
     await Bun.sleep(150);
     expect(done).toBe(false); // blocked on the held lock — append serialized
     expect(existsSync(lockFile)).toBe(true);
-    releaseRunLock(mine);
+    rmSync(lockFile); // the holder releases
 
     const res = await pending;
     expect(done).toBe(true);
     expect(res.appendedProbes).toBe(1);
     const after = JSON.parse(readFileSync(probeSetPath(), "utf8")) as Probe[];
     expect(after.length).toBe(2);
+  });
+
+  test("growth: a reentrant acquire in THIS process is fatal to growth, not spun on (R2-015) — report completes with a dataNote", async () => {
+    const seed = [probe(100)];
+    writeProbeSet(probeSetPath(), seed);
+    writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-200"] }, "2026-10-07T10:00:00.000Z");
+    writeRecallRow(
+      recallDir(),
+      `${runId(1)}.json`,
+      rowOf(runId(1), { recalledDocumentIds: ["mulch-doc-200"] }),
+    );
+
+    // Same process holds the probe-writer lock: growth's acquire is a nesting
+    // bug — it must fail fast (F-007 degradation), not poll until the deadline.
+    const probesDir = dirname(probeSetPath());
+    const mine = acquireRunLock(probesDir, PROBE_WRITER_LOCK_ID, "leaf-t reentrant test");
+    const res = await runPrimingReport(baseReportDeps());
+    releaseRunLock(mine);
+    expect(res.appendedProbes).toBe(0);
+    expect(res.metrics.dataNotes.some((n) => /probe growth skipped/.test(n))).toBe(true);
+    // The set is untouched — growth appended nothing before refusing.
+    expect((JSON.parse(readFileSync(probeSetPath(), "utf8")) as Probe[]).length).toBe(1);
   });
 });
 
@@ -1210,7 +1353,12 @@ describe("harness-e2e", () => {
     writeRecallRow(recallDir(), `${runId(2)}.json`, rowOf(runId(2), { primed: false }));
     mkdirSync(dirname(auditPath()), { recursive: true });
     seedReceipt(auditPath(), runId(1));
-    seedLedger(ledgerPath(), [{ runId: runId(1), microUsd: 400 }]);
+    // R2-001: both observed cycles priced (run 2 a fully-cached 0) so the
+    // env-pointed ledger still surfaces in costTable.
+    seedLedger(ledgerPath(), [
+      { runId: runId(1), microUsd: 400 },
+      { runId: runId(2), microUsd: 0 },
+    ]);
 
     // probe-recall: receipts come from the env-pointed audit db (no explicit path).
     const cannedMap = new Map<string, { results: CannedResult[] }>();

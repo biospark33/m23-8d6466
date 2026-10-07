@@ -29,6 +29,8 @@ export interface ReportMetrics {
   correlationNote: string;
   dataNotes: string[];
   appendedProbes: number;
+  /** R2-004: probe-set origin provenance (counts only — the report runs no recalls). Omitted when the probe set is absent/unreadable. */
+  byOrigin?: { seed: { probes: number }; cycle: { probes: number } };
   dispatchFailures?: number;
 }
 
@@ -71,6 +73,18 @@ export function renderReportMd(m: ReportMetrics): string {
     for (const c of m.cycles) {
       lines.push(
         `  runId=${c.runId} primed=${c.primed} receipt=${c.receiptPresent ? "present" : "absent"} latencyMs=${c.latencyMs}`,
+      );
+    }
+    lines.push("");
+  }
+  // R2-004: the origin split, with the id-anchor caveat whenever cycle probes
+  // exist — the blended rate must not hide that cycle-grown queries embed the
+  // expected document id.
+  if (m.byOrigin !== undefined) {
+    lines.push(`byOrigin (probe-set provenance): seed=${m.byOrigin.seed.probes} cycle=${m.byOrigin.cycle.probes}`);
+    if (m.byOrigin.cycle.probes > 0) {
+      lines.push(
+        "  caveat: cycle-grown probes are id-anchored (query embeds the document id) — read the cycle split as id-lookup capability, not semantic recall",
       );
     }
     lines.push("");

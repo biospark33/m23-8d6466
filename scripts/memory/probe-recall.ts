@@ -34,8 +34,9 @@ import {
   checkLabelIntegrity,
   loadP09MintRecords,
   loadReceiptMintRecords,
+  mergeMint,
   parseProbeSet,
-  type MintRecords,
+  withCwd,
   type Probe,
   type ProbeClient,
 } from "./probe-schema.ts";
@@ -98,19 +99,6 @@ function rand6(): string {
   return Array.from(randomBytes(6), (b) => (b % 36).toString(36)).join("");
 }
 
-/** Union of mint records per bank — neither source alone is the truth. */
-function mergeMint(a: MintRecords, b: MintRecords): MintRecords {
-  const merged: MintRecords = new Map();
-  for (const source of [a, b]) {
-    for (const [bank, ids] of source) {
-      const into = merged.get(bank) ?? new Set<string>();
-      for (const id of ids) into.add(id);
-      merged.set(bank, into);
-    }
-  }
-  return merged;
-}
-
 function median(values: number[]): number {
   const sorted = [...values].sort((x, y) => x - y);
   const mid = Math.floor(sorted.length / 2);
@@ -159,6 +147,7 @@ async function probeRecallLocked(
   const now = env.now;
 
   // Gate 0: probe-set load + parse. A parse failure is a label-integrity refusal.
+  // R2-007: refusal reasons naming the (DEFAULT-relative) path carry the cwd.
   let probes: Probe[];
   try {
     const parsed = parseProbeSet(JSON.parse(readFileSync(env.probeSetPath, "utf8")));
@@ -166,7 +155,7 @@ async function probeRecallLocked(
       return {
         ok: false,
         stage: "label-integrity",
-        reason: `probe set invalid at ${env.probeSetPath}: ${parsed.error}`,
+        reason: `probe set invalid at ${withCwd(env.probeSetPath)}: ${parsed.error}`,
       };
     }
     probes = parsed.value;
@@ -174,13 +163,13 @@ async function probeRecallLocked(
     return {
       ok: false,
       stage: "label-integrity",
-      reason: `probe set unreadable at ${env.probeSetPath}: ${(e as Error).message}`,
+      reason: `probe set unreadable at ${withCwd(env.probeSetPath)}: ${(e as Error).message}`,
     };
   }
   // F-003: an empty set parses valid but measures nothing — refusing here
   // keeps a zero-sample run from writing a legitimate-looking artifact at all.
   if (probes.length === 0) {
-    return { ok: false, stage: "label-integrity", reason: `probe set empty at ${env.probeSetPath}` };
+    return { ok: false, stage: "label-integrity", reason: `probe set empty at ${withCwd(env.probeSetPath)}` };
   }
 
   // Gate 1: label integrity — BEFORE any recall/retain traffic. Every
@@ -200,9 +189,11 @@ async function probeRecallLocked(
 
   // Gate 2: self-hit canary — retains once (replace-on-write, so it never
   // accumulates), then recalls itself. It gates scoring; it never scores.
-  // A canary that ERRORS (network, upstream extraction failure) is refused at
-  // this stage exactly like a canary miss — never an unhandled crash, never a
-  // scored run.
+  // A canary that ERRORS (network, upstream extraction failure) — or RESOLVES
+  // malformed (R2-006: `results` not an array, or null/primitive elements) —
+  // is refused at this stage exactly like a canary miss: never an unhandled
+  // crash, never a scored run. The shape validation lives INSIDE the try for
+  // exactly that reason.
   let canaryResults: { documentId: string | null }[] = [];
   let canaryError: string | undefined;
   try {
@@ -214,7 +205,14 @@ async function probeRecallLocked(
       tags: ["qds-canary"],
     });
     const canaryRecall = await deps.client.recall(SEED_PROBE_BANK, CANARY_CONTENT, 5);
-    canaryResults = canaryRecall.results ?? [];
+    if (!Array.isArray(canaryRecall.results)) {
+      throw new Error("malformed canary recall envelope: results not an array");
+    }
+    // Null/primitive elements are non-matching noise, not a crash — filter
+    // them out before any `.some`/`.map` touches an element.
+    canaryResults = canaryRecall.results.filter(
+      (r) => typeof r === "object" && r !== null && "documentId" in r,
+    );
   } catch (e) {
     canaryError = (e as Error).message;
   }
@@ -337,37 +335,49 @@ async function probeRecallLocked(
 }
 
 if (import.meta.main) {
-  const res = await runProbeRecall({ client: new HindsightClient() });
-  if (res.ok) {
-    const agg = res.metrics.aggregate;
-    const floorNote =
-      agg.hitRateAt5 !== undefined
-        ? `hitRateAt5=${agg.hitRateAt5}`
-        : "hitRateAt5 withheld (below 20-probe floor)";
-    const medianNote =
-      agg.medianRecallMs !== undefined
-        ? ` medianRecallMs=${agg.medianRecallMs}ms`
-        : " (below 20-probe floor: no median emitted)";
-    writeSync(1, `${floorNote} probes=${agg.probes} hits=${agg.hits}${medianNote}\n`);
-    // F-012: seed vs cycle split, printed only when cycle probes exist.
-    if (agg.byOrigin.cycle.probes > 0) {
-      writeSync(
-        1,
-        `byOrigin seed=${agg.byOrigin.seed.probes}/${agg.byOrigin.seed.hits} cycle=${agg.byOrigin.cycle.probes}/${agg.byOrigin.cycle.hits} (probes/hits)\n`,
-      );
+  // R2-008: a throw escaping the runner (lock deadline past 60s, an unwritable
+  // probes dir, the deliberate artifact-persist throw) is a structured refusal
+  // line, not a stack trace — the header's exit-1 contract holds on purpose.
+  try {
+    const res = await runProbeRecall({ client: new HindsightClient() });
+    if (res.ok) {
+      const agg = res.metrics.aggregate;
+      const floorNote =
+        agg.hitRateAt5 !== undefined
+          ? `hitRateAt5=${agg.hitRateAt5}`
+          : "hitRateAt5 withheld (below 20-probe floor)";
+      const medianNote =
+        agg.medianRecallMs !== undefined
+          ? ` medianRecallMs=${agg.medianRecallMs}ms`
+          : " (below 20-probe floor: no median emitted)";
+      writeSync(1, `${floorNote} probes=${agg.probes} hits=${agg.hits}${medianNote}\n`);
+      // F-012: seed vs cycle split, printed only when cycle probes exist.
+      if (agg.byOrigin.cycle.probes > 0) {
+        writeSync(
+          1,
+          `byOrigin seed=${agg.byOrigin.seed.probes}/${agg.byOrigin.seed.hits} cycle=${agg.byOrigin.cycle.probes}/${agg.byOrigin.cycle.hits} (probes/hits)\n`,
+        );
+      }
+      writeSync(1, `artifact=${res.artifactPath}\n`);
+      process.exit(0);
     }
-    writeSync(1, `artifact=${res.artifactPath}\n`);
-    process.exit(0);
-  }
-  if (res.stage === "label-integrity") {
-    for (const v of res.violations ?? []) writeSync(2, `label-integrity violation ${v.probeId}: ${v.reason}\n`);
-    writeSync(2, `${res.reason}\n`);
-    process.exit(2);
-  }
-  if (res.stage === "scoring") {
-    writeSync(2, `scoring refusal: ${res.reason}\n`);
+    if (res.stage === "label-integrity") {
+      for (const v of res.violations ?? []) writeSync(2, `label-integrity violation ${v.probeId}: ${v.reason}\n`);
+      writeSync(2, `${res.reason}\n`);
+      process.exit(2);
+    }
+    if (res.stage === "scoring") {
+      writeSync(2, `scoring refusal: ${res.reason}\n`);
+      process.exit(1);
+    }
+    writeSync(2, `canary refusal: ${res.reason}\ndiagnostic=${res.diagnosticPath ?? "-"}\n`);
+    process.exit(3);
+  } catch (e) {
+    const err = e as Error & { remediation?: string };
+    writeSync(
+      2,
+      `probe-recall failed: ${err.message}${err.remediation !== undefined ? ` — ${err.remediation}` : ""}\n`,
+    );
     process.exit(1);
   }
-  writeSync(2, `canary refusal: ${res.reason}\ndiagnostic=${res.diagnosticPath ?? "-"}\n`);
-  process.exit(3);
 }

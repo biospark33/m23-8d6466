@@ -120,6 +120,8 @@ Three offline instruments over M1.2's artifacts plus one report: (1) a schema'd,
 
 **Live-tier note for the operator:** the local Hindsight instance used for the prerequisite rerun is still up (`m13-hindsight` compose project, loopback 18890, fresh volumes, throwaway tenant key). A real-instance canary + probe run (~$0.01 for the canary retain; recalls are RRF, no LLM) would produce the first real hit-rate@5 baseline artifact whenever the operator wants it — not required by this story's DoD (mock-tier machinery + committed seeds). Destroy with `docker compose -p m13-hindsight down -v` when done with it.
 
+**Spec-letter note (R2):** side-channel `recalledDocumentIds` are dev-meta documents actually recalled during priming, so growth banks them dev-meta — the spec's "outcome-document ids" letter describes repo-bank outcome docs; the report md's id-anchor caveat on the cycle split (cycle-grown probes are id-anchored: the query embeds the document id) is the honest framing of that banking choice.
+
 ### Review Findings (round 1, 2026-10-07 — full campaign: 25 patch / 2 dismissed / 1 deferred)
 
 - [ ] [Review][Patch] Scoring-loop recall error escapes unclassified [scripts/memory/probe-recall.ts]
@@ -148,3 +150,24 @@ Three offline instruments over M1.2's artifacts plus one report: (1) a schema'd,
 - [ ] [Review][Patch] verify-test-slice parsing/bounds fixes; verifier vacuous check; header wording; test name overstatement; record DD-22 working bar as decision-input context in evidence+md [scripts/dev + scripts/memory]
 - [ ] [Review][Patch] Drop dead PrimingReportDeps.runsDir [scripts/memory/priming-report.ts]
 - [x] [Review][Defer] Failed-leg evidence deleteOutcomes semantics (leg-driver classification, pre-existing) [scripts/p0-9/leg-lib.ts] — deferred, pre-existing
+
+### Review Findings (round 2, 2026-10-07 — 17 patch / 0 dismissed / 1 deferred)
+
+- [x] [Review][Patch] costTable $0-print for absent/unpriced cycles at >0 cycles — branch on CostView hasEvents/hasTokenRows/unpricedRows [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Verifier hitRateAt5 assertion NaN-vacuous below floor — assert belowFloor + hits [scripts/dev/verify-m13-e2e.ts]
+- [x] [Review][Patch] Committed baseline artifact predates shipped shape — provenance README in evidence/memory [_bmad-output/evidence/memory]
+- [x] [Review][Patch] Cycle probes id-anchored: byOrigin + caveat in md; outcome-doc banking deviation noted [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] recallDir unreadable (non-ENOENT) → dataNote, not silent zero cycles [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Malformed canary resolve crashes outside try — shape-check inside [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] CWD hint in refusal reasons (relative defaults) [scripts/memory]
+- [x] [Review][Patch] probe-recall CLI main catch — structured lock-timeout line [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] mergeMint deduped via probe-schema export [scripts/memory]
+- [x] [Review][Patch] Lock across the same-day json/md pair write [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Growth unreadable-set skip gets a dataNote [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] writtenAt tie-break comment honesty [scripts/memory/probe-schema.ts]
+- [x] [Review][Patch] --min-pass required, no silent 1 default [scripts/dev/verify-test-slice.mjs]
+- [x] [Review][Patch] SideRow docstring + growth credits row.banks[0] when present [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] RunLockReentrantError fatal in growth (align contention policy) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Verifier dead runsDir wiring dropped [scripts/dev/verify-m13-e2e.ts]
+- [x] [Review][Patch] writeP09 `at` shadow rename [tests/memory/probe-harness.test.ts]
+- [x] [Review][Defer] vrf9ks memoryResidue mirrors mintRecord vs residue:[] (leg-driver family, pre-existing) — deferred, pre-existing

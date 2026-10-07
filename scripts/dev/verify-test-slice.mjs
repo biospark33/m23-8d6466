@@ -39,7 +39,10 @@ for (let i = 0; i < args.length; i++) {
     usage();
   }
 }
-const minPass = Number(minPassRaw ?? "1");
+// R2-013: --min-pass is REQUIRED — a forgotten flag must not silently weaken
+// the vacuous-pass guard this script exists to enforce.
+if (minPassRaw === undefined) usage();
+const minPass = Number(minPassRaw);
 if (targets.length === 0 || !Number.isInteger(minPass) || minPass < 0) usage();
 
 const argv = ["test", ...targets];
