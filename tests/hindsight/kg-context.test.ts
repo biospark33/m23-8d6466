@@ -32,7 +32,9 @@ import {
 // Fixtures — fake client, env control, tmpdir, log capture
 // ---------------------------------------------------------------------------
 
-const RUN_ID = "qds-20261006-kgtest";
+// A strict UUID v4 — the row gate is now EXACTLY resolveBriefRequestId's gate
+// (isValidUuidV4), so the test correlation id must be one dispatch would keep.
+const RUN_ID = "00000000-0000-4000-8000-000000000001";
 const OUTCOME_DOC_ID = "qds-20261006-kgtest";
 const REPO_SLUG = "acme/widget";
 const REPO_BANK = "acme-widget"; // resolveBankId("acme/widget")
@@ -580,6 +582,57 @@ describe("kg context ladder negative controls", () => {
       expect(readdirSync(dir)).toEqual([]);
       expect(kgRecallEntries().length).toBe(0);
     }
+  });
+
+  test("safe-but-non-UUID requestId is treated as NO id — the row gate is resolveBriefRequestId's gate, so dispatch would drop it and NO orphan row is written", async () => {
+    configEnv();
+    // All of these pass the OLD SAFE_RUN_ID charset gate but fail
+    // isValidUuidV4 — under the old gate each left an orphan row a receipt
+    // could never join to (Amendment R7's case; the tightened gate closes it).
+    for (const requestId of ["qds-20261006-kgtest", "abc123", "00000000-0000-4000-8000-00000000000", "00000000-0000-4000-8000-000000000001extra"]) {
+      const b = { requestId, repoSlug: REPO_SLUG };
+      const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir })) as
+        Record<string, unknown>;
+      expect(typeof primed.kgContext).toBe("string");
+      expect(readdirSync(dir)).toEqual([]);
+      expect(kgRecallEntries().length).toBe(0);
+    }
+  });
+
+  test("deps.requestId (submit's --request-id) wins over the brief field and keys the row when the brief names NO id at all", async () => {
+    configEnv();
+    const depsId = "11111111-2222-4333-8444-555555555555";
+    // Submit's shape: the correlation id exists ONLY as a flag — the brief
+    // carries none. Before the threading this cycle wrote no row at all.
+    const b = { repoSlug: REPO_SLUG };
+    const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir, requestId: depsId })) as
+      Record<string, unknown>;
+    expect(typeof primed.kgContext).toBe("string");
+    const row = readRow(depsId);
+    expect(row.runId).toBe(depsId);
+    expect(kgRecallEntries().some((e) => e.runId === depsId)).toBe(true);
+  });
+
+  test("deps.requestId overrides a DIFFERENT brief requestId — the row keys on the id the run will carry", async () => {
+    configEnv();
+    const depsId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const b = { requestId: RUN_ID, repoSlug: REPO_SLUG };
+    const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir, requestId: depsId })) as
+      Record<string, unknown>;
+    expect(typeof primed.kgContext).toBe("string");
+    expect(rowFileExists(`${RUN_ID}.json`)).toBe(false);
+    expect(readRow(depsId).runId).toBe(depsId);
+  });
+
+  test("INVALID deps.requestId is treated as NO id — the gate is uniform, the seam never throws", async () => {
+    configEnv();
+    const b = { requestId: RUN_ID, repoSlug: REPO_SLUG };
+    const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir, requestId: "not-a-uuid" })) as
+      Record<string, unknown>;
+    // Priming unaffected (deps-win does not mean deps-trusted past the gate).
+    expect(typeof primed.kgContext).toBe("string");
+    expect(readdirSync(dir)).toEqual([]);
+    expect(kgRecallEntries().length).toBe(0);
   });
 
   test("unconfigured env (including empty-string values): no row file, no log line, byte-identical brief", async () => {

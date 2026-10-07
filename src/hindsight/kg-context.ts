@@ -28,6 +28,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { kgContextSanitize } from "../fleet/brief-schema.ts";
+import { isValidUuidV4 } from "../phase-engine/issue-correlation.ts";
 import { atomicReplaceFile } from "../providers/fs-atomic.ts";
 import { log } from "../swarmclaw/mcp/stdio-transport.ts";
 import {
@@ -88,6 +89,17 @@ export interface PrimeDispatchBriefDeps {
   client?: RecallClient;
   /** Side-channel dir override (tests use a tmpdir; never real _bmad-output). */
   recallDir?: string;
+  /**
+   * The caller's already-resolved correlation id (submit's `--request-id` —
+   * the id the run will carry, which the brief itself does not name). Wins
+   * over the brief's own field, mirroring dispatch's deps-requestId rule
+   * (INV-4-bis). The SAME UUID v4 gate applies to it as to the brief field —
+   * an invalid value is treated as NO id (no row, no line), never a throw:
+   * the seam's never-throw contract outranks caller input. Production callers
+   * validate upstream (submit refuses a non-UUID `--request-id` before the
+   * brief is read), so this gate firing is a defensive no-op there.
+   */
+  requestId?: string;
 }
 
 /** Side-channel row — EXACTLY these seven keys (M1.3 parses the shape verbatim). */
@@ -267,15 +279,18 @@ function briefStr(brief: object, key: string): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
-/** runId becomes a filename segment, so it must be one. The raw pre-schema
- * brief is not trusted for it: this refuses traversal ("../.."), dot-segment
- * forgeries ("a..b" is also caught by the ".." substring rule), and
- * over-length strings — an invalid id is treated as NO id (no row, no line),
- * exactly the missing-requestId posture. */
-const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
-
-function usableRunId(raw: string | undefined): string | undefined {
-  return raw !== undefined && SAFE_RUN_ID.test(raw) && !raw.includes("..") ? raw : undefined;
+/** The correlation id becomes a filename segment AND the row's join key —
+ * so the gate here must be EXACTLY the resolver's gate (resolveBriefRequestId /
+ * isValidUuidV4): an id this seam would write a row for is an id dispatch
+ * keeps, and an id dispatch drops (mints past) produces NO row at all. The
+ * earlier SAFE_RUN_ID charset gate was looser than the resolver's, which let
+ * a safe-but-non-UUID brief id leave an orphan row — a counted cycle with no
+ * joinable receipt (the case Amendment R7 recorded; this gate closes it).
+ * A UUID v4 is inherently filename-safe, so the traversal/dot-segment
+ * refusals ride along for free. An invalid id is treated as NO id (no row,
+ * no line), exactly the missing-requestId posture. */
+function usableCorrelation(raw: string | undefined): string | undefined {
+  return raw !== undefined && isValidUuidV4(raw) ? raw : undefined;
 }
 
 function writeRecallRow(dir: string | undefined, runId: string | undefined, row: RecallRow): void {
@@ -312,9 +327,13 @@ export async function primeDispatchBrief<T extends object>(
   if (!memoryEnvConfigured()) return briefJson;
   const startedAt = Date.now();
   // Validated ONCE, at the derivation point: both the row and the log line
-  // below then treat an unsafe id exactly like a missing one (F1 — the raw
+  // below then treat an invalid id exactly like a missing one (F1 — the raw
   // pre-schema brief must never reach a filename or the log's runId field).
-  const runId = usableRunId(briefStr(briefJson, "requestId"));
+  // The caller's resolved id (submit's --request-id) wins over the brief's
+  // own field — the same deps-win rule dispatch applies (INV-4-bis) — and
+  // rides the SAME gate, so every written row joins to the id the run
+  // actually carries.
+  const runId = usableCorrelation(deps.requestId ?? briefStr(briefJson, "requestId"));
   // banks:[] on a PRE-RECALL failure is truthful — zero banks were attempted
   // — and the error detail rides the log line, not the row (D2).
   let attempted: string[] = [];

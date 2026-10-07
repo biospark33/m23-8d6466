@@ -33,21 +33,14 @@
  * closure wired into the approval port passes the SAME handle — never a
  * `withRunLock` wrap, which would throw on re-entry.
  */
-import { join } from "node:path";
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
-import {
-  extractExistingBankIds,
-  resolveProvisionedRepoBankId,
-} from "../hindsight/bank-provisioner.ts";
-import { HindsightClient } from "../hindsight/client.ts";
-import { retainRunOutcome } from "../hindsight/run-retain.ts";
-import { resolveBankId } from "../hindsight/schemas.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { KeyApi } from "../providers/credentials.ts";
 import type { ProviderAuditLink, ProviderDriver } from "../providers/driver.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
+import { retainRunOutcomeBestEffort } from "./retain-best-effort.ts";
 import { recordApprovalPort } from "../reverify/approval.ts";
 import { runRedactionMap } from "../reverify/redaction.ts";
 import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
@@ -206,138 +199,25 @@ function recordRequestId(rec: RunRecord, deps: RunCompletionDeps): string {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * M1.2 AC4: the observe chain's post-harvest retain — the twin of fleet.ts's
- * `retainRunOutcomeBestEffort`. scripts/fleet.ts imports THIS module, so
- * importing its helper back would be a cycle; this small duplication is the
- * sanctioned fallback, and both twins call the SAME src/hindsight functions —
- * same env gate, same family-signature bank resolution, same `retainRunOutcome`
- * seam. (The sweep's chain rides this too: observe.ts builds this module's
- * deps for every candidate, so batch and single-run retain identically.)
- *
- * Same contract as the twin: env-unconfigured memory skips entirely (no row,
- * no line, chain untouched); everything else is failure-isolated — a retain
- * refusal is one structured error line, never a chain failure, because the
- * harvest leg landed either way. The bank is resolved by FAMILY SIGNATURE
- * against the LIVE list (F16/G1): `resolveProvisionedRepoBankId` walks the
- * truncation candidates (base, then -2..-11) and returns the first for which
- * BOTH the bank and its `-dev-meta` sibling exist — a pair only
- * `provisionBanks` creates — so the retain targets the SAME provisioned bank
- * the write leg created and the kg-context read leg fans out over: the
- * dispatch→harvest cycle closes against one id. Null means the banks were
- * never provisioned for this repo, and retaining into an invented id is an
- * opaque 404.
+ * M1.2 AC4: the observe chain's post-harvest retain — the shared best-effort
+ * seam (src/fleet/retain-best-effort.ts) with this chain's deps adapted in.
+ * The former twin body — the cycle-forced duplication the story's deviation
+ * note sanctioned — lives there now, verbatim for both callers: env-gated
+ * skip, family-signature bank resolution (G1), record-stamp-wins join key,
+ * F9 never-throw lines, F17 wall clock.
  */
-// F17: the retain's wall-clock cap — best-effort never dwells past it on the
-// chain's teardown critical path.
-const RETAIN_BEST_EFFORT_WALL_MS = 10_000;
-
 async function postHarvestRetain(
   deps: RunCompletionDeps,
   info: { runId: string; requestId: string; outcome: "harvested" | "none"; count?: number },
 ): Promise<void> {
-  const envConfigured =
-    Boolean(process.env.HINDSIGHT_BASE_URL) &&
-    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
-  if (!envConfigured) return;
-  // F9: this line is the helper's LAST resort — its own emission must never
-  // throw past it (a raising log sink must not turn a skipped retain into a
-  // crashed chain step).
-  const skipLine = (code: string, reason: string): void => {
-    try {
-      log({
-        requestId: info.requestId,
-        operation: "memory-retain",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: 0,
-        status: "error",
-        runId: info.runId,
-        error: { code, message: reason },
-        reason:
-          "harvest retain skipped — the harvest leg landed and its exit is unchanged (M1.2 AC4 best-effort)",
-      });
-    } catch {
-      // Silence is the last resort.
-    }
-  };
-  const retainOnce = async (): Promise<void> => {
-    const rec = deps.store.get(info.runId);
-    // The RECORD's stamp is the join key whenever it carries one. (F14: when
-    // NEITHER the record nor the invocation carries one there is no join key
-    // at all — a benign skip, not a failure.)
-    const requestId = recordRequestId(rec, deps);
-    if (requestId.length === 0) {
-      skipLine("retain-skipped", `run ${info.runId} carries no requestId — the retain's join key is unknown`);
-      return;
-    }
-    const repoSlug = rec.extensions?.budget?.repoSlug;
-    if (typeof repoSlug !== "string" || repoSlug.length === 0) {
-      // INV-AUDIT-4 posture: no attribution, no invented bank — skipped loudly.
-      skipLine("retain-skipped", `run ${info.runId} carries no budget.repoSlug — the retain's bank is unknown`);
-      return;
-    }
-    const client = new HindsightClient();
-    const existing = extractExistingBankIds(await client.listBanks());
-    // G1: only a provisioned FAMILY (bank + `-dev-meta`) is retainable — see
-    // the header above.
-    const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), existing);
-    if (repoBankId === null) {
-      skipLine("retain-skipped", `run ${info.runId}'s memory banks are not provisioned for this repo`);
-      return;
-    }
-    await retainRunOutcome(
-      client,
-      // retainRunOutcome only ever calls `record`; the composition root owns
-      // the store's lifecycle, so the adapter closes nothing and names no path.
-      { record: deps.recordAuditLink, close() {}, path: "" },
-      {
-        runId: info.runId,
-        repoSlug,
-        requestId,
-        // The harvest leg landed either way; harvested-with-commits is the
-        // only green shape — a harvest that pulled nothing is unsettled.
-        // (G7: the bundle IS the harvest's record — harvest writes nothing to
-        // the run record — so its path rides along exactly when there is one.)
-        exitClassification: info.outcome === "harvested" ? "green" : "unsettled",
-        ...(info.outcome === "harvested"
-          ? { harvestedCount: info.count ?? 0, bundlePath: join(deps.store.dir, `${info.runId}.bundle`) }
-          : {}),
-        tags: ["factory-run"],
-        repoBankId,
-      },
-    );
-  };
-  // F17: the whole post-env-gate body rides the wall clock. A body that
-  // loses the race keeps running, but its late rejection must not surface as
-  // an unhandled rejection — the timeout line is the only witness the cap
-  // owes the operator.
-  const body = retainOnce();
-  body.catch(() => {});
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      body,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(() => {
-          skipLine("retain-timeout", `the retain exceeded its ${RETAIN_BEST_EFFORT_WALL_MS}ms wall-clock cap`);
-          resolve();
-        }, RETAIN_BEST_EFFORT_WALL_MS);
-      }),
-    ]);
-  } catch (e) {
-    // F9: the failure line's own construction (String/redactSecrets over a
-    // hostile throwable) is guarded too — the catch never throws past itself.
-    try {
-      skipLine(
-        "retain-failed",
-        redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200) || "the retain call failed",
-      );
-    } catch {
-      // Silence — see F9 above.
-    }
-  } finally {
-    clearTimeout(timer);
-  }
+  await retainRunOutcomeBestEffort({
+    store: deps.store,
+    runId: info.runId,
+    requestId: info.requestId,
+    outcome: info.outcome,
+    count: info.count,
+    auditRecord: deps.recordAuditLink,
+  });
 }
 
 function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): TeardownDeps {
