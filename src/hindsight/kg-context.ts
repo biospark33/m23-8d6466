@@ -183,8 +183,12 @@ export async function recallFanOut(
 /**
  * Rank by score desc. Array#sort is stable (ES2019+), so equal scores keep
  * fan-out (original) order — the deterministic tie-break the story names.
+ * Non-finite scores (NaN/±Infinity) collapse to 0: a NaN would make the
+ * comparator return NaN (sort order undefined) and ±Infinity would hijack
+ * rank order outright.
  */
-const byScoreDesc = (a: KgObservation, b: KgObservation): number => b.score - a.score;
+const byScoreDesc = (a: KgObservation, b: KgObservation): number =>
+  (Number.isFinite(b.score) ? b.score : 0) - (Number.isFinite(a.score) ? a.score : 0);
 
 function escXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

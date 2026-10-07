@@ -664,6 +664,40 @@ describe("M1.2 retain surface", () => {
     expect(caught?.requestId).toBe("req-retain-zero");
   });
 
+  test("2xx success:true with items_count:0 + async:true → queued accept, resolves (no zero-items refusal)", async () => {
+    // async:true is a queued accept (the response schema models `async`), so
+    // the G8 refusal only fires for the synchronous zero-item shape.
+    installMock({ body: { success: true, items_count: 0, async: true } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.retain("qds-factory", "outcome body");
+    expect(r.status).toBe("created");
+  });
+
+  test("updateMode without documentId → HindsightHttpError 422 pre-fetch [L-replace]", async () => {
+    // `replace` IS the document_id upsert — without an identity it can only
+    // fabricate a new document, which would fake idempotency.
+    installMock({ body: { success: true, items_count: 1, async: false } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.retain("qds-factory", "outcome body", { updateMode: "replace" });
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(422);
+    expect(caught?.message).toBe("updateMode requires documentId");
+    // Refusal happens at the client boundary, before request(): no fetch.
+    expect(lastCall).toBeUndefined();
+  });
+
+  test("empty documentId is refused by the RetainExtensionSchema [L-emptydocid]", async () => {
+    // documentId is the upsert identity — an empty string must never ride the
+    // wire as one.
+    expect(RetainExtensionSchema.safeParse({ documentId: "" }).success).toBe(false);
+    expect(RetainExtensionSchema.safeParse({ documentId: "qds-20261006-abc" }).success).toBe(true);
+  });
+
   test("tags ride the RetainExtensionSchema parse; a non-array tags refuses before any fetch [F20]", async () => {
     // Owned: the extension validates tags so a malformed one is refused at the
     // client boundary, not drifted onto the wire.

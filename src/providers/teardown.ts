@@ -1114,7 +1114,9 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
           durationMs: 0,
           status: "error",
           outcome: "continued",
-          error: { code: err.code ?? "post-harvest-failed", message: redactSecrets(err.message ?? e) },
+          // Sliced like the sibling arms above (~337, ~363): the hook's
+          // message is caller-controlled free text — bound it too.
+          error: { code: err.code ?? "post-harvest-failed", message: redactSecrets(err.message ?? e).slice(0, 200) },
           reason:
             "the post-harvest hook refused — the harvest leg landed and teardown continues to revoke+destroy (memory retain is best-effort, never a teardown gate)",
         });

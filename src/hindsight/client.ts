@@ -283,21 +283,49 @@ export class HindsightClient {
     if (!extension.success) {
       // Thrown BEFORE request(), so request()'s finally-log never fires — log
       // the refusal here, mirroring assertBankId, or it is invisible.
-      log({
-        requestId,
-        operation: "retain",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: 0,
-        status: "error",
-        bankId,
-        error: { code: "invalid_retain_extension", message: extension.error.message },
-      });
+      try {
+        log({
+          requestId,
+          operation: "retain",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          bankId,
+          error: { code: "invalid_retain_extension", message: extension.error.message },
+        });
+      } catch {
+        // A throwing log sink must not replace the typed 422 below.
+      }
       throw new HindsightHttpError(
         422,
         `invalid retain extension: ${extension.error.message}`,
         requestId,
       );
+    }
+    // `replace` IS the document_id upsert — with no identity it can only
+    // fabricate a new document, which would fake idempotency. Refused
+    // pre-fetch like the extension parse above (and logged the same way, for
+    // the same before-request visibility reason).
+    if (extension.data.updateMode !== undefined && extension.data.documentId === undefined) {
+      try {
+        log({
+          requestId,
+          operation: "retain",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          bankId,
+          error: {
+            code: "update_mode_requires_document_id",
+            message: "updateMode requires documentId",
+          },
+        });
+      } catch {
+        // A throwing log sink must not replace the typed 422 below.
+      }
+      throw new HindsightHttpError(422, "updateMode requires documentId", requestId);
     }
     const item: Record<string, unknown> = { content };
     if (metadata?.tags !== undefined) item.tags = metadata.tags;
@@ -329,10 +357,14 @@ export class HindsightClient {
     }
     // G8: the mirror arm — a 2xx claiming success but storing nothing is not a
     // landed retain either, and must never produce a receipt-backed success.
+    // Skipped when the wire body carries async:true — that is a queued accept
+    // (the response schema models `async`, and items_count:0 is the natural
+    // shape of a not-yet-processed queue), not a synchronous zero-item store.
     if (
       raw !== null && typeof raw === "object"
       && (raw as { success?: unknown }).success === true
       && (raw as { items_count?: unknown }).items_count === 0
+      && (raw as { async?: unknown }).async !== true
     ) {
       throw new HindsightHttpError(502, "retain stored zero items", requestId);
     }

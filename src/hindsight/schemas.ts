@@ -106,7 +106,9 @@ export const RetainPayloadSchema = z.object({
  * refused at the client boundary (422, before fetch).
  */
 export const RetainExtensionSchema = z.object({
-  documentId: z.string().optional(),
+  // .min(1): documentId is the upsert identity — an empty string must never
+  // ride the wire as one.
+  documentId: z.string().min(1).optional(),
   updateMode: z.literal("replace").optional(),
   // F20: tags are schema-OWNED here (the client maps them TOP-LEVEL on the wire
   // item — never metadata.tags, which 0.10.0 422s on). A non-array refusal
@@ -186,8 +188,12 @@ export const RetainResponseSchema = RetainWireSchema.transform((w) => ({
  * assumed equal. `documentId` in the view is the additive null-tolerant field
  * M1.3's expected-id matching consumes: an item retained without an explicit
  * identity gets a server-assigned one, so a missing `document_id` → null, not
- * "". `content`/`score` keep old-name tolerance per the conformance contract —
- * `text ?? content ?? ""`, `score ?? 0`.
+ * "" — and an empty-string wire id folds into absent the same way (the
+ * null-tolerance contract gets no third state). `content`/`score` keep
+ * old-name tolerance per the conformance contract — `text ?? content ?? ""`,
+ * `score ?? 0`. The pre-change 0..1 score bound is DROPPED with the wire
+ * shape: the live scale is unmeasured (issue #408), and ranking tolerates any
+ * finite number.
  */
 export const RecallResponseSchema = z
   .object({
@@ -207,7 +213,7 @@ export const RecallResponseSchema = z
       memoryId: r.id ?? "",
       content: r.text ?? r.content ?? "",
       score: r.score ?? 0,
-      documentId: r.document_id ?? null,
+      documentId: r.document_id ? r.document_id : null,
     })),
     durationMs: w.durationMs ?? 0,
   }));
