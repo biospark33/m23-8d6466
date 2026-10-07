@@ -1,0 +1,140 @@
+[
+  {
+    "probeId": "seed-sparc-methodology-tdd",
+    "query": "how does the SPARC methodology structure a story from spec through TDD completion?",
+    "expectedDocumentIds": ["mulch-5f5e31c6ff8ada4d"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-swarmclaw-mcp-bridge",
+    "query": "where do hindsight retain and recall tools get invoked through swarmclaw's bridge?",
+    "expectedDocumentIds": ["mulch-4e3dee5b901fd88e"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-trunk-based-branching-git",
+    "query": "what is the branching model for feature work and pull requests in this repo?",
+    "expectedDocumentIds": ["mulch-62743a4396d30fd1"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-bun-typescript-zod-biome",
+    "query": "which runtime, linter, and schema-validation library does the toolchain pin?",
+    "expectedDocumentIds": ["mulch-f1b8dc3aec89f96c"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-hindsight-memory-banks",
+    "query": "which memory banks are provisioned per repo and how are their REST paths scoped?",
+    "expectedDocumentIds": ["mulch-04acf7ccc921ae65"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-mcp-tool-bridge-retry",
+    "query": "when does the tool bridge retry an unknown-tool call and what must tests assert afterwards?",
+    "expectedDocumentIds": ["mulch-8ff7a752dd1c326b"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-maskenv-redaction-security",
+    "query": "how should environment variable values be masked before an env diagnostic is logged?",
+    "expectedDocumentIds": ["mulch-5b85755bfd6842d6"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-npx-allowlist-command-validation",
+    "query": "which npx packages are allowed to run under the command-validation invariant?",
+    "expectedDocumentIds": ["mulch-631f98ad36517bec"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-hindsight-recall-contract",
+    "query": "what shape do recall results take for document identifiers when the wire field is absent?",
+    "expectedDocumentIds": ["mulch-d32ea1bc6e56262b"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-hindsight-retain-receipts",
+    "query": "where is the audit row recorded after a successful memory retain, and what does it detail?",
+    "expectedDocumentIds": ["mulch-50496882cef82e13"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-priming-side-channel",
+    "query": "which per-run file marks whether the host-side memory cycle primed the run's banks?",
+    "expectedDocumentIds": ["mulch-24f03d71e47362b5"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-cost-ledger-micros",
+    "query": "how is model spend recorded per event, and how do read-only consumers read the totals?",
+    "expectedDocumentIds": ["mulch-b3f318b167975a44"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-phase-engine-gates",
+    "query": "how are gate events identified across retries while the run phases execute?",
+    "expectedDocumentIds": ["mulch-93f4c108e755bf27"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-fleet-dispatch-budget",
+    "query": "why would fleet dispatch refuse a manifest before launching any of its runs?",
+    "expectedDocumentIds": ["mulch-2391420af3eeea22"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-live-e2e-gating",
+    "query": "what environment variables gate a live end-to-end round, and what if they are half set?",
+    "expectedDocumentIds": ["mulch-0a98d1af8d693b21"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-image-pin-adoption",
+    "query": "how does image pin adoption read the published image reference out of the ci gate log?",
+    "expectedDocumentIds": ["mulch-c2b2d2013f123560"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-gitnexus-reindex-contract",
+    "query": "why must reindexing run through the canonical install script instead of a bare analyze call?",
+    "expectedDocumentIds": ["mulch-41dff4a2c69d2768"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-branch-convention-dev",
+    "query": "which integration base do feature branches cut from and which branch do their PRs target?",
+    "expectedDocumentIds": ["mulch-244085b3caaddad5"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-static-gates-typecheck",
+    "query": "besides a green test run, which static checks must pass before a branch is declared final?",
+    "expectedDocumentIds": ["mulch-b4c5a164cc788361"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-sqlite-wal-readonly",
+    "query": "why must readers open the audit database read-only while the writer runs in wal mode?",
+    "expectedDocumentIds": ["mulch-525ec56deda0b34a"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-evidence-scrub-artifacts",
+    "query": "where do timestamped evidence artifacts land and what does the shared evidence writer scrub?",
+    "expectedDocumentIds": ["mulch-8acd90aea0708225"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-register-amendment-decisions",
+    "query": "how are deviations and flex-cuts recorded in the decision register before an operator pins them?",
+    "expectedDocumentIds": ["mulch-e7fdce53282ba8fa"],
+    "bank": "qds-factory-dev-meta"
+  },
+  {
+    "probeId": "seed-probe-integrity-canary",
+    "query": "what must be validated about measurement probe labels before any recall scoring happens?",
+    "expectedDocumentIds": ["mulch-02b92c3d574f7a17"],
+    "bank": "qds-factory-dev-meta"
+  }
+]

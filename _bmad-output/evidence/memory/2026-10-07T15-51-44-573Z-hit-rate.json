@@ -1,0 +1,184 @@
+{
+  "writtenAt": "2026-10-07T15:51:44.573Z",
+  "perProbe": [
+    {
+      "probeId": "seed-sparc-methodology-tdd",
+      "hit": true,
+      "rank": 2,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-swarmclaw-mcp-bridge",
+      "hit": true,
+      "rank": 4,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-trunk-based-branching-git",
+      "hit": true,
+      "rank": 4,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-bun-typescript-zod-biome",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-hindsight-memory-banks",
+      "hit": true,
+      "rank": 4,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-mcp-tool-bridge-retry",
+      "hit": true,
+      "rank": 5,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-maskenv-redaction-security",
+      "hit": true,
+      "rank": 3,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-npx-allowlist-command-validation",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-hindsight-recall-contract",
+      "hit": true,
+      "rank": 3,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-hindsight-retain-receipts",
+      "hit": true,
+      "rank": 3,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-priming-side-channel",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-cost-ledger-micros",
+      "hit": true,
+      "rank": 2,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-phase-engine-gates",
+      "hit": true,
+      "rank": 1,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-fleet-dispatch-budget",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-live-e2e-gating",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-image-pin-adoption",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-gitnexus-reindex-contract",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-branch-convention-dev",
+      "hit": true,
+      "rank": 3,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-static-gates-typecheck",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-sqlite-wal-readonly",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-evidence-scrub-artifacts",
+      "hit": true,
+      "rank": 1,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-register-amendment-decisions",
+      "hit": true,
+      "rank": 5,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    },
+    {
+      "probeId": "seed-probe-integrity-canary",
+      "hit": false,
+      "rank": null,
+      "bank": "qds-factory-dev-meta",
+      "recallMs": 0
+    }
+  ],
+  "aggregate": {
+    "probes": 23,
+    "hits": 13,
+    "hitRateAt5": 0.5652173913043478,
+    "bankBreakdown": {
+      "qds-factory-dev-meta": {
+        "probes": 23,
+        "hits": 13
+      }
+    },
+    "medianRecallMs": 0
+  },
+  "labelIntegrity": "pass",
+  "canary": {
+    "bank": "qds-factory-dev-meta",
+    "documentId": "qds-canary",
+    "hit": true
+  }
+}
