@@ -14,7 +14,9 @@
  * cares about the URL-scoped form.
  *
  * Casing (story CC-8): payloads use snake_case (Hindsight internal names);
- * RESPONSE schemas use camelCase (REST-boundary consumers).
+ * RESPONSE schemas PARSE the measured snake_case wire (issue #408 conformance
+ * slice) and `.transform()` it into the legacy camelCase view, so REST-boundary
+ * consumers compile unchanged.
  *
  * Zod v3 syntax — `.optional()`, `.default()`, `.refine({message})`.
  */
@@ -57,21 +59,47 @@ export function resolveBankId(repoSlug: string): string {
 // Payloads (snake_case — Hindsight internal API arg names)
 // ---------------------------------------------------------------------------
 
+/**
+ * Retain wire body (M1.2 AC5): an `items` array whose items carry `document_id`
+ * and `tags` TOP-LEVEL. Measured against live 0.10.0 — same document_id
+ * retained twice upserts to ONE document, and `metadata.tags` 422s (evidence:
+ * _bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json,
+ * `documentsAfter1`/`documentsAfter2` = 1 + note).
+ */
 export const RetainPayloadSchema = z.object({
   bank_id: BankIdSchema,
-  content: z
-    .string()
-    .min(1)
-    .refine((v) => Buffer.byteLength(v, "utf8") <= 102_400, {
-      message: "Content exceeds 100KB byte limit",
-    }),
-  metadata: z
-    .object({
-      source: z.enum(["agent", "mulch-import", "manual", "consolidate"]),
-      kind: z.enum(["decision", "pattern", "expertise", "observation"]).optional(),
-      tags: z.array(z.string()).optional(),
-    })
-    .optional(),
+  items: z
+    .array(
+      z.object({
+        content: z
+          .string()
+          .min(1)
+          .refine((v) => Buffer.byteLength(v, "utf8") <= 102_400, {
+            message: "Content exceeds 100KB byte limit",
+          }),
+        document_id: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+        metadata: z
+          .object({
+            source: z.enum(["agent", "mulch-import", "manual", "consolidate"]),
+            kind: z.enum(["decision", "pattern", "expertise", "observation"]).optional(),
+          })
+          .optional(),
+      }),
+    )
+    .min(1),
+});
+
+/**
+ * M1.2 AC5 retain-extension metadata — camelCase client-arg names, mapped onto
+ * the wire item by client.retain. `updateMode:"replace"` is API-LEVEL
+ * semantics: it IS the document_id upsert, so NO wire field exists for it and
+ * none is invented. `"replace"` is the only honored mode — any other value is
+ * refused at the client boundary (422, before fetch).
+ */
+export const RetainExtensionSchema = z.object({
+  documentId: z.string().optional(),
+  updateMode: z.literal("replace").optional(),
 });
 
 export const RecallPayloadSchema = z.object({
@@ -96,26 +124,81 @@ export const ConsolidatePayloadSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Responses (camelCase — REST-boundary consumers, story CC-8 exception list)
+// Responses — parse the measured snake_case wire; `.transform()` emits the
+// legacy camelCase view (REST-boundary consumers, story CC-8 exception list).
 // ---------------------------------------------------------------------------
 
-export const RetainResponseSchema = z.object({
-  memoryId: z.string(),
-  bankId: BankIdSchema,
-  status: z.enum(["created", "updated"]),
-  durationMs: z.number(),
+/**
+ * RetainResponse — wire shape measured live on 0.10.0
+ * (_bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json):
+ * `{success, bank_id?, items_count, async, usage?}`. The transform produces the
+ * legacy camelCase view so existing consumers compile unchanged (issue #408
+ * conformance slice).
+ *
+ * Legacy-view placeholders are issue #408's OPEN DECISION, not observations:
+ * 0.10.0 has NO wire source for `memoryId` — identity is `document_id` now —
+ * so `memoryId` falls back to "" from a forward-compat `id` field no current
+ * server emits. `status` is pinned "created": the 0.10.0 body carries no
+ * created/updated distinction (the upsert is silent). `durationMs` is absent
+ * from the measured body → 0 (host-side latency is the honest figure anyway —
+ * round-trip-verifier F009).
+ */
+const RetainWireSchema = z.object({
+  success: z.boolean(),
+  bank_id: z.string().optional(),
+  items_count: z.number(),
+  async: z.boolean(),
+  id: z.string().optional(),
+  durationMs: z.number().optional(),
+  usage: z
+    .object({
+      input_tokens: z.number(),
+      output_tokens: z.number(),
+      total_tokens: z.number(),
+      cached_tokens: z.number(),
+      thoughts_tokens: z.number(),
+    })
+    .optional(),
 });
 
-export const RecallResponseSchema = z.object({
-  results: z.array(
-    z.object({
-      content: z.string(),
-      score: z.number().min(0).max(1),
-      memoryId: z.string(),
-    }),
-  ),
-  durationMs: z.number(),
-});
+export const RetainResponseSchema = RetainWireSchema.transform((w) => ({
+  memoryId: w.id ?? "",
+  bankId: w.bank_id ?? "",
+  status: "created" as const,
+  durationMs: w.durationMs ?? 0,
+}));
+
+/**
+ * RecallResponse — results measured live on 0.10.0 carry DISTINCT `id`
+ * (server-minted fact id) and `document_id` (document identity); never
+ * assumed equal. `documentId` in the view is the additive null-tolerant field
+ * M1.3's expected-id matching consumes: an item retained without an explicit
+ * identity gets a server-assigned one, so a missing `document_id` → null, not
+ * "". `content`/`score` keep old-name tolerance per the conformance contract —
+ * `text ?? content ?? ""`, `score ?? 0`.
+ */
+export const RecallResponseSchema = z
+  .object({
+    results: z.array(
+      z.object({
+        id: z.string().optional(),
+        text: z.string().optional(),
+        document_id: z.string().nullish(),
+        content: z.string().optional(),
+        score: z.number().optional(),
+      }),
+    ),
+    durationMs: z.number().optional(),
+  })
+  .transform((w) => ({
+    results: w.results.map((r) => ({
+      memoryId: r.id ?? "",
+      content: r.text ?? r.content ?? "",
+      score: r.score ?? 0,
+      documentId: r.document_id ?? null,
+    })),
+    durationMs: w.durationMs ?? 0,
+  }));
 
 export const ReflectResponseSchema = z.object({
   bankId: z.string(),

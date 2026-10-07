@@ -10,6 +10,7 @@ import {
   RecallResponseSchema,
   ReflectResponseSchema,
   resolveBankId,
+  RetainExtensionSchema,
   RetainResponseSchema,
 } from "../../src/hindsight/schemas.ts";
 import {
@@ -147,12 +148,14 @@ describe("BankIdSchema + resolveBankId", () => {
 
 describe("HindsightClient success paths", () => {
   test("retain success parses RetainResponseSchema and returns typed obj", async () => {
+    // Wire body (0.10.0): {success, bank_id?, items_count, async}. A malformed
+    // body would throw 502 inside retain, so a typed return IS the parse proof.
     installMock({
       body: {
-        memoryId: "mem-1",
-        bankId: "qds-factory",
-        status: "created",
-        durationMs: 42,
+        success: true,
+        bank_id: "qds-factory",
+        items_count: 1,
+        async: false,
       },
     });
     const client = new HindsightClient({
@@ -160,23 +163,27 @@ describe("HindsightClient success paths", () => {
       requestId: "req-retain",
     });
     const r = await client.retain("qds-factory", "Sprint planning uses SPARC methodology");
-    expect(RetainResponseSchema.safeParse(r).success).toBe(true);
-    expect(r.memoryId).toBe("mem-1");
+    // Legacy view via the schema transform: memoryId "" is the issue-#408
+    // placeholder (0.10.0 wire has no memoryId source; identity is document_id).
+    expect(r.memoryId).toBe("");
     expect(r.bankId).toBe("qds-factory");
     expect(r.status).toBe("created");
+    expect(r.durationMs).toBe(0);
     expect(lastCall?.url).toBe(
       "http://hindsight.test/v1/default/banks/qds-factory/memories",
     );
   });
 
   test("recall success parses RecallResponseSchema", async () => {
+    // Wire result items (0.10.0): {id, text, document_id} — distinct fact id
+    // and document identity; content/score are produced by the transform.
     installMock({
       body: {
         results: [
           {
-            content: "Sprint planning uses SPARC methodology",
-            score: 0.92,
-            memoryId: "mem-1",
+            id: "fact-1",
+            text: "Sprint planning uses SPARC methodology",
+            document_id: "doc-1",
           },
         ],
         durationMs: 120,
@@ -184,8 +191,8 @@ describe("HindsightClient success paths", () => {
     });
     const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
     const r = await client.recall("qds-factory", "planning methodology");
-    expect(RecallResponseSchema.safeParse(r).success).toBe(true);
     expect(r.results[0]?.content).toBe("Sprint planning uses SPARC methodology");
+    expect(r.results[0]?.memoryId).toBe("fact-1");
     expect(lastCall?.url).toBe(
       "http://hindsight.test/v1/default/banks/qds-factory/memories/recall",
     );
@@ -414,16 +421,21 @@ describe("HindsightClient mock mode", () => {
   test("mock recall returns schema-valid empty results without network", async () => {
     const c = new HindsightClient({ mode: "mock" });
     const res = await c.recall("qds-factory", "anything");
-    expect(RecallResponseSchema.safeParse(res).success).toBe(true);
+    // A malformed canned body would throw 502 inside recall — a typed return
+    // proves the mock body passed the SAME strict parse a live one does.
     expect(res.results).toEqual([]);
+    expect(res.durationMs).toBe(0);
   });
 
-  test("mock retain returns schema-valid response with deterministic memoryId", async () => {
+  test("mock retain returns the measured 0.10.0 wire body through the strict parse", async () => {
     const c = new HindsightClient({ mode: "mock" });
     const res = await c.retain("qds-factory", "data");
-    expect(RetainResponseSchema.safeParse(res).success).toBe(true);
-    expect(res.memoryId).toBe("mock-qds-factory");
-    expect(res.bankId).toBe("qds-factory");
+    // Legacy view via the transform. memoryId "" is the issue-#408 placeholder
+    // (the canned wire body has no id source); no bank_id on the wire → "".
+    expect(res.memoryId).toBe("");
+    expect(res.bankId).toBe("");
+    expect(res.status).toBe("created");
+    expect(res.durationMs).toBe(0);
   });
 
   test("mock reflect + consolidate + banks return schema-valid/echo shapes", async () => {
@@ -573,6 +585,122 @@ describe("HindsightClient.deleteBank", () => {
     const c = new HindsightClient({ mode: "mock" });
     const r = await c.deleteBank("qds-factory");
     expect(r).toEqual({ deleted: true, alreadyGone: false, bankId: "qds-factory" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M1.2 retain surface — AC5 (P2.8 fold): owned schema'd retain extension +
+// wire→legacy-view response conformance. Wire shapes are the MEASURED 0.10.0
+// bodies (_bmad-output/evidence/p0-9-closure/
+// 2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json), not invented.
+// ---------------------------------------------------------------------------
+
+describe("M1.2 retain surface", () => {
+  test("retain forwards documentId/updateMode/tags as wire document_id + top-level tags", async () => {
+    installMock({ body: { success: true, items_count: 1, async: false } });
+    const client = new HindsightClient({
+      baseUrl: "http://hindsight.test",
+      requestId: "req-m12-retain",
+    });
+    await client.retain("qds-factory", "outcome body", {
+      source: "agent",
+      kind: "observation",
+      documentId: "qds-20261006-abc",
+      updateMode: "replace",
+      tags: ["memory-retain"],
+    });
+    // One whole-body assertion pins the mapping: document_id + tags are
+    // TOP-LEVEL on the item (metadata.tags 422s on 0.10.0) and updateMode
+    // leaks NOTHING to the wire — it IS the document_id upsert.
+    expect(JSON.parse(String(lastCall?.init?.body))).toEqual({
+      items: [
+        {
+          content: "outcome body",
+          document_id: "qds-20261006-abc",
+          tags: ["memory-retain"],
+          metadata: { source: "agent", kind: "observation" },
+        },
+      ],
+    });
+  });
+
+  test("mock retain round-trips through the strict schema with no network", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("mock mode MUST NOT call fetch");
+    }) as unknown as typeof globalThis.fetch;
+    // The exact canned retain body mockBody returns must parse and transform —
+    // a wire-drifted mock fails the SAME strict parse a live body does (AC5:
+    // network-only short-circuit, never validation short-circuit).
+    const parsed = RetainResponseSchema.safeParse({
+      success: true,
+      items_count: 1,
+      async: false,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cached_tokens: 0,
+        thoughts_tokens: 0,
+      },
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data).toEqual({ memoryId: "", bankId: "", status: "created", durationMs: 0 });
+    }
+    const c = new HindsightClient({ mode: "mock" });
+    const res = await c.retain("qds-factory", "data");
+    expect(res).toEqual({ memoryId: "", bankId: "", status: "created", durationMs: 0 });
+  });
+
+  test("recall wire result {id, text, document_id} → legacy view fields + documentId echo", () => {
+    const parsed = RecallResponseSchema.safeParse({
+      results: [
+        { id: "fact-1", text: "kg observation", document_id: "qds-20261006-abc" },
+      ],
+      durationMs: 120,
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.results[0]).toEqual({
+        memoryId: "fact-1",
+        content: "kg observation",
+        score: 0,
+        documentId: "qds-20261006-abc",
+      });
+      expect(parsed.data.durationMs).toBe(120);
+    }
+  });
+
+  test("recall result without document_id → documentId null (null-tolerant additive)", () => {
+    const parsed = RecallResponseSchema.safeParse({
+      results: [{ id: "fact-2", text: "no doc" }],
+      durationMs: 5,
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.results[0]?.documentId).toBeNull();
+      expect(parsed.data.results[0]?.memoryId).toBe("fact-2");
+      expect(parsed.data.results[0]?.content).toBe("no doc");
+    }
+  });
+
+  test("updateMode other than 'replace' is refused by schema before any fetch", async () => {
+    expect(RetainExtensionSchema.safeParse({ updateMode: "append" }).success).toBe(false);
+    installMock({ body: { success: true, items_count: 1, async: false } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.retain("qds-factory", "x", {
+        source: "agent",
+        updateMode: "append",
+      } as unknown as { source: "agent"; updateMode: "replace" });
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught?.status).toBe(422);
+    expect(caught?.message).toContain("invalid retain extension");
+    // Refusal happens at the client boundary, before request(): no fetch.
+    expect(lastCall).toBeUndefined();
   });
 });
 

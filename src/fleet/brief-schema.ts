@@ -292,6 +292,34 @@ const MAX_FIX_SNIPPET_CHARS = 4000;
 const MAX_FIX_SNIPPET_BYTES_TOTAL = 40_000;
 
 /**
+ * M1.2 AC3: the `<kg_context>` memory appendix ceiling. The same number lives
+ * producer-side as `KG_CONTEXT_MAX_CHARS` (src/hindsight/kg-context.ts) and is
+ * DELIBERATELY NOT imported from there: this schema is the box-compiled trust
+ * boundary (INV-2), so importing from src/hindsight/ would couple what the box
+ * ships to what the host compiles. The duplication is the accepted cost of that
+ * separation, and the drift it permits is loud in the dangerous direction: the
+ * producer assembles to its own ceiling, so a producer that outgrows this copy
+ * of the number is REFUSED here (exit-2 class at dispatch), never truncated —
+ * reaching this refusal means the boundary was bypassed, and a silently
+ * truncated context would disguise exactly the bug the ceiling exists to
+ * surface.
+ */
+const BRIEF_KG_CONTEXT_MAX_CHARS = 8_000;
+
+/**
+ * kgContext's charset, unlike every other field's NO_CONTROL_CHARS above: the
+ * value is a MULTI-LINE XML block rendered verbatim into the resident's prompt
+ * (pipeline-run.ts's residentContextLines), so \n (0x0a) and \t (0x09) are the
+ * payload, not an attack — they are the only C0 code points allowed through.
+ * Refused is the rest of C0 plus DEL: the classes that forge a line boundary or
+ * inject an escape inside that block. \r is included even though it is only a
+ * line boundary for CRLF-folding consumers: the block is \n-joined, so a bare
+ * CR mid-line can only ever be a forgery attempt.
+ */
+const KG_CONTEXT_CONTROL_CLASS = "\\u0000-\\u0008\\u000B-\\u001F\\u007F";
+const KG_CONTEXT_NO_CONTROL_CHARS = new RegExp(`^[^${KG_CONTEXT_CONTROL_CLASS}]*$`, "u");
+
+/**
  * Non-blank, for the two fields whose `.min(1)` was doing the job blankness
  * defeats.
  *
@@ -463,6 +491,21 @@ export const BriefSchema = z.strictObject({
         message: `fixContext bodySnippets exceed the ${MAX_FIX_SNIPPET_BYTES_TOTAL}-byte UTF-8 total`,
         path: ["botComments"],
       },
+    )
+    .optional(),
+  // M1.2 AC3: the dispatch-time memory appendix, carried VERBATIM into the
+  // resident's context by pipeline-run.ts's residentContextLines. Optional and
+  // adds-only: a brief without it parses byte-identical to v5. The ceiling and
+  // charset above are the trust boundary (INV-KG-3) — the renderer deliberately
+  // does NOT re-sanitize, because the value IS a multi-line block and escaping
+  // would destroy it; that is only safe because this field is the one place the
+  // schema both bounds and charset-guards the payload.
+  kgContext: z
+    .string()
+    .max(BRIEF_KG_CONTEXT_MAX_CHARS)
+    .refine(
+      (s) => KG_CONTEXT_NO_CONTROL_CHARS.test(s),
+      "kgContext may not contain control characters other than newline and tab",
     )
     .optional(),
 })

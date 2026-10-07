@@ -34,6 +34,10 @@
  * `withRunLock` wrap, which would throw on re-entry.
  */
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
+import { extractExistingBankIds, resolveRepoBankId } from "../hindsight/bank-provisioner.ts";
+import { HindsightClient } from "../hindsight/client.ts";
+import { retainRunOutcome } from "../hindsight/run-retain.ts";
+import { resolveBankId } from "../hindsight/schemas.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { KeyApi } from "../providers/credentials.ts";
 import type { ProviderAuditLink, ProviderDriver } from "../providers/driver.ts";
@@ -197,6 +201,76 @@ function recordRequestId(rec: RunRecord, deps: RunCompletionDeps): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * M1.2 AC4: the observe chain's post-harvest retain — the twin of fleet.ts's
+ * `retainRunOutcomeBestEffort`. scripts/fleet.ts imports THIS module, so
+ * importing its helper back would be a cycle; this small duplication is the
+ * sanctioned fallback, and both twins call the SAME src/hindsight functions —
+ * same env gate, same provision-time bank resolution, same `retainRunOutcome`
+ * seam. (The sweep's chain rides this too: observe.ts builds this module's
+ * deps for every candidate, so batch and single-run retain identically.)
+ *
+ * Same contract as the twin: env-unconfigured memory skips entirely (no row,
+ * no line, chain untouched); everything else is failure-isolated — a retain
+ * refusal is one structured error line, never a chain failure, because the
+ * harvest leg landed either way.
+ */
+async function postHarvestRetain(
+  deps: RunCompletionDeps,
+  info: { runId: string; requestId: string; outcome: "harvested" | "none"; count?: number },
+): Promise<void> {
+  const envConfigured =
+    Boolean(process.env.HINDSIGHT_BASE_URL) &&
+    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
+  if (!envConfigured) return;
+  try {
+    const rec = deps.store.get(info.runId);
+    // The RECORD's stamp is the join key whenever it carries one.
+    const requestId = recordRequestId(rec, deps);
+    const repoSlug = rec.extensions?.budget?.repoSlug;
+    if (typeof repoSlug !== "string" || repoSlug.length === 0) {
+      // INV-AUDIT-4 posture: no attribution, no invented bank — skipped loudly.
+      throw new Error(`run ${info.runId} carries no budget.repoSlug — the retain's bank is unknown`);
+    }
+    const client = new HindsightClient();
+    const existing = extractExistingBankIds(await client.listBanks());
+    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
+    if (repoBankId === null) {
+      throw new Error(`run ${info.runId}'s repo bank id did not resolve against the live bank list`);
+    }
+    await retainRunOutcome(
+      client,
+      // retainRunOutcome only ever calls `record`; the composition root owns
+      // the store's lifecycle, so the adapter closes nothing and names no path.
+      { record: deps.recordAuditLink, close() {}, path: "" },
+      {
+        runId: info.runId,
+        repoSlug,
+        requestId,
+        // The harvest leg landed either way; harvested-with-commits is the
+        // only green shape — a harvest that pulled nothing is unsettled.
+        exitClassification: info.outcome === "harvested" ? "green" : "unsettled",
+        ...(info.outcome === "harvested" ? { harvestedCount: info.count ?? 0 } : {}),
+        tags: ["factory-run"],
+        repoBankId,
+      },
+    );
+  } catch (e) {
+    log({
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      requestId: info.requestId,
+      operation: "memory-retain",
+      runId: info.runId,
+      error: { code: "retain-failed", message: errText(e) },
+      reason:
+        "harvest retain skipped — the harvest leg landed and the chain's exit is unchanged (M1.2 AC4 best-effort)",
+    });
+  }
+}
+
 function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): TeardownDeps {
   return {
     driver: deps.driver,
@@ -209,6 +283,11 @@ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): Teardown
     // DF5.3: the chain's teardown emits its `teardown` link through the same
     // required seam every other construction threads.
     recordAuditLink: deps.recordAuditLink,
+    // M1.2 AC4: the chain's harvest step retains through the same seam the
+    // direct `fleet harvest` arm uses; the hook is injected (providers own
+    // the firing rules) and failure-isolated inside — and again by
+    // teardown.ts's own wrap.
+    postHarvest: (info) => postHarvestRetain(deps, info),
   };
 }
 

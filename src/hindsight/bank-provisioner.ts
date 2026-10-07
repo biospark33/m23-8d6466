@@ -181,7 +181,7 @@ function truncateForSuffix(baseId: string): string {
  * — the latter happens when the base id is already near the 64-char cap and
  * truncation cannot produce a valid suffixed form → -32005 per INV-HM6).
  */
-function resolveRepoBankId(
+export function resolveRepoBankId(
   baseId: string,
   existing: Set<string>,
 ): string | null {
@@ -212,7 +212,7 @@ function resolveRepoBankId(
 // Existing-bank set extraction (defensive — INV-HM5 style narrowing)
 // ---------------------------------------------------------------------------
 
-function extractExistingBankIds(raw: unknown): Set<string> {
+export function extractExistingBankIds(raw: unknown): Set<string> {
   const out = new Set<string>();
   if (raw === null || typeof raw !== "object") return out;
   // Accept {banks:[{bank_id|bankId|id}]}, {banks:[string]}, [string], [{}].

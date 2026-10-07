@@ -3705,6 +3705,14 @@ export async function dispatch(
           // the engine re-checks the bounds fail-closed before rendering,
           // because what is trusted here is the channel, not the content.
           ...(valid.fixContext === undefined ? {} : { fixContext: valid.fixContext }),
+          // M1.2 AC1 (contract R3): kgContext rides the same designed channel —
+          // host-side dispatch-time recall primes the brief (fleet.ts's
+          // ingestBriefJson seam), and the witness is how ANY brief field
+          // reaches the box. Same discipline as fixContext: conditional spread
+          // (absent key = byte-identical witness), and the payload is already
+          // bounded + charset-guarded once, at BriefSchema (INV-KG-3) — the
+          // in-box renderer (residentContextLines) emits it verbatim.
+          ...(valid.kgContext === undefined ? {} : { kgContext: valid.kgContext }),
         }),
       },
     ];

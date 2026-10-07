@@ -1585,10 +1585,14 @@ function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[
  * witness-borne strings reach the resident's prompt the way manifest-borne
  * strings reach log messages (types.ts's one-shared-implementation rule); a
  * newline in a hand-forged witness value must not forge instruction lines.
+ * The ONE exception is `kgContext` (INV-KG-3): BriefSchema already bounds and
+ * charset-guards that field, and its value IS a multi-line XML block, so
+ * sanitizeForMessage would escape the newlines and destroy it — it is appended
+ * verbatim, with the schema as the boundary guard instead of this renderer.
  * Bounded by construction; steering.ts enforces the 16,000-char prompt
  * ceiling at render, head-truncated with the directive instruction reserved.
  */
-function residentContextLines(
+export function residentContextLines(
   runId: string,
   manifest: { pipelineId: string; phases: readonly PhaseSpec[] },
   brief: Record<string, unknown>,
@@ -1610,6 +1614,15 @@ function residentContextLines(
       )
       .join(", ")}`,
   );
+  // Appended LAST, verbatim, and only when present: absent = the lines above
+  // exactly as before. NOT routed through sanitizeForMessage — the schema's
+  // ceiling + control-char refine (INV-KG-3) are the boundary guard, and the
+  // escaping this function applies everywhere else would flatten the block's
+  // newlines into \n literals and hand the resident a dead context.
+  const kgContext = brief.kgContext;
+  if (typeof kgContext === "string" && kgContext.length > 0) {
+    lines.push(kgContext);
+  }
   return lines;
 }
 

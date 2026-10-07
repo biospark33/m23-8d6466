@@ -139,6 +139,16 @@ import type { ProviderAuditLink } from "../src/providers/driver.ts";
 import { withRunLock } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
 import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
+// M1.2 (AC1/AC4): the memory cycle's two host legs. This file is their
+// composition root — the dispatch prime rides the ONE brief ingress
+// (ingestBriefJson, below) and the harvest retain rides the shared
+// best-effort helper (below, at runHarvest); the landed hindsight modules own
+// every gate (env, ladder, payload bounds, receipt).
+import { extractExistingBankIds, resolveRepoBankId } from "../src/hindsight/bank-provisioner.ts";
+import { HindsightClient } from "../src/hindsight/client.ts";
+import { primeDispatchBrief } from "../src/hindsight/kg-context.ts";
+import { retainRunOutcome } from "../src/hindsight/run-retain.ts";
+import { resolveBankId } from "../src/hindsight/schemas.ts";
 import {
   assertFleetRunId,
   dispatch,
@@ -1341,8 +1351,9 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
       );
     }
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
+    parsed = JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
   } catch (e) {
     throw new FleetError(
       2,
@@ -1351,7 +1362,25 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
       "fix the JSON on stdin or in --brief <path>",
     );
   }
+  // M1.2 AC1: THE dispatch seam — this is the shared brief ingress of
+  // dispatch/fanout/submit, so ONE call here primes every dispatch-shaped
+  // entry; per-verb copies are the AC1 negative control. The prime is
+  // env-gated and never throws: unconfigured memory and a failed recall both
+  // hand back the SAME reference (AC2a/AC2b — v5 exits byte-identical), and
+  // the call is awaited so a slow recall cannot outlive the verb. A scalar or
+  // null JSON document is not a brief — passed through untouched to the
+  // verb's own schema refusal, exactly as v5 answered it.
+  return typeof parsed === "object" && parsed !== null ? primeDispatchBrief(parsed) : parsed;
 }
+
+/**
+ * Test hook (the `__auditStoreTestHooks` posture): the seam suite pins the
+ * ingest behavior through the REAL `ingestBriefJson` — exported here so the
+ * test exercises what dispatch runs, not a copy of the wiring.
+ * `primeDispatchBrief` rides along so the test can pin the hook identity:
+ * one seam means the landed function itself, not a fleet-local wrapper.
+ */
+export const __fleetTestHooks = { ingestBriefJson, primeDispatchBrief };
 
 /**
  * The budget gate's ONLY storage handle, wired beside the records dir. One
@@ -5830,6 +5859,19 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // bundle/artifact paths must be under exactly that directory.
       runsDir: store.dir,
       recordAuditLink: (link) => audit.record(link),
+      // M1.2 AC4: the teardown verb's own harvest step retains through the
+      // SAME seam as the direct `fleet harvest` arm (retainRunOutcomeBestEffort)
+      // — the hook is the injection point; providers/teardown.ts owns the
+      // firing rules and the failure isolation.
+      postHarvest: (info) =>
+        retainRunOutcomeBestEffort({
+          store,
+          runId: info.runId,
+          requestId: info.requestId,
+          outcome: info.outcome,
+          count: info.count,
+          auditRecord: (link) => audit.record(link),
+        }),
     };
     if (verb === "harvest") {
       code = await runHarvest(ctx, tdeps, runIdArg);
@@ -6027,11 +6069,120 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
   return finish(requestId, verb, runIdArg, code);
 }
 
+/**
+ * M1.2 AC4: the ONE harvest-retain seam in this file. Both post-harvest call
+ * sites land here — the direct `fleet harvest` arm (runHarvest, below) and
+ * the injected `postHarvest` hook the teardown verb's harvest step fires — so
+ * every harvest leg in this composition root retains identically. (The
+ * observe chain's chainTeardownDeps carries its own twin in
+ * src/fleet/run-completion.ts: this script imports that module, so the reverse
+ * import would be a cycle — the fallback the story wiring anticipated. Both
+ * twins call the SAME src/hindsight functions; the seam is retainRunOutcome.)
+ *
+ * Env-gated (AC2a's harvest twin): unconfigured memory means no client, no
+ * listBanks, no row, no line — and harvest's exit untouched. Everything else
+ * that can throw sits inside the try: a retain failure NEVER changes the
+ * harvest exit code (the harvest leg landed either way) — it degrades to one
+ * structured error line, the same posture the teardown hook's own wrap takes.
+ *
+ * The repo bank id is the PROVISION-TIME resolution (AC1/AC4): resolved
+ * against the LIVE bank list through resolveRepoBankId's truncate/collision
+ * semantics, never re-derived from the raw resolveBankId normalization. A
+ * record with no budget.repoSlug refuses to invent one (INV-AUDIT-4 posture)
+ * — skipped loudly, since a misprovisioned run must be findable.
+ */
+async function retainRunOutcomeBestEffort(input: {
+  store: RunRecordStore;
+  runId: string;
+  requestId: string;
+  outcome: "harvested" | "none";
+  count?: number;
+  auditRecord: (link: ProviderAuditLink) => void;
+}): Promise<void> {
+  // Empty strings count as unconfigured — the same coercion kg-context's gate
+  // and the client's auth fallback apply (and the same env pair: the host
+  // token INV-HM1 is the only retain credential there is, DD-16).
+  const envConfigured =
+    Boolean(process.env.HINDSIGHT_BASE_URL) &&
+    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
+  if (!envConfigured) return;
+  const skipLine = (code: string, reason: string): void => {
+    log({
+      requestId: input.requestId,
+      operation: "memory-retain",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      runId: input.runId,
+      error: { code, message: reason },
+      reason: "harvest retain skipped — the harvest leg landed and its exit is unchanged (M1.2 AC4 best-effort)",
+    });
+  };
+  try {
+    // The RECORD's stamp is the join key whenever it carries one — the same
+    // rule run-completion's recordRequestId applies; the invocation's id is
+    // only the fallback.
+    const rec = input.store.get(input.runId);
+    const requestId =
+      typeof rec.requestId === "string" && rec.requestId !== "" ? rec.requestId : input.requestId;
+    const repoSlug = rec.extensions?.budget?.repoSlug;
+    if (typeof repoSlug !== "string" || repoSlug.length === 0) {
+      skipLine("retain-skipped", `run ${input.runId} carries no budget.repoSlug — the retain's bank is unknown`);
+      return;
+    }
+    const client = new HindsightClient();
+    const existing = extractExistingBankIds(await client.listBanks());
+    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
+    if (repoBankId === null) {
+      skipLine("retain-skipped", `run ${input.runId}'s repo bank id did not resolve against the live bank list`);
+      return;
+    }
+    await retainRunOutcome(
+      client,
+      // The caller's audit emitter, adapted: retainRunOutcome only ever calls
+      // `record`, and the composition root owns the store's lifecycle — the
+      // retain never closes another module's handle.
+      { record: input.auditRecord, close() {}, path: "" },
+      {
+        runId: input.runId,
+        repoSlug,
+        requestId,
+        // The harvest LEG landed either way; harvested-with-commits is the
+        // only green shape — a harvest that pulled nothing is an unsettled
+        // outcome, which is the classification's own meaning.
+        exitClassification: input.outcome === "harvested" ? "green" : "unsettled",
+        ...(input.outcome === "harvested" ? { harvestedCount: input.count ?? 0 } : {}),
+        tags: ["factory-run"],
+        repoBankId,
+      },
+    );
+  } catch (e) {
+    skipLine(
+      "retain-failed",
+      redactSecrets((e as Error)?.message ?? e).slice(0, 200) || "the retain call failed",
+    );
+  }
+}
+
 /** `fleet harvest`'s arm of the shared destructive scaffolding: D8, credential-free. */
 async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): Promise<number> { // dp:ok awaited at fleet.ts:2609 inside runDestructive's try/finally, which owns the diagnostics and the exit code
   const { reportCompletion, outputIncomplete } = ctx;
   // D8: harvest is credential-free — no keyApi is built.
   const res = await harvestRun(tdeps, runIdArg);
+  // M1.2 AC4: the harvest LEG landed on BOTH outcomes — retain best-effort
+  // before the completion line. The helper catches everything, so this await
+  // cannot move the exit code off what the leg itself earned.
+  await retainRunOutcomeBestEffort({
+    store: tdeps.store,
+    runId: runIdArg,
+    // tdeps.requestId is the invocation's mint; the helper prefers the
+    // record's own dispatch stamp whenever the record carries one.
+    requestId: tdeps.requestId ?? "",
+    outcome: res.outcome,
+    count: res.outcome === "harvested" ? res.count : undefined,
+    auditRecord: tdeps.recordAuditLink,
+  });
   // Through `reportCompletion`, not a bare `emit` (see it): the harvest
   // has already run, so a lost result line is 6, never a retryable 1. Folded
   // with `outputIncomplete()` like every sibling arm (A12): `reportCompletion`

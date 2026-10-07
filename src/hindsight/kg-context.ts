@@ -1,0 +1,350 @@
+/**
+ * Dispatch-time KG grounding (M1.2 AC1/AC2/AC3) — fan-out recall over the
+ * repo's provision-time bank + `qds-collective`, `<kg_context>` assembly, and
+ * `primeDispatchBrief` — the ONE dispatch-shaped seam (leaf-1.3.1 calls it
+ * from ingestBriefJson; per-verb copies are the AC1 make-or-break negative
+ * control: they pass the happy path and strand sibling dispatch callers).
+ *
+ * Degradation ladder (story AC2 — the directive fires on EMPTY-RESULT only):
+ *   (a) env unconfigured → brief returned untouched (SAME reference), no row,
+ *       no log line — absent, not zero;
+ *   (b) any recall/bank-resolution failure → proceed-unprimed, row
+ *       {primed:false, directive:"none"} — NEVER the empty directive (mapping
+ *       "KG unreachable" onto "KG says nothing" is the AC2 negative control);
+ *   (c) recall ok, zero observations → EMPTY_KG_DIRECTIVE only;
+ *   (d) results → full block, citation-floored, ranked, ≤ KG_CONTEXT_MAX_CHARS.
+ * (b)/(c)/(d) write the side-channel row + `kg-recall` line; (a) writes
+ * NEITHER. The seam never throws and never changes dispatch's exit codes.
+ *
+ * Budgets (story "Guards/limits"): KG_CONTEXT_MAX_CHARS is the assembly
+ * ceiling at whole-observation granularity (an observation that does not fit
+ * is dropped, never split); KG_RECALL_LIMIT per bank; the wall budget is the
+ * client's own RECALL timeout — one attempt per bank, ZERO retries
+ * (zeropoint's RECALL_MAX_ATTEMPTS=3 deliberately not copied: dispatch is
+ * latency-budgeted).
+ */
+
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { log } from "../swarmclaw/mcp/stdio-transport.ts";
+import {
+  COLLECTIVE_BANK_ID,
+  extractExistingBankIds,
+  resolveRepoBankId,
+} from "./bank-provisioner.ts";
+import { HindsightClient } from "./client.ts";
+import { resolveBankId, type RecallResponse } from "./schemas.ts";
+
+// ---------------------------------------------------------------------------
+// Grammar + guards (copied symbols per story "Zeropoint grammar")
+// ---------------------------------------------------------------------------
+
+/** Half of the steering prompt ceiling (16_000) — the brief keeps prose headroom. */
+export const KG_CONTEXT_MAX_CHARS = 8_000;
+
+/** Per-bank recall k — the client default, named here so AC1 stays greppable. */
+export const KG_RECALL_LIMIT = 5;
+
+/** Default side-channel dir (relative to cwd, like judgment's provenance dir). */
+export const DEFAULT_RECALL_DIR = "_bmad-output/memory/recall";
+
+/**
+ * Fires on EMPTY-RESULT only — a timed-out/errored fan-out must never emit
+ * this (AC2's negative control). Single static string: no interpolation of
+ * run internals, so the directive text is byte-stable across runs.
+ */
+export const EMPTY_KG_DIRECTIVE =
+  "The factory memory banks hold no observations relevant to this repo or task; nothing in this dispatch is memory-grounded. Do not present generalizations, conventions, or prior-run knowledge as grounded — they are not in the banks.";
+
+export const CITATION_INSTRUCTION =
+  "When you make a factual claim grounded in a <kg_context> observation, append the citation token [cite:OBSERVATION_ID] immediately after the claim, using the observation's id exactly as it appears in <kg_context>. Use one token per grounded claim. Do not cite general knowledge or information not present in <kg_context>. The OBSERVATION_ID charset is letters, digits, underscore, and hyphen ([A-Za-z0-9_-]+); there are no spaces inside the brackets.";
+
+/** Citable ids are exactly the charset CITATION_INSTRUCTION promises the box. */
+const CITABLE_ID = /^[A-Za-z0-9_-]+$/;
+
+export type KgDirective = "kg_context" | "empty" | "none";
+
+/** One recalled fact, already narrowed to what the citation contract needs. */
+export interface KgObservation {
+  /** Server-minted fact id — the `[cite:<id>]` token target (distinct from documentId). */
+  id: string;
+  content: string;
+  score: number;
+  /** Document identity; null when retained without an explicit id (AC5). */
+  documentId: string | null;
+}
+
+/** Minimal structural client — the real HindsightClient satisfies it; tests inject plain objects. */
+export interface RecallClient {
+  recall(bankId: string, query: string, limit?: number): Promise<RecallResponse>;
+  listBanks(): Promise<unknown>;
+}
+
+export interface PrimeDispatchBriefDeps {
+  /** Mock-mode client override (tests; never a second production client). */
+  client?: RecallClient;
+  /** Side-channel dir override (tests use a tmpdir; never real _bmad-output). */
+  recallDir?: string;
+}
+
+/** Side-channel row — EXACTLY these seven keys (M1.3 parses the shape verbatim). */
+export interface RecallRow {
+  runId: string;
+  primed: boolean;
+  directive: KgDirective;
+  banks: string[];
+  recalledDocumentIds: string[];
+  chars: number;
+  latencyMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out recall — exactly {<provision-time repo bank>, qds-collective}
+// ---------------------------------------------------------------------------
+
+export interface RecallFanOutResult {
+  observations: KgObservation[];
+  /** Fan-out set attempted (deduped, repo bank first). */
+  banks: string[];
+  /** True when at least one bank's recall SUCCEEDED — even with zero results. */
+  anyBankOk: boolean;
+  /** Per-bank wall ms, attempted banks only (failed attempts included). */
+  bankMs: Record<string, number>;
+  /** Whole fan-out wall ms. */
+  recallMs: number;
+}
+
+/**
+ * One attempt per bank, in parallel, zero retries. A failed bank contributes
+ * nothing — no observations, no directive change — but a bank that SUCCEEDED
+ * keeps ladder (c) alive even when it returned zero results: only ALL-bank
+ * failure is ladder (b). Partial failure therefore degrades content, never
+ * the ladder.
+ */
+export async function recallFanOut(
+  client: RecallClient,
+  repoBankId: string,
+  query: string,
+): Promise<RecallFanOutResult> {
+  // The set is EXACTLY these two banks (story "Fan-out set" — `-dev-meta` is
+  // deliberately absent); deduped for a caller that hands us the collective.
+  const banks = [...new Set([repoBankId, COLLECTIVE_BANK_ID])];
+  const start = Date.now();
+  const per = await Promise.all(
+    banks.map(async (bankId) => {
+      const t0 = Date.now();
+      try {
+        const res = await client.recall(bankId, query, KG_RECALL_LIMIT);
+        return { bankId, ms: Date.now() - t0, ok: true as const, results: res.results };
+      } catch {
+        // Per-bank failure contributes NOTHING — swallowed by design, not by
+        // accident: the client already logged the attempt (request() finally).
+        return { bankId, ms: Date.now() - t0, ok: false as const, results: [] };
+      }
+    }),
+  );
+  const observations = per.flatMap((p) =>
+    p.ok
+      ? p.results
+          // Citation floor: an id outside the promised charset (or an absent
+          // one → "") cannot back a [cite:] token — drop the observation
+          // whole rather than ship an uncitable line.
+          .filter((r) => CITABLE_ID.test(r.memoryId))
+          .map((r) => ({
+            id: r.memoryId,
+            content: r.content,
+            score: r.score,
+            documentId: r.documentId,
+          }))
+      : [],
+  );
+  return {
+    observations,
+    banks,
+    anyBankOk: per.some((p) => p.ok),
+    bankMs: Object.fromEntries(per.map((p) => [p.bankId, p.ms])),
+    recallMs: Date.now() - start,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Assembly — ranked, citation-floored, whole-observation ceiling
+// ---------------------------------------------------------------------------
+
+/**
+ * Rank by score desc. Array#sort is stable (ES2019+), so equal scores keep
+ * fan-out (original) order — the deterministic tie-break the story names.
+ */
+const byScoreDesc = (a: KgObservation, b: KgObservation): number => b.score - a.score;
+
+function escXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escAttr(s: string): string {
+  return escXml(s).replace(/"/g, "&quot;");
+}
+
+function observationXml(o: KgObservation): string {
+  // documentId rides the element only when the substrate surfaced one (AC5:
+  // null-tolerant — an item retained without an explicit id has none to show).
+  const doc = o.documentId !== null ? ` documentId="${escAttr(o.documentId)}"` : "";
+  return `<observation id="${escAttr(o.id)}"${doc}>${escXml(o.content)}</observation>`;
+}
+
+/**
+ * Assemble the appendix: `<kg_context>` block (one observation element per
+ * fact, id attribute for `[cite:<id>]`, documentId when non-null) followed by
+ * the CITATION_INSTRUCTION line. Content is escaped ONLY for XML-structural
+ * safety (<>&) — this is host-side assembly of host-recalled content, escaped
+ * to keep the block well-formed, not sanitized for trust.
+ *
+ * The ceiling budget covers the WHOLE assembled block (wrapper + instruction
+ * included) so the brief schema's own cap can never trip downstream — the
+ * schema ceiling stays a fail-loud backstop, never a routine path.
+ */
+export function buildKgContextXml(observations: KgObservation[]): string {
+  const head = "<kg_context>\n";
+  const tail = `\n</kg_context>\n${CITATION_INSTRUCTION}`;
+  const ranked = [...observations].sort(byScoreDesc);
+  let used = head.length + tail.length;
+  const lines: string[] = [];
+  for (const o of ranked) {
+    const line = observationXml(o);
+    const cost = line.length + (lines.length > 0 ? 1 : 0);
+    // Whole-observation granularity: an observation that does not fit is
+    // dropped whole, never split (a split citation grounds half a fact).
+    if (used + cost > KG_CONTEXT_MAX_CHARS) continue;
+    lines.push(line);
+    used += cost;
+  }
+  return head + lines.join("\n") + tail;
+}
+
+// ---------------------------------------------------------------------------
+// primeDispatchBrief — the ONE dispatch-shaped seam
+// ---------------------------------------------------------------------------
+
+function memoryEnvConfigured(): boolean {
+  // Empty-string env values count as unconfigured (mirror client.ts's coercion).
+  return Boolean(process.env.HINDSIGHT_BASE_URL) &&
+    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
+}
+
+function briefStr(brief: object, key: string): string | undefined {
+  const v = (brief as Record<string, unknown>)[key];
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function writeRecallRow(dir: string | undefined, runId: string | undefined, row: RecallRow): void {
+  // No runId → no filename. Observability is skipped; priming is unaffected.
+  if (runId === undefined) return;
+  try {
+    const base = dir ?? DEFAULT_RECALL_DIR;
+    mkdirSync(base, { recursive: true });
+    writeFileSync(join(base, `${runId}.json`), `${JSON.stringify(row)}\n`);
+  } catch {
+    // The side channel must never break dispatch — a full disk degrades to a
+    // missing row, which M1.3 reads as an uncounted cycle, not a crash.
+  }
+}
+
+/**
+ * Prime a dispatch brief with the `<kg_context>` appendix, env-gated.
+ *
+ * Returns the SAME reference untouched on ladder (a) and (b) — v5 byte-identical
+ * — and a SHALLOW copy carrying `kgContext` on (c)/(d). Never throws: any
+ * surprise (listBanks failure, unresolvable bank id, missing brief fields) is
+ * ladder (b), row + line still firing so M1.3 counts every M1 cycle.
+ */
+export async function primeDispatchBrief<T extends object>(
+  briefJson: T,
+  deps: PrimeDispatchBriefDeps = {},
+): Promise<T> {
+  // Ladder (a): the env gate is FIRST and unconditional — no attempt, no row,
+  // no line, same object reference.
+  if (!memoryEnvConfigured()) return briefJson;
+  const startedAt = Date.now();
+  const runId = briefStr(briefJson, "requestId");
+  let attempted: string[] = [];
+  let bankMs: Record<string, number> = {};
+  let recallMs: number | undefined;
+
+  // Single emit point so the row and the log line stay unconditionally paired
+  // (same conditionality) and the untouched-reference contract can't drift.
+  const emitAndReturn = (
+    primed: boolean,
+    directive: KgDirective,
+    kgContext: string | undefined,
+    docIds: string[],
+  ): T => {
+    const latencyMs = Date.now() - startedAt;
+    const chars = kgContext?.length ?? 0;
+    writeRecallRow(deps.recallDir, runId, {
+      runId: runId ?? "",
+      primed,
+      directive,
+      banks: attempted,
+      recalledDocumentIds: docIds,
+      chars,
+      latencyMs,
+    });
+    if (runId !== undefined) {
+      log({
+        requestId: runId,
+        operation: "kg-recall",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: latencyMs,
+        status: primed ? "ok" : "error",
+        runId,
+        directive,
+        banks: attempted,
+        chars,
+        ...(recallMs !== undefined ? { recallMs, bankMs } : {}),
+      });
+    }
+    return kgContext === undefined ? briefJson : ({ ...briefJson, kgContext } as T);
+  };
+
+  try {
+    const client = deps.client ?? new HindsightClient();
+    const repoSlug = briefStr(briefJson, "repoSlug");
+    if (repoSlug === undefined) return emitAndReturn(false, "none", undefined, []);
+    // resolveBankId is the RAW normalizer: it feeds ONLY the collision
+    // resolver, which picks the provision-time id against the LIVE bank list.
+    // The raw form can diverge from the provisioned id and is never used as
+    // the bank id itself (AC1).
+    const existing = extractExistingBankIds(await client.listBanks());
+    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
+    if (repoBankId === null) return emitAndReturn(false, "none", undefined, []);
+    const workId = briefStr(briefJson, "workId") ?? briefStr(briefJson, "issueId");
+    // Short deterministic query — same brief always recalls the same thing.
+    const query = `${repoSlug} ${workId ?? ""}`.trim();
+    const fan = await recallFanOut(client, repoBankId, query);
+    attempted = fan.banks;
+    bankMs = fan.bankMs;
+    recallMs = fan.recallMs;
+    // Directive vocab is exact. Only ALL-bank failure is ladder (b); a bank
+    // that succeeded-but-empty keeps (c) alive.
+    if (fan.observations.length === 0 && !fan.anyBankOk) {
+      return emitAndReturn(false, "none", undefined, []);
+    }
+    if (fan.observations.length === 0) {
+      return emitAndReturn(true, "empty", EMPTY_KG_DIRECTIVE, []);
+    }
+    const kgContext = buildKgContextXml(fan.observations);
+    // recalledDocumentIds in RANK order — the same comparator the block used.
+    const recalledDocumentIds = [...fan.observations]
+      .sort(byScoreDesc)
+      .map((o) => o.documentId)
+      .filter((d): d is string => d !== null);
+    return emitAndReturn(true, "kg_context", kgContext, recalledDocumentIds);
+  } catch {
+    // Contract: NEVER throw out of the seam. Recall failures are swallowed per
+    // bank above; what reaches here is bank resolution/shape surprises — all
+    // ladder (b): proceed-unprimed, observability still fires.
+    return emitAndReturn(false, "none", undefined, []);
+  }
+}

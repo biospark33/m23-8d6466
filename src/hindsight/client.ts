@@ -30,6 +30,7 @@ import {
   ConsolidateResponseSchema,
   RecallResponseSchema,
   ReflectResponseSchema,
+  RetainExtensionSchema,
   RetainResponseSchema,
   type ConsolidateResponse,
   type RecallResponse,
@@ -49,16 +50,29 @@ export const CONSOLIDATE_TIMEOUT_MS = 60_000;
 const DEFAULT_BASE_URL = "http://127.0.0.1:8888";
 
 /**
- * Canned schema-valid bodies returned in `'mock'` mode — no network. Each
- * shape matches the Zod schema the typed method parses downstream
- * (`requestJSON`), so mock round-trips pass validation like live ones.
- * `bankId` echoes the request's bank; the synthetic retain `memoryId` is
- * deterministic per bank so repeat calls are comparable.
+ * Canned WIRE-shape bodies returned in `'mock'` mode — no network. Each shape
+ * matches the Zod schema the typed method parses downstream (`requestJSON`),
+ * so mock round-trips pass the SAME strict parse as live ones (M1.2 AC5: mock
+ * is a network-only short-circuit, never a validation short-circuit). The
+ * retain body is the measured 0.10.0 wire (zero-token usage); the legacy
+ * camelCase view consumers see (memoryId "" placeholder etc.) is produced by
+ * the schema transform, not by this body.
  */
 function mockBody(path: string, bankId: string): unknown {
   if (path.endsWith("/memories/recall")) return { results: [], durationMs: 0 };
   if (path.endsWith("/memories")) {
-    return { memoryId: `mock-${bankId}`, bankId, status: "created" as const, durationMs: 0 };
+    return {
+      success: true,
+      items_count: 1,
+      async: false,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cached_tokens: 0,
+        thoughts_tokens: 0,
+      },
+    };
   }
   if (path.endsWith("/reflect")) {
     return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
@@ -244,6 +258,14 @@ export class HindsightClient {
     }
   }
 
+  /**
+   * M1.2 AC5 (P2.8 fold): the retain extension is OWNED, not assumed —
+   * `documentId`/`updateMode` are schema-validated at this boundary
+   * (RetainExtensionSchema), `tags` move TOP-LEVEL on the wire item (never
+   * `metadata.tags` — 0.10.0 422s on that), and `updateMode:"replace"` is
+   * API-level semantics for the `document_id` upsert: no wire field exists
+   * for it and none is sent.
+   */
   async retain(
     bankId: string,
     content: string,
@@ -251,13 +273,42 @@ export class HindsightClient {
       source?: "agent" | "mulch-import" | "manual" | "consolidate";
       kind?: "decision" | "pattern" | "expertise" | "observation";
       tags?: string[];
+      documentId?: string;
+      updateMode?: "replace";
     },
   ): Promise<RetainResponse> {
     const requestId = this.requestId ?? newRequestId();
     assertBankId(bankId, requestId);
-    const body: Record<string, unknown> = {
-      items: [metadata ? { content, metadata } : { content }],
-    };
+    const extension = RetainExtensionSchema.safeParse(metadata ?? {});
+    if (!extension.success) {
+      // Thrown BEFORE request(), so request()'s finally-log never fires — log
+      // the refusal here, mirroring assertBankId, or it is invisible.
+      log({
+        requestId,
+        operation: "retain",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        bankId,
+        error: { code: "invalid_retain_extension", message: extension.error.message },
+      });
+      throw new HindsightHttpError(
+        422,
+        `invalid retain extension: ${extension.error.message}`,
+        requestId,
+      );
+    }
+    const item: Record<string, unknown> = { content };
+    if (metadata?.tags !== undefined) item.tags = metadata.tags;
+    if (metadata?.documentId !== undefined) item.document_id = metadata.documentId;
+    if (metadata?.source !== undefined || metadata?.kind !== undefined) {
+      item.metadata = {
+        ...(metadata.source !== undefined ? { source: metadata.source } : {}),
+        ...(metadata.kind !== undefined ? { kind: metadata.kind } : {}),
+      };
+    }
+    const body: Record<string, unknown> = { items: [item] };
     return this.requestJSON(
       "POST",
       `/v1/default/banks/${bankId}/memories`,

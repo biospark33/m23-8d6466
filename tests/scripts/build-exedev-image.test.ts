@@ -1973,7 +1973,17 @@ describe("buildIdFileInputs", () => {
       // the probe-gate suite). The bunfig.coverage.toml and tests/ edits of
       // the same round are NOT walked COPY inputs. Received from this test's
       // own failing run on the final tree, per the re-pin-last ritual above.
-            "c4db474b616a4d57a5792a2d15cd8a31784af95f86e5e42ca052115e88fbc93e",
+      //
+      // 90250820: M1.2 (2026-10-06) — walked COPY inputs touched were
+      // `src/fleet/brief-schema.ts` (optional kgContext field), and
+      // `scripts/pipeline-run.ts` + `src/fleet/run-completion.ts` +
+      // `src/fleet/dispatch.ts` (kgContext witness carriage + render). NOT
+      // walked: src/hindsight/** (host-only), src/audit/link-store.ts,
+      // scripts/fleet.ts, src/providers/teardown.ts (outside the COPY set).
+      // The image re-publish half of this ritual is OPS-side and operator-
+      // gated (story Technical Notes) — it must run on a tree containing
+      // M1.2 BEFORE the next T2 live round fires a box.
+            "9025082041dab842504a26f494120a4b662e05523550af66c4905d76e5d863e4",
     );
   });
 });

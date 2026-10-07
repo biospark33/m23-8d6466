@@ -84,7 +84,7 @@ const HOP_EVENT_VOCABULARY = {
   "run-issue": [],
   "run-cost": [],
   "run-gate-evidence": [],
-  "memory-retain-receipt": [],
+  "memory-retain-receipt": ["retain"],
 } as const satisfies Readonly<Record<AuditHop, readonly string[]>>;
 
 /** The walker's first-observation digest rows. */
