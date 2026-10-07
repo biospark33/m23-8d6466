@@ -116,6 +116,35 @@ Three offline instruments over M1.2's artifacts plus one report: (1) a schema'd,
 
 **Contract amendments (all in `.unlazy/m1-3/PLAN.md`, none silent):** R3 — `p09EvidenceDir` is an explicit dep on both runners (real layout separates `_bmad-output/evidence/memory/` artifacts from the `evidence/p0-9-closure/` mint record; the original single-dir binding would phantom-refuse every real CLI run); `DEFAULT_P09_EVIDENCE_DIR` exported. R4 — leaf-1.3+1.4 merged into leaf-1.34 (the single test file's static imports make parallel runner builds require cross-lease stubs). R5 — strict AC1 refusal at run time: leaf-t's hit-rate-math fixture originally under-minted a probe id and expected a scored miss; ruled that AC1's negative control governs ("absent from the mint records … MUST fail validation, not the score"), fixture amended to mint all labels, runner refuses on all violations with no classification.
 
-**Test/verification evidence:** `tests/memory/probe-harness.test.ts` 43/43 (probe-schema 16, probe-recall 10, priming-report 14, harness-e2e 3) — written TDD-red first (43 red proven against missing modules), then made green; `bunx tsc --noEmit` 0 errors; repo-wide `bun run lint` exit 0; leaf ledgers under `.unlazy/m1-3/gates/` all ALL MET with automatic evidence; driver e2e verifier (`scripts/dev/verify-m13-e2e.ts`) runs both runners end-to-end against real CostLedger/audit-store fixtures — integrity pass, both artifacts, `checkpointEligible` false at 5 cycles, absent-ledger-stays-absent, audit.db mtime unchanged. Seed probes verified against the real mint record: 23/23 ids present for `qds-factory-dev-meta` (computed roster == minted record, bidirectionally).
+**Test/verification evidence:** `tests/memory/probe-harness.test.ts` 48/48 (probe-schema 16, probe-recall 13, priming-report 16, harness-e2e 3; 43 red at authoring, recounted after the round-1 review re-pins) — written TDD-red first (43 red proven against missing modules), then made green; `bunx tsc --noEmit` 0 errors; repo-wide `bun run lint` exit 0; leaf ledgers under `.unlazy/m1-3/gates/` all ALL MET with automatic evidence; driver e2e verifier (`scripts/dev/verify-m13-e2e.ts`) runs both runners end-to-end against real CostLedger/audit-store fixtures — integrity pass, both artifacts, `checkpointEligible` false at 5 cycles, absent-ledger-stays-absent, audit.db mtime unchanged. Seed probes verified against the real mint record: 23/23 ids present for `qds-factory-dev-meta` (computed roster == minted record, bidirectionally).
 
 **Live-tier note for the operator:** the local Hindsight instance used for the prerequisite rerun is still up (`m13-hindsight` compose project, loopback 18890, fresh volumes, throwaway tenant key). A real-instance canary + probe run (~$0.01 for the canary retain; recalls are RRF, no LLM) would produce the first real hit-rate@5 baseline artifact whenever the operator wants it — not required by this story's DoD (mock-tier machinery + committed seeds). Destroy with `docker compose -p m13-hindsight down -v` when done with it.
+
+### Review Findings (round 1, 2026-10-07 — full campaign: 25 patch / 2 dismissed / 1 deferred)
+
+- [ ] [Review][Patch] Scoring-loop recall error escapes unclassified [scripts/memory/probe-recall.ts]
+- [ ] [Review][Patch] listBanks rejection crashes instead of label-integrity refusal [scripts/memory/probe-schema.ts]
+- [ ] [Review][Patch] Empty probe set scores a 0.0 artifact; hitRateAt5 not withheld below MIN_PROBE_SET_SIZE (spec letter) [scripts/memory/probe-recall.ts]
+- [ ] [Review][Patch] Unreadable cost ledger kills the report (needs dataNote omission) [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Under-lock probe-set read unguarded [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Growth probeId slug collision bricks the set with duplicate probeIds [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Growth lock failure fatal to whole report (degrade to dataNote) [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Audit-db readonly opens crash on TOCTOU/non-sqlite (return absent-data) [scripts/memory/probe-schema.ts]
+- [ ] [Review][Patch] costTable/outcomeTable zero-filled at zero cycles (absent, not 0) [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] dispatchFailures unreachable from CLI; unreadable log reads as 0 [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Redact revoked OpenRouter key-management URLs from committed P0.9 evidence (45x) [_bmad-output/evidence/p0-9-closure]
+- [ ] [Review][Patch] Growth probes: origin field (seed|cycle), per-source-bank candidates, byOrigin aggregate [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] verify-m13-e2e hermeticity (auditPath into tmpdir) + tmpdir cleanup on fail [scripts/dev/verify-m13-e2e.ts]
+- [ ] [Review][Patch] Remove stale all-zero-recallMs artifact; recallMs sub-ms floor [_bmad-output/evidence/memory]
+- [ ] [Review][Patch] writtenAt Date.parse ordering with tie fallback [scripts/memory/probe-schema.ts]
+- [ ] [Review][Patch] latencyMs shape-check finite/non-negative [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Skip empty-concepts entries with recorded failure in p0-9 import [scripts/p0-9/provision-and-import.ts]
+- [ ] [Review][Patch] Artifact stamp collision: run-unique rand per repo naming discipline [scripts/memory/probe-recall.ts]
+- [ ] [Review][Patch] Guard canary diagnostic write (refusal contract under write failure) [scripts/memory/probe-recall.ts]
+- [ ] [Review][Patch] Per-cycle rows (runId, primed, receiptPresent) — AC4 per-row letter [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Growth uses the SAME integrity path: extract shared mint-membership core [scripts/memory/priming-report.ts]
+- [ ] [Review][Patch] Serialize concurrent probe-recall runs under the named lock [scripts/memory/probe-recall.ts]
+- [ ] [Review][Patch] Dev Agent Record suite count 43 -> 44 (16/11/14/3) [story record]
+- [ ] [Review][Patch] verify-test-slice parsing/bounds fixes; verifier vacuous check; header wording; test name overstatement; record DD-22 working bar as decision-input context in evidence+md [scripts/dev + scripts/memory]
+- [ ] [Review][Patch] Drop dead PrimingReportDeps.runsDir [scripts/memory/priming-report.ts]
+- [x] [Review][Defer] Failed-leg evidence deleteOutcomes semantics (leg-driver classification, pre-existing) [scripts/p0-9/leg-lib.ts] — deferred, pre-existing

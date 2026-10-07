@@ -109,6 +109,7 @@ function probe(i: number, over: Partial<Probe> = {}): Probe {
     query: `probe query ${i}`,
     expectedDocumentIds: [`mulch-doc-${i}`],
     bank: SEED_PROBE_BANK,
+    origin: "seed",
     ...over,
   };
 }
@@ -274,14 +275,24 @@ function fakeProbeClient(
     banks?: unknown;
     canned?: Map<string, { results: CannedResult[]; durationMs?: number }>;
     canaryHits?: boolean;
+    /** F-002: listBanks itself rejects (endpoint down). */
+    listBanksThrows?: string;
+    /** F-001: recall rejects only for this query — mid-scoring traffic failure. */
+    recallThrowsOnQuery?: string;
   } = {},
 ): { client: ProbeClient; recalls: RecallRecord[]; retains: RetainRecord[] } {
   const recalls: RecallRecord[] = [];
   const retains: RetainRecord[] = [];
   const raw = {
-    listBanks: async () => opts.banks ?? { banks: [{ bank_id: SEED_PROBE_BANK }] },
+    listBanks: async () => {
+      if (opts.listBanksThrows !== undefined) throw new Error(opts.listBanksThrows);
+      return opts.banks ?? { banks: [{ bank_id: SEED_PROBE_BANK }] };
+    },
     recall: async (bankId: string, query: string, limit?: number) => {
       recalls.push({ bankId, query, limit });
+      if (opts.recallThrowsOnQuery !== undefined && query === opts.recallThrowsOnQuery) {
+        throw new Error(`HTTP 502: recall upstream failed for ${bankId}`);
+      }
       const hit = opts.canned?.get(`${bankId}\u0000${query}`);
       if (hit) return { results: hit.results, durationMs: hit.durationMs ?? 5 };
       return {
@@ -343,8 +354,9 @@ function filesIn(target: string): string[] {
   return existsSync(target) ? readdirSync(target) : [];
 }
 
-function readArtifact(target: string, suffix: string): string | undefined {
-  return filesIn(target).find((n) => n.endsWith(suffix));
+/** F-018: artifact names carry a random suffix — contains-match, never endsWith. */
+function readArtifact(target: string, marker: string): string | undefined {
+  return filesIn(target).find((n) => n.includes(marker));
 }
 
 /** One call to the label-integrity gate with a fake listBanks client. */
@@ -526,7 +538,9 @@ describe("probe-recall", () => {
     expect(missRank === null || missRank === undefined).toBe(true);
     expect(metrics.aggregate.probes).toBe(4);
     expect(metrics.aggregate.hits).toBe(3);
-    expect(metrics.aggregate.hitRateAt5).toBe(0.75);
+    // F-003: below the 20-probe floor the rate is WITHHELD — absent, not 0.
+    expect("hitRateAt5" in metrics.aggregate).toBe(false);
+    expect(metrics.aggregate.belowFloor).toBe(true);
   });
 
   test("a probe matching nothing expected misses", async () => {
@@ -637,14 +651,14 @@ describe("probe-recall", () => {
     if (res.ok) return;
     expect(res.stage).toBe("canary");
     expect(/402|extraction/i.test(res.reason)).toBe(true);
-    expect(res.diagnosticPath?.endsWith("-canary-failure.json")).toBe(true);
-    const diagName = readArtifact(evidenceDir(), "-canary-failure.json");
+    expect(/-canary-failure-[a-z0-9]{6}\.json$/.test(res.diagnosticPath ?? "")).toBe(true);
+    const diagName = readArtifact(evidenceDir(), "-canary-failure-");
     expect(diagName).toBeDefined();
     const diag = JSON.parse(readFileSync(join(evidenceDir(), diagName ?? ""), "utf8")) as Record<string, unknown>;
     expect(typeof diag.error).toBe("string");
     // No scoring happened: the retain threw before any recall.
     expect(recalls.length).toBe(0);
-    expect(readArtifact(evidenceDir(), "-hit-rate.json")).toBeUndefined();
+    expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeUndefined();
   });
 
   test("canary miss refuses: stage canary, hit-rate withheld, canary-failure diagnostic written", async () => {
@@ -659,9 +673,9 @@ describe("probe-recall", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.stage).toBe("canary");
-    expect(res.diagnosticPath?.endsWith("-canary-failure.json")).toBe(true);
+    expect(/-canary-failure-[a-z0-9]{6}\.json$/.test(res.diagnosticPath ?? "")).toBe(true);
 
-    const diagName = readArtifact(evidenceDir(), "-canary-failure.json");
+    const diagName = readArtifact(evidenceDir(), "-canary-failure-");
     expect(diagName).toBeDefined();
     const diag = JSON.parse(
       readFileSync(join(evidenceDir(), diagName ?? ""), "utf8"),
@@ -672,7 +686,7 @@ describe("probe-recall", () => {
     expect(Array.isArray(diag.recallTail)).toBe(true);
 
     // The hit-rate evidence JSON is WITHHELD — never a legitimate-looking 0.0.
-    expect(readArtifact(evidenceDir(), "-hit-rate.json")).toBeUndefined();
+    expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeUndefined();
   });
 
   test("label-integrity failure refuses before any client traffic, naming the offending probeId", async () => {
@@ -712,9 +726,10 @@ describe("probe-recall", () => {
     const res = await runProbeRecall(baseRecallDeps(client));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.artifactPath.endsWith("-hit-rate.json")).toBe(true);
+    // F-018: stamp + random suffix — same-millisecond runs never overwrite.
+    expect(/-hit-rate-[a-z0-9]{6}\.json$/.test(res.artifactPath)).toBe(true);
 
-    const name = readArtifact(evidenceDir(), "-hit-rate.json");
+    const name = readArtifact(evidenceDir(), "-hit-rate-");
     expect(name).toBeDefined();
     const artifact = JSON.parse(
       readFileSync(join(evidenceDir(), name ?? ""), "utf8"),
@@ -729,6 +744,8 @@ describe("probe-recall", () => {
     expect("belowFloor" in aggregate).toBe(false);
     expect(aggregate.bankBreakdown).toBeTypeOf("object");
     expect(SEED_PROBE_BANK in (aggregate.bankBreakdown as object)).toBe(true);
+    // F-012: origin split always present — this set is all-seed.
+    expect(aggregate.byOrigin).toEqual({ seed: { probes: 20, hits: 20 }, cycle: { probes: 0, hits: 0 } });
     const canary = artifact.canary as Record<string, unknown>;
     expect(canary.hit).toBe(true);
     expect(canary.documentId).toBe(CANARY_DOCUMENT_ID);
@@ -756,7 +773,7 @@ describe("probe-recall", () => {
     expect("medianRecallMs" in res.metrics.aggregate).toBe(false);
   });
 
-  test("medianRecallMs is computed from per-probe recall durations (odd count)", async () => {
+  test("medianRecallMs is computed from per-probe recall durations, hitRateAt5 emitted at the floor (odd count)", async () => {
     const probes = makeProbes(21);
     writeProbeSet(probeSetPath(), probes);
     writeP09(
@@ -766,6 +783,14 @@ describe("probe-recall", () => {
     );
     const cannedMap = new Map<string, { results: CannedResult[]; durationMs?: number }>();
     probes.forEach((p, i) => {
+      if (i % 4 === 3) {
+        // 5 misses (indices 3,7,11,15,19) → 16/21 — a rate that is neither 0 nor 1.
+        cannedMap.set(cannedKey(p), {
+          results: canned("f1", "f2", "f3", "f4", "f5"),
+          durationMs: 10 * (i + 1),
+        });
+        return;
+      }
       cannedMap.set(cannedKey(p), {
         results: canned(p.expectedDocumentIds[0] ?? null),
         durationMs: 10 * (i + 1), // 10..210, distinct
@@ -781,6 +806,51 @@ describe("probe-recall", () => {
     const sorted = res.metrics.perProbe.map((p) => p.recallMs).sort((a, b) => a - b);
     expect(sorted[10]).toBe(110);
     expect(res.metrics.aggregate.medianRecallMs).toBe(sorted[10]);
+    // At/above the floor the rate is emitted and correct (F-003 math pin,
+    // moved here from the sub-floor fixture where it must stay withheld).
+    expect(res.metrics.aggregate.belowFloor).toBeUndefined();
+    expect(Math.abs((res.metrics.aggregate.hitRateAt5 ?? -1) - 16 / 21)).toBeLessThan(1e-9);
+  });
+
+  test("a recall rejection mid-scoring refuses at stage scoring: no artifact (F-001)", async () => {
+    const probes = [probe(0), probe(1)];
+    writeProbeSet(probeSetPath(), probes);
+    writeP09(
+      p09Dir(),
+      { [SEED_PROBE_BANK]: ["mulch-doc-0", "mulch-doc-1"] },
+      "2026-10-07T10:00:00.000Z",
+    );
+    const cannedMap = new Map<string, { results: CannedResult[] }>();
+    cannedMap.set(cannedKey(at(probes, 0)), { results: canned("mulch-doc-0") });
+    const { client } = fakeProbeClient({
+      canned: cannedMap,
+      recallThrowsOnQuery: at(probes, 1).query, // probe 0 scores, probe 1 throws
+    });
+
+    const res = await runProbeRecall(baseRecallDeps(client));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.stage).toBe("scoring");
+    expect(/scoring failed/i.test(res.reason)).toBe(true);
+    // An unmeasured run never leaves a score behind.
+    expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeUndefined();
+  });
+
+  test("a listBanks rejection is a label-integrity refusal under the reserved <listBanks> probeId (F-002)", async () => {
+    const probes = [probe(0)];
+    writeProbeSet(probeSetPath(), probes);
+    writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-0"] }, "2026-10-07T10:00:00.000Z");
+    const { client, recalls, retains } = fakeProbeClient({ listBanksThrows: "HTTP 503 upstream" });
+
+    const res = await runProbeRecall(baseRecallDeps(client));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.stage).toBe("label-integrity");
+    expect(res.violations?.map((v) => v.probeId)).toEqual(["<listBanks>"]);
+    expect(/listBanks failed/.test(res.violations?.[0]?.reason ?? "")).toBe(true);
+    // No traffic beyond the failed listing itself.
+    expect(recalls.length).toBe(0);
+    expect(retains.length).toBe(0);
   });
 });
 
@@ -810,6 +880,8 @@ describe("priming-report", () => {
     writeProbeSet(probeSetPath(), []);
     writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1)));
     writeRecallRow(recallDir(), `${runId(2)}.json`, rowOf(runId(2)));
+    utimesSync(join(recallDir(), `${runId(1)}.json`), new Date(1000), new Date(1000));
+    utimesSync(join(recallDir(), `${runId(2)}.json`), new Date(2000), new Date(2000));
     mkdirSync(dirname(auditPath()), { recursive: true });
     seedReceipt(auditPath(), runId(1)); // run 2 has no receipt
 
@@ -817,6 +889,19 @@ describe("priming-report", () => {
     expect(res.metrics.cyclesToDate).toBe(2); // receipt-less cycle still counts
     expect(res.metrics.receiptCoverage.withReceipt).toBe(1);
     expect(res.metrics.receiptCoverage.withoutReceipt).toBe(1);
+    // F-020: the per-cycle rows behind the aggregate — receiptPresence per row.
+    expect(res.metrics.cycles?.[0]).toEqual({
+      runId: runId(1),
+      primed: true,
+      receiptPresent: true,
+      latencyMs: 100,
+    });
+    expect(res.metrics.cycles?.[1]).toEqual({
+      runId: runId(2),
+      primed: true,
+      receiptPresent: false,
+      latencyMs: 100,
+    });
   });
 
   test("cost join: exact integer micro-usd per run; a run absent from the ledger reads 0", async () => {
@@ -859,10 +944,25 @@ describe("priming-report", () => {
 
     const res = await runPrimingReport(baseReportDeps());
     const outcome = res.metrics.outcomeTable;
+    if (!outcome) throw new Error("outcomeTable must be present above 0 cycles");
     expect(outcome.primed.runs).toBe(2);
     expect(outcome.primed.meanLatencyMs).toBe(200);
     expect(outcome.unprimed.runs).toBe(1);
     expect(outcome.unprimed.meanLatencyMs).toBe(50);
+  });
+
+  test("zero cycles: outcomeTable and cycles keys absent with a dataNote; a present ledger with no observed events omits costTable too (F-009/F-020)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    // recallDir stays absent → 0 cycles; the ledger EXISTS but holds only
+    // unrelated runs — no events for the (zero) observed cycles.
+    seedLedger(ledgerPath(), [{ runId: runId(99), microUsd: 42 }]);
+
+    const res = await runPrimingReport(baseReportDeps());
+    expect(res.metrics.cyclesToDate).toBe(0);
+    expect("outcomeTable" in res.metrics).toBe(false);
+    expect("cycles" in res.metrics).toBe(false);
+    expect("costTable" in res.metrics).toBe(false);
+    expect(res.metrics.dataNotes.some((n) => /no observed cycles/i.test(n))).toBe(true);
   });
 
   test("exitClassification carries a dataNote naming where it lives (D1)", async () => {
@@ -873,6 +973,22 @@ describe("priming-report", () => {
     const note = res.metrics.dataNotes.find((n) => /exitClassification/i.test(n));
     expect(note).toBeDefined();
     expect(note && /retain/i.test(note)).toBe(true);
+  });
+
+  test("dispatchFailures: line count from an explicit log path; a present-but-unreadable path is a dataNote, key absent (F-010)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1)));
+
+    const logPath = join(dir, "dispatch-failures.log");
+    writeFileSync(logPath, "line one\nline two\nline three\n");
+    const readable = await runPrimingReport({ ...baseReportDeps(), dispatchLogPath: logPath });
+    expect(readable.metrics.dispatchFailures).toBe(3);
+
+    const dirPath = join(dir, "not-a-file"); // a directory: readFileSync → EISDIR
+    mkdirSync(dirPath, { recursive: true });
+    const unreadable = await runPrimingReport({ ...baseReportDeps(), dispatchLogPath: dirPath });
+    expect("dispatchFailures" in unreadable.metrics).toBe(false);
+    expect(unreadable.metrics.dataNotes.some((n) => /dispatch failure log unreadable/i.test(n))).toBe(true);
   });
 
   test("cyclesToDate 29 stays below the DD-22 checkpoint (false)", async () => {
@@ -939,9 +1055,16 @@ describe("priming-report", () => {
     expect(parsed.checkpointEligible).toBe(false);
   });
 
-  test("probe growth appends integrity-gated candidates, existing rows byte-identical", async () => {
-    const seed = [probe(100)];
-    writeProbeSet(probeSetPath(), seed);
+  test("probe growth appends integrity-gated candidates, existing rows canonically identical", async () => {
+    // Raw pre-F-012 row: no origin field on disk — re-serialization stamps it.
+    const seedRaw = {
+      probeId: "seed-probe-100",
+      query: "probe query 100",
+      expectedDocumentIds: ["mulch-doc-100"],
+      bank: SEED_PROBE_BANK,
+    };
+    mkdirSync(dirname(probeSetPath()), { recursive: true });
+    writeFileSync(probeSetPath(), `${JSON.stringify([seedRaw], null, 2)}\n`);
     writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-200"] }, "2026-10-07T10:00:00.000Z");
     writeRecallRow(
       recallDir(),
@@ -954,9 +1077,11 @@ describe("priming-report", () => {
 
     const after = JSON.parse(readFileSync(probeSetPath(), "utf8")) as Probe[];
     expect(after.length).toBe(2);
-    // Append-only: the existing row is byte-identical (canonical form).
-    expect(canonicalJson(after[0])).toBe(canonicalJson(seed[0]));
+    // F-012: the existing row re-serializes canonically identical PLUS the
+    // defaulted origin:"seed"; the appended row carries origin:"cycle".
+    expect(canonicalJson(after[0])).toBe(canonicalJson({ ...seedRaw, origin: "seed" }));
     const appended = after[1];
+    expect(appended?.origin).toBe("cycle");
     expect(appended?.bank).toBe(SEED_PROBE_BANK);
     expect(appended?.expectedDocumentIds).toContain("mulch-doc-200");
     // The report JSON carries the appended count too.
@@ -1034,7 +1159,7 @@ describe("harness-e2e", () => {
     const recallRes = await runProbeRecall(baseRecallDeps(client));
     expect(recallRes.ok).toBe(true);
     if (!recallRes.ok) return;
-    expect(readArtifact(evidenceDir(), "-hit-rate.json")).toBeDefined();
+    expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeDefined();
 
     // Side channel: 5 cycles (3 primed, 2 unprimed), receipts for 2, cost for 1.
     for (let i = 1; i <= 5; i++) {

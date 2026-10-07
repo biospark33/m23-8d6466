@@ -315,6 +315,12 @@ async function mintCorpus(
       const documentId = `mulch-${dedupHash(entry.domain, entry.concepts).slice(0, 16)}`;
       if (seen.has(documentId)) continue;
       seen.add(documentId);
+      // F-017: an empty-concepts entry would retain tags: [] — an unmeasured
+      // wire shape. Skip it with a recorded failure instead of probing the API.
+      if (entry.concepts.length === 0) {
+        failures.push(`${bankId} ${documentId}: empty-concepts-skipped`);
+        continue;
+      }
       const content = canonicalJsonl(entry);
       if (Buffer.byteLength(content, "utf8") > MAX_CONTENT_BYTES) {
         oversized.push(`${bankId} ${documentId} (${Buffer.byteLength(content, "utf8")}B)`);

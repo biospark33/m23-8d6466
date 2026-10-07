@@ -25,3 +25,7 @@ Two of the recorded refusals are mislabelled:
 - `missing-bank-profile-read` (`http_410`) hit the removed bank-profile endpoint, like the auth-retired probes above. It is inconclusive.
 
 Fixing the driver (a separate classification for schema-validation failures and a supported endpoint for the profile probe) belongs to work item 2 in issue #408.
+
+## Redaction note (2026-10-07)
+
+On 2026-10-07, every occurrence of a revoked OpenRouter key id inside the account-management URLs of `2026-10-07T11-49-36-792Z-p0-9-provision-and-import-vrf9ks.json` (64 occurrences) was replaced with `<revoked-key-id-redacted>`. The keys were revoked before redaction; the ids are account-identifying management-URL material, so they were scrubbed for secret hygiene. No other bytes in the evidence were altered — this is the sole sanctioned deviation from the "never edited after capture" rule above.

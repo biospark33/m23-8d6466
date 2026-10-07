@@ -38,6 +38,9 @@ export const ProbeSchema = z.object({
   query: z.string().min(1).max(MAX_PROBE_QUERY_CHARS),
   expectedDocumentIds: z.array(z.string().min(1)).min(1),
   bank: BankIdSchema,
+  // F-012: seed vs cycle provenance — seed rows predate the field and default
+  // to "seed"; the priming-report growth appender writes "cycle".
+  origin: z.enum(["seed", "cycle"]).default("seed"),
 });
 
 export type Probe = z.infer<typeof ProbeSchema>;
@@ -73,7 +76,12 @@ export function loadP09MintRecords(evidenceDir: string = DEFAULT_P09_EVIDENCE_DI
   } catch {
     return mint; // absent/unreadable dir → empty map, never throws
   }
-  const latest = new Map<string, string>(); // bank → winning writtenAt
+  // F-015: winner per bank = newest writtenAt by EPOCH (Date.parse — ISO stamps
+  // with differing offsets misorder under lexicographic compare); an unparseable
+  // stamp reads as oldest so it can never beat a real one, and ties (two files
+  // with the same stamp, or both unparseable) fall back to FILENAME order with
+  // the lexicographically-LATER filename winning (later write wins).
+  const latest = new Map<string, { ts: number; name: string }>(); // bank → winning stamp+file
   for (const name of files) {
     let data: unknown;
     try {
@@ -86,12 +94,15 @@ export function loadP09MintRecords(evidenceDir: string = DEFAULT_P09_EVIDENCE_DI
     if (rec.ok !== true) continue;
     if (typeof rec.mintRecord !== "object" || rec.mintRecord === null) continue;
     const at = typeof rec.writtenAt === "string" ? rec.writtenAt : "";
+    const ts = Date.parse(at);
+    const epoch = Number.isFinite(ts) ? ts : Number.NEGATIVE_INFINITY;
     for (const [bank, entry] of Object.entries(rec.mintRecord as Record<string, unknown>)) {
       const ids = (entry as { documentIds?: unknown })?.documentIds;
       if (!Array.isArray(ids)) continue;
       const prev = latest.get(bank);
-      if (prev !== undefined && prev >= at) continue; // latest writtenAt wins per bank
-      latest.set(bank, at);
+      const wins = prev === undefined || epoch > prev.ts || (epoch === prev.ts && name > prev.name);
+      if (!wins) continue;
+      latest.set(bank, { ts: epoch, name });
       mint.set(bank, new Set(ids.filter((id): id is string => typeof id === "string")));
     }
   }
@@ -106,27 +117,34 @@ export function loadReceiptMintRecords(auditPath?: string): MintRecords {
   const path = auditPath ?? process.env.QDS_AUDIT_DB ?? DEFAULT_AUDIT_DB_FILE;
   const mint: MintRecords = new Map();
   if (!existsSync(path)) return mint;
-  const db = new Database(path, { readonly: true });
+  // F-008: the existsSync check races the open, and a non-sqlite file at the
+  // path throws SQLITE_CANTOPEN/NOTADB — an unreadable audit db is absent
+  // data (empty map), never a crash.
+  let rows: { subject_id: unknown; detail_json: unknown }[];
+  let db: Database | undefined;
   try {
-    const rows = db
+    db = new Database(path, { readonly: true });
+    rows = db
       .prepare(`SELECT subject_id, detail_json FROM audit_links WHERE hop='memory-retain-receipt'`)
       .all() as { subject_id: unknown; detail_json: unknown }[];
-    for (const row of rows) {
-      if (typeof row.subject_id !== "string") continue;
-      let detail: unknown;
-      try {
-        detail = JSON.parse(String(row.detail_json));
-      } catch {
-        continue; // malformed detail_json → skip row
-      }
-      const bank = (detail as { bank?: unknown })?.bank;
-      if (typeof bank !== "string") continue;
-      const set = mint.get(bank) ?? new Set<string>();
-      set.add(row.subject_id);
-      mint.set(bank, set);
-    }
+  } catch {
+    return mint;
   } finally {
-    db.close();
+    db?.close();
+  }
+  for (const row of rows) {
+    if (typeof row.subject_id !== "string") continue;
+    let detail: unknown;
+    try {
+      detail = JSON.parse(String(row.detail_json));
+    } catch {
+      continue; // malformed detail_json → skip row
+    }
+    const bank = (detail as { bank?: unknown })?.bank;
+    if (typeof bank !== "string") continue;
+    const set = mint.get(bank) ?? new Set<string>();
+    set.add(row.subject_id);
+    mint.set(bank, set);
   }
   return mint;
 }
@@ -159,21 +177,19 @@ function extractBankIds(envelope: unknown): Set<string> {
 }
 
 /**
- * Label integrity: every probe's bank must exist in listBanks, and every
- * expectedDocumentId must be minted into THAT bank (per-bank lookup only —
- * a cross-bank id is phantom-class, never a global union).
+ * The mint-membership leg of label integrity, SHARED (F-021) by
+ * checkLabelIntegrity and priming-report's growProbeSet: every probe's every
+ * expectedDocumentId must be minted into THAT probe's own bank (per-bank
+ * lookup only — a cross-bank id is phantom-class, never a global union).
+ * Shape: violations per offending probeId, empty array = all members pass.
  */
-export async function checkLabelIntegrity(
-  probes: Probe[],
-  deps: { client: Pick<ProbeClient, "listBanks">; mint: MintRecords },
-): Promise<{ ok: boolean; violations: { probeId: string; reason: string }[]; checkedProbes: number }> {
-  const listed = extractBankIds(await deps.client.listBanks());
+export function mintMembershipViolations(
+  probes: Pick<Probe, "probeId" | "bank" | "expectedDocumentIds">[],
+  mint: MintRecords,
+): { probeId: string; reason: string }[] {
   const violations: { probeId: string; reason: string }[] = [];
   for (const probe of probes) {
-    if (!listed.has(probe.bank)) {
-      violations.push({ probeId: probe.probeId, reason: `bank "${probe.bank}" is absent from listBanks` });
-    }
-    const minted = deps.mint.get(probe.bank);
+    const minted = mint.get(probe.bank);
     if (!minted) {
       violations.push({ probeId: probe.probeId, reason: `no mint record for bank "${probe.bank}"` });
       continue;
@@ -187,5 +203,36 @@ export async function checkLabelIntegrity(
       }
     }
   }
+  return violations;
+}
+
+/**
+ * Label integrity: every probe's bank must exist in listBanks, and every
+ * expectedDocumentId must be minted into THAT bank (the shared
+ * mintMembershipViolations core). F-002: a listBanks rejection is NOT an
+ * unhandled crash — it surfaces as a single violation under the reserved
+ * probeId "<listBanks>" (the endpoint error in the reason), which
+ * probe-recall maps to a label-integrity refusal like any other violation.
+ */
+export async function checkLabelIntegrity(
+  probes: Probe[],
+  deps: { client: Pick<ProbeClient, "listBanks">; mint: MintRecords },
+): Promise<{ ok: boolean; violations: { probeId: string; reason: string }[]; checkedProbes: number }> {
+  const violations: { probeId: string; reason: string }[] = [];
+  try {
+    const listed = extractBankIds(await deps.client.listBanks());
+    for (const probe of probes) {
+      if (!listed.has(probe.bank)) {
+        violations.push({ probeId: probe.probeId, reason: `bank "${probe.bank}" is absent from listBanks` });
+      }
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      violations: [{ probeId: "<listBanks>", reason: `listBanks failed: ${(e as Error).message}` }],
+      checkedProbes: probes.length,
+    };
+  }
+  violations.push(...mintMembershipViolations(probes, deps.mint));
   return { ok: violations.length === 0, violations, checkedProbes: probes.length };
 }
