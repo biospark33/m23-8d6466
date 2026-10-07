@@ -80,6 +80,9 @@ export class RunRetainError extends Error {
 /** The minted-runId shape — pinned verbatim from dispatch.ts's MINTED_RUN_ID_RE. */
 const RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control characters IS the purpose (F8 bundlePath guard)
+const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
+
 /**
  * The document identity IS the runId (AC4: "dated by construction"). Refusing
  * every other shape is what makes a time-based or random documentId
@@ -89,7 +92,7 @@ export function deriveDocumentId(runId: string): string {
   if (typeof runId !== "string" || !RUN_ID_RE.test(runId)) {
     throw new RunRetainError(
       "retain-run-id-invalid",
-      `runId ${JSON.stringify(runId.slice(0, 64))} is not a minted run id (qds-YYYYMMDD-hex6) — the documentId is the runId itself, so no other shape can be retained`,
+      `runId ${JSON.stringify(String(runId).slice(0, 64))} is not a minted run id (qds-YYYYMMDD-hex6) — the documentId is the runId itself, so no other shape can be retained`,
     );
   }
   return runId;
@@ -117,6 +120,20 @@ export function buildRetainPayload(input: RetainOutcome): string {
     const v = input[field];
     if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v))) {
       throw new RunRetainError("retain-payload-invalid", `payload field ${field} must be a finite number when present`);
+    }
+  }
+  // F8: bundlePath is optional but never free-form — when present it must be a
+  // bounded, printable string (≤512 chars, no control characters), or the
+  // payload-invalid refusal fires here, before any network call.
+  if (input.bundlePath !== undefined) {
+    const p: unknown = input.bundlePath;
+    if (
+      typeof p !== "string" || p.length === 0 || p.length > 512 || CONTROL_CHAR_RE.test(p)
+    ) {
+      throw new RunRetainError(
+        "retain-payload-invalid",
+        "payload field bundlePath must be a non-empty string of at most 512 characters with no control characters when present",
+      );
     }
   }
   if (!Array.isArray(input.tags) || !input.tags.every((t) => typeof t === "string")) {

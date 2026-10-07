@@ -311,13 +311,54 @@ const BRIEF_KG_CONTEXT_MAX_CHARS = 8_000;
  * value is a MULTI-LINE XML block rendered verbatim into the resident's prompt
  * (pipeline-run.ts's residentContextLines), so \n (0x0a) and \t (0x09) are the
  * payload, not an attack — they are the only C0 code points allowed through.
- * Refused is the rest of C0 plus DEL: the classes that forge a line boundary or
- * inject an escape inside that block. \r is included even though it is only a
- * line boundary for CRLF-folding consumers: the block is \n-joined, so a bare
- * CR mid-line can only ever be a forgery attempt.
+ * Refused is the full Unicode `Cc` category minus those two — the rest of C0,
+ * DEL, and C1 (U+0080–U+009F, the NEL U+0085 among them) — plus the two code
+ * points Zl (U+2028) and Zp (U+2029): JS line terminators, so a JS or JSON-ish
+ * consumer of the rendered prompt sees a forged record boundary without a `\n`
+ * ever appearing. \r is included even though it is only a line boundary for
+ * CRLF-folding consumers: the block is \n-joined, so a bare CR mid-line can
+ * only ever be a forgery attempt.
+ *
+ * Written as `\u` ranges rather than `\p{Cc}` because a character class cannot
+ * subtract, and because ONE string is the single source the two arms of the
+ * rule are built from — the matcher below (kgContextSanitize, the repair arm)
+ * and the schema's refine (kgContextIsWellFormed, the reject arm) — so they
+ * cannot stop agreeing the way two hand-written literals would.
+ *
+ * The guard's substance now runs at ALL THREE boundaries: the host schema here,
+ * the producer's own assembly, and pipeline-run.ts's box-side render — which
+ * re-validates even though the schema already refused, because the value the
+ * box reads arrives through run-context.json, a witness FILE inside the
+ * checkout that the run's own phases can rewrite (the same reason fixContext's
+ * copy is add-only and re-checked). There a non-well-formed value is DROPPED
+ * rather than fatal: grounding is best-effort and the resident proceeds
+ * unprimed.
  */
-const KG_CONTEXT_CONTROL_CLASS = "\\u0000-\\u0008\\u000B-\\u001F\\u007F";
-const KG_CONTEXT_NO_CONTROL_CHARS = new RegExp(`^[^${KG_CONTEXT_CONTROL_CLASS}]*$`, "u");
+const KG_CONTEXT_CONTROL_CLASS = "\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F\\u2028\\u2029";
+const KG_CONTEXT_CONTROL_CHARS_G = new RegExp(`[${KG_CONTEXT_CONTROL_CLASS}]`, "gu");
+
+/**
+ * Every refused code point removed, \t and \n kept. The repair arm of the rule
+ * above: the producer sanitizes with this same function before assembly, so
+ * what reaches the schema is already clean and the two layers repair with the
+ * exact class the schema refuses on.
+ */
+export function kgContextSanitize(s: string): string {
+  return s.replace(KG_CONTEXT_CONTROL_CHARS_G, "");
+}
+
+/**
+ * The full kgContext well-formedness predicate: at or under the ceiling, and
+ * unchanged by kgContextSanitize (callers holding an unknown-typed value gate
+ * on `typeof` first — pipeline-run.ts does). The schema's refine is this
+ * predicate outright — the ceiling stays `.max()` above it so a length problem
+ * still reports as a length problem — and the box-side render re-applies the
+ * SAME predicate against the witness rather than trusting the schema's refusal
+ * to have happened on the host.
+ */
+export function kgContextIsWellFormed(s: string): boolean {
+  return s.length <= BRIEF_KG_CONTEXT_MAX_CHARS && kgContextSanitize(s) === s;
+}
 
 /**
  * Non-blank, for the two fields whose `.min(1)` was doing the job blankness
@@ -496,15 +537,15 @@ export const BriefSchema = z.strictObject({
   // M1.2 AC3: the dispatch-time memory appendix, carried VERBATIM into the
   // resident's context by pipeline-run.ts's residentContextLines. Optional and
   // adds-only: a brief without it parses byte-identical to v5. The ceiling and
-  // charset above are the trust boundary (INV-KG-3) — the renderer deliberately
-  // does NOT re-sanitize, because the value IS a multi-line block and escaping
-  // would destroy it; that is only safe because this field is the one place the
-  // schema both bounds and charset-guards the payload.
+  // charset above are the trust boundary (INV-KG-3); the refine is the
+  // exported predicate outright (see its comment), and the renderer re-applies
+  // it box-side rather than re-sanitizing — the value IS a multi-line block
+  // and escaping would destroy it.
   kgContext: z
     .string()
     .max(BRIEF_KG_CONTEXT_MAX_CHARS)
     .refine(
-      (s) => KG_CONTEXT_NO_CONTROL_CHARS.test(s),
+      kgContextIsWellFormed,
       "kgContext may not contain control characters other than newline and tab",
     )
     .optional(),

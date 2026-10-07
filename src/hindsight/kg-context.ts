@@ -24,9 +24,11 @@
  * latency-budgeted).
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { kgContextSanitize } from "../fleet/brief-schema.ts";
+import { atomicReplaceFile } from "../providers/fs-atomic.ts";
 import { log } from "../swarmclaw/mcp/stdio-transport.ts";
 import {
   COLLECTIVE_BANK_ID,
@@ -187,10 +189,15 @@ function escAttr(s: string): string {
 }
 
 function observationXml(o: KgObservation): string {
+  // Recalled text is substrate data, so it can carry code points the brief
+  // schema refuses (\r, \v, \f, DEL, C1, U+2028/2029) — the strip happens
+  // HERE, before wrapping/ceiling, so a poisoned bank degrades the block's
+  // text instead of killing dispatch with an exit-2 at schema refine time.
+  const content = kgContextSanitize(o.content);
   // documentId rides the element only when the substrate surfaced one (AC5:
   // null-tolerant — an item retained without an explicit id has none to show).
   const doc = o.documentId !== null ? ` documentId="${escAttr(o.documentId)}"` : "";
-  return `<observation id="${escAttr(o.id)}"${doc}>${escXml(o.content)}</observation>`;
+  return `<observation id="${escAttr(o.id)}"${doc}>${escXml(content)}</observation>`;
 }
 
 /**
@@ -237,13 +244,28 @@ function briefStr(brief: object, key: string): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
+/** runId becomes a filename segment, so it must be one. The raw pre-schema
+ * brief is not trusted for it: this refuses traversal ("../.."), dot-segment
+ * forgeries ("a..b" is also caught by the ".." substring rule), and
+ * over-length strings — an invalid id is treated as NO id (no row, no line),
+ * exactly the missing-requestId posture. */
+const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+
+function usableRunId(raw: string | undefined): string | undefined {
+  return raw !== undefined && SAFE_RUN_ID.test(raw) && !raw.includes("..") ? raw : undefined;
+}
+
 function writeRecallRow(dir: string | undefined, runId: string | undefined, row: RecallRow): void {
-  // No runId → no filename. Observability is skipped; priming is unaffected.
+  // No (usable) runId → no filename. Observability is skipped; priming is
+  // unaffected.
   if (runId === undefined) return;
   try {
     const base = dir ?? DEFAULT_RECALL_DIR;
     mkdirSync(base, { recursive: true });
-    writeFileSync(join(base, `${runId}.json`), `${JSON.stringify(row)}\n`);
+    // Temp + rename (the fs-atomic posture): a crash mid-write must leave the
+    // prior row complete, never a truncated one. A replayed requestId reuses
+    // the filename — documented last-wins.
+    atomicReplaceFile(join(base, `${runId}.json`), `${JSON.stringify(row)}\n`);
   } catch {
     // The side channel must never break dispatch — a full disk degrades to a
     // missing row, which M1.3 reads as an uncounted cycle, not a crash.
@@ -266,7 +288,12 @@ export async function primeDispatchBrief<T extends object>(
   // no line, same object reference.
   if (!memoryEnvConfigured()) return briefJson;
   const startedAt = Date.now();
-  const runId = briefStr(briefJson, "requestId");
+  // Validated ONCE, at the derivation point: both the row and the log line
+  // below then treat an unsafe id exactly like a missing one (F1 — the raw
+  // pre-schema brief must never reach a filename or the log's runId field).
+  const runId = usableRunId(briefStr(briefJson, "requestId"));
+  // banks:[] on a PRE-RECALL failure is truthful — zero banks were attempted
+  // — and the error detail rides the log line, not the row (D2).
   let attempted: string[] = [];
   let bankMs: Record<string, number> = {};
   let recallMs: number | undefined;
@@ -291,19 +318,25 @@ export async function primeDispatchBrief<T extends object>(
       latencyMs,
     });
     if (runId !== undefined) {
-      log({
-        requestId: runId,
-        operation: "kg-recall",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: latencyMs,
-        status: primed ? "ok" : "error",
-        runId,
-        directive,
-        banks: attempted,
-        chars,
-        ...(recallMs !== undefined ? { recallMs, bankMs } : {}),
-      });
+      // Never-throw is the seam's contract, independent of the sink's
+      // behaviour — the row above is already guarded the same way.
+      try {
+        log({
+          requestId: runId,
+          operation: "kg-recall",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: latencyMs,
+          status: primed ? "ok" : "error",
+          runId,
+          directive,
+          banks: attempted,
+          chars,
+          ...(recallMs !== undefined ? { recallMs, bankMs } : {}),
+        });
+      } catch {
+        // A broken sink degrades to a missing line; priming still returns.
+      }
     }
     return kgContext === undefined ? briefJson : ({ ...briefJson, kgContext } as T);
   };
@@ -319,7 +352,11 @@ export async function primeDispatchBrief<T extends object>(
     const existing = extractExistingBankIds(await client.listBanks());
     const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
     if (repoBankId === null) return emitAndReturn(false, "none", undefined, []);
-    const workId = briefStr(briefJson, "workId") ?? briefStr(briefJson, "issueId");
+    // BriefSchema types issueId as a NUMBER, so a string probe never engaged
+    // for it — numeric-issue dispatches were recalling on repoSlug alone.
+    const rawIssueId = (briefJson as Record<string, unknown>).issueId;
+    const workId = briefStr(briefJson, "workId") ??
+      (typeof rawIssueId === "number" ? String(rawIssueId) : undefined);
     // Short deterministic query — same brief always recalls the same thing.
     const query = `${repoSlug} ${workId ?? ""}`.trim();
     const fan = await recallFanOut(client, repoBankId, query);

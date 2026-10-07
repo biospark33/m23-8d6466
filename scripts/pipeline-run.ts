@@ -153,6 +153,7 @@ import {
 } from "../src/phase-engine/resident-bounds.ts";
 import { loadRoster } from "../src/phase-engine/roster/schema.ts";
 import { ACKS_READ_CAP_BYTES, acksPath, localSteeringInbox } from "../src/fleet/attach.ts";
+import { kgContextIsWellFormed } from "../src/fleet/brief-schema.ts";
 import {
   CgroupUnenforceableError,
   DEFAULT_RESIDENT_SLUG,
@@ -1585,10 +1586,15 @@ function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[
  * witness-borne strings reach the resident's prompt the way manifest-borne
  * strings reach log messages (types.ts's one-shared-implementation rule); a
  * newline in a hand-forged witness value must not forge instruction lines.
- * The ONE exception is `kgContext` (INV-KG-3): BriefSchema already bounds and
- * charset-guards that field, and its value IS a multi-line XML block, so
- * sanitizeForMessage would escape the newlines and destroy it — it is appended
- * verbatim, with the schema as the boundary guard instead of this renderer.
+ * The ONE exception is `kgContext` (INV-KG-3): its value IS a multi-line XML
+ * block, so sanitizeForMessage would escape the newlines and destroy it — it
+ * is appended verbatim, NOT routed through the sanitizer, but gated on the
+ * full kgContextIsWellFormed predicate instead. Re-checking here is not
+ * distrust of the schema: the brief reached this box through run-context.json,
+ * a witness FILE inside the checkout that the run's own phases can rewrite
+ * (the same discipline fixContext's copy assumes), so the box side re-validates
+ * and a non-well-formed value is DROPPED rather than fatal — grounding is
+ * best-effort and the resident proceeds unprimed.
  * Bounded by construction; steering.ts enforces the 16,000-char prompt
  * ceiling at render, head-truncated with the directive instruction reserved.
  */
@@ -1614,13 +1620,15 @@ export function residentContextLines(
       )
       .join(", ")}`,
   );
-  // Appended LAST, verbatim, and only when present: absent = the lines above
-  // exactly as before. NOT routed through sanitizeForMessage — the schema's
-  // ceiling + control-char refine (INV-KG-3) are the boundary guard, and the
-  // escaping this function applies everywhere else would flatten the block's
-  // newlines into \n literals and hand the resident a dead context.
+  // Appended LAST, verbatim, and only when present AND well-formed: absent =
+  // the lines above exactly as before. NOT routed through sanitizeForMessage —
+  // the escaping this function applies everywhere else would flatten the
+  // block's newlines into \n literals and hand the resident a dead context —
+  // so the whole kgContextIsWellFormed predicate is re-checked here instead:
+  // the witness is workload-writable (see the docstring), and a value that
+  // fails it is dropped, fail-closed, not thrown.
   const kgContext = brief.kgContext;
-  if (typeof kgContext === "string" && kgContext.length > 0) {
+  if (typeof kgContext === "string" && kgContext.length > 0 && kgContextIsWellFormed(kgContext)) {
     lines.push(kgContext);
   }
   return lines;

@@ -309,16 +309,35 @@ export class HindsightClient {
       };
     }
     const body: Record<string, unknown> = { items: [item] };
-    return this.requestJSON(
+    // F6: 0.10.0 answers a refused retain with 2xx + success:false, and the
+    // legacy view the schema transform emits carries no `success` — so the wire
+    // check happens HERE on the raw body, before the strict parse (same shape
+    // as deleteBank's F-015 arm). Only an explicit false refuses; missing key /
+    // non-object bodies fall through to the normal parse (which still 502s on
+    // malformed shapes).
+    const raw = await this.request(
       "POST",
       `/v1/default/banks/${bankId}/memories`,
       body,
       RETAIN_TIMEOUT_MS,
       "retain",
       bankId,
-      RetainResponseSchema,
       requestId,
     );
+    if (raw !== null && typeof raw === "object" && (raw as { success?: unknown }).success === false) {
+      throw new HindsightHttpError(502, "retain refused by server (success:false)", requestId);
+    }
+    // Same parse as requestJSON — inlined only because the raw body must be
+    // inspected above before it is narrowed by the schema transform.
+    const parsed = RetainResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new HindsightHttpError(
+        502,
+        `Hindsight response failed schema validation: ${parsed.error.message}`,
+        requestId,
+      );
+    }
+    return parsed.data;
   }
 
   async recall(bankId: string, query: string, limit = 5): Promise<RecallResponse> {

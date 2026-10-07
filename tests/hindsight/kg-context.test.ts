@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -311,6 +311,48 @@ describe("kg context assembly", () => {
     expect(block).not.toContain("<b>");
   });
 
+  test("recalled text is charset-stripped, not dropped: \\r and U+2028 removed, text kept", async () => {
+    configEnv();
+    const client = fakeClient({
+      recall: async () => ({
+        results: [
+          {
+            memoryId: "obs-cr",
+            // \r and U+2028 are refused by the brief schema's kgContext refine —
+            // unstripped, a poisoned bank would exit-2 at dispatch.
+            content: "line1\rline2\u2028line3",
+            score: 0.9,
+            documentId: null,
+          },
+        ],
+        durationMs: 1,
+      }),
+    });
+    const primed = (await primeDispatchBrief(brief(), { client, recallDir: dir })) as {
+      kgContext?: string;
+    };
+    const kg = primed.kgContext ?? "";
+    expect(kg).not.toContain("\r");
+    expect(kg).not.toContain("\u2028");
+    // Stripped, not dropped whole — the fact itself still grounds.
+    expect(kg).toContain("line1line2");
+    expect(kg).toContain("line3");
+    // Atomic write: the rename completed (row parses above via readRow) and
+    // left no temp behind.
+    expect(readdirSync(dir).every((f) => !f.endsWith(".tmp"))).toBe(true);
+    expect(readRow().directive).toBe("kg_context");
+  });
+
+  test("numeric issueId reaches the recall query (BriefSchema types issueId as number)", async () => {
+    configEnv();
+    const client = fakeClient({});
+    await primeDispatchBrief({ requestId: RUN_ID, repoSlug: REPO_SLUG, issueId: 42 }, {
+      client,
+      recallDir: dir,
+    });
+    expect(client.calls[0]?.query).toBe("acme/widget 42");
+  });
+
   test("recallFanOut dedups when the repo bank IS the collective", async () => {
     const client = fakeClient({});
     const fan = await recallFanOut(client, COLLECTIVE, "q");
@@ -420,6 +462,21 @@ describe("kg context ladder negative controls", () => {
     expect(typeof primed.kgContext).toBe("string"); // primed, just unobservable
     expect(rowFileExists("undefined.json")).toBe(false);
     expect(kgRecallEntries().length).toBe(0);
+  });
+
+  test("unsafe requestId (traversal / dot-segment forgery) is treated as NO id: no row file anywhere, no line, priming unaffected", async () => {
+    configEnv();
+    for (const requestId of ["../../evil", "..", "a..b", ".hidden", "has space", "a".repeat(64)]) {
+      const b = { requestId, repoSlug: REPO_SLUG };
+      const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir })) as
+        Record<string, unknown>;
+      // Priming is unaffected by observability's refusal.
+      expect(typeof primed.kgContext).toBe("string");
+      // No file AT ALL in the side-channel dir — a traversal id must not land
+      // as any filename segment, inside or outside the dir.
+      expect(readdirSync(dir)).toEqual([]);
+      expect(kgRecallEntries().length).toBe(0);
+    }
   });
 
   test("unconfigured env (including empty-string values): no row file, no log line, byte-identical brief", async () => {

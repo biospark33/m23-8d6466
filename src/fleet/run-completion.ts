@@ -34,7 +34,7 @@
  * `withRunLock` wrap, which would throw on re-entry.
  */
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
-import { extractExistingBankIds, resolveRepoBankId } from "../hindsight/bank-provisioner.ts";
+import { extractExistingBankIds } from "../hindsight/bank-provisioner.ts";
 import { HindsightClient } from "../hindsight/client.ts";
 import { retainRunOutcome } from "../hindsight/run-retain.ts";
 import { resolveBankId } from "../hindsight/schemas.ts";
@@ -206,15 +206,25 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * `retainRunOutcomeBestEffort`. scripts/fleet.ts imports THIS module, so
  * importing its helper back would be a cycle; this small duplication is the
  * sanctioned fallback, and both twins call the SAME src/hindsight functions —
- * same env gate, same provision-time bank resolution, same `retainRunOutcome`
+ * same env gate, same presence-based bank resolution, same `retainRunOutcome`
  * seam. (The sweep's chain rides this too: observe.ts builds this module's
  * deps for every candidate, so batch and single-run retain identically.)
  *
  * Same contract as the twin: env-unconfigured memory skips entirely (no row,
  * no line, chain untouched); everything else is failure-isolated — a retain
  * refusal is one structured error line, never a chain failure, because the
- * harvest leg landed either way.
+ * harvest leg landed either way. The bank is resolved by PRESENCE against the
+ * LIVE list (F16): the retain targets the PROVISIONED bank —
+ * `resolveBankId(repoSlug)`, the id `provisionBanks` creates in the common
+ * case — and a bank absent from the list was never provisioned (retaining
+ * into it is an opaque 404). The CREATE-side collision resolver is
+ * deliberately NOT used here: it returns ids NOT in the live list, so it can
+ * never locate the provisioned bank.
  */
+// F17: the retain's wall-clock cap — best-effort never dwells past it on the
+// chain's teardown critical path.
+const RETAIN_BEST_EFFORT_WALL_MS = 10_000;
+
 async function postHarvestRetain(
   deps: RunCompletionDeps,
   info: { runId: string; requestId: string; outcome: "harvested" | "none"; count?: number },
@@ -223,20 +233,50 @@ async function postHarvestRetain(
     Boolean(process.env.HINDSIGHT_BASE_URL) &&
     Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
   if (!envConfigured) return;
-  try {
+  // F9: this line is the helper's LAST resort — its own emission must never
+  // throw past it (a raising log sink must not turn a skipped retain into a
+  // crashed chain step).
+  const skipLine = (code: string, reason: string): void => {
+    try {
+      log({
+        requestId: info.requestId,
+        operation: "memory-retain",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        runId: info.runId,
+        error: { code, message: reason },
+        reason:
+          "harvest retain skipped — the harvest leg landed and its exit is unchanged (M1.2 AC4 best-effort)",
+      });
+    } catch {
+      // Silence is the last resort.
+    }
+  };
+  const retainOnce = async (): Promise<void> => {
     const rec = deps.store.get(info.runId);
-    // The RECORD's stamp is the join key whenever it carries one.
+    // The RECORD's stamp is the join key whenever it carries one. (F14: when
+    // NEITHER the record nor the invocation carries one there is no join key
+    // at all — a benign skip, not a failure.)
     const requestId = recordRequestId(rec, deps);
+    if (requestId.length === 0) {
+      skipLine("retain-skipped", `run ${info.runId} carries no requestId — the retain's join key is unknown`);
+      return;
+    }
     const repoSlug = rec.extensions?.budget?.repoSlug;
     if (typeof repoSlug !== "string" || repoSlug.length === 0) {
       // INV-AUDIT-4 posture: no attribution, no invented bank — skipped loudly.
-      throw new Error(`run ${info.runId} carries no budget.repoSlug — the retain's bank is unknown`);
+      skipLine("retain-skipped", `run ${info.runId} carries no budget.repoSlug — the retain's bank is unknown`);
+      return;
     }
+    const repoBankId = resolveBankId(repoSlug);
     const client = new HindsightClient();
     const existing = extractExistingBankIds(await client.listBanks());
-    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
-    if (repoBankId === null) {
-      throw new Error(`run ${info.runId}'s repo bank id did not resolve against the live bank list`);
+    // F16: only a bank that EXISTS is retainable — see the header above.
+    if (!existing.has(repoBankId)) {
+      skipLine("retain-skipped", `run ${info.runId}'s repo memory bank is absent from the live bank list — never provisioned`);
+      return;
     }
     await retainRunOutcome(
       client,
@@ -255,19 +295,37 @@ async function postHarvestRetain(
         repoBankId,
       },
     );
+  };
+  // F17: the whole post-env-gate body rides the wall clock. A body that
+  // loses the race keeps running, but its late rejection must not surface as
+  // an unhandled rejection — the timeout line is the only witness the cap
+  // owes the operator.
+  const body = retainOnce();
+  body.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      body,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          skipLine("retain-timeout", `the retain exceeded its ${RETAIN_BEST_EFFORT_WALL_MS}ms wall-clock cap`);
+          resolve();
+        }, RETAIN_BEST_EFFORT_WALL_MS);
+      }),
+    ]);
   } catch (e) {
-    log({
-      agentId: null,
-      timestamp: new Date().toISOString(),
-      duration: 0,
-      status: "error",
-      requestId: info.requestId,
-      operation: "memory-retain",
-      runId: info.runId,
-      error: { code: "retain-failed", message: errText(e) },
-      reason:
-        "harvest retain skipped — the harvest leg landed and the chain's exit is unchanged (M1.2 AC4 best-effort)",
-    });
+    // F9: the failure line's own construction (String/redactSecrets over a
+    // hostile throwable) is guarded too — the catch never throws past itself.
+    try {
+      skipLine(
+        "retain-failed",
+        redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200) || "the retain call failed",
+      );
+    } catch {
+      // Silence — see F9 above.
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 

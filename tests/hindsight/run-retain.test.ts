@@ -368,6 +368,42 @@ describe("run retain negative controls", () => {
     }
   });
 
+  test("deriveDocumentId refuses a NON-STRING runId with the typed error, not a TypeError [F18]", () => {
+    // The message stringifies the offending value safely (String(runId).slice),
+    // so the typed retain-run-id-invalid surfaces even when the caller passes a
+    // non-string (the old code called .slice on the raw value and died with an
+    // untyped TypeError before the refusal could).
+    let thrown: unknown;
+    try {
+      deriveDocumentId(123 as never);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(RunRetainError);
+    expect((thrown as RunRetainError).code).toBe("retain-run-id-invalid");
+    expect((thrown as RunRetainError).message).toContain("123");
+  });
+
+  test("bundlePath, when present, must be a bounded printable string — refused pre-network [F8]", () => {
+    const { calls, client } = fakeClient();
+    const oversize = runInput({ bundlePath: "a".repeat(513) }); // one char past the bound
+    const controlChar = runInput({ bundlePath: ".sandbox/bundles/\u0000evil.tar.zst" });
+    for (const bad of [oversize, controlChar]) {
+      let thrown: unknown;
+      try {
+        buildRetainPayload(bad);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(RunRetainError);
+      expect((thrown as RunRetainError).code).toBe("retain-payload-invalid");
+      expect((thrown as RunRetainError).message).toContain("bundlePath");
+    }
+    // Both refuse inside the builder — the fake client's retain is never reached.
+    expect(calls.length).toBe(0);
+    return expect(retainRunOutcome(client, undefined, oversize)).rejects.toBeInstanceOf(RunRetainError);
+  });
+
   test("no per-run credential parameter exists on the surface (INV-KG-2)", async () => {
     // The input surface is the closed RunRetainInput shape — no apiKey, no
     // token, no memory key slot exists for a caller to fill.

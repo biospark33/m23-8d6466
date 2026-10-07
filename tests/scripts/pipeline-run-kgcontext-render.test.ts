@@ -1,8 +1,10 @@
 /**
  * M1.2 AC3: `residentContextLines` renders the brief's `kgContext` verbatim as
- * its own trailing block when present (INV-KG-3 — the schema's ceiling and
- * control-char refine are the boundary guard; sanitizeForMessage would destroy
- * the multi-line XML), and produces byte-identical lines when absent.
+ * its own trailing block when present AND well-formed (INV-KG-3 — the schema's
+ * ceiling and control-char refine are the host-side guard, and the renderer
+ * re-applies the same predicate because the witness is workload-writable;
+ * sanitizeForMessage would destroy the multi-line XML), and produces
+ * byte-identical lines when absent or when the value fails the predicate.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -60,5 +62,28 @@ describe("kgContext resident render", () => {
     expect(empty).toEqual(residentContextLines(RUN_ID, MANIFEST, BRIEF));
     const nonString = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: 7 });
     expect(nonString).toEqual(residentContextLines(RUN_ID, MANIFEST, BRIEF));
+  });
+
+  test("a non-well-formed kgContext is dropped, render otherwise unchanged", () => {
+    const baseline = residentContextLines(RUN_ID, MANIFEST, BRIEF);
+    // Over-ceiling: the host schema's .max refuses this shape, but the brief
+    // reaches the box through run-context.json, a witness FILE the run's own
+    // phases can rewrite — so the renderer re-validates and DROPS (fail-closed
+    // degrade: grounding is best-effort, the resident proceeds unprimed).
+    const over = residentContextLines(RUN_ID, MANIFEST, {
+      ...BRIEF,
+      kgContext: "x".repeat(8_001),
+    });
+    expect(over).toEqual(baseline);
+    // Control-char-bearing: a bare CR (refused by the kgContext charset, even
+    // inside the block grammar) must not reach the prompt.
+    const crl = residentContextLines(RUN_ID, MANIFEST, {
+      ...BRIEF,
+      kgContext: "<kg_context>bad\x0brun\x7f</kg_context>",
+    });
+    expect(crl).toEqual(baseline);
+    // C1 (NEL U+0085) is in the refused category too.
+    const c1 = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: "a\x85b" });
+    expect(c1).toEqual(baseline);
   });
 });

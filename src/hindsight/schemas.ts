@@ -65,9 +65,17 @@ export function resolveBankId(repoSlug: string): string {
  * retained twice upserts to ONE document, and `metadata.tags` 422s (evidence:
  * _bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json,
  * `documentsAfter1`/`documentsAfter2` = 1 + note).
+ *
+ * F21: `bank_id` is OPTIONAL and no longer required — the REAL body the client
+ * sends is `{items:[...]}` with the bank scoped in the URL path
+ * (`POST /v1/default/banks/{bank_id}/memories`); a required top-level
+ * `bank_id` described a body nobody sends. Kept as an optional passthrough so
+ * any future body-borne bank_id still validates (grep verified: no consumer
+ * parses outgoing bodies with this schema — it is only re-exported from
+ * index.ts).
  */
 export const RetainPayloadSchema = z.object({
-  bank_id: BankIdSchema,
+  bank_id: BankIdSchema.optional(),
   items: z
     .array(
       z.object({
@@ -100,6 +108,10 @@ export const RetainPayloadSchema = z.object({
 export const RetainExtensionSchema = z.object({
   documentId: z.string().optional(),
   updateMode: z.literal("replace").optional(),
+  // F20: tags are schema-OWNED here (the client maps them TOP-LEVEL on the wire
+  // item — never metadata.tags, which 0.10.0 422s on). A non-array refusal
+  // fires at the client boundary, before fetch.
+  tags: z.array(z.string()).optional(),
 });
 
 export const RecallPayloadSchema = z.object({

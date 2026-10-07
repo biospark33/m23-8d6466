@@ -90,6 +90,7 @@ import {
   liveTodoOff,
   listedKeyHashes,
   preflight,
+  recoverDispatchIds,
   runFleet,
   scratchClone,
   secretHitsIn,
@@ -363,11 +364,16 @@ describe("memory cycle live", () => {
           fallback: "host-side retain-identity ledger keyed on documentId → skip-on-replay replaces server-side replace (DD-28.3 design intent, gated on this echo)",
         });
         try {
-          // PROVE the fallback on a fresh bank: retain once, then replay
-          // through the ledger — the entry is present, so the replay retain
-          // is SKIPPED (no second retain call is made) — and the substrate
-          // must hold EXACTLY ONE document for the identity. The skip is the
-          // ledger's contract; the recall is its substrate proof.
+          // PROVE the fallback on a fresh bank, honestly (F10 — no invented
+          // counts): 1. retain once (the identity's first sight on the
+          // substrate); 2. write the identity into the REAL host-side ledger
+          // file; 3. run a SECOND retain attempt whose gate CONSULTS the file
+          // — identity present → the network retain is SKIPPED (no retain
+          // call is made); 4. recall and assert the substrate STILL holds
+          // EXACTLY ONE document for the identity. Only then is
+          // `replaysSkipped` written into the ledger — a count naming
+          // something that actually happened. Any step that cannot be proven
+          // fails the leg (the catch below).
           const bankB = probeBankId();
           banks.push(bankB);
           await client.createBank(bankB);
@@ -375,15 +381,57 @@ describe("memory cycle live", () => {
           await client.retain(bankB, content, retainOpts);
           const demo = await recallPolled(client, bankB, docId, docId);
           const oneDocument = demo.res.results.filter((r) => r.documentId === docId).length === 1;
-          evidence.push({ phase: "fallback-proof", bankId: bankB, replaySkipped: true, oneDocument, pollCounts: demo.counts });
+          evidence.push({ phase: "fallback-first-retain", bankId: bankB, oneDocument, pollCounts: demo.counts });
           expect(oneDocument).toBe(true);
 
           // The ledger: the round's retain-identity record, keyed on
           // documentId, written under the round's evidence artifacts dir —
           // L1 has no run artifacts of its own, and a tmpdir would discard
-          // the one artifact the fallback exists to leave behind.
+          // the one artifact the fallback exists to leave behind. The count
+          // is NOT in this write: nothing has been skipped yet.
           mkdirSync(M12_EVIDENCE_DIR, { recursive: true });
           const ledgerPath = join(M12_EVIDENCE_DIR, `m12-retain-identity-ledger-${datedStamp()}-${Math.random().toString(36).slice(2, 6)}.json`);
+          writeFileSync(
+            ledgerPath,
+            `${JSON.stringify(
+              {
+                mode,
+                keyedOn: "documentId",
+                entries: [
+                  {
+                    documentId: docId,
+                    contentDigest: sha256Hex(content),
+                    firstRetainedAt: firstSeenAt,
+                    replayPolicy: "skip-on-replay",
+                  },
+                ],
+              },
+              null,
+              2,
+            )}\n`,
+          );
+
+          // The SECOND retain attempt consults the FILE — not the in-memory
+          // object, because the ledger's whole point is what a host-side
+          // reader sees — and the identity being present is what SKIPS the
+          // network retain. This leg is the retain's only author, so zero
+          // retain calls here is a fact, not a claim; the recall below is the
+          // substrate proof.
+          const consulted = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+            entries: { documentId: string; contentDigest: string }[];
+          };
+          const identityPresent = consulted.entries.some(
+            (entry) => entry.documentId === docId && entry.contentDigest === sha256Hex(content),
+          );
+          expect(identityPresent).toBe(true);
+          evidence.push({ phase: "fallback-replay-attempt", ledgerPath, identityPresent, networkRetainCalls: 0 });
+
+          const afterSkip = await recallPolled(client, bankB, docId, docId);
+          const stillOne = afterSkip.res.results.filter((r) => r.documentId === docId).length === 1;
+          evidence.push({ phase: "fallback-skip-proof", stillOne, pollCounts: afterSkip.counts });
+          expect(stillOne).toBe(true);
+
+          // NOW the count is written — the skip happened and was proven.
           writeFileSync(
             ledgerPath,
             `${JSON.stringify(
@@ -404,7 +452,7 @@ describe("memory cycle live", () => {
               2,
             )}\n`,
           );
-          evidence.push({ phase: "fallback-ledger", ledgerPath });
+          evidence.push({ phase: "fallback-ledger", ledgerPath, replaysSkipped: 1, proven: true });
           // The fallback engaged AND its proof held: this is the leg's pass
           // condition ("continue the round with the fallback engaged") — the
           // echo failure stays recorded in the evidence, not in the verdict.
@@ -532,18 +580,36 @@ describe("memory cycle live", () => {
           { cwd: REPO_ROOT, env, timeoutMs: 1_200_000 },
         ).catch((e: unknown) => {
           const partial = fleetPartialOutput(e);
-          round.evidence.push({ phase: "dispatch-verb-timeout", error: (e as Error).message, recoveredBytes: partial.stdout.length + partial.stderr.length });
+          // F4: arm ownership from the raw partial streams BEFORE rethrowing —
+          // dispatch reaches the substrate before it can still fail, and these
+          // bytes are the only handle on the box on this path.
+          // `recoverDispatchIds` is `emittedRunId`'s documented failure-path
+          // twin (refusal envelopes + teardown remediation lines name the box).
+          const recovered = recoverDispatchIds(partial.stdout, partial.stderr);
+          if (round.runId === "" && recovered.runId !== "") round.runId = recovered.runId;
+          if (round.vmName === "" && recovered.vmName !== "") round.vmName = recovered.vmName;
+          round.evidence.push({
+            phase: "dispatch-verb-timeout",
+            error: (e as Error).message,
+            recoveredRunId: round.runId || null,
+            recoveredVmName: round.vmName || null,
+            recoveredBytes: partial.stdout.length + partial.stderr.length,
+          });
           throw e;
         });
-        // Ownership armed BEFORE the assertion that can throw (EB3 rule):
-        // dispatch names a box before it can still fail.
+        // Ownership armed BEFORE the assertions that can throw (EB3 rule, F4):
+        // dispatch names a box before it can still fail. The ack JSON's own
+        // values are set AS FAR AS THEY ARE KNOWN — runId already armed from
+        // the raw streams, vmName from the parsed ack — so a failed exit/state
+        // assertion still leaves L3's finally the ids to tear the box down
+        // with. Existing armed values are never clobbered.
+        const ack = lastJsonLine<{ runId?: string; vmName?: string; state?: string }>(dispatch.stdout);
+        if (ack.runId !== undefined && ack.runId !== "" && round.runId === "") round.runId = ack.runId;
+        if (ack.vmName !== undefined && ack.vmName !== "" && round.vmName === "") round.vmName = ack.vmName;
         const emitted = emittedRunId(dispatch.stdout, dispatch.stderr);
-        if (emitted !== undefined) round.runId = emitted;
+        if (emitted !== undefined && round.runId === "") round.runId = emitted;
         round.evidence.push({ phase: "dispatch-verb", exitCode: dispatch.exitCode, stdoutTail: dispatch.stdout.trim().slice(-400), stderrTail: dispatch.stderr.trim().slice(-600) });
         expect(dispatch.exitCode).toBe(0);
-        const ack = lastJsonLine<{ runId: string; vmName: string; state: string }>(dispatch.stdout);
-        round.runId = ack.runId;
-        round.vmName = ack.vmName;
         expect(ack.state).toBe("ready");
         expect(round.runId).toMatch(MINTED_RUN_ID);
         round.evidence.push({ phase: "ack", runId: round.runId, vmName: round.vmName });
@@ -616,9 +682,13 @@ describe("memory cycle live", () => {
     //   evidence + local                                       ~   10 s
     //                                                     body ≈ 2580 s
     //   finally (evidence write only)                          ~   10 s
-    // Hence 2_580 s → 2_640 s. NO cleanup legs here (L3 owns them): a bun
-    // timeout abort skips this finally only — the box/key leak is still
-    // recovered by L3's finally, which always runs after this one.
+    // Hence 2_580 s → 2_640 s. NO cleanup legs here (L3 owns the verdicts):
+    // every failure path arms the round's ids first — the dispatch timeout
+    // via recoverDispatchIds on the partial streams, later failures via the
+    // ack values set before any assertion that can throw — and L3's finally
+    // now ALWAYS runs (F4: its hollow-leg guard throws INSIDE L3's try) and
+    // tears down every resource those ids name. Only a bun timeout abort of
+    // the runner itself skips even that.
     2_640_000,
   );
 
@@ -628,9 +698,6 @@ describe("memory cycle live", () => {
     async () => {
       liveGate("2");
       const ctx = round.ctx;
-      if (ctx === undefined || round.runId === "" || round.vmName === "" || round.repoBankId === "") {
-        throw new Error("L2 did not reach preflight/dispatch — nothing to harvest; refusing to fire a hollow leg");
-      }
       const { recordsDir, runId, vmName, auditDb, repoBankId } = round;
       const env = { QDS_AUDIT_DB: auditDb };
       let failure: unknown;
@@ -644,6 +711,14 @@ describe("memory cycle live", () => {
        * failed double-destroy would fail a green round via destroyFailures). */
       let bodyTeardownOk = false;
       try {
+        // F4: FIRST statement INSIDE the try — the hollow-leg refusal throws
+        // into the try, so the finally below ALWAYS runs. A partial L2
+        // (dispatch provisioned, then timed out) arrives armed with the ids
+        // recovered from the dispatch streams, and this finally tears those
+        // armed resources down instead of leaking them.
+        if (ctx === undefined || round.runId === "" || round.vmName === "" || round.repoBankId === "") {
+          throw new Error("L2 did not reach preflight/dispatch — nothing to harvest; refusing to fire a hollow leg");
+        }
         const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, round.workspace);
 
         // ── the harvest verb (real harvest path; receipt into the round store)
@@ -743,7 +818,10 @@ describe("memory cycle live", () => {
       } finally {
         // Failure-path backstops (never throw over the held body error):
         // teardown verb, box destroy, key revoke — the L2/L3 shared substrate.
-        if (round.workspace !== "" && recordsDir !== "") {
+        // F4: each step guards on its OWN armed id (and on ctx, which only
+        // exists once preflight returned), so a partial L2 cleans exactly the
+        // resources that exist and a hollow leg skips every unarmed one.
+        if (ctx !== undefined && recordsDir !== "" && runId !== "") {
           const torn = await teardownQuietly(
             ["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"],
             { env, timeoutMs: 180_000 },
@@ -752,12 +830,13 @@ describe("memory cycle live", () => {
           );
           if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
         }
-        if (vmName !== "" && !bodyTeardownOk) {
+        if (ctx !== undefined && vmName !== "" && !bodyTeardownOk) {
           const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
           if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
         }
         // Probe-bank cleanup — ONLY banks this round created (resolver-fresh;
-        // a pre-existing production bank is never deleted).
+        // a pre-existing production bank is never deleted). The loop is its
+        // own unarmed guard: no armed bank, no iteration.
         for (const bankId of round.banksWeCreated) {
           try {
             const deleted = await new HindsightClient().deleteBank(bankId);
@@ -766,14 +845,16 @@ describe("memory cycle live", () => {
             bankProblems.push(`probe bank ${bankId} delete FAILED: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
-        finalBoxes = (await fleetLeftovers(ctx.driver, [vmName, runId], evidence)).owned;
-        let recordStore: RunRecordStore | undefined;
-        try {
-          if (recordsDir !== "") recordStore = new RunRecordStore({ dir: recordsDir });
-        } catch (e) {
-          evidence.push({ phase: "finally-store", ok: false, error: (e as Error).message });
+        if (ctx !== undefined) {
+          finalBoxes = (await fleetLeftovers(ctx.driver, [vmName, runId], evidence)).owned;
+          let recordStore: RunRecordStore | undefined;
+          try {
+            if (recordsDir !== "") recordStore = new RunRecordStore({ dir: recordsDir });
+          } catch (e) {
+            evidence.push({ phase: "finally-store", ok: false, error: (e as Error).message });
+          }
+          keyProblems = await keyLeakProblems(round.hashesBefore, { driver: ctx.driver, store: recordStore, runIds: [runId] }, evidence);
         }
-        keyProblems = await keyLeakProblems(round.hashesBefore, { driver: ctx.driver, store: recordStore, runIds: [runId] }, evidence);
         writeM12EvidenceQuietly(
           "m12-l3-harvest-retain",
           {
@@ -781,14 +862,22 @@ describe("memory cycle live", () => {
             runId,
             vmName,
             repoBankId,
-            image: { ref: ctx.driver.image, buildId: ctx.driver.imageBuildId },
+            image: ctx === undefined ? null : { ref: ctx.driver.image, buildId: ctx.driver.imageBuildId },
             phases: evidence,
           },
           bankProblems,
         );
         if (round.workspace !== "") rmSync(round.workspace, { recursive: true, force: true });
       }
-      settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...bankProblems]);
+      settleRun(
+        failure,
+        // F4: ctx undefined means preflight never returned — no box, key or
+        // bank could exist (preflight's only side effects are read-only), so
+        // there is no fleet/key verdict to render and none is faked as clean.
+        ctx === undefined
+          ? [...destroyFailures, ...bankProblems]
+          : [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...bankProblems],
+      );
     },
     //   scratchClone allowance                                   ~ 180 s
     //   harvest verb                             300_000         ~ 300 s

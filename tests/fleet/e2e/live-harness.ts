@@ -377,7 +377,27 @@ export function recoverDispatchIds(stdout: string, stderr: string): { runId: str
  * failed) — there is genuinely nothing to own in that case.
  */
 export function emittedRunId(stdout: string, stderr: string): string | undefined {
-  return new RegExp(`"runId"\\s*:\\s*"(${MINTED_RUN_ID_RE.source})"`).exec(`${stdout}\n${stderr}`)?.[1];
+  // F11: the kg-recall seam's log line (kg-context.ts) carries a `runId`
+  // field of its own — the brief's requestId, which SAFE_RUN_ID admits in a
+  // qds shape — and that line lands on stderr BEFORE dispatch's ack, so the
+  // first match could arm ownership with the seam's id instead of the verb's.
+  // A line whose parsed JSON carries `operation: "kg-recall"` is the seam,
+  // never a verb verdict, so it is SKIPPED. This is strictly narrowing: every
+  // line this helper matched before is still matched (the dispatch ack JSON,
+  // the refusal envelopes, remediation prose — none carry that operation), so
+  // the sibling tiers that arm ownership from it keep their existing ids.
+  for (const line of `${stdout}\n${stderr}`.split("\n")) {
+    const m = new RegExp(`"runId"\\s*:\\s*"(${MINTED_RUN_ID_RE.source})"`).exec(line);
+    if (m === null) continue;
+    try {
+      if ((JSON.parse(line) as { operation?: unknown }).operation === "kg-recall") continue;
+    } catch {
+      // not a JSON line — the match stands (the free-text case the docblock
+      // above covers)
+    }
+    return m[1];
+  }
+  return undefined;
 }
 
 // ─── evidence ────────────────────────────────────────────────────────────────

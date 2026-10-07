@@ -91,6 +91,8 @@ Two host-side legs around the existing run lifecycle, both outside the box: **di
 
 ## Observability Contract
 
+> **Amendment R5 (implementation record):** the side-channel row is keyed on the brief's `requestId` — the correlation id available at the dispatch seam, pre-mint (the minted runId does not exist there yet). Briefs without a requestId produce no row: an uncounted cycle, known to M1.3's counter. Receipts remain keyed on the minted runId; the requestId is the join between the two.
+
 - Log vocabulary (swarmclaw/log): `kg-recall` `{runId, directive: "kg_context"|"empty"|"none", banks, chars, recallMs}` on dispatch; `memory-retain` `{runId, documentId, bank, contentDigest}` on harvest. Unconfigured env emits NEITHER line (absent, not 0).
 - Side-channel `_bmad-output/memory/recall/<runId>.json` — `{runId, primed, directive, banks, recalledDocumentIds, chars, latencyMs}`; M1.3's input; not digest-stable (not audit). Ladder (b) timeout/error DOES write the row — `{primed: false, directive: "none"}` — plus the `kg-recall` line (M1.3 counts every M1 cycle from these rows); unconfigured env writes neither row nor line.
 - Sub-timings: per-bank `recallMs` present only when recall was attempted.

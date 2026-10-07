@@ -624,6 +624,50 @@ describe("M1.2 retain surface", () => {
     });
   });
 
+  test("2xx body success:false → HindsightHttpError 502 'retain refused by server' — no silent success [F6]", async () => {
+    // The legacy view the schema transform emits carries no `success`, so a
+    // refused retain would otherwise parse clean and resolve as success.
+    installMock({ body: { success: false, items_count: 0, async: false } });
+    const client = new HindsightClient({
+      baseUrl: "http://hindsight.test",
+      requestId: "req-retain-refused",
+    });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.retain("qds-factory", "outcome body");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(502);
+    expect(caught?.message).toBe("retain refused by server (success:false)");
+    expect(caught?.requestId).toBe("req-retain-refused");
+  });
+
+  test("tags ride the RetainExtensionSchema parse; a non-array tags refuses before any fetch [F20]", async () => {
+    // Owned: the extension validates tags so a malformed one is refused at the
+    // client boundary, not drifted onto the wire.
+    expect(RetainExtensionSchema.safeParse({ tags: ["a", "b"] }).success).toBe(true);
+    expect(RetainExtensionSchema.safeParse({}).success).toBe(true);
+    expect(RetainExtensionSchema.safeParse({ tags: "run-outcome" }).success).toBe(false);
+    // And through the client: the same 422 pre-fetch refusal as updateMode.
+    installMock({ body: { success: true, items_count: 1, async: false } });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.retain("qds-factory", "x", {
+        source: "agent",
+        tags: "run-outcome" as unknown as string[],
+      });
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught?.status).toBe(422);
+    expect(caught?.message).toContain("invalid retain extension");
+    // Refusal happens at the client boundary, before request(): no fetch.
+    expect(lastCall).toBeUndefined();
+  });
+
   test("mock retain round-trips through the strict schema with no network", async () => {
     globalThis.fetch = (async () => {
       throw new Error("mock mode MUST NOT call fetch");
