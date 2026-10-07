@@ -19,6 +19,8 @@ OPENROUTER_PROVISIONING_KEY=… \
 bun test tests/fleet/e2e/memory-cycle.live.test.ts
 ```
 
+Operator notes: the round is self-contained — the probe-family seeding carries its own git `insteadOf` alias (subprocess env only) so `fill` clones the real repo despite the probe slug; the seeded `cost-config.json` pre-bounds the minted key to 50,000 µ$ (the round asserts that bound echoes back). No extra setup beyond the four inputs above.
+
 Legs: L1 echo [VERIFY DD-28.26(3)] (retain → recall `documentId` contains; replay upserts to ONE document; honest gated fallback on echo failure); L2 primed dispatch on the probe-slug family (`qds-probe/m12-<rand>` — base + `-dev-meta` seeded; zero production-memory pollution) with `<kg_context>` render + side-channel row assertions; L3 harvest retain (outcome document, exactly one `memory-retain-receipt`/`retain` row, re-harvest dedup). Cleanup (probe banks, box, key, side-channel rows) in `finally`; evidence scrubbed to `_bmad-output/evidence/m1-2/`.
 
 ## Known state at handoff
