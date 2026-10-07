@@ -1,0 +1,230 @@
+{
+ "pr": 0,
+ "round": 1,
+ "findings": [
+  {
+   "finding_id": "F-001",
+   "finding_text": "A recall error mid-scoring escapes unclassified: per-probe client.recall rejections propagate out of runProbeRecall (no refusal shape, no diagnostic, undocumented exit)",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@420b057d",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-002",
+   "finding_text": "A listBanks rejection at the integrity gate escapes as an unhandled crash instead of a label-integrity refusal",
+   "diff_context_ref": "scripts/memory/probe-schema.ts@420b057d",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-003",
+   "finding_text": "Empty probe set parses valid and writes a legitimate-looking hitRateAt5=0.0 artifact; MIN_PROBE_SET_SIZE gates only the median, and spec letter says hitRateAt5 itself is withheld below the floor",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-004",
+   "finding_text": "Present-but-unreadable cost ledger (openReadOnly/readRunCost throw) kills the whole report instead of omitting costTable with a dataNote",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-005",
+   "finding_text": "Under-lock probe-set read/parse unguarded (inconsistent with the guarded pre-lock read)",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-006",
+   "finding_text": "Growth can append duplicate probeIds (slugOf collisions), producing a set its own parser refuses \u2014 sticky bricking",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-007",
+   "finding_text": "Probe-writer lock failure (deadline/non-retryable) is fatal to the entire report; growth is auxiliary and must degrade to a dataNote",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-008",
+   "finding_text": "Readonly audit-db opens race existsSync (TOCTOU/non-sqlite file): SQLITE_CANTOPEN/NOTADB crash both readers instead of returning absent-data",
+   "diff_context_ref": "scripts/memory/probe-schema.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-009",
+   "finding_text": "costTable/outcomeTable zero-filled at zero cycles \u2014 breaches the Observability Contract's named example (absent, not 0); outcomeTable unconditional, costTable gated on file existence not data",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-010",
+   "finding_text": "dispatchFailures unreachable from the CLI (no default path/env) and an unreadable log reads as 0 failures (comforting direction)",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-011",
+   "finding_text": "Committed P0.9 evidence embeds revoked OpenRouter key-management URLs (workspace key ids) 45x \u2014 secret-hygiene redaction required",
+   "diff_context_ref": "_bmad-output/evidence/p0-9-closure@9bb63e3c",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-012",
+   "finding_text": "Growth auto-probes are id-tautological and indistinguishable from seeds in the aggregate; P0.9 loop iterates all banks but hardcodes SEED_PROBE_BANK \u2014 instrument dilution + mislabeling; fix = origin field + per-source-bank candidates + byOrigin aggregate",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-013",
+   "finding_text": "verify-m13-e2e non-hermetic (no auditPath/QDS_AUDIT_DB into tmpdir; integrity join reads the real .sandbox/audit.db) + tmpdir leaked on fail()",
+   "diff_context_ref": "scripts/dev/verify-m13-e2e.ts@420b057d",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-014",
+   "finding_text": "Stale committed artifact (all recallMs=0) from the durationMs=0 bug superseded by the fixed rerun \u2014 remove; recallMs floor for sub-ms wall-clock",
+   "diff_context_ref": "_bmad-output/evidence/memory/2026-10-07T15-51-44-573Z-hit-rate.json@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-015",
+   "finding_text": "loadP09MintRecords writtenAt lexicographic compare misorders offsets and silently drops ties \u2014 Date.parse with name-order fallback",
+   "diff_context_ref": "scripts/memory/probe-schema.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-016",
+   "finding_text": "Side-channel latencyMs accepts Infinity/negative \u2014 shape-check Number.isFinite >= 0",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-017",
+   "finding_text": "p0-9 import sends tags: [] for an empty-concepts entry \u2014 unmeasured wire shape; skip with recorded failure",
+   "diff_context_ref": "scripts/p0-9/provision-and-import.ts@9bb63e3c",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-018",
+   "finding_text": "Same-millisecond artifact stamp collision overwrites evidence \u2014 add run-unique rand per repo naming discipline",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-019",
+   "finding_text": "Canary diagnostic write is unguarded \u2014 a write failure breaks the refusal contract; artifact write failure documented",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-020",
+   "finding_text": "AC4 letter: receipt presence is an aggregate count, not a per-row data-quality field \u2014 add per-cycle rows (runId, primed, receiptPresent) to the metrics",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-021",
+   "finding_text": "Growth gate is hand-rolled instead of the SAME probe-schema integrity path \u2014 extract shared mint-membership core used by both",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-022",
+   "finding_text": "Concurrent probe-recall runs not serialized by the named acquireRunLock guard \u2014 take the lock for the run, poll bounded",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-023",
+   "finding_text": "Story Dev Agent Record miscounts the suite (43 vs 44 after canary-error hardening)",
+   "diff_context_ref": "_bmad-output/sprint-artifacts/dark-factory-v6/stories/m1-3-recall-measurement-harness.md@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-024",
+   "finding_text": "verify-test-slice: first-match summary parsing, --file bounds check, usage text; verifier vacuous canary check; header read-only wording; byte-identical test name overstates; SLOW_QUERY_THRESHOLD_MS dead export \u2014 record the DD-22 working bar as decision-input context in evidence+md",
+   "diff_context_ref": "scripts/dev/verify-test-slice.mjs@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-025",
+   "finding_text": "PrimingReportDeps.runsDir dead surface after D1",
+   "diff_context_ref": "scripts/memory/priming-report.ts@420b057d",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-026",
+   "finding_text": "Day-stamped interim report naming (B14): spec-authored (<date>-interim) \u2014 not drift",
+   "diff_context_ref": "N/A",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-027",
+   "finding_text": "Canary perturbs measured bank (B16): AC1(iii) spec-authored placement",
+   "diff_context_ref": "N/A",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  },
+  {
+   "finding_id": "F-028",
+   "finding_text": "Failed-leg evidence deleteOutcomes semantics (created banks + already-gone + empty residue) \u2014 pre-existing leg-driver classification logic, predates M1.3; file follow-up",
+   "diff_context_ref": "scripts/p0-9/leg-lib.ts@9bb63e3c",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "created_at": "2026-10-07T16:18:21+00:00"
+  }
+ ]
+}

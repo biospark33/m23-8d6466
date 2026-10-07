@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-10-07T18:47:32.955Z",
+  "cyclesToDate": 0,
+  "primedCount": 0,
+  "unprimedCount": 0,
+  "receiptCoverage": {
+    "withReceipt": 0,
+    "withoutReceipt": 0
+  },
+  "checkpointEligible": false,
+  "correlationNote": "primed-vs-unprimed deltas are correlation (observational)",
+  "dataNotes": [
+    "exitClassification is not available offline: it lives in the memory-retain retained payload, not in run records — absent section, not 0",
+    "no observed cycles: outcomeTable and per-cycle rows omitted — absent, not 0"
+  ],
+  "appendedProbes": 0,
+  "byOrigin": {
+    "seed": {
+      "probes": 23
+    },
+    "cycle": {
+      "probes": 0
+    }
+  },
+  "dispatchFailures": 57
+}

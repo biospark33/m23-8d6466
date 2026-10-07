@@ -285,7 +285,11 @@ function makeProvisionClient(
 const TMP_CORPUS = [
   { domain: "qds-test-mint-a", concepts: ["alpha", "beta"], expertise: "fixture expertise A" },
   { domain: "qds-test-mint-b", concepts: ["gamma"], expertise: "fixture expertise B" },
-  { domain: "qds-test-mint-c", concepts: [], expertise: "fixture expertise C" },
+  // F-017: an empty-concepts entry FAILS the leg by design (recorded
+  // empty-concepts-skipped failure) — the default fixture stays all-valid so
+  // the green-leg assertions below hold; the empty path is covered by the
+  // dedicated E6 test's own corpus.
+  { domain: "qds-test-mint-c", concepts: ["delta"], expertise: "fixture expertise C" },
 ];
 
 function makeTmpCorpus(): string {
@@ -1303,6 +1307,45 @@ describe("provision-and-import", () => {
       const mint = ev.mintRecord as Record<string, { documentIds: string[] }>;
       expect(Object.keys(mint).sort()).toEqual(["qds-collective", "qds-factory", "qds-factory-dev-meta"]);
       for (const bankId of Object.keys(mint)) expect(mint[bankId]!.documentIds.length).toBe(3);
+    },
+  );
+
+  test.skipIf(!hasDriver("provision-and-import"))(
+    "E6 (R3): TWO same-domain empty-concepts entries EACH record their failure — the seen-dedupe never swallows a recorded empty-concepts skip",
+    async () => {
+      const runLeg = await loadDriver("provision-and-import");
+      // Same domain + empty concepts → the SAME documentId for both entries;
+      // pre-E6 the guard sat after seen.add, so the second vanished behind
+      // the seen-continue without its recorded failure.
+      const dir6 = join(tmpDir, "corpus-e6");
+      mkdirSync(dir6, { recursive: true });
+      writeFileSync(
+        join(dir6, "seed.json"),
+        `${JSON.stringify(
+          [
+            { domain: "qds-e6-dup", concepts: [], expertise: "empty fixture A" },
+            { domain: "qds-e6-dup", concepts: [], expertise: "empty fixture B" },
+          ],
+          null,
+          2,
+        )}\n`,
+      );
+      const client = makeProvisionClient();
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        lockPath: join(tmpDir, "leg.lock"),
+        outDir: tmpDir,
+        expertiseDir: dir6,
+      });
+      assertEvidenceContract(ev);
+      // The recorded-failure contract counts BOTH entries per roster bank,
+      // and a leg whose mint recorded failures is a failed leg (F-017).
+      const failures = (ev.mintFailures as string[] | undefined) ?? [];
+      expect(failures.filter((f) => f.startsWith("qds-factory ") && f.endsWith("empty-concepts-skipped")).length).toBe(2);
+      expect(ev.ok).toBe(false);
+      expect(ev.exitCode).toBe(1);
     },
   );
 

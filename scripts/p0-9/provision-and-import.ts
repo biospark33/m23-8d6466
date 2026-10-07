@@ -313,6 +313,15 @@ async function mintCorpus(
     const failuresBefore = failures.length;
     for (const entry of corpus.entries) {
       const documentId = `mulch-${dedupHash(entry.domain, entry.concepts).slice(0, 16)}`;
+      // F-017: an empty-concepts entry would retain tags: [] — an unmeasured
+      // wire shape. Skip it with a recorded failure instead of probing the API.
+      // E6: BEFORE the seen-dedupe — two same-domain empty-concepts entries
+      // share a documentId, and a guard after seen.add would let the second
+      // vanish behind the seen-continue without its recorded failure.
+      if (entry.concepts.length === 0) {
+        failures.push(`${bankId} ${documentId}: empty-concepts-skipped`);
+        continue;
+      }
       if (seen.has(documentId)) continue;
       seen.add(documentId);
       const content = canonicalJsonl(entry);
@@ -326,7 +335,12 @@ async function mintCorpus(
             {
               content,
               document_id: documentId,
-              metadata: { source: "mulch-import", kind: "expertise", tags: entry.concepts },
+              // 0.10.0 MemoryItem: metadata is Dict[str, str]; tags are
+              // item-level (an array under metadata.tags is a 422 — measured
+              // live 2026-10-04, same class as hindsight-live.ts's shape
+              // probe). Item-level tags array is the measured-good shape.
+              metadata: { source: "mulch-import", kind: "expertise" },
+              tags: entry.concepts,
             },
           ],
         });

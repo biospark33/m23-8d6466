@@ -1,0 +1,120 @@
+# QDS Platform — real seed expertise (M1.3 prerequisite corpus growth, operator-ruled 2026-10-07).
+# Consumed by scripts/p0-9/provision-and-import.ts and scripts/import-mulch-expertise.ts.
+# Schema: MulchExpertiseSchema (id auto-generated on import; source recorded).
+# INV-PH-1 discipline: derived from qds- repo content only — no credentials,
+# no box-internal paths, no secrets.
+- domain: qds
+  concepts: [hindsight, recall, contract]
+  expertise: >-
+    Hindsight recall via client.recall(bankId, query, limit=5) returns results
+    whose wire document_id is exposed as the typed null-tolerant documentId
+    field. memoryId is a server-minted fact id, distinct from document
+    identity. Expected-document matching always keys on documentId, never on
+    memoryId or the raw wire name.
+- domain: qds
+  concepts: [hindsight, retain, receipts]
+  expertise: >-
+    Every successful retain lands a memory-retain-receipt row in audit.db.
+    The row carries a digest-stable detail blob recording the retain bank id
+    beside the documentId, making receipts the per-run mint record for
+    run-outcome documents. Read-only consumers open audit.db with sqlite
+    readonly mode; a retain item's updateMode replace upserts by document_id.
+- domain: qds
+  concepts: [priming, side-channel]
+  expertise: >-
+    The host-side memory cycle writes one side-channel JSON per run at
+    _bmad-output/memory/recall/<runId>.json marking which banks primed the
+    run. The side channel is the priming seam: producers write it, consumers
+    like measurement harnesses read it. Primed-vs-unprimed comparisons are
+    observational correlations, never causal claims.
+- domain: qds
+  concepts: [cost, ledger, micros]
+  expertise: >-
+    The cost ledger at .sandbox/cost-ledger.db records spend as exact integer
+    microUSD per event. Read-only consumers use the ledger's read-only open,
+    which never creates the file. Cost figures are summed exactly and are
+    never estimated or relabeled; a missing ledger means a section is absent,
+    not zero.
+- domain: qds
+  concepts: [phase-engine, gates]
+  expertise: >-
+    The phase engine sequences run phases behind named gates and records
+    GateEvents whose phaseIds are attempt-qualified (runId:attempt:phase).
+    Comparing gate sequences across runs or legs requires projecting the last
+    colon segment so attempts do not mask identical phase order.
+- domain: qds
+  concepts: [fleet, dispatch, budget]
+  expertise: >-
+    Fleet dispatch refuses a manifest whose declared runBudgetMs is below
+    requiredBudgetMs, computed as the sum over runs of (retries+1) times
+    (PARSE_FIX_ATTEMPTS+1) times maxDurationMs plus n times ROUTING_MARGIN_MS.
+    The runner's own budget flag must be at least the manifest value.
+- domain: qds
+  concepts: [live-e2e, gating]
+  expertise: >-
+    Live e2e files gate on QDS_E2E_LIVE with QDS_E2E_TIER limited to 1 or 2;
+    liveGate throws on a half-configured environment instead of skipping. A
+    live invocation that exits 0 with zero passing tests is a misconfigured
+    run, never a pass — every live round must show at least one (pass).
+- domain: qds
+  concepts: [image, pin, adoption]
+  expertise: >-
+    Image pin adoption extracts DEFAULT_IMAGE_REF and DEFAULT_IMAGE_BUILD_ID
+    from the publish workflow's gate log via the adopt-image-pin script; the
+    workflow is the only source of the digest. Hand-computing the digest is
+    forbidden — the walk literal is an offline file-input hash, never the
+    image digest. Adoption lands as one commit on the integration base.
+- domain: qds
+  concepts: [gitnexus, reindex, contract]
+  expertise: >-
+    GitNexus reindexing runs through the canonical install script, never a
+    bare analyze call, so transient ignore negations survive. The repo pins
+    the CLI contract: a strict schema suite is the drift alarm that must be
+    allowed to fail loudly on upgrades, while functional graph tests assert
+    only minimal fields.
+- domain: qds
+  concepts: [branch, convention, dev]
+  expertise: >-
+    The factory repo cuts feature branches with a feature prefix from the dev
+    integration base and targets pull requests at dev; the only pull request
+    that targets main is the periodic dev-to-main promote. The convention is
+    cached as a one-line sentinel in CLAUDE.md per repo.
+- domain: qds
+  concepts: [static, gates, typecheck]
+  expertise: >-
+    A green bun test run is not merge green: CI's check job runs tsc noEmit
+    and repo-wide Biome lint on every pull request. Before declaring a branch
+    done, run the typecheck and the full lint; capture any long test run to a
+    log file and read failures out of it after stripping carriage returns and
+    ANSI color.
+- domain: qds
+  concepts: [sqlite, wal, readonly]
+  expertise: >-
+    bun:sqlite readonly attaches poison same-process write opens when the
+    database writer is later killed with its shm deleted — the write open
+    fails with SQLITE_IOERR_VNODE while a fresh process reads the crashed
+    writer's bytes cleanly. Healing belongs in a fresh subprocess; production
+    writers are always separate processes.
+- domain: qds
+  concepts: [evidence, scrub, artifacts]
+  expertise: >-
+    Evidence artifacts land as timestamped JSON under the story's evidence
+    directory, written through the shared evidence writer whose scrub
+    self-fails the write if any secret-shaped token survives. A withheld
+    artifact on a failed gate is the honesty contract: never write a
+    legitimate-looking success file when validation refused to score.
+- domain: qds
+  concepts: [register, amendment, decisions]
+  expertise: >-
+    Deviations and flex-cuts are recorded as register amendments in the
+    decision register with a PROPOSED state until an operator pins them. A
+    named flex-cut ships its atomic deliverable and defers a render or
+    presentation leg by explicit register note, never by silent omission.
+- domain: qds
+  concepts: [probe, integrity, canary]
+  expertise: >-
+    Measurement probes carry labels validated before scoring: expected
+    document ids must exist in the factory's own mint records for the
+    probe's bank, and a self-hit canary document is retained then recalled
+    before any aggregate is computed. A canary miss refuses to score rather
+    than emitting a legitimate-looking zero hit rate.

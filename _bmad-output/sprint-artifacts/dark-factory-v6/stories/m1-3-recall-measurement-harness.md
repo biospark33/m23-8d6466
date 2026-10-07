@@ -108,4 +108,106 @@ Three offline instruments over M1.2's artifacts plus one report: (1) a schema'd,
 
 ## Dev Agent Record
 
-(written at implementation time — not part of this spec)
+**Branch:** `feature/m1-3-recall-measurement-harness` (base/target `dev`); orchestrated build under `.unlazy/m1-3/` (research wave + 3 implementation leaves + branch node; PLAN.md contract inventory, revisions 1-5).
+
+**Prerequisite (operator-ruled, commit `9bb63e3c`):** the story's named seed source was empty — the P0.9 provision-and-import leg had never minted a document (every retain 422'd: array under `metadata.tags`, the 0.10.0 `Dict[str,str]` metadata contract that `src/hindsight/client.ts:264-265` documents and works around on the wire; `scripts/p0-9/hindsight-live.ts:333` measured it live 2026-10-04), and no M1 cycle had ever run, so receipts were absent too. The corpus also held only 8 expertise entries against the ≥20 seed floor. Operator ruled: fix the import leg first, grow the corpus to 20+. `scripts/p0-9/provision-and-import.ts` now sends item-level `tags` (the measured-good shape), `.mulch/expertise/qds-platform.yaml` adds 15 real entries (23 total, unique concept sets), and the leg was re-run against a local pinned `hindsight:0.10.0` instance (same index digest the VPS ran, loopback 18890, capped OpenRouter key minted for the boot-required LLM extraction and revoked after — $0.74 total spend across two attempts, leak-checked to zero live keys). The passing leg JSON (`2026-10-07T12-01-42-955Z-p0-9-provision-and-import-kvdvho.json`) minted 23 documents per bank with zero failures and is the seed mint record AC1(ii) consumes. The failed $0.05-cap attempt evidence is committed alongside (honest history: 402 after 5 docs, compensated clean).
+
+**Spec-vs-reality drift (recorded, binding):** AC3 names `exit classification (run record)` and `retried (priorAttempt presence)`; neither field exists in `.sandbox/runs/` records — exit classification lives in the retain payload retained INTO the KG (`src/hindsight/run-retain.ts:37,167-175`), and no priorAttempt marker exists anywhere in run records or extensions. D1/D2: the report omits both columns and carries dataNotes naming where classification lives (never fabricated, never zero-filled — the observability contract's "absent, not 0"). The dispatch log is consumed as a read-only failure count (`dispatchFailures`), present only when the log exists.
+
+**Contract amendments (all in `.unlazy/m1-3/PLAN.md`, none silent):** R3 — `p09EvidenceDir` is an explicit dep on both runners (real layout separates `_bmad-output/evidence/memory/` artifacts from the `evidence/p0-9-closure/` mint record; the original single-dir binding would phantom-refuse every real CLI run); `DEFAULT_P09_EVIDENCE_DIR` exported. R4 — leaf-1.3+1.4 merged into leaf-1.34 (the single test file's static imports make parallel runner builds require cross-lease stubs). R5 — strict AC1 refusal at run time: leaf-t's hit-rate-math fixture originally under-minted a probe id and expected a scored miss; ruled that AC1's negative control governs ("absent from the mint records … MUST fail validation, not the score"), fixture amended to mint all labels, runner refuses on all violations with no classification.
+
+**Test/verification evidence:** `tests/memory/probe-harness.test.ts` 60/60 (probe-schema 17, probe-recall 16, priming-report 24, harness-e2e 3; 43 red at authoring, recounted after each review round — 55 after round 2, 59 after the round-3 re-pins, 60 after round 4) — written TDD-red first (43 red proven against missing modules), then made green; `bunx tsc --noEmit` 0 errors; repo-wide `bun run lint` exit 0; leaf ledgers under `.unlazy/m1-3/gates/` all ALL MET with automatic evidence; driver e2e verifier (`scripts/dev/verify-m13-e2e.ts`) runs both runners end-to-end against real CostLedger/audit-store fixtures — integrity pass, both artifacts, `checkpointEligible` false at 5 cycles, absent-ledger-stays-absent, audit.db mtime unchanged. Seed probes verified against the real mint record: 23/23 ids present for `qds-factory-dev-meta` (computed roster == minted record, bidirectionally).
+
+**Live-tier note for the operator:** the real-instance baseline ALREADY EXISTS — the canary + probe run against the local `m13-hindsight` instance (the same instance the prerequisite rerun used) produced the committed first baseline `_bmad-output/evidence/memory/2026-10-07T15-52-32-492Z-hit-rate.json` (hit-rate@5 0.565 over 23 probes, canary hit, median 106ms; see the provenance README beside it). The instance is now down (no `m13-hindsight` containers or volumes remain — the `docker compose -p m13-hindsight down -v` teardown already happened, and the throwaway OpenRouter key was revoked at provisioning close-out). Any future canary + probe run (~$0.01 for the canary retain; recalls are RRF, no LLM) is a REPEAT measurement against a fresh instance — it grows the DD-22 series, it is not the first baseline — and remains optional: not required by this story's DoD (mock-tier machinery + committed seeds).
+
+**Spec-letter note (R2):** side-channel `recalledDocumentIds` are dev-meta documents actually recalled during priming, so growth banks them dev-meta — the spec's "outcome-document ids" letter describes repo-bank outcome docs; the report md's id-anchor caveat on the cycle split (cycle-grown probes are id-anchored: the query embeds the document id) is the honest framing of that banking choice.
+
+### Review Findings (round 1, 2026-10-07 — full campaign: 25 patch / 2 dismissed / 1 deferred)
+
+- [x] [Review][Patch] Scoring-loop recall error escapes unclassified [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] listBanks rejection crashes instead of label-integrity refusal [scripts/memory/probe-schema.ts]
+- [x] [Review][Patch] Empty probe set scores a 0.0 artifact; hitRateAt5 not withheld below MIN_PROBE_SET_SIZE (spec letter) [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] Unreadable cost ledger kills the report (needs dataNote omission) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Under-lock probe-set read unguarded [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Growth probeId slug collision bricks the set with duplicate probeIds [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Growth lock failure fatal to whole report (degrade to dataNote) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Audit-db readonly opens crash on TOCTOU/non-sqlite (return absent-data) [scripts/memory/probe-schema.ts]
+- [x] [Review][Patch] costTable/outcomeTable zero-filled at zero cycles (absent, not 0) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] dispatchFailures unreachable from CLI; unreadable log reads as 0 [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Redact revoked OpenRouter key-management URLs from committed P0.9 evidence (45x) [_bmad-output/evidence/p0-9-closure]
+- [x] [Review][Patch] Growth probes: origin field (seed|cycle), per-source-bank candidates, byOrigin aggregate [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] verify-m13-e2e hermeticity (auditPath into tmpdir) + tmpdir cleanup on fail [scripts/dev/verify-m13-e2e.ts]
+- [x] [Review][Patch] Remove stale all-zero-recallMs artifact; recallMs sub-ms floor [_bmad-output/evidence/memory]
+- [x] [Review][Patch] writtenAt Date.parse ordering with tie fallback [scripts/memory/probe-schema.ts]
+- [x] [Review][Patch] latencyMs shape-check finite/non-negative [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Skip empty-concepts entries with recorded failure in p0-9 import [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] Artifact stamp collision: run-unique rand per repo naming discipline [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] Guard canary diagnostic write (refusal contract under write failure) [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] Per-cycle rows (runId, primed, receiptPresent) — AC4 per-row letter [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Growth uses the SAME integrity path: extract shared mint-membership core [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Serialize concurrent probe-recall runs under the named lock [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] Dev Agent Record suite count 43 -> 44 (16/11/14/3) [story record]
+- [x] [Review][Patch] verify-test-slice parsing/bounds fixes; verifier vacuous check; header wording; test name overstatement; record DD-22 working bar as decision-input context in evidence+md [scripts/dev + scripts/memory]
+- [x] [Review][Patch] Drop dead PrimingReportDeps.runsDir [scripts/memory/priming-report.ts]
+- [x] [Review][Defer] Failed-leg evidence deleteOutcomes semantics (leg-driver classification, pre-existing) [scripts/p0-9/leg-lib.ts] — deferred, pre-existing
+
+### Review Findings (round 2, 2026-10-07 — 17 patch / 0 dismissed / 1 deferred)
+
+- [x] [Review][Patch] costTable $0-print for absent/unpriced cycles at >0 cycles — branch on CostView hasEvents/hasTokenRows/unpricedRows [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Verifier hitRateAt5 assertion NaN-vacuous below floor — assert belowFloor + hits [scripts/dev/verify-m13-e2e.ts]
+- [x] [Review][Patch] Committed baseline artifact predates shipped shape — provenance README in evidence/memory [_bmad-output/evidence/memory]
+- [x] [Review][Patch] Cycle probes id-anchored: byOrigin + caveat in md; outcome-doc banking deviation noted [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] recallDir unreadable (non-ENOENT) → dataNote, not silent zero cycles [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Malformed canary resolve crashes outside try — shape-check inside [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] CWD hint in refusal reasons (relative defaults) [scripts/memory]
+- [x] [Review][Patch] probe-recall CLI main catch — structured lock-timeout line [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] mergeMint deduped via probe-schema export [scripts/memory]
+- [x] [Review][Patch] Lock across the same-day json/md pair write [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Growth unreadable-set skip gets a dataNote [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] writtenAt tie-break comment honesty [scripts/memory/probe-schema.ts]
+- [x] [Review][Patch] --min-pass required, no silent 1 default [scripts/dev/verify-test-slice.mjs]
+- [x] [Review][Patch] SideRow docstring + growth credits row.banks[0] when present [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] RunLockReentrantError fatal in growth (align contention policy) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Verifier dead runsDir wiring dropped [scripts/dev/verify-m13-e2e.ts]
+- [x] [Review][Patch] writeP09 `at` shadow rename [tests/memory/probe-harness.test.ts]
+- [x] [Review][Defer] vrf9ks memoryResidue mirrors mintRecord vs residue:[] (leg-driver family, pre-existing) — deferred, pre-existing
+
+### Review Findings (round 3, 2026-10-07 — verification round: 12 patch / 0 dismissed / 0 new deferred)
+
+- [x] [Review][Patch] writeP09 rename incomplete: `writtenAt: at` serialized the helper function — fixtures lost writtenAt, epoch-ordering test passed via tie-break (coverage restored + same-stamp tie test added) [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Committed interim report pair stale-shaped — regenerated with shipped code + provenance note extended to cover it [_bmad-output/memory/reports]
+- [x] [Review][Patch] Dev Agent Record test counts 48/48 → final recount [story record]
+- [x] [Review][Patch] Jammed one-line test statement normalized [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Header dispatchFailures wording aligned (absent log = silent by design) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Misplaced renderer comment above import.meta.main removed [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Canary mkdirSync inside the guarded region — uncreatable evidenceDir still returns the exit-3 refusal [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] ledger.close() failure no longer contradicts an assigned costTable (read-complete note) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] md-write failure rolls the json back — no torn pair on disk [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Present-but-unreadable audit db → receiptCoverage-0 dataNote (not silent absent) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Individually unreadable side-channel files counted + noted (not silently malformed) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Empty-concepts guard before seen.add — duplicate skips now recorded [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] Dead runsDir dropped from test baseReportDeps (driver close-out) [tests/memory/probe-harness.test.ts]
+
+All three rounds: 58 findings raised (28 + 18 + 12), 54 patched (every HIGH/MED/LOW through round 3), 2 deferred as pre-existing leg-driver semantics, 2 dismissed as spec-sanctioned.
+
+### Review Findings (round 3, 2026-10-07 — final wave: 12 patch / 0 dismissed / 0 deferred)
+
+- [x] [Review][Patch] writeP09 `writtenAt: at` bound the helper function (JSON.stringify dropped it) — every fixture had NO writtenAt and the writtenAt-wins test resolved via the filename tie-break; fixed to `stamp` + same-stamp tie-path test added [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Committed interim report pair stale-shaped (pre-round-2 dataNotes text not producible by shipped code) — regenerated with current code + provenance sentence in evidence/memory README [_bmad-output/memory/reports + _bmad-output/evidence/memory/README.md]
+- [x] [Review][Patch] Dev Agent Record suite count stale (48/48-era) — recounted to 59/59 (17/16/23/3) [story record]
+- [x] [Review][Patch] canary-miss test's first statement jammed onto the test() line — normalized [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Header overclaim: absent dispatch log omits dispatchFailures silently by design (present-but-unreadable gets the note) — wording aligned [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Misplaced "Pure renderer (AC5)" comment above `import.meta.main` (describes report-render.ts) — deleted [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Canary-path mkdirSync could throw past the contracted refusal — moved inside the guarded region (refusal survives, diagnosticPath omitted) [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] Cost-join outer catch could push "costTable omitted" beside a serialized table on close() failure — close-failure branch notes the table is read-complete [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Torn json/md pair on md-write failure — json rolled back to its previous bytes (or absent state) before rethrow [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Present-but-unreadable audit db collapsed to silent 0% coverage — dataNote "audit db unreadable … receiptCoverage reported 0" (absent db stays silent) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Side-channel row present-but-unreadable indistinguishable from malformed JSON — read-vs-parse failures counted separately, non-ENOENT reads get a counted dataNote [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Empty-concepts guard sat after seen.add — second same-domain empty-concepts entry dropped without its recorded failure; guard moved before the dedupe + dedicated test (also un-broke 3 legs.test.ts green-leg fixtures made leg-fatal by F-017's corpus entry) [scripts/p0-9/provision-and-import.ts + tests/p0-9/legs.test.ts]
+
+### Review Findings (round 4, 2026-10-07 — 4 patch / 0 dismissed / 0 deferred)
+
+- [x] [Review][Patch] Three-round summary overcounted: 59 raised / 3 deferred vs the recorded round headings (28 + 18 + 12 = 58; deferrals 1 + 1 = 2 — the verification-round section's 13th checkbox, the dead-runsDir driver close-out, double-books round 2's fix) — summary aligned to 58 / 54 patched / 2 dismissed / 2 deferred [story record]
+- [x] [Review][Patch] Live-tier note claimed the real-instance run was still pending — it already happened (committed first baseline `2026-10-07T15-52-32-492Z-hit-rate.json`, hit-rate@5 0.565 / 23 probes / canary hit / median 106ms) and the `m13-hindsight` instance is down (no containers or volumes remain); note rewritten, future runs framed as repeat measurements [story record]
+- [x] [Review][Patch] Round-1 [Review][Patch] checklist entries left unchecked though all 25 patches shipped (rounds 2–3 entries were already checked) — marked [x]; the round-1 [Review][Defer] disposition entry left as-is [story record]
+- [x] [Review][Patch] Receipt coverage query keyed on `subject_id` (the retain's documentId) — works today only because M1.2's `deriveDocumentId` aliases runId verbatim; keyed on `run_id` (AC4's join is on the run) + discriminating fixture: receipt whose subject_id names a live cycle but run_id does not must NOT count as covered. `probe-schema`'s `loadReceiptMintRecords` intentionally keeps `subject_id` — mint membership joins on the document, a different key [scripts/memory/priming-report.ts + tests/memory/probe-harness.test.ts]

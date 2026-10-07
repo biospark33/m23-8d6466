@@ -1,0 +1,150 @@
+{
+ "pr": 0,
+ "round": 2,
+ "findings": [
+  {
+   "finding_id": "R2-001",
+   "finding_text": "costTable prints exact-looking $0 for observed cycles whose ledger events are absent/unpriced \u2014 the all-zero omission guard can never fire at >0 cycles; branch on CostView hasEvents/hasTokenRows/unpricedRows per run",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-002",
+   "finding_text": "verify-m13-e2e hitRateAt5 assertion NaN-vacuous (3-probe fixture below the 20 floor withholds the key) \u2014 assert belowFloor + perProbe hits instead",
+   "diff_context_ref": "scripts/dev/verify-m13-e2e.ts@108a7e1a",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-003",
+   "finding_text": "Committed 15-52 hit-rate artifact predates shipped shape (no origin/byOrigin/dd22 keys) \u2014 provenance README note in evidence/memory",
+   "diff_context_ref": "_bmad-output/evidence/memory@108a7e1a",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-004",
+   "finding_text": "Cycle-grown probes are id-anchored; blended rate hides it \u2014 md prints byOrigin + id-anchored caveat dataNote; outcome-doc banking deviation noted",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-005",
+   "finding_text": "Unreadable/wrong-type recallDir collapses to silent zero cycles \u2014 ENOENT stays absent, other errnos get a dataNote",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-006",
+   "finding_text": "Malformed canary RESOLVE (non-array results / null elements) crashes outside the try \u2014 shape-check inside",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@108a7e1a",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-007",
+   "finding_text": "CLI defaults CWD-relative \u2014 refusal reasons include process.cwd() hint",
+   "diff_context_ref": "scripts/memory@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-008",
+   "finding_text": "probe-recall CLI main has no catch \u2014 lock timeout prints stack instead of documented refusal line",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-009",
+   "finding_text": "mergeMint duplicated across two modules \u2014 export from probe-schema",
+   "diff_context_ref": "scripts/memory@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-010",
+   "finding_text": "Same-day concurrent report runs can publish mismatched json/md pair \u2014 hold a lock across the pair write",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-011",
+   "finding_text": "Growth silent-skip on unreadable probe set \u2014 dataNote like the lock-degradation path",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-012",
+   "finding_text": "writtenAt tie-break comment overclaims later-write (random suffix is arbitrary-but-deterministic)",
+   "diff_context_ref": "scripts/memory/probe-schema.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-013",
+   "finding_text": "verify-test-slice --min-pass silently defaults to 1 \u2014 make it required",
+   "diff_context_ref": "scripts/dev/verify-test-slice.mjs@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-014",
+   "finding_text": "SideRow docstring overstates validation; growth should credit row.banks[0] when present",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-015",
+   "finding_text": "Contention-policy inconsistency: growth retries RunLockReentrantError (spins forever on a real nesting bug) \u2014 align to fatal",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-016",
+   "finding_text": "Verifier runsDir dead wiring \u2014 drop the unused dir, keep the honest stub comment",
+   "diff_context_ref": "scripts/dev/verify-m13-e2e.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-017",
+   "finding_text": "writeP09 param `at` shadows the at() helper \u2014 rename to stamp",
+   "diff_context_ref": "tests/memory/probe-harness.test.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  },
+  {
+   "finding_id": "R2-018",
+   "finding_text": "vrf9ks memoryResidue mirrors mintRecord while residue:[] \u2014 same pre-existing leg-driver classification family as F-028",
+   "diff_context_ref": "_bmad-output/evidence/p0-9-closure@9bb63e3c",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "created_at": "2026-10-07T17:59:59+00:00"
+  }
+ ]
+}

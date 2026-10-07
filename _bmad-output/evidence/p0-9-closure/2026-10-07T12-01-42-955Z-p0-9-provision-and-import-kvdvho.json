@@ -1,0 +1,176 @@
+{
+  "leg": "p0-9-provision-and-import",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass",
+  "steps": [
+    {
+      "step": "prereq",
+      "outcome": "ok",
+      "detail": {
+        "file": "2026-10-04T20-17-45-645Z-p0-9-hindsight-live-lbghxg.json"
+      }
+    },
+    {
+      "step": "snapshot-pre",
+      "outcome": "ok",
+      "detail": {
+        "count": 0
+      }
+    },
+    {
+      "step": "provision",
+      "outcome": "ok",
+      "durationMs": 28,
+      "detail": {
+        "banks": [
+          {
+            "bankId": "qds-factory",
+            "status": "created"
+          },
+          {
+            "bankId": "qds-factory-dev-meta",
+            "status": "created"
+          },
+          {
+            "bankId": "qds-collective",
+            "status": "created"
+          }
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "resolved-fresh"
+      }
+    },
+    {
+      "step": "snapshot-post",
+      "outcome": "ok",
+      "detail": {
+        "count": 3
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "ok",
+      "detail": {
+        "expertiseDir": "/Users/steve/QDS-Factory/.mulch/expertise",
+        "retained": 23
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "ok",
+      "detail": {
+        "expertiseDir": "/Users/steve/QDS-Factory/.mulch/expertise",
+        "retained": 23
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "ok",
+      "detail": {
+        "expertiseDir": "/Users/steve/QDS-Factory/.mulch/expertise",
+        "retained": 23
+      }
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"snapshot-pre\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"provision\",\"outcome\":\"ok\",\"durationMs\":28}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"snapshot-post\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"ok\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"ok\",\"bankId\":\"qds-factory-dev-meta\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"ok\",\"bankId\":\"qds-collective\"}",
+  "writtenAt": "2026-10-07T12:01:42.954Z",
+  "createdInAttempt": [
+    "qds-factory",
+    "qds-factory-dev-meta",
+    "qds-collective"
+  ],
+  "unclaimedCreated": [],
+  "residue": [],
+  "deleteOutcomes": {},
+  "mintRecord": {
+    "qds-factory": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": [
+        "mulch-8ff7a752dd1c326b",
+        "mulch-5b85755bfd6842d6",
+        "mulch-631f98ad36517bec",
+        "mulch-5f5e31c6ff8ada4d",
+        "mulch-4e3dee5b901fd88e",
+        "mulch-62743a4396d30fd1",
+        "mulch-f1b8dc3aec89f96c",
+        "mulch-04acf7ccc921ae65",
+        "mulch-d32ea1bc6e56262b",
+        "mulch-50496882cef82e13",
+        "mulch-24f03d71e47362b5",
+        "mulch-b3f318b167975a44",
+        "mulch-93f4c108e755bf27",
+        "mulch-2391420af3eeea22",
+        "mulch-0a98d1af8d693b21",
+        "mulch-c2b2d2013f123560",
+        "mulch-41dff4a2c69d2768",
+        "mulch-244085b3caaddad5",
+        "mulch-b4c5a164cc788361",
+        "mulch-525ec56deda0b34a",
+        "mulch-8acd90aea0708225",
+        "mulch-e7fdce53282ba8fa",
+        "mulch-02b92c3d574f7a17"
+      ]
+    },
+    "qds-factory-dev-meta": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": [
+        "mulch-8ff7a752dd1c326b",
+        "mulch-5b85755bfd6842d6",
+        "mulch-631f98ad36517bec",
+        "mulch-5f5e31c6ff8ada4d",
+        "mulch-4e3dee5b901fd88e",
+        "mulch-62743a4396d30fd1",
+        "mulch-f1b8dc3aec89f96c",
+        "mulch-04acf7ccc921ae65",
+        "mulch-d32ea1bc6e56262b",
+        "mulch-50496882cef82e13",
+        "mulch-24f03d71e47362b5",
+        "mulch-b3f318b167975a44",
+        "mulch-93f4c108e755bf27",
+        "mulch-2391420af3eeea22",
+        "mulch-0a98d1af8d693b21",
+        "mulch-c2b2d2013f123560",
+        "mulch-41dff4a2c69d2768",
+        "mulch-244085b3caaddad5",
+        "mulch-b4c5a164cc788361",
+        "mulch-525ec56deda0b34a",
+        "mulch-8acd90aea0708225",
+        "mulch-e7fdce53282ba8fa",
+        "mulch-02b92c3d574f7a17"
+      ]
+    },
+    "qds-collective": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": [
+        "mulch-8ff7a752dd1c326b",
+        "mulch-5b85755bfd6842d6",
+        "mulch-631f98ad36517bec",
+        "mulch-5f5e31c6ff8ada4d",
+        "mulch-4e3dee5b901fd88e",
+        "mulch-62743a4396d30fd1",
+        "mulch-f1b8dc3aec89f96c",
+        "mulch-04acf7ccc921ae65",
+        "mulch-d32ea1bc6e56262b",
+        "mulch-50496882cef82e13",
+        "mulch-24f03d71e47362b5",
+        "mulch-b3f318b167975a44",
+        "mulch-93f4c108e755bf27",
+        "mulch-2391420af3eeea22",
+        "mulch-0a98d1af8d693b21",
+        "mulch-c2b2d2013f123560",
+        "mulch-41dff4a2c69d2768",
+        "mulch-244085b3caaddad5",
+        "mulch-b4c5a164cc788361",
+        "mulch-525ec56deda0b34a",
+        "mulch-8acd90aea0708225",
+        "mulch-e7fdce53282ba8fa",
+        "mulch-02b92c3d574f7a17"
+      ]
+    }
+  },
+  "repoSlug": "QDS-Factory"
+}
