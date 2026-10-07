@@ -144,7 +144,7 @@ function writeP09(
       mode: "fixture",
       ok,
       outcome: ok ? "pass" : "leg-failure",
-      writtenAt: at,
+      writtenAt: stamp, // F1: the stamp STRING — the old `at` bound the helper function, which JSON.stringify silently dropped
       mintRecord: Object.fromEntries(
         Object.entries(banks).map(([bank, ids]) => [
           bank,
@@ -343,7 +343,6 @@ function baseRecallDeps(client: ProbeClient) {
 function baseReportDeps() {
   return {
     recallDir: recallDir(),
-    runsDir: join(dir, "runs"),
     ledgerPath: ledgerPath(),
     auditPath: auditPath(),
     reportsDir: reportsDir(),
@@ -423,6 +422,25 @@ describe("probe-schema", () => {
     writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-new"] }, "2026-10-07T11:00:00.000Z");
     const mint = loadP09MintRecords(p09Dir());
     expect([...(mint.get(SEED_PROBE_BANK) ?? [])]).toEqual(["mulch-new"]);
+  });
+
+  test("loadP09MintRecords: identical writtenAt → lexicographically-LATER filename wins (tie path, F1)", () => {
+    // writeP09 derives the filename from the stamp, so a same-stamp tie needs
+    // hand-named files — identical writtenAt, different names, same bank.
+    mkdirSync(p09Dir(), { recursive: true });
+    const body = (ids: string[]) =>
+      JSON.stringify({
+        leg: "p0-9-provision-and-import",
+        mode: "fixture",
+        ok: true,
+        outcome: "pass",
+        writtenAt: "2026-10-07T10:00:00.000Z",
+        mintRecord: { [SEED_PROBE_BANK]: { resolvedFrom: "fixture", documentIds: ids } },
+      });
+    writeFileSync(join(p09Dir(), "aaa-earlier-name-p0-9-provision-and-import-fixture.json"), body(["mulch-from-aaa"]));
+    writeFileSync(join(p09Dir(), "zzz-later-name-p0-9-provision-and-import-fixture.json"), body(["mulch-from-zzz"]));
+    const mint = loadP09MintRecords(p09Dir());
+    expect([...(mint.get(SEED_PROBE_BANK) ?? [])]).toEqual(["mulch-from-zzz"]);
   });
 
   test("loadP09MintRecords ignores ok:false records", () => {
@@ -697,7 +715,8 @@ describe("probe-recall", () => {
     expect(res.metrics.canary.hit).toBe(true);
   });
 
-  test("canary miss refuses: stage canary, hit-rate withheld, canary-failure diagnostic written", async () => {    const probes = [probe(0)];
+  test("canary miss refuses: stage canary, hit-rate withheld, canary-failure diagnostic written", async () => {
+    const probes = [probe(0)];
     writeProbeSet(probeSetPath(), probes);
     writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-0"] }, "2026-10-07T10:00:00.000Z");
     const cannedMap = new Map<string, { results: CannedResult[] }>();
@@ -722,6 +741,28 @@ describe("probe-recall", () => {
 
     // The hit-rate evidence JSON is WITHHELD — never a legitimate-looking 0.0.
     expect(readArtifact(evidenceDir(), "-hit-rate-")).toBeUndefined();
+  });
+
+  test("canary refusal with an UNCREATABLE evidence dir still returns the contracted refusal (E1): reason notes the diagnostic write failure, diagnosticPath omitted", async () => {
+    const probes = [probe(0)];
+    writeProbeSet(probeSetPath(), probes);
+    writeP09(p09Dir(), { [SEED_PROBE_BANK]: ["mulch-doc-0"] }, "2026-10-07T10:00:00.000Z");
+    // A FILE where the evidence dir's parent should be → mkdirSync ENOTDIR.
+    // Pre-E1 the mkdir threw PAST the canary refusal (generic crash); the
+    // refusal contract must survive any diagnostic-persistence failure.
+    writeFileSync(join(dir, "blocker"), "{}\n");
+    const { client } = fakeProbeClient({ canaryHits: false });
+
+    const res = await runProbeRecall({
+      ...baseRecallDeps(client),
+      evidenceDir: join(dir, "blocker", "evidence"),
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.stage).toBe("canary");
+    expect(/did not surface in the top-5/.test(res.reason)).toBe(true);
+    expect(/diagnostic write failed/.test(res.reason)).toBe(true);
+    expect(res.diagnosticPath).toBeUndefined();
   });
 
   test("label-integrity failure refuses before any client traffic, naming the offending probeId", async () => {
@@ -1004,6 +1045,41 @@ describe("priming-report", () => {
     });
     expect("costTable" in allPartial.metrics).toBe(false);
     expect(allPartial.metrics.dataNotes.some((n) => /cost partial for 1 cycles/.test(n))).toBe(true);
+  });
+
+  test("side-channel row file unreadable AT READ TIME (EISDIR dir-as-row): counted + dataNote, distinct from the malformed-row skip (E5)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1)));
+    writeRecallRow(recallDir(), `${runId(2)}.json`, rowOf(runId(2), { primed: false }));
+    // A DIRECTORY named like a row file: readdir lists it, readFileSync EISDIRs
+    // — a non-ENOENT read failure, counted and noted instead of silently
+    // vanishing beside the valid rows.
+    mkdirSync(join(recallDir(), `${runId(3)}.json`), { recursive: true });
+
+    const res = await runPrimingReport(baseReportDeps());
+    expect(res.metrics.cyclesToDate).toBe(2);
+    expect(res.metrics.dataNotes.some((n) => /1 side-channel row\(s\) unreadable and skipped/.test(n))).toBe(true);
+  });
+
+  test("audit db present-but-unreadable: receiptCoverage 0 + dataNote (E4); an absent db stays silently absent", async () => {
+    writeProbeSet(probeSetPath(), []);
+    writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1)));
+    writeFileSync(auditPath(), "this is not a sqlite database");
+
+    const res = await runPrimingReport(baseReportDeps());
+    expect(res.metrics.receiptCoverage).toEqual({ withReceipt: 0, withoutReceipt: 1 });
+    expect(res.metrics.dataNotes.some((n) => /audit db unreadable at .+ \(.*\); receiptCoverage reported 0/.test(n))).toBe(
+      true,
+    );
+
+    // Absent file: the normal no-receipts-yet state — silent, no note.
+    const absent = await runPrimingReport({
+      ...baseReportDeps(),
+      auditPath: join(dir, "never-created.db"),
+      reportsDir: join(dir, "reports-4"),
+    });
+    expect(absent.metrics.receiptCoverage.withReceipt).toBe(0);
+    expect(absent.metrics.dataNotes.some((n) => /audit db unreadable/.test(n))).toBe(false);
   });
 
   test("side-channel dir present as a FILE (non-ENOENT): dataNote + zero cycles, not a silent fresh factory (R2-005)", async () => {

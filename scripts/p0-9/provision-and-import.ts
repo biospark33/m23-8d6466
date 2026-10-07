@@ -313,14 +313,17 @@ async function mintCorpus(
     const failuresBefore = failures.length;
     for (const entry of corpus.entries) {
       const documentId = `mulch-${dedupHash(entry.domain, entry.concepts).slice(0, 16)}`;
-      if (seen.has(documentId)) continue;
-      seen.add(documentId);
       // F-017: an empty-concepts entry would retain tags: [] — an unmeasured
       // wire shape. Skip it with a recorded failure instead of probing the API.
+      // E6: BEFORE the seen-dedupe — two same-domain empty-concepts entries
+      // share a documentId, and a guard after seen.add would let the second
+      // vanish behind the seen-continue without its recorded failure.
       if (entry.concepts.length === 0) {
         failures.push(`${bankId} ${documentId}: empty-concepts-skipped`);
         continue;
       }
+      if (seen.has(documentId)) continue;
+      seen.add(documentId);
       const content = canonicalJsonl(entry);
       if (Buffer.byteLength(content, "utf8") > MAX_CONTENT_BYTES) {
         oversized.push(`${bankId} ${documentId} (${Buffer.byteLength(content, "utf8")}B)`);

@@ -116,7 +116,7 @@ Three offline instruments over M1.2's artifacts plus one report: (1) a schema'd,
 
 **Contract amendments (all in `.unlazy/m1-3/PLAN.md`, none silent):** R3 — `p09EvidenceDir` is an explicit dep on both runners (real layout separates `_bmad-output/evidence/memory/` artifacts from the `evidence/p0-9-closure/` mint record; the original single-dir binding would phantom-refuse every real CLI run); `DEFAULT_P09_EVIDENCE_DIR` exported. R4 — leaf-1.3+1.4 merged into leaf-1.34 (the single test file's static imports make parallel runner builds require cross-lease stubs). R5 — strict AC1 refusal at run time: leaf-t's hit-rate-math fixture originally under-minted a probe id and expected a scored miss; ruled that AC1's negative control governs ("absent from the mint records … MUST fail validation, not the score"), fixture amended to mint all labels, runner refuses on all violations with no classification.
 
-**Test/verification evidence:** `tests/memory/probe-harness.test.ts` 48/48 (probe-schema 16, probe-recall 13, priming-report 16, harness-e2e 3; 43 red at authoring, recounted after the round-1 review re-pins) — written TDD-red first (43 red proven against missing modules), then made green; `bunx tsc --noEmit` 0 errors; repo-wide `bun run lint` exit 0; leaf ledgers under `.unlazy/m1-3/gates/` all ALL MET with automatic evidence; driver e2e verifier (`scripts/dev/verify-m13-e2e.ts`) runs both runners end-to-end against real CostLedger/audit-store fixtures — integrity pass, both artifacts, `checkpointEligible` false at 5 cycles, absent-ledger-stays-absent, audit.db mtime unchanged. Seed probes verified against the real mint record: 23/23 ids present for `qds-factory-dev-meta` (computed roster == minted record, bidirectionally).
+**Test/verification evidence:** `tests/memory/probe-harness.test.ts` 59/59 (probe-schema 17, probe-recall 16, priming-report 23, harness-e2e 3; 43 red at authoring, recounted after each review round — 55 after round 2, 59 after the round-3 re-pins) — written TDD-red first (43 red proven against missing modules), then made green; `bunx tsc --noEmit` 0 errors; repo-wide `bun run lint` exit 0; leaf ledgers under `.unlazy/m1-3/gates/` all ALL MET with automatic evidence; driver e2e verifier (`scripts/dev/verify-m13-e2e.ts`) runs both runners end-to-end against real CostLedger/audit-store fixtures — integrity pass, both artifacts, `checkpointEligible` false at 5 cycles, absent-ledger-stays-absent, audit.db mtime unchanged. Seed probes verified against the real mint record: 23/23 ids present for `qds-factory-dev-meta` (computed roster == minted record, bidirectionally).
 
 **Live-tier note for the operator:** the local Hindsight instance used for the prerequisite rerun is still up (`m13-hindsight` compose project, loopback 18890, fresh volumes, throwaway tenant key). A real-instance canary + probe run (~$0.01 for the canary retain; recalls are RRF, no LLM) would produce the first real hit-rate@5 baseline artifact whenever the operator wants it — not required by this story's DoD (mock-tier machinery + committed seeds). Destroy with `docker compose -p m13-hindsight down -v` when done with it.
 
@@ -171,3 +171,36 @@ Three offline instruments over M1.2's artifacts plus one report: (1) a schema'd,
 - [x] [Review][Patch] Verifier dead runsDir wiring dropped [scripts/dev/verify-m13-e2e.ts]
 - [x] [Review][Patch] writeP09 `at` shadow rename [tests/memory/probe-harness.test.ts]
 - [x] [Review][Defer] vrf9ks memoryResidue mirrors mintRecord vs residue:[] (leg-driver family, pre-existing) — deferred, pre-existing
+
+### Review Findings (round 3, 2026-10-07 — verification round: 12 patch / 0 dismissed / 0 new deferred)
+
+- [x] [Review][Patch] writeP09 rename incomplete: `writtenAt: at` serialized the helper function — fixtures lost writtenAt, epoch-ordering test passed via tie-break (coverage restored + same-stamp tie test added) [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Committed interim report pair stale-shaped — regenerated with shipped code + provenance note extended to cover it [_bmad-output/memory/reports]
+- [x] [Review][Patch] Dev Agent Record test counts 48/48 → final recount [story record]
+- [x] [Review][Patch] Jammed one-line test statement normalized [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Header dispatchFailures wording aligned (absent log = silent by design) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Misplaced renderer comment above import.meta.main removed [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Canary mkdirSync inside the guarded region — uncreatable evidenceDir still returns the exit-3 refusal [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] ledger.close() failure no longer contradicts an assigned costTable (read-complete note) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] md-write failure rolls the json back — no torn pair on disk [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Present-but-unreadable audit db → receiptCoverage-0 dataNote (not silent absent) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Individually unreadable side-channel files counted + noted (not silently malformed) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Empty-concepts guard before seen.add — duplicate skips now recorded [scripts/p0-9/provision-and-import.ts]
+- [x] [Review][Patch] Dead runsDir dropped from test baseReportDeps (driver close-out) [tests/memory/probe-harness.test.ts]
+
+All three rounds: 59 findings raised, 54 patched (every HIGH/MED/LOW through round 3), 3 deferred as pre-existing leg-driver semantics, 2 dismissed as spec-sanctioned.
+
+### Review Findings (round 3, 2026-10-07 — final wave: 12 patch / 0 dismissed / 0 deferred)
+
+- [x] [Review][Patch] writeP09 `writtenAt: at` bound the helper function (JSON.stringify dropped it) — every fixture had NO writtenAt and the writtenAt-wins test resolved via the filename tie-break; fixed to `stamp` + same-stamp tie-path test added [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Committed interim report pair stale-shaped (pre-round-2 dataNotes text not producible by shipped code) — regenerated with current code + provenance sentence in evidence/memory README [_bmad-output/memory/reports + _bmad-output/evidence/memory/README.md]
+- [x] [Review][Patch] Dev Agent Record suite count stale (48/48-era) — recounted to 59/59 (17/16/23/3) [story record]
+- [x] [Review][Patch] canary-miss test's first statement jammed onto the test() line — normalized [tests/memory/probe-harness.test.ts]
+- [x] [Review][Patch] Header overclaim: absent dispatch log omits dispatchFailures silently by design (present-but-unreadable gets the note) — wording aligned [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Misplaced "Pure renderer (AC5)" comment above `import.meta.main` (describes report-render.ts) — deleted [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Canary-path mkdirSync could throw past the contracted refusal — moved inside the guarded region (refusal survives, diagnosticPath omitted) [scripts/memory/probe-recall.ts]
+- [x] [Review][Patch] Cost-join outer catch could push "costTable omitted" beside a serialized table on close() failure — close-failure branch notes the table is read-complete [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Torn json/md pair on md-write failure — json rolled back to its previous bytes (or absent state) before rethrow [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Present-but-unreadable audit db collapsed to silent 0% coverage — dataNote "audit db unreadable … receiptCoverage reported 0" (absent db stays silent) [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Side-channel row present-but-unreadable indistinguishable from malformed JSON — read-vs-parse failures counted separately, non-ENOENT reads get a counted dataNote [scripts/memory/priming-report.ts]
+- [x] [Review][Patch] Empty-concepts guard sat after seen.add — second same-domain empty-concepts entry dropped without its recorded failure; guard moved before the dedupe + dedicated test (also un-broke 3 legs.test.ts green-leg fixtures made leg-fatal by F-017's corpus entry) [scripts/p0-9/provision-and-import.ts + tests/p0-9/legs.test.ts]

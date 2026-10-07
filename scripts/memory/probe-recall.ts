@@ -217,7 +217,6 @@ async function probeRecallLocked(
     canaryError = (e as Error).message;
   }
   if (canaryError !== undefined || !canaryResults.some((r) => r.documentId === CANARY_DOCUMENT_ID)) {
-    mkdirSync(env.evidenceDir, { recursive: true });
     const missReason =
       canaryError !== undefined
         ? `canary "${CANARY_DOCUMENT_ID}" failed: ${canaryError}`
@@ -232,10 +231,12 @@ async function probeRecallLocked(
     };
     // F-019: the diagnostic is best-effort — a write failure must not break
     // the refusal contract itself, so the refusal still returns (reason notes
-    // the write failure, diagnosticPath omitted).
+    // the write failure, diagnosticPath omitted). E1: the evidence-dir mkdir
+    // is INSIDE the guard too — an uncreatable dir throws past nothing.
     const diagnosticPath = join(env.evidenceDir, `${stampOf(now())}-canary-failure-${rand6()}.json`);
     let diagnosticWritten = true;
     try {
+      mkdirSync(env.evidenceDir, { recursive: true });
       atomicReplaceFile(diagnosticPath, `${JSON.stringify(diagnostic, null, 2)}\n`);
     } catch (e) {
       diagnosticWritten = false;

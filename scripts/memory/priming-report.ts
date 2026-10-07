@@ -5,8 +5,11 @@
  *
  * Read-only posture (INV-PH-2): the cost ledger opens via openReadOnly, the
  * audit db via a readonly sqlite handle, and an absent source stays absent —
- * a section with no data is omitted with a dataNote, never zero-filled, and
- * an absent ledger file is never created by a reader.
+ * a section with no data is omitted, never zero-filled, and an absent ledger
+ * file is never created by a reader. dataNotes name the PRESENT-but-unreadable
+ * sources (E4 audit db, E5 side-channel rows); an ABSENT dispatch log is the
+ * normal pre-first-dispatch state, so dispatchFailures omits silently — only a
+ * present-but-unreadable log gets the note.
  *
  * Every cross-group delta carries CORRELATION_NOTE; the report vocabulary is
  * restricted to observational labeling. The DD-22 checkpoint surfaces as
@@ -18,7 +21,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DEFAULT_RECALL_DIR } from "../../src/hindsight/kg-context.ts";
 import { DISPATCH_FAILURE_LOG } from "../../src/fleet/dispatch.ts";
@@ -76,23 +79,40 @@ interface SideRow {
  * failure (EACCES, ENOTDIR, …) surfaces as readError so the report can say
  * WHY it counted zero cycles instead of collapsing real data behind the
  * failure into a silent fresh-factory report.
+ * E5: a row file that EXISTS but cannot be READ (EACCES mid-dir, a directory
+ * where a row should be → EISDIR) is counted in unreadableRows — distinct
+ * from a malformed-but-readable row, which still skips silently.
  */
-function readSideChannel(recallDir: string): { winners: Map<string, SideRow>; readError?: string } {
+function readSideChannel(recallDir: string): {
+  winners: Map<string, SideRow>;
+  readError?: string;
+  unreadableRows: number;
+} {
   let names: string[];
   try {
     names = readdirSync(recallDir).filter((n) => n.endsWith(".json"));
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { winners: new Map() };
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { winners: new Map(), unreadableRows: 0 };
     return {
       winners: new Map(),
       readError: (e as NodeJS.ErrnoException).code ?? (e as Error).message,
+      unreadableRows: 0,
     };
   }
   const stamped: { row: SideRow; mtimeMs: number; name: string }[] = [];
+  let unreadableRows = 0;
   for (const name of names) {
+    let text: string;
+    try {
+      text = readFileSync(join(recallDir, name), "utf8");
+    } catch (e) {
+      // ENOENT is a read/delete race on a file we listed — not a hidden row.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") unreadableRows += 1;
+      continue;
+    }
     let raw: unknown;
     try {
-      raw = JSON.parse(readFileSync(join(recallDir, name), "utf8"));
+      raw = JSON.parse(text);
     } catch {
       continue;
     }
@@ -121,31 +141,35 @@ function readSideChannel(recallDir: string): { winners: Map<string, SideRow>; re
   stamped.sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
   const winners = new Map<string, SideRow>();
   for (const s of stamped) winners.set(s.row.runId, s.row);
-  return { winners };
+  return { winners, unreadableRows };
 }
 
-/** DISTINCT receipt runIds (subject_id) — a LEFT-JOIN key set, never a filter. */
-function readReceiptRunIds(auditPath?: string): Set<string> {
-  const path = auditPath ?? process.env.QDS_AUDIT_DB ?? DEFAULT_AUDIT_DB_FILE;
+/**
+ * DISTINCT receipt runIds (subject_id) — a LEFT-JOIN key set, never a filter.
+ * E4: a PRESENT-but-unreadable db (SQLITE_BUSY, corruption, non-sqlite) is
+ * reported via `unreadable` so receiptCoverage 0 is labeled as hidden data,
+ * not silently indistinguishable from an absent db.
+ */
+function readReceiptRunIds(auditPath: string): { ids: Set<string>; unreadable?: string } {
   const ids = new Set<string>();
-  if (!existsSync(path)) return ids; // absent db stays absent, never created
+  if (!existsSync(auditPath)) return { ids }; // absent db stays absent, never created
   // F-008: the existsSync check races the open, and a non-sqlite file at the
   // path throws — an unreadable audit db is absent data (empty set), never a
   // crash that kills the report.
   let rows: { subject_id: unknown }[];
   let db: Database | undefined;
   try {
-    db = new Database(path, { readonly: true });
+    db = new Database(auditPath, { readonly: true });
     rows = db
       .prepare(`SELECT DISTINCT subject_id FROM audit_links WHERE hop='memory-retain-receipt'`)
       .all() as { subject_id: unknown }[];
-  } catch {
-    return ids;
+  } catch (e) {
+    return { ids, unreadable: (e as NodeJS.ErrnoException).code ?? (e as Error).message };
   } finally {
     db?.close();
   }
   for (const r of rows) if (typeof r.subject_id === "string") ids.add(r.subject_id);
-  return ids;
+  return { ids };
 }
 
 /** Exact integer micro-usd per group (R2-001: emitted only when every counted cycle is fully priced — see joinCost). */
@@ -381,12 +405,6 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
   const primedCount = rows.filter((r) => r.primed).length;
   const unprimedCount = cyclesToDate - primedCount;
 
-  // Receipt LEFT-JOIN: presence is a per-cycle data-quality field — a
-  // receipt-less cycle still counts.
-  const receiptRunIds = readReceiptRunIds(deps.auditPath);
-  let withReceipt = 0;
-  for (const r of rows) if (receiptRunIds.has(r.runId)) withReceipt += 1;
-
   const dataNotes: string[] = [];
   // R2-005: a recallDir that exists but cannot be read (EACCES, a file where
   // the dir should be, …) collapses to zero cycles — say so instead of
@@ -394,6 +412,24 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
   if (side.readError !== undefined) {
     dataNotes.push(`side-channel dir unreadable at ${withCwd(recallDir)} (${side.readError}); cycles counted as 0`);
   }
+  // E5: rows the dir listing SAW but the read could not return (EACCES,
+  // dir-as-row) — data hidden behind the failure, named at row granularity.
+  if (side.unreadableRows > 0) {
+    dataNotes.push(`${side.unreadableRows} side-channel row(s) unreadable and skipped`);
+  }
+
+  // Receipt LEFT-JOIN: presence is a per-cycle data-quality field — a
+  // receipt-less cycle still counts. E4: a present-but-unreadable audit db
+  // gets a note so coverage 0 is not mistaken for absent data.
+  const receiptPath = deps.auditPath ?? process.env.QDS_AUDIT_DB ?? DEFAULT_AUDIT_DB_FILE;
+  const receipts = readReceiptRunIds(receiptPath);
+  const receiptRunIds = receipts.ids;
+  if (receipts.unreadable !== undefined) {
+    dataNotes.push(`audit db unreadable at ${withCwd(receiptPath)} (${receipts.unreadable}); receiptCoverage reported 0`);
+  }
+  let withReceipt = 0;
+  for (const r of rows) if (receiptRunIds.has(r.runId)) withReceipt += 1;
+
   const primedRows = rows.filter((r) => r.primed);
   const unprimedRows = rows.filter((r) => !r.primed);
 
@@ -403,6 +439,9 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
   // partial cycles carry aggregate dataNotes instead.
   // F-004: a PRESENT-but-unreadable ledger is absent data too (costTable
   // undefined + note), never fatal.
+  // E2: if the ledger was READ successfully but close() then threw, the table
+  // above is read-complete — the note says so instead of claiming an omitted
+  // table beside a serialized one.
   let costTable: ReportMetrics["costTable"];
   if (existsSync(ledgerPath)) {
     try {
@@ -422,7 +461,11 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
         ledger.close();
       }
     } catch (e) {
-      dataNotes.push(`cost ledger unreadable at ${withCwd(ledgerPath)} (${(e as Error).message}); costTable omitted`);
+      if (costTable !== undefined) {
+        dataNotes.push(`cost ledger close failed (${(e as Error).message}) — costTable above is read-complete`);
+      } else {
+        dataNotes.push(`cost ledger unreadable at ${withCwd(ledgerPath)} (${(e as Error).message}); costTable omitted`);
+      }
     }
   } else {
     dataNotes.push(
@@ -524,18 +567,25 @@ export async function runPrimingReport(deps: PrimingReportDeps = {}): Promise<{
     }
   }
   try {
+    // E3: the pair must not TEAR on disk — if the md replace throws after the
+    // json replace landed, roll the json back to its previous bytes (or absent
+    // state) before rethrowing. R2-010's lock serializes writers only; this
+    // keeps AC5's re-derivability true for the lockless reader at rest too.
+    const previousJson = existsSync(jsonPath) ? readFileSync(jsonPath, "utf8") : undefined;
     atomicReplaceFile(jsonPath, `${JSON.stringify(metrics, null, 2)}\n`);
-    atomicReplaceFile(mdPath, renderReportMd(metrics));
+    try {
+      atomicReplaceFile(mdPath, renderReportMd(metrics));
+    } catch (e) {
+      if (previousJson !== undefined) atomicReplaceFile(jsonPath, previousJson);
+      else rmSync(jsonPath, { force: true });
+      throw e;
+    }
   } finally {
     releaseRunLock(pairLock);
   }
   return { metrics, jsonPath, mdPath, appendedProbes };
 }
 
-/**
- * Pure renderer (AC5): reads ONLY its parameter, so the md is always
- * re-derivable from the metrics JSON — the JSON alone is the deliverable.
- */
 if (import.meta.main) {
   try {
     const res = await runPrimingReport();
