@@ -1,0 +1,4007 @@
+diff --git a/_bmad-output/sprint-artifacts/dark-factory-v6/stories/m1-2-host-side-memory-cycle.md b/_bmad-output/sprint-artifacts/dark-factory-v6/stories/m1-2-host-side-memory-cycle.md
+index b60bd667..65d56bb3 100644
+--- a/_bmad-output/sprint-artifacts/dark-factory-v6/stories/m1-2-host-side-memory-cycle.md
++++ b/_bmad-output/sprint-artifacts/dark-factory-v6/stories/m1-2-host-side-memory-cycle.md
+@@ -131,4 +131,17 @@ Two host-side legs around the existing run lifecycle, both outside the box: **di
+ 
+ ## Dev Agent Record
+ 
+-(written at implementation time — not part of this spec)
++**Branch:** `feature/m1-2-host-side-memory-cycle` (base/target `dev`). Orchestrated build: 7 leaves in 3 dispatch waves under `.unlazy/m1-2/` (PLAN.md = contract inventory C1–C14, revisions 1–4; every leaf parent-reverified from its own gate ledger before promotion).
++
++**Path drift (recorded, binding):** the story names `src/fleet/teardown.ts`; the real module is `src/providers/teardown.ts` (symbols `teardownSandbox`/`teardownSteps`/harvest step match the story's citations). Consequence: `src/providers/teardown.ts` is NOT in the box COPY enumerate set, so the post-harvest hook does NOT move the image pin; the pin movers in this story are `src/fleet/brief-schema.ts`, `scripts/pipeline-run.ts`, `src/fleet/run-completion.ts`, and (contract R3) `src/fleet/dispatch.ts` — digest adopted as `90250820…` in `tests/scripts/build-exedev-image.test.ts` (received from the failing run on the final tree, per the re-pin-last ritual; the IMAGE re-publish half is ops-side and operator-gated — it must run on a tree containing M1.2 BEFORE the next T2 round fires a box).
++
++**Live-measured wire facts this story consumed** (issue #408 coordination; both adds-only at the schemas layer, wire→legacy `.transform()` views keep `round-trip-verifier.ts` byte-unchanged): 0.10.0 retain response is `{success, bank_id?, items_count, async, usage}` — no `memoryId` (placeholder `""` documented as #408's open decision); recall results carry `{id, text, document_id}` — the additive null-tolerant `documentId` (AC5) maps from `document_id`; `metadata.tags` 422s on live so tags ride the item top-level; `updateMode:"replace"` is API-level semantics for the `document_id` upsert (upsert measured live: `documentsAfter1`/`After2` = 1, `upsertObserved: true`, `2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json`) — NO wire field invented.
++
++**Contract amendments (recorded in `.unlazy/m1-2/PLAN.md`, none silent):**
++- R2: leaf-1.4.1 (live-test AUTHORING) does not depend on the wiring leaf — owns one file, hermetic gating only.
++- R3: story DOD froze `src/fleet/dispatch.ts` byte-identical, but the story's own E2E slice requires the box to render `kgContext` — and the brief NEVER travels in-box (`dispatch.ts`: "the brief itself never travels in-box"); the witness `run-context.json` is the designed host→box channel (DF6.1a `fixContext` precedent). Resolution: ONE conditional spread `...(valid.kgContext === undefined ? {} : { kgContext: valid.kgContext })` beside `fixContext` — absent key = byte-identical witness, preserving the byte-identity clause's intent (no memory logic in dispatch internals). Pinned by a dedicated dispatch.test.ts leg.
++- R4: branch-gate N4 is baseline-relative — the dev tree at 8501eede carries 18 pre-existing full-suite failures (verified on a clean dev worktree: cli.test ×2; gitnexus contract ×3 — the 1.6.12 pin landed in #409 without the CLI-upgrade ritual having run locally, filed as issue #411; vendored self-compact parity ×13, vendor-side). Zero NEW failures is the M1.2 bar; the three M1.2-introduced failures found by the full suite were FIXED (audit vocab-aware test update, buildId digest adoption, live-mirror annotation), not waived.
++
++**Deviations from the letter of the spec (intent preserved):** harvest retain fires on BOTH `harvested` and `none` outcomes (the harvest LEG lands either way; `exitClassification` carries the difference — `green` vs `unsettled`); the observe chain's retain helper is a twin of fleet.ts's (both call the same `src/hindsight` seam; a reverse import would be a cycle — noted at both sites); `primeDispatchBrief` is awaited inside `ingestBriefJson` so a slow recall cannot outlive the verb.
++
++**Test/verification evidence:** 7 leaf ledgers + node integration ledger under `.unlazy/m1-2/gates/` (every runnable gate re-executed by the driver, not trusted from the leaves); full suite per R4; targeted suites green: hindsight/ (client, kg-context, run-retain), audit/ (109 tests incl. vocabulary), brief-schema + render + seam + dispatch witness legs; `bunx tsc --noEmit` + `bun run lint` at the branch gate; GitNexus detect_changes over the full diff (CRITICAL risk = the story's authorized core surfaces; affected processes reviewed).
+diff --git a/_bmad-output/sprint-artifacts/sprint-status.yaml b/_bmad-output/sprint-artifacts/sprint-status.yaml
+index f249ab3e..7b815f85 100644
+--- a/_bmad-output/sprint-artifacts/sprint-status.yaml
++++ b/_bmad-output/sprint-artifacts/sprint-status.yaml
+@@ -346,7 +346,7 @@ epics:
+     stories_dir: sprint-artifacts/dark-factory-v6/stories
+     stories:
+       M1.1: { title: "Dedicated Hindsight 0.10.0 on VPS + qds- banks + round-trip + no-auth retired-check", points: 3, status: done, deps: [Z4] }  # dev-half merged PR #407 (9f3caca5); VPS-day P0.9 legs + probe fixes merged PR #410 (8c2ef0be, evidence _bmad-output/evidence/p0-9-closure/); ops remainder = issue #408 (schemas.ts conformance amendment + P0.5 legs, open)  # v6a — Z4 edge = authored-early (fired on VPS-day); carries P0.5/P0.9 closure legs (transport re-homed per DD-17); operator-gated VPS spend
+-      M1.2: { title: "Host-side memory cycle (dispatch recall → kg_context brief + harvest idempotent retain)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — T2 live round; mock-first dev; P2.8 mechanism fold; moves deriveBuildId (kgContext brief field) — re-pin ritual runs on a tree containing M1.2; P2.8's documentId vocabulary = runId
++      M1.2: { title: "Host-side memory cycle (dispatch recall → kg_context brief + harvest idempotent retain)", points: 5, status: in-progress, deps: [M1.1] }  # v6a — T2 live round; mock-first dev; P2.8 mechanism fold; moves deriveBuildId (kgContext brief field) — re-pin ritual runs on a tree containing M1.2; P2.8's documentId vocabulary = runId
+       M1.3: { title: "Recall measurement harness (probe set, hit-rate@k, DD-22 checkpoint)", points: 3, status: ready-for-dev, deps: [M1.2] }  # v6a — probe set early (risk §7.3); report leg = flex-cut #1; checkpoint ~30 cycles, DATED not sprint-bound
+       M2.1: { title: "Memory gateway (per-run recall-only keys + agent tokens; D8 amendment impl)", points: 5, status: ready-for-dev, deps: [M1.1] }  # v6a — unit/mock; M1.1 edge ACCEPTANCE-ONLY (dev-first sanctioned, DD-26); mirrors credentials.ts ordering exactly; module root src/memgate/
+       M2.2: { title: "In-box kg_recall pi extension + roster grant + full image re-pin ritual", points: 5, status: ready-for-dev, deps: [M2.1] }  # v6b — recall-only/sanitized/char-budgeted/F10-treated; re-pin ritual = operator GO (blocks ALL T2; batched with M1.2/J3 pin moves)
+diff --git a/scripts/fleet.ts b/scripts/fleet.ts
+index 71d625a8..489ac59e 100644
+--- a/scripts/fleet.ts
++++ b/scripts/fleet.ts
+@@ -139,6 +139,16 @@ import type { ProviderAuditLink } from "../src/providers/driver.ts";
+ import { withRunLock } from "./lib/run-lock.ts";
+ import { BriefSchema } from "../src/fleet/brief-schema.ts";
+ import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
++// M1.2 (AC1/AC4): the memory cycle's two host legs. This file is their
++// composition root — the dispatch prime rides the ONE brief ingress
++// (ingestBriefJson, below) and the harvest retain rides the shared
++// best-effort helper (below, at runHarvest); the landed hindsight modules own
++// every gate (env, ladder, payload bounds, receipt).
++import { extractExistingBankIds, resolveRepoBankId } from "../src/hindsight/bank-provisioner.ts";
++import { HindsightClient } from "../src/hindsight/client.ts";
++import { primeDispatchBrief } from "../src/hindsight/kg-context.ts";
++import { retainRunOutcome } from "../src/hindsight/run-retain.ts";
++import { resolveBankId } from "../src/hindsight/schemas.ts";
+ import {
+   assertFleetRunId,
+   dispatch,
+@@ -1341,8 +1351,9 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
+       );
+     }
+   }
++  let parsed: unknown;
+   try {
+-    return JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
++    parsed = JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
+   } catch (e) {
+     throw new FleetError(
+       2,
+@@ -1351,8 +1362,26 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
+       "fix the JSON on stdin or in --brief <path>",
+     );
+   }
++  // M1.2 AC1: THE dispatch seam — this is the shared brief ingress of
++  // dispatch/fanout/submit, so ONE call here primes every dispatch-shaped
++  // entry; per-verb copies are the AC1 negative control. The prime is
++  // env-gated and never throws: unconfigured memory and a failed recall both
++  // hand back the SAME reference (AC2a/AC2b — v5 exits byte-identical), and
++  // the call is awaited so a slow recall cannot outlive the verb. A scalar or
++  // null JSON document is not a brief — passed through untouched to the
++  // verb's own schema refusal, exactly as v5 answered it.
++  return typeof parsed === "object" && parsed !== null ? primeDispatchBrief(parsed) : parsed;
+ }
+ 
++/**
++ * Test hook (the `__auditStoreTestHooks` posture): the seam suite pins the
++ * ingest behavior through the REAL `ingestBriefJson` — exported here so the
++ * test exercises what dispatch runs, not a copy of the wiring.
++ * `primeDispatchBrief` rides along so the test can pin the hook identity:
++ * one seam means the landed function itself, not a fleet-local wrapper.
++ */
++export const __fleetTestHooks = { ingestBriefJson, primeDispatchBrief };
++
+ /**
+  * The budget gate's ONLY storage handle, wired beside the records dir. One
+  * implementation for dispatch and fanout — only a genuine missing record reads
+@@ -5830,6 +5859,19 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
+       // bundle/artifact paths must be under exactly that directory.
+       runsDir: store.dir,
+       recordAuditLink: (link) => audit.record(link),
++      // M1.2 AC4: the teardown verb's own harvest step retains through the
++      // SAME seam as the direct `fleet harvest` arm (retainRunOutcomeBestEffort)
++      // — the hook is the injection point; providers/teardown.ts owns the
++      // firing rules and the failure isolation.
++      postHarvest: (info) =>
++        retainRunOutcomeBestEffort({
++          store,
++          runId: info.runId,
++          requestId: info.requestId,
++          outcome: info.outcome,
++          count: info.count,
++          auditRecord: (link) => audit.record(link),
++        }),
+     };
+     if (verb === "harvest") {
+       code = await runHarvest(ctx, tdeps, runIdArg);
+@@ -6027,11 +6069,120 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
+   return finish(requestId, verb, runIdArg, code);
+ }
+ 
++/**
++ * M1.2 AC4: the ONE harvest-retain seam in this file. Both post-harvest call
++ * sites land here — the direct `fleet harvest` arm (runHarvest, below) and
++ * the injected `postHarvest` hook the teardown verb's harvest step fires — so
++ * every harvest leg in this composition root retains identically. (The
++ * observe chain's chainTeardownDeps carries its own twin in
++ * src/fleet/run-completion.ts: this script imports that module, so the reverse
++ * import would be a cycle — the fallback the story wiring anticipated. Both
++ * twins call the SAME src/hindsight functions; the seam is retainRunOutcome.)
++ *
++ * Env-gated (AC2a's harvest twin): unconfigured memory means no client, no
++ * listBanks, no row, no line — and harvest's exit untouched. Everything else
++ * that can throw sits inside the try: a retain failure NEVER changes the
++ * harvest exit code (the harvest leg landed either way) — it degrades to one
++ * structured error line, the same posture the teardown hook's own wrap takes.
++ *
++ * The repo bank id is the PROVISION-TIME resolution (AC1/AC4): resolved
++ * against the LIVE bank list through resolveRepoBankId's truncate/collision
++ * semantics, never re-derived from the raw resolveBankId normalization. A
++ * record with no budget.repoSlug refuses to invent one (INV-AUDIT-4 posture)
++ * — skipped loudly, since a misprovisioned run must be findable.
++ */
++async function retainRunOutcomeBestEffort(input: {
++  store: RunRecordStore;
++  runId: string;
++  requestId: string;
++  outcome: "harvested" | "none";
++  count?: number;
++  auditRecord: (link: ProviderAuditLink) => void;
++}): Promise<void> {
++  // Empty strings count as unconfigured — the same coercion kg-context's gate
++  // and the client's auth fallback apply (and the same env pair: the host
++  // token INV-HM1 is the only retain credential there is, DD-16).
++  const envConfigured =
++    Boolean(process.env.HINDSIGHT_BASE_URL) &&
++    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
++  if (!envConfigured) return;
++  const skipLine = (code: string, reason: string): void => {
++    log({
++      requestId: input.requestId,
++      operation: "memory-retain",
++      agentId: null,
++      timestamp: new Date().toISOString(),
++      duration: 0,
++      status: "error",
++      runId: input.runId,
++      error: { code, message: reason },
++      reason: "harvest retain skipped — the harvest leg landed and its exit is unchanged (M1.2 AC4 best-effort)",
++    });
++  };
++  try {
++    // The RECORD's stamp is the join key whenever it carries one — the same
++    // rule run-completion's recordRequestId applies; the invocation's id is
++    // only the fallback.
++    const rec = input.store.get(input.runId);
++    const requestId =
++      typeof rec.requestId === "string" && rec.requestId !== "" ? rec.requestId : input.requestId;
++    const repoSlug = rec.extensions?.budget?.repoSlug;
++    if (typeof repoSlug !== "string" || repoSlug.length === 0) {
++      skipLine("retain-skipped", `run ${input.runId} carries no budget.repoSlug — the retain's bank is unknown`);
++      return;
++    }
++    const client = new HindsightClient();
++    const existing = extractExistingBankIds(await client.listBanks());
++    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
++    if (repoBankId === null) {
++      skipLine("retain-skipped", `run ${input.runId}'s repo bank id did not resolve against the live bank list`);
++      return;
++    }
++    await retainRunOutcome(
++      client,
++      // The caller's audit emitter, adapted: retainRunOutcome only ever calls
++      // `record`, and the composition root owns the store's lifecycle — the
++      // retain never closes another module's handle.
++      { record: input.auditRecord, close() {}, path: "" },
++      {
++        runId: input.runId,
++        repoSlug,
++        requestId,
++        // The harvest LEG landed either way; harvested-with-commits is the
++        // only green shape — a harvest that pulled nothing is an unsettled
++        // outcome, which is the classification's own meaning.
++        exitClassification: input.outcome === "harvested" ? "green" : "unsettled",
++        ...(input.outcome === "harvested" ? { harvestedCount: input.count ?? 0 } : {}),
++        tags: ["factory-run"],
++        repoBankId,
++      },
++    );
++  } catch (e) {
++    skipLine(
++      "retain-failed",
++      redactSecrets((e as Error)?.message ?? e).slice(0, 200) || "the retain call failed",
++    );
++  }
++}
++
+ /** `fleet harvest`'s arm of the shared destructive scaffolding: D8, credential-free. */
+ async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): Promise<number> { // dp:ok awaited at fleet.ts:2609 inside runDestructive's try/finally, which owns the diagnostics and the exit code
+   const { reportCompletion, outputIncomplete } = ctx;
+   // D8: harvest is credential-free — no keyApi is built.
+   const res = await harvestRun(tdeps, runIdArg);
++  // M1.2 AC4: the harvest LEG landed on BOTH outcomes — retain best-effort
++  // before the completion line. The helper catches everything, so this await
++  // cannot move the exit code off what the leg itself earned.
++  await retainRunOutcomeBestEffort({
++    store: tdeps.store,
++    runId: runIdArg,
++    // tdeps.requestId is the invocation's mint; the helper prefers the
++    // record's own dispatch stamp whenever the record carries one.
++    requestId: tdeps.requestId ?? "",
++    outcome: res.outcome,
++    count: res.outcome === "harvested" ? res.count : undefined,
++    auditRecord: tdeps.recordAuditLink,
++  });
+   // Through `reportCompletion`, not a bare `emit` (see it): the harvest
+   // has already run, so a lost result line is 6, never a retryable 1. Folded
+   // with `outputIncomplete()` like every sibling arm (A12): `reportCompletion`
+diff --git a/scripts/pipeline-run.ts b/scripts/pipeline-run.ts
+index b9834d9e..91c63166 100644
+--- a/scripts/pipeline-run.ts
++++ b/scripts/pipeline-run.ts
+@@ -1585,10 +1585,14 @@ function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[
+  * witness-borne strings reach the resident's prompt the way manifest-borne
+  * strings reach log messages (types.ts's one-shared-implementation rule); a
+  * newline in a hand-forged witness value must not forge instruction lines.
++ * The ONE exception is `kgContext` (INV-KG-3): BriefSchema already bounds and
++ * charset-guards that field, and its value IS a multi-line XML block, so
++ * sanitizeForMessage would escape the newlines and destroy it — it is appended
++ * verbatim, with the schema as the boundary guard instead of this renderer.
+  * Bounded by construction; steering.ts enforces the 16,000-char prompt
+  * ceiling at render, head-truncated with the directive instruction reserved.
+  */
+-function residentContextLines(
++export function residentContextLines(
+   runId: string,
+   manifest: { pipelineId: string; phases: readonly PhaseSpec[] },
+   brief: Record<string, unknown>,
+@@ -1610,6 +1614,15 @@ function residentContextLines(
+       )
+       .join(", ")}`,
+   );
++  // Appended LAST, verbatim, and only when present: absent = the lines above
++  // exactly as before. NOT routed through sanitizeForMessage — the schema's
++  // ceiling + control-char refine (INV-KG-3) are the boundary guard, and the
++  // escaping this function applies everywhere else would flatten the block's
++  // newlines into \n literals and hand the resident a dead context.
++  const kgContext = brief.kgContext;
++  if (typeof kgContext === "string" && kgContext.length > 0) {
++    lines.push(kgContext);
++  }
+   return lines;
+ }
+ 
+diff --git a/src/audit/link-store.ts b/src/audit/link-store.ts
+index 5819f0d8..c558e4ae 100644
+--- a/src/audit/link-store.ts
++++ b/src/audit/link-store.ts
+@@ -84,7 +84,7 @@ const HOP_EVENT_VOCABULARY = {
+   "run-issue": [],
+   "run-cost": [],
+   "run-gate-evidence": [],
+-  "memory-retain-receipt": [],
++  "memory-retain-receipt": ["retain"],
+ } as const satisfies Readonly<Record<AuditHop, readonly string[]>>;
+ 
+ /** The walker's first-observation digest rows. */
+diff --git a/src/fleet/brief-schema.ts b/src/fleet/brief-schema.ts
+index 7c613883..a068e015 100644
+--- a/src/fleet/brief-schema.ts
++++ b/src/fleet/brief-schema.ts
+@@ -291,6 +291,34 @@ const MAX_FIX_AUTHOR_CHARS = 100;
+ const MAX_FIX_SNIPPET_CHARS = 4000;
+ const MAX_FIX_SNIPPET_BYTES_TOTAL = 40_000;
+ 
++/**
++ * M1.2 AC3: the `<kg_context>` memory appendix ceiling. The same number lives
++ * producer-side as `KG_CONTEXT_MAX_CHARS` (src/hindsight/kg-context.ts) and is
++ * DELIBERATELY NOT imported from there: this schema is the box-compiled trust
++ * boundary (INV-2), so importing from src/hindsight/ would couple what the box
++ * ships to what the host compiles. The duplication is the accepted cost of that
++ * separation, and the drift it permits is loud in the dangerous direction: the
++ * producer assembles to its own ceiling, so a producer that outgrows this copy
++ * of the number is REFUSED here (exit-2 class at dispatch), never truncated —
++ * reaching this refusal means the boundary was bypassed, and a silently
++ * truncated context would disguise exactly the bug the ceiling exists to
++ * surface.
++ */
++const BRIEF_KG_CONTEXT_MAX_CHARS = 8_000;
++
++/**
++ * kgContext's charset, unlike every other field's NO_CONTROL_CHARS above: the
++ * value is a MULTI-LINE XML block rendered verbatim into the resident's prompt
++ * (pipeline-run.ts's residentContextLines), so \n (0x0a) and \t (0x09) are the
++ * payload, not an attack — they are the only C0 code points allowed through.
++ * Refused is the rest of C0 plus DEL: the classes that forge a line boundary or
++ * inject an escape inside that block. \r is included even though it is only a
++ * line boundary for CRLF-folding consumers: the block is \n-joined, so a bare
++ * CR mid-line can only ever be a forgery attempt.
++ */
++const KG_CONTEXT_CONTROL_CLASS = "\\u0000-\\u0008\\u000B-\\u001F\\u007F";
++const KG_CONTEXT_NO_CONTROL_CHARS = new RegExp(`^[^${KG_CONTEXT_CONTROL_CLASS}]*$`, "u");
++
+ /**
+  * Non-blank, for the two fields whose `.min(1)` was doing the job blankness
+  * defeats.
+@@ -465,6 +493,21 @@ export const BriefSchema = z.strictObject({
+       },
+     )
+     .optional(),
++  // M1.2 AC3: the dispatch-time memory appendix, carried VERBATIM into the
++  // resident's context by pipeline-run.ts's residentContextLines. Optional and
++  // adds-only: a brief without it parses byte-identical to v5. The ceiling and
++  // charset above are the trust boundary (INV-KG-3) — the renderer deliberately
++  // does NOT re-sanitize, because the value IS a multi-line block and escaping
++  // would destroy it; that is only safe because this field is the one place the
++  // schema both bounds and charset-guards the payload.
++  kgContext: z
++    .string()
++    .max(BRIEF_KG_CONTEXT_MAX_CHARS)
++    .refine(
++      (s) => KG_CONTEXT_NO_CONTROL_CHARS.test(s),
++      "kgContext may not contain control characters other than newline and tab",
++    )
++    .optional(),
+ })
+   /**
+    * `repoSlug` and `repoUrl` are two names for one repository, and validating
+diff --git a/src/fleet/dispatch.ts b/src/fleet/dispatch.ts
+index a734101e..c18c07e6 100644
+--- a/src/fleet/dispatch.ts
++++ b/src/fleet/dispatch.ts
+@@ -3705,6 +3705,14 @@ export async function dispatch(
+           // the engine re-checks the bounds fail-closed before rendering,
+           // because what is trusted here is the channel, not the content.
+           ...(valid.fixContext === undefined ? {} : { fixContext: valid.fixContext }),
++          // M1.2 AC1 (contract R3): kgContext rides the same designed channel —
++          // host-side dispatch-time recall primes the brief (fleet.ts's
++          // ingestBriefJson seam), and the witness is how ANY brief field
++          // reaches the box. Same discipline as fixContext: conditional spread
++          // (absent key = byte-identical witness), and the payload is already
++          // bounded + charset-guarded once, at BriefSchema (INV-KG-3) — the
++          // in-box renderer (residentContextLines) emits it verbatim.
++          ...(valid.kgContext === undefined ? {} : { kgContext: valid.kgContext }),
+         }),
+       },
+     ];
+diff --git a/src/fleet/run-completion.ts b/src/fleet/run-completion.ts
+index a1c289b7..869b8099 100644
+--- a/src/fleet/run-completion.ts
++++ b/src/fleet/run-completion.ts
+@@ -34,6 +34,10 @@
+  * `withRunLock` wrap, which would throw on re-entry.
+  */
+ import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
++import { extractExistingBankIds, resolveRepoBankId } from "../hindsight/bank-provisioner.ts";
++import { HindsightClient } from "../hindsight/client.ts";
++import { retainRunOutcome } from "../hindsight/run-retain.ts";
++import { resolveBankId } from "../hindsight/schemas.ts";
+ import type { CostLedger } from "../providers/cost-ledger.ts";
+ import type { KeyApi } from "../providers/credentials.ts";
+ import type { ProviderAuditLink, ProviderDriver } from "../providers/driver.ts";
+@@ -197,6 +201,76 @@ function recordRequestId(rec: RunRecord, deps: RunCompletionDeps): string {
+ 
+ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+ 
++/**
++ * M1.2 AC4: the observe chain's post-harvest retain — the twin of fleet.ts's
++ * `retainRunOutcomeBestEffort`. scripts/fleet.ts imports THIS module, so
++ * importing its helper back would be a cycle; this small duplication is the
++ * sanctioned fallback, and both twins call the SAME src/hindsight functions —
++ * same env gate, same provision-time bank resolution, same `retainRunOutcome`
++ * seam. (The sweep's chain rides this too: observe.ts builds this module's
++ * deps for every candidate, so batch and single-run retain identically.)
++ *
++ * Same contract as the twin: env-unconfigured memory skips entirely (no row,
++ * no line, chain untouched); everything else is failure-isolated — a retain
++ * refusal is one structured error line, never a chain failure, because the
++ * harvest leg landed either way.
++ */
++async function postHarvestRetain(
++  deps: RunCompletionDeps,
++  info: { runId: string; requestId: string; outcome: "harvested" | "none"; count?: number },
++): Promise<void> {
++  const envConfigured =
++    Boolean(process.env.HINDSIGHT_BASE_URL) &&
++    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
++  if (!envConfigured) return;
++  try {
++    const rec = deps.store.get(info.runId);
++    // The RECORD's stamp is the join key whenever it carries one.
++    const requestId = recordRequestId(rec, deps);
++    const repoSlug = rec.extensions?.budget?.repoSlug;
++    if (typeof repoSlug !== "string" || repoSlug.length === 0) {
++      // INV-AUDIT-4 posture: no attribution, no invented bank — skipped loudly.
++      throw new Error(`run ${info.runId} carries no budget.repoSlug — the retain's bank is unknown`);
++    }
++    const client = new HindsightClient();
++    const existing = extractExistingBankIds(await client.listBanks());
++    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
++    if (repoBankId === null) {
++      throw new Error(`run ${info.runId}'s repo bank id did not resolve against the live bank list`);
++    }
++    await retainRunOutcome(
++      client,
++      // retainRunOutcome only ever calls `record`; the composition root owns
++      // the store's lifecycle, so the adapter closes nothing and names no path.
++      { record: deps.recordAuditLink, close() {}, path: "" },
++      {
++        runId: info.runId,
++        repoSlug,
++        requestId,
++        // The harvest leg landed either way; harvested-with-commits is the
++        // only green shape — a harvest that pulled nothing is unsettled.
++        exitClassification: info.outcome === "harvested" ? "green" : "unsettled",
++        ...(info.outcome === "harvested" ? { harvestedCount: info.count ?? 0 } : {}),
++        tags: ["factory-run"],
++        repoBankId,
++      },
++    );
++  } catch (e) {
++    log({
++      agentId: null,
++      timestamp: new Date().toISOString(),
++      duration: 0,
++      status: "error",
++      requestId: info.requestId,
++      operation: "memory-retain",
++      runId: info.runId,
++      error: { code: "retain-failed", message: errText(e) },
++      reason:
++        "harvest retain skipped — the harvest leg landed and the chain's exit is unchanged (M1.2 AC4 best-effort)",
++    });
++  }
++}
++
+ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): TeardownDeps {
+   return {
+     driver: deps.driver,
+@@ -209,6 +283,11 @@ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): Teardown
+     // DF5.3: the chain's teardown emits its `teardown` link through the same
+     // required seam every other construction threads.
+     recordAuditLink: deps.recordAuditLink,
++    // M1.2 AC4: the chain's harvest step retains through the same seam the
++    // direct `fleet harvest` arm uses; the hook is injected (providers own
++    // the firing rules) and failure-isolated inside — and again by
++    // teardown.ts's own wrap.
++    postHarvest: (info) => postHarvestRetain(deps, info),
+   };
+ }
+ 
+diff --git a/src/hindsight/bank-provisioner.ts b/src/hindsight/bank-provisioner.ts
+index 4ad30d93..2e01fee3 100644
+--- a/src/hindsight/bank-provisioner.ts
++++ b/src/hindsight/bank-provisioner.ts
+@@ -181,7 +181,7 @@ function truncateForSuffix(baseId: string): string {
+  * — the latter happens when the base id is already near the 64-char cap and
+  * truncation cannot produce a valid suffixed form → -32005 per INV-HM6).
+  */
+-function resolveRepoBankId(
++export function resolveRepoBankId(
+   baseId: string,
+   existing: Set<string>,
+ ): string | null {
+@@ -212,7 +212,7 @@ function resolveRepoBankId(
+ // Existing-bank set extraction (defensive — INV-HM5 style narrowing)
+ // ---------------------------------------------------------------------------
+ 
+-function extractExistingBankIds(raw: unknown): Set<string> {
++export function extractExistingBankIds(raw: unknown): Set<string> {
+   const out = new Set<string>();
+   if (raw === null || typeof raw !== "object") return out;
+   // Accept {banks:[{bank_id|bankId|id}]}, {banks:[string]}, [string], [{}].
+diff --git a/src/hindsight/client.ts b/src/hindsight/client.ts
+index 2675fdf4..e008aff4 100644
+--- a/src/hindsight/client.ts
++++ b/src/hindsight/client.ts
+@@ -30,6 +30,7 @@ import {
+   ConsolidateResponseSchema,
+   RecallResponseSchema,
+   ReflectResponseSchema,
++  RetainExtensionSchema,
+   RetainResponseSchema,
+   type ConsolidateResponse,
+   type RecallResponse,
+@@ -49,16 +50,29 @@ export const CONSOLIDATE_TIMEOUT_MS = 60_000;
+ const DEFAULT_BASE_URL = "http://127.0.0.1:8888";
+ 
+ /**
+- * Canned schema-valid bodies returned in `'mock'` mode — no network. Each
+- * shape matches the Zod schema the typed method parses downstream
+- * (`requestJSON`), so mock round-trips pass validation like live ones.
+- * `bankId` echoes the request's bank; the synthetic retain `memoryId` is
+- * deterministic per bank so repeat calls are comparable.
++ * Canned WIRE-shape bodies returned in `'mock'` mode — no network. Each shape
++ * matches the Zod schema the typed method parses downstream (`requestJSON`),
++ * so mock round-trips pass the SAME strict parse as live ones (M1.2 AC5: mock
++ * is a network-only short-circuit, never a validation short-circuit). The
++ * retain body is the measured 0.10.0 wire (zero-token usage); the legacy
++ * camelCase view consumers see (memoryId "" placeholder etc.) is produced by
++ * the schema transform, not by this body.
+  */
+ function mockBody(path: string, bankId: string): unknown {
+   if (path.endsWith("/memories/recall")) return { results: [], durationMs: 0 };
+   if (path.endsWith("/memories")) {
+-    return { memoryId: `mock-${bankId}`, bankId, status: "created" as const, durationMs: 0 };
++    return {
++      success: true,
++      items_count: 1,
++      async: false,
++      usage: {
++        input_tokens: 0,
++        output_tokens: 0,
++        total_tokens: 0,
++        cached_tokens: 0,
++        thoughts_tokens: 0,
++      },
++    };
+   }
+   if (path.endsWith("/reflect")) {
+     return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
+@@ -244,6 +258,14 @@ export class HindsightClient {
+     }
+   }
+ 
++  /**
++   * M1.2 AC5 (P2.8 fold): the retain extension is OWNED, not assumed —
++   * `documentId`/`updateMode` are schema-validated at this boundary
++   * (RetainExtensionSchema), `tags` move TOP-LEVEL on the wire item (never
++   * `metadata.tags` — 0.10.0 422s on that), and `updateMode:"replace"` is
++   * API-level semantics for the `document_id` upsert: no wire field exists
++   * for it and none is sent.
++   */
+   async retain(
+     bankId: string,
+     content: string,
+@@ -251,13 +273,42 @@ export class HindsightClient {
+       source?: "agent" | "mulch-import" | "manual" | "consolidate";
+       kind?: "decision" | "pattern" | "expertise" | "observation";
+       tags?: string[];
++      documentId?: string;
++      updateMode?: "replace";
+     },
+   ): Promise<RetainResponse> {
+     const requestId = this.requestId ?? newRequestId();
+     assertBankId(bankId, requestId);
+-    const body: Record<string, unknown> = {
+-      items: [metadata ? { content, metadata } : { content }],
+-    };
++    const extension = RetainExtensionSchema.safeParse(metadata ?? {});
++    if (!extension.success) {
++      // Thrown BEFORE request(), so request()'s finally-log never fires — log
++      // the refusal here, mirroring assertBankId, or it is invisible.
++      log({
++        requestId,
++        operation: "retain",
++        agentId: null,
++        timestamp: new Date().toISOString(),
++        duration: 0,
++        status: "error",
++        bankId,
++        error: { code: "invalid_retain_extension", message: extension.error.message },
++      });
++      throw new HindsightHttpError(
++        422,
++        `invalid retain extension: ${extension.error.message}`,
++        requestId,
++      );
++    }
++    const item: Record<string, unknown> = { content };
++    if (metadata?.tags !== undefined) item.tags = metadata.tags;
++    if (metadata?.documentId !== undefined) item.document_id = metadata.documentId;
++    if (metadata?.source !== undefined || metadata?.kind !== undefined) {
++      item.metadata = {
++        ...(metadata.source !== undefined ? { source: metadata.source } : {}),
++        ...(metadata.kind !== undefined ? { kind: metadata.kind } : {}),
++      };
++    }
++    const body: Record<string, unknown> = { items: [item] };
+     return this.requestJSON(
+       "POST",
+       `/v1/default/banks/${bankId}/memories`,
+diff --git a/src/hindsight/kg-context.ts b/src/hindsight/kg-context.ts
+new file mode 100644
+index 00000000..1350a1ee
+--- /dev/null
++++ b/src/hindsight/kg-context.ts
+@@ -0,0 +1,350 @@
++/**
++ * Dispatch-time KG grounding (M1.2 AC1/AC2/AC3) — fan-out recall over the
++ * repo's provision-time bank + `qds-collective`, `<kg_context>` assembly, and
++ * `primeDispatchBrief` — the ONE dispatch-shaped seam (leaf-1.3.1 calls it
++ * from ingestBriefJson; per-verb copies are the AC1 make-or-break negative
++ * control: they pass the happy path and strand sibling dispatch callers).
++ *
++ * Degradation ladder (story AC2 — the directive fires on EMPTY-RESULT only):
++ *   (a) env unconfigured → brief returned untouched (SAME reference), no row,
++ *       no log line — absent, not zero;
++ *   (b) any recall/bank-resolution failure → proceed-unprimed, row
++ *       {primed:false, directive:"none"} — NEVER the empty directive (mapping
++ *       "KG unreachable" onto "KG says nothing" is the AC2 negative control);
++ *   (c) recall ok, zero observations → EMPTY_KG_DIRECTIVE only;
++ *   (d) results → full block, citation-floored, ranked, ≤ KG_CONTEXT_MAX_CHARS.
++ * (b)/(c)/(d) write the side-channel row + `kg-recall` line; (a) writes
++ * NEITHER. The seam never throws and never changes dispatch's exit codes.
++ *
++ * Budgets (story "Guards/limits"): KG_CONTEXT_MAX_CHARS is the assembly
++ * ceiling at whole-observation granularity (an observation that does not fit
++ * is dropped, never split); KG_RECALL_LIMIT per bank; the wall budget is the
++ * client's own RECALL timeout — one attempt per bank, ZERO retries
++ * (zeropoint's RECALL_MAX_ATTEMPTS=3 deliberately not copied: dispatch is
++ * latency-budgeted).
++ */
++
++import { mkdirSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++
++import { log } from "../swarmclaw/mcp/stdio-transport.ts";
++import {
++  COLLECTIVE_BANK_ID,
++  extractExistingBankIds,
++  resolveRepoBankId,
++} from "./bank-provisioner.ts";
++import { HindsightClient } from "./client.ts";
++import { resolveBankId, type RecallResponse } from "./schemas.ts";
++
++// ---------------------------------------------------------------------------
++// Grammar + guards (copied symbols per story "Zeropoint grammar")
++// ---------------------------------------------------------------------------
++
++/** Half of the steering prompt ceiling (16_000) — the brief keeps prose headroom. */
++export const KG_CONTEXT_MAX_CHARS = 8_000;
++
++/** Per-bank recall k — the client default, named here so AC1 stays greppable. */
++export const KG_RECALL_LIMIT = 5;
++
++/** Default side-channel dir (relative to cwd, like judgment's provenance dir). */
++export const DEFAULT_RECALL_DIR = "_bmad-output/memory/recall";
++
++/**
++ * Fires on EMPTY-RESULT only — a timed-out/errored fan-out must never emit
++ * this (AC2's negative control). Single static string: no interpolation of
++ * run internals, so the directive text is byte-stable across runs.
++ */
++export const EMPTY_KG_DIRECTIVE =
++  "The factory memory banks hold no observations relevant to this repo or task; nothing in this dispatch is memory-grounded. Do not present generalizations, conventions, or prior-run knowledge as grounded — they are not in the banks.";
++
++export const CITATION_INSTRUCTION =
++  "When you make a factual claim grounded in a <kg_context> observation, append the citation token [cite:OBSERVATION_ID] immediately after the claim, using the observation's id exactly as it appears in <kg_context>. Use one token per grounded claim. Do not cite general knowledge or information not present in <kg_context>. The OBSERVATION_ID charset is letters, digits, underscore, and hyphen ([A-Za-z0-9_-]+); there are no spaces inside the brackets.";
++
++/** Citable ids are exactly the charset CITATION_INSTRUCTION promises the box. */
++const CITABLE_ID = /^[A-Za-z0-9_-]+$/;
++
++export type KgDirective = "kg_context" | "empty" | "none";
++
++/** One recalled fact, already narrowed to what the citation contract needs. */
++export interface KgObservation {
++  /** Server-minted fact id — the `[cite:<id>]` token target (distinct from documentId). */
++  id: string;
++  content: string;
++  score: number;
++  /** Document identity; null when retained without an explicit id (AC5). */
++  documentId: string | null;
++}
++
++/** Minimal structural client — the real HindsightClient satisfies it; tests inject plain objects. */
++export interface RecallClient {
++  recall(bankId: string, query: string, limit?: number): Promise<RecallResponse>;
++  listBanks(): Promise<unknown>;
++}
++
++export interface PrimeDispatchBriefDeps {
++  /** Mock-mode client override (tests; never a second production client). */
++  client?: RecallClient;
++  /** Side-channel dir override (tests use a tmpdir; never real _bmad-output). */
++  recallDir?: string;
++}
++
++/** Side-channel row — EXACTLY these seven keys (M1.3 parses the shape verbatim). */
++export interface RecallRow {
++  runId: string;
++  primed: boolean;
++  directive: KgDirective;
++  banks: string[];
++  recalledDocumentIds: string[];
++  chars: number;
++  latencyMs: number;
++}
++
++// ---------------------------------------------------------------------------
++// Fan-out recall — exactly {<provision-time repo bank>, qds-collective}
++// ---------------------------------------------------------------------------
++
++export interface RecallFanOutResult {
++  observations: KgObservation[];
++  /** Fan-out set attempted (deduped, repo bank first). */
++  banks: string[];
++  /** True when at least one bank's recall SUCCEEDED — even with zero results. */
++  anyBankOk: boolean;
++  /** Per-bank wall ms, attempted banks only (failed attempts included). */
++  bankMs: Record<string, number>;
++  /** Whole fan-out wall ms. */
++  recallMs: number;
++}
++
++/**
++ * One attempt per bank, in parallel, zero retries. A failed bank contributes
++ * nothing — no observations, no directive change — but a bank that SUCCEEDED
++ * keeps ladder (c) alive even when it returned zero results: only ALL-bank
++ * failure is ladder (b). Partial failure therefore degrades content, never
++ * the ladder.
++ */
++export async function recallFanOut(
++  client: RecallClient,
++  repoBankId: string,
++  query: string,
++): Promise<RecallFanOutResult> {
++  // The set is EXACTLY these two banks (story "Fan-out set" — `-dev-meta` is
++  // deliberately absent); deduped for a caller that hands us the collective.
++  const banks = [...new Set([repoBankId, COLLECTIVE_BANK_ID])];
++  const start = Date.now();
++  const per = await Promise.all(
++    banks.map(async (bankId) => {
++      const t0 = Date.now();
++      try {
++        const res = await client.recall(bankId, query, KG_RECALL_LIMIT);
++        return { bankId, ms: Date.now() - t0, ok: true as const, results: res.results };
++      } catch {
++        // Per-bank failure contributes NOTHING — swallowed by design, not by
++        // accident: the client already logged the attempt (request() finally).
++        return { bankId, ms: Date.now() - t0, ok: false as const, results: [] };
++      }
++    }),
++  );
++  const observations = per.flatMap((p) =>
++    p.ok
++      ? p.results
++          // Citation floor: an id outside the promised charset (or an absent
++          // one → "") cannot back a [cite:] token — drop the observation
++          // whole rather than ship an uncitable line.
++          .filter((r) => CITABLE_ID.test(r.memoryId))
++          .map((r) => ({
++            id: r.memoryId,
++            content: r.content,
++            score: r.score,
++            documentId: r.documentId,
++          }))
++      : [],
++  );
++  return {
++    observations,
++    banks,
++    anyBankOk: per.some((p) => p.ok),
++    bankMs: Object.fromEntries(per.map((p) => [p.bankId, p.ms])),
++    recallMs: Date.now() - start,
++  };
++}
++
++// ---------------------------------------------------------------------------
++// Assembly — ranked, citation-floored, whole-observation ceiling
++// ---------------------------------------------------------------------------
++
++/**
++ * Rank by score desc. Array#sort is stable (ES2019+), so equal scores keep
++ * fan-out (original) order — the deterministic tie-break the story names.
++ */
++const byScoreDesc = (a: KgObservation, b: KgObservation): number => b.score - a.score;
++
++function escXml(s: string): string {
++  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
++}
++
++function escAttr(s: string): string {
++  return escXml(s).replace(/"/g, "&quot;");
++}
++
++function observationXml(o: KgObservation): string {
++  // documentId rides the element only when the substrate surfaced one (AC5:
++  // null-tolerant — an item retained without an explicit id has none to show).
++  const doc = o.documentId !== null ? ` documentId="${escAttr(o.documentId)}"` : "";
++  return `<observation id="${escAttr(o.id)}"${doc}>${escXml(o.content)}</observation>`;
++}
++
++/**
++ * Assemble the appendix: `<kg_context>` block (one observation element per
++ * fact, id attribute for `[cite:<id>]`, documentId when non-null) followed by
++ * the CITATION_INSTRUCTION line. Content is escaped ONLY for XML-structural
++ * safety (<>&) — this is host-side assembly of host-recalled content, escaped
++ * to keep the block well-formed, not sanitized for trust.
++ *
++ * The ceiling budget covers the WHOLE assembled block (wrapper + instruction
++ * included) so the brief schema's own cap can never trip downstream — the
++ * schema ceiling stays a fail-loud backstop, never a routine path.
++ */
++export function buildKgContextXml(observations: KgObservation[]): string {
++  const head = "<kg_context>\n";
++  const tail = `\n</kg_context>\n${CITATION_INSTRUCTION}`;
++  const ranked = [...observations].sort(byScoreDesc);
++  let used = head.length + tail.length;
++  const lines: string[] = [];
++  for (const o of ranked) {
++    const line = observationXml(o);
++    const cost = line.length + (lines.length > 0 ? 1 : 0);
++    // Whole-observation granularity: an observation that does not fit is
++    // dropped whole, never split (a split citation grounds half a fact).
++    if (used + cost > KG_CONTEXT_MAX_CHARS) continue;
++    lines.push(line);
++    used += cost;
++  }
++  return head + lines.join("\n") + tail;
++}
++
++// ---------------------------------------------------------------------------
++// primeDispatchBrief — the ONE dispatch-shaped seam
++// ---------------------------------------------------------------------------
++
++function memoryEnvConfigured(): boolean {
++  // Empty-string env values count as unconfigured (mirror client.ts's coercion).
++  return Boolean(process.env.HINDSIGHT_BASE_URL) &&
++    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
++}
++
++function briefStr(brief: object, key: string): string | undefined {
++  const v = (brief as Record<string, unknown>)[key];
++  return typeof v === "string" && v.length > 0 ? v : undefined;
++}
++
++function writeRecallRow(dir: string | undefined, runId: string | undefined, row: RecallRow): void {
++  // No runId → no filename. Observability is skipped; priming is unaffected.
++  if (runId === undefined) return;
++  try {
++    const base = dir ?? DEFAULT_RECALL_DIR;
++    mkdirSync(base, { recursive: true });
++    writeFileSync(join(base, `${runId}.json`), `${JSON.stringify(row)}\n`);
++  } catch {
++    // The side channel must never break dispatch — a full disk degrades to a
++    // missing row, which M1.3 reads as an uncounted cycle, not a crash.
++  }
++}
++
++/**
++ * Prime a dispatch brief with the `<kg_context>` appendix, env-gated.
++ *
++ * Returns the SAME reference untouched on ladder (a) and (b) — v5 byte-identical
++ * — and a SHALLOW copy carrying `kgContext` on (c)/(d). Never throws: any
++ * surprise (listBanks failure, unresolvable bank id, missing brief fields) is
++ * ladder (b), row + line still firing so M1.3 counts every M1 cycle.
++ */
++export async function primeDispatchBrief<T extends object>(
++  briefJson: T,
++  deps: PrimeDispatchBriefDeps = {},
++): Promise<T> {
++  // Ladder (a): the env gate is FIRST and unconditional — no attempt, no row,
++  // no line, same object reference.
++  if (!memoryEnvConfigured()) return briefJson;
++  const startedAt = Date.now();
++  const runId = briefStr(briefJson, "requestId");
++  let attempted: string[] = [];
++  let bankMs: Record<string, number> = {};
++  let recallMs: number | undefined;
++
++  // Single emit point so the row and the log line stay unconditionally paired
++  // (same conditionality) and the untouched-reference contract can't drift.
++  const emitAndReturn = (
++    primed: boolean,
++    directive: KgDirective,
++    kgContext: string | undefined,
++    docIds: string[],
++  ): T => {
++    const latencyMs = Date.now() - startedAt;
++    const chars = kgContext?.length ?? 0;
++    writeRecallRow(deps.recallDir, runId, {
++      runId: runId ?? "",
++      primed,
++      directive,
++      banks: attempted,
++      recalledDocumentIds: docIds,
++      chars,
++      latencyMs,
++    });
++    if (runId !== undefined) {
++      log({
++        requestId: runId,
++        operation: "kg-recall",
++        agentId: null,
++        timestamp: new Date().toISOString(),
++        duration: latencyMs,
++        status: primed ? "ok" : "error",
++        runId,
++        directive,
++        banks: attempted,
++        chars,
++        ...(recallMs !== undefined ? { recallMs, bankMs } : {}),
++      });
++    }
++    return kgContext === undefined ? briefJson : ({ ...briefJson, kgContext } as T);
++  };
++
++  try {
++    const client = deps.client ?? new HindsightClient();
++    const repoSlug = briefStr(briefJson, "repoSlug");
++    if (repoSlug === undefined) return emitAndReturn(false, "none", undefined, []);
++    // resolveBankId is the RAW normalizer: it feeds ONLY the collision
++    // resolver, which picks the provision-time id against the LIVE bank list.
++    // The raw form can diverge from the provisioned id and is never used as
++    // the bank id itself (AC1).
++    const existing = extractExistingBankIds(await client.listBanks());
++    const repoBankId = resolveRepoBankId(resolveBankId(repoSlug), existing);
++    if (repoBankId === null) return emitAndReturn(false, "none", undefined, []);
++    const workId = briefStr(briefJson, "workId") ?? briefStr(briefJson, "issueId");
++    // Short deterministic query — same brief always recalls the same thing.
++    const query = `${repoSlug} ${workId ?? ""}`.trim();
++    const fan = await recallFanOut(client, repoBankId, query);
++    attempted = fan.banks;
++    bankMs = fan.bankMs;
++    recallMs = fan.recallMs;
++    // Directive vocab is exact. Only ALL-bank failure is ladder (b); a bank
++    // that succeeded-but-empty keeps (c) alive.
++    if (fan.observations.length === 0 && !fan.anyBankOk) {
++      return emitAndReturn(false, "none", undefined, []);
++    }
++    if (fan.observations.length === 0) {
++      return emitAndReturn(true, "empty", EMPTY_KG_DIRECTIVE, []);
++    }
++    const kgContext = buildKgContextXml(fan.observations);
++    // recalledDocumentIds in RANK order — the same comparator the block used.
++    const recalledDocumentIds = [...fan.observations]
++      .sort(byScoreDesc)
++      .map((o) => o.documentId)
++      .filter((d): d is string => d !== null);
++    return emitAndReturn(true, "kg_context", kgContext, recalledDocumentIds);
++  } catch {
++    // Contract: NEVER throw out of the seam. Recall failures are swallowed per
++    // bank above; what reaches here is bank resolution/shape surprises — all
++    // ladder (b): proceed-unprimed, observability still fires.
++    return emitAndReturn(false, "none", undefined, []);
++  }
++}
+diff --git a/src/hindsight/run-retain.ts b/src/hindsight/run-retain.ts
+new file mode 100644
+index 00000000..09a0f85a
+--- /dev/null
++++ b/src/hindsight/run-retain.ts
+@@ -0,0 +1,226 @@
++/**
++ * run-retain — M1.2 AC4/AC6: the idempotent host-side harvest retain.
++ *
++ * One outcome document per run, retained to the provision-time repo bank id
++ * with `documentId = <runId>` (the minted `qds-YYYYMMDD-hex6` id, dated BY
++ * CONSTRUCTION — never time- or random-derived here) and
++ * `updateMode:"replace"`, so a byte-identical replay REPLACES instead of
++ * duplicating. The payload is host-authored and structured ONLY (INV-KG-3 /
++ * F10): the builder's exact-shape literal leaves no prose channel for raw box
++ * output, and the 4 KiB ceiling is refused before any network call.
++ *
++ * INV-KG-2: no credential parameter exists on any surface in this module — the
++ * client carries the host env token (INV-HM1), and that is the only retain
++ * credential there is.
++ *
++ * The audit receipt (INV-KG-4) lands AFTER retain success only, best-effort:
++ * the store's coalesce identity dedups a replayed receipt to ONE row, and its
++ * divergent-evidence check is the tamper alarm when the same documentId is
++ * re-emitted with different content. A store refusal is logged, never allowed
++ * to fail a landed retain.
++ */
++
++import { canonicalJson, sha256Hex, type AuditStoreWriter } from "../audit/link-store.ts";
++import { log } from "../swarmclaw/mcp/stdio-transport.ts";
++import type { HindsightClient } from "./client.ts";
++
++/** Story Guards/limits: the retain payload's UTF-8 byte ceiling. */
++export const RETAIN_PAYLOAD_MAX_BYTES = 4_096;
++
++/**
++ * The closed harvest exit classification. The payload's ONLY non-id string is
++ * this field, so it is a union, not a string: raw box prose has no field to
++ * ride in on. The fleet.ts harvest seam passes one of these; anything else is
++ * a builder refusal, not a passthrough.
++ */
++export type ExitClassification = "green" | "vetoed" | "failed" | "unsettled";
++
++const EXIT_CLASSIFICATIONS: readonly ExitClassification[] = ["green", "vetoed", "failed", "unsettled"];
++
++/** The structured outcome the payload serialises — plus the wire-item tags. */
++export interface RetainOutcome {
++  runId: string;
++  repoSlug: string;
++  requestId: string;
++  exitClassification: ExitClassification;
++  harvestedCount?: number;
++  spendMicroUsd?: number;
++  bundlePath?: string;
++  tags: string[];
++}
++
++/** What `retainRunOutcome` takes: the outcome plus the caller-resolved bank. */
++export interface RunRetainInput extends RetainOutcome {
++  /** Provision-time repo bank id (`resolveRepoBankId` semantics) — never re-derived here. */
++  repoBankId: string;
++}
++
++export interface RunRetainResult {
++  retained: true;
++  documentId: string;
++  bank: string;
++  contentDigest: string;
++}
++
++export type RunRetainErrorCode =
++  | "retain-run-id-invalid"
++  | "retain-payload-invalid"
++  | "retain-payload-oversize";
++
++export class RunRetainError extends Error {
++  constructor(
++    readonly code: RunRetainErrorCode,
++    message: string,
++  ) {
++    super(message);
++    this.name = "RunRetainError";
++  }
++}
++
++/** The minted-runId shape — pinned verbatim from dispatch.ts's MINTED_RUN_ID_RE. */
++const RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
++
++/**
++ * The document identity IS the runId (AC4: "dated by construction"). Refusing
++ * every other shape is what makes a time-based or random documentId
++ * structurally impossible — there is no other input to derive from.
++ */
++export function deriveDocumentId(runId: string): string {
++  if (typeof runId !== "string" || !RUN_ID_RE.test(runId)) {
++    throw new RunRetainError(
++      "retain-run-id-invalid",
++      `runId ${JSON.stringify(runId.slice(0, 64))} is not a minted run id (qds-YYYYMMDD-hex6) — the documentId is the runId itself, so no other shape can be retained`,
++    );
++  }
++  return runId;
++}
++
++/**
++ * The bounded, canonical retain payload. PURE: no network, no clock, no
++ * randomness. Built as an exact-shape literal in sorted key order, so the
++ * serialised bytes are deterministic (byte-identical replays are what make the
++ * substrate's `document_id` upsert a replace) and match `canonicalJson`.
++ */
++export function buildRetainPayload(input: RetainOutcome): string {
++  if (typeof input.exitClassification !== "string" || !EXIT_CLASSIFICATIONS.includes(input.exitClassification as ExitClassification)) {
++    throw new RunRetainError(
++      "retain-payload-invalid",
++      `exitClassification must be one of ${EXIT_CLASSIFICATIONS.join(" | ")} — the payload has no prose channel (INV-KG-3)`,
++    );
++  }
++  for (const field of ["runId", "repoSlug", "requestId"] as const) {
++    if (typeof input[field] !== "string" || input[field].length === 0) {
++      throw new RunRetainError("retain-payload-invalid", `payload field ${field} must be a non-empty string`);
++    }
++  }
++  for (const field of ["harvestedCount", "spendMicroUsd"] as const) {
++    const v = input[field];
++    if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v))) {
++      throw new RunRetainError("retain-payload-invalid", `payload field ${field} must be a finite number when present`);
++    }
++  }
++  if (!Array.isArray(input.tags) || !input.tags.every((t) => typeof t === "string")) {
++    throw new RunRetainError("retain-payload-invalid", "tags must be an array of strings");
++  }
++  // Undefined members are dropped by JSON.stringify, so the present-key set is
++  // exactly the caller's — and the literal's order is the canonical order.
++  const payload = {
++    bundlePath: input.bundlePath,
++    exitClassification: input.exitClassification,
++    harvestedCount: input.harvestedCount,
++    repoSlug: input.repoSlug,
++    requestId: input.requestId,
++    runId: input.runId,
++    spendMicroUsd: input.spendMicroUsd,
++  };
++  const json = JSON.stringify(payload);
++  if (Buffer.byteLength(json, "utf8") > RETAIN_PAYLOAD_MAX_BYTES) {
++    throw new RunRetainError(
++      "retain-payload-oversize",
++      `retain payload is ${Buffer.byteLength(json, "utf8")} bytes — past the ${RETAIN_PAYLOAD_MAX_BYTES}-byte ceiling (refused before any network call, never truncated)`,
++    );
++  }
++  return json;
++}
++
++/**
++ * Retain one run outcome, then receipt it.
++ *
++ * Order is load-bearing: the payload is built and bounded FIRST (an oversize
++ * run refuses before any client call), the retain lands, and only then is the
++ * receipt attempted — best-effort, so an audit-store refusal is logged and
++ * NEVER fails the landed retain. The receipt's coalesce identity is
++ * (runId, memory-retain-receipt, retain, documentId): a byte-identical replay
++ * dedups to one row; different content under the same documentId trips the
++ * store's divergent-evidence alarm by design (INV-KG-4) — the store keeps the
++ * first row and logs the divergence; this module adds nothing on top.
++ */
++export async function retainRunOutcome(
++  client: Pick<HindsightClient, "retain">,
++  auditStore: AuditStoreWriter | undefined,
++  input: RunRetainInput,
++): Promise<RunRetainResult> {
++  const documentId = deriveDocumentId(input.runId);
++  const payload = buildRetainPayload(input);
++  const contentDigest = sha256Hex(payload);
++  await client.retain(input.repoBankId, payload, {
++    documentId,
++    updateMode: "replace",
++    tags: input.tags,
++    kind: "observation",
++    source: "agent",
++  });
++  // The Observability Contract line: `memory-retain` {runId, documentId, bank,
++  // contentDigest}. Latency rides the client's own retain log — never here.
++  log({
++    requestId: input.requestId,
++    operation: "memory-retain",
++    agentId: null,
++    timestamp: new Date().toISOString(),
++    duration: 0,
++    status: "ok",
++    runId: input.runId,
++    documentId,
++    bank: input.repoBankId,
++    contentDigest,
++  });
++  if (auditStore !== undefined) {
++    try {
++      const now = new Date().toISOString();
++      auditStore.record({
++        runId: input.runId,
++        repoSlug: input.repoSlug,
++        requestId: input.requestId,
++        hop: "memory-retain-receipt",
++        event: "retain",
++        subjectId: documentId,
++        subjectKind: "document",
++        evidenceDigest: sha256Hex(canonicalJson({ bank: input.repoBankId, documentId, contentDigest })),
++        // Digest-stable on replay (both fields are run-stable) and the readable
++        // provenance input M1.3's bank gate compares per probe.
++        detail: { documentId, bank: input.repoBankId },
++        occurredAt: now,
++        recordedAt: now,
++      });
++    } catch (e) {
++      // Best-effort by contract: the retain already landed. A refusal (invalid
++      // link, 8 KiB, lock, drift) is one structured error line — the operator
++      // can see the receipt is missing without the harvest failing.
++      log({
++        requestId: input.requestId,
++        operation: "memory-retain-receipt",
++        agentId: null,
++        timestamp: new Date().toISOString(),
++        duration: 0,
++        status: "error",
++        error: {
++          code: typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "receipt-refused",
++          message: (e as Error).message,
++        },
++        runId: input.runId,
++        documentId,
++      });
++    }
++  }
++  return { retained: true, documentId, bank: input.repoBankId, contentDigest };
++}
+diff --git a/src/hindsight/schemas.ts b/src/hindsight/schemas.ts
+index 371d292f..917e679a 100644
+--- a/src/hindsight/schemas.ts
++++ b/src/hindsight/schemas.ts
+@@ -14,7 +14,9 @@
+  * cares about the URL-scoped form.
+  *
+  * Casing (story CC-8): payloads use snake_case (Hindsight internal names);
+- * RESPONSE schemas use camelCase (REST-boundary consumers).
++ * RESPONSE schemas PARSE the measured snake_case wire (issue #408 conformance
++ * slice) and `.transform()` it into the legacy camelCase view, so REST-boundary
++ * consumers compile unchanged.
+  *
+  * Zod v3 syntax — `.optional()`, `.default()`, `.refine({message})`.
+  */
+@@ -57,21 +59,47 @@ export function resolveBankId(repoSlug: string): string {
+ // Payloads (snake_case — Hindsight internal API arg names)
+ // ---------------------------------------------------------------------------
+ 
++/**
++ * Retain wire body (M1.2 AC5): an `items` array whose items carry `document_id`
++ * and `tags` TOP-LEVEL. Measured against live 0.10.0 — same document_id
++ * retained twice upserts to ONE document, and `metadata.tags` 422s (evidence:
++ * _bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json,
++ * `documentsAfter1`/`documentsAfter2` = 1 + note).
++ */
+ export const RetainPayloadSchema = z.object({
+   bank_id: BankIdSchema,
+-  content: z
+-    .string()
+-    .min(1)
+-    .refine((v) => Buffer.byteLength(v, "utf8") <= 102_400, {
+-      message: "Content exceeds 100KB byte limit",
+-    }),
+-  metadata: z
+-    .object({
+-      source: z.enum(["agent", "mulch-import", "manual", "consolidate"]),
+-      kind: z.enum(["decision", "pattern", "expertise", "observation"]).optional(),
+-      tags: z.array(z.string()).optional(),
+-    })
+-    .optional(),
++  items: z
++    .array(
++      z.object({
++        content: z
++          .string()
++          .min(1)
++          .refine((v) => Buffer.byteLength(v, "utf8") <= 102_400, {
++            message: "Content exceeds 100KB byte limit",
++          }),
++        document_id: z.string().optional(),
++        tags: z.array(z.string()).optional(),
++        metadata: z
++          .object({
++            source: z.enum(["agent", "mulch-import", "manual", "consolidate"]),
++            kind: z.enum(["decision", "pattern", "expertise", "observation"]).optional(),
++          })
++          .optional(),
++      }),
++    )
++    .min(1),
++});
++
++/**
++ * M1.2 AC5 retain-extension metadata — camelCase client-arg names, mapped onto
++ * the wire item by client.retain. `updateMode:"replace"` is API-LEVEL
++ * semantics: it IS the document_id upsert, so NO wire field exists for it and
++ * none is invented. `"replace"` is the only honored mode — any other value is
++ * refused at the client boundary (422, before fetch).
++ */
++export const RetainExtensionSchema = z.object({
++  documentId: z.string().optional(),
++  updateMode: z.literal("replace").optional(),
+ });
+ 
+ export const RecallPayloadSchema = z.object({
+@@ -96,26 +124,81 @@ export const ConsolidatePayloadSchema = z.object({
+ });
+ 
+ // ---------------------------------------------------------------------------
+-// Responses (camelCase — REST-boundary consumers, story CC-8 exception list)
++// Responses — parse the measured snake_case wire; `.transform()` emits the
++// legacy camelCase view (REST-boundary consumers, story CC-8 exception list).
+ // ---------------------------------------------------------------------------
+ 
+-export const RetainResponseSchema = z.object({
+-  memoryId: z.string(),
+-  bankId: BankIdSchema,
+-  status: z.enum(["created", "updated"]),
+-  durationMs: z.number(),
++/**
++ * RetainResponse — wire shape measured live on 0.10.0
++ * (_bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json):
++ * `{success, bank_id?, items_count, async, usage?}`. The transform produces the
++ * legacy camelCase view so existing consumers compile unchanged (issue #408
++ * conformance slice).
++ *
++ * Legacy-view placeholders are issue #408's OPEN DECISION, not observations:
++ * 0.10.0 has NO wire source for `memoryId` — identity is `document_id` now —
++ * so `memoryId` falls back to "" from a forward-compat `id` field no current
++ * server emits. `status` is pinned "created": the 0.10.0 body carries no
++ * created/updated distinction (the upsert is silent). `durationMs` is absent
++ * from the measured body → 0 (host-side latency is the honest figure anyway —
++ * round-trip-verifier F009).
++ */
++const RetainWireSchema = z.object({
++  success: z.boolean(),
++  bank_id: z.string().optional(),
++  items_count: z.number(),
++  async: z.boolean(),
++  id: z.string().optional(),
++  durationMs: z.number().optional(),
++  usage: z
++    .object({
++      input_tokens: z.number(),
++      output_tokens: z.number(),
++      total_tokens: z.number(),
++      cached_tokens: z.number(),
++      thoughts_tokens: z.number(),
++    })
++    .optional(),
+ });
+ 
+-export const RecallResponseSchema = z.object({
+-  results: z.array(
+-    z.object({
+-      content: z.string(),
+-      score: z.number().min(0).max(1),
+-      memoryId: z.string(),
+-    }),
+-  ),
+-  durationMs: z.number(),
+-});
++export const RetainResponseSchema = RetainWireSchema.transform((w) => ({
++  memoryId: w.id ?? "",
++  bankId: w.bank_id ?? "",
++  status: "created" as const,
++  durationMs: w.durationMs ?? 0,
++}));
++
++/**
++ * RecallResponse — results measured live on 0.10.0 carry DISTINCT `id`
++ * (server-minted fact id) and `document_id` (document identity); never
++ * assumed equal. `documentId` in the view is the additive null-tolerant field
++ * M1.3's expected-id matching consumes: an item retained without an explicit
++ * identity gets a server-assigned one, so a missing `document_id` → null, not
++ * "". `content`/`score` keep old-name tolerance per the conformance contract —
++ * `text ?? content ?? ""`, `score ?? 0`.
++ */
++export const RecallResponseSchema = z
++  .object({
++    results: z.array(
++      z.object({
++        id: z.string().optional(),
++        text: z.string().optional(),
++        document_id: z.string().nullish(),
++        content: z.string().optional(),
++        score: z.number().optional(),
++      }),
++    ),
++    durationMs: z.number().optional(),
++  })
++  .transform((w) => ({
++    results: w.results.map((r) => ({
++      memoryId: r.id ?? "",
++      content: r.text ?? r.content ?? "",
++      score: r.score ?? 0,
++      documentId: r.document_id ?? null,
++    })),
++    durationMs: w.durationMs ?? 0,
++  }));
+ 
+ export const ReflectResponseSchema = z.object({
+   bankId: z.string(),
+diff --git a/src/providers/teardown.ts b/src/providers/teardown.ts
+index 2127dd17..f858498b 100644
+--- a/src/providers/teardown.ts
++++ b/src/providers/teardown.ts
+@@ -68,6 +68,7 @@ import {
+   pullArtifacts,
+   rmBestEffort,
+   type GitRunner,
++  type HarvestResult,
+ } from "./harvest.ts";
+ import { resolveRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
+ import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+@@ -163,6 +164,22 @@ export interface TeardownDeps {
+    * this sequence drives.
+    */
+   recordAuditLink: (link: ProviderAuditLink) => void;
++  /**
++   * M1.2: the post-harvest retain hook, INJECTED (the recordAuditLink seam
++   * shape: this module never imports the memory modules — the composition
++   * root binds them, so the provider layer stays decoupled from Hindsight).
++   * Fired immediately AFTER the harvest step COMPLETES (never in the skip
++   * arms, never under noHarvest) with the leg's own outcome. A rejection is
++   * logged and NEVER fails teardown — the harvest gate (AC3) is harvest
++   * itself; what the host does with the outcome afterwards must not be able
++   * to keep a box alive.
++   */
++  postHarvest?: (info: {
++    runId: string;
++    requestId: string;
++    outcome: "harvested" | "none";
++    count?: number;
++  }) => Promise<void>;
+ }
+ 
+ export interface TeardownOptions {
+@@ -1067,11 +1084,42 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
+   if (opts.noHarvest) {
+     skipStep(ctx, "harvest", "waived by --no-harvest");
+   } else {
++    // M1.2: undefined after runBoxStep means the step did NOT run this
++    // sequence — the gone-box skip arm swallowed a NoSuchBox — so the hook
++    // below fires only on a harvest that actually LANDED.
++    let harvested: HarvestResult | undefined;
+     await runBoxStep(ctx, "harvest", async () => {
+       // Teardown already pulled artifacts as its own step 2 — harvestRun skips
+       // its Step E so exactly one artifact pipeline runs per teardown.
+-      await harvestRun(deps, runId, { artifactsOwnedByCaller: true });
++      harvested = await harvestRun(deps, runId, { artifactsOwnedByCaller: true });
+     });
++    if (harvested !== undefined && deps.postHarvest !== undefined) {
++      try {
++        await deps.postHarvest({
++          runId,
++          requestId: ctx.requestId,
++          outcome: harvested.outcome,
++          count: harvested.outcome === "harvested" ? harvested.count : undefined,
++        });
++      } catch (e) {
++        // Failure-isolated by contract (mirror tokenIngestRefusalLog's
++        // posture): the leg landed; a retain refusal is one structured line
++        // and teardown continues to revoke+destroy. The injected hook is
++        // untrusted here regardless of what its own body catches.
++        const err = (e ?? {}) as { code?: string; message?: string };
++        log({
++          ...stepBase(ctx, "teardown", "harvest"),
++          operation: "teardown.post_harvest",
++          duration: 0,
++          durationMs: 0,
++          status: "error",
++          outcome: "continued",
++          error: { code: err.code ?? "post-harvest-failed", message: redactSecrets(err.message ?? e) },
++          reason:
++            "the post-harvest hook refused — the harvest leg landed and teardown continues to revoke+destroy (memory retain is best-effort, never a teardown gate)",
++        });
++      }
++    }
+   }
+ 
+   // 4. revoke — "revoked" | "already-gone" both OK; a throw aborts with the
+diff --git a/tests/audit/link-store.test.ts b/tests/audit/link-store.test.ts
+index 4fdb1345..e12b1b88 100644
+--- a/tests/audit/link-store.test.ts
++++ b/tests/audit/link-store.test.ts
+@@ -805,16 +805,26 @@ describe("write-time refusals (fail loud, nothing written)", () => {
+     assertInvalid(join(dir, "c.db"), { hop: "pr-run", event: "mint" }, /not in hop .* vocabulary/);
+   });
+ 
+-  test("the four hops that carry NO rows by design refuse every event", () => {
++  test("the three hops that carry NO rows by design refuse every event", () => {
+     // An empty vocabulary is what makes "nothing emits this" a refusal rather
+     // than a courtesy: a link for an event that never occurred is manufactured
+     // evidence (INV-AUDIT-4).
+-    for (const hop of ["run-issue", "run-cost", "run-gate-evidence", "memory-retain-receipt"]) {
++    for (const hop of ["run-issue", "run-cost", "run-gate-evidence"]) {
+       assertInvalid(join(dir, `empty-${hop}.db`), { hop, event: "walk-observed" }, /carries no rows by design/);
+       assertInvalid(join(dir, `empty2-${hop}.db`), { hop, event: "mint" }, /carries no rows by design/);
+     }
+   });
+ 
++  test("memory-retain-receipt refuses every event EXCEPT its one vocabulary event (M1.2 Deviation 1)", () => {
++    // Deviation 1 populated the reserved hop's vocabulary with exactly
++    // ["retain"], converting the empty-vocabulary refusal into a one-event
++    // one. The hop is still CLOSED to everything else — and the refusal class
++    // changes with it: a populated vocabulary refuses with the not-in-hop-
++    // vocabulary error, not the no-rows-by-design one.
++    assertInvalid(join(dir, "mrr-walk.db"), { hop: "memory-retain-receipt", event: "walk-observed" }, /not in hop .* vocabulary/);
++    assertInvalid(join(dir, "mrr-mint.db"), { hop: "memory-retain-receipt", event: "mint" }, /not in hop .* vocabulary/);
++  });
++
+   test("a subject literally named '<none>' is refused — it collides with the sentinel", () => {
+     assertInvalid(join(dir, "sentinel.db"), { subjectId: "<none>" }, /reserved sentinel/);
+   });
+diff --git a/tests/audit/memory-retain-receipt-vocabulary.test.ts b/tests/audit/memory-retain-receipt-vocabulary.test.ts
+new file mode 100644
+index 00000000..dbc44fee
+--- /dev/null
++++ b/tests/audit/memory-retain-receipt-vocabulary.test.ts
+@@ -0,0 +1,164 @@
++/**
++ * M1.2 Deviation 1 (binding): the reserved `memory-retain-receipt` hop gains
++ * its one-event vocabulary — `["retain"]` — the adds-only row that converts
++ * INV-AUDIT-4's deliberate empty-vocabulary refusal into a write-open hop.
++ * These pins live beside link-store.test.ts (whose "carries no rows by design"
++ * loop predates Deviation 1 and is not this file's to edit): the hop contract
++ * stays closed (exactly the previous ten hops), the vocabulary stays closed
++ * (exactly `retain`), and the refusal arm the emptiness used to serve now
++ * rejects by vocabulary membership instead.
++ *
++ * Every test points `QDS_AUDIT_DB` inside its own tmpdir FIRST (C-5), the same
++ * backstop link-store.test.ts uses — an accidental default-path open can never
++ * resolve at the repo root.
++ */
++
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++import { Database } from "bun:sqlite";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import {
++  AUDIT_HOPS,
++  openAuditStore,
++  sha256Hex,
++  type AuditLinkInput,
++  AuditStoreError,
++} from "../../src/audit/link-store.ts";
++
++let dir: string;
++let prevAuditEnv: string | undefined;
++
++beforeEach(() => {
++  dir = mkdtempSync(join(tmpdir(), "qds-m12-vocab-"));
++  prevAuditEnv = process.env.QDS_AUDIT_DB;
++  process.env.QDS_AUDIT_DB = join(dir, "env-default-guard.db");
++});
++
++afterEach(() => {
++  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
++  if (prevAuditEnv === undefined) delete process.env.QDS_AUDIT_DB;
++  else process.env.QDS_AUDIT_DB = prevAuditEnv;
++  rmSync(dir, { recursive: true, force: true });
++});
++
++/** A legal receipt link (story: hop `memory-retain-receipt`, event `retain`, subject `documentId`). */
++function receiptLink(over: Partial<AuditLinkInput> = {}): AuditLinkInput {
++  return {
++    runId: "run-1",
++    repoSlug: "acme/widgets",
++    requestId: "req-1",
++    hop: "memory-retain-receipt",
++    event: "retain",
++    subjectId: "doc-1",
++    subjectKind: "hindsight-document",
++    evidenceDigest: sha256Hex("subject"),
++    occurredAt: "2026-10-06T00:00:00.000Z",
++    recordedAt: "2026-10-06T00:00:00.001Z",
++    ...over,
++  };
++}
++
++function storedRows(path: string): { hop: string; event: string; subject_id: string | null }[] {
++  const db = new Database(path);
++  try {
++    return db.prepare("SELECT hop, event, subject_id FROM audit_links").all() as {
++      hop: string;
++      event: string;
++      subject_id: string | null;
++    }[];
++  } finally {
++    db.close();
++  }
++}
++
++function rowCount(path: string): number {
++  const db = new Database(path);
++  try {
++    return (db.prepare("SELECT COUNT(*) AS n FROM audit_links").get() as { n: number }).n;
++  } finally {
++    db.close();
++  }
++}
++
++/** The one typed refusal a thunk raises, narrowed — captured ONCE (see link-store.test.ts). */
++function refusalOf(fn: () => unknown): AuditStoreError {
++  try {
++    fn();
++  } catch (e) {
++    if (e instanceof AuditStoreError) return e;
++    throw e;
++  }
++  throw new Error("expected an AuditStoreError, nothing was thrown");
++}
++
++describe("memory-retain-receipt vocabulary", () => {
++  test("event retain is accepted and lands exactly its row", () => {
++    const p = join(dir, "retain.db");
++    const store = openAuditStore(p);
++    store.record(receiptLink());
++    store.close();
++    expect(storedRows(p)).toEqual([{ hop: "memory-retain-receipt", event: "retain", subject_id: "doc-1" }]);
++  });
++
++  test("any other event on the hop is refused with the audit-link-invalid refusal", () => {
++    // The vocabulary is non-empty now, so the refusal arm is the VOCABULARY
++    // one — the machinery INV-AUDIT-4 used to hold this hop write-closed by
++    // emptiness now rejects by membership instead, and names the one allowed
++    // event in the message.
++    const p = join(dir, "refused.db");
++    const store = openAuditStore(p);
++    try {
++      for (const event of ["walk-observed", "mint", ""]) {
++        const e = refusalOf(() => store.record(receiptLink({ event })));
++        expect(e.code).toBe("audit-link-invalid");
++        expect(e.message).toMatch(/not in hop "memory-retain-receipt"'s vocabulary \(retain\)/);
++      }
++    } finally {
++      store.close();
++    }
++    // Fail loud BEFORE anything is written.
++    expect(rowCount(p)).toBe(0);
++  });
++
++  test("AUDIT_HOPS still holds exactly the previous ten hops, including memory-retain-receipt", () => {
++    expect([...AUDIT_HOPS]).toEqual([
++      "pr-run",
++      "run-issue",
++      "run-cost",
++      "run-credential",
++      "run-box",
++      "run-bundle",
++      "run-reverify",
++      "run-approval",
++      "run-gate-evidence",
++      "memory-retain-receipt",
++    ]);
++  });
++
++  test("the vocabulary row is exactly [retain]: every documented event of every other hop is refused", () => {
++    // `HOP_EVENT_VOCABULARY` is module-private, so exact membership is pinned
++    // behaviourally: `retain` in (above); every event any OTHER hop documents,
++    // plus near-miss spellings of retain, out. A future edit that grows the
++    // vocabulary is named by whichever entry this loop catches.
++    const p = join(dir, "exact.db");
++    const store = openAuditStore(p);
++    const elsewhere = [
++      "mint", "deliver", "revoke", "verify-revoked", // run-credential
++      "create", "fill", "setup-gate", "teardown", "reap", // run-box
++      "bundle-verify", "bundle-fetch", // run-bundle
++      "walk-observed", // pr-run / run-reverify / run-approval
++    ];
++    try {
++      for (const event of [...elsewhere, "retains", "Retain"]) {
++        const e = refusalOf(() => store.record(receiptLink({ event })));
++        expect(e.code).toBe("audit-link-invalid");
++        expect(e.message).toMatch(/not in hop "memory-retain-receipt"'s vocabulary \(retain\)/);
++      }
++    } finally {
++      store.close();
++    }
++    expect(rowCount(p)).toBe(0);
++  });
++});
+diff --git a/tests/fleet/brief-schema-kgcontext.test.ts b/tests/fleet/brief-schema-kgcontext.test.ts
+new file mode 100644
+index 00000000..a46929b9
+--- /dev/null
++++ b/tests/fleet/brief-schema-kgcontext.test.ts
+@@ -0,0 +1,92 @@
++/**
++ * M1.2 AC3: the optional `kgContext` brief field — ceiling and charset
++ * enforced at the schema (INV-KG-3), absent-field v5 identity.
++ *
++ * The number 8_000 is pinned LITERALLY, not imported: the test exists to fail
++ * the day the schema's ceiling moves, and an exported constant the test reads
++ * would make that day a quiet pass. Same reasoning as the schema's own refusal
++ * to import the producer-side KG_CONTEXT_MAX_CHARS.
++ */
++import { describe, expect, test } from "bun:test";
++import type { ZodError } from "zod";
++
++import { BriefSchema, extractZodErrorField } from "../../src/fleet/brief-schema.ts";
++
++const BRIEF_KG_CONTEXT_MAX_CHARS = 8_000;
++
++function validBrief(over: Record<string, unknown> = {}): Record<string, unknown> {
++  return {
++    repoSlug: "owner/repo",
++    issueId: 123,
++    commitSha: "a".repeat(40),
++    manifestPath: "path/to/pipeline.json",
++    repoUrl: "https://github.com/owner/repo",
++    ...over,
++  };
++}
++
++/** The multi-line XML shape the producer (kg-context assembly) actually emits. */
++function kgBlock(lines: readonly string[]): string {
++  return ["<kg_context>", ...lines, "</kg_context>"].join("\n");
++}
++
++/**
++ * Assert the refusal is kgContext's OWN rule, not the fixture failing on an
++ * unrelated field — a bare .toThrow() cannot tell a charset refusal from a
++ * brief that stopped being valid for some other reason.
++ */
++function expectKgContextRejected(brief: Record<string, unknown>): void {
++  const result = BriefSchema.safeParse(brief);
++  expect(result.success).toBe(false);
++  const error = (result as { error: ZodError }).error;
++  expect(extractZodErrorField(error)).toBe("kgContext");
++}
++
++describe("kgContext brief schema", () => {
++  test("accepts an in-ceiling multi-line XML block, carried through verbatim", () => {
++    const block = kgBlock([
++      '\t<observation bank="qds-owner-repo" documentId="qds-20260920-abc123">',
++      "Run qds-20260920-abc123 exited 0; review latency p95 6m [cite:1]",
++      "\t</observation>",
++    ]);
++    const result = BriefSchema.safeParse(validBrief({ kgContext: block }));
++    expect(result.success).toBe(true);
++    expect((result as { data: { kgContext: string } }).data.kgContext).toBe(block);
++  });
++
++  test("refuses a value one char over the 8,000-char ceiling (never truncated)", () => {
++    expectKgContextRejected(validBrief({ kgContext: "x".repeat(BRIEF_KG_CONTEXT_MAX_CHARS + 1) }));
++  });
++
++  test("accepts a value exactly at the ceiling", () => {
++    const result = BriefSchema.safeParse(validBrief({ kgContext: "x".repeat(BRIEF_KG_CONTEXT_MAX_CHARS) }));
++    expect(result.success).toBe(true);
++  });
++
++  test("refuses every control-char class except newline and tab", () => {
++    // Each embedded mid-line in an otherwise-valid block: the block grammar is
++    // no defense, and \r especially must die inside it, not at some fold later.
++    const refused = ["\x00", "\x01", "\x0b", "\x0c", "\x0e", "\x1f", "\x7f", "\r"];
++    for (const ch of refused) {
++      expectKgContextRejected(validBrief({ kgContext: kgBlock([`line one${ch}line two`]) }));
++    }
++  });
++
++  test("newline and tab are the payload, not an attack", () => {
++    const result = BriefSchema.safeParse(
++      validBrief({ kgContext: kgBlock(["\tindented line", "second line"]) }),
++    );
++    expect(result.success).toBe(true);
++  });
++
++  test("absent field: parse output is the v5 object exactly", () => {
++    const without = BriefSchema.parse(validBrief());
++    const withField = BriefSchema.parse(validBrief({ kgContext: kgBlock(["obs [cite:1]"]) }));
++    expect("kgContext" in without).toBe(false);
++    const { kgContext: _present, ...rest } = withField;
++    expect(rest).toEqual(without);
++    // Byte-level, not just deep-equal: JSON.stringify is what crosses the seam
++    // into the shipped brief, so key ORDER is part of the v5 identity too.
++    expect(JSON.stringify(rest)).toBe(JSON.stringify(without));
++  });
++});
+diff --git a/tests/fleet/dispatch-kgcontext-seam.test.ts b/tests/fleet/dispatch-kgcontext-seam.test.ts
+new file mode 100644
+index 00000000..4306afdd
+--- /dev/null
++++ b/tests/fleet/dispatch-kgcontext-seam.test.ts
+@@ -0,0 +1,157 @@
++/**
++ * M1.2 AC1/AC2 — the dispatch kg seam, pinned through the REAL
++ * `ingestBriefJson` (fleet.ts's shared brief ingress of dispatch/fanout/
++ * submit) via `__fleetTestHooks`. What is under test is the WIRING, not a
++ * copy of it:
++ *   (a) memory env unconfigured  → the parse comes back byte-identical, no
++ *       `kgContext` key, no recall attempted (v5-identical dispatch);
++ *   (b) env set + a live local Hindsight stand-in → the brief GAINS
++ *       `kgContext`, assembled over exactly the fan-out set
++ *       {<repo bank>, qds-collective} (the `-dev-meta` exclusion holds at the
++ *       seam too), through the REAL client and env path — no injected mock on
++ *       the production call;
++ *   (c) env set + unreachable endpoint → proceed-unprimed: the ingest still
++ *       resolves (the seam never throws, so dispatch's exit table downstream
++ *       is untouched), brief unchanged;
++ *   (d) the hook identity: the seam delegates to the landed `primeDispatchBrief`
++ *       itself (G1's grep proves the call count; this pins WHICH function).
++ *
++ * Briefs here deliberately carry NO `requestId`: the side-channel row and the
++ * `kg-recall` line key on it, so their absence keeps this suite from writing
++ * into the repo's `_bmad-output/memory/recall` — the row/log shapes are
++ * pinned by tests/hindsight/kg-context.test.ts through `deps.recallDir`.
++ *
++ * Env save/restore is per-test and total: HINDSIGHT_* must never leak out of
++ * (or into) a test.
++ */
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++
++import { __fleetTestHooks } from "../../scripts/fleet.ts";
++import { primeDispatchBrief as landedPrimeDispatchBrief } from "../../src/hindsight/kg-context.ts";
++
++const ENV_KEYS = ["HINDSIGHT_BASE_URL", "HINDSIGHT_BEARER_TOKEN", "HINDSIGHT_API_KEY"] as const;
++let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
++
++beforeEach(() => {
++  savedEnv = {};
++  for (const key of ENV_KEYS) {
++    savedEnv[key] = process.env[key];
++    delete process.env[key];
++  }
++});
++
++afterEach(() => {
++  for (const key of ENV_KEYS) {
++    const saved = savedEnv[key];
++    if (saved === undefined) delete process.env[key];
++    else process.env[key] = saved;
++  }
++});
++
++/** Dispatch-shaped brief; the fields the seam itself reads are repoSlug/workId. */
++const briefJson = (): string =>
++  JSON.stringify({
++    repoSlug: "acme/widgets",
++    workId: "IBOX-1",
++    steps: [{ id: "s1", prompt: "do the thing" }],
++  });
++
++async function ingest(): Promise<unknown> {
++  return __fleetTestHooks.ingestBriefJson(undefined, { readBrief: async () => briefJson() });
++}
++
++describe("dispatch kg seam", () => {
++  test("(a) env unconfigured → v5-identical parse, no kgContext, no recall", async () => {
++    const out = (await ingest()) as Record<string, unknown>;
++    // Byte-identical in value: the seam added nothing and removed nothing.
++    expect(out).toEqual({
++      repoSlug: "acme/widgets",
++      workId: "IBOX-1",
++      steps: [{ id: "s1", prompt: "do the thing" }],
++    });
++    expect("kgContext" in out).toBe(false);
++  });
++
++  test("(b) env set + local Hindsight → brief gains kgContext over the exact fan-out set", async () => {
++    const seen: { method: string; path: string }[] = [];
++    const server = Bun.serve({
++      port: 0,
++      fetch: async (req) => {
++        const url = new URL(req.url);
++        seen.push({ method: req.method, path: url.pathname });
++        if (req.method === "GET" && url.pathname === "/v1/default/banks") {
++          return Response.json({ banks: [] });
++        }
++        if (req.method === "POST" && url.pathname.endsWith("/memories/recall")) {
++          return Response.json({
++            results: [
++              {
++                id: "obs-1",
++                content: "prior observation about widgets",
++                score: 0.9,
++                document_id: "qds-20260101-abc123",
++              },
++            ],
++            durationMs: 1,
++          });
++        }
++        return new Response("not found", { status: 404 });
++      },
++    });
++    try {
++      process.env.HINDSIGHT_BASE_URL = `http://127.0.0.1:${server.port}`;
++      process.env.HINDSIGHT_BEARER_TOKEN = "test-token-not-a-secret";
++
++      const out = (await ingest()) as Record<string, unknown>;
++
++      // The brief GAINS the appendix; the input shape is otherwise untouched.
++      const kg = out.kgContext;
++      expect(typeof kg).toBe("string");
++      expect(kg as string).toContain("<kg_context>");
++      expect(kg as string).toContain('id="obs-1"');
++      expect(kg as string).toContain('documentId="qds-20260101-abc123"');
++      expect(kg as string).toContain("prior observation about widgets");
++      expect(kg as string).toContain("[cite:");
++      // The appendix is the ONLY change.
++      const { kgContext: _kg, ...rest } = out;
++      expect(rest).toEqual({
++        repoSlug: "acme/widgets",
++        workId: "IBOX-1",
++        steps: [{ id: "s1", prompt: "do the thing" }],
++      });
++      // The fan-out set is EXACTLY {<provision-time repo bank>, qds-collective}
++      // — one listBanks, one recall per bank, no `-dev-meta` probe. Sorted:
++      // the two recalls are parallel requests, so arrival order is not the
++      // assertion — the SET is.
++      const recalls = seen.filter((r) => r.path.endsWith("/memories/recall")).map((r) => r.path);
++      expect(recalls.slice().sort()).toEqual([
++        "/v1/default/banks/acme-widgets/memories/recall",
++        "/v1/default/banks/qds-collective/memories/recall",
++      ]);
++      expect(seen.filter((r) => r.path === "/v1/default/banks")).toHaveLength(1);
++    } finally {
++      server.stop(true);
++    }
++  });
++
++  test("(c) env set + unreachable endpoint → proceed-unprimed, ingest still resolves", async () => {
++    // Port 1 (tcpmux) refuses on any sane host: the client's listBanks fails
++    // at the transport, and the seam must hand the parse back UNPRIMED — the
++    // resolve (not a throw) is what keeps dispatch's exit table exactly v5's.
++    process.env.HINDSIGHT_BASE_URL = "http://127.0.0.1:1";
++    process.env.HINDSIGHT_BEARER_TOKEN = "test-token-not-a-secret";
++
++    const out = (await ingest()) as Record<string, unknown>;
++    expect("kgContext" in out).toBe(false);
++    expect(out).toEqual({
++      repoSlug: "acme/widgets",
++      workId: "IBOX-1",
++      steps: [{ id: "s1", prompt: "do the thing" }],
++    });
++  });
++
++  test("(d) the seam IS the landed prime — hook identity pinned", () => {
++    expect(__fleetTestHooks.primeDispatchBrief).toBe(landedPrimeDispatchBrief);
++    expect(typeof __fleetTestHooks.ingestBriefJson).toBe("function");
++  });
++});
+diff --git a/tests/fleet/dispatch.test.ts b/tests/fleet/dispatch.test.ts
+index b6e05ebc..681c0323 100644
+--- a/tests/fleet/dispatch.test.ts
++++ b/tests/fleet/dispatch.test.ts
+@@ -2971,6 +2971,31 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
+     ]);
+   });
+ 
++  test("M1.2: a brief carrying kgContext sees the payload on the witness verbatim, as one more additive key", async () => {
++    // kgContext rides the SAME designed host→box channel as fixContext (the
++    // brief itself never travels in-box): the witness is the render source for
++    // residentContextLines (scripts/pipeline-run.ts), so a transform or re-key
++    // here would hand the resident a context the host never validated. The
++    // payload was bounded + charset-guarded once, at BriefSchema (INV-KG-3);
++    // this leg pins carriage only — verbatim, no sanitization.
++    const kgContext = "<kg_context>\n<observation id=\"obs-1\" documentId=\"doc-1\">fact</observation>\n</kg_context>";
++    const result = await dispatch({ ...validBrief(), kgContext }, deps());
++    const witness = JSON.parse(
++      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
++    ) as Record<string, unknown>;
++    expect(witness.kgContext).toBe(kgContext);
++    expect(Object.keys(witness)).toEqual([
++      "runId",
++      "pipelineId",
++      "requestId",
++      "effectiveCeilingMicros",
++      "budgetMs",
++      "repoSlug",
++      "issueId",
++      "kgContext",
++    ]);
++  });
++
+   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
+     // The create step STRADDLES the record: `provisionAdmittedRun` writes the
+     // run record first (INV-1), then the box. An untyped throw escaping from
+diff --git a/tests/fleet/e2e/memory-cycle.live.test.ts b/tests/fleet/e2e/memory-cycle.live.test.ts
+new file mode 100644
+index 00000000..b7ade59b
+--- /dev/null
++++ b/tests/fleet/e2e/memory-cycle.live.test.ts
+@@ -0,0 +1,812 @@
++/**
++ * M1.2 AC7 — the memory cycle live round (v6a's only T2 round): primed
++ * dispatch + idempotent harvest retain, end to end, on the real substrate.
++ *
++ * GATING: QDS_E2E_LIVE=1 AND QDS_E2E_TIER=2 (liveGate("2") throws on a tier
++ * mismatch or a half-configured substrate env). Operator approves spend OUT
++ * of band first; the round's worst-case figure is printed by the first leg
++ * AND again immediately before the dispatch verb fires. With QDS_E2E_LIVE
++ * unset every leg below is `todoIf`-ed off: the file imports cleanly,
++ * registers zero executable tests, and touches NO network.
++ *
++ * WHAT IS REAL HERE (no fakes anywhere in this file — the story's negative
++ * control: any mock/stub in the live path must fail review):
++ *   - the memory legs drive the REAL HindsightClient against the dedicated
++ *     instance named by the M1.2 memory env (HINDSIGHT_BASE_URL +
++ *     HINDSIGHT_BEARER_TOKEN — env-only auth, INV-HM1; the client never sees
++ *     a credential from this file). Real banks, real retain/recall REST.
++ *   - the dispatch/harvest legs drive REAL `bun scripts/fleet.ts` subprocess
++ *     verbs (the tier2-dispatch-engine pattern): one real exe.dev box, one
++ *     real minted capped key, real setup gate, real in-box engine
++ *     (`fleet run`, armed resident = real model spend), real harvest bundle +
++ *     artifacts pull, real QDS_AUDIT_DB store for the round.
++ *   - every assertion reads real substrate state: recall results, the
++ *     side-channel row the dispatch subprocess wrote, the HARVESTED solicit
++ *     prompt artifacts (the box run context as rendered — never SSH-parsed),
++ *     the round's audit store rows.
++ *
++ * LEG STRUCTURE (sequential test() legs; state flows through `round`):
++ *   L1  [VERIFY DD-28.26(3)] the echo — disposable `qds-probe-m12-*` bank,
++ *       deterministic documentId, recall CONTAINS it (never keyed on a fact
++ *       id), replay-retain leaves EXACTLY ONE document (live upsert,
++ *       upsertObserved precedent: _bmad-output/evidence/p0-9-closure/
++ *       2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json). On echo
++ *       failure the named fallback engages and is PROVEN on a fresh bank:
++ *       host-side retain-identity ledger keyed on documentId → skip-on-replay
++ *       retains exactly one document.
++ *   L2  primed dispatch — the marker is seeded into the bank the dispatch
++ *       seam will resolve (see SEAM MIRROR below), the real dispatch primes,
++ *       the in-box engine settles, the side-channel row reads
++ *       {primed:true, directive:"kg_context"}.
++ *   L3  harvest retain — the outcome document lands (documentId = runId),
++ *       EXACTLY ONE memory-retain-receipt/retain row (subject = runId), the
++ *       re-harvest produces NO second document and NO second receipt row;
++ *       then the full cleanup verdicts (box, key, probe banks, leftovers).
++ *
++ * SEAM MIRROR (why L2 seeds a RESOLVER-fresh bank instead of L1's probe
++ * bank): the dispatch fan-out set is exactly {<provision-time repo bank>,
++ * qds-collective} (kg-context.ts recallFanOut), and BriefSchema ties
++ * repoSlug to repoUrl's path — no live-round brief can resolve to a
++ * `qds-probe-*` id. So L2 resolves the bank the SAME way the seam does —
++ * `resolveRepoBankId(resolveBankId(repoSlug), liveBanks)` — which by
++ * construction returns an id NOT in the live list; L2 creates it, seeds the
++ * marker, and the fan-out deterministically recalls it. Freshness is also
++ * the delete-safety guard: only banks this round created (absent from the
++ * before-list) are deleted in cleanup, never a pre-existing production bank.
++ *
++ * EVIDENCE: scrubbed JSON per leg → _bmad-output/evidence/m1-2/ (AC7's dir;
++ * timestamped like the sibling evidence files). The harness `writeEvidence`
++ * is deliberately NOT used because its destination is env-or-df3-e2e and
++ * this file must not set env; the local writer reuses the harness's
++ * `secretHitsIn` as the write-refusal gate (keys/tokens never enter these
++ * payloads by construction, and the sweep still refuses a leaked byte).
++ * Box boot provenance rides every box-leg payload explicitly (image +
++ * buildId off the preflight driver — the same fact F16 stamps).
++ */
++import { mkdirSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
++import { randomUUID } from "node:crypto";
++import { join } from "node:path";
++
++import { describe, expect, test } from "bun:test";
++
++import { openAuditStoreForWalk, sha256Hex } from "../../../src/audit/link-store.ts";
++import { extractExistingBankIds, resolveRepoBankId } from "../../../src/hindsight/bank-provisioner.ts";
++import { HindsightClient } from "../../../src/hindsight/client.ts";
++import { DEFAULT_RECALL_DIR, type RecallRow } from "../../../src/hindsight/kg-context.ts";
++import { BankIdSchema, resolveBankId, type RecallResponse } from "../../../src/hindsight/schemas.ts";
++import { forbiddenOrigin } from "../../../scripts/p0-9/leg-lib.ts";
++import { RunRecordStore } from "../../../src/providers/run-record.ts";
++import {
++  REPO_ROOT,
++  awaitBoxAbsent,
++  destroyQuietly,
++  emittedRunId,
++  fleetCleanupProblems,
++  fleetLeftovers,
++  fleetPartialOutput,
++  keyLeakProblems,
++  lastJsonLine,
++  liveGate,
++  liveTodoOff,
++  listedKeyHashes,
++  preflight,
++  runFleet,
++  scratchClone,
++  secretHitsIn,
++  settleRun,
++  teardownQuietly,
++  tmpWorkspace,
++  waitForSettledVerdict,
++  type LiveCtx,
++} from "./live-harness.ts";
++
++// ─── round constants ─────────────────────────────────────────────────────────
++
++/** Plan default (e2e-plan.md §TIER-2): 50,000 µ$ = $0.05 worst-case per key. */
++const T2_CAP_MICRO_USD = 50_000;
++/** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
++const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
++/** The brief's repoSlug — canonically tied to QDS_EXEDEV_REPO_URL's path. */
++const REPO_SLUG = "Quantum-Digital-Solutions/QDS-Factory";
++/** The probe manifest the T2 tiers dispatch: code phases only, 60 s budget. */
++const MANIFEST_PATH = "config/rosters/t2.pipeline.json";
++/** The minted-runId grammar (dispatch.ts MINTED_RUN_ID_RE) — AC4's documentId. */
++const MINTED_RUN_ID = /^qds-\d{8}-[a-f0-9]{6}$/;
++
++/** `_bmad-output/evidence/m1-2/` — this round's evidence + ledger artifacts. */
++const M12_EVIDENCE_DIR = join(REPO_ROOT, "_bmad-output/evidence/m1-2");
++
++/** Dated, FIXED documentId suffix: same-day replays exercise the same identity. */
++function datedStamp(): string {
++  return new Date().toISOString().slice(0, 10).replace(/-/g, "");
++}
++
++/** A fresh, grammar-valid disposable probe bank id: `qds-probe-m12-<stamp>`. */
++function probeBankId(): string {
++  const id = `qds-probe-m12-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
++  expect(BankIdSchema.safeParse(id).success).toBe(true);
++  return id;
++}
++
++/**
++ * The M1.2 memory env — required by the memory legs, checked BY NAME (never
++ * values). The wrong-instance trap (:8888 sidecar default / :18889 tenant
++ * stack) is refused BEFORE any retain/recall fires (the p0-9 leg's guard).
++ */
++function requireMemoryEnv(): string {
++  const base = (process.env.HINDSIGHT_BASE_URL ?? "").trim();
++  if (base === "") {
++    throw new Error("HINDSIGHT_BASE_URL is unset — the M1.2 memory env (HINDSIGHT_BASE_URL + HINDSIGHT_BEARER_TOKEN) is required for this leg");
++  }
++  const trap = forbiddenOrigin(base);
++  if (trap !== null) throw new Error(trap);
++  if ((process.env.HINDSIGHT_BEARER_TOKEN ?? "").trim() === "") {
++    throw new Error("HINDSIGHT_BEARER_TOKEN is unset — the M1.2 memory env (HINDSIGHT_BASE_URL + HINDSIGHT_BEARER_TOKEN) is required for this leg");
++  }
++  return base;
++}
++
++// ─── evidence (AC7's dir; scrubbed; sweep-refused) ───────────────────────────
++
++/** Deep string scrub — the same credential SHAPES the harness's sweep knows. */
++function scrubDeep(v: unknown): unknown {
++  if (typeof v === "string") {
++    return v
++      .replace(/sk-or-[A-Za-z0-9_-]+/g, "[REDACTED-KEY]")
++      .replace(/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED-KEY]")
++      .replace(/\bghp_[A-Za-z0-9]{20,}\b/g, "[REDACTED-KEY]")
++      .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED-KEY]");
++  }
++  if (Array.isArray(v)) return v.map(scrubDeep);
++  if (v !== null && typeof v === "object") {
++    const out: Record<string, unknown> = {};
++    for (const [k, val] of Object.entries(v)) out[k] = scrubDeep(val);
++    return out;
++  }
++  return v;
++}
++
++/**
++ * Scrubbed JSON evidence → `_bmad-output/evidence/m1-2/<date>-<HHMMSS>-<name>
++ * -<rand>.json`. Written PASS or FAIL (call from `finally`). The harness's
++ * `secretHitsIn` is the write gate: any surviving secret shape refuses the
++ * write — evidence that leaks is worse than no evidence. THROWS (mkdir/fs/
++ * scrub refusal): callers inside a `finally` must go through
++ * {@link writeM12EvidenceQuietly} so an evidence-write failure cannot skip
++ * the cleanup verdicts or replace the held body error (the harness's F11
++ * rule, mirrored here because `writeEvidenceQuietly` writes to the wrong
++ * dir for this round).
++ */
++function writeM12Evidence(name: string, payload: Record<string, unknown>): string {
++  mkdirSync(M12_EVIDENCE_DIR, { recursive: true });
++  const now = new Date();
++  const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
++  const path = join(M12_EVIDENCE_DIR, `${stamp}-${name}-${Math.random().toString(36).slice(2, 8)}.json`);
++  const body = JSON.stringify(
++    { ...(scrubDeep(payload) as Record<string, unknown>), writtenAt: now.toISOString() },
++    null,
++    2,
++  );
++  const hits = secretHitsIn(body);
++  if (hits.length > 0) {
++    throw new Error(`evidence ${name} failed the secret scrub — ${hits.join("; ")} survived — refusing to write ${path}`);
++  }
++  writeFileSync(path, `${body}\n`);
++  return path;
++}
++
++/** {@link writeM12Evidence} as CLEANUP — never throws (the harness's
++ * `writeEvidenceQuietly` contract, pointed at this round's dir). */
++function writeM12EvidenceQuietly(
++  name: string,
++  payload: Record<string, unknown>,
++  problems: string[],
++): string {
++  try {
++    const path = writeM12Evidence(name, payload);
++    try {
++      process.stderr.write(`[memory-cycle live] ${name} evidence: ${path}\n`);
++    } catch {
++      // dead stderr — the file is written regardless
++    }
++    return path;
++  } catch (e) {
++    const error = e instanceof Error ? e.message : String(e);
++    problems.push(`the ${name} evidence write FAILED: ${error}`);
++    try {
++      process.stderr.write(`[memory-cycle live] ${name} EVIDENCE WRITE FAILED: ${error}\n`);
++    } catch {
++      // dead stderr — the problem entry still reaches settleRun
++    }
++    return "";
++  }
++}
++
++// ─── recall polling (real substrate, bounded) ────────────────────────────────
++
++/**
++ * Recall with a bounded re-poll: Hindsight's recall index can lag a just-
++ * landed retain, so a zero-match count is RETRIED (a real recall each
++ * attempt — never a fabricated result) before the caller's assertion
++ * decides. Returns the LAST attempt's full response plus every attempt's
++ * matching count, so the evidence shows the poll honestly.
++ */
++async function recallPolled(
++  client: HindsightClient,
++  bankId: string,
++  query: string,
++  documentId: string,
++  opts: { attempts?: number; waitMs?: number } = {},
++): Promise<{ res: RecallResponse; counts: number[] }> {
++  const attempts = Math.max(1, opts.attempts ?? 4);
++  const waitMs = opts.waitMs ?? 2_000;
++  const counts: number[] = [];
++  let res: RecallResponse = { results: [], durationMs: 0 };
++  for (let attempt = 1; attempt <= attempts; attempt++) {
++    res = await client.recall(bankId, query, 25);
++    counts.push(res.results.filter((r) => r.documentId === documentId).length);
++    if (counts[attempt - 1] !== 0 || attempt === attempts) break;
++    await new Promise((r) => setTimeout(r, waitMs));
++  }
++  return { res, counts };
++}
++
++/** The deterministic echo marker content — the replay retain is byte-identical BY CONSTRUCTION. */
++function echoContent(docId: string): string {
++  return `M1.2 live echo marker (documentId ${docId}): memory-cycle round-trip probe from tests/fleet/e2e/memory-cycle.live.test.ts — the additive null-tolerant documentId verification against the pinned Hindsight 0.10.0.`;
++}
++
++// ─── round state shared by the sequential legs ───────────────────────────────
++
++interface RoundState {
++  ctx?: LiveCtx;
++  workspace: string;
++  recordsDir: string;
++  auditDb: string;
++  requestId: string;
++  runId: string;
++  vmName: string;
++  repoBankId: string;
++  primeDocId: string;
++  /** Banks THIS round created (resolver-fresh) — the only ones cleanup deletes. */
++  banksWeCreated: string[];
++  hashesBefore: ReadonlySet<string>;
++  evidence: Record<string, unknown>[];
++}
++
++const round: RoundState = {
++  workspace: "",
++  recordsDir: "",
++  auditDb: "",
++  requestId: "",
++  runId: "",
++  vmName: "",
++  repoBankId: "",
++  primeDocId: "",
++  banksWeCreated: [],
++  hashesBefore: new Set<string>(),
++  evidence: [],
++};
++
++// ─── the round ───────────────────────────────────────────────────────────────
++
++describe("memory cycle live", () => {
++  test.todoIf(liveTodoOff())("spend estimate printed before any box exists", () => {
++    const boxHoursUsd = T2_BOX_HOUR_RATE_MICRO_USD / 1_000_000;
++    process.stdout.write(
++      `M1.2 memory-cycle worst-case spend: 1 box ≤ 1h (≈ $${boxHoursUsd.toFixed(2)}/h) + 1 key capped at ${T2_CAP_MICRO_USD} µ$ ` +
++        `(gate C/D pings + armed-resident solicitations inside the cap) + Hindsight retain/recall REST ($0) = ≤ $${(
++          boxHoursUsd + T2_CAP_MICRO_USD / 1_000_000
++        ).toFixed(2)}. Realistic < $0.10. The key is revoked and the box destroyed in cleanup; probe banks are deleted in every leg's finally.\n`,
++    );
++    expect((process.env.QDS_EXEDEV_SHA ?? "").length).toBe(40);
++  });
++
++  // ── L1: the [VERIFY] echo (DD-28.26(3)) ──────────────────────────────────
++  test.todoIf(liveTodoOff())(
++    "L1 echo [VERIFY]: retain → recall documentId CONTAINS; replay-retain upserts to ONE document; fallback = ledger skip-on-replay on a fresh bank",
++    async () => {
++      liveGate("2");
++      const base = requireMemoryEnv();
++      const client = new HindsightClient({ baseUrl: base });
++      const evidence: Record<string, unknown>[] = [];
++      const workspace = tmpWorkspace("m12-l1");
++      const banks: string[] = [];
++      const problems: string[] = [];
++      let failure: unknown;
++      let mode = "server-upsert";
++      const docId = `m12-echo-${datedStamp()}`;
++      const content = echoContent(docId);
++      const retainOpts = { documentId: docId, updateMode: "replace" as const, kind: "observation" as const, source: "agent" as const };
++      try {
++        // ── the echo round on a disposable bank ────────────────────────────
++        const bankA = probeBankId();
++        banks.push(bankA);
++        evidence.push({ phase: "echo-setup", bankId: bankA, documentId: docId });
++        await client.createBank(bankA);
++        await client.retain(bankA, content, retainOpts);
++        const first = await recallPolled(client, bankA, docId, docId);
++        const containsDocId = first.res.results.some((r) => r.documentId === docId);
++        // The fact ids the match rode on — recorded to show the assertion did
++        // NOT key on them (distinct server-minted ids; never assumed equal).
++        const factIds = first.res.results.filter((r) => r.documentId === docId).map((r) => r.memoryId);
++        evidence.push({
++          phase: "echo-recall-1",
++          containsDocId,
++          factIds,
++          documentIds: first.res.results.map((r) => r.documentId),
++          pollCounts: first.counts,
++        });
++        expect(containsDocId).toBe(true);
++
++        // ── the replay retain: same documentId + same content ──────────────
++        await client.retain(bankA, content, retainOpts);
++        const second = await recallPolled(client, bankA, docId, docId);
++        const matchesAfterReplay = second.res.results.filter((r) => r.documentId === docId).length;
++        evidence.push({
++          phase: "echo-recall-2",
++          matchesAfterReplay,
++          pollCounts: second.counts,
++          upsertObservedPrecedent: "_bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json",
++        });
++        expect(matchesAfterReplay).toBe(1);
++
++        // ── fallback ONLY on echo failure: ledger + skip-on-replay proof ───
++        // (The two expects above throw here on failure; the catch engages the
++        // fallback so the round can continue under the named degradation.)
++      } catch (echoError) {
++        mode = "fallback-skip-on-replay";
++        failure = echoError;
++        evidence.push({
++          phase: "echo-fallback-engaged",
++          reason: echoError instanceof Error ? echoError.message : String(echoError),
++          fallback: "host-side retain-identity ledger keyed on documentId → skip-on-replay replaces server-side replace (DD-28.3 design intent, gated on this echo)",
++        });
++        try {
++          // PROVE the fallback on a fresh bank: retain once, then replay
++          // through the ledger — the entry is present, so the replay retain
++          // is SKIPPED (no second retain call is made) — and the substrate
++          // must hold EXACTLY ONE document for the identity. The skip is the
++          // ledger's contract; the recall is its substrate proof.
++          const bankB = probeBankId();
++          banks.push(bankB);
++          await client.createBank(bankB);
++          const firstSeenAt = new Date().toISOString();
++          await client.retain(bankB, content, retainOpts);
++          const demo = await recallPolled(client, bankB, docId, docId);
++          const oneDocument = demo.res.results.filter((r) => r.documentId === docId).length === 1;
++          evidence.push({ phase: "fallback-proof", bankId: bankB, replaySkipped: true, oneDocument, pollCounts: demo.counts });
++          expect(oneDocument).toBe(true);
++
++          // The ledger: the round's retain-identity record, keyed on
++          // documentId, written under the round's evidence artifacts dir —
++          // L1 has no run artifacts of its own, and a tmpdir would discard
++          // the one artifact the fallback exists to leave behind.
++          mkdirSync(M12_EVIDENCE_DIR, { recursive: true });
++          const ledgerPath = join(M12_EVIDENCE_DIR, `m12-retain-identity-ledger-${datedStamp()}-${Math.random().toString(36).slice(2, 6)}.json`);
++          writeFileSync(
++            ledgerPath,
++            `${JSON.stringify(
++              {
++                mode,
++                keyedOn: "documentId",
++                entries: [
++                  {
++                    documentId: docId,
++                    contentDigest: sha256Hex(content),
++                    firstRetainedAt: firstSeenAt,
++                    replayPolicy: "skip-on-replay",
++                    replaysSkipped: 1,
++                  },
++                ],
++              },
++              null,
++              2,
++            )}\n`,
++          );
++          evidence.push({ phase: "fallback-ledger", ledgerPath });
++          // The fallback engaged AND its proof held: this is the leg's pass
++          // condition ("continue the round with the fallback engaged") — the
++          // echo failure stays recorded in the evidence, not in the verdict.
++          failure = undefined;
++        } catch (fallbackError) {
++          failure = new Error(
++            `the echo failed AND the fallback proof failed — the round cannot continue on this substrate: echo=(${
++              echoError instanceof Error ? echoError.message : String(echoError)
++            }) fallback=(${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)})`,
++            { cause: echoError },
++          );
++        }
++      } finally {
++        // Probe-bank cleanup (M1.1's disposable-probe discipline): every bank
++        // this leg created is deleted; a failed delete is recorded and fails
++        // the leg AFTER the evidence write — a stranded bank is a real
++        // failure, never a warning.
++        for (const bankId of banks) {
++          try {
++            const deleted = await client.deleteBank(bankId);
++            evidence.push({ phase: "finally-delete-bank", ...deleted, bankId });
++          } catch (e) {
++            problems.push(`probe bank ${bankId} delete FAILED: ${e instanceof Error ? e.message : String(e)}`);
++          }
++        }
++        writeM12EvidenceQuietly(
++          "m12-l1-echo",
++          {
++            test: "L1-echo",
++            mode,
++            documentId: docId,
++            probeBankPrefix: "qds-probe-m12-",
++            bootedBox: false,
++            phases: evidence,
++          },
++          problems,
++        );
++        rmSync(workspace, { recursive: true, force: true });
++      }
++      settleRun(failure, problems);
++    },
++    // Priced at ceilings: ~8 client calls ≤ 30 s (RETAIN) / 10 s (RECALL) +
++    // two recall polls ≤ 4 × (10 + 2) s each + two bank deletes ≤ 30 s each +
++    // local writes. Every ceiling firing rejects into the catch; the finally
++    // still runs. Healthy round: seconds.
++    360_000,
++  );
++
++  // ── L2: primed dispatch + in-box engine (real box, real spend) ───────────
++  test.todoIf(liveTodoOff())(
++    "L2 primed dispatch: real box + capped key ≤ 50,000 µ$ — seam-mirrored bank seeded, kg_context primed, side-channel row, engine settles",
++    async () => {
++      liveGate("2");
++      requireMemoryEnv(); // refuse BEFORE any spend: an unprimed dispatch would fail L2's assertions anyway
++      let failure: unknown;
++      const evidenceProblems: string[] = [];
++      try {
++        round.ctx = await preflight("2");
++        const ctx = round.ctx;
++        round.hashesBefore = await listedKeyHashes(); // F17 key-delta baseline
++        round.workspace = tmpWorkspace("m12");
++        round.recordsDir = join(round.workspace, "runs");
++        mkdirSync(round.recordsDir, { recursive: true });
++        // The round's OWN audit store (QDS_AUDIT_DB for every verb below) —
++        // never the operator's .sandbox/audit.db.
++        round.auditDb = join(round.workspace, "audit.db");
++        const env = { QDS_RUNS_DIR: round.recordsDir, QDS_AUDIT_DB: round.auditDb };
++        writeFileSync(
++          join(round.workspace, "cost-config.json"),
++          JSON.stringify({ defaultCapMicroUsd: T2_CAP_MICRO_USD, boxHourRateMicroUsd: T2_BOX_HOUR_RATE_MICRO_USD }),
++        );
++        round.evidence.push({ phase: "setup", ok: true, capMicroUsd: T2_CAP_MICRO_USD, auditDb: "round-owned (under the tmp workspace)" });
++
++        // ── seed the bank the dispatch seam will fan out to (SEAM MIRROR) ──
++        const mem = new HindsightClient();
++        const existing = extractExistingBankIds(await mem.listBanks());
++        const repoBankId = resolveRepoBankId(resolveBankId(REPO_SLUG), existing);
++        if (repoBankId === null) throw new Error(`resolveRepoBankId could not resolve a fresh bank id for ${REPO_SLUG} — every candidate exists`);
++        expect(existing.has(repoBankId)).toBe(false); // resolver freshness = the delete-safety guard
++        round.repoBankId = repoBankId;
++        await mem.createBank(repoBankId);
++        round.banksWeCreated.push(repoBankId);
++        round.primeDocId = `m12-prime-${datedStamp()}`;
++        await mem.retain(
++          repoBankId,
++          `M1.2 primed-dispatch marker (documentId ${round.primeDocId}) for ${REPO_SLUG} issue 46: the memory-cycle live round seeds this observation so the dispatch seam's fan-out recall can prime and cite it.`,
++          {
++            documentId: round.primeDocId,
++            updateMode: "replace",
++            kind: "observation",
++            source: "agent",
++            tags: ["m12-primed-dispatch-probe"],
++          },
++        );
++        round.evidence.push({ phase: "seed-repo-bank", repoBankId, documentId: round.primeDocId, preExistingBankCount: existing.size });
++
++        // ── SPEND PRINT, immediately before the verb that fires ────────────
++        const boxHoursUsd = T2_BOX_HOUR_RATE_MICRO_USD / 1_000_000;
++        process.stderr.write(
++          `[memory-cycle live] FIRING dispatch: 1 box ≤ 1h (≈ $${boxHoursUsd.toFixed(2)}/h) + 1 key capped ${T2_CAP_MICRO_USD} µ$ → worst case ≤ $${(boxHoursUsd + T2_CAP_MICRO_USD / 1_000_000).toFixed(2)}\n`,
++        );
++
++        const briefPath = join(round.workspace, "brief.json");
++        // requestId: strict UUID v4 so dispatch HONOURS it (resolveBriefRequestId
++        // drops anything else) — the side-channel row is keyed on exactly this id.
++        round.requestId = randomUUID();
++        writeFileSync(
++          briefPath,
++          JSON.stringify({
++            repoSlug: REPO_SLUG,
++            issueId: 46,
++            requestId: round.requestId,
++            commitSha: ctx.sha,
++            manifestPath: MANIFEST_PATH,
++            repoUrl: ctx.repoUrl,
++          }),
++        );
++
++        const before = (await ctx.driver.list()).map((b) => b.name);
++        round.evidence.push({ phase: "ls-before", boxes: before.filter((n) => n.startsWith("e2e-") || n.startsWith("qds-")) });
++
++        // ── the dispatch verb, as a real subprocess, production path ───────
++        const dispatch = await runFleet(
++          ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", round.recordsDir],
++          { cwd: REPO_ROOT, env, timeoutMs: 1_200_000 },
++        ).catch((e: unknown) => {
++          const partial = fleetPartialOutput(e);
++          round.evidence.push({ phase: "dispatch-verb-timeout", error: (e as Error).message, recoveredBytes: partial.stdout.length + partial.stderr.length });
++          throw e;
++        });
++        // Ownership armed BEFORE the assertion that can throw (EB3 rule):
++        // dispatch names a box before it can still fail.
++        const emitted = emittedRunId(dispatch.stdout, dispatch.stderr);
++        if (emitted !== undefined) round.runId = emitted;
++        round.evidence.push({ phase: "dispatch-verb", exitCode: dispatch.exitCode, stdoutTail: dispatch.stdout.trim().slice(-400), stderrTail: dispatch.stderr.trim().slice(-600) });
++        expect(dispatch.exitCode).toBe(0);
++        const ack = lastJsonLine<{ runId: string; vmName: string; state: string }>(dispatch.stdout);
++        round.runId = ack.runId;
++        round.vmName = ack.vmName;
++        expect(ack.state).toBe("ready");
++        expect(round.runId).toMatch(MINTED_RUN_ID);
++        round.evidence.push({ phase: "ack", runId: round.runId, vmName: round.vmName });
++
++        // ── the side-channel row the dispatch subprocess wrote ─────────────
++        const rowPath = join(REPO_ROOT, DEFAULT_RECALL_DIR, `${round.requestId}.json`);
++        expect(existsSync(rowPath)).toBe(true);
++        const row = JSON.parse(readFileSync(rowPath, "utf8")) as RecallRow;
++        round.evidence.push({ phase: "side-channel-row", rowPath: rowPath.replace(REPO_ROOT, ""), row });
++        expect(row.runId).toBe(round.requestId);
++        expect(row.primed).toBe(true);
++        expect(row.directive).toBe("kg_context");
++        expect(row.banks).toContain(repoBankId);
++        expect(row.banks).toContain("qds-collective");
++        expect(row.recalledDocumentIds).toContain(round.primeDocId);
++        expect(row.chars).toBeGreaterThan(0);
++
++        // ── the box is LIVE + the record carries the money identity ───────
++        const live = (await ctx.driver.list()).map((b) => b.name);
++        expect(live).toContain(round.vmName);
++        const rec = new RunRecordStore({ dir: round.recordsDir }).get(round.runId);
++        expect(rec.vmName).toBe(round.vmName);
++        expect(rec.commitSha).toBe(ctx.sha);
++        expect(rec.keyHash ?? "").not.toBe("");
++        expect(rec.limitMicroUsd).toBe(T2_CAP_MICRO_USD);
++        round.evidence.push({ phase: "record", ok: true, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd });
++
++        // ── fleet run: the in-box engine walks (armed resident = real render)
++        const started = await runFleet(["run", round.runId, "--driver", "exedev", "--dir", round.recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 180_000 });
++        round.evidence.push({ phase: "run-verb", exitCode: started.exitCode, stdout: started.stdout.trim().slice(0, 200), stderrTail: started.stderr.trim().slice(-300) });
++        expect(started.exitCode).toBe(0);
++
++        const state = await waitForSettledVerdict({ recordsDir: round.recordsDir, evidence: round.evidence }, round.runId);
++        round.evidence.push({ phase: "settled", state });
++        // live-mirror: src/fleet/run-completion.ts ChainOutcome "ok" (the settled chain verdict literal)
++        expect(state).toBe("ok");
++      } catch (e) {
++        failure = e;
++        round.evidence.push({ phase: "test-error", error: e instanceof Error ? e.message : String(e) });
++      } finally {
++        // DELIBERATE: no box destroy / no revoke here — L3 harvests the run
++        // this leg created, and L3's finally owns the full cleanup verdict.
++        // If THIS leg failed, L3 still runs and its finally tears down what
++        // `round` names (ids are armed above every assertion that can throw).
++        writeM12EvidenceQuietly(
++          "m12-l2-primed-dispatch",
++          {
++            test: "L2-primed-dispatch",
++            runId: round.runId,
++            vmName: round.vmName,
++            requestId: round.requestId,
++            repoBankId: round.repoBankId,
++            primeDocId: round.primeDocId,
++            image: round.ctx === undefined ? null : { ref: round.ctx.driver.image, buildId: round.ctx.driver.imageBuildId },
++            phases: round.evidence,
++          },
++          evidenceProblems,
++        );
++      }
++      // The evidence-write problem fails the leg only when the body passed —
++      // a body error is never replaced by a cleanup problem (settleRun's rule).
++      if (failure !== undefined) throw failure;
++      if (evidenceProblems.length > 0) throw new Error(evidenceProblems.join("; "));
++    },
++    //   preflight + key list + ls                              ~  260 s
++    //   listBanks + createBank + retain (30 s ceilings)        ~   90 s
++    //   dispatch verb                          1_200_000       ~ 1200 s
++    //   run verb                               180_000         ~  180 s
++    //   settle poll  12 × (status 60 s + wait 10 s)            ~  840 s
++    //   evidence + local                                       ~   10 s
++    //                                                     body ≈ 2580 s
++    //   finally (evidence write only)                          ~   10 s
++    // Hence 2_580 s → 2_640 s. NO cleanup legs here (L3 owns them): a bun
++    // timeout abort skips this finally only — the box/key leak is still
++    // recovered by L3's finally, which always runs after this one.
++    2_640_000,
++  );
++
++  // ── L3: harvest retain + idempotent replay + full cleanup ────────────────
++  test.todoIf(liveTodoOff())(
++    "L3 harvest retain: outcome document (documentId = runId), EXACTLY ONE receipt row, re-harvest dedups; box/key/probe-bank cleanup",
++    async () => {
++      liveGate("2");
++      const ctx = round.ctx;
++      if (ctx === undefined || round.runId === "" || round.vmName === "" || round.repoBankId === "") {
++        throw new Error("L2 did not reach preflight/dispatch — nothing to harvest; refusing to fire a hollow leg");
++      }
++      const { recordsDir, runId, vmName, auditDb, repoBankId } = round;
++      const env = { QDS_AUDIT_DB: auditDb };
++      let failure: unknown;
++      const destroyFailures: string[] = [];
++      let finalBoxes: string[] | undefined;
++      let keyProblems: string[] = [];
++      const bankProblems: string[] = [];
++      const evidence: Record<string, unknown>[] = round.evidence;
++      /** Set once the body's teardown + box-gone proof both held — the
++       * finally's destroy backstop must NOT re-destroy a disposed box (a
++       * failed double-destroy would fail a green round via destroyFailures). */
++      let bodyTeardownOk = false;
++      try {
++        const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, round.workspace);
++
++        // ── the harvest verb (real harvest path; receipt into the round store)
++        const harvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, env, timeoutMs: 300_000 });
++        evidence.push({ phase: "harvest-verb", exitCode: harvest.exitCode, stdout: harvest.stdout.trim().slice(0, 300), stderrTail: harvest.stderr.trim().slice(-400) });
++        expect(harvest.exitCode).toBe(0);
++        expect(existsSync(join(recordsDir, `${runId}.bundle`))).toBeTrue();
++        const artifactsDir = join(recordsDir, `${runId}-artifacts`);
++        expect(existsSync(artifactsDir)).toBeTrue();
++
++        // ── the box run context RENDERED — read off the HARVESTED artifacts,
++        // never SSH-parsed off the box. The armed resident's solicit prompts
++        // are the rendered run context; the kg_context block must be in them
++        // with the marker's documentId and the citation grammar.
++        const promptFiles = readdirSync(artifactsDir).filter((f) => f.startsWith(`${runId}-solicit-`) && f.endsWith("-prompt.txt"));
++        evidence.push({ phase: "solicit-prompts", promptFiles });
++        expect(promptFiles.length).toBeGreaterThan(0);
++        let renderedIn: string | undefined;
++        let renderedText = "";
++        for (const f of promptFiles) {
++          const text = readFileSync(join(artifactsDir, f), "utf8");
++          if (text.includes("<kg_context>") && text.includes(`documentId="${round.primeDocId}"`) && text.includes("[cite:")) {
++            renderedIn = f;
++            renderedText = text;
++            break;
++          }
++        }
++        evidence.push({ phase: "rendered-kg-context", file: renderedIn ?? null, promptBytes: renderedText.length });
++        expect(renderedIn).toBeDefined();
++
++        // ── probe recall: the run bank now holds the outcome document ──────
++        const mem = new HindsightClient();
++        const probe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 5 });
++        const outcomeDoc = probe.res.results.find((r) => r.documentId === runId);
++        evidence.push({
++          phase: "probe-recall",
++          documentIds: probe.res.results.map((r) => r.documentId),
++          pollCounts: probe.counts,
++          outcomeContentHead: outcomeDoc?.content.slice(0, 200) ?? null,
++        });
++        expect(outcomeDoc).toBeDefined();
++        // The retained payload is the host-authored structured outcome — its
++        // runId field must name THIS run (content, not just identity).
++        expect(outcomeDoc?.content ?? "").toContain(`"runId":"${runId}"`);
++
++        // ── EXACTLY ONE memory-retain-receipt/retain row, subject = runId ──
++        const receiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
++          const handle = openAuditStoreForWalk(auditDb);
++          try {
++            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain");
++          } finally {
++            handle.close();
++          }
++        };
++        let receipts = receiptRows();
++        evidence.push({
++          phase: "receipts-after-harvest-1",
++          count: receipts.length,
++          subjects: receipts.map((l) => l.subjectId ?? null),
++          detail: receipts.map((l) => l.detail ?? null),
++        });
++        expect(receipts.length).toBe(1);
++        expect(receipts[0]?.subjectId).toBe(runId);
++        const receiptDetail = receipts[0]?.detail as { documentId?: string; bank?: string } | null | undefined;
++        expect(receiptDetail?.documentId).toBe(runId);
++        expect(receiptDetail?.bank).toBe(repoBankId);
++
++        // ── re-harvest: NO second document, NO second receipt row ──────────
++        const reharvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, env, timeoutMs: 300_000 });
++        evidence.push({ phase: "reharvest-verb", exitCode: reharvest.exitCode, stdout: reharvest.stdout.trim().slice(0, 200) });
++        expect(reharvest.exitCode).toBe(0);
++        const reprobe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 5 });
++        const matchesAfterReplay = reprobe.res.results.filter((r) => r.documentId === runId).length;
++        receipts = receiptRows();
++        evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length });
++        expect(matchesAfterReplay).toBe(1);
++        expect(receipts.length).toBe(1);
++
++        // ── body teardown (the round is asserted; the verb closes it) ──────
++        // --no-harvest is LOAD-BEARING: a teardown harvest here would fire the
++        // retain seam a THIRD time after the dedup assertions above.
++        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], { cwd: hostRepo, env, timeoutMs: 300_000 });
++        evidence.push({ phase: "teardown-verb", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
++        expect(td.exitCode).toBe(0);
++        const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
++        expect(closed.closedAt ?? "").not.toBe("");
++        expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
++        expect(closed.spendMicroUsd ?? 1).toBeLessThanOrEqual(T2_CAP_MICRO_USD);
++        expect(await listedKeyHashes()).not.toContain(closed.keyHash);
++        const boxGone = await awaitBoxAbsent(ctx.driver, vmName, evidence);
++        expect(boxGone.absent).toBe(true);
++        bodyTeardownOk = true;
++        evidence.push({ phase: "spend", spendMicroUsd: closed.spendMicroUsd, capMicroUsd: T2_CAP_MICRO_USD });
++      } catch (e) {
++        failure = e;
++        evidence.push({ phase: "test-error", error: e instanceof Error ? e.message : String(e) });
++      } finally {
++        // Failure-path backstops (never throw over the held body error):
++        // teardown verb, box destroy, key revoke — the L2/L3 shared substrate.
++        if (round.workspace !== "" && recordsDir !== "") {
++          const torn = await teardownQuietly(
++            ["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"],
++            { env, timeoutMs: 180_000 },
++            evidence,
++            { at: "finally-teardown", runId },
++          );
++          if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
++        }
++        if (vmName !== "" && !bodyTeardownOk) {
++          const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
++          if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
++        }
++        // Probe-bank cleanup — ONLY banks this round created (resolver-fresh;
++        // a pre-existing production bank is never deleted).
++        for (const bankId of round.banksWeCreated) {
++          try {
++            const deleted = await new HindsightClient().deleteBank(bankId);
++            evidence.push({ phase: "finally-delete-bank", ...deleted, bankId });
++          } catch (e) {
++            bankProblems.push(`probe bank ${bankId} delete FAILED: ${e instanceof Error ? e.message : String(e)}`);
++          }
++        }
++        finalBoxes = (await fleetLeftovers(ctx.driver, [vmName, runId], evidence)).owned;
++        let recordStore: RunRecordStore | undefined;
++        try {
++          if (recordsDir !== "") recordStore = new RunRecordStore({ dir: recordsDir });
++        } catch (e) {
++          evidence.push({ phase: "finally-store", ok: false, error: (e as Error).message });
++        }
++        keyProblems = await keyLeakProblems(round.hashesBefore, { driver: ctx.driver, store: recordStore, runIds: [runId] }, evidence);
++        writeM12EvidenceQuietly(
++          "m12-l3-harvest-retain",
++          {
++            test: "L3-harvest-retain",
++            runId,
++            vmName,
++            repoBankId,
++            image: { ref: ctx.driver.image, buildId: ctx.driver.imageBuildId },
++            phases: evidence,
++          },
++          bankProblems,
++        );
++        if (round.workspace !== "") rmSync(round.workspace, { recursive: true, force: true });
++      }
++      settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...bankProblems]);
++    },
++    //   scratchClone allowance                                   ~ 180 s
++    //   harvest verb                             300_000         ~ 300 s
++    //   artifact reads + audit reads                             ~  20 s
++    //   probe polls 2 × 5 × (recall 10 s + wait 2 s)             ~ 120 s
++    //   re-harvest verb                          300_000         ~ 300 s
++    //   teardown verb                            300_000         ~ 300 s
++    //   awaitBoxAbsent 5 × (ls 120 s + wait 8 s)                 ~ 640 s
++    //   key listings × 2                                         ~ 240 s
++    //                                                        body ─────
++    //                                                          2 100 s
++    //   finally: teardownQuietly 180 + destroy 120 + fleetLeftovers
++    //   ~1000 + keyLeakProblems ~480 + banks 2×30 + local 10    ~1850 s
++    //                                                                   ────────
++    //                                                            3 950 s
++    // Hence 3_950 s → 4_020 s. Every inner ceiling FIRING is safe (rejects
++    // into the catch; the finally still runs) — this number is what a fully
++    // degraded round may consume before the one abort that skips cleanup.
++    4_020_000,
++  );
++});
+diff --git a/tests/hindsight/client.test.ts b/tests/hindsight/client.test.ts
+index 10898136..1fd93102 100644
+--- a/tests/hindsight/client.test.ts
++++ b/tests/hindsight/client.test.ts
+@@ -10,6 +10,7 @@ import {
+   RecallResponseSchema,
+   ReflectResponseSchema,
+   resolveBankId,
++  RetainExtensionSchema,
+   RetainResponseSchema,
+ } from "../../src/hindsight/schemas.ts";
+ import {
+@@ -147,12 +148,14 @@ describe("BankIdSchema + resolveBankId", () => {
+ 
+ describe("HindsightClient success paths", () => {
+   test("retain success parses RetainResponseSchema and returns typed obj", async () => {
++    // Wire body (0.10.0): {success, bank_id?, items_count, async}. A malformed
++    // body would throw 502 inside retain, so a typed return IS the parse proof.
+     installMock({
+       body: {
+-        memoryId: "mem-1",
+-        bankId: "qds-factory",
+-        status: "created",
+-        durationMs: 42,
++        success: true,
++        bank_id: "qds-factory",
++        items_count: 1,
++        async: false,
+       },
+     });
+     const client = new HindsightClient({
+@@ -160,23 +163,27 @@ describe("HindsightClient success paths", () => {
+       requestId: "req-retain",
+     });
+     const r = await client.retain("qds-factory", "Sprint planning uses SPARC methodology");
+-    expect(RetainResponseSchema.safeParse(r).success).toBe(true);
+-    expect(r.memoryId).toBe("mem-1");
++    // Legacy view via the schema transform: memoryId "" is the issue-#408
++    // placeholder (0.10.0 wire has no memoryId source; identity is document_id).
++    expect(r.memoryId).toBe("");
+     expect(r.bankId).toBe("qds-factory");
+     expect(r.status).toBe("created");
++    expect(r.durationMs).toBe(0);
+     expect(lastCall?.url).toBe(
+       "http://hindsight.test/v1/default/banks/qds-factory/memories",
+     );
+   });
+ 
+   test("recall success parses RecallResponseSchema", async () => {
++    // Wire result items (0.10.0): {id, text, document_id} — distinct fact id
++    // and document identity; content/score are produced by the transform.
+     installMock({
+       body: {
+         results: [
+           {
+-            content: "Sprint planning uses SPARC methodology",
+-            score: 0.92,
+-            memoryId: "mem-1",
++            id: "fact-1",
++            text: "Sprint planning uses SPARC methodology",
++            document_id: "doc-1",
+           },
+         ],
+         durationMs: 120,
+@@ -184,8 +191,8 @@ describe("HindsightClient success paths", () => {
+     });
+     const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+     const r = await client.recall("qds-factory", "planning methodology");
+-    expect(RecallResponseSchema.safeParse(r).success).toBe(true);
+     expect(r.results[0]?.content).toBe("Sprint planning uses SPARC methodology");
++    expect(r.results[0]?.memoryId).toBe("fact-1");
+     expect(lastCall?.url).toBe(
+       "http://hindsight.test/v1/default/banks/qds-factory/memories/recall",
+     );
+@@ -414,16 +421,21 @@ describe("HindsightClient mock mode", () => {
+   test("mock recall returns schema-valid empty results without network", async () => {
+     const c = new HindsightClient({ mode: "mock" });
+     const res = await c.recall("qds-factory", "anything");
+-    expect(RecallResponseSchema.safeParse(res).success).toBe(true);
++    // A malformed canned body would throw 502 inside recall — a typed return
++    // proves the mock body passed the SAME strict parse a live one does.
+     expect(res.results).toEqual([]);
++    expect(res.durationMs).toBe(0);
+   });
+ 
+-  test("mock retain returns schema-valid response with deterministic memoryId", async () => {
++  test("mock retain returns the measured 0.10.0 wire body through the strict parse", async () => {
+     const c = new HindsightClient({ mode: "mock" });
+     const res = await c.retain("qds-factory", "data");
+-    expect(RetainResponseSchema.safeParse(res).success).toBe(true);
+-    expect(res.memoryId).toBe("mock-qds-factory");
+-    expect(res.bankId).toBe("qds-factory");
++    // Legacy view via the transform. memoryId "" is the issue-#408 placeholder
++    // (the canned wire body has no id source); no bank_id on the wire → "".
++    expect(res.memoryId).toBe("");
++    expect(res.bankId).toBe("");
++    expect(res.status).toBe("created");
++    expect(res.durationMs).toBe(0);
+   });
+ 
+   test("mock reflect + consolidate + banks return schema-valid/echo shapes", async () => {
+@@ -576,3 +588,119 @@ describe("HindsightClient.deleteBank", () => {
+   });
+ });
+ 
++// ---------------------------------------------------------------------------
++// M1.2 retain surface — AC5 (P2.8 fold): owned schema'd retain extension +
++// wire→legacy-view response conformance. Wire shapes are the MEASURED 0.10.0
++// bodies (_bmad-output/evidence/p0-9-closure/
++// 2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json), not invented.
++// ---------------------------------------------------------------------------
++
++describe("M1.2 retain surface", () => {
++  test("retain forwards documentId/updateMode/tags as wire document_id + top-level tags", async () => {
++    installMock({ body: { success: true, items_count: 1, async: false } });
++    const client = new HindsightClient({
++      baseUrl: "http://hindsight.test",
++      requestId: "req-m12-retain",
++    });
++    await client.retain("qds-factory", "outcome body", {
++      source: "agent",
++      kind: "observation",
++      documentId: "qds-20261006-abc",
++      updateMode: "replace",
++      tags: ["memory-retain"],
++    });
++    // One whole-body assertion pins the mapping: document_id + tags are
++    // TOP-LEVEL on the item (metadata.tags 422s on 0.10.0) and updateMode
++    // leaks NOTHING to the wire — it IS the document_id upsert.
++    expect(JSON.parse(String(lastCall?.init?.body))).toEqual({
++      items: [
++        {
++          content: "outcome body",
++          document_id: "qds-20261006-abc",
++          tags: ["memory-retain"],
++          metadata: { source: "agent", kind: "observation" },
++        },
++      ],
++    });
++  });
++
++  test("mock retain round-trips through the strict schema with no network", async () => {
++    globalThis.fetch = (async () => {
++      throw new Error("mock mode MUST NOT call fetch");
++    }) as unknown as typeof globalThis.fetch;
++    // The exact canned retain body mockBody returns must parse and transform —
++    // a wire-drifted mock fails the SAME strict parse a live body does (AC5:
++    // network-only short-circuit, never validation short-circuit).
++    const parsed = RetainResponseSchema.safeParse({
++      success: true,
++      items_count: 1,
++      async: false,
++      usage: {
++        input_tokens: 0,
++        output_tokens: 0,
++        total_tokens: 0,
++        cached_tokens: 0,
++        thoughts_tokens: 0,
++      },
++    });
++    expect(parsed.success).toBe(true);
++    if (parsed.success) {
++      expect(parsed.data).toEqual({ memoryId: "", bankId: "", status: "created", durationMs: 0 });
++    }
++    const c = new HindsightClient({ mode: "mock" });
++    const res = await c.retain("qds-factory", "data");
++    expect(res).toEqual({ memoryId: "", bankId: "", status: "created", durationMs: 0 });
++  });
++
++  test("recall wire result {id, text, document_id} → legacy view fields + documentId echo", () => {
++    const parsed = RecallResponseSchema.safeParse({
++      results: [
++        { id: "fact-1", text: "kg observation", document_id: "qds-20261006-abc" },
++      ],
++      durationMs: 120,
++    });
++    expect(parsed.success).toBe(true);
++    if (parsed.success) {
++      expect(parsed.data.results[0]).toEqual({
++        memoryId: "fact-1",
++        content: "kg observation",
++        score: 0,
++        documentId: "qds-20261006-abc",
++      });
++      expect(parsed.data.durationMs).toBe(120);
++    }
++  });
++
++  test("recall result without document_id → documentId null (null-tolerant additive)", () => {
++    const parsed = RecallResponseSchema.safeParse({
++      results: [{ id: "fact-2", text: "no doc" }],
++      durationMs: 5,
++    });
++    expect(parsed.success).toBe(true);
++    if (parsed.success) {
++      expect(parsed.data.results[0]?.documentId).toBeNull();
++      expect(parsed.data.results[0]?.memoryId).toBe("fact-2");
++      expect(parsed.data.results[0]?.content).toBe("no doc");
++    }
++  });
++
++  test("updateMode other than 'replace' is refused by schema before any fetch", async () => {
++    expect(RetainExtensionSchema.safeParse({ updateMode: "append" }).success).toBe(false);
++    installMock({ body: { success: true, items_count: 1, async: false } });
++    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
++    let caught: HindsightHttpError | undefined;
++    try {
++      await client.retain("qds-factory", "x", {
++        source: "agent",
++        updateMode: "append",
++      } as unknown as { source: "agent"; updateMode: "replace" });
++    } catch (e) {
++      if (e instanceof HindsightHttpError) caught = e;
++    }
++    expect(caught?.status).toBe(422);
++    expect(caught?.message).toContain("invalid retain extension");
++    // Refusal happens at the client boundary, before request(): no fetch.
++    expect(lastCall).toBeUndefined();
++  });
++});
++
+diff --git a/tests/hindsight/kg-context.test.ts b/tests/hindsight/kg-context.test.ts
+new file mode 100644
+index 00000000..1e56e810
+--- /dev/null
++++ b/tests/hindsight/kg-context.test.ts
+@@ -0,0 +1,530 @@
++/**
++ * kg-context tests (M1.2 AC1/AC2/AC3 + Observability Contract).
++ *
++ * Mock boundary: a structural FAKE client ({recall, listBanks}) — no network
++ * anywhere, and the real HindsightClient is never constructed because
++ * deps.client is always injected (env vars are set only to flip the seam's
++ * gate). Side-channel writes go to a per-test tmpdir via deps.recallDir —
++ * never the real _bmad-output. Logs are captured via setLogSink (CC-9).
++ */
++
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
++import { HindsightHttpError } from "../../src/hindsight/client.ts";
++import type { RecallResponse } from "../../src/hindsight/schemas.ts";
++import {
++  buildKgContextXml,
++  CITATION_INSTRUCTION,
++  EMPTY_KG_DIRECTIVE,
++  KG_CONTEXT_MAX_CHARS,
++  KG_RECALL_LIMIT,
++  primeDispatchBrief,
++  recallFanOut,
++  type RecallClient,
++  type RecallRow,
++} from "../../src/hindsight/kg-context.ts";
++
++// ---------------------------------------------------------------------------
++// Fixtures — fake client, env control, tmpdir, log capture
++// ---------------------------------------------------------------------------
++
++const RUN_ID = "qds-20261006-kgtest";
++const OUTCOME_DOC_ID = "qds-20261006-kgtest";
++const REPO_SLUG = "acme/widget";
++const REPO_BANK = "acme-widget"; // resolveBankId("acme/widget")
++const COLLECTIVE = "qds-collective";
++
++interface RecallCall {
++  bankId: string;
++  query: string;
++  limit?: number;
++}
++
++/** Structural fake client — records every recall for fan-out assertions. */
++function fakeClient(cfg: {
++  banks?: unknown;
++  recall?: (bankId: string, query: string, limit?: number) => Promise<unknown>;
++  listBanks?: () => Promise<unknown>;
++}): RecallClient & { calls: RecallCall[] } {
++  const calls: RecallCall[] = [];
++  return {
++    calls,
++    listBanks: cfg.listBanks ?? (async () => cfg.banks ?? { banks: [{ bank_id: "qds-demo" }] }),
++    recall: async (bankId, query, limit) => {
++      calls.push({ bankId, query, limit });
++      const res = cfg.recall
++        ? await cfg.recall(bankId, query, limit)
++        : { results: [], durationMs: 1 };
++      return res as RecallResponse;
++    },
++  };
++}
++
++const ENV_KEYS = ["HINDSIGHT_BASE_URL", "HINDSIGHT_BEARER_TOKEN", "HINDSIGHT_API_KEY"] as const;
++let savedEnv: Record<string, string | undefined> = {};
++let dir = "";
++let logEntries: LogEntry[] = [];
++let restoreLogSink: (() => void) | undefined;
++
++beforeEach(() => {
++  savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
++  for (const k of ENV_KEYS) delete process.env[k];
++  dir = mkdtempSync(join(tmpdir(), "kg-context-"));
++  logEntries = [];
++  restoreLogSink = setLogSink((e) => {
++    logEntries.push(e);
++  });
++});
++
++afterEach(() => {
++  if (restoreLogSink) restoreLogSink();
++  rmSync(dir, { recursive: true, force: true });
++  for (const k of ENV_KEYS) {
++    if (savedEnv[k] === undefined) delete process.env[k];
++    else process.env[k] = savedEnv[k];
++  }
++});
++
++/** Flip the seam's env gate ON (the injected fake means no network results). */
++function configEnv(): void {
++  process.env.HINDSIGHT_BASE_URL = "http://127.0.0.1:1";
++  process.env.HINDSIGHT_BEARER_TOKEN = "test-host-token";
++}
++
++function brief(overrides: Record<string, unknown> = {}): Record<string, unknown> {
++  return { requestId: RUN_ID, repoSlug: REPO_SLUG, ...overrides };
++}
++
++function readRow(runId: string = RUN_ID): RecallRow {
++  const raw = readFileSync(join(dir, `${runId}.json`), "utf8");
++  expect(raw.endsWith("\n")).toBe(true);
++  return JSON.parse(raw) as RecallRow;
++}
++
++/** File-existence check (the tmpdir itself always exists — never gate on it). */
++function rowFileExists(name: string): boolean {
++  return existsSync(join(dir, name));
++}
++
++function kgRecallEntries(): LogEntry[] {
++  return logEntries.filter((e) => e.operation === "kg-recall");
++}
++
++const ROW_KEYS = [
++  "banks",
++  "chars",
++  "directive",
++  "latencyMs",
++  "primed",
++  "recalledDocumentIds",
++  "runId",
++];
++
++// ---------------------------------------------------------------------------
++// describe 1 — kg context assembly
++// ---------------------------------------------------------------------------
++
++describe("kg context assembly", () => {
++  test("ladder (a): unconfigured env → brief untouched (same reference), no attempt, no row, no line", async () => {
++    const b = brief();
++    const client = fakeClient({});
++    const primed = await primeDispatchBrief(b, { client, recallDir: dir });
++    expect(primed).toBe(b); // byte-identical v5 dispatch = same object reference
++    expect(client.calls.length).toBe(0);
++    expect(rowFileExists(`${RUN_ID}.json`)).toBe(false);
++    expect(kgRecallEntries().length).toBe(0);
++  });
++
++  test("ladder (d): results → shallow copy with ranked, citation-floored <kg_context> block", async () => {
++    configEnv();
++    const client = fakeClient({
++      recall: async (bankId) =>
++        bankId === REPO_BANK
++          ? {
++              results: [
++                { memoryId: "obs-1", content: "CI uses bun test", score: 0.9, documentId: OUTCOME_DOC_ID },
++              ],
++              durationMs: 3,
++            }
++          : {
++              results: [
++                { memoryId: "obs-2", content: "Always tee test logs", score: 0.7, documentId: null },
++              ],
++              durationMs: 4,
++            },
++    });
++    const b = brief();
++    const primed = (await primeDispatchBrief(b, { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    expect(primed).not.toBe(b); // shallow copy, caller's object identity preserved
++    const kg = primed.kgContext ?? "";
++    expect(kg.startsWith("<kg_context>")).toBe(true);
++    expect(kg).toContain('id="obs-1"');
++    expect(kg).toContain(`documentId="${OUTCOME_DOC_ID}"`);
++    // Rank: higher score first, merged across banks.
++    expect(kg.indexOf('id="obs-1"')).toBeLessThan(kg.indexOf('id="obs-2"'));
++    expect(kg).toContain(CITATION_INSTRUCTION);
++    expect(kg.length).toBeLessThanOrEqual(KG_CONTEXT_MAX_CHARS);
++    // Citation floor: every observation line carries its [cite:<id>] id attribute.
++    for (const m of kg.matchAll(/<observation id="([^"]+)"/g)) {
++      expect(m[1]).toMatch(/^[A-Za-z0-9_-]+$/);
++    }
++    // Side-channel row — the Observability Contract shape, EXACTLY.
++    const row = readRow();
++    expect(Object.keys(row).sort()).toEqual(ROW_KEYS);
++    expect(row.runId).toBe(RUN_ID);
++    expect(row.primed).toBe(true);
++    expect(row.directive).toBe("kg_context");
++    expect(row.banks).toEqual([REPO_BANK, COLLECTIVE]);
++    expect(row.recalledDocumentIds).toEqual([OUTCOME_DOC_ID]); // nulls filtered, rank order
++    expect(row.chars).toBe(kg.length);
++    expect(row.latencyMs).toBeGreaterThanOrEqual(0);
++    const entry = kgRecallEntries()[0];
++    expect(entry).toBeDefined();
++    expect(entry?.directive).toBe("kg_context");
++    expect(typeof entry?.recallMs).toBe("number");
++    expect(typeof entry?.bankMs).toBe("object");
++  });
++
++  test("ladder (c): zero observations across banks → EMPTY_KG_DIRECTIVE only, directive 'empty'", async () => {
++    configEnv();
++    const client = fakeClient({}); // default recall → empty results, both banks ok
++    const primed = (await primeDispatchBrief(brief(), { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    expect(primed.kgContext).toBe(EMPTY_KG_DIRECTIVE);
++    const row = readRow();
++    expect(row.primed).toBe(true);
++    expect(row.directive).toBe("empty");
++    expect(row.recalledDocumentIds).toEqual([]);
++    expect(row.chars).toBe(EMPTY_KG_DIRECTIVE.length);
++    expect(row.banks).toEqual([REPO_BANK, COLLECTIVE]);
++  });
++
++  test("fan-out set is exactly {provision-time repo bank, qds-collective}, one attempt each, limit=KG_RECALL_LIMIT", async () => {
++    configEnv();
++    const client = fakeClient({});
++    await primeDispatchBrief({ requestId: RUN_ID, repoSlug: REPO_SLUG, workId: "M1.2" }, {
++      client,
++      recallDir: dir,
++    });
++    expect(client.calls.map((c) => c.bankId)).toEqual([REPO_BANK, COLLECTIVE]);
++    expect(client.calls[0]?.limit).toBe(KG_RECALL_LIMIT);
++    // Query is the short deterministic repoSlug + workId derivation.
++    expect(client.calls[0]?.query).toBe("acme/widget M1.2");
++  });
++
++  test("provision-time bank id: collision suffix resolves against the LIVE list, never the raw slug", async () => {
++    configEnv();
++    // acme-widget already exists → resolver must suffix (-2), the raw
++    // resolveBankId form must never be recalled directly.
++    const client = fakeClient({ banks: { banks: [{ bank_id: REPO_BANK }] } });
++    await primeDispatchBrief(brief(), { client, recallDir: dir });
++    expect(client.calls.map((c) => c.bankId)).toEqual([`${REPO_BANK}-2`, COLLECTIVE]);
++    expect(client.calls.some((c) => c.bankId === REPO_BANK)).toBe(false);
++  });
++
++  test("per-bank partial failure contributes nothing, but partial results still count as results", async () => {
++    configEnv();
++    const client = fakeClient({
++      recall: async (bankId) => {
++        if (bankId === COLLECTIVE) {
++          throw new HindsightHttpError(408, "timed out after 10000ms", "req-p");
++        }
++        return {
++          results: [{ memoryId: "obs-1", content: "CI uses bun test", score: 0.9, documentId: null }],
++          durationMs: 2,
++        };
++      },
++    });
++    const primed = (await primeDispatchBrief(brief(), { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    const kg = primed.kgContext ?? "";
++    expect(kg).toContain('id="obs-1"');
++    expect(kg).not.toContain("obs-2");
++    const row = readRow();
++    expect(row.directive).toBe("kg_context"); // any bank returned results → kg_context
++    expect(row.banks).toEqual([REPO_BANK, COLLECTIVE]); // both were ATTEMPTED
++  });
++
++  test("rank: score desc with stable fan-out-order tie-break", () => {
++    const block = buildKgContextXml([
++      { id: "low", content: "low", score: 0.2, documentId: null },
++      { id: "high", content: "high", score: 0.9, documentId: null },
++      { id: "tie-1", content: "tie one", score: 0.5, documentId: null },
++      { id: "tie-2", content: "tie two", score: 0.5, documentId: null },
++    ]);
++    const at = (id: string) => block.indexOf(`id="${id}"`);
++    expect(at("high")).toBeLessThan(at("tie-1"));
++    expect(at("tie-1")).toBeLessThan(at("tie-2")); // equal scores keep original order
++    expect(at("tie-2")).toBeLessThan(at("low"));
++  });
++
++  test("citation floor: an observation without a citable id is dropped whole", async () => {
++    configEnv();
++    const client = fakeClient({
++      recall: async (bankId) =>
++        bankId === REPO_BANK
++          ? {
++              results: [
++                { memoryId: "", content: "uncitable fact", score: 0.99, documentId: null },
++                { memoryId: "good-1", content: "citable fact", score: 0.5, documentId: null },
++              ],
++              durationMs: 1,
++            }
++          : { results: [], durationMs: 1 },
++    });
++    const primed = (await primeDispatchBrief(brief(), { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    const kg = primed.kgContext ?? "";
++    expect(kg).toContain('id="good-1"');
++    expect(kg).not.toContain("uncitable fact");
++  });
++
++  test("whole-observation ceiling stop: a non-fitting observation is dropped whole, never split", () => {
++    const big1 = "A".repeat(5000);
++    const big2 = "B".repeat(5000);
++    const block = buildKgContextXml([
++      { id: "big-1", content: big1, score: 0.9, documentId: null },
++      { id: "big-2", content: big2, score: 0.8, documentId: null },
++      { id: "small", content: "tiny fits", score: 0.7, documentId: null },
++    ]);
++    expect(block.length).toBeLessThanOrEqual(KG_CONTEXT_MAX_CHARS);
++    expect(block).toContain(big1);
++    expect(block).not.toContain(big2.slice(0, 64)); // not present in any fragment
++    expect(block).not.toContain('id="big-2"');
++    expect(block).toContain("tiny fits"); // a smaller later-ranked one still fits
++  });
++
++  test("content is escaped only for XML-structural safety (< > &)", () => {
++    const block = buildKgContextXml([
++      { id: "esc-1", content: "a <b> & c > d", score: 1, documentId: null },
++    ]);
++    expect(block).toContain("a &lt;b&gt; &amp; c &gt; d");
++    expect(block).not.toContain("<b>");
++  });
++
++  test("recallFanOut dedups when the repo bank IS the collective", async () => {
++    const client = fakeClient({});
++    const fan = await recallFanOut(client, COLLECTIVE, "q");
++    expect(client.calls.map((c) => c.bankId)).toEqual([COLLECTIVE]);
++    expect(fan.banks).toEqual([COLLECTIVE]);
++  });
++});
++
++// ---------------------------------------------------------------------------
++// describe 2 — kg context ladder negative controls
++// ---------------------------------------------------------------------------
++
++describe("kg context ladder negative controls", () => {
++  test("timeout → proceed-unprimed, NEVER the empty directive", async () => {
++    configEnv();
++    const client = fakeClient({
++      recall: async () => {
++        throw new HindsightHttpError(408, "timed out after 10000ms", "req-t");
++      },
++    });
++    const b = brief();
++    const primed = (await primeDispatchBrief(b, { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    expect(primed).toBe(b); // v5-identical, same reference
++    expect(primed.kgContext).toBeUndefined();
++    // Ladder (b) still writes the row — M1.3 counts every M1 cycle.
++    const row = readRow();
++    expect(row.primed).toBe(false);
++    expect(row.directive).toBe("none"); // NOT "empty" — that is the AC2 negative control
++    expect(row.chars).toBe(0);
++    expect(row.banks).toEqual([REPO_BANK, COLLECTIVE]);
++    expect(kgRecallEntries()[0]?.directive).toBe("none");
++  });
++
++  test("one bank times out, the other succeeds-but-empty → 'empty' (only ALL-bank failure is 'none')", async () => {
++    configEnv();
++    const client = fakeClient({
++      recall: async (bankId) => {
++        if (bankId === COLLECTIVE) throw new HindsightHttpError(408, "timeout", "req-t2");
++        return { results: [], durationMs: 1 };
++      },
++    });
++    const primed = (await primeDispatchBrief(brief(), { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    expect(primed.kgContext).toBe(EMPTY_KG_DIRECTIVE);
++    expect(readRow().directive).toBe("empty");
++  });
++
++  test("recall/listBanks errors never throw out of primeDispatchBrief (even non-Error rejections)", async () => {
++    configEnv();
++    const boom = fakeClient({
++      recall: async () => {
++        throw new Error("boom");
++      },
++    });
++    await expect(primeDispatchBrief(brief(), { client: boom, recallDir: dir })).resolves.toBeDefined();
++    const strReject = fakeClient({
++      recall: async () => {
++        throw "not-an-error"; // non-Error rejection — the seam must still swallow it
++      },
++    });
++    await expect(
++      primeDispatchBrief(brief(), { client: strReject, recallDir: dir }),
++    ).resolves.toBeDefined();
++    const listFail = fakeClient({
++      listBanks: async () => {
++        throw new HindsightHttpError(500, "list failed", "req-l");
++      },
++    });
++    const b = brief();
++    await expect(primeDispatchBrief(b, { client: listFail, recallDir: dir })).resolves.toBe(b);
++    expect(readRow().directive).toBe("none");
++  });
++
++  test("bank id unresolvable (every suffix collides) → proceed-unprimed, directive 'none'", async () => {
++    configEnv();
++    const existing = [REPO_BANK, ...Array.from({ length: 10 }, (_, i) => `${REPO_BANK}-${i + 2}`)];
++    const client = fakeClient({ banks: { banks: existing.map((bank_id) => ({ bank_id })) } });
++    const b = brief();
++    const primed = (await primeDispatchBrief(b, { client, recallDir: dir })) as {
++      kgContext?: string;
++    };
++    expect(primed).toBe(b);
++    expect(client.calls.length).toBe(0); // never recalled — no bank id to recall
++    expect(readRow().directive).toBe("none");
++  });
++
++  test("brief missing repoSlug → proceed-unprimed, row fires when requestId present", async () => {
++    configEnv();
++    const b = { requestId: RUN_ID };
++    const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir })) as
++      Record<string, unknown>;
++    expect(primed).toBe(b);
++    const row = readRow();
++    expect(row.primed).toBe(false);
++    expect(row.directive).toBe("none");
++    expect(row.banks).toEqual([]);
++  });
++
++  test("brief missing requestId → priming still works, but NEITHER row NOR line is written", async () => {
++    configEnv();
++    const b = { repoSlug: REPO_SLUG };
++    const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir })) as
++      Record<string, unknown>;
++    expect(typeof primed.kgContext).toBe("string"); // primed, just unobservable
++    expect(rowFileExists("undefined.json")).toBe(false);
++    expect(kgRecallEntries().length).toBe(0);
++  });
++
++  test("unconfigured env (including empty-string values): no row file, no log line, byte-identical brief", async () => {
++    const cases: Array<Record<string, string>> = [
++      {}, // nothing set
++      { HINDSIGHT_BASE_URL: "", HINDSIGHT_BEARER_TOKEN: "t" },
++      { HINDSIGHT_BASE_URL: "http://x", HINDSIGHT_BEARER_TOKEN: "" },
++      { HINDSIGHT_BASE_URL: "http://x", HINDSIGHT_API_KEY: "" },
++    ];
++    for (const env of cases) {
++      for (const [k, v] of Object.entries(env)) process.env[k] = v;
++      const b = brief();
++      const primed = (await primeDispatchBrief(b, { client: fakeClient({}), recallDir: dir })) as {
++        kgContext?: string;
++      };
++      expect(primed).toBe(b);
++      expect(primed.kgContext).toBeUndefined();
++      // No row file at all — absent, not zero.
++      expect(rowFileExists(`${RUN_ID}.json`)).toBe(false);
++      expect(kgRecallEntries().length).toBe(0);
++      for (const k of ENV_KEYS) delete process.env[k];
++    }
++  });
++});
++
++// ---------------------------------------------------------------------------
++// describe 3 — side channel round trip
++// ---------------------------------------------------------------------------
++
++describe("side channel round trip", () => {
++  test("row written → read back → recalledDocumentIds feed a probe recall that finds the retained outcome document", async () => {
++    configEnv();
++    const outcome = {
++      memoryId: "outcome-fact",
++      content: "run outcome: exit ok, bundle archived",
++      score: 1,
++      documentId: OUTCOME_DOC_ID,
++    };
++    const client = fakeClient({
++      recall: async (bankId) =>
++        bankId === REPO_BANK
++          ? { results: [outcome], durationMs: 2 }
++          : { results: [], durationMs: 1 },
++    });
++    const primed = await primeDispatchBrief(brief(), { client, recallDir: dir });
++    expect(typeof (primed as { kgContext?: string }).kgContext).toBe("string");
++
++    // 1. Row written with a trailing newline, EXACT seven-key shape.
++    const raw = readFileSync(join(dir, `${RUN_ID}.json`), "utf8");
++    expect(raw.endsWith("\n")).toBe(true);
++    const row = JSON.parse(raw) as RecallRow;
++    expect(Object.keys(row).sort()).toEqual(ROW_KEYS);
++    expect(row.recalledDocumentIds).toContain(OUTCOME_DOC_ID);
++
++    // 2. M1.3's input contract: probe recall keyed on the row's retained ids
++    //    finds the outcome document among the results.
++    const probe = fakeClient({
++      recall: async (_bankId, query) =>
++        query.includes(OUTCOME_DOC_ID)
++          ? { results: [outcome], durationMs: 1 }
++          : { results: [], durationMs: 1 },
++    });
++    for (const expected of row.recalledDocumentIds) {
++      const probeRes = await probe.recall(REPO_BANK, expected, KG_RECALL_LIMIT);
++      const found = probeRes.results.map((r) => r.documentId);
++      expect(found).toContain(expected);
++      expect(found).toContain(OUTCOME_DOC_ID); // the retained outcome document itself
++    }
++  });
++
++  test("recalledDocumentIds are in RANK order and the top-ranked retained document is probe-recoverable", async () => {
++    configEnv();
++    const docHigh = "qds-20261006-rank-high";
++    const docLow = "qds-20261006-rank-low";
++    const byDoc: Record<string, { memoryId: string; content: string; score: number; documentId: string }> = {
++      [docHigh]: { memoryId: "fact-high", content: "top-ranked outcome", score: 1, documentId: docHigh },
++      [docLow]: { memoryId: "fact-low", content: "lower-ranked outcome", score: 1, documentId: docLow },
++    };
++    const client = fakeClient({
++      recall: async (bankId) =>
++        bankId === REPO_BANK
++          ? {
++              // Deliberately unranked on the wire: low score arrives first.
++              results: [
++                { memoryId: "fact-low", content: "lower-ranked outcome", score: 0.4, documentId: docLow },
++                { memoryId: "fact-high", content: "top-ranked outcome", score: 0.9, documentId: docHigh },
++                { memoryId: "fact-nodoc", content: "no document identity", score: 0.95, documentId: null },
++              ],
++              durationMs: 2,
++            }
++          : { results: [], durationMs: 1 },
++    });
++    const primed = await primeDispatchBrief(brief(), { client, recallDir: dir });
++    // The block itself proves the rank: high before low, null-documentId fact cited but absent from docIds.
++    const kg = (primed as { kgContext?: string }).kgContext ?? "";
++    expect(kg.indexOf('id="fact-high"')).toBeLessThan(kg.indexOf('id="fact-low"'));
++
++    const row = readRow();
++    expect(row.recalledDocumentIds).toEqual([docHigh, docLow]); // rank order, nulls excluded
++    // M1.3 probe: the FIRST expected id recovers the top-ranked outcome document.
++    const probe = fakeClient({
++      recall: async (_bankId, query) =>
++        query in byDoc ? { results: [byDoc[query]], durationMs: 1 } : { results: [], durationMs: 1 },
++    });
++    const top = await probe.recall(REPO_BANK, row.recalledDocumentIds[0] ?? "", KG_RECALL_LIMIT);
++    expect(top.results[0]?.documentId).toBe(docHigh);
++  });
++});
+diff --git a/tests/hindsight/run-retain.test.ts b/tests/hindsight/run-retain.test.ts
+new file mode 100644
+index 00000000..eda90b02
+--- /dev/null
++++ b/tests/hindsight/run-retain.test.ts
+@@ -0,0 +1,392 @@
++/**
++ * M1.2 AC4/AC6 — run-retain: documentId determinism, payload bound + structure,
++ * replace-dedup, receipt shape/dedup on the REAL audit store, best-effort
++ * receipt, and the negative controls (no prose channel, no time-based
++ * documentId, no per-run credential parameter).
++ *
++ * The store legs run the real `openAuditStore` on a tmpdir DB (the link-store
++ * test pattern); every test points `QDS_AUDIT_DB` inside its own tmpdir FIRST
++ * (C-5) so an accidental default-path open can never resolve at the repo root.
++ */
++
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++import { Database } from "bun:sqlite";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import {
++  canonicalJson,
++  openAuditStore,
++  sha256Hex,
++  type AuditStoreWriter,
++} from "../../src/audit/link-store.ts";
++import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
++import type { HindsightClient } from "../../src/hindsight/client.ts";
++import {
++  RETAIN_PAYLOAD_MAX_BYTES,
++  RunRetainError,
++  buildRetainPayload,
++  deriveDocumentId,
++  retainRunOutcome,
++  type RetainOutcome,
++  type RunRetainInput,
++} from "../../src/hindsight/run-retain.ts";
++
++// ---------------------------------------------------------------------------
++// Fixtures
++// ---------------------------------------------------------------------------
++
++let dir: string;
++let prevAuditEnv: string | undefined;
++
++beforeEach(() => {
++  dir = mkdtempSync(join(tmpdir(), "qds-m12-run-retain-"));
++  prevAuditEnv = process.env.QDS_AUDIT_DB;
++  process.env.QDS_AUDIT_DB = join(dir, "env-default-guard.db");
++});
++
++afterEach(() => {
++  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
++  if (prevAuditEnv === undefined) delete process.env.QDS_AUDIT_DB;
++  else process.env.QDS_AUDIT_DB = prevAuditEnv;
++  rmSync(dir, { recursive: true, force: true });
++});
++
++const RUN_ID = "qds-20261006-ab12cd";
++
++/** A fully-populated realistic outcome. */
++function outcome(over: Partial<RetainOutcome> = {}): RetainOutcome {
++  return {
++    runId: RUN_ID,
++    repoSlug: "acme/widgets",
++    requestId: "req-retain-1",
++    exitClassification: "green",
++    harvestedCount: 3,
++    spendMicroUsd: 41_250,
++    bundlePath: ".sandbox/bundles/qds-20261006-ab12cd.tar.zst",
++    tags: ["run-outcome", "acme/widgets"],
++    ...over,
++  };
++}
++
++function runInput(over: Partial<RunRetainInput> = {}): RunRetainInput {
++  return { ...outcome(), repoBankId: "qds-acme-widgets", ...over };
++}
++
++type RetainMetadata = Parameters<HindsightClient["retain"]>[2];
++
++interface CapturedRetain {
++  bankId: string;
++  content: string;
++  metadata?: RetainMetadata;
++}
++
++/** Fake client: captures every retain call, returns the schema-valid view. */
++function fakeClient() {
++  const calls: CapturedRetain[] = [];
++  const client = {
++    retain: async (bankId: string, content: string, metadata?: RetainMetadata) => {
++      calls.push({ bankId, content, metadata });
++      return { memoryId: "", bankId, status: "created" as const, durationMs: 0 };
++    },
++  };
++  return { calls, client: client as unknown as Pick<HindsightClient, "retain"> };
++}
++
++/** Install a capturing sink; returns the restore thunk. */
++function captureLog(): { lines: LogEntry[]; restore: () => void } {
++  const lines: LogEntry[] = [];
++  const restore = setLogSink((entry) => lines.push(entry));
++  return { lines, restore };
++}
++
++interface StoredRow {
++  hop: string;
++  event: string;
++  subject_id: string | null;
++  subject_kind: string | null;
++  evidence_digest: string;
++  detail_json: string | null;
++}
++
++function storedRows(path: string): StoredRow[] {
++  const db = new Database(path);
++  try {
++    return db
++      .prepare(
++        "SELECT hop, event, subject_id, subject_kind, evidence_digest, detail_json FROM audit_links",
++      )
++      .all() as StoredRow[];
++  } finally {
++    db.close();
++  }
++}
++
++/** The canonical retain identity the receipt's evidence digest is taken over. */
++function identityDigest(bank: string, documentId: string, contentDigest: string): string {
++  return sha256Hex(canonicalJson({ bank, documentId, contentDigest }));
++}
++
++// ---------------------------------------------------------------------------
++// "run retain" — the happy path and its idempotency contract
++// ---------------------------------------------------------------------------
++
++describe("run retain", () => {
++  test("documentId is deterministic — exactly the validated runId, every time", () => {
++    expect(deriveDocumentId(RUN_ID)).toBe(RUN_ID);
++    // Determinism: no clock, no randomness — the same runId derives the same
++    // documentId forever, which is what makes a replay a replace.
++    expect(deriveDocumentId(RUN_ID)).toBe(deriveDocumentId(RUN_ID));
++    expect(deriveDocumentId("qds-19991231-000000")).toBe("qds-19991231-000000");
++  });
++
++  test("payload is deterministic, canonical (sorted keys), and within the byte bound", () => {
++    const input = runInput();
++    const first = buildRetainPayload(input);
++    expect(buildRetainPayload(input)).toBe(first);
++    // Canonical: the serialised bytes ARE the canonical form — key order cannot
++    // drift between two builds of the same input.
++    expect(first).toBe(canonicalJson(JSON.parse(first)));
++    expect(Buffer.byteLength(first, "utf8")).toBeLessThanOrEqual(RETAIN_PAYLOAD_MAX_BYTES);
++  });
++
++  test("byte-identical replay: two retains produce identical documentId + payload (replace, no duplicate)", async () => {
++    const { calls, client } = fakeClient();
++    const input = runInput();
++    const first = await retainRunOutcome(client, undefined, input);
++    const second = await retainRunOutcome(client, undefined, input);
++    expect(first).toEqual({
++      retained: true,
++      documentId: RUN_ID,
++      bank: "qds-acme-widgets",
++      contentDigest: sha256Hex(buildRetainPayload(input)),
++    });
++    expect(second).toEqual(first);
++    expect(calls.length).toBe(2);
++    const [firstCall, secondCall] = calls;
++    if (!firstCall || !secondCall) throw new Error("expected both retains to be captured");
++    // The wire saw the SAME identity twice: same documentId, same payload, same
++    // replace mode — the substrate's document_id upsert collapses these.
++    expect(secondCall).toEqual(firstCall);
++    expect(firstCall.bankId).toBe("qds-acme-widgets");
++    expect(firstCall.metadata).toEqual({
++      documentId: RUN_ID,
++      updateMode: "replace",
++      tags: outcome().tags,
++      kind: "observation",
++      source: "agent",
++    });
++  });
++
++  test("receipt row shape: hop/event/subject/digest over the canonical identity, detail carries documentId + bank", async () => {
++    const p = join(dir, "receipt.db");
++    const store = openAuditStore(p);
++    try {
++      const { client } = fakeClient();
++      const input = runInput();
++      const result = await retainRunOutcome(client, store, input);
++      const rows = storedRows(p);
++      expect(rows.length).toBe(1);
++      const row = rows[0];
++      if (row === undefined) throw new Error("expected the receipt row to exist");
++      expect(row.hop).toBe("memory-retain-receipt");
++      expect(row.event).toBe("retain");
++      expect(row.subject_id).toBe(RUN_ID);
++      expect(row.subject_kind).toBe("document");
++      expect(row.evidence_digest).toBe(identityDigest(result.bank, result.documentId, result.contentDigest));
++      expect(JSON.parse(row.detail_json as string)).toEqual({ documentId: RUN_ID, bank: "qds-acme-widgets" });
++      // The detail is digest-stable AND far under the store's 8 KiB cap.
++      expect(Buffer.byteLength(row.detail_json as string, "utf8")).toBeLessThanOrEqual(8192);
++    } finally {
++      store.close();
++    }
++  });
++
++  test("receipt dedup on replay: a byte-identical re-retain leaves exactly ONE row", async () => {
++    const p = join(dir, "dedup.db");
++    const store = openAuditStore(p);
++    try {
++      const { client } = fakeClient();
++      const input = runInput();
++      await retainRunOutcome(client, store, input);
++      await retainRunOutcome(client, store, input);
++      expect(storedRows(p).length).toBe(1);
++    } finally {
++      store.close();
++    }
++  });
++
++  test("divergent content under the same documentId fires the tamper alarm: no throw, row stands with the FIRST digest", async () => {
++    const p = join(dir, "divergent.db");
++    const store = openAuditStore(p);
++    const { lines, restore } = captureLog();
++    try {
++      const { client } = fakeClient();
++      const first = await retainRunOutcome(client, store, runInput({ harvestedCount: 3 }));
++      // Same documentId (same runId), DIFFERENT content — exactly the anomaly
++      // the store's divergent-evidence check exists to surface (INV-KG-4).
++      const second = await retainRunOutcome(client, store, runInput({ harvestedCount: 7 }));
++      expect(second.contentDigest).not.toBe(first.contentDigest);
++      // The store did NOT throw and did NOT overwrite: the first row stands.
++      const rows = storedRows(p);
++      expect(rows.length).toBe(1);
++      const standing = rows[0];
++      if (standing === undefined) throw new Error("expected the first receipt row to stand");
++      expect(standing.evidence_digest).toBe(identityDigest(first.bank, first.documentId, first.contentDigest));
++      // The alarm is the store's own error line naming the divergence.
++      const divergent = lines.filter(
++        (l) => l.operation === "audit-link.record" && l.status === "error" && l.outcome === "divergent",
++      );
++      expect(divergent.length).toBe(1);
++    } finally {
++      restore();
++      store.close();
++    }
++  });
++
++  test("best-effort receipt: a refusing store never fails the landed retain — refusal logged", async () => {
++    const refusing: AuditStoreWriter = {
++      path: join(dir, "refusing.db"),
++      record() {
++        throw new RunRetainError("retain-payload-invalid", "audit-link-invalid: refused by the test store");
++      },
++      close() {},
++    };
++    const { lines, restore } = captureLog();
++    try {
++      const { calls, client } = fakeClient();
++      const result = await retainRunOutcome(client, refusing, runInput());
++      // The retain landed; only the receipt was refused.
++      expect(result.retained).toBe(true);
++      expect(calls.length).toBe(1);
++      // Both contract lines exist: the success line AND the refusal.
++      const ok = lines.find((l) => l.operation === "memory-retain" && l.status === "ok");
++      expect(ok).toBeDefined();
++      const refusal = lines.find((l) => l.operation === "memory-retain-receipt" && l.status === "error");
++      expect(refusal).toBeDefined();
++      expect(refusal?.error?.message).toMatch(/refused by the test store/);
++    } finally {
++      restore();
++    }
++  });
++
++  test("the memory-retain log line carries the Observability Contract shape", async () => {
++    const { lines, restore } = captureLog();
++    try {
++      const { client } = fakeClient();
++      const result = await retainRunOutcome(client, undefined, runInput());
++      const line = lines.find((l) => l.operation === "memory-retain");
++      expect(line).toBeDefined();
++      expect(line).toMatchObject({
++        runId: RUN_ID,
++        documentId: result.documentId,
++        bank: result.bank,
++        contentDigest: result.contentDigest,
++        status: "ok",
++      });
++    } finally {
++      restore();
++    }
++  });
++});
++
++// ---------------------------------------------------------------------------
++// "run retain negative controls" — the fences, each proven by refusal
++// ---------------------------------------------------------------------------
++
++describe("run retain negative controls", () => {
++  test("oversize payload refuses BEFORE any client call", () => {
++    const { calls, client } = fakeClient();
++    // ~2x the ceiling of filler in the one field that scales: the correlation id.
++    const oversized = runInput({ requestId: "r".repeat(RETAIN_PAYLOAD_MAX_BYTES * 2) });
++    let thrown: unknown;
++    try {
++      buildRetainPayload(oversized);
++    } catch (e) {
++      thrown = e;
++    }
++    expect(thrown).toBeInstanceOf(RunRetainError);
++    expect((thrown as RunRetainError).code).toBe("retain-payload-oversize");
++    expect(calls.length).toBe(0);
++    // And through the full seam, not just the builder: the oversize input
++    // refuses before the fake client's retain is ever reached.
++    return expect(retainRunOutcome(client, undefined, oversized)).rejects.toBeInstanceOf(RunRetainError);
++  });
++
++  test("the payload has NO prose channel: exactly the structured fields, extra input properties cannot enter", () => {
++    // A caller smuggling an extra (prose-bearing) property cannot get it into
++    // the payload: the builder's exact-shape literal never reads it.
++    const smuggled = runInput({ requestId: "req-retain-1" }) as RunRetainInput & { boxProse?: string };
++    smuggled.boxProse = "RAW BOX OUTPUT: the agent wrote pages of prose here…";
++    const parsed = JSON.parse(buildRetainPayload(smuggled)) as Record<string, unknown>;
++    expect(Object.keys(parsed).sort()).toEqual(
++      ["bundlePath", "exitClassification", "harvestedCount", "repoSlug", "requestId", "runId", "spendMicroUsd"],
++    );
++    expect(parsed.boxProse).toBeUndefined();
++    // Optional fields absent → absent from the payload, never null-filled.
++    const minimal = JSON.parse(
++      buildRetainPayload(
++        outcome({
++          harvestedCount: undefined,
++          spendMicroUsd: undefined,
++          bundlePath: undefined,
++        }),
++      ),
++    ) as Record<string, unknown>;
++    expect(Object.keys(minimal).sort()).toEqual(["exitClassification", "repoSlug", "requestId", "runId"]);
++    // The classification is a closed union — free text is refused at the boundary.
++    let thrown: unknown;
++    try {
++      buildRetainPayload(outcome({ exitClassification: "the agent seemed happy with the result" as never }));
++    } catch (e) {
++      thrown = e;
++    }
++    expect(thrown).toBeInstanceOf(RunRetainError);
++    expect((thrown as RunRetainError).code).toBe("retain-payload-invalid");
++  });
++
++  test("deriveDocumentId refuses malformed runIds — no time-based or random documentId is possible", () => {
++    for (const bad of [
++      "",
++      "run-1",
++      "qds-2026106-ab12cd", // 7-digit date
++      "qds-20261006-AB12CD", // uppercase hex
++      "qds-20261006-ab12cd-extra",
++      "qds-20261006", // no suffix
++      "abc-20261006-ab12cd", // wrong brand
++      "qds-20261006-ab12c", // 5 hex
++    ]) {
++      let thrown: unknown;
++      try {
++        deriveDocumentId(bad);
++      } catch (e) {
++        thrown = e;
++      }
++      expect(thrown).toBeInstanceOf(RunRetainError);
++      expect((thrown as RunRetainError).code).toBe("retain-run-id-invalid");
++    }
++  });
++
++  test("no per-run credential parameter exists on the surface (INV-KG-2)", async () => {
++    // The input surface is the closed RunRetainInput shape — no apiKey, no
++    // token, no memory key slot exists for a caller to fill.
++    const input = runInput();
++    expect(Object.keys(input).sort()).toEqual(
++      ["bundlePath", "exitClassification", "harvestedCount", "repoBankId", "repoSlug", "requestId", "runId", "spendMicroUsd", "tags"],
++    );
++    // And the wire extension this module sends carries identity + classification
++    // only — never a credential field.
++    const { calls, client } = fakeClient();
++    await retainRunOutcome(client, undefined, input);
++    const sent = calls[0];
++    if (!sent) throw new Error("expected the retain call to be captured");
++    expect(Object.keys(sent.metadata as object).sort()).toEqual(
++      ["documentId", "kind", "source", "tags", "updateMode"],
++    );
++    const flat = JSON.stringify(sent);
++    for (const forbidden of ["apiKey", "token", "credential", "password", "secret"]) {
++      expect(flat.includes(forbidden)).toBe(false);
++    }
++  });
++});
+diff --git a/tests/scripts/build-exedev-image.test.ts b/tests/scripts/build-exedev-image.test.ts
+index 3ae509d3..465201ca 100644
+--- a/tests/scripts/build-exedev-image.test.ts
++++ b/tests/scripts/build-exedev-image.test.ts
+@@ -1973,7 +1973,17 @@ describe("buildIdFileInputs", () => {
+       // the probe-gate suite). The bunfig.coverage.toml and tests/ edits of
+       // the same round are NOT walked COPY inputs. Received from this test's
+       // own failing run on the final tree, per the re-pin-last ritual above.
+-            "c4db474b616a4d57a5792a2d15cd8a31784af95f86e5e42ca052115e88fbc93e",
++      //
++      // 90250820: M1.2 (2026-10-06) — walked COPY inputs touched were
++      // `src/fleet/brief-schema.ts` (optional kgContext field), and
++      // `scripts/pipeline-run.ts` + `src/fleet/run-completion.ts` +
++      // `src/fleet/dispatch.ts` (kgContext witness carriage + render). NOT
++      // walked: src/hindsight/** (host-only), src/audit/link-store.ts,
++      // scripts/fleet.ts, src/providers/teardown.ts (outside the COPY set).
++      // The image re-publish half of this ritual is OPS-side and operator-
++      // gated (story Technical Notes) — it must run on a tree containing
++      // M1.2 BEFORE the next T2 live round fires a box.
++            "9025082041dab842504a26f494120a4b662e05523550af66c4905d76e5d863e4",
+     );
+   });
+ });
+diff --git a/tests/scripts/pipeline-run-kgcontext-render.test.ts b/tests/scripts/pipeline-run-kgcontext-render.test.ts
+new file mode 100644
+index 00000000..5db41896
+--- /dev/null
++++ b/tests/scripts/pipeline-run-kgcontext-render.test.ts
+@@ -0,0 +1,64 @@
++/**
++ * M1.2 AC3: `residentContextLines` renders the brief's `kgContext` verbatim as
++ * its own trailing block when present (INV-KG-3 — the schema's ceiling and
++ * control-char refine are the boundary guard; sanitizeForMessage would destroy
++ * the multi-line XML), and produces byte-identical lines when absent.
++ */
++import { describe, expect, test } from "bun:test";
++
++import { residentContextLines } from "../../scripts/pipeline-run.ts";
++import type { PhaseSpec } from "../../src/phase-engine/index.ts";
++
++const RUN_ID = "qds-20261006-test01";
++const MANIFEST = {
++  pipelineId: "test-pipeline",
++  phases: [
++    {
++      name: "probe",
++      kind: "code",
++      description: "probe phase",
++      maxDurationMs: 60_000,
++      retries: 0,
++    },
++  ] as PhaseSpec[],
++};
++
++const BRIEF = { requestId: "req-1", repoSlug: "qds/demo", issueId: 42 };
++
++const KG_BLOCK = [
++  "<kg_context>",
++  '\t<observation bank="qds-demo" documentId="qds-20260920-abc123">',
++  "Run qds-20260920-abc123 exited 0 [cite:1]",
++  "\t</observation>",
++  "</kg_context>",
++].join("\n");
++
++describe("kgContext resident render", () => {
++  test("present: the block is appended last, verbatim, after unchanged lines", () => {
++    const without = residentContextLines(RUN_ID, MANIFEST, BRIEF);
++    const withBlock = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: KG_BLOCK });
++    // The pre-existing lines are untouched — the append is ADDS-ONLY — and the
++    // block line is byte-identical to the brief's value.
++    expect(withBlock).toEqual([...without, KG_BLOCK]);
++    expect(withBlock[withBlock.length - 1]).toBe(KG_BLOCK);
++  });
++
++  test("absent: the lines are exactly the pre-change render", () => {
++    expect(residentContextLines(RUN_ID, MANIFEST, BRIEF)).toEqual([
++      "pipeline test-pipeline run qds-20261006-test01",
++      "requestId: req-1",
++      "repoSlug: qds/demo",
++      "issueId: 42",
++      "phases: probe(code)",
++    ]);
++  });
++
++  test("empty string and non-string kgContext render nothing", () => {
++    // `""` is the one present-but-unusable value: falsy, so it must not push an
++    // empty trailing line that a consumer counts as a block.
++    const empty = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: "" });
++    expect(empty).toEqual(residentContextLines(RUN_ID, MANIFEST, BRIEF));
++    const nonString = residentContextLines(RUN_ID, MANIFEST, { ...BRIEF, kgContext: 7 });
++    expect(nonString).toEqual(residentContextLines(RUN_ID, MANIFEST, BRIEF));
++  });
++});

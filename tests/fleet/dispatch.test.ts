@@ -2971,6 +2971,31 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     ]);
   });
 
+  test("M1.2: a brief carrying kgContext sees the payload on the witness verbatim, as one more additive key", async () => {
+    // kgContext rides the SAME designed host→box channel as fixContext (the
+    // brief itself never travels in-box): the witness is the render source for
+    // residentContextLines (scripts/pipeline-run.ts), so a transform or re-key
+    // here would hand the resident a context the host never validated. The
+    // payload was bounded + charset-guarded once, at BriefSchema (INV-KG-3);
+    // this leg pins carriage only — verbatim, no sanitization.
+    const kgContext = "<kg_context>\n<observation id=\"obs-1\" documentId=\"doc-1\">fact</observation>\n</kg_context>";
+    const result = await dispatch({ ...validBrief(), kgContext }, deps());
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as Record<string, unknown>;
+    expect(witness.kgContext).toBe(kgContext);
+    expect(Object.keys(witness)).toEqual([
+      "runId",
+      "pipelineId",
+      "requestId",
+      "effectiveCeilingMicros",
+      "budgetMs",
+      "repoSlug",
+      "issueId",
+      "kgContext",
+    ]);
+  });
+
   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
     // The create step STRADDLES the record: `provisionAdmittedRun` writes the
     // run record first (INV-1), then the box. An untyped throw escaping from

@@ -68,6 +68,7 @@ import {
   pullArtifacts,
   rmBestEffort,
   type GitRunner,
+  type HarvestResult,
 } from "./harvest.ts";
 import { resolveRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
@@ -163,6 +164,22 @@ export interface TeardownDeps {
    * this sequence drives.
    */
   recordAuditLink: (link: ProviderAuditLink) => void;
+  /**
+   * M1.2: the post-harvest retain hook, INJECTED (the recordAuditLink seam
+   * shape: this module never imports the memory modules — the composition
+   * root binds them, so the provider layer stays decoupled from Hindsight).
+   * Fired immediately AFTER the harvest step COMPLETES (never in the skip
+   * arms, never under noHarvest) with the leg's own outcome. A rejection is
+   * logged and NEVER fails teardown — the harvest gate (AC3) is harvest
+   * itself; what the host does with the outcome afterwards must not be able
+   * to keep a box alive.
+   */
+  postHarvest?: (info: {
+    runId: string;
+    requestId: string;
+    outcome: "harvested" | "none";
+    count?: number;
+  }) => Promise<void>;
 }
 
 export interface TeardownOptions {
@@ -1067,11 +1084,44 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   if (opts.noHarvest) {
     skipStep(ctx, "harvest", "waived by --no-harvest");
   } else {
+    // M1.2: undefined after runBoxStep means the step did NOT run this
+    // sequence — the gone-box skip arm swallowed a NoSuchBox — so the hook
+    // below fires only on a harvest that actually LANDED.
+    let harvested: HarvestResult | undefined;
     await runBoxStep(ctx, "harvest", async () => {
       // Teardown already pulled artifacts as its own step 2 — harvestRun skips
       // its Step E so exactly one artifact pipeline runs per teardown.
-      await harvestRun(deps, runId, { artifactsOwnedByCaller: true });
+      harvested = await harvestRun(deps, runId, { artifactsOwnedByCaller: true });
     });
+    if (harvested !== undefined && deps.postHarvest !== undefined) {
+      try {
+        await deps.postHarvest({
+          runId,
+          requestId: ctx.requestId,
+          outcome: harvested.outcome,
+          count: harvested.outcome === "harvested" ? harvested.count : undefined,
+        });
+      } catch (e) {
+        // Failure-isolated by contract (mirror tokenIngestRefusalLog's
+        // posture): the leg landed; a retain refusal is one structured line
+        // and teardown continues to revoke+destroy. The injected hook is
+        // untrusted here regardless of what its own body catches.
+        const err = (e ?? {}) as { code?: string; message?: string };
+        log({
+          ...stepBase(ctx, "teardown", "harvest"),
+          operation: "teardown.post_harvest",
+          duration: 0,
+          durationMs: 0,
+          status: "error",
+          outcome: "continued",
+          // Sliced like the sibling arms above (~337, ~363): the hook's
+          // message is caller-controlled free text — bound it too.
+          error: { code: err.code ?? "post-harvest-failed", message: redactSecrets(err.message ?? e).slice(0, 200) },
+          reason:
+            "the post-harvest hook refused — the harvest leg landed and teardown continues to revoke+destroy (memory retain is best-effort, never a teardown gate)",
+        });
+      }
+    }
   }
 
   // 4. revoke — "revoked" | "already-gone" both OK; a throw aborts with the

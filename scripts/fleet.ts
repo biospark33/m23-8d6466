@@ -139,6 +139,13 @@ import type { ProviderAuditLink } from "../src/providers/driver.ts";
 import { withRunLock } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
 import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
+// M1.2 (AC1/AC4): the memory cycle's two host legs. This file is their
+// composition root — the dispatch prime rides the ONE brief ingress
+// (ingestBriefJson, below) and the harvest retain rides the shared
+// best-effort helper (src/fleet/retain-best-effort.ts); the landed hindsight
+// modules own every gate (env, ladder, payload bounds, receipt).
+import { primeDispatchBrief } from "../src/hindsight/kg-context.ts";
+import { retainRunOutcomeBestEffort } from "../src/fleet/retain-best-effort.ts";
 import {
   assertFleetRunId,
   dispatch,
@@ -1305,7 +1312,18 @@ async function stdinHasQueuedByte(): Promise<boolean> {
  * Every refusal is a FleetError exit 2, so both callers' catch blocks render
  * it unchanged. Nothing here touches disk beyond reading the brief itself.
  */
-async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<FleetDeps>): Promise<unknown> {
+async function ingestBriefJson(
+  briefPath: string | undefined,
+  deps?: Partial<FleetDeps>,
+  // The correlation id the verb has ALREADY resolved from its own flags —
+  // submit's required `--request-id` (parsed and UUID-validated before the
+  // brief is read). Dispatch and fanout resolve their id FROM the brief, so
+  // they pass nothing and the seam reads the brief's own field; submit's
+  // id exists nowhere in the brief, so without this threading its cycles
+  // wrote no side-channel row at all (an uncounted entry point — the
+  // observability contract's "M1.3 counts every M1 cycle" had a hole).
+  correlation?: { requestId?: string },
+): Promise<unknown> {
   const readBrief: () => Promise<string> =
     deps?.readBrief ??
     (async () => {
@@ -1341,8 +1359,9 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
       );
     }
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
+    parsed = JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
   } catch (e) {
     throw new FleetError(
       2,
@@ -1351,7 +1370,25 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
       "fix the JSON on stdin or in --brief <path>",
     );
   }
+  // M1.2 AC1: THE dispatch seam — this is the shared brief ingress of
+  // dispatch/fanout/submit, so ONE call here primes every dispatch-shaped
+  // entry; per-verb copies are the AC1 negative control. The prime is
+  // env-gated and never throws: unconfigured memory and a failed recall both
+  // hand back the SAME reference (AC2a/AC2b — v5 exits byte-identical), and
+  // the call is awaited so a slow recall cannot outlive the verb. A scalar or
+  // null JSON document is not a brief — passed through untouched to the
+  // verb's own schema refusal, exactly as v5 answered it.
+  return typeof parsed === "object" && parsed !== null ? primeDispatchBrief(parsed, correlation) : parsed;
 }
+
+/**
+ * Test hook (the `__auditStoreTestHooks` posture): the seam suite pins the
+ * ingest behavior through the REAL `ingestBriefJson` — exported here so the
+ * test exercises what dispatch runs, not a copy of the wiring.
+ * `primeDispatchBrief` rides along so the test can pin the hook identity:
+ * one seam means the landed function itself, not a fleet-local wrapper.
+ */
+export const __fleetTestHooks = { ingestBriefJson, primeDispatchBrief };
 
 /**
  * The budget gate's ONLY storage handle, wired beside the records dir. One
@@ -2977,10 +3014,11 @@ async function runSubmit(ctx: VerbCtx): Promise<number> {
             `omit for the 600_000 ms default, or pass a positive integer up to ${MAX_TIMEOUT_MS}`,
           );
 
-    const briefJson = await ingestBriefJson(briefPath, deps);
+    const briefJson = await ingestBriefJson(briefPath, deps, { requestId });
     // INV-4-bis: the submit's requestId IS the correlation id — the record,
     // the driver's log lines and the ack all carry it (dispatch re-validates
-    // the shape; submit's core refuses before anything is claimed).
+    // the shape; submit's core refuses before anything is claimed). It is
+    // threaded into the seam above so the side-channel row keys on it too.
     const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
     const briefCanMint = BriefSchema.safeParse(briefJson).success;
     const store =
@@ -5830,6 +5868,19 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // bundle/artifact paths must be under exactly that directory.
       runsDir: store.dir,
       recordAuditLink: (link) => audit.record(link),
+      // M1.2 AC4: the teardown verb's own harvest step retains through the
+      // SAME seam as the direct `fleet harvest` arm (retainRunOutcomeBestEffort)
+      // — the hook is the injection point; providers/teardown.ts owns the
+      // firing rules and the failure isolation.
+      postHarvest: (info) =>
+        retainRunOutcomeBestEffort({
+          store,
+          runId: info.runId,
+          requestId: info.requestId,
+          outcome: info.outcome,
+          count: info.count,
+          auditRecord: (link) => audit.record(link),
+        }),
     };
     if (verb === "harvest") {
       code = await runHarvest(ctx, tdeps, runIdArg);
@@ -6027,11 +6078,35 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
   return finish(requestId, verb, runIdArg, code);
 }
 
+/**
+ * M1.2 AC4: the ONE harvest-retain seam — `retainRunOutcomeBestEffort`, now
+ * shared with the observe chain in src/fleet/retain-best-effort.ts (the
+ * cycle-forced twin duplication the story's deviation note recorded; the
+ * shared module breaks the cycle: scripts/fleet.ts and src/fleet/
+ * run-completion.ts both import it, it imports neither back). The contract
+ * both twins pinned moves with it verbatim: env-gated skip, family-signature
+ * bank resolution (G1), record-stamp-wins join key, F9 never-throw lines,
+ * F17 wall clock.
+ */
+
 /** `fleet harvest`'s arm of the shared destructive scaffolding: D8, credential-free. */
 async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): Promise<number> { // dp:ok awaited at fleet.ts:2609 inside runDestructive's try/finally, which owns the diagnostics and the exit code
   const { reportCompletion, outputIncomplete } = ctx;
   // D8: harvest is credential-free — no keyApi is built.
   const res = await harvestRun(tdeps, runIdArg);
+  // M1.2 AC4: the harvest LEG landed on BOTH outcomes — retain best-effort
+  // before the completion line. The helper catches everything, so this await
+  // cannot move the exit code off what the leg itself earned.
+  await retainRunOutcomeBestEffort({
+    store: tdeps.store,
+    runId: runIdArg,
+    // tdeps.requestId is the invocation's mint; the helper prefers the
+    // record's own dispatch stamp whenever the record carries one.
+    requestId: tdeps.requestId ?? "",
+    outcome: res.outcome,
+    count: res.outcome === "harvested" ? res.count : undefined,
+    auditRecord: tdeps.recordAuditLink,
+  });
   // Through `reportCompletion`, not a bare `emit` (see it): the harvest
   // has already run, so a lost result line is 6, never a retryable 1. Folded
   // with `outputIncomplete()` like every sibling arm (A12): `reportCompletion`

@@ -805,14 +805,24 @@ describe("write-time refusals (fail loud, nothing written)", () => {
     assertInvalid(join(dir, "c.db"), { hop: "pr-run", event: "mint" }, /not in hop .* vocabulary/);
   });
 
-  test("the four hops that carry NO rows by design refuse every event", () => {
+  test("the three hops that carry NO rows by design refuse every event", () => {
     // An empty vocabulary is what makes "nothing emits this" a refusal rather
     // than a courtesy: a link for an event that never occurred is manufactured
     // evidence (INV-AUDIT-4).
-    for (const hop of ["run-issue", "run-cost", "run-gate-evidence", "memory-retain-receipt"]) {
+    for (const hop of ["run-issue", "run-cost", "run-gate-evidence"]) {
       assertInvalid(join(dir, `empty-${hop}.db`), { hop, event: "walk-observed" }, /carries no rows by design/);
       assertInvalid(join(dir, `empty2-${hop}.db`), { hop, event: "mint" }, /carries no rows by design/);
     }
+  });
+
+  test("memory-retain-receipt refuses every event EXCEPT its one vocabulary event (M1.2 Deviation 1)", () => {
+    // Deviation 1 populated the reserved hop's vocabulary with exactly
+    // ["retain"], converting the empty-vocabulary refusal into a one-event
+    // one. The hop is still CLOSED to everything else — and the refusal class
+    // changes with it: a populated vocabulary refuses with the not-in-hop-
+    // vocabulary error, not the no-rows-by-design one.
+    assertInvalid(join(dir, "mrr-walk.db"), { hop: "memory-retain-receipt", event: "walk-observed" }, /not in hop .* vocabulary/);
+    assertInvalid(join(dir, "mrr-mint.db"), { hop: "memory-retain-receipt", event: "mint" }, /not in hop .* vocabulary/);
   });
 
   test("a subject literally named '<none>' is refused — it collides with the sentinel", () => {

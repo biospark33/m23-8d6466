@@ -30,6 +30,7 @@ import {
   ConsolidateResponseSchema,
   RecallResponseSchema,
   ReflectResponseSchema,
+  RetainExtensionSchema,
   RetainResponseSchema,
   type ConsolidateResponse,
   type RecallResponse,
@@ -49,16 +50,29 @@ export const CONSOLIDATE_TIMEOUT_MS = 60_000;
 const DEFAULT_BASE_URL = "http://127.0.0.1:8888";
 
 /**
- * Canned schema-valid bodies returned in `'mock'` mode — no network. Each
- * shape matches the Zod schema the typed method parses downstream
- * (`requestJSON`), so mock round-trips pass validation like live ones.
- * `bankId` echoes the request's bank; the synthetic retain `memoryId` is
- * deterministic per bank so repeat calls are comparable.
+ * Canned WIRE-shape bodies returned in `'mock'` mode — no network. Each shape
+ * matches the Zod schema the typed method parses downstream (`requestJSON`),
+ * so mock round-trips pass the SAME strict parse as live ones (M1.2 AC5: mock
+ * is a network-only short-circuit, never a validation short-circuit). The
+ * retain body is the measured 0.10.0 wire (zero-token usage); the legacy
+ * camelCase view consumers see (memoryId "" placeholder etc.) is produced by
+ * the schema transform, not by this body.
  */
 function mockBody(path: string, bankId: string): unknown {
   if (path.endsWith("/memories/recall")) return { results: [], durationMs: 0 };
   if (path.endsWith("/memories")) {
-    return { memoryId: `mock-${bankId}`, bankId, status: "created" as const, durationMs: 0 };
+    return {
+      success: true,
+      items_count: 1,
+      async: false,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cached_tokens: 0,
+        thoughts_tokens: 0,
+      },
+    };
   }
   if (path.endsWith("/reflect")) {
     return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
@@ -244,6 +258,14 @@ export class HindsightClient {
     }
   }
 
+  /**
+   * M1.2 AC5 (P2.8 fold): the retain extension is OWNED, not assumed —
+   * `documentId`/`updateMode` are schema-validated at this boundary
+   * (RetainExtensionSchema), `tags` move TOP-LEVEL on the wire item (never
+   * `metadata.tags` — 0.10.0 422s on that), and `updateMode:"replace"` is
+   * API-level semantics for the `document_id` upsert: no wire field exists
+   * for it and none is sent.
+   */
   async retain(
     bankId: string,
     content: string,
@@ -251,23 +273,112 @@ export class HindsightClient {
       source?: "agent" | "mulch-import" | "manual" | "consolidate";
       kind?: "decision" | "pattern" | "expertise" | "observation";
       tags?: string[];
+      documentId?: string;
+      updateMode?: "replace";
     },
   ): Promise<RetainResponse> {
     const requestId = this.requestId ?? newRequestId();
     assertBankId(bankId, requestId);
-    const body: Record<string, unknown> = {
-      items: [metadata ? { content, metadata } : { content }],
-    };
-    return this.requestJSON(
+    const extension = RetainExtensionSchema.safeParse(metadata ?? {});
+    if (!extension.success) {
+      // Thrown BEFORE request(), so request()'s finally-log never fires — log
+      // the refusal here, mirroring assertBankId, or it is invisible.
+      try {
+        log({
+          requestId,
+          operation: "retain",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          bankId,
+          error: { code: "invalid_retain_extension", message: extension.error.message },
+        });
+      } catch {
+        // A throwing log sink must not replace the typed 422 below.
+      }
+      throw new HindsightHttpError(
+        422,
+        `invalid retain extension: ${extension.error.message}`,
+        requestId,
+      );
+    }
+    // `replace` IS the document_id upsert — with no identity it can only
+    // fabricate a new document, which would fake idempotency. Refused
+    // pre-fetch like the extension parse above (and logged the same way, for
+    // the same before-request visibility reason).
+    if (extension.data.updateMode !== undefined && extension.data.documentId === undefined) {
+      try {
+        log({
+          requestId,
+          operation: "retain",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          bankId,
+          error: {
+            code: "update_mode_requires_document_id",
+            message: "updateMode requires documentId",
+          },
+        });
+      } catch {
+        // A throwing log sink must not replace the typed 422 below.
+      }
+      throw new HindsightHttpError(422, "updateMode requires documentId", requestId);
+    }
+    const item: Record<string, unknown> = { content };
+    if (metadata?.tags !== undefined) item.tags = metadata.tags;
+    if (metadata?.documentId !== undefined) item.document_id = metadata.documentId;
+    if (metadata?.source !== undefined || metadata?.kind !== undefined) {
+      item.metadata = {
+        ...(metadata.source !== undefined ? { source: metadata.source } : {}),
+        ...(metadata.kind !== undefined ? { kind: metadata.kind } : {}),
+      };
+    }
+    const body: Record<string, unknown> = { items: [item] };
+    // F6: 0.10.0 answers a refused retain with 2xx + success:false, and the
+    // legacy view the schema transform emits carries no `success` — so the wire
+    // check happens HERE on the raw body, before the strict parse (same shape
+    // as deleteBank's F-015 arm). Only an explicit false refuses; missing key /
+    // non-object bodies fall through to the normal parse (which still 502s on
+    // malformed shapes).
+    const raw = await this.request(
       "POST",
       `/v1/default/banks/${bankId}/memories`,
       body,
       RETAIN_TIMEOUT_MS,
       "retain",
       bankId,
-      RetainResponseSchema,
       requestId,
     );
+    if (raw !== null && typeof raw === "object" && (raw as { success?: unknown }).success === false) {
+      throw new HindsightHttpError(502, "retain refused by server (success:false)", requestId);
+    }
+    // G8: the mirror arm — a 2xx claiming success but storing nothing is not a
+    // landed retain either, and must never produce a receipt-backed success.
+    // Skipped when the wire body carries async:true — that is a queued accept
+    // (the response schema models `async`, and items_count:0 is the natural
+    // shape of a not-yet-processed queue), not a synchronous zero-item store.
+    if (
+      raw !== null && typeof raw === "object"
+      && (raw as { success?: unknown }).success === true
+      && (raw as { items_count?: unknown }).items_count === 0
+      && (raw as { async?: unknown }).async !== true
+    ) {
+      throw new HindsightHttpError(502, "retain stored zero items", requestId);
+    }
+    // Same parse as requestJSON — inlined only because the raw body must be
+    // inspected above before it is narrowed by the schema transform.
+    const parsed = RetainResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new HindsightHttpError(
+        502,
+        `Hindsight response failed schema validation: ${parsed.error.message}`,
+        requestId,
+      );
+    }
+    return parsed.data;
   }
 
   async recall(bankId: string, query: string, limit = 5): Promise<RecallResponse> {

@@ -40,6 +40,7 @@ import type { ProviderAuditLink, ProviderDriver } from "../providers/driver.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
+import { retainRunOutcomeBestEffort } from "./retain-best-effort.ts";
 import { recordApprovalPort } from "../reverify/approval.ts";
 import { runRedactionMap } from "../reverify/redaction.ts";
 import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
@@ -197,6 +198,28 @@ function recordRequestId(rec: RunRecord, deps: RunCompletionDeps): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * M1.2 AC4: the observe chain's post-harvest retain — the shared best-effort
+ * seam (src/fleet/retain-best-effort.ts) with this chain's deps adapted in.
+ * The former twin body — the cycle-forced duplication the story's deviation
+ * note sanctioned — lives there now, verbatim for both callers: env-gated
+ * skip, family-signature bank resolution (G1), record-stamp-wins join key,
+ * F9 never-throw lines, F17 wall clock.
+ */
+async function postHarvestRetain(
+  deps: RunCompletionDeps,
+  info: { runId: string; requestId: string; outcome: "harvested" | "none"; count?: number },
+): Promise<void> {
+  await retainRunOutcomeBestEffort({
+    store: deps.store,
+    runId: info.runId,
+    requestId: info.requestId,
+    outcome: info.outcome,
+    count: info.count,
+    auditRecord: deps.recordAuditLink,
+  });
+}
+
 function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): TeardownDeps {
   return {
     driver: deps.driver,
@@ -209,6 +232,11 @@ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): Teardown
     // DF5.3: the chain's teardown emits its `teardown` link through the same
     // required seam every other construction threads.
     recordAuditLink: deps.recordAuditLink,
+    // M1.2 AC4: the chain's harvest step retains through the same seam the
+    // direct `fleet harvest` arm uses; the hook is injected (providers own
+    // the firing rules) and failure-isolated inside — and again by
+    // teardown.ts's own wrap.
+    postHarvest: (info) => postHarvestRetain(deps, info),
   };
 }
 

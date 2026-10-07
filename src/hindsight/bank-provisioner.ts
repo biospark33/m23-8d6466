@@ -181,7 +181,7 @@ function truncateForSuffix(baseId: string): string {
  * — the latter happens when the base id is already near the 64-char cap and
  * truncation cannot produce a valid suffixed form → -32005 per INV-HM6).
  */
-function resolveRepoBankId(
+export function resolveRepoBankId(
   baseId: string,
   existing: Set<string>,
 ): string | null {
@@ -208,11 +208,38 @@ function resolveRepoBankId(
   return null;
 }
 
+/**
+ * READ/WRITE-side counterpart of resolveRepoBankId — identifies the bank a
+ * PREVIOUS provision call actually created. Nothing persists the provision-time
+ * id (the spec's persistence alternative stays unimplemented by design), so the
+ * provisioned repo bank is recognised by its family signature: a candidate `c`
+ * that exists WITH its `-dev-meta` sibling — the pair only the provisioner
+ * creates. Same candidate order as resolveRepoBankId; null when no candidate
+ * carries the signature (a bare base without the sibling is a FOREIGN bank —
+ * never recalled/written as ours).
+ */
+export function resolveProvisionedRepoBankId(
+  baseId: string,
+  existing: Set<string>,
+): string | null {
+  const safeBase = truncateForSuffix(baseId);
+  if (existing.has(safeBase) && existing.has(`${safeBase}-dev-meta`)) {
+    return safeBase;
+  }
+  for (let n = 2; n <= MAX_SUFFIX; n++) {
+    const candidate = `${safeBase}-${n}`;
+    if (existing.has(candidate) && existing.has(`${candidate}-dev-meta`)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Existing-bank set extraction (defensive — INV-HM5 style narrowing)
 // ---------------------------------------------------------------------------
 
-function extractExistingBankIds(raw: unknown): Set<string> {
+export function extractExistingBankIds(raw: unknown): Set<string> {
   const out = new Set<string>();
   if (raw === null || typeof raw !== "object") return out;
   // Accept {banks:[{bank_id|bankId|id}]}, {banks:[string]}, [string], [{}].
