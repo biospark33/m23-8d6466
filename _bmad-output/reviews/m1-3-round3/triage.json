@@ -1,0 +1,102 @@
+{
+ "pr": 413,
+ "round": 3,
+ "findings": [
+  {
+   "finding_id": "R3-001",
+   "finding_text": "writeP09 rename incomplete: writtenAt serialized the at() helper \u2014 fixtures lost writtenAt, epoch-ordering test passed via tie-break (F-015 zero coverage behind green suite + ticked story box)",
+   "diff_context_ref": "tests/memory/probe-harness.test.ts@108a7e1a",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-002",
+   "finding_text": "Committed interim report pair stale-shaped (pre-round-2 dataNote string not in shipped code) with no provenance note \u2014 regenerated + note extended",
+   "diff_context_ref": "_bmad-output/memory/reports@108a7e1a",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-003",
+   "finding_text": "Dev Agent Record counts 48/48 (16/13/16/3) vs actual suite \u2014 corrected to final recount",
+   "diff_context_ref": "stories/m1-3-recall-measurement-harness.md@f0c204bd",
+   "label": "MED",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-004",
+   "finding_text": "Jammed one-line test statement (format risk)",
+   "diff_context_ref": "tests/memory/probe-harness.test.ts@f0c204bd",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-005",
+   "finding_text": "Header overclaims dispatchFailures absent-case note policy",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-006",
+   "finding_text": "Misplaced renderer comment above import.meta.main",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-007",
+   "finding_text": "Canary mkdirSync outside the guarded region \u2014 uncreatable evidenceDir breaks the exit-3 refusal contract",
+   "diff_context_ref": "scripts/memory/probe-recall.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-008",
+   "finding_text": "ledger.close() failure pushes omitted-note beside a delivered costTable",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-009",
+   "finding_text": "md-write failure leaves a torn json/md pair \u2014 rollback added",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-010",
+   "finding_text": "Present-but-unreadable audit db silently reports receiptCoverage 0 \u2014 dataNote added",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-011",
+   "finding_text": "Individually unreadable side-channel files undercount cycles silently \u2014 counted + noted",
+   "diff_context_ref": "scripts/memory/priming-report.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  },
+  {
+   "finding_id": "R3-012",
+   "finding_text": "Empty-concepts guard after seen.add drops duplicate skip records \u2014 moved before",
+   "diff_context_ref": "scripts/p0-9/provision-and-import.ts@108a7e1a",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "created_at": "2026-10-07T18:54:54+00:00"
+  }
+ ]
+}
