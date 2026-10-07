@@ -326,7 +326,12 @@ async function mintCorpus(
             {
               content,
               document_id: documentId,
-              metadata: { source: "mulch-import", kind: "expertise", tags: entry.concepts },
+              // 0.10.0 MemoryItem: metadata is Dict[str, str]; tags are
+              // item-level (an array under metadata.tags is a 422 — measured
+              // live 2026-10-04, same class as hindsight-live.ts's shape
+              // probe). Item-level tags array is the measured-good shape.
+              metadata: { source: "mulch-import", kind: "expertise" },
+              tags: entry.concepts,
             },
           ],
         });

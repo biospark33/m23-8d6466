@@ -1,0 +1,212 @@
+{
+  "leg": "p0-9-provision-and-import",
+  "mode": "live",
+  "ok": false,
+  "outcome": "leg-failure",
+  "steps": [
+    {
+      "step": "prereq",
+      "outcome": "ok",
+      "detail": {
+        "file": "2026-10-04T20-17-45-645Z-p0-9-hindsight-live-lbghxg.json"
+      }
+    },
+    {
+      "step": "snapshot-pre",
+      "outcome": "ok",
+      "detail": {
+        "count": 0
+      }
+    },
+    {
+      "step": "provision",
+      "outcome": "ok",
+      "durationMs": 55,
+      "detail": {
+        "banks": [
+          {
+            "bankId": "qds-factory",
+            "status": "created"
+          },
+          {
+            "bankId": "qds-factory-dev-meta",
+            "status": "created"
+          },
+          {
+            "bankId": "qds-collective",
+            "status": "created"
+          }
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "resolved-fresh"
+      }
+    },
+    {
+      "step": "snapshot-post",
+      "outcome": "ok",
+      "detail": {
+        "count": 3
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "failed",
+      "detail": {
+        "expertiseDir": "/Users/steve/QDS-Factory/.mulch/expertise",
+        "retained": 5
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "failed",
+      "detail": {
+        "expertiseDir": "/Users/steve/QDS-Factory/.mulch/expertise",
+        "retained": 0
+      }
+    },
+    {
+      "step": "mulch-import",
+      "outcome": "failed",
+      "detail": {
+        "expertiseDir": "/Users/steve/QDS-Factory/.mulch/expertise",
+        "retained": 0
+      }
+    },
+    {
+      "step": "compensate-delete",
+      "outcome": "deleted"
+    },
+    {
+      "step": "compensate-delete",
+      "outcome": "already-gone"
+    },
+    {
+      "step": "compensate-delete",
+      "outcome": "already-gone"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"snapshot-pre\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"provision\",\"outcome\":\"ok\",\"durationMs\":55}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"snapshot-post\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"failed\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"failed\",\"bankId\":\"qds-factory-dev-meta\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"mulch-import\",\"outcome\":\"failed\",\"bankId\":\"qds-collective\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"compensate-delete\",\"outcome\":\"deleted\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"compensate-delete\",\"outcome\":\"already-gone\",\"bankId\":\"qds-factory-dev-meta\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-provision-and-import\",\"step\":\"compensate-delete\",\"outcome\":\"already-gone\",\"bankId\":\"qds-collective\"}",
+  "writtenAt": "2026-10-07T11:49:36.792Z",
+  "createdInAttempt": [
+    "qds-factory",
+    "qds-factory-dev-meta",
+    "qds-collective"
+  ],
+  "unclaimedCreated": [],
+  "residue": [],
+  "deleteOutcomes": {
+    "qds-factory": "deleted",
+    "qds-factory-dev-meta": "already-gone",
+    "qds-collective": "already-gone"
+  },
+  "mintRecord": {
+    "qds-factory": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": [
+        "mulch-8ff7a752dd1c326b",
+        "mulch-5b85755bfd6842d6",
+        "mulch-631f98ad36517bec",
+        "mulch-5f5e31c6ff8ada4d",
+        "mulch-4e3dee5b901fd88e"
+      ]
+    },
+    "qds-factory-dev-meta": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    },
+    "qds-collective": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    }
+  },
+  "repoSlug": "QDS-Factory",
+  "mintFailures": [
+    "qds-factory mulch-62743a4396d30fd1: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 58456. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-f1b8dc3aec89f96c: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-04acf7ccc921ae65: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-d32ea1bc6e56262b: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-50496882cef82e13: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-24f03d71e47362b5: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-b3f318b167975a44: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-93f4c108e755bf27: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-2391420af3eeea22: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-0a98d1af8d693b21: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-c2b2d2013f123560: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-41dff4a2c69d2768: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-244085b3caaddad5: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-b4c5a164cc788361: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-525ec56deda0b34a: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-8acd90aea0708225: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-e7fdce53282ba8fa: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory mulch-02b92c3d574f7a17: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-8ff7a752dd1c326b: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-5b85755bfd6842d6: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-631f98ad36517bec: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-5f5e31c6ff8ada4d: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-4e3dee5b901fd88e: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-62743a4396d30fd1: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-f1b8dc3aec89f96c: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-04acf7ccc921ae65: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-d32ea1bc6e56262b: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-50496882cef82e13: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-24f03d71e47362b5: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-b3f318b167975a44: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-93f4c108e755bf27: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-2391420af3eeea22: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-0a98d1af8d693b21: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-c2b2d2013f123560: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-41dff4a2c69d2768: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-244085b3caaddad5: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-b4c5a164cc788361: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-525ec56deda0b34a: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-8acd90aea0708225: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-e7fdce53282ba8fa: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-factory-dev-meta mulch-02b92c3d574f7a17: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-8ff7a752dd1c326b: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-5b85755bfd6842d6: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-631f98ad36517bec: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-5f5e31c6ff8ada4d: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-4e3dee5b901fd88e: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-62743a4396d30fd1: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-f1b8dc3aec89f96c: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-04acf7ccc921ae65: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-d32ea1bc6e56262b: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-50496882cef82e13: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-24f03d71e47362b5: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-b3f318b167975a44: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-93f4c108e755bf27: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-2391420af3eeea22: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-0a98d1af8d693b21: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-c2b2d2013f123560: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-41dff4a2c69d2768: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-244085b3caaddad5: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-b4c5a164cc788361: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-525ec56deda0b34a: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-8acd90aea0708225: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-e7fdce53282ba8fa: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…",
+    "qds-collective mulch-02b92c3d574f7a17: HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 56557. To increase, visit https://openrouter.ai/workspaces/default/keys/17db6831669a4624cea2503582ea739af25c8378a2ddefd92ae7e8f4fa3ece74 and adjust the key's total limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_key_limit', 'remedy_hint': \"Raise or remove this A…"
+  ],
+  "memoryResidue": {
+    "qds-factory": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": [
+        "mulch-8ff7a752dd1c326b",
+        "mulch-5b85755bfd6842d6",
+        "mulch-631f98ad36517bec",
+        "mulch-5f5e31c6ff8ada4d",
+        "mulch-4e3dee5b901fd88e"
+      ]
+    },
+    "qds-factory-dev-meta": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    },
+    "qds-collective": {
+      "resolvedFrom": "QDS-Factory",
+      "documentIds": []
+    }
+  }
+}
