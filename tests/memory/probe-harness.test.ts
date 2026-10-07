@@ -174,7 +174,7 @@ function writeRecallRow(rowDir: string, fileName: string, row: RecallRow): void 
 }
 
 /** Seed memory-retain-receipt rows via the real audit store (R2 §5). */
-function seedReceipt(path: string, runIdValue: string, bank = SEED_PROBE_BANK): void {
+function seedReceipt(path: string, runIdValue: string, bank = SEED_PROBE_BANK, subjectId = runIdValue): void {
   const store = openAuditStore(path);
   try {
     store.record({
@@ -183,7 +183,7 @@ function seedReceipt(path: string, runIdValue: string, bank = SEED_PROBE_BANK): 
       requestId: runIdValue,
       hop: "memory-retain-receipt",
       event: "retain",
-      subjectId: runIdValue,
+      subjectId,
       subjectKind: "document",
       evidenceDigest: sha256Hex(
         canonicalJson({ bank, documentId: runIdValue, contentDigest: "fixture" }),
@@ -978,6 +978,25 @@ describe("priming-report", () => {
       receiptPresent: false,
       latencyMs: 100,
     });
+  });
+
+  test("receipt join keys on run_id, not subject_id (the documentId alias)", async () => {
+    writeProbeSet(probeSetPath(), []);
+    writeRecallRow(recallDir(), `${runId(1)}.json`, rowOf(runId(1)));
+    writeRecallRow(recallDir(), `${runId(2)}.json`, rowOf(runId(2)));
+    utimesSync(join(recallDir(), `${runId(1)}.json`), new Date(1000), new Date(1000));
+    utimesSync(join(recallDir(), `${runId(2)}.json`), new Date(2000), new Date(2000));
+    mkdirSync(dirname(auditPath()), { recursive: true });
+    // A receipt whose subject_id (the retain's documentId) names a LIVE cycle
+    // but whose run_id does not: coverage must follow run_id — M1.2's
+    // deriveDocumentId happens to alias runId today, but the join is on the
+    // run, not on that upstream alias.
+    seedReceipt(auditPath(), "receipt-for-some-other-run", SEED_PROBE_BANK, runId(1));
+
+    const res = await runPrimingReport(baseReportDeps());
+    expect(res.metrics.cyclesToDate).toBe(2);
+    expect(res.metrics.receiptCoverage).toEqual({ withReceipt: 0, withoutReceipt: 2 });
+    expect(res.metrics.cycles?.every((c) => c.receiptPresent === false)).toBe(true);
   });
 
   test("cost join: exact integer micro-usd per group when every observed cycle is fully priced", async () => {

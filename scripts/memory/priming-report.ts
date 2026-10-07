@@ -145,7 +145,13 @@ function readSideChannel(recallDir: string): {
 }
 
 /**
- * DISTINCT receipt runIds (subject_id) — a LEFT-JOIN key set, never a filter.
+ * DISTINCT receipt runIds (run_id) — a LEFT-JOIN key set, never a filter. The
+ * join is on the RUN (AC4: cycles are deduped on runId), so the receipt row's
+ * run_id column is the key — NOT subject_id, which is the retain's documentId
+ * (probe-schema's loadReceiptMintRecords keys on it for mint membership, a
+ * different join). The two happen to be equal on every row M1.2 writes today
+ * (deriveDocumentId returns the runId verbatim), but this reader keys on
+ * run_id by name, not by that upstream alias.
  * E4: a PRESENT-but-unreadable db (SQLITE_BUSY, corruption, non-sqlite) is
  * reported via `unreadable` so receiptCoverage 0 is labeled as hidden data,
  * not silently indistinguishable from an absent db.
@@ -156,19 +162,19 @@ function readReceiptRunIds(auditPath: string): { ids: Set<string>; unreadable?: 
   // F-008: the existsSync check races the open, and a non-sqlite file at the
   // path throws — an unreadable audit db is absent data (empty set), never a
   // crash that kills the report.
-  let rows: { subject_id: unknown }[];
+  let rows: { run_id: unknown }[];
   let db: Database | undefined;
   try {
     db = new Database(auditPath, { readonly: true });
     rows = db
-      .prepare(`SELECT DISTINCT subject_id FROM audit_links WHERE hop='memory-retain-receipt'`)
-      .all() as { subject_id: unknown }[];
+      .prepare(`SELECT DISTINCT run_id FROM audit_links WHERE hop='memory-retain-receipt'`)
+      .all() as { run_id: unknown }[];
   } catch (e) {
     return { ids, unreadable: (e as NodeJS.ErrnoException).code ?? (e as Error).message };
   } finally {
     db?.close();
   }
-  for (const r of rows) if (typeof r.subject_id === "string") ids.add(r.subject_id);
+  for (const r of rows) if (typeof r.run_id === "string") ids.add(r.run_id);
   return { ids };
 }
 
