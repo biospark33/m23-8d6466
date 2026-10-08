@@ -28,7 +28,7 @@ function mockResponse(request: JudgmentRequest): unknown {
       const keys = Object.keys(q.criteria);
       answers[qid] = {
         type: "choice",
-        choice: keys[0] ?? "",
+        choice: keys[0] ?? "", // dp:ok moved verbatim from JEV-2 (J1 is a behaviour-preserving extraction)
         probabilities: Object.fromEntries(keys.map((k, i) => [k, i === 0 ? 1 : 0])),
         confidence: 1,
       };
@@ -36,7 +36,7 @@ function mockResponse(request: JudgmentRequest): unknown {
       const legend = q.criteria;
       answers[qid] = {
         type: "score",
-        score: legend[0] ?? "",
+        score: legend[0] ?? "", // dp:ok moved verbatim from JEV-2 (J1 is a behaviour-preserving extraction)
         legend,
         probabilities: Object.fromEntries(legend.map((k, i) => [k, i === 0 ? 1 : 0])),
         confidence: 1,
