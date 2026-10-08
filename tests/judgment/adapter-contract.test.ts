@@ -362,3 +362,35 @@ describe("policy lives at the seam (AC1, structural)", () => {
     expect(src).not.toMatch(/function mockResponse|private async post\(|httpRequest\(/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// jev transport retry posture — only 429/529 retry (contract json http block).
+// ---------------------------------------------------------------------------
+
+describe("jev adapter retry posture", () => {
+  function sequence(statuses: number[]): void {
+    let i = 0;
+    globalThis.fetch = (async (input: Parameters<FetchImpl>[0], init?: RequestInit): Promise<Response> => {
+      calls.push({ url: String(input), headers: new Headers(init?.headers), body: undefined });
+      const status = statuses[Math.min(i++, statuses.length - 1)]!;
+      return new Response(JSON.stringify(status === 200 ? contractBody(QUESTIONS) : { message: "x" }), { status });
+    }) as FetchImpl;
+  }
+  const jev = () => resolveProvider("jev")({ apiKey: KEY, baseUrl: BASE, timeoutMs: 1_000, retryDelayMs: 0 });
+
+  for (const status of [400, 401, 403, 404, 422, 500, 502, 503]) {
+    test(`HTTP ${status} is not retried — exactly one wire call`, async () => {
+      sequence([status, 200]);
+      await expect(jev().ask(REQUEST, "rid-noretry")).rejects.toMatchObject({ status });
+      expect(calls.length).toBe(1);
+    });
+  }
+
+  for (const status of contract.http.retryOnStatuses) {
+    test(`HTTP ${status} retries once, then succeeds`, async () => {
+      sequence([status, 200]);
+      expect(contractViolations(await jev().ask(REQUEST, "rid-retry"), QUESTIONS)).toEqual([]);
+      expect(calls.length).toBe(contract.http.maxAttempts);
+    });
+  }
+});

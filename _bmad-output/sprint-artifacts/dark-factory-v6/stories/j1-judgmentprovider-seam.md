@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Foundation, Wave 1 — one of the four zero-gate roots; the story that makes D-4's "future jev-like tier-1 systems swap in" a named seam instead of a hope)
-**Status:** ready-for-dev (no gates)
+**Status:** in-review (PR open; DoD e2e live round pending the operator key)
 
 ## Spec Reference
 
@@ -94,6 +94,8 @@ Extract the one pluggable step of `JudgmentClient.judge()` — **transport: `Jud
 - `tests/judgment/adapter-contract.test.ts` (new — the parameterized per-adapter suite; the AC1/AC3/AC4 negative controls)
 - `tests/judgment/contract.test.ts` (adds only — second-literal grep + registry membership pins)
 - `tests/judgment/fence.test.ts` (adds only — recursive walk covering `adapters/`)
+- `tests/judgment/probe-gate.test.ts` (adds the AC6 registry/evidence/argv arms; see Dev Agent Record deviations 5–6) — *added at implementation*
+- `src/judgment/errors.ts` (new — see Dev Agent Record deviation 2) — *added at implementation*
 
 ## Security Invariants
 
@@ -130,7 +132,7 @@ Extract the one pluggable step of `JudgmentClient.judge()` — **transport: `Jud
 
 **Verification.** `bun test tests/judgment/ tests/scripts/corpus/ tests/scripts/judgment/` green; `bunx tsc --noEmit` 0; `bun run lint` exit 0; a 12-mutant negative-control battery (second model literal, `registerProvider`, mock boolean `noul`, mock missing usage key, adapter redaction import, adapter validation import, interface growth, adapter → `providers/`, probe registry bypass, barrel maker export, adapter dynamic import, literal hidden after a comment opener in a string) — every mutant killed by its named suite; full `bun test` introduces zero failures beyond `origin/dev`'s 34 pre-existing ones; the probe CLI runs as a real process (refuses without confirm; mock run prints MOCK).
 
-**Live round (DoD e2e):** `TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts --evidence-dir _bmad-output/evidence/v6a/j1` — operator-gated (handoff §8); status recorded in the DoD below.
+**Live round (DoD e2e):** `TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts --evidence-dir _bmad-output/evidence/v6a/j1` — operator-gated (handoff §8); status recorded in the DoD above.
 
 ## Review Findings (post-merge)
 

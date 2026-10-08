@@ -139,7 +139,7 @@ describe("maker reach — seam-private, repo-wide", () => {
   const PRIVATE_NORM = PRIVATE.map(norm);
 
   function trackedTs(): string[] {
-    const r = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.ts", "*.mts", "*.tsx"], {
+    const r = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.ts", "*.mts", "*.tsx", "*.js", "*.mjs", "*.cjs"], {
       cwd: ROOT,
       encoding: "utf8",
     });
@@ -162,10 +162,20 @@ describe("maker reach — seam-private, repo-wide", () => {
     const visit = (node: ts.Node): void => {
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
         edge(node.moduleSpecifier.text);
-      } else if (ts.isCallExpression(node) && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])) {
-        if (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require")) {
-          edge(node.arguments[0].text);
-        }
+      } else if (
+        ts.isImportEqualsDeclaration(node) &&
+        ts.isExternalModuleReference(node.moduleReference) &&
+        ts.isStringLiteral(node.moduleReference.expression)
+      ) {
+        edge(node.moduleReference.expression.text);
+      } else if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+      ) {
+        const arg = node.arguments[0];
+        if (arg && ts.isStringLiteralLike(arg)) edge(arg.text);
+        // a computed specifier cannot be proven safe — refuse it in reach of the makers
+        else if (arg && /judgment/i.test(arg.getText())) hits.push(`${relative(ROOT, file)} computes an import of ${arg.getText()}`);
       } else if (ts.isIdentifier(node) && MAKER_NAMES.test(node.text)) {
         hits.push(`${relative(ROOT, file)} names ${node.text}`);
       }
@@ -187,6 +197,8 @@ describe("maker reach — seam-private, repo-wide", () => {
     expect(reaches(f, 'export * from "../src/Judgment/Provider.ts";').length).toBe(1);
     expect(reaches(f, 'const s = "a//"; resolveProvider("jev");').length).toBe(1);
     expect(reaches(f, '// resolveProvider is seam-private\nconst s = "resolveProvider";')).toEqual([]);
+    expect(reaches(f, 'import p = require("../src/judgment/provider.ts");').length).toBe(1);
+    expect(reaches(f, 'const m = await import(`../src/judgment/${"provider"}.ts`);').length).toBe(1);
   });
 
   test("outside src/judgment/ and tests/judgment/, nothing reaches the makers", () => {

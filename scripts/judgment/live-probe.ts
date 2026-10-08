@@ -56,6 +56,7 @@ import {
   type JudgmentEnvelope,
   type JudgmentProviderId,
 } from "../../src/judgment/index.ts";
+import { newRequestId } from "../../src/swarmclaw/log.ts";
 import contract from "../../tests/judgment/typesafe-api-contract.json";
 
 const CONFIRM_ENV = "QDS_LIVE_PROBE_CONFIRMED";
@@ -189,7 +190,10 @@ export async function main(argv: readonly string[] = [], opts: ProbeOptions = {}
   const req = canonicalRequest();
   // The transport comes from the closed registry inside the client; the
   // client's mode is ground truth for what this round actually is.
-  const client = new JudgmentClient({ mode: "live", provenanceDir });
+  // One id for the whole round: wire x-request-id, envelope, side channel,
+  // house log AND the evidence file — even when the failure is not HTTP.
+  const requestId = newRequestId();
+  const client = new JudgmentClient({ mode: "live", provenanceDir, requestId });
   const transport = client.mode;
   // Evidence dir proven writable BEFORE the paid request.
   const writeEvidence = args.evidenceDir ? prepareEvidence(args.evidenceDir) : undefined;
@@ -227,7 +231,7 @@ export async function main(argv: readonly string[] = [], opts: ProbeOptions = {}
         spend: { judgments: 1, maxWireAttempts: DEFAULT_MAX_ATTEMPTS },
         envelope: null,
       },
-      e instanceof JudgmentHttpError ? e.requestId : "unknown",
+      requestId,
     );
     // A strict-parse / non-JSON failure IS the drift — name it, exit 2.
     if (isDrift) drift(err.message);
@@ -247,7 +251,7 @@ export async function main(argv: readonly string[] = [], opts: ProbeOptions = {}
       },
       envelope: env,
     },
-    env.requestId,
+    requestId,
   );
   if (d) drift(d);
   console.log(

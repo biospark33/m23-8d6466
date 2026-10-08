@@ -250,6 +250,9 @@ describe("live-probe through the provider registry (J1 AC6)", () => {
     expect(files.length).toBe(1);
     expect(files[0]).toMatch(/^live-probe-\d{8}T\d{9}Z-[\w-]{1,8}\.json$/);
     expect(readFileSync(join(tmp, files[0]!), "utf8")).not.toContain(KEY);
+    // one id for the round: the evidence filename, the envelope and the wire header agree
+    const rid = (evidence()[0]?.envelope as { requestId: string }).requestId;
+    expect(files[0]).toContain(`-${rid.slice(0, 8)}.json`);
     expect(evidence()[0]).toMatchObject({
       provider: "jev",
       transport: "live",
@@ -339,9 +342,11 @@ describe("live-probe through the provider registry (J1 AC6)", () => {
     const ev = JSON.parse(readFileSync(join(tmp, "ev", files[0]!), "utf8"));
     expect(String(ev.contractDiff)).toStartWith("error: ");
     expect(ev.envelope).toBeNull();
+    expect(files[0]).not.toContain("unknown"); // a non-HTTP failure still carries the round's id
   });
 
-  test("an evidence write that fails after the spend keeps the round's exit code (drift stays 2) and dumps the record", async () => {
+  // root ignores 0o555 (Docker parity / exe.dev boxes) — same guard as tests/audit/link-store.test.ts
+  test.skipIf(process.getuid?.() === 0)("an evidence write that fails after the spend keeps the round's exit code (drift stays 2) and dumps the record", async () => {
     go();
     const evDir = join(tmp, "ev");
     globalThis.fetch = (async () => {
