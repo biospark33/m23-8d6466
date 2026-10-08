@@ -35,17 +35,13 @@ diagnosis.
 
 ```
 0. list_repos {}                                          → Bind repo
-1. query({search_query: "<error or symptom>", repo})      → Find related execution flows
-2. context({name: "<suspect>", repo})                     → See callers/callees/processes
-3. READ gitnexus://repo/{name}/process/{name}             → Trace execution flow
-4. cypher({statement: "MATCH path...", repo})             → Custom traces if needed
+1. query({search_query: "<error or symptom>"})            → Find related execution flows
+2. context({name: "<suspect>"})                    → See callers/callees/processes
+3. READ gitnexus://repo/{name}/process/{name}                → Trace execution flow
+4. cypher({statement: "MATCH path..."})                 → Custom traces if needed
 ```
 
-`repo` in the calls above is the bound repository — required on every call
-whenever more than one repository is indexed (an omitted `repo` silently
-resolves to the MCP default under a configured policy).
-
-> If "Index is stale" → run `bash scripts/install-gitnexus-plus.sh` from the project root (never a bare `analyze`).
+> If "Index is stale" → run `node .gitnexus/run.cjs analyze` in terminal.
 
 ## Checklist
 

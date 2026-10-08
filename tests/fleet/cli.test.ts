@@ -2227,7 +2227,7 @@ process.stdout.write(t);
     reset();
     expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
     expect(text()).toContain(`torn down: ${runId}`);
-  });
+  }, 20_000); // real-process spawn chain; ~5.1s on a loaded host — past bun's 5s default (2026-10-08, M2.2: dev-red margin, identical pre/post branch)
 
   // ─── Q1.4 `cancel`: idempotent teardown (G4) ───────────────────────────────
   //
@@ -6450,7 +6450,7 @@ process.on = ((sig, listener) => {
           rmSync(lock);
         }
       }
-    });
+    }, 20_000); // real-process spawn chain; ~5.2s on a loaded host — past bun's 5s default (2026-10-08, M2.2: dev-red margin, identical pre/post branch)
 
     test("a fanout list-unverified refusal stamps its completion line transient", async () => {
       // The primitive attaches exitStatus "transient" to the ERROR itself
