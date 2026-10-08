@@ -1,7 +1,7 @@
 /**
  * src/judgment public surface — the TypeSafe (Jev) judgment core (JEV-2).
  * JEV-3 (S1 observer) is the sole Wave-3 consumer. v6 J1 adds the
- * JudgmentProvider seam surface (closed registry + typed refusal).
+ * JudgmentProvider seam's id list + typed refusal (never the makers).
  */
 
 export {
@@ -31,15 +31,12 @@ export {
 } from "./egress.ts";
 export { DEFAULT_PROVENANCE_DIR, detailFromEnvelope, DigestDivergenceError, emitProvenance, provenanceDigest, type ProvenanceDetail } from "./emit.ts";
 export { EnvelopeSchema, type JudgmentEnvelope } from "./envelope.ts";
-export {
-  JUDGMENT_PROVIDER_IDS,
-  JUDGMENT_PROVIDERS,
-  resolveProvider,
-  UnknownProviderError,
-  type JudgmentProvider,
-  type JudgmentProviderId,
-} from "./provider.ts";
-export type { JevProviderConfig } from "./adapters/jev.ts";
+// Ids, the typed refusal and the types ONLY: the adapter makers
+// (JUDGMENT_PROVIDERS / resolveProvider) are deliberately NOT public. A made
+// adapter's ask() skips the egress choke, the ceiling and the strict parse,
+// so the only caller allowed to make one is the seam client — pinned by
+// tests/judgment/provider.test.ts's repo-wide reach test.
+export { JUDGMENT_PROVIDER_IDS, UnknownProviderError, type JudgmentProvider, type JudgmentProviderId } from "./provider.ts";
 export {
   JudgmentRequestSchema,
   makeJudgmentResponseSchema,

@@ -114,7 +114,7 @@ export class JudgmentClient {
       this.mode === "live"
         ? resolveProvider("jev")({
             apiKey: this.apiKey,
-            baseUrl: (opts.baseUrl ?? "https://api.typesafe.ai").replace(/\/+$/, ""),
+            baseUrl: (opts.baseUrl ?? new URL(TYPESAFE_API_URL).origin).replace(/\/+$/, ""),
             timeoutMs: opts.timeoutMs ?? JUDGE_TIMEOUT_MS,
             retryDelayMs: opts.retryDelayMs,
           })

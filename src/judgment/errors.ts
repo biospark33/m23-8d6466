@@ -31,7 +31,12 @@ export class UnknownProviderError extends Error {
     public readonly providerId: unknown,
     registered: readonly string[],
   ) {
-    super(`unknown judgment provider ${JSON.stringify(providerId)} — the closed registry holds ${registered.join(" | ")}`);
+    super(`unknown judgment provider ${describeId(providerId)} — the closed registry holds ${registered.join(" | ")}`);
     this.name = "UnknownProviderError";
   }
+}
+
+/** Total over every input (BigInt and cyclic values make JSON.stringify throw). */
+function describeId(id: unknown): string {
+  return typeof id === "string" ? JSON.stringify(id) : `<${typeof id}>`;
 }

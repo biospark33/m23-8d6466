@@ -16,6 +16,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import ts from "typescript";
 import contract from "./typesafe-api-contract.json";
 import {
   DEFAULT_MAX_ATTEMPTS,
@@ -23,7 +24,7 @@ import {
   TYPESAFE_MODEL,
 } from "../../src/judgment/client.ts";
 import { DEFAULT_MAX_EGRESS_CLASS } from "../../src/judgment/egress.ts";
-import { JUDGMENT_PROVIDER_IDS } from "../../src/judgment/provider.ts";
+import { JUDGMENT_PROVIDER_IDS, resolveProvider } from "../../src/judgment/provider.ts";
 import {
   ChoiceQuestionSchema,
   JudgmentRequestSchema,
@@ -176,13 +177,36 @@ const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
 
 /**
  * Every `jev-…` string literal in a source text — the model-id family.
- * Comments are prose, not code (schemas.ts's doc comment names the banned
- * `jev-latest` alias on purpose), so they are stripped first; a `//` after
- * `:` is a URL, not a comment.
+ * Tokenized with the TypeScript scanner, so comments (schemas.ts's doc
+ * comment names the banned `jev-latest` alias on purpose) are skipped and a
+ * `/*` or `//` INSIDE a string can never hide the literal after it.
  */
 function modelLiterals(source: string): string[] {
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-  return [...code.matchAll(/["'`](jev-[^"'`\s]*)["'`]/g)].map((m) => m[1] ?? "");
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, source);
+  const found: string[] = [];
+  const LITERALS = new Set([
+    ts.SyntaxKind.StringLiteral,
+    ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+    ts.SyntaxKind.TemplateHead,
+    ts.SyntaxKind.TemplateMiddle,
+    ts.SyntaxKind.TemplateTail,
+  ]);
+  // Brace stack: a `}` closes a template substitution only when the innermost
+  // open brace is a `${` — only then is the text after it template text.
+  const braces: ("block" | "template")[] = [];
+  for (let k = scanner.scan(); k !== ts.SyntaxKind.EndOfFileToken; k = scanner.scan()) {
+    if (k === ts.SyntaxKind.OpenBraceToken) braces.push("block");
+    else if (k === ts.SyntaxKind.TemplateHead) braces.push("template");
+    else if (k === ts.SyntaxKind.CloseBraceToken) {
+      if (braces.pop() === "template") {
+        k = scanner.reScanTemplateToken(false);
+        if (k === ts.SyntaxKind.TemplateMiddle) braces.push("template");
+      }
+    }
+    if (!LITERALS.has(k)) continue;
+    for (const m of scanner.getTokenValue().matchAll(/\bjev-[^\s"'`]*/g)) found.push(m[0]);
+  }
+  return found;
 }
 
 function walkTs(root: string): string[] {
@@ -198,8 +222,11 @@ describe("contract pin: one model literal behind the provider seam (J1 AC3)", ()
       "jev-x",
       "jev-latest",
     ]);
-    // prose is not a literal; a URL is not a comment
+    // prose is not a literal; comment openers inside strings hide nothing
     expect(modelLiterals('/** never `jev-latest` */\n// "jev-x"\nconst u = "https://h"; const m = "jev-z";')).toEqual(["jev-z"]);
+    expect(modelLiterals('const g = "src/**/*.ts"; const m = "jev-2"; const e = "*/";')).toEqual(["jev-2"]);
+    expect(modelLiterals("const t = `a ${x} jev-3 ${y} b`;")).toEqual(["jev-3"]);
+    expect(modelLiterals("function f() { if (a) { b(); } } const m = `${{ k: 1 }.k} jev-4`;")).toEqual(["jev-4"]);
   });
 
   test("TYPESAFE_MODEL is the ONLY model literal anywhere under src/judgment/ (recursive, adapters included)", () => {
@@ -215,15 +242,27 @@ describe("contract pin: one model literal behind the provider seam (J1 AC3)", ()
     expect(TYPESAFE_MODEL).toBe(contract.model);
   });
 
-  test("no adapter carries a model key of its own — the request model is the seam's TYPESAFE_MODEL", () => {
-    for (const file of walkTs(join(JUDGMENT_SRC, "adapters"))) {
-      const src = readFileSync(file, "utf8");
-      for (const m of src.matchAll(/\bmodel\s*:\s*([^,}\n]+)/g)) {
-        expect({ file: relative(JUDGMENT_SRC, file), model: m[1]?.trim() }).toEqual({
-          file: relative(JUDGMENT_SRC, file),
-          model: "TYPESAFE_MODEL",
-        });
+  test("every registered adapter's body carries TYPESAFE_MODEL — jev forwards the seam's request verbatim, mock answers with the pin", async () => {
+    const request = { model: TYPESAFE_MODEL, state: "s", questions: { q: { type: "noul" as const, instructions: "i" } } };
+    const saved = globalThis.fetch;
+    let wire: { model?: string } | undefined;
+    globalThis.fetch = (async (_: unknown, init?: RequestInit) => {
+      wire = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ model: TYPESAFE_MODEL, answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }));
+    }) as unknown as typeof fetch;
+    try {
+      const seen: Record<string, string | undefined> = {};
+      for (const id of JUDGMENT_PROVIDER_IDS) {
+        const adapter =
+          id === "jev"
+            ? resolveProvider("jev")({ apiKey: "k", baseUrl: "http://judgment.test", timeoutMs: 1_000, retryDelayMs: 0 })
+            : resolveProvider(id)();
+        const body = (await adapter.ask(request, "rid")) as { model?: string };
+        seen[id] = id === "jev" ? wire?.model : body.model;
       }
+      expect(seen).toEqual(Object.fromEntries(JUDGMENT_PROVIDER_IDS.map((id) => [id, TYPESAFE_MODEL])));
+    } finally {
+      globalThis.fetch = saved;
     }
   });
 

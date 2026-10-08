@@ -84,9 +84,18 @@ function judgmentFiles(): string[] {
     .map((f) => join(JUDGMENT_SRC, f));
 }
 
+/** Static edges plus the dynamic ones a static-only scan misses: import() and require(). */
+function allSpecifiers(source: string): string[] {
+  return [
+    ...importSpecifiers(source),
+    ...[...source.matchAll(/\bimport\s*\(\s*["'`]([^"'`]+)["'`]/g)].map((m) => m[1] ?? ""),
+    ...[...source.matchAll(/\brequire\s*\(\s*["'`]([^"'`]+)["'`]/g)].map((m) => m[1] ?? ""),
+  ];
+}
+
 function fenceViolations(file: string, source: string): string[] {
   const out: string[] = [];
-  for (const spec of importSpecifiers(source)) {
+  for (const spec of allSpecifiers(source)) {
     if (spec === "zod" || spec.startsWith("node:")) continue;
     if (!spec.startsWith(".")) {
       out.push(`${relative(JUDGMENT_SRC, file)}: "${spec}"`);
@@ -114,6 +123,8 @@ describe("src/judgment import fence — recursive (J1)", () => {
     expect(fenceViolations(adapter, 'export * from "../../providers/run-record.ts";').length).toBe(1);
     expect(fenceViolations(adapter, 'import { x } from "../../audit/link-store.ts";').length).toBe(1);
     expect(fenceViolations(adapter, 'import { x } from "@typesafe/sdk";').length).toBe(1);
+    expect(fenceViolations(adapter, 'const p = await import("../../providers/run-record.ts");').length).toBe(1);
+    expect(fenceViolations(adapter, 'const a = require("../../audit/link-store.ts");').length).toBe(1);
   });
 
   test("every module at every depth imports only http.ts, swarmclaw/log.ts, zod, node:, or src/judgment/ itself", () => {
@@ -123,7 +134,7 @@ describe("src/judgment import fence — recursive (J1)", () => {
 
   test("no providers / redactSecrets / audit / gate symbol is imported at any depth", () => {
     for (const file of judgmentFiles()) {
-      const specifiers = importSpecifiers(readFileSync(file, "utf8")).join("\n");
+      const specifiers = allSpecifiers(readFileSync(file, "utf8")).join("\n");
       expect(specifiers).not.toMatch(/redactSecrets|providers|audit|gate-runner|classifyRunExit|classifyDiffScope/);
     }
   });

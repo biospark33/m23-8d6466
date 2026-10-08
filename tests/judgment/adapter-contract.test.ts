@@ -216,7 +216,9 @@ test("the contract checker itself catches every divergence (positive control on 
 
 for (const id of JUDGMENT_PROVIDER_IDS) {
   describe(`adapter "${id}" — contract + seam path`, () => {
-    test("the raw body it serves satisfies the contract json for every question type", async () => {
+    // jev: proves the transport hands back the wire body unaltered (the body
+    // is the stub's contract fixture); mock: proves its canned bodies conform.
+    test("the raw body it hands the seam satisfies the contract json for every question type", async () => {
       const h = HARNESS[id]!;
       h.arrange(QUESTIONS);
       const body = await h.make().ask(REQUEST, "rid-raw");
@@ -279,22 +281,28 @@ for (const id of JUDGMENT_PROVIDER_IDS) {
       });
     }
 
-    test("the egress choke refuses before the adapter is asked — no wire, no envelope", async () => {
-      HARNESS[id]!.arrange(QUESTIONS);
+    // Ordering ahead of ask() is proven structurally for every adapter (the
+    // "policy lives at the seam" block below); behaviourally, only jev's ask
+    // is observable (a wire call), so the zero-calls assertion binds jev and
+    // the shared assertions are the typed refusal, the log code, no envelope.
+    test("the egress choke refuses typed with no envelope (jev: and with zero wire calls)", async () => {
+      serve(contractBody(QUESTIONS)); // recording stub for BOTH arms: mock must not fetch either
       const client = clientFor(id, `rid-egress-${id}`);
       await expect(client.judge("s", QUESTIONS, { egressClass: "diff-hunk" })).rejects.toBeInstanceOf(EgressRefusedError);
       expect(calls.length).toBe(0);
       expect(readdirSync(dir)).toEqual([]);
+      expect(logs.find((e) => e.operation === "judge")).toMatchObject({ status: "error", provider: id, error: { code: "egress_refused" } });
     });
 
-    test("the stage ceiling refuses before the adapter is asked — no wire, no envelope", async () => {
-      HARNESS[id]!.arrange(QUESTIONS);
+    test("the stage ceiling refuses typed with no envelope (jev: and with zero wire calls)", async () => {
+      serve(contractBody(QUESTIONS));
       const ceiling = new JudgmentCeiling(5);
       ceiling.record(5);
       const client = clientFor(id, `rid-ceiling-${id}`);
       await expect(client.judge("s", QUESTIONS, { egressClass: "machine-state", ceiling })).rejects.toBeInstanceOf(CeilingExceededError);
       expect(calls.length).toBe(0);
       expect(readdirSync(dir)).toEqual([]);
+      expect(logs.find((e) => e.operation === "judge")).toMatchObject({ status: "error", provider: id, error: { code: "ceiling_exceeded" } });
     });
   });
 }

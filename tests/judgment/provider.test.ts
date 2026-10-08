@@ -9,6 +9,9 @@
  * refuses any id that is not an own key of the constant.
  */
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { makeJevProvider } from "../../src/judgment/adapters/jev.ts";
 import { makeMockProvider } from "../../src/judgment/adapters/mock.ts";
 import * as providerModule from "../../src/judgment/provider.ts";
@@ -113,5 +116,88 @@ describe("adapter makers", () => {
     const jev = makeJevProvider({ apiKey: "SECRETKEYVALUE123", baseUrl: "http://judgment.test", timeoutMs: 1 });
     expect(JSON.stringify(jev)).not.toContain("SECRETKEYVALUE123");
     expect(Object.values(jev)).not.toContain("SECRETKEYVALUE123");
+  });
+});
+
+/**
+ * The makers are seam-private: a made adapter's ask() skips the egress choke,
+ * the ceiling and the strict parse, so only the seam client (and this
+ * directory's tests) may reach provider.ts or adapters/. Repo-wide, by
+ * resolved import path AND by maker identifier.
+ */
+describe("maker reach — seam-private, repo-wide", () => {
+  const ROOT = join(import.meta.dir, "..", "..");
+  const JUDGMENT = join(ROOT, "src", "judgment");
+  const PRIVATE = [join(JUDGMENT, "provider.ts"), join(JUDGMENT, "adapters")];
+  const MAKER_NAMES = /\b(JUDGMENT_PROVIDERS|resolveProvider|makeJevProvider|makeMockProvider)\b/;
+
+  /** Prose may name a maker (to say why it is private); only code counts. */
+  function code(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  }
+
+  function trackedTs(): string[] {
+    const r = spawnSync("git", ["ls-files", "-z", "--", "*.ts", "*.mts", "*.tsx"], { cwd: ROOT, encoding: "utf8" });
+    return r.stdout.split("\0").filter(Boolean).map((f) => join(ROOT, f));
+  }
+
+  function specifiers(src: string): string[] {
+    return [
+      ...src.matchAll(/(?:import|export)\b[^"';]*?\bfrom\s*["']([^"']+)["']/g),
+      ...src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/g),
+      ...src.matchAll(/\brequire\s*\(\s*["']([^"']+)["']/g),
+      ...src.matchAll(/(?:^|\n)\s*import\s*["']([^"']+)["']/g),
+    ].map((m) => m[1] ?? "");
+  }
+
+  function reaches(file: string, src: string): string[] {
+    const hits: string[] = [];
+    for (const spec of specifiers(src)) {
+      if (!spec.startsWith(".")) continue;
+      const target = resolve(dirname(file), spec);
+      if (PRIVATE.some((p) => target === p || target.startsWith(`${p}/`))) hits.push(`${relative(ROOT, file)} imports ${spec}`);
+    }
+    const name = code(src).match(MAKER_NAMES);
+    if (name) hits.push(`${relative(ROOT, file)} names ${name[1]}`);
+    return hits;
+  }
+
+  test("controls: the reach check flags a direct import, a dynamic import and a maker name", () => {
+    const f = join(ROOT, "scripts", "x.ts");
+    expect(reaches(f, 'import { resolveProvider } from "../src/judgment/index.ts";').length).toBe(1);
+    expect(reaches(f, 'const m = await import("../src/judgment/adapters/jev.ts");').length).toBe(1);
+    expect(reaches(f, 'export * from "../src/judgment/provider.ts";').length).toBe(1);
+    expect(reaches(f, 'import { JudgmentClient } from "../src/judgment/index.ts";')).toEqual([]);
+  });
+
+  test("outside src/judgment/ and tests/judgment/, nothing reaches the makers", () => {
+    const allowed = [JUDGMENT, join(ROOT, "tests", "judgment")];
+    const files = trackedTs().filter((f) => !allowed.some((a) => f.startsWith(`${a}/`)));
+    expect(files.length).toBeGreaterThan(100); // not vacuous
+    const hits = files.flatMap((f) => reaches(f, readFileSync(f, "utf8")));
+    expect(hits).toEqual([]);
+  });
+
+  test("the public barrel exposes ids + typed refusal, never a maker", async () => {
+    const barrel = await import("../../src/judgment/index.ts");
+    expect(Object.keys(barrel)).toContain("JUDGMENT_PROVIDER_IDS");
+    expect(Object.keys(barrel)).toContain("UnknownProviderError");
+    expect(Object.keys(barrel)).not.toContain("JUDGMENT_PROVIDERS");
+    expect(Object.keys(barrel)).not.toContain("resolveProvider");
+  });
+
+  test("inside src/judgment/, only client.ts reaches the registry (adapters are made by the seam alone)", () => {
+    const users = readdirSync(JUDGMENT, { recursive: true, encoding: "utf8" })
+      .filter((f) => f.endsWith(".ts") && f !== "provider.ts" && !f.startsWith("adapters"))
+      .filter((f) => /\bresolveProvider\(|\bJUDGMENT_PROVIDERS\b/.test(code(readFileSync(join(JUDGMENT, f), "utf8"))));
+    expect(users).toEqual(["client.ts"]);
+  });
+
+  test("UnknownProviderError formats every id without throwing (BigInt, cyclic)", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    for (const id of [10n, cyclic, Symbol("s"), null]) {
+      expect(() => resolveProvider(id as unknown as string)).toThrow(UnknownProviderError);
+    }
   });
 });
