@@ -356,6 +356,90 @@ describe("lifecycle-order", () => {
 });
 
 // ---------------------------------------------------------------------------
+// live-key phase (review round 5): the delivered key must be USABLE between
+// delivery and revocation — the run callback is that window
+// ---------------------------------------------------------------------------
+
+describe("live-key phase", () => {
+  test("run callback executes after delivery and before capture — the delivered key verifies OK inside the window, refused revoked after", async () => {
+    const d = deps();
+    const opts = lifecycleOpts();
+    let windowMaterial = "";
+    let okDuringWindow = false;
+    await runMemoryKeyLifecycle(d, {
+      ...opts,
+      run: () => {
+        // The consumption path the in-box consumer uses: read the delivered env file.
+        windowMaterial =
+          readFileSync(opts.target, "utf8")
+            .split("\n")
+            .find((line) => line.startsWith("QDS_KG_RECALL_KEY="))
+            ?.slice("QDS_KG_RECALL_KEY=".length)
+            .trim() ?? "";
+        okDuringWindow =
+          verifyRequest(d, {
+            authHeader: `Bearer ${windowMaterial}`,
+            method: "POST",
+            path: "/v1/default/banks/bank-a/memories/recall",
+            requestId: "req-window",
+          }).ok === true;
+      },
+    });
+    expect(windowMaterial.startsWith("mgrun-")).toBe(true);
+    expect(okDuringWindow).toBe(true);
+    // AC1's exact event sequence is untouched — the run phase emits nothing.
+    expect(memgateEvents()).toEqual([
+      "memgate-mint",
+      "memgate-deliver",
+      "memgate-capture",
+      "memgate-revoke",
+      "memgate-verify-revoked",
+    ]);
+    // And after the lifecycle the same material is refused revoked.
+    expect(
+      verifyRequest(d, {
+        authHeader: `Bearer ${windowMaterial}`,
+        method: "POST",
+        path: "/v1/default/banks/bank-a/memories/recall",
+        requestId: "req-after",
+      }).ok,
+    ).toBe(false);
+    const refusedLine = memgateLines().find(
+      (l) => eventOf(l) === "memgate-refused" && l.requestId === "req-after",
+    );
+    expect(refusedLine).toBeDefined();
+    expect(str((refusedLine as LogEntry).reason)).toBe("revoked");
+  });
+
+  test("a run fault compensates BEFORE the original error rethrows — the key is verifiably dead", async () => {
+    const { wrapped, revokedTokenIds } = ledgerWithRecorder();
+    let caught: unknown;
+    try {
+      await runMemoryKeyLifecycle(deps({ ledger: wrapped }), {
+        ...lifecycleOpts(),
+        run: async () => {
+          throw new Error("sentinel-run-fault");
+        },
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // Original-error fidelity: the run fault, never a compensation-generated one.
+    expect((caught as Error).message).toContain("sentinel-run-fault");
+    expect(memgateEvents()).toEqual([
+      "memgate-mint",
+      "memgate-deliver",
+      "memgate-compensate",
+      "memgate-revoke",
+      "memgate-verify-revoked",
+    ]);
+    const tokenId = str(onlyIssuance().token_id);
+    expect(revokedTokenIds).toEqual([tokenId]);
+    expect(await ledger.isRevoked(tokenId)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // compensation — AC1: a minted key must never outlive a failed delivery
 // ---------------------------------------------------------------------------
 

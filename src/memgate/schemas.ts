@@ -50,8 +50,10 @@ export const QDS_MEMGATE_LEDGER = "QDS_MEMGATE_LEDGER";
 export const QDS_KG_RECALL_KEY = "QDS_KG_RECALL_KEY";
 export const QDS_KG_GATEWAY_URL = "QDS_KG_GATEWAY_URL";
 
-/** Delivery default — HOME-relative KEY_ENV_FILE discipline (credentials.ts:100):
- * every driver exec lands in the box's ssh HOME, so relative is image-agnostic.
+/** Delivery default — the KEY_ENV_FILE name discipline (credentials.ts:100),
+ * kept HOME-relative so the BOX-routed leg (M2.2's driver fill: every driver
+ * exec lands in the box's ssh HOME, so relative is image-agnostic) can adopt
+ * it unchanged. M2.1's write is process-LOCAL (gateway cwd), not box-routed.
  * Consumer: runMemoryKeyLifecycle's default target (F-025). */
 export const MEMGATE_ENV_FILE = "app/.env";
 
@@ -426,6 +428,14 @@ export interface RunMemoryKeyLifecycleInput {
   target: string;
   gatewayUrl: string;
   requestId: string;
+  /** The live-key window (review round 5): invoked after delivery, BEFORE
+   * capture/revoke — the delivered key verifies OK for its duration and is
+   * dead by the time the lifecycle resolves. A fault here compensates
+   * (revoke+verify) BEFORE the original error rethrows (INV-MG-2). Consume the
+   * key by reading `target` (the delivered env file) — mint's return stays
+   * the only plaintext handoff, and the window emits nothing (AC1's event
+   * sequence is untouched). */
+  run?: (() => void) | (() => Promise<void>);
 }
 
 export interface RevokeTokenInput {

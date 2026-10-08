@@ -116,7 +116,12 @@ export function mintRunMemoryKey(
 
 // --- Deliver — exactly the DD-28.23 pair, KEY_ENV_FILE discipline ------------
 /** Grammar gates FIRST (F-007/F-008): target+URL safety and the mgrun- barrier
- * (AC6). The post-write state emit is the ONE strict emit (the seam). */
+ * (AC6). The post-write state emit is the ONE strict emit (the seam).
+ * Boundary (review round 5): M2.1's write is process-LOCAL — target resolves
+ * against THIS process's cwd (the F-025 default "app/.env" included), fs-modes
+ * by the repo-wide fs-atomic idiom (parent forced 0700, file 0600). The
+ * BOX-routed leg (driver fill into the box HOME) is M2.2's seam; the target
+ * grammar is already box-shaped, so M2.2 re-points the write, not the input. */
 export function deliverRunKey(deps: MemgateDeps, input: DeliverRunKeyInput): void {
   const { target, keyMaterial, gatewayUrl, requestId } = input;
   const deliveryFailed = (e: unknown): MemgateError => new MemgateError("delivery-failed",
@@ -152,8 +157,10 @@ export function deliverRunKey(deps: MemgateDeps, input: DeliverRunKeyInput): voi
 // --- Lifecycle — the runCredentialLifecycle mirror ---------------------------
 /** AC1 order: config assert (pre-mint) → mint → deliver in try → catch:
  * deliver-state-write-failed bare-rethrows (NO compensation), else compensate
- * THEN rethrow the ORIGINAL (:1722) → capture (D2) → revoke → verify — the tail
- * under the SAME bracket (F-002): faults compensate first. */
+ * THEN rethrow the ORIGINAL (:1722) → the live-key window (input.run, optional —
+ * caller work while the key is usable; a fault here compensates first) →
+ * capture (D2) → revoke → verify — the tail under the SAME bracket (F-002):
+ * faults compensate first. */
 export async function runMemoryKeyLifecycle(
   deps: MemgateDeps,
   input: RunMemoryKeyLifecycleInput,
@@ -176,6 +183,15 @@ export async function runMemoryKeyLifecycle(
     if (e instanceof MemgateError && e.code === "deliver-state-write-failed") throw e;
     compensate(deps, minted.tokenId, runId, requestId);
     throw e;
+  }
+  // 4.5 (review round 5): the live-key window — caller work runs while the
+  // delivered key is LIVE, after delivery and BEFORE capture/revoke. A fault
+  // here compensates THEN rethrows the ORIGINAL (INV-MG-2) — the same bracket
+  // discipline as delivery. Emits nothing: the window's side effects are the
+  // caller's, and AC1's exact event sequence is preserved.
+  if (input.run !== undefined) {
+    try { await input.run(); }
+    catch (e) { compensate(deps, minted.tokenId, runId, requestId); throw e; }
   }
   // 5-7. capture → revoke → PROVE under the SAME bracket (F-002): a fault here
   // compensates BEFORE rethrowing — no stranded key.
