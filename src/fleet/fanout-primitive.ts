@@ -41,6 +41,14 @@ import { boxRunRoot } from "../providers/harvest.ts";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
+// M2.2 / INV-M2-4: the loser-disposal hook below. The fanout → run-completion
+// edge is circular (run-completion imports this module's classifier consts),
+// but both sides reference each other only inside function bodies — a hoisted
+// function here, lazily-read consts there — so neither module's top-level
+// evaluation touches the other's TDZ. Same host-reachable-only exposure class
+// as dispatch.ts's direct memgate import this branch (no in-box entry reaches
+// fanout), verified at review.
+import { teardownMemoryKey } from "./run-completion.ts";
 import { mintFanoutId, FanoutRecordStore } from "./fanout.ts";
 import { FLEET_LOCK_PATH, FleetLock } from "./fleet-lock.ts";
 
@@ -1455,6 +1463,12 @@ async function disposeLosers(
     // or the ledger under-counts spend and a later assertWithinBudget
     // over-admits against the cap.
     ...(deps.costLedger === undefined ? {} : { costLedger: deps.costLedger }),
+    // M2.2 AC4 / INV-M2-4: every arm went through dispatch() (its per-run
+    // memory-key mint), so every LOSER provably holds minted keys — the
+    // revoke-verify leg rides INSIDE teardownSandbox like every other
+    // destroy path, fired ahead of its step-4 provider revoke per loser
+    // runId. Env is the host process's (the hook's process.env default).
+    memoryKeyTeardown: (runId) => teardownMemoryKey({}, runId, { requestId: deps.requestId }),
   };
   // Undecided losers become lostRace; a marker-decided armFailed KEEPS its
   // classification (a completed run that reported failure — not a race loss).

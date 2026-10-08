@@ -57,6 +57,7 @@ import {
   defaultKeyCapMicroUsd,
   deliverRunKey,
   deliverSeatKeys,
+  KEY_ENV_FILE,
   mintRunKey,
   mintSeatKeys,
   type KeyApi,
@@ -85,6 +86,28 @@ import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from 
 import { basename, dirname, join, resolve } from "node:path";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
+// M2.2 (DD-16): the per-run recall-only memory key — the M2.1 gateway mint and
+// the DD-28.23 env pair it is delivered with. Direct module imports, beside the
+// credentials ones above: the memgate barrel is not widened for dispatch (the
+// same precedent as the resident-bounds import).
+import { memgateDeps, mintRunMemoryKey, revokeRunMemoryKey } from "../memgate/gateway.ts";
+import {
+  assertDeliveryConfigSafe,
+  DEFAULT_KEY_TTL_BACKSTOP_MS,
+  emitBestEffort,
+  MEMGATE_ADMIN_KEY,
+  MemgateError,
+  QDS_KG_GATEWAY_URL,
+  QDS_KG_RECALL_KEY,
+  QDS_MEMGATE_SIGNING_KEY,
+} from "../memgate/schemas.ts";
+import {
+  COLLECTIVE_BANK_ID,
+  extractExistingBankIds,
+  resolveProvisionedRepoBankId,
+} from "../hindsight/bank-provisioner.ts";
+import { resolveBankId } from "../hindsight/schemas.ts";
+import { HindsightClient } from "../hindsight/client.ts";
 
 /**
  * The dir-box setup gate, re-exported from the providers layer where its probe
@@ -529,6 +552,19 @@ export interface DispatchDeps {
    * behavior identical to pre-DF3.2.
    */
   capMicroUsd?: number;
+  /**
+   * M2.2 (DD-16): the bank-list seam the memory-key leg resolves its
+   * allowlist from — the key is scoped to EXACTLY the M1.2 dispatch-time
+   * recall fan-out set `{<provision-time repo bank>, qds-collective}`
+   * (src/hindsight/kg-context.ts recallFanOut), and the provision-time id is
+   * identified by family signature against a LIVE list
+   * (resolveProvisionedRepoBankId — nothing persists it). Structural, so
+   * tests inject a plain object; the default is the real HindsightClient's
+   * own listBanks (kg-context.ts's `deps.client ?? new HindsightClient()`
+   * idiom). Trusted configuration, like every other field here: never
+   * brief-reachable.
+   */
+  memoryBankList?: { listBanks(): Promise<unknown> };
 }
 
 export interface GateOpts {
@@ -2029,6 +2065,174 @@ async function mintAndDeliverKey(
     }
   }
   return mintedCeilingMicros;
+}
+
+/**
+ * M2.2 (DD-16) — the SECOND credential of the per-box set: the per-run
+ * recall-only memory key, minted through the M2.1 gateway and delivered into
+ * the box beside the provider key. Mirrors the provider leg's ordering and
+ * compensation (INV-MG-2): any failure AFTER a successful mint compensates
+ * best-effort (revoke + verify-revoked) and rethrows the ORIGINAL error, so
+ * dispatch's own catch treats it exactly like a provider-key delivery failure
+ * (FleetError, box ALIVE, record OPEN — INV-5).
+ *
+ * ZERO digest-bearing audit rows: the run-credential hop belongs to the
+ * provider key alone (story Observability Contract); this leg's lifecycle
+ * events are M2.1's `memgate-*` log lines only.
+ *
+ * Config-absent is a SKIP, not a failure: memory is an optional lane at
+ * dispatch, and the in-box extension's `no-auth` refusal is the visible
+ * failure mode — one `memgate-skip` line, no mint, no ledger row, no delivery.
+ */
+/** The memory pair rides the PROVIDER key's own env file (`envFileFor(driver)
+ * ?? KEY_ENV_FILE`, i.e. `app/.env` on a real box): that file is the one env
+ * channel the box actually sources — the unit's mandatory
+ * `EnvironmentFile=/home/exedev/app/.env` (oci/exedev/systemd/qds-run@.service)
+ * — and the resident's CHILD_ENV_ALLOWLIST gates the same names, so a sibling
+ * file would be written by dispatch and sourced by nobody. */
+
+/** APPEND grammar, not the provider `deliverScript`'s truncate (`cat >`): the
+ * target is the provider key's OWN file, already written by the strictly-
+ * earlier provider leg (the ordering the seam suite pins). `touch` + `chmod
+ * 600` first so a fresh file is created tight even where the provider leg
+ * wrote elsewhere; same umask 077 / single-quoted-path / python3-mode-probe
+ * discipline as credentials.ts (the argv carries only this fixed script — the
+ * key material rides stdin and appears in no `ps` on either side, D8;
+ * mirrored locally because the original is not exported and this file is
+ * adds-only). Re-delivery appends duplicate entries: last-wins under both
+ * shell sourcing and systemd EnvironmentFile semantics. */
+function memoryDeliverScript(envFile: string): string {
+  return (
+    `umask 077 && mkdir -p "$(dirname '${envFile}')" && touch '${envFile}' && chmod 600 '${envFile}' && ` +
+    `cat >> '${envFile}' && chmod 600 '${envFile}' && ` +
+    `python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' '${envFile}'`
+  );
+}
+
+/** ONE structured skip line through the module's own log channel — the countable
+ * signal that the memory lane is OFF for this dispatch (the in-box `no-auth`
+ * refusal is the in-box half of the same visibility). */
+function emitMemgateSkip(requestId: string, runId: string, reason: string): void {
+  try {
+    log({
+      requestId,
+      operation: "memgate",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+      event: "memgate-skip",
+      reason,
+      runId,
+    });
+  } catch {
+    // a throwing sink is never the run's failure (this module's own log rule)
+  }
+}
+
+async function mintAndDeliverMemoryKey(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  args: {
+    requestId: string;
+    runId: string;
+    vm: Awaited<ReturnType<typeof provisionAdmittedRun>>["vm"];
+    repoSlug: string;
+  },
+): Promise<{ skipped: boolean }> {
+  const { requestId, runId, vm, repoSlug } = args;
+  // 1. Config gate — the three DD-28.23/M2.1 gateway vars on the dispatch env
+  // source. Empty string is absent (memgateDeps' own rule). Absent ⇒ skip:
+  // fail-closed IN-BOX (the extension refuses `no-auth` visibly), never a
+  // dispatch failure for a lane the operator did not configure.
+  const env = process.env as Record<string, string | undefined>;
+  const missing = [MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, QDS_KG_GATEWAY_URL].find(
+    (k) => env[k] === undefined || env[k] === "",
+  );
+  if (missing !== undefined) {
+    // F-008: the reason token is the shared kebab grammar (run-completion's
+    // teardown leg emits the same `env-absent`) — not the raw var name.
+    emitMemgateSkip(requestId, runId, "env-absent");
+    return { skipped: true };
+  }
+  const gatewayUrl = env[QDS_KG_GATEWAY_URL] as string;
+  // 2. The allowlist: EXACTLY the M1.2 dispatch-time recall fan-out set for
+  // this run's repo — `{resolveProvisionedRepoBankId(resolveBankId(repoSlug),
+  // existing), qds-collective}` (src/hindsight/kg-context.ts recallFanOut /
+  // primeDispatchBrief; src/hindsight/bank-provisioner.ts for the
+  // family-signature resolver and the fixed collective id). Nothing invents a
+  // scheme here: the in-box recall targets the same banks the host-side
+  // dispatch-time recall does, and the key's scope is exactly those. An
+  // unresolvable family (or an unreachable bank list) is a SKIP with a line —
+  // the kg seam's own never-throw posture for the same substrate — never a
+  // mis-scoped key and never a dead dispatch for an optional lane.
+  const target = envFileFor(deps.driver) ?? KEY_ENV_FILE;
+  // Pre-mint grammar gates (F-007/F-008) — a refusal here fires while NO key
+  // exists, mirroring runMemoryKeyLifecycle's step 1 (F-005): an
+  // env-file-invalid refusal PROPAGATES to dispatch's key-failure handling,
+  // the same treatment a provider-key delivery failure gets — never a
+  // mislabeled kg-banks-unresolved skip.
+  assertDeliveryConfigSafe(target, gatewayUrl);
+  let banks: string[] | undefined;
+  try {
+    const lister = deps.memoryBankList ?? new HindsightClient();
+    const existing = extractExistingBankIds(await lister.listBanks());
+    const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), existing);
+    if (repoBankId !== null) banks = [...new Set([repoBankId, COLLECTIVE_BANK_ID])];
+  } catch {
+    // skip below — the reason line is the diagnosis
+  }
+  if (banks === undefined) {
+    emitMemgateSkip(requestId, runId, "kg-banks-unresolved");
+    return { skipped: true };
+  }
+  // 3. Mint → deliver, with the INV-MG-2 bracket. A MINT refusal takes no
+  // compensation (nothing was issued); anything after a successful mint
+  // compensates best-effort and rethrows the ORIGINAL.
+  const mg = memgateDeps({ env, now: ctx.now, log });
+  let minted: { tokenId: string; keyMaterial: string } | undefined;
+  try {
+    minted = mintRunMemoryKey(mg, { runId, banks, ttlMs: DEFAULT_KEY_TTL_BACKSTOP_MS, requestId });
+    // Leading "\n" — append-after-possibly-unterminated-file safety: the provider
+    // leg's payload is assumed but not guaranteed to end in a newline, and a bare
+    // append would fuse both entries into one corrupt line; a blank line is
+    // ignored by both shell sourcing and systemd EnvironmentFile (duplicates
+    // stay last-wins).
+    const stdin = `\n${QDS_KG_RECALL_KEY}=${minted.keyMaterial}\n${QDS_KG_GATEWAY_URL}=${gatewayUrl}\n`;
+    const res = await deps.driver.exec(vm.name, ["sh", "-c", memoryDeliverScript(target)], stdin);
+    const mode = res.stdout.trim();
+    if (res.exitCode !== 0 || mode !== "600") {
+      throw new MemgateError(
+        "delivery-failed",
+        `memory key delivery to ${vm.name}:${target} failed (exit ${res.exitCode}, mode ${mode || "unknown"})`,
+        "inspect the box by hand, then tear the run down",
+      );
+    }
+  } catch (e) {
+    if (minted !== undefined) {
+      try {
+        revokeRunMemoryKey(mg, { tokenId: minted.tokenId, requestId });
+      } catch (compErr) {
+        // A compensation fault is logged, never allowed to mask the original
+        // (the gateway's own compensate() bracket discipline).
+        emitBestEffort(mg, {
+          requestId,
+          runId,
+          tokenId: minted.tokenId,
+          event: "memgate-compensation-failed",
+          status: "error",
+          error: {
+            code: compErr instanceof MemgateError ? compErr.code : "compensation_failed",
+            message: compErr instanceof Error ? compErr.message : String(compErr),
+          },
+        });
+      }
+    }
+    throw e;
+  }
+  // tokenId is NOT persisted for teardown: the teardown leg re-derives the
+  // run's key(s) from the memgate ledger by runId (M2.2's run-completion half).
+  return { skipped: false };
 }
 
 /**
@@ -3575,6 +3779,12 @@ export async function dispatch(
       recordAuditLink,
       ...(seatPlan !== undefined ? { seatPlan } : {}),
     });
+
+    // M2.2 (DD-16): the per-run recall-only memory key — minted through the
+    // M2.1 gateway and delivered beside the provider key, AFTER it. Config
+    // absent skips visibly (`memgate-skip`); a post-mint failure compensates
+    // (revoke-verify) and refuses exactly like a provider-key delivery failure.
+    await mintAndDeliverMemoryKey(ctx, deps, { requestId, runId, vm, repoSlug });
 
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
     const tFill = now();

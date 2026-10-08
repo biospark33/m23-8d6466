@@ -42,6 +42,11 @@ import {
 } from "../src/providers/index.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { getRecord } from "../src/providers/harvest.ts";
+// M2.2 / INV-M2-4: this CLI is the reaper's composition root, so the memory-key
+// revoke-verify binding is wired HERE and forwarded by the sweep's
+// SweepDeps.memoryKeyTeardown passthrough (the provider layer never imports
+// the memgate binding itself). Host-only script, same as sandbox-teardown.
+import { teardownMemoryKey } from "../src/fleet/run-completion.ts";
 // DF5.3: opened for an APPLY only — a dry run performs zero calls and emits
 // nothing, so it must not materialise audit.db either (the same file-set
 // discipline F044 set for the ledger).
@@ -232,6 +237,13 @@ export async function run(
         // openRouterKeyApi throws its own provisioning-key-missing remediation
         // before the sweep enumerates anything.
         keyApi: deps.keyApi ?? openRouterKeyApi(),
+        // M2.2 / INV-M2-4: a reaped run was dispatched, so it can hold a live
+        // per-run gateway key — the revoke-verify leg rides inside
+        // teardownSandbox (fired ahead of its step-4 provider revoke) like
+        // every other destroy path. Env is the operator's exported
+        // environment (the hook's process.env default, `{}` deps); a fault
+        // aborts the unit with the box alive.
+        memoryKeyTeardown: (runId) => teardownMemoryKey({}, runId, { requestId }),
         ...(ledger !== undefined ? { costLedger: ledger } : {}),
         ...(deps.reapDir !== undefined ? { reapDir: deps.reapDir } : {}),
         ...(deps.limits !== undefined ? { limits: deps.limits } : {}),

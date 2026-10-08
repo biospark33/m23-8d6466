@@ -155,6 +155,9 @@ on:
       # loads by absolute path, COPY'd by the runtime stage into
       # /opt/qds/pi-ext/self-compact — a buildId input like every COPY source.
       - pi-vs-claude-code-vendor/self-compact/extensions/self-compact/**
+      # M2.2: the kg-recall pi extension, COPY'd by the runtime stage into
+      # /opt/qds/pi-ext/kg-recall — a buildId input like every COPY source.
+      - pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/**
       # The workspace member manifests. `COPY <member>/package.json` lands each
       # of these in the builder stage so `bun install --frozen-lockfile` can
       # resolve the workspace — the same reason the root package.json is in
@@ -546,6 +549,7 @@ jobs:
                         src/providers/viz-guard.ts src/swarmclaw \
                         cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts \
                         pi-vs-claude-code-vendor/self-compact/extensions/self-compact \
+                        pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall \
                         cli-anything/package.json pi-vs-claude-code-vendor/package.json \
                         visualizer/package.json)
           src_sha=$(git log -1 --format=%H -- "${SOURCE_PATHS[@]}")

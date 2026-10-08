@@ -180,6 +180,21 @@ export interface TeardownDeps {
     outcome: "harvested" | "none";
     count?: number;
   }) => Promise<void>;
+  /**
+   * M2.2 / INV-M2-4: the run's per-run memory gateway key revoke-verify,
+   * INJECTED (the postHarvest seam shape: this module never imports the
+   * memgate module — the composition root binds it). Fired with the runId
+   * THIS sequence is tearing down, immediately BEFORE the step-4 provider
+   * revoke. UNLIKE postHarvest, a rejection is NOT failure-isolated: it
+   * propagates like any step fault (asTeardownError) and aborts the
+   * sequence with the box still ALIVE — a destroyed box can never revoke
+   * a gateway key, so this leg gates the destroy rather than riding past
+   * it. This is the choke point every destroy path shares: the call sites
+   * that bypass guardedTeardown (the `fleet teardown` verb, the reaper's
+   * teardown unit, fan-out loser disposal) all construct TeardownDeps, so
+   * wiring the hook here covers them without each re-implementing the leg.
+   */
+  memoryKeyTeardown?: (runId: string) => Promise<void>;
 }
 
 export interface TeardownOptions {
@@ -1123,6 +1138,15 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       }
     }
   }
+
+  // M2.2 AC4 / INV-M2-4: revoke-verify the run's per-run memory key ahead of
+  // any destroy (step 6) — the same revoke → verify → destroy ordering the
+  // provider-key steps below hold. Injected, never imported (see the field).
+  // A fault here throws OUT of this sequence BEFORE revoke/verify/destroy/
+  // close can run: asTeardownError surfaces it with the box alive and the
+  // record open, so the revoke can be re-attempted — the deliberate inverse
+  // of postHarvest's failure isolation, because this leg gates the destroy.
+  await deps.memoryKeyTeardown?.(runId);
 
   // 4. revoke — "revoked" | "already-gone" both OK; a throw aborts with the
   // key possibly still live. (keyed && !cred already threw at spend.)
