@@ -117,7 +117,7 @@ export function mintRunMemoryKey(
 // --- Deliver — exactly the DD-28.23 pair, KEY_ENV_FILE discipline ------------
 /** Grammar gates FIRST (F-007/F-008): target+URL safety and the mgrun- barrier
  * (AC6). The post-write state emit is the ONE strict emit (the seam).
- * Boundary (review round 5): M2.1's write is process-LOCAL — target resolves
+ * Boundary (review round 4): M2.1's write is process-LOCAL — target resolves
  * against THIS process's cwd (the F-025 default "app/.env" included), fs-modes
  * by the repo-wide fs-atomic idiom (parent forced 0700, file 0600). The
  * BOX-routed leg (driver fill into the box HOME) is M2.2's seam; the target
@@ -184,7 +184,7 @@ export async function runMemoryKeyLifecycle(
     compensate(deps, minted.tokenId, runId, requestId);
     throw e;
   }
-  // 4.5 (review round 5): the live-key window — caller work runs while the
+  // 4.5 (review round 4): the live-key window — caller work runs while the
   // delivered key is LIVE, after delivery and BEFORE capture/revoke. A fault
   // here compensates THEN rethrows the ORIGINAL (INV-MG-2) — the same bracket
   // discipline as delivery. Emits nothing: the window's side effects are the

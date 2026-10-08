@@ -356,7 +356,7 @@ describe("lifecycle-order", () => {
 });
 
 // ---------------------------------------------------------------------------
-// live-key phase (review round 5): the delivered key must be USABLE between
+// live-key phase (review round 4): the delivered key must be USABLE between
 // delivery and revocation — the run callback is that window
 // ---------------------------------------------------------------------------
 

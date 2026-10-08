@@ -428,7 +428,7 @@ export interface RunMemoryKeyLifecycleInput {
   target: string;
   gatewayUrl: string;
   requestId: string;
-  /** The live-key window (review round 5): invoked after delivery, BEFORE
+  /** The live-key window (review round 4): invoked after delivery, BEFORE
    * capture/revoke — the delivered key verifies OK for its duration and is
    * dead by the time the lifecycle resolves. A fault here compensates
    * (revoke+verify) BEFORE the original error rethrows (INV-MG-2). Consume the
