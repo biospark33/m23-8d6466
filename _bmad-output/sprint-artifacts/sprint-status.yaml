@@ -343,7 +343,7 @@ epics:
   v6-m:
     name: Memory ladder
     status: ready-for-dev
-    points: 29
+    points: 31
     stories_dir: sprint-artifacts/dark-factory-v6/stories
     stories:
       M1.1: { title: "Dedicated Hindsight 0.10.0 on VPS + qds- banks + round-trip + no-auth retired-check", points: 3, status: done, deps: [Z4] }  # dev-half merged PR #407 (9f3caca5); VPS-day P0.9 legs + probe fixes merged PR #410 (8c2ef0be, evidence _bmad-output/evidence/p0-9-closure/); ops remainder = issue #408 (schemas.ts conformance amendment + P0.5 legs, open)  # v6a — Z4 edge = authored-early (fired on VPS-day); carries P0.5/P0.9 closure legs (transport re-homed per DD-17); operator-gated VPS spend
