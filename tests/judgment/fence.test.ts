@@ -12,7 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
 const ALLOWED_REPO_IMPORTS = new Set(["../lib/http.ts", "../swarmclaw/log.ts"]);
@@ -65,6 +65,66 @@ describe("src/judgment import fence", () => {
       expect(specifiers).not.toMatch(
         /redactSecrets|providers|audit|gate-runner|classifyRunExit|classifyDiffScope/,
       );
+    }
+  });
+});
+
+/**
+ * v6 J1 AC5 — the fence walks src/judgment/ RECURSIVELY, adapters/ included.
+ * Specifiers are resolved against the importing file, so `../../lib/http.ts`
+ * from adapters/ is the same allowed edge as `../lib/http.ts` from the root,
+ * and a sibling edge is any path that stays inside src/judgment/.
+ */
+const SRC = join(JUDGMENT_SRC, "..");
+const ALLOWED_REPO_TARGETS = new Set([join(SRC, "lib", "http.ts"), join(SRC, "swarmclaw", "log.ts")]);
+
+function judgmentFiles(): string[] {
+  return readdirSync(JUDGMENT_SRC, { recursive: true, encoding: "utf8" })
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => join(JUDGMENT_SRC, f));
+}
+
+function fenceViolations(file: string, source: string): string[] {
+  const out: string[] = [];
+  for (const spec of importSpecifiers(source)) {
+    if (spec === "zod" || spec.startsWith("node:")) continue;
+    if (!spec.startsWith(".")) {
+      out.push(`${relative(JUDGMENT_SRC, file)}: "${spec}"`);
+      continue;
+    }
+    const target = resolve(dirname(file), spec);
+    const inModule = target.startsWith(`${JUDGMENT_SRC}/`) && target.endsWith(".ts");
+    if (!inModule && !ALLOWED_REPO_TARGETS.has(target)) out.push(`${relative(JUDGMENT_SRC, file)}: "${spec}"`);
+  }
+  return out;
+}
+
+describe("src/judgment import fence — recursive (J1)", () => {
+  test("the recursive walk reaches adapters/ (it is not vacuous)", () => {
+    const rel = judgmentFiles().map((f) => relative(JUDGMENT_SRC, f));
+    expect(rel).toContain(join("adapters", "jev.ts"));
+    expect(rel).toContain(join("adapters", "mock.ts"));
+    expect(rel).toContain("provider.ts");
+  });
+
+  test("resolved-path fence: positive and negative controls", () => {
+    const adapter = join(JUDGMENT_SRC, "adapters", "x.ts");
+    expect(fenceViolations(adapter, 'import { httpRequest } from "../../lib/http.ts";')).toEqual([]);
+    expect(fenceViolations(adapter, 'import type { JudgmentRequest } from "../schemas.ts";')).toEqual([]);
+    expect(fenceViolations(adapter, 'export * from "../../providers/run-record.ts";').length).toBe(1);
+    expect(fenceViolations(adapter, 'import { x } from "../../audit/link-store.ts";').length).toBe(1);
+    expect(fenceViolations(adapter, 'import { x } from "@typesafe/sdk";').length).toBe(1);
+  });
+
+  test("every module at every depth imports only http.ts, swarmclaw/log.ts, zod, node:, or src/judgment/ itself", () => {
+    const violations = judgmentFiles().flatMap((f) => fenceViolations(f, readFileSync(f, "utf8")));
+    expect(violations).toEqual([]);
+  });
+
+  test("no providers / redactSecrets / audit / gate symbol is imported at any depth", () => {
+    for (const file of judgmentFiles()) {
+      const specifiers = importSpecifiers(readFileSync(file, "utf8")).join("\n");
+      expect(specifiers).not.toMatch(/redactSecrets|providers|audit|gate-runner|classifyRunExit|classifyDiffScope/);
     }
   });
 });

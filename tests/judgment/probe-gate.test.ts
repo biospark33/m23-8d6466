@@ -5,15 +5,42 @@
  * network. The gate is the security control: no key, no wire; no explicit
  * steve go (QDS_LIVE_PROBE_CONFIRMED=1), no wire.
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   canonicalRequest,
   diffEnvelope,
   main as liveProbeMain,
+  PROBE_PROVIDER,
   probeGate,
 } from "../../scripts/judgment/live-probe.ts";
 import { DEFAULT_MAX_EGRESS_CLASS } from "../../src/judgment/egress.ts";
-import { JudgmentClient } from "../../src/judgment/index.ts";
+import { DEFAULT_PROVENANCE_DIR, JudgmentClient, TYPESAFE_API_URL, TYPESAFE_MODEL } from "../../src/judgment/index.ts";
+
+/**
+ * main() and a default-dir mock client write provenance to the REAL default
+ * side-channel dir (tracked files live there). Snapshot it once per file and
+ * remove only what this file's tests added, so a test run never leaves
+ * untracked judgment files behind.
+ */
+let provenanceAtStart = new Set<string>();
+function provenanceFiles(): Set<string> {
+  try {
+    return new Set(readdirSync(DEFAULT_PROVENANCE_DIR));
+  } catch {
+    return new Set();
+  }
+}
+beforeAll(() => {
+  provenanceAtStart = provenanceFiles();
+});
+afterAll(() => {
+  for (const f of provenanceFiles()) {
+    if (!provenanceAtStart.has(f)) rmSync(join(DEFAULT_PROVENANCE_DIR, f), { force: true });
+  }
+});
 
 describe("live-probe gate", () => {
   test("no key → refuse", () => {
@@ -117,5 +144,163 @@ describe("live-probe main + contract diff (mock mode, never the network)", () =>
       exit.mockRestore();
       err.mockRestore();
     }
+  });
+});
+
+/**
+ * v6 J1 AC6 — the probe reaches the wire through the REGISTRY-resolved `jev`
+ * adapter, never a hand-constructed transport, and the INV-J5 double gate
+ * still refuses before any request exists. The live arm runs against a
+ * `globalThis.fetch` stub — no test touches the network.
+ */
+describe("live-probe through the provider registry (J1 AC6)", () => {
+  const PROBE_SRC = join(import.meta.dir, "..", "..", "scripts", "judgment", "live-probe.ts");
+  const ENV_KEYS = ["TYPESAFE_API_KEY", "QDS_LIVE_PROBE_CONFIRMED", "TYPESAFE_MOCK"] as const;
+  const originalFetch = globalThis.fetch;
+  let savedEnv: [string, string | undefined][] = [];
+  let fetched: { url: string; body: unknown }[] = [];
+  let out: string[] = [];
+  let tmp: string;
+
+  beforeEach(() => {
+    savedEnv = ENV_KEYS.map((k) => [k, process.env[k]]);
+    for (const k of ENV_KEYS) {
+      delete process.env[k];
+    }
+    fetched = [];
+    out = [];
+    tmp = mkdtempSync(join(tmpdir(), "live-probe-"));
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      fetched.push({ url: typeof input === "string" ? input : input.toString(), body });
+      return new Response(
+        JSON.stringify({
+          model: TYPESAFE_MODEL,
+          answers: { probe_ok: { type: "noul", noul: 0.97 } },
+          usage: { input_tokens: 42, output_tokens: 1 },
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) {
+        delete process.env[k];
+      } else process.env[k] = v;
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function captureConsole(): () => void {
+    const log = spyOn(console, "log").mockImplementation((s: unknown) => {
+      out.push(String(s));
+    });
+    const err = spyOn(console, "error").mockImplementation((s: unknown) => {
+      out.push(String(s));
+    });
+    return () => {
+      log.mockRestore();
+      err.mockRestore();
+    };
+  }
+
+  test("the probe imports no adapter module — the registry is its only route to a transport", () => {
+    const src = readFileSync(PROBE_SRC, "utf8");
+    expect(src).not.toMatch(/src\/judgment\/adapters\//);
+    expect(src).not.toMatch(/\bmake(Jev|Mock)Provider\b/);
+    expect(src).toMatch(/\bresolveProvider\(PROBE_PROVIDER\)/);
+    expect(PROBE_PROVIDER).toBe("jev");
+  });
+
+  test("live arm: one request through the registered jev adapter to the pinned endpoint, provider named before fire", async () => {
+    process.env.TYPESAFE_API_KEY = "test-key-not-a-real-credential";
+    process.env.QDS_LIVE_PROBE_CONFIRMED = "1";
+    const restore = captureConsole();
+    try {
+      await expect(liveProbeMain([])).resolves.toBeUndefined();
+    } finally {
+      restore();
+    }
+    expect(fetched.length).toBe(1);
+    expect(fetched[0]!.url).toBe(TYPESAFE_API_URL);
+    expect((fetched[0]!.body as { model: string }).model).toBe(TYPESAFE_MODEL);
+    const text = out.join("\n");
+    expect(text).toContain("provider jev");
+    expect(text).toContain("contract matches");
+    // spend is printed BEFORE the fire line, and the observed usage after
+    expect(text.indexOf("spend:")).toBeGreaterThan(-1);
+    expect(text.indexOf("spend:")).toBeLessThan(text.indexOf("contract matches"));
+    expect(text).not.toContain("test-key-not-a-real-credential");
+  });
+
+  test("--evidence-dir writes one scrubbed timestamped evidence JSON naming provider, transport and the clean diff", async () => {
+    process.env.TYPESAFE_API_KEY = "test-key-not-a-real-credential";
+    process.env.QDS_LIVE_PROBE_CONFIRMED = "1";
+    const restore = captureConsole();
+    try {
+      await liveProbeMain(["--evidence-dir", tmp]);
+    } finally {
+      restore();
+    }
+    const files = readdirSync(tmp);
+    expect(files.length).toBe(1);
+    expect(files[0]).toMatch(/^live-probe-\d{8}T\d{6}Z\.json$/);
+    const raw = readFileSync(join(tmp, files[0]!), "utf8");
+    expect(raw).not.toContain("test-key-not-a-real-credential");
+    const ev = JSON.parse(raw);
+    expect(ev).toMatchObject({
+      provider: "jev",
+      transport: "live",
+      contractDiff: "clean",
+      endpoint: TYPESAFE_API_URL,
+      spend: { requests: 1, input_tokens: 42, output_tokens: 1 },
+      envelope: { model: TYPESAFE_MODEL, egress_class: "machine-state" },
+    });
+  });
+
+  test("under TYPESAFE_MOCK=1 the evidence says transport mock — a mock run can never pass as live evidence", async () => {
+    process.env.TYPESAFE_API_KEY = "test-key-not-a-real-credential";
+    process.env.QDS_LIVE_PROBE_CONFIRMED = "1";
+    process.env.TYPESAFE_MOCK = "1";
+    const restore = captureConsole();
+    try {
+      await liveProbeMain(["--evidence-dir", tmp]);
+    } finally {
+      restore();
+    }
+    expect(fetched.length).toBe(0);
+    const ev = JSON.parse(readFileSync(join(tmp, readdirSync(tmp)[0]!), "utf8"));
+    expect(ev).toMatchObject({ provider: "mock", transport: "mock" });
+    expect(out.join("\n")).toContain("provider mock");
+  });
+
+  for (const [name, env] of [
+    ["no key", { QDS_LIVE_PROBE_CONFIRMED: "1" }],
+    ["no confirm flag", { TYPESAFE_API_KEY: "test-key-not-a-real-credential" }],
+  ] as const) {
+    test(`${name} → refused before any request is built or sent`, async () => {
+      Object.assign(process.env, env);
+      const exit = spyOn(process, "exit").mockImplementation(((code: number) => {
+        throw new Error(`exit:${code}`);
+      }) as never);
+      const restore = captureConsole();
+      try {
+        await expect(liveProbeMain(["--evidence-dir", tmp])).rejects.toThrow("exit:1");
+      } finally {
+        exit.mockRestore();
+        restore();
+      }
+      expect(fetched.length).toBe(0);
+      expect(readdirSync(tmp)).toEqual([]);
+      expect(out.join("\n")).toContain("refusing to run");
+      expect(out.join("\n")).not.toContain("spend:");
+    });
+  }
+
+  test("an unknown --flag is refused (no silent typo of --evidence-dir)", async () => {
+    await expect(liveProbeMain(["--evidence", tmp])).rejects.toThrow(/unknown argument/);
   });
 });

@@ -14,6 +14,8 @@
  * contract json and exiting 2 on drift.
  */
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import contract from "./typesafe-api-contract.json";
 import {
   DEFAULT_MAX_ATTEMPTS,
@@ -21,6 +23,7 @@ import {
   TYPESAFE_MODEL,
 } from "../../src/judgment/client.ts";
 import { DEFAULT_MAX_EGRESS_CLASS } from "../../src/judgment/egress.ts";
+import { JUDGMENT_PROVIDER_IDS } from "../../src/judgment/provider.ts";
 import {
   ChoiceQuestionSchema,
   JudgmentRequestSchema,
@@ -162,5 +165,69 @@ describe("contract pin: response schemas match the contract's shape rules", () =
     const schema = makeJudgmentResponseSchema(["c"]);
     const c = { type: "choice", choice: "patch", probabilities: { patch: 1.5 }, confidence: 0.5 };
     expect(schema.safeParse({ model: TYPESAFE_MODEL, answers: { c }, usage: USAGE }).success).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v6 J1 AC3 — the drift alarm stays THE alarm behind the JudgmentProvider seam.
+// ---------------------------------------------------------------------------
+
+const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
+
+/**
+ * Every `jev-…` string literal in a source text — the model-id family.
+ * Comments are prose, not code (schemas.ts's doc comment names the banned
+ * `jev-latest` alias on purpose), so they are stripped first; a `//` after
+ * `:` is a URL, not a comment.
+ */
+function modelLiterals(source: string): string[] {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  return [...code.matchAll(/["'`](jev-[^"'`\s]*)["'`]/g)].map((m) => m[1] ?? "");
+}
+
+function walkTs(root: string): string[] {
+  return readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => join(root, f));
+}
+
+describe("contract pin: one model literal behind the provider seam (J1 AC3)", () => {
+  test("the literal scanner sees every quote style (positive control)", () => {
+    expect(modelLiterals(`const a = "jev-2.0.0"; const b = 'jev-x'; const c = \`jev-latest\`;`)).toEqual([
+      "jev-2.0.0",
+      "jev-x",
+      "jev-latest",
+    ]);
+    // prose is not a literal; a URL is not a comment
+    expect(modelLiterals('/** never `jev-latest` */\n// "jev-x"\nconst u = "https://h"; const m = "jev-z";')).toEqual(["jev-z"]);
+  });
+
+  test("TYPESAFE_MODEL is the ONLY model literal anywhere under src/judgment/ (recursive, adapters included)", () => {
+    const found: string[] = [];
+    for (const file of walkTs(JUDGMENT_SRC)) {
+      for (const lit of modelLiterals(readFileSync(file, "utf8"))) {
+        found.push(`${relative(JUDGMENT_SRC, file)}: ${lit}`);
+      }
+    }
+    // A second literal (e.g. a `jev-2` constant wired into an adapter but not
+    // the contract json) fails HERE, named in the diff.
+    expect(found).toEqual([`schemas.ts: ${contract.model}`]);
+    expect(TYPESAFE_MODEL).toBe(contract.model);
+  });
+
+  test("no adapter carries a model key of its own — the request model is the seam's TYPESAFE_MODEL", () => {
+    for (const file of walkTs(join(JUDGMENT_SRC, "adapters"))) {
+      const src = readFileSync(file, "utf8");
+      for (const m of src.matchAll(/\bmodel\s*:\s*([^,}\n]+)/g)) {
+        expect({ file: relative(JUDGMENT_SRC, file), model: m[1]?.trim() }).toEqual({
+          file: relative(JUDGMENT_SRC, file),
+          model: "TYPESAFE_MODEL",
+        });
+      }
+    }
+  });
+
+  test("registry membership is pinned: exactly jev + mock serve the contract", () => {
+    expect([...JUDGMENT_PROVIDER_IDS]).toEqual(["jev", "mock"]);
   });
 });
