@@ -124,3 +124,102 @@ As the factory, I want a memory gateway that issues per-run recall-only keys and
 - [ ] **Integration (e2e demo — MANDATORY):** the mock-mode closed loop — mint → deliver → scoped recall against the mock hindsight client → capture → revoke → verify — green with no network, no VPS, no box (unit/mock tier).
 - [ ] **Integration (acceptance-only edge, recorded):** the completion note states the live-instance conformance leg is M2.3's and records the M1.1 edge as acceptance-only — never silently dropped.
 - [ ] **Hygiene:** GitNexus `impact()` before shared-symbol edits; `detect_changes()` before commit (new module + tests expected).
+
+## Dev Agent Record (2026-10-07, driver + 7-agent wave campaign on feature/m2-1-memory-gateway @ 9fe11a07)
+
+**Prerequisites (driver-verified at story start):** `bun test tests/hindsight/ tests/providers/credentials.test.ts` → 283 pass / 0 fail; byte-identity baselines captured (credentials.ts `c9a81c04…`, client.ts `9fe27295…`) and re-verified green at branch gate (N4) — the mirror was consumed, never modified.
+
+**Delivery:** `src/memgate/{schemas,forward,ledger,gateway,index}.ts` (475/121/431/500/72 lines at close — D6 split; counts at wave-t land were 340/375/497/72) + `tests/memgate/{lifecycle,gateway}.test.ts` (grown red-first from 19 + 31 to 38 + 47 tests — TDD-red proven against missing modules before implementation, both red proofs load-time `Cannot find module`, 0 pass / 1 fail / 1 error) + `scripts/dev/verify-m21-e2e.ts` (driver integration verifier, see D5). Suite totals 85/85 green; `bunx tsc --noEmit` 0 errors repo-wide; `bunx @biomejs/biome check src/memgate tests/memgate scripts/dev/verify-m21-e2e.ts` clean; mock-mode closed loop e2e (`M21 E2E OK`) covers mint → deliver (exactly the DD-28.23 pair, 0600) → verify → scoped recall through the mock client → capture state read → revoke → verify-refused → already-gone, plus scope-bank / scope-verb / unknown-key / no-auth / expired refusal arms and the TTL-backstop pre-issuance no-state-change assertion. Orchestrated under unlazy scope `m2-1` (PLAN rev 4, ledgers in `.unlazy/m2-1/gates/` — leaf-t, leaf-u, leaf-1 ALL MET with independent parent reverification; wave t = 2 parallel test leaves, wave s = 1 implementation leaf).
+
+**Deviations (all register-noted; intent preserved):**
+- **D1 (record step):** credentials' "record" pre-exists the lifecycle (store.get); memgate's record = the issuance row written at mint; lifecycle opens with assertDeliveryTargetSafe (target-before-mint-before-deliver preserved; the ledger-alone design story Technical Notes ratifies).
+- **D2 (capture):** no money in this ledger — capture = the pre-revoke lifecycle state read + `memgate-capture` event; the captureSpend ordering slot preserved, spend content honestly absent (not zero-filled).
+- **D3 (unknown credential vs the closed 8-member refusal set):** absent auth header → `no-auth` (exact DD-28.26(13) shape); present-but-invalid/unknown credential → refuses fail-closed with `no-auth` + structured log detail `authOutcome: "unknown-key"`; known-and-revoked still refuses `revoked`. ZERO set members added; the detail field gives M2.3's battery the known-key-out-of-scope vs unknown-key split AC2 demands. **Operator flag:** ratify the `authOutcome` detail convention at the register (DD-28.26(13) said the set gains "exactly one member" — this adds a field, not a member).
+- **D4 (AC4 retry posture):** Hindsight 0.10.x has NO key-mint API (verified against the instance's own route class table — no /keys route exists), so memgate mint is gateway-LOCAL (HMAC + ledger): "mint POST attempts = 1" is structurally exceeded (ZERO network attempts — the stranded-second-key hazard cannot exist). The posture lands where transport exists: each mapped POST forwards exactly once via the injected HindsightClient (`src/hindsight/client.ts:504-506` "no retries anywhere: a replayed retain is not idempotent" — identical rationale to credentials :1762-1766), and the closed route table maps no non-POST route, so the ≤2-stepped helper has no call site and was not shipped. Tests: mint zero-network (count 0), forward-once (count 1), closed-table POST-only structural assert.
+- **D5 (write set):** + `scripts/dev/verify-m21-e2e.ts` (driver-authored; the DoD's mandatory e2e demo, M1.3 committed-verifier precedent). leakScan/at helpers duplicated inline in both test files rather than adding a shared fixtures file.
+- **D-vocab (load-bearing register reading, driver ruling):** DD-28.26 item 1's two agent grant classes are EXHAUSTIVE — host-held {reflect, retain}, bot-held {consolidate}. `recall` stays in the closed `AGENT_TOKEN_VERBS` vocabulary (the AC5 negative control stays well-defined; the register-amendment hook is preserved) but NO agent grant class carries it — only per-run keys recall. Grant-time typed refusals: grant-verb-outside-vocabulary / grant-verb-outside-class / grant-consumer-class-required (admin surface, not the closed request-path set). **Operator flag:** if Z3's memory legs ever need agent-recall, that is a register amendment (item 1 as written does not grant it).
+- **AC7 correction (driver, wave-s ruling):** `revokeRunMemoryKey` is admin-gated (timing-safe presented-vs-configured compare, `admin-auth` refusal) — AC7's letter names "mint, revoke, agent-token grant/list/revoke".
+- **Admin-key seam (wave-t pin):** `memgateDeps(opts)` reads `MEMGATE_ADMIN_KEY` + `QDS_MEMGATE_SIGNING_KEY` env-by-name and refuses BEFORE any ledger open; `deps.adminKey` is the presented key for the call context; configured key read from `deps.env` at op time. No-env wiring = embedded/test mode (presented IS configured) — documented seam, never the prod wiring.
+
+**Wave-t mechanical fixes (driver, leases released — each intent-preserving, none weakens an assertion):** makeClient record-then-delegate wrap (bare spread shadowed the call recorder); no-wildcard assert substring→membership ("recall" contains "all"); sentinels re-prefixed `mgx-` (collided with mandated `memgate-*` event values); two `toEqual`/`toBe` type-param fixes; third-kind `@ts-expect-error` moved to the excess-property line; two MemgateError fixture calls gained the remediation arg (the impl's `(code, message, remediation)` is the ProviderError pattern of record); one no-interpolation template literal → plain string (biome).
+
+**Hygiene receipts:** GitNexus `detect_changes(compare vs dev)` at branch gate: risk LOW, 0 affected processes, 9 changed files — exactly the M2.1 write set + the M1.3 story-record addendum; zero pre-existing symbols touched (greenfield — no `impact()` call owed). GitNexus reindex this session hit an upstream 1.6.9 embedding-pipeline duplicate-PK bug twice (fresh DB after `clean`); worked around with a no-embeddings reindex (25,085 nodes / 51,602 edges @ branch point) behind the canonical script's lock + transient `.gitnexusignore` — **operator flag:** consider filing upstream. **Register note (F-027, review round 1):** `memgate-compensation-failed` and `memgate-grant` are ADDITIVE observability events on top of the story's 7-event list (compensation-failed mirrors credentials' own delivery_compensation error line; grant mirrors the other lifecycle ops); `memgate-forward` remains covered by the rev-3(d) adjudication, and its error line reuses the same name with status "error" — no additional event name. **Register note (D6, review round 2):** module layout is FIVE flat files, not the Technical Notes' four — round-2 hardening pushed schemas.ts past the repo's 500-line pin, so the cohesive forward surface (`VERB_ROUTES`, `bankOfPath`, `matchRoute`, `MAX_RETAIN_CONTENT_CHARS`, `ForwardArgs`, `parseForwardBody`) split into `src/memgate/forward.ts`; `schemas.ts` re-exports every moved symbol verbatim (consumer imports unchanged); five files, each ≤500 lines.
+
+**Integration acceptance edge (recorded, never silently dropped):** the live-instance conformance leg belongs to **M2.3's combined live round**; the M1.1 dependency edge is **acceptance-only** (dev-first sanctioned, DD-26) — this story is unit/mock tier and needed no VPS, no box, no live Hindsight, no spend. Every green gate above ran on a laptop in mock mode.
+
+**Operator flags (all surfaced, none blocking):** D3 `authOutcome` register ratification; D-vocab Z3 agent-recall amendment hook; M3.1's prerequisite names `bun test tests/memory/` where this story ships `tests/memgate/` (naming mismatch already on record from derivation — M2.2's prereq uses the matching name); GitNexus 1.6.9 embedding dedup bug.
+
+### Review Findings (round 1 — 3-layer adversarial: blind 20 / edge 15 / acceptance 5 → 31 unified: 28 patch, 1 defer, 2 dismiss)
+
+- [x] [Review][Patch] F-001 Compensation bracket: throwing sink on compensate-emit skips revocation; compensation-failed emit throw replaces original error [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-002 Post-delivery faults (capture/revoke/verify) have no compensation bracket — stranded live delivered key [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-003 Post-state-write emits unguarded (mint/capture/revoke/verify-revoked/grant) — throwing sink strands rows/masks results [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-004 forwardScoped never rechecks revocation/expiry — verify→forward TOCTOU [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-005 listAgentTokens returns revoked tokens ("live" docstring) + one corrupt row aborts listing [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-006 Agent tokens immortal — optional admin-supplied expiresAtMs honored at verify [src/memgate/schemas.ts]
+- [x] [Review][Patch] F-007 deliverRunKey bypasses assertDeliveryTargetSafe — gate at the write choke point [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-008 Env injection via unvalidated gatewayUrl/keyMaterial + missing mgrun- prefix barrier (AC6) [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-009 memgateDeps ignores opts.env for ledger resolution — stray-default-open at the seam [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-010 Non-string method/path crashes verifyRequest (raw TypeError, not refusal) [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-011 Double-revoke race mislabels UNIQUE constraint as ledger-unwritable (→ already-gone) [src/memgate/ledger.ts]
+- [x] [Review][Patch] F-012 openReadOnly post-attach inode recheck missing — swap window [src/memgate/ledger.ts]
+- [x] [Review][Patch] F-013 Claims shape not re-validated at verify — corrupt verbs row verifies [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-014 memgate-refused carries out-of-set reason values (mint-invalid-scope/env-file-invalid/grant-*) — event reason stays closed [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-015 Verifier discards forwardScoped promise — unhandled rejection can fake OK [scripts/dev/verify-m21-e2e.ts]
+- [x] [Review][Patch] F-016 ttlRemainingMs 0 at exact boundary violates absent-not-0 pin [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-017 Empty-string signing/admin keys pass undefined-only checks (forgeable HMAC) [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-018 NaN now() mints immortal key [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-019 runId unbounded length/charset persisted+logged [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-020 Ledger ctor raw fs errors escape closed set (statSync/exclusive-create unguarded) [src/memgate/ledger.ts]
+- [x] [Review][Patch] F-021 Failed writable open leaves empty 0600 file behind [src/memgate/ledger.ts]
+- [x] [Review][Patch] F-022 recordRevocation clock not injectable (Date.now) [src/memgate/ledger.ts]
+- [x] [Review][Patch] F-023 Forward bodies unvalidated (NaN limit, unbounded content, coerced queries) [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-024 Forward transport failures emit no memgate-* event [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-025 Grant name never persisted; MEMGATE_ENV_FILE unconsumed [src/memgate/schemas.ts]
+- [x] [Review][Patch] F-026 revokeAgentToken revokes per-run tokens — no kind check [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-027 memgate-compensation-failed/memgate-grant event names unregistered (register note) [src/memgate/gateway.ts]
+- [x] [Review][Patch] F-028 Delivery-target remediation text contradicts relative-path discipline [src/memgate/gateway.ts]
+- [x] [Review][Defer] F-029 Delivered env file retains revoked key material post-lifecycle — teardown ownership (DF2.5 lineage), outside module surface [src/memgate/gateway.ts] — deferred
+
+### Review Findings (round 2 — 3-layer fresh pass incl. fix-regression hunt: 21 unified, all PATCH; round-1 fixes audited CONFORMANT)
+
+- [x] [Review][Patch] R2-F-001 mgrun- barrier prefix-only — keyMaterial charset gate (base64url) at the choke point [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-002 requireAdmin self-comparison fail-open on unwired env — explicit embedded-mode flag; hand-built deps fail closed [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-003 deliver-state-write-failed carries no tokenId — attach the compensation handle to the thrown error [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-004 Verifier TTL arm swallows wrong error class — assert mint-invalid-ttl [scripts/dev/verify-m21-e2e.ts]
+- [x] [Review][Patch] R2-F-005 Retain ceiling bypasses non-string content — refuse forward-body-invalid [src/memgate/schemas.ts]
+- [x] [Review][Patch] R2-F-006 Invalid limit coerced to undefined — throw like the sibling query arm [src/memgate/schemas.ts]
+- [x] [Review][Patch] R2-F-007 Non-finite clock bypasses verify/forward expiry — fail-closed, ttlRemainingMs absent [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-008 Verifier refusal arms never assert the typed reason [scripts/dev/verify-m21-e2e.ts]
+- [x] [Review][Patch] R2-F-009 recordIssuance UNIQUE collision mislabeled ledger-unwritable [src/memgate/ledger.ts]
+- [x] [Review][Patch] R2-F-010 Grant accepts born-expired expiresAtMs — compare against now [src/memgate/schemas.ts]
+- [x] [Review][Patch] R2-F-011 F-021 cleanup check-then-act — rm only own zero-row skeleton [src/memgate/ledger.ts]
+- [x] [Review][Patch] R2-F-012 O_EXCL refusal leaks the probe fd [src/memgate/ledger.ts]
+- [x] [Review][Patch] R2-F-013 Corrupt claims (non-object) rides the D3 unknown-key ladder with tokenId, not ledger-unreadable [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-014 forwardScoped client-missing/body-invalid/ledger-recheck arms emit no audit line [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-015 revokeRunMemoryKey drops runId from its emit lines [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-016 listAgentTokens prefers claims.tokenId over the row PK [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-017 Unbounded banks arrays — .max(64) [src/memgate/schemas.ts]
+- [x] [Review][Patch] R2-F-018 gateway.test deps() leaks sqlite handles — afterEach close [tests/memgate/gateway.test.ts]
+- [x] [Review][Patch] R2-F-019 Dir-mode refusal rewrapped as delivery-failed — hoist config assert [src/memgate/gateway.ts]
+- [x] [Review][Patch] R2-F-020 10 round-1 fixes lack named regression pins — test wave adds honest pins [tests/memgate/**]
+- [x] [Review][Patch] R2-F-021 Story record line counts stale — update at wave close [story record]
+
+### Review Findings (round 3 — final verification: 11 unified, 1 dismissed-resolved-in-round, 10 PATCH)
+
+- [x] [Review][Patch] R3-F-002 Per-run expiry from validated claims, column cross-checked, divergence fail-closed (+ forward re-check) [src/memgate/gateway.ts]
+- [x] [Review][Patch] R3-F-003 parseForwardBody refuses non-object bodies — no silent body-less widening [src/memgate/forward.ts]
+- [x] [Review][Patch] R3-F-004 consolidate options validated (field types + size ceiling) [src/memgate/forward.ts]
+- [x] [Review][Patch] R3-F-005 retain metadata validated (object-ness + size ceiling) [src/memgate/forward.ts]
+- [x] [Review][Patch] R3-F-006 revokeRunMemoryKey kind-gates agent rows (revoke-kind-mismatch) — symmetric with F-026 [src/memgate/gateway.ts]
+- [x] [Review][Patch] R3-F-007 listAgentTokens surfaces expiresAtMs + name [src/memgate/gateway.ts]
+- [x] [Review][Patch] R3-F-008 Barrel exports MEMGATE_ENV_FILE [src/memgate/index.ts]
+- [x] [Review][Patch] R3-F-009 Verifier tmpdir cleaned on every exit path [scripts/dev/verify-m21-e2e.ts]
+- [x] [Review][Patch] R3-F-010 grantAgentToken finite-clock guard pre-state [src/memgate/gateway.ts]
+- [x] [Review][Patch] R3-F-011 bankOfPath/matchRoute grammar-agreement pin [tests/memgate/gateway.test.ts]
+- [x] [Review][Patch] R3-F-001 forward.ts missing from review patch — RESOLVED in-round (staged; reviewed from working tree) — dismissed
+
+### Review Findings (round 5 — CodeRabbit PR review: 2 findings, 1 patch, 1 partial with pushback)
+
+- [x] [Review][Patch] CR-2 runMemoryKeyLifecycle delivers then immediately revokes — no usable live-key window; added optional `run` callback input (invoked after delivery, BEFORE capture/revoke; a fault compensates THEN rethrows the ORIGINAL per INV-MG-2; the window emits nothing so AC1's exact event sequence is untouched; the key is consumed by reading `target`, so mint's return stays the only plaintext handoff) + 2 tests (live-window verify-OK/revoked-after, run-fault compensation) [src/memgate/{schemas,gateway}.ts tests/memgate/lifecycle.test.ts]
+- [x] [Review][Patch] CR-1 deliverRunKey delivery boundary — PARTIAL: accepted the boundary ambiguity the finding exposes and fixed the misleading doc (MEMGATE_ENV_FILE's comment claimed the driver-exec-HOME rationale the M2.1 write path does not exercise; now states the write is process-LOCAL and the box-routed leg is M2.2's driver-fill seam, with the target grammar already box-shaped so M2.2 re-points the write, not the input). PUSHBACK on routing the write through the driver's fill primitive now: the ratified M2.1 surface is driver-agnostic mock-mode delivery (no driver dep, no vm handle in the inputs, story ships no box file — M2.2 owns the in-box side), and the CWD-relative default is test-pinned F-025 behavior; a driver seam is a spec-level design change, not a review patch. PUSHBACK on removing the parent 0700 enforcement: forcing the key-file parent to 0700 is the repo-wide fs-atomic contract (INV-5; run-record/fanout/fleet-lock/the ledger all share it) and is the containment guard working, not a hazard. [src/memgate/{schemas,gateway}.ts]

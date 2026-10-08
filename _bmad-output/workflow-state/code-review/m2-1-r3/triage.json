@@ -1,0 +1,18 @@
+{
+  "pr": 0,
+  "round": 3,
+  "duration_ms": 300000,
+  "findings": [
+    {"finding_id": "R3-F-001", "finding_text": "forward.ts absent from the round-3 review patch — authz decision surface unreviewable (review integrity).", "diff_context_ref": "src/memgate/forward.ts@9fe11a07", "label": "HIGH", "disposition": "DISMISS", "rationale": "Resolved in-round: the D6 split file was created after the intent-to-add staging; staged mid-round, reviewed by edge+acceptance from the working tree, and present in the commit. bankOfPath/matchRoute agreement pin folded into the test task."},
+    {"finding_id": "R3-F-002", "finding_text": "Per-run expiry reads the raw ledger column over the zod-validated claims — a hand-crafted row with expires_at_ms NULL is an immortal recall key; forwardScoped re-check has the same hole.", "diff_context_ref": "src/memgate/gateway.ts@9fe11a07", "label": "MED", "disposition": "PATCH", "rationale": "Claims are the validated authority; column cross-checked, divergence fail-closed."},
+    {"finding_id": "R3-F-003", "finding_text": "parseForwardBody casts non-object bodies to {} — malformed body silently widens to a body-less forward.", "diff_context_ref": "src/memgate/forward.ts@9fe11a07", "label": "MED", "disposition": "PATCH", "rationale": "Non-object non-null bodies refuse forward-body-invalid."},
+    {"finding_id": "R3-F-004", "finding_text": "consolidate options forwards verbatim — unmeasured, field types unchecked, arbitrary keys ride.", "diff_context_ref": "src/memgate/forward.ts@9fe11a07", "label": "MED", "disposition": "PATCH", "rationale": "Field validation + size ceiling."},
+    {"finding_id": "R3-F-005", "finding_text": "retain metadata forwards verbatim — second unmeasured sibling of the content ceiling.", "diff_context_ref": "src/memgate/forward.ts@9fe11a07", "label": "MED", "disposition": "PATCH", "rationale": "Object-ness + size ceiling."},
+    {"finding_id": "R3-F-006", "finding_text": "Revoke kind-gating asymmetric — revokeRunMemoryKey silently revokes live AGENT tokens (mirror of F-026).", "diff_context_ref": "src/memgate/gateway.ts@9fe11a07", "label": "LOW", "disposition": "PATCH", "rationale": "Merged blind+edge: kind check refusing revoke-kind-mismatch."},
+    {"finding_id": "R3-F-007", "finding_text": "listAgentTokens omits expiresAtMs and name — the audit surface hides whether a live grant is immortal.", "diff_context_ref": "src/memgate/gateway.ts@9fe11a07", "label": "LOW", "disposition": "PATCH", "rationale": "Surface both fields."},
+    {"finding_id": "R3-F-008", "finding_text": "Barrel exports DEFAULT_MEMGATE_LEDGER but not MEMGATE_ENV_FILE — consumers must deep-import.", "diff_context_ref": "src/memgate/index.ts@9fe11a07", "label": "LOW", "disposition": "PATCH", "rationale": "One-line export."},
+    {"finding_id": "R3-F-009", "finding_text": "e2e driver leaks its tmpdir (with a delivered key-material env file) on every failure path.", "diff_context_ref": "scripts/dev/verify-m21-e2e.ts@9fe11a07", "label": "LOW", "disposition": "PATCH", "rationale": "Cleanup wrapped around all exit paths."},
+    {"finding_id": "R3-F-010", "finding_text": "grantAgentToken lacks the finite-clock guard — NaN clock mislabeled ledger-unwritable.", "diff_context_ref": "src/memgate/gateway.ts@9fe11a07", "label": "LOW", "disposition": "PATCH", "rationale": "Typed clock refusal before any state, mirroring F-018/R2-F-007."},
+    {"finding_id": "R3-F-011", "finding_text": "bankOfPath has no behavioral pin; its grammar agreement with matchRoute is the bank-check safety argument.", "diff_context_ref": "tests/memgate/gateway.test.ts@9fe11a07", "label": "LOW", "disposition": "PATCH", "rationale": "Folded from R3-F-001: test task adds the agreement pin."}
+  ]
+}
