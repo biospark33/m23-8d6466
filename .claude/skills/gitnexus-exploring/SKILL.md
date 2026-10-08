@@ -35,7 +35,7 @@ the bound repository and index freshness alongside your explanation.
 5. READ gitnexus://repo/{name}/process/{name}      → Trace full execution flow
 ```
 
-> If step 2 says "Index is stale" → run `node .gitnexus/run.cjs analyze` in terminal.
+> If step 2 says "Index is stale" → run `bash scripts/install-gitnexus-plus.sh` from the project root (never a bare `analyze`).
 
 ## Checklist
 

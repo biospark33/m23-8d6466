@@ -301,11 +301,19 @@ describe("dispatch memory-key provision leg (M2.2 / DD-16)", () => {
 
   test("gateway URL with a space → env-file-invalid refusal (NOT a kg-banks-unresolved skip), no ledger row", async () => {
     // F-007/F-008 grammar: a URL whose value could inject env entries. F-005:
-    // the config assert sits BEFORE the banks block, so the refusal fires
-    // while NO key exists and propagates to dispatch's key-failure handling —
-    // the same treatment a provider-key delivery failure gets.
+    // the config assert is PRE-ADMISSION (beside the manifest/roster
+    // validation, review round) AND re-checked pre-mint in the leg, so the
+    // refusal fires while NO key exists and — the pre-admission point — BEFORE
+    // a billable box is provisioned. It propagates to dispatch's key-failure
+    // handling: the same treatment a provider-key delivery failure gets.
     process.env.QDS_KG_GATEWAY_URL = "http://127.0.0.1:8099 /injected=1";
     captureDeliveries();
+    let boxesCreated = 0;
+    const originalCreate = driver.create.bind(driver);
+    driver.create = async (name: string, tag?: string) => {
+      boxesCreated += 1;
+      return originalCreate(name, tag);
+    };
     let refused: unknown;
     try {
       await dispatch(validBrief(), deps());
@@ -318,9 +326,11 @@ describe("dispatch memory-key provision leg (M2.2 / DD-16)", () => {
     // Never a skip: the refusal pre-dates the banks resolution AND the mint.
     expect(entries.filter((e) => e.event === "memgate-skip")).toHaveLength(0);
     expect(openLedger().listIssued()).toHaveLength(0);
-    // Only the provider key's delivery ran — the memory leg never reached one.
+    // Pre-admission: neither delivery ran, and no box was ever created — the
+    // position's entire point.
     expect(memoryDeliveries()).toHaveLength(0);
-    expect(providerDeliveries()).toHaveLength(1);
+    expect(providerDeliveries()).toHaveLength(0);
+    expect(boxesCreated).toBe(0);
   });
 
   // ─── (3) delivery failure → INV-MG-2 compensation ────────────────────────────

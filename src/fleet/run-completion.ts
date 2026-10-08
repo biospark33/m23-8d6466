@@ -309,15 +309,36 @@ export async function teardownMemoryKey(
     return;
   }
   const gateway = memgateDeps({ env, ledgerPath }); // the WRITABLE open — refusal throws, fail-closed
-  for (const tokenId of tokenIds) {
-    // "revoked" and "already-gone" both satisfy INV-M2-4 (L4's dispatch
-    // compensation may have revoked first). "none" is the scan→revoke race —
-    // the gateway re-read the issuance (gateway.ts :241) and the row is gone;
-    // the ledger is append-only, so the honest reading is
-    // already-gone-with-audit — never an error. The gateway's own
-    // memgate-revoke / memgate-verify-revoked lines are the per-token record:
-    // this story adds no second vocabulary for the same lifecycle.
-    revokeRunMemoryKey(gateway, { tokenId, requestId: opts.requestId });
+  try {
+    for (const tokenId of tokenIds) {
+      // "revoked" and "already-gone" both satisfy INV-M2-4 (L4's dispatch
+      // compensation may have revoked first). "none" is the scan→revoke race —
+      // the gateway re-read the issuance (gateway.ts :241) and the row is gone;
+      // the ledger is append-only, so the honest reading is
+      // already-gone-with-audit — never an error. The gateway's own
+      // memgate-revoke / memgate-verify-revoked lines are the per-token record:
+      // this story adds no second vocabulary for the same lifecycle.
+      revokeRunMemoryKey(gateway, { tokenId, requestId: opts.requestId });
+    }
+  } finally {
+    // The writable open owns a ledger handle: close it on every path so a
+    // mid-loop revoke fault cannot leak it. Guarded close — a close fault is a
+    // line, never a mask for the revoke fault above, and never a teardown
+    // fault of its own: every token is revoke-VERIFIED through this same
+    // connection before the close (INV-M2-4 is already satisfied), so there is
+    // no live key a close fault could be about.
+    try {
+      gateway.ledger.close();
+    } catch (closeErr) {
+      observeLine(opts.requestId, {
+        runId,
+        event: "memgate-ledger-close-failed",
+        error: {
+          code: "ledger-close-failed",
+          message: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        },
+      });
+    }
   }
 }
 

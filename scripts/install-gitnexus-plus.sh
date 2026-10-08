@@ -352,6 +352,14 @@ for name in $GITNEXUS_SKILLS; do
   fi
 done
 
+# The version the skill files' package-invocation fallbacks pin to: the index
+# contract's expected CLI version — the same pin `contract.test.ts` alarms on —
+# so a contract bump (the upgrade ritual's step 4/5) is the ONLY edit needed to
+# move the skill pins. Falls back to a literal for the tests' temp roots, where
+# tests/gitnexus/gitnexus-cli-contract.json does not exist.
+PINNED_CLI_VERSION="$(sed -n 's/.*"expectedCliVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$REPO_ROOT/tests/gitnexus/gitnexus-cli-contract.json" 2>/dev/null | head -1)"
+: "${PINNED_CLI_VERSION:=1.6.12}"
+
 # Repo-local edits to the bundled skills: upstream tells agents to run a bare
 # `analyze` on a stale index, which skips this repo's transient .gitnexusignore
 # negation (see section 2). Point them at this script instead. Idempotent.
@@ -363,14 +371,40 @@ localize_gitnexus_skills() {
     # Same class of upstream instruction: the missing-runner recovery in the
     # gitnexus-cli skill says "(Re)generate it with `npx gitnexus analyze`" — a
     # bare analyze that drops the fixture negation. Rewrite it to this script,
-    # keeping the npx forms only as the CLI-itself-missing fallback. Guarded so
-    # the rewrite runs once per file (grep for the replacement's marker).
+    # keeping the npx forms only as the CLI-itself-missing fallback — pinned to
+    # the contract version, never a floating latest (review round: unpinned
+    # `npx gitnexus` / `gitnexus@latest` in recovery text invites a CLI newer
+    # than the adopted contract into a recovery path). Guarded so the rewrite
+    # runs once per file (grep for the replacement's marker).
     if ! grep -q 'Run the repo installer' "$f"; then
       # The pattern is split around \Q so the `@latest` sits outside the
       # quotemeta region (inside \Q..\E an escaped-at still fails to match —
-      # measured, not assumed).
-      perl -0pi -e 's{\Q(Re)generate it with `npx gitnexus analyze` from the project root, or `bunx gitnexus\E\@latest analyze` on a bun-only machine.}{Run the repo installer: `bash scripts/install-gitnexus-plus.sh` from the project root (analyze-only: `GITNEXUS_SKIP_INSTALL=1 bash scripts/install-gitnexus-plus.sh`). It rebuilds the index AND the runner while keeping this repo'"'"'s transient `.gitnexusignore` negation. Only when the installer reports the `gitnexus` CLI itself missing: (Re)generate the runner with `npx gitnexus analyze` from the project root, or `bunx gitnexus\@latest analyze` on a bun-only machine.}g' "$f"
+      # measured, not assumed). The `\$VERSION`-spliced @ signs are escaped as
+      # \@ in the replacement: unescaped, perl interpolates `@1` (of @1.6.12)
+      # as an empty array slice and the pin comes out `.6.12` — measured, not
+      # assumed, on the first localization pass with the splice in place.
+      perl -0pi -e 's{\Q(Re)generate it with `npx gitnexus analyze` from the project root, or `bunx gitnexus\E\@latest analyze` on a bun-only machine.}{Run the repo installer: `bash scripts/install-gitnexus-plus.sh` from the project root (analyze-only: `GITNEXUS_SKIP_INSTALL=1 bash scripts/install-gitnexus-plus.sh`). It rebuilds the index AND the runner while keeping this repo'"'"'s transient `.gitnexusignore` negation. Only when the installer reports the `gitnexus` CLI itself missing: (Re)generate the runner with `npx gitnexus\@'"$PINNED_CLI_VERSION"' analyze` from the project root, or `bunx gitnexus\@'"$PINNED_CLI_VERSION"' analyze` on a bun-only machine — pinned to this repo'"'"'s index-contract version (`tests/gitnexus/gitnexus-cli-contract.json`), never a floating `latest`.}g' "$f"
     fi
+    # Pin the REMAINING package invocations the rewrites above don't touch: the
+    # npm-11.x fallback sentence's `@latest` tags, the `npm i -g gitnexus`
+    # install (pinned at install time — `(then `gitnexus analyze`)` is the
+    # installed binary and stays bare), and the impact-analysis missing-runner
+    # note's bare `npx gitnexus`. Idempotent without a guard: after the rewrite
+    # the patterns no longer match. Same \@ escaping as above.
+    perl -pi -e 's{gitnexus\@latest}{gitnexus\@'"$PINNED_CLI_VERSION"'}g; s{`npx gitnexus`}{`npx gitnexus\@'"$PINNED_CLI_VERSION"'`}g; s{`npm i -g gitnexus`}{`npm i -g gitnexus\@'"$PINNED_CLI_VERSION"'`}g' "$f"
+    # Review round: the impact-analysis workflow's step 0 gains the CLI
+    # repository-binding fallback and step 2 the CLI impact-response path (use
+    # affected_processes/affected_modules only on a RESOLVED target). Scoped to
+    # this one skill by the loop's own per-file iteration + these lines being
+    # absent from the other five templates. Idempotent: neither pattern matches
+    # its own replacement (non-whitespace text now sits between `{}` / the
+    # resource URI and the arrow).
+    case "$f" in
+      */gitnexus-impact-analysis/SKILL.md)
+        perl -pi -e 's{^0\. list_repos \{\}\s+→ Bind repo \(and worktree\)$}{0. list_repos {} (CLI fallback: `node .gitnexus/run.cjs list`)  → Bind repo (and worktree)}m' "$f"
+        perl -pi -e 's{^2\. READ gitnexus://repo/\{name\}/processes\s+→ Check affected execution flows$}{2. READ gitnexus://repo/\{name\}/processes — or, on the CLI impact payload, `affected_processes` / `affected_modules`, but ONLY once the target resolved: an ambiguous target prints ranked candidates instead of an impact result, so disambiguate (file_path/kind/uid) before trusting those fields}m' "$f"
+        ;;
+    esac
   done
   f="$SKILLS_ROOT/gitnexus-cli/SKILL.md"
   if [ -f "$f" ] && ! grep -q 'QDS-Factory reindex rule' "$f"; then

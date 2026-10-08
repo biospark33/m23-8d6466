@@ -1307,6 +1307,8 @@ class DispatchContext {
         return `the fill call was ABANDONED, not cancelled: the manifest and run context may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "deliver":
         return `the deliver call was ABANDONED, not cancelled: the provider key may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
+      case "memory-deliver":
+        return `the memory-deliver call was ABANDONED, not cancelled: the per-run memory key may still be written into the billable box after this refusal (this dispatch's compensation has already attempted the minted key's revoke — the box copy is what tearing down disposes of). Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "gate":
         return `the gate call was ABANDONED, not cancelled: the probe may still finish on the billable box after this refusal, and its outcome reaches no record this dispatch writes — inspect the box directly, then tear the run down: ${teardown}`;
       default:
@@ -2109,6 +2111,15 @@ function memoryDeliverScript(envFile: string): string {
   );
 }
 
+/** The three DD-28.23/M2.1 gateway vars, present-and-non-empty (empty string is
+ * absent — memgateDeps' own rule). One predicate so the pre-admission grammar
+ * gate and the in-leg skip path cannot disagree about "configured". */
+function memoryGatewayConfigured(env: Record<string, string | undefined>): boolean {
+  return [MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, QDS_KG_GATEWAY_URL].every(
+    (k) => env[k] !== undefined && env[k] !== "",
+  );
+}
+
 /** ONE structured skip line through the module's own log channel — the countable
  * signal that the memory lane is OFF for this dispatch (the in-box `no-auth`
  * refusal is the in-box half of the same visibility). */
@@ -2146,10 +2157,7 @@ async function mintAndDeliverMemoryKey(
   // fail-closed IN-BOX (the extension refuses `no-auth` visibly), never a
   // dispatch failure for a lane the operator did not configure.
   const env = process.env as Record<string, string | undefined>;
-  const missing = [MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, QDS_KG_GATEWAY_URL].find(
-    (k) => env[k] === undefined || env[k] === "",
-  );
-  if (missing !== undefined) {
+  if (!memoryGatewayConfigured(env)) {
     // F-008: the reason token is the shared kebab grammar (run-completion's
     // teardown leg emits the same `env-absent`) — not the raw var name.
     emitMemgateSkip(requestId, runId, "env-absent");
@@ -2176,7 +2184,14 @@ async function mintAndDeliverMemoryKey(
   let banks: string[] | undefined;
   try {
     const lister = deps.memoryBankList ?? new HindsightClient();
-    const existing = extractExistingBankIds(await lister.listBanks());
+    // Ceiling-bounded like every other dispatch await (within's own list is the
+    // whole of it — an unbounded await here could run the leg past the budget).
+    // A timeout (like any list fault) lands in the catch below and folds into
+    // the SAME kg-banks-unresolved skip — the lane's documented posture for an
+    // unreachable bank list; the step's duration is in ctx.timings either way.
+    const existing = extractExistingBankIds(
+      await ctx.within("memory-banks", () => lister.listBanks()),
+    );
     const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), existing);
     if (repoBankId !== null) banks = [...new Set([repoBankId, COLLECTIVE_BANK_ID])];
   } catch {
@@ -2199,7 +2214,13 @@ async function mintAndDeliverMemoryKey(
     // ignored by both shell sourcing and systemd EnvironmentFile (duplicates
     // stay last-wins).
     const stdin = `\n${QDS_KG_RECALL_KEY}=${minted.keyMaterial}\n${QDS_KG_GATEWAY_URL}=${gatewayUrl}\n`;
-    const res = await deps.driver.exec(vm.name, ["sh", "-c", memoryDeliverScript(target)], stdin);
+    // Ceiling-bounded like the provider leg's `deliver` step. A timeout leaves
+    // the write's completion UNKNOWN — the catch below revokes the minted key
+    // either way, so an abandoned delivery cannot leave a live, unowned key
+    // behind (INV-MG-2 covers abandonment exactly as it covers a fault).
+    const res = await ctx.within("memory-deliver", () =>
+      deps.driver.exec(vm.name, ["sh", "-c", memoryDeliverScript(target)], stdin),
+    );
     const mode = res.stdout.trim();
     if (res.exitCode !== 0 || mode !== "600") {
       throw new MemgateError(
@@ -2229,6 +2250,27 @@ async function mintAndDeliverMemoryKey(
       }
     }
     throw e;
+  } finally {
+    // memgateDeps owns a WRITABLE ledger handle: close it on every path (the
+    // bracket above cannot — its catch rethrows). Guarded: a close fault is a
+    // line, never a mask for the leg's own outcome, and never a fault of its
+    // own — mint/deliver/compensation semantics are already decided above, and
+    // on the error path the original error is what must reach dispatch's key-
+    // failure handling.
+    try {
+      mg.ledger.close();
+    } catch (closeErr) {
+      emitBestEffort(mg, {
+        requestId,
+        runId,
+        event: "memgate-ledger-close-failed",
+        status: "error",
+        error: {
+          code: closeErr instanceof MemgateError ? closeErr.code : "ledger-close-failed",
+          message: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        },
+      });
+    }
   }
   // tokenId is NOT persisted for teardown: the teardown leg re-derives the
   // run's key(s) from the memgate ledger by runId (M2.2's run-completion half).
@@ -2883,6 +2925,40 @@ export async function dispatch(
 
   // ── 3. manifest + roster (INV-2: pure validation, so it belongs HERE) ──────
   const { loaded, rosterPath, manifestBudgetMs } = loadManifestAndRoster(ctx, deps, valid);
+
+  // M2.2 (review round): the memory leg's delivery-config grammar ALSO runs
+  // HERE — pure validation, pre-admission like the manifest's — gated on the
+  // same memory-configuration-present condition the skip path uses, so an
+  // invalid gateway URL (or delivery path) refuses BEFORE a billable box is
+  // provisioned or any key is delivered. The in-leg re-check inside
+  // mintAndDeliverMemoryKey stays as defense in depth: both sides resolve the
+  // same `envFileFor(driver) ?? KEY_ENV_FILE` target and the same env var, so
+  // they cannot disagree — the second check exists for the day one of them
+  // drifts.
+  {
+    const memEnv = process.env as Record<string, string | undefined>;
+    if (memoryGatewayConfigured(memEnv)) {
+      try {
+        assertDeliveryConfigSafe(
+          envFileFor(deps.driver) ?? KEY_ENV_FILE,
+          memEnv[QDS_KG_GATEWAY_URL] as string,
+        );
+      } catch (e) {
+        // The assert's own type is a MemgateError, and this region sits BEFORE
+        // the wrapping try below — a non-FleetError would escape bare (the
+        // pre-try boundary's own rule). Re-emit it as the SAME typed refusal
+        // the leg's in-leg re-check produces through the key-failure wrapper:
+        // same code, same message, same remediation — exit 2, because nothing
+        // has run yet.
+        throw refuse(
+          2,
+          e instanceof MemgateError ? e.code : "env-file-invalid",
+          e instanceof Error ? e.message : String(e),
+          e instanceof MemgateError ? e.remediation : "pass a plain delivery path and a plain http(s) gateway URL",
+        );
+      }
+    }
+  }
 
   // ── 4. runId (dispatcher-owned; AC2 opts.runId only accepts minted ids) ────
   // `MintedRunId` already refuses a caller-invented literal at compile time; the
