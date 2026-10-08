@@ -10,8 +10,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import ts from "typescript";
 import { makeJevProvider } from "../../src/judgment/adapters/jev.ts";
 import { makeMockProvider } from "../../src/judgment/adapters/mock.ts";
 import * as providerModule from "../../src/judgment/provider.ts";
@@ -129,36 +130,48 @@ describe("maker reach — seam-private, repo-wide", () => {
   const ROOT = join(import.meta.dir, "..", "..");
   const JUDGMENT = join(ROOT, "src", "judgment");
   const PRIVATE = [join(JUDGMENT, "provider.ts"), join(JUDGMENT, "adapters")];
-  const MAKER_NAMES = /\b(JUDGMENT_PROVIDERS|resolveProvider|makeJevProvider|makeMockProvider)\b/;
+  const MAKER_NAMES = /^(JUDGMENT_PROVIDERS|resolveProvider|makeJevProvider|makeMockProvider)$/;
 
-  /** Prose may name a maker (to say why it is private); only code counts. */
-  function code(src: string): string {
-    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  /** Compare module paths the way the resolver does: extension-less, case-folded (macOS). */
+  function norm(p: string): string {
+    return p.replace(/\.(ts|mts|tsx|js|mjs)$/, "").toLowerCase();
   }
+  const PRIVATE_NORM = PRIVATE.map(norm);
 
   function trackedTs(): string[] {
-    const r = spawnSync("git", ["ls-files", "-z", "--", "*.ts", "*.mts", "*.tsx"], { cwd: ROOT, encoding: "utf8" });
-    return r.stdout.split("\0").filter(Boolean).map((f) => join(ROOT, f));
+    const r = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.ts", "*.mts", "*.tsx"], {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+    return r.stdout
+      .split("\0")
+      .filter(Boolean)
+      .map((f) => join(ROOT, f))
+      .filter((f) => existsSync(f));
   }
 
-  function specifiers(src: string): string[] {
-    return [
-      ...src.matchAll(/(?:import|export)\b[^"';]*?\bfrom\s*["']([^"']+)["']/g),
-      ...src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/g),
-      ...src.matchAll(/\brequire\s*\(\s*["']([^"']+)["']/g),
-      ...src.matchAll(/(?:^|\n)\s*import\s*["']([^"']+)["']/g),
-    ].map((m) => m[1] ?? "");
-  }
-
+  /** AST walk: every module edge (static, re-export, import(), require()) and every maker identifier. */
   function reaches(file: string, src: string): string[] {
+    const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true);
     const hits: string[] = [];
-    for (const spec of specifiers(src)) {
-      if (!spec.startsWith(".")) continue;
-      const target = resolve(dirname(file), spec);
-      if (PRIVATE.some((p) => target === p || target.startsWith(`${p}/`))) hits.push(`${relative(ROOT, file)} imports ${spec}`);
-    }
-    const name = code(src).match(MAKER_NAMES);
-    if (name) hits.push(`${relative(ROOT, file)} names ${name[1]}`);
+    const edge = (spec: string): void => {
+      if (!spec.startsWith(".")) return;
+      const target = norm(resolve(dirname(file), spec));
+      if (PRIVATE_NORM.some((p) => target === p || target.startsWith(`${p}/`))) hits.push(`${relative(ROOT, file)} imports ${spec}`);
+    };
+    const visit = (node: ts.Node): void => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        edge(node.moduleSpecifier.text);
+      } else if (ts.isCallExpression(node) && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])) {
+        if (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require")) {
+          edge(node.arguments[0].text);
+        }
+      } else if (ts.isIdentifier(node) && MAKER_NAMES.test(node.text)) {
+        hits.push(`${relative(ROOT, file)} names ${node.text}`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
     return hits;
   }
 
@@ -168,6 +181,12 @@ describe("maker reach — seam-private, repo-wide", () => {
     expect(reaches(f, 'const m = await import("../src/judgment/adapters/jev.ts");').length).toBe(1);
     expect(reaches(f, 'export * from "../src/judgment/provider.ts";').length).toBe(1);
     expect(reaches(f, 'import { JudgmentClient } from "../src/judgment/index.ts";')).toEqual([]);
+    // resolver-equivalent spellings, and text inside strings/comments is not code
+    expect(reaches(f, 'export * from "../src/judgment/provider";').length).toBe(1);
+    expect(reaches(f, 'import * as p from "../src/judgment/provider.js";').length).toBe(1);
+    expect(reaches(f, 'export * from "../src/Judgment/Provider.ts";').length).toBe(1);
+    expect(reaches(f, 'const s = "a//"; resolveProvider("jev");').length).toBe(1);
+    expect(reaches(f, '// resolveProvider is seam-private\nconst s = "resolveProvider";')).toEqual([]);
   });
 
   test("outside src/judgment/ and tests/judgment/, nothing reaches the makers", () => {
@@ -189,7 +208,7 @@ describe("maker reach — seam-private, repo-wide", () => {
   test("inside src/judgment/, only client.ts reaches the registry (adapters are made by the seam alone)", () => {
     const users = readdirSync(JUDGMENT, { recursive: true, encoding: "utf8" })
       .filter((f) => f.endsWith(".ts") && f !== "provider.ts" && !f.startsWith("adapters"))
-      .filter((f) => /\bresolveProvider\(|\bJUDGMENT_PROVIDERS\b/.test(code(readFileSync(join(JUDGMENT, f), "utf8"))));
+      .filter((f) => reaches(join(JUDGMENT, f), readFileSync(join(JUDGMENT, f), "utf8")).some((h) => / names (resolveProvider|JUDGMENT_PROVIDERS)$/.test(h)));
     expect(users).toEqual(["client.ts"]);
   });
 

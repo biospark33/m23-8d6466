@@ -105,18 +105,32 @@ Extract the one pluggable step of `JudgmentClient.judge()` — **transport: `Jud
 
 ## Definition of Done
 
-- [ ] **Impl:** registry + two adapters + seam extraction land with `client.ts`'s public surface unchanged and `observe-round.ts`/`ab-report.ts` unmodified (AC1, AC2).
-- [ ] **Contract:** `TYPESAFE_MODEL` is still the only model literal under `src/judgment/` (grep test), the contract json is untouched, and the drift alarm still fires by name on a planted second literal (AC3).
-- [ ] **Test (adapter contract):** one suite, parameterized over the registry, covers both adapters; each of the three negative controls (policy bypass, unregistered literal, mock divergence) has a named failing case in the suite (AC1, AC3, AC4).
-- [ ] **Test (registry closure):** a runtime registration attempt is impossible by construction and asserted impossible by test; `resolveProvider` refuses unknown ids typed (AC2).
-- [ ] **Security:** `git diff` shows zero changed lines in `egress.ts`, `ceiling.ts`, `envelope.ts`, `emit.ts`, `schemas.ts`; zero new entries in `package.json`; the recursive fence test is green (AC5, INV-J2/J4).
-- [ ] **Test (probe gate):** probe refuses without key or without `QDS_LIVE_PROBE_CONFIRMED=1` before building any request; the registry path is asserted (AC6).
-- [ ] **Integration:** `bun test tests/judgment/ tests/scripts/corpus/` green — existing suites pass with additive-only edits, proving behavior-identical extraction.
+- [x] **Impl:** registry + two adapters + seam extraction land with `client.ts`'s public surface unchanged and `observe-round.ts`/`ab-report.ts` unmodified (AC1, AC2).
+- [x] **Contract:** `TYPESAFE_MODEL` is still the only model literal under `src/judgment/` (grep test), the contract json is untouched, and the drift alarm still fires by name on a planted second literal (AC3).
+- [x] **Test (adapter contract):** one suite, parameterized over the registry, covers both adapters; each of the three negative controls (policy bypass, unregistered literal, mock divergence) has a named failing case in the suite (AC1, AC3, AC4).
+- [x] **Test (registry closure):** a runtime registration attempt is impossible by construction and asserted impossible by test; `resolveProvider` refuses unknown ids typed (AC2).
+- [x] **Security:** `git diff` shows zero changed lines in `egress.ts`, `ceiling.ts`, `envelope.ts`, `emit.ts`, `schemas.ts`; zero new entries in `package.json`; the recursive fence test is green (AC5, INV-J2/J4).
+- [x] **Test (probe gate):** probe refuses without key or without `QDS_LIVE_PROBE_CONFIRMED=1` before building any request; the registry path is asserted (AC6).
+- [x] **Integration:** `bun test tests/judgment/ tests/scripts/corpus/` green — existing suites pass with additive-only edits, proving behavior-identical extraction.
 - [ ] **Test (e2e demo — MANDATORY):** one operator-gated Jev-live probe round through the registered `jev` adapter — canonical machine-state call, contract diff clean, spend printed, evidence JSON under `_bmad-output/evidence/v6a/j1/`; offline suite stays keyless-green.
 
 ## Dev Agent Record
 
-*(written at implementation time)*
+**Branch:** `feature/j1-judgmentprovider-seam` (qds-dev J1, 2026-10-08). BMad plugin absent on the host → qds-dev ran BMad-off (implementation HITL, TDD pre-check kept); the three review layers (blind hunter / edge-case hunter / acceptance auditor) were run as parallel sub-agents, three rounds before the PR.
+
+**What landed.** `src/judgment/provider.ts` (interface `{ id, ask }`, frozen `JUDGMENT_PROVIDERS` of two makers, `resolveProvider` via `Object.hasOwn`, typed `UnknownProviderError` code `unknown-provider`); `adapters/jev.ts` (the moved `post()`, verbatim semantics) and `adapters/mock.ts` (the moved `mockResponse`, a zero-arg maker); `client.ts` resolves its mode's maker from the registry and keeps the whole neutral-layer policy ahead of the single `ask()`; the judge log line gains `provider`. Neutral layer (`egress/ceiling/envelope/emit/schemas.ts`), `package.json`, `bun.lock`, `observe-round.ts`, `ab-report.ts`, the contract json and `src/providers/` are byte-identical to `dev`; no buildId walk input moved (offline digest identical to `dev`'s).
+
+**Deviations from the spec text (each justified, reviewed in rounds 1–3):**
+1. **`index.ts` exports a narrower provider surface than "export the provider surface" implies** — `JUDGMENT_PROVIDER_IDS`, `UnknownProviderError` and the types, never `JUDGMENT_PROVIDERS`/`resolveProvider`. A made adapter's `ask()` skips the egress choke, the ceiling and the strict parse, so the makers stay seam-private. The probe (and `observe-round.ts`, unmodified) reach the wire through the registry inside `JudgmentClient`'s constructor — the E2E Slice's "registry-resolved adapter". Enforced by a repo-wide AST reach test (static/re-export/`import()`/`require()` edges + maker identifiers, resolver-normalized paths), a client-only registry test, and the probe's no-route test.
+2. **`src/judgment/errors.ts` (new, not in Files to Modify)** — holds `JudgmentHttpError` (moved, re-exported from `client.ts` as the same class), `JudgmentSchemaError` (a 502 `JudgmentHttpError` subclass for strict-parse / non-JSON bodies) and `UnknownProviderError`. A leaf module, so the seam and the jev adapter share the errors without a `provider.ts ↔ adapters` import cycle.
+3. **`JudgmentClient` gains `readonly providerId`** — additive; required by the Observability Contract's `provider` log field and the probe's pre-fire line. `readonly apiKey` stays public (pre-existing surface, unchanged by design).
+4. **`client.ts` imports `DEFAULT_MAX_ATTEMPTS` from `adapters/jev.ts`** — a constant re-export so `contract.test.ts`'s existing import from `client.ts` is unchanged; the retry posture lives with the transport that owns it.
+5. **`live-probe.ts` is more than "adds only"** — exit codes (gate 1, drift 2, other errors 1), the gate/drift messages and "gate refuses before any request exists" are unchanged and tested. Added: `--evidence-dir` (validated writable before the paid request; one ms+requestId-stamped key-free JSON per round — clean, drift, HTTP/transport error or post-response failure; a failed write dumps the record to stderr without changing the exit code), a pre-fire provider + spend line, a `ProbeOptions.provenanceDir` test seam, and argv validation (refused before the gate). **Drift is now `JudgmentSchemaError` only** — on `dev` any 502 (incl. a DNS failure or an upstream 502) exited 2 as CONTRACT DRIFT; now those are errors (exit 1) and only a body that arrived but is not contract-shaped is drift. Under `TYPESAFE_MOCK=1` the console verdict and evidence say MOCK / `transport: "mock"`, `endpoint: null`.
+6. **Two pre-existing `probe-gate.test.ts` lines** now pass a tmp `provenanceDir` — on `dev` they wrote untracked files into the real `_bmad-output/judgment/provenance/`. Behaviour-preserving (the unmodified `dev` probe-gate suite also passes against this branch); `client.test.ts` has zero diff.
+
+**Verification.** `bun test tests/judgment/ tests/scripts/corpus/ tests/scripts/judgment/` green; `bunx tsc --noEmit` 0; `bun run lint` exit 0; a 12-mutant negative-control battery (second model literal, `registerProvider`, mock boolean `noul`, mock missing usage key, adapter redaction import, adapter validation import, interface growth, adapter → `providers/`, probe registry bypass, barrel maker export, adapter dynamic import, literal hidden after a comment opener in a string) — every mutant killed by its named suite; full `bun test` introduces zero failures beyond `origin/dev`'s 34 pre-existing ones; the probe CLI runs as a real process (refuses without confirm; mock run prints MOCK).
+
+**Live round (DoD e2e):** `TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts --evidence-dir _bmad-output/evidence/v6a/j1` — operator-gated (handoff §8); status recorded in the DoD below.
 
 ## Review Findings (post-merge)
 

@@ -16,7 +16,7 @@
  */
 
 import { httpRequest, retryAfterMs } from "../../lib/http.ts";
-import { JudgmentHttpError } from "../errors.ts";
+import { JudgmentHttpError, JudgmentSchemaError } from "../errors.ts";
 import type { JudgmentProvider } from "../provider.ts";
 import type { JudgmentRequest } from "../schemas.ts";
 
@@ -74,7 +74,7 @@ export function makeJevProvider(config: JevProviderConfig): JudgmentProvider {
       try {
         return text.length === 0 ? {} : JSON.parse(text);
       } catch {
-        throw new JudgmentHttpError(502, `TypeSafe returned a non-JSON body: ${truncate(text)}`, requestId, truncate(text));
+        throw new JudgmentSchemaError(`TypeSafe returned a non-JSON body: ${truncate(text)}`, requestId, truncate(text));
       }
     },
   });

@@ -44,7 +44,7 @@ const BASE = "http://judgment.test";
 
 const SAVED = { mock: process.env.TYPESAFE_MOCK, key: process.env.TYPESAFE_API_KEY };
 type FetchImpl = typeof globalThis.fetch;
-const originalFetch: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl;
+const originalFetch: FetchImpl = globalThis.fetch; // the original object, restored as-is
 
 interface Recorded {
   url: string;

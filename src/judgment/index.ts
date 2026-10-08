@@ -11,6 +11,7 @@ export {
   JudgmentClient,
   JudgmentConfigError,
   JudgmentHttpError,
+  JudgmentSchemaError,
   TYPESAFE_API_URL,
   TYPESAFE_MODEL,
   type JudgeOptions,

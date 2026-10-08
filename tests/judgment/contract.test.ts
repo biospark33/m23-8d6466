@@ -27,6 +27,7 @@ import { DEFAULT_MAX_EGRESS_CLASS } from "../../src/judgment/egress.ts";
 import { JUDGMENT_PROVIDER_IDS, resolveProvider } from "../../src/judgment/provider.ts";
 import {
   ChoiceQuestionSchema,
+  type JudgmentRequest,
   JudgmentRequestSchema,
   makeJudgmentResponseSchema,
   ScoreQuestionSchema,
@@ -177,35 +178,26 @@ const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
 
 /**
  * Every `jev-…` string literal in a source text — the model-id family.
- * Tokenized with the TypeScript scanner, so comments (schemas.ts's doc
- * comment names the banned `jev-latest` alias on purpose) are skipped and a
- * `/*` or `//` INSIDE a string can never hide the literal after it.
+ * Parsed to an AST, so comments are skipped (schemas.ts's doc comment names
+ * the banned `jev-latest` alias on purpose) and no regex literal, `/*` or
+ * `//` inside a string can desynchronize the scan.
  */
 function modelLiterals(source: string): string[] {
-  const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, source);
+  const sf = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
   const found: string[] = [];
-  const LITERALS = new Set([
-    ts.SyntaxKind.StringLiteral,
-    ts.SyntaxKind.NoSubstitutionTemplateLiteral,
-    ts.SyntaxKind.TemplateHead,
-    ts.SyntaxKind.TemplateMiddle,
-    ts.SyntaxKind.TemplateTail,
-  ]);
-  // Brace stack: a `}` closes a template substitution only when the innermost
-  // open brace is a `${` — only then is the text after it template text.
-  const braces: ("block" | "template")[] = [];
-  for (let k = scanner.scan(); k !== ts.SyntaxKind.EndOfFileToken; k = scanner.scan()) {
-    if (k === ts.SyntaxKind.OpenBraceToken) braces.push("block");
-    else if (k === ts.SyntaxKind.TemplateHead) braces.push("template");
-    else if (k === ts.SyntaxKind.CloseBraceToken) {
-      if (braces.pop() === "template") {
-        k = scanner.reScanTemplateToken(false);
-        if (k === ts.SyntaxKind.TemplateMiddle) braces.push("template");
-      }
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    ) {
+      for (const m of node.text.matchAll(/\bjev-[^\s"'`]*/g)) found.push(m[0]);
     }
-    if (!LITERALS.has(k)) continue;
-    for (const m of scanner.getTokenValue().matchAll(/\bjev-[^\s"'`]*/g)) found.push(m[0]);
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
   return found;
 }
 
@@ -227,6 +219,7 @@ describe("contract pin: one model literal behind the provider seam (J1 AC3)", ()
     expect(modelLiterals('const g = "src/**/*.ts"; const m = "jev-2"; const e = "*/";')).toEqual(["jev-2"]);
     expect(modelLiterals("const t = `a ${x} jev-3 ${y} b`;")).toEqual(["jev-3"]);
     expect(modelLiterals("function f() { if (a) { b(); } } const m = `${{ k: 1 }.k} jev-4`;")).toEqual(["jev-4"]);
+    expect(modelLiterals('const r = /"/; const m = "jev-5";')).toEqual(["jev-5"]);
   });
 
   test("TYPESAFE_MODEL is the ONLY model literal anywhere under src/judgment/ (recursive, adapters included)", () => {
@@ -243,7 +236,7 @@ describe("contract pin: one model literal behind the provider seam (J1 AC3)", ()
   });
 
   test("every registered adapter's body carries TYPESAFE_MODEL — jev forwards the seam's request verbatim, mock answers with the pin", async () => {
-    const request = { model: TYPESAFE_MODEL, state: "s", questions: { q: { type: "noul" as const, instructions: "i" } } };
+    const request: JudgmentRequest = { model: TYPESAFE_MODEL, state: "s", questions: { q: { type: "noul", instructions: "i" } } };
     const saved = globalThis.fetch;
     let wire: { model?: string } | undefined;
     globalThis.fetch = (async (_: unknown, init?: RequestInit) => {

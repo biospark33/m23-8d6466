@@ -21,13 +21,16 @@
  * Usage:  TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts [--evidence-dir <dir>]
  *
  * v6 J1: the probe reaches the wire only through the JudgmentProvider
- * registry — the live-mode client resolves its transport there, and the probe
- * refuses before fire unless the registry-resolved provider is
- * PROBE_PROVIDER (`jev`). It never imports an adapter module or hand-builds a
+ * registry — the live-mode client resolves its transport there, and the
+ * client's mode is the round's transport (`live` = the registry's `jev`
+ * adapter). It never imports an adapter module or hand-builds a
  * transport (the adapter makers are not even public). The serving provider
  * is printed before fire with the spend line; `--evidence-dir` (validated
  * writable BEFORE the paid request) gets one timestamped, key-free evidence
- * JSON per round — clean, drift or HTTP error alike. J1's round:
+ * JSON per round — clean, drift, HTTP/transport error or post-response
+ * failure alike. Only a body that arrived but is not contract-shaped
+ * (JudgmentSchemaError) is DRIFT (exit 2); a transport failure or upstream
+ * 502 is an error (exit 1). J1's round:
  *
  *   TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts --evidence-dir _bmad-output/evidence/v6a/j1
  *
@@ -40,12 +43,14 @@
  * this probe.
  */
 
-import { accessSync, constants, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  DEFAULT_MAX_ATTEMPTS,
   DEFAULT_PROVENANCE_DIR,
   JudgmentClient,
   JudgmentHttpError,
+  JudgmentSchemaError,
   TYPESAFE_API_URL,
   TYPESAFE_MODEL,
   type JudgmentEnvelope,
@@ -57,9 +62,8 @@ const CONFIRM_ENV = "QDS_LIVE_PROBE_CONFIRMED";
 
 /**
  * The registered adapter this probe proves against the real endpoint (J1
- * AC6). The live-mode client resolves its transport from the closed registry;
- * the probe refuses before fire unless that registry-resolved provider IS
- * this one — so the probe can never prove a different transport by accident.
+ * AC6). The live-mode client resolves it from the closed registry; the probe
+ * names it in the pre-fire line so a round is attributable.
  */
 export const PROBE_PROVIDER: JudgmentProviderId = "jev";
 
@@ -88,11 +92,12 @@ function stamp(d: Date): string {
 /**
  * Validate the evidence dir BEFORE the paid request (create it, prove it is a
  * writable directory) and return the writer. A write that still fails after
- * the spend prints the record to stderr so the round is never lost.
+ * the spend prints the record to stderr and does NOT throw — the round's own
+ * exit code (0 clean / 2 drift / 1 error) must survive an evidence failure.
  */
 function prepareEvidence(dir: string): (record: Record<string, unknown>, requestId: string) => void {
+  if (existsSync(dir) && !statSync(dir).isDirectory()) throw new Error(`--evidence-dir ${dir} is not a directory`);
   mkdirSync(dir, { recursive: true });
-  if (!statSync(dir).isDirectory()) throw new Error(`--evidence-dir ${dir} is not a directory`);
   accessSync(dir, constants.W_OK);
   return (record, requestId) => {
     const text = `${JSON.stringify(record, null, 2)}\n`;
@@ -102,7 +107,6 @@ function prepareEvidence(dir: string): (record: Record<string, unknown>, request
       console.log(`[live-probe] evidence written: ${file}`);
     } catch (e) {
       console.error(`[live-probe] evidence write failed (${(e as Error).message}) — record follows:\n${text}`);
-      throw e;
     }
   };
 }
@@ -187,16 +191,12 @@ export async function main(argv: readonly string[] = [], opts: ProbeOptions = {}
   // client's mode is ground truth for what this round actually is.
   const client = new JudgmentClient({ mode: "live", provenanceDir });
   const transport = client.mode;
-  if (transport === "live" && client.providerId !== PROBE_PROVIDER) {
-    console.error(`[live-probe] refusing to run: the live client resolved provider "${client.providerId}", this probe proves "${PROBE_PROVIDER}"`);
-    process.exit(1);
-  }
   // Evidence dir proven writable BEFORE the paid request.
   const writeEvidence = args.evidenceDir ? prepareEvidence(args.evidenceDir) : undefined;
 
   console.log(`[live-probe] endpoint ${TYPESAFE_API_URL}, model pin ${TYPESAFE_MODEL}`);
   console.log(
-    `[live-probe] provider ${client.providerId} (registry-resolved, transport ${transport}); spend: 1 request, ${req.state.length}-char machine-state, cents-class at most (jev-live-r1: 108 requests = $0.00223)`,
+    `[live-probe] provider ${client.providerId} (registry-resolved, transport ${transport}; probe proves ${PROBE_PROVIDER}); spend: 1 judgment (at most ${DEFAULT_MAX_ATTEMPTS} wire attempts on 429/529), ${req.state.length}-char machine-state, cents-class at most (jev-live-r1: 108 requests = $0.00223)`,
   );
   // Scrubbed by construction: no state text, no key, nothing env-derived
   // beyond the provider id. A mock round names no endpoint it never touched.
@@ -212,22 +212,25 @@ export async function main(argv: readonly string[] = [], opts: ProbeOptions = {}
   try {
     env = await client.judge(req.state, req.questions, { egressClass: req.egressClass });
   } catch (e) {
-    if (e instanceof JudgmentHttpError) {
-      // The request was sent (or attempted): record the round before exiting.
-      writeEvidence?.(
-        {
-          ...base,
-          at: new Date().toISOString(),
-          contractDiff: e.status === 502 ? `drift: ${e.message}` : `error: http_${e.status}`,
-          error: { status: e.status, message: e.message },
-          spend: { requests: 1 },
-          envelope: null,
-        },
-        e.requestId,
-      );
-      // A strict-parse failure IS the drift — name it, exit 2.
-      if (e.status === 502) drift(e.message);
-    }
+    // Only a received-but-not-contract-shaped body is DRIFT; a transport
+    // failure or an upstream 502 shares the status but not the meaning.
+    const isDrift = e instanceof JudgmentSchemaError;
+    const err = e as Error;
+    // Every failed round is recorded — HTTP, transport, drift, or a
+    // post-response failure (e.g. the provenance emit) after a paid request.
+    writeEvidence?.(
+      {
+        ...base,
+        at: new Date().toISOString(),
+        contractDiff: isDrift ? `drift: ${err.message}` : `error: ${e instanceof JudgmentHttpError ? `http_${e.status}` : err.name}`,
+        error: { name: err.name, message: err.message, ...(e instanceof JudgmentHttpError ? { status: e.status } : {}) },
+        spend: { judgments: 1, maxWireAttempts: DEFAULT_MAX_ATTEMPTS },
+        envelope: null,
+      },
+      e instanceof JudgmentHttpError ? e.requestId : "unknown",
+    );
+    // A strict-parse / non-JSON failure IS the drift — name it, exit 2.
+    if (isDrift) drift(err.message);
     throw e;
   }
   const d = contractDrift(env);
@@ -236,13 +239,22 @@ export async function main(argv: readonly string[] = [], opts: ProbeOptions = {}
       ...base,
       at: env.created_at,
       contractDiff: d ? `drift: ${d}` : "clean",
-      spend: { requests: 1, input_tokens: env.usage.input_tokens, output_tokens: env.usage.output_tokens },
+      spend: {
+        judgments: 1,
+        maxWireAttempts: DEFAULT_MAX_ATTEMPTS,
+        input_tokens: env.usage.input_tokens,
+        output_tokens: env.usage.output_tokens,
+      },
       envelope: env,
     },
     env.requestId,
   );
   if (d) drift(d);
-  console.log("[live-probe] contract matches. envelope:");
+  console.log(
+    transport === "live"
+      ? "[live-probe] contract matches. envelope:"
+      : "[live-probe] contract matches (MOCK transport — TYPESAFE_MOCK=1 — NOT live evidence). envelope:",
+  );
   console.log(JSON.stringify(env, null, 2));
   console.log(`[live-probe] observed usage: ${env.usage.input_tokens} input / ${env.usage.output_tokens} output tokens`);
   console.log(`[live-probe] provenance entry written under ${provenanceDir}/`);

@@ -21,6 +21,20 @@ export class JudgmentHttpError extends Error {
 }
 
 /**
+ * The response body was received but is not a contract-shaped judgment — the
+ * strict parse refused it, or it was not JSON at all. Still a 502
+ * JudgmentHttpError (callers that branch on status are unchanged); the
+ * subclass is what lets the live probe tell CONTRACT DRIFT apart from a
+ * transport failure or an upstream 502, which share the status.
+ */
+export class JudgmentSchemaError extends JudgmentHttpError {
+  constructor(message: string, requestId: string, bodyText: string) {
+    super(502, message, requestId, bodyText);
+    this.name = "JudgmentSchemaError";
+  }
+}
+
+/**
  * A provider id that is not an own key of the closed registry (J1
  * Observability Contract: typed `unknown-provider`, refused before any
  * request exists).

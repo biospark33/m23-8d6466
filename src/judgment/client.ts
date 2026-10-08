@@ -30,9 +30,9 @@
 import { log, newRequestId, type LogEntry } from "../swarmclaw/log.ts";
 import { DEFAULT_MAX_ATTEMPTS } from "./adapters/jev.ts";
 import { CeilingExceededError, type JudgmentCeiling } from "./ceiling.ts";
-import { detailFromEnvelope, emitProvenance } from "./emit.ts";
+import { DEFAULT_PROVENANCE_DIR, detailFromEnvelope, emitProvenance } from "./emit.ts";
 import { egress, EgressRefusedError, type EgressClass } from "./egress.ts";
-import { JudgmentHttpError } from "./errors.ts";
+import { JudgmentHttpError, JudgmentSchemaError } from "./errors.ts";
 import { resolveProvider, type JudgmentProvider, type JudgmentProviderId } from "./provider.ts";
 import {
   makeJudgmentResponseSchema,
@@ -42,7 +42,7 @@ import {
 } from "./schemas.ts";
 import type { JudgmentEnvelope } from "./envelope.ts";
 
-export { DEFAULT_MAX_ATTEMPTS, JudgmentHttpError, TYPESAFE_MODEL };
+export { DEFAULT_MAX_ATTEMPTS, JudgmentHttpError, JudgmentSchemaError, TYPESAFE_MODEL };
 
 /** Pinned vendor endpoint (handoff §4). `baseUrl` overrides for tests. */
 export const TYPESAFE_API_URL = "https://api.typesafe.ai/v1/systemone";
@@ -121,7 +121,7 @@ export class JudgmentClient {
         : resolveProvider("mock")();
     this.providerId = this.provider.id;
     this.requestId = opts.requestId;
-    this.provenanceDir = opts.provenanceDir ?? "_bmad-output/judgment/provenance";
+    this.provenanceDir = opts.provenanceDir ?? DEFAULT_PROVENANCE_DIR;
     this.warnWhenStateCharsOver = opts.warnWhenStateCharsOver ?? DEFAULT_WARN_STATE_CHARS;
   }
 
@@ -170,8 +170,7 @@ export class JudgmentClient {
       const schema = makeJudgmentResponseSchema(Object.keys(questions));
       const parsed = schema.safeParse(body);
       if (!parsed.success) {
-        throw new JudgmentHttpError(
-          502,
+        throw new JudgmentSchemaError(
           `TypeSafe response failed schema validation: ${parsed.error.message}`,
           requestId,
           JSON.stringify(body).slice(0, 512),
