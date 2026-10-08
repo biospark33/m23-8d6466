@@ -133,6 +133,16 @@ pre-agreed Graphiti-vs-Hindsight bar, So that the KG choice is decided by measur
 
 **Sprint:** v6a · deps: M1.2 · live tier: none · DD-22 checkpoint (dated, not sprint-bound)
 
+### Story M1.4: Jev rerank arm for the recall re-measure *(measurement addition to the operator-ruled re-measure, not a charter row)*
+
+**Story File:** [`sprint-artifacts/dark-factory-v6/stories/m1-4-jev-recall-rerank-arm.md`](../sprint-artifacts/dark-factory-v6/stories/m1-4-jev-recall-rerank-arm.md)
+
+As the **operator** taking the DD-22 checkpoint with the repeat recall measurement in hand, I want
+the same probe runs scored by Jev as a rerank arm — recorded, never applied — So that the checkpoint
+sees whether reranking WOULD have moved hit-rate@5, as a measurement, before anyone arms it.
+
+**Sprint:** v6b · deps: M1.3 · live tier: none (mock-tier DoD; live harvest = J1 double gate + operator GO)
+
 ### Story M2.1: Memory gateway
 
 **Story File:** [`sprint-artifacts/dark-factory-v6/stories/m2-1-memory-gateway.md`](../sprint-artifacts/dark-factory-v6/stories/m2-1-memory-gateway.md)

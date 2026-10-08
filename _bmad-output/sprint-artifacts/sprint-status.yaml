@@ -305,11 +305,12 @@ epics:
   # this file is the numbers authority). Cross-repo contract: docs/planning/v6-crossrepo-contract.md.
   # ADR-2 (PROPOSED): docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md — decided via G1.
   #
-  # V6 ROWS: 23 stories / 81 pts — recomputed from the rows below (DD-14a; the charter's §3 epic
-  # table read 76 and is stale by +5: M 26→29, A 16→18).
-  # Per-epic: z 16 (5 stories) · m 29 (8) · a 18 (5) · j 16 (4) · g 2 (1) = 23 / 81. ✓
+  # V6 ROWS: 24 stories / 83 pts — recomputed from the rows below (DD-14a; the charter's §3 epic
+  # table read 76 and is stale by +5: M 26→29, A 16→18; +1 row 2026-10-08: M1.4, the Jev rerank
+  # measurement arm riding the operator-ruled recall re-measure — M 29→31).
+  # Per-epic: z 16 (5 stories) · m 31 (9) · a 18 (5) · j 16 (4) · g 2 (1) = 24 / 83. ✓
   # Per-sprint: v6a 36 (11 stories: Z1,Z2,Z4,Z5,M1.1,M1.2,M1.3,M2.1,J1,A6,G1) ·
-  #             v6b 45 (12 stories: Z3,A1,A2,A3,A5,M2.2,M2.3,M3.1,M3.2,J2,J3,J4). ✓
+  #             v6b 47 (13 stories: Z3,A1,A2,A3,A5,M2.2,M2.3,M3.1,M3.2,M1.4,J2,J3,J4). ✓
   # Sprints: v6a "Foundation" — THE next sprint, zero E21 gates, ships standalone (D-1).
   #          v6b "Autonomy" — E21-gated stories + the E21-independent lane (DD-14); external gate classes (R5): ops VPS G1–G7,
   #          E21 S02b/S03b, J2 corpus milestones. Gated rows carry `status: gated` + the gate
@@ -353,6 +354,7 @@ epics:
       M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: ready-for-dev, deps: [M2.2, M1.2] }  # v6b — T2; adversarial negative probes; digest-stable audit rows
       M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: ready-for-dev, deps: [M2.1, M1.1] }  # v6b — ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
       M3.2: { title: "L4 weekly reflect → PROPOSE (never auto-apply)", points: 3, status: ready-for-dev, deps: [M3.1, A5] }  # v6b — FR-LEARN-30 shape; proposals to meta bank + operator; M3.1 edge satisfiable via fallback leg
+      M1.4: { title: "Jev rerank arm for the recall re-measure (measured, never applied)", points: 2, status: draft, deps: [M1.3] }  # v6b — rides operator-ruled recall re-measure (8ce22829) pre-DD-22; draft — atomicity audit owed before ready-for-dev
   v6-a:
     name: Autonomy (E21-gated)
     status: ready-for-dev

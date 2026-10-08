@@ -234,6 +234,13 @@ Quality Standard: Phase 2.5 atomicity gate (≤10 DoD items, ≤8 SP, ≤200 nor
   variant (backend vs frontend) and **incorporate learned patterns** from
   previous sessions (story estimation, wave strategy, research sources).
 
+**Third-party claims come from source, not memory.** Any claim about a
+pinned dependency's behavior — pi-lens, jev HTTP contract, Hindsight,
+cgroup/kernfs, upstream caps/limits — must be verified against the
+package's real source (`rg "<claim>" $(opensrc path <pkg>)`; see the
+`opensrc` skill) and cited as `file:line`, never asserted from training
+data.
+
 **Conditional crosswalk agent (SPL-025 — MANDATORY when applicable).**
 If this run consumes an upstream disposition/audit table that names
 clauses as "surviving verbatim" (supersession audits, re-derivation

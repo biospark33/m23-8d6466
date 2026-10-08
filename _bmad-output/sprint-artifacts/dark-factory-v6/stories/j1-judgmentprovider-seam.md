@@ -10,7 +10,7 @@
 - **DD register (same PR):** `docs/superpowers/specs/2026-10-02-v6-story-derivation-decisions.md` **DD-21** — LOCKED #3 superseded-refined ("still no SDK, now behind the named seam"); L6 parked (host-side-placement conflict). This story implements DD-21's seam half; J2 implements its arming half.
 - **Jev handoff** `_bmad-output/typesafe-integration/handoff.md` — §3 LOCKED #1/#2/#4–#12 hold **verbatim** (D-5 amends only #3's mechanism); §4 vendor facts binding; §8 guardrails verbatim.
 - **Ancestry (merged, consumed unchanged):** JEV-1 (`_bmad-output/typesafe-integration/stories/jev-1-corpus-capture.md`) and JEV-2 (`…/jev-2-judgment-core.md`) built the modules this story re-arranges. Their ADR 0001 (`_bmad-output/typesafe-integration/adr/0001-egress-max-class-code-pinned.md`, ACCEPTED) is why `DEFAULT_MAX_EGRESS_CLASS` stays code-pinned — this story does not reopen it.
-- **Seam half-exists (the formalization target):** `src/judgment/client.ts:98-279` — `judge()` already runs choke → ceiling → request → strict parse → envelope → emit for both modes; `mockResponse` (:286-315) already short-circuits **the network only, never validation** (:164-171). That mock leg is the adapter template; this story extracts the transport step and pins the boundary, changing no behavior.
+- **Seam half-exists (the formalization target):** `src/judgment/client.ts:98-279 (JudgmentClient)` — `judge()` (:133-223) already runs choke → ceiling → request → strict parse → envelope → emit for both modes; `mockResponse` (:286-315, `mockResponse()`) already short-circuits **the network only, never validation** (:164-171, the mock ternary + shared strict parse inside `judge()`). That mock leg is the adapter template; this story extracts the transport step (`post()`, :231-278) and pins the boundary, changing no behavior.
 
 ## User Story
 
@@ -121,3 +121,11 @@ Extract the one pluggable step of `JudgmentClient.judge()` — **transport: `Jud
 ## Review Findings (post-merge)
 
 *(appended by the review campaign)*
+
+## Re-visit (2026-10-08)
+
+- `src/judgment/client.ts:98-279` → `src/judgment/client.ts:98-279 (JudgmentClient)` — range exact on HEAD (class span; `judge()` at :133-223, `post()` at :231-278); symbol names appended so future drift is greppable.
+- `:286-315` (`mockResponse()`) — verified, no change (function start :286, close :315).
+- `:164-171` (mock ternary + shared strict parse, inside `judge()`) — verified, no change.
+- `src/judgment/schemas.ts:21` (`TYPESAFE_MODEL`) — verified, no change.
+- `src/judgment/adapters/` — absent on HEAD, matching the extraction plan (Files to Modify creates it).

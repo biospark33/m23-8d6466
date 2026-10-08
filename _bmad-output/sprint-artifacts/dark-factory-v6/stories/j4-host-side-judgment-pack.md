@@ -19,7 +19,7 @@ so that frontier spend concentrates on findings and briefs that survive a cheap 
 
 ## Overview
 
-Three legs plus one separable one, all host-side, all behind J1's seam: **L7** builds a machine-state question per observe tick (context-utilization fraction vs the roster's own `soft_at` threshold, RSS vs `PROVISIONAL_RESIDENT_RSS_BYTES`, spend micros vs the 8_000 µ$ ceiling, steering iterations vs 3 — numbers only, never conversation content) and, when armed, writes a compact directive through the DF1.11 steering seam; **L8** pre-filters QA hunter-pack findings (factory-authored finding text only) before deep adjudication, feeding A2; **pre-dispatch sanity** reads the manifest (machine-state) before box provisioning; **L9** triages repo-sweep hotspots (host-authored brief prose) for A3-style consumers — and L9 is built to be cut.
+Three legs plus one separable one, all host-side, all behind J1's seam: **L7** builds a machine-state question per observe tick (context-utilization fraction vs the roster's own `soft_at` threshold, RSS vs `PROVISIONAL_RESIDENT_RSS_BYTES`, spend micros vs the 8_000 µ$ ceiling, steering iterations vs 3 — numbers only, never conversation content) and, when armed, writes a compact directive through the DF1.11 steering seam; **L8** pre-filters QA hunter-pack findings (factory-authored finding text only) before deep adjudication, feeding A2; **pre-dispatch sanity** reads the manifest (machine-state) before box provisioning; **L9** triages repo-sweep hotspots (host-authored brief prose) for A3-style consumers — and L9 is built to be cut. **Re-visit amendment:** L9's per-file score machinery names a **second consumer** — `opensrc path <pkg>` dependency-source spans (deterministic host-CLI fetch, cached), ranked by the same score leg for brief curation. Locks unchanged: recording-only until J2 arming (LOCKED #5, `PACK_SIGNALS_ARMED = false`); host-side (LOCKED #1 — opensrc runs on the host, never enters the box COPY set); L9 stays flex-cut #1; no new dep edges. In-box baking of the opensrc binary is an ops-register item riding the wave-0 re-pin ritual — not this story.
 
 **What this does NOT deliver.** No arming: every leg ships **recording-only** (`PACK_SIGNALS_ARMED = false`) — asks happen, envelopes + corpus records land, and *no behavior changes* until the arming gate (AC5) is passed. No in-box judgment call ever (AC1). No severity calibration, no gating use of any answer — gate-runner, admission, budgets, and verdicts stay Jev-free permanently. No L6 in-box tool hooks (PARKED DD-21). No diff hunks (stage 2 is ZDR-gated, untouched). No new live tier.
 
@@ -54,6 +54,7 @@ L9 is a **separable leg**: one module (`src/autonomy/l9-repo-sweep-triage.ts`) +
 | L8 QA finding pre-filter | in-scope | `tests/autonomy/host-pack.test.ts` | A2 consumption (optional seam) |
 | Pre-dispatch manifest sanity | in-scope | `tests/autonomy/host-pack.test.ts` | — |
 | L9 repo-sweep triage (separable) | in-scope | `tests/autonomy/l9-repo-sweep-triage.test.ts` (functional; cut with the module) + `l9-cut-boundary.test.ts` (the cut contract) | **named flex-cut — see contract above** |
+| L9 score leg over `opensrc path <pkg>` dep-source spans (second named consumer) | in-scope — deterministic host-CLI fetch, cached; recording-only until J2 arming (LOCKED #5 unchanged); host-side, never in the box COPY set (LOCKED #1); flex-cut #1 unchanged; no new dep edges; in-box binary baking = ops-register item (wave-0 re-pin ritual), not this story | `tests/autonomy/l9-repo-sweep-triage.test.ts` | — |
 | Arming flip (signals live) | out-of-scope — follow-up PR + register entry + operator sign-off (AC5) | — | post-measurement PR |
 | L6 in-box tool-call guardrail hooks | out-of-scope — **PARKED DD-21** (conflicts LOCKED host-side placement) | — | re-adjudication = new D-number + evidence of need |
 | Stage-2 diff-hunk egress | out-of-scope — ZDR-gated, untouched | — | executed ZDR addendum |
@@ -113,3 +114,13 @@ L9 is a **separable leg**: one module (`src/autonomy/l9-repo-sweep-triage.ts`) +
 - [ ] **Test (schema):** raw-NDJSON and note-overloaded `proceed` compact attempts are rejections, never warnings; `run_end` rejects `compact` (AC2).
 - [ ] **Ops:** no live spend without steve's GO; any live probe rides J1's double gate (`TYPESAFE_API_KEY` + `QDS_LIVE_PROBE_CONFIRMED=1`); mock envelopes never enter measured-agreement denominators (§8, Observability).
 - [ ] **Test (e2e demo — MANDATORY):** the mock-tier pack round — seeded resident machine-state past a threshold → observe tick → L7 ask through the `mock` adapter → strict schema-validated envelope → corpus + provenance records + `l7-ask` line with `armed: false`; plus the steering-suite round proving the `compact` member validates end-to-end through DF1.11's own drain/ack machinery — no box required, and the story says so twice (E2E Slice, AC4).
+
+## Re-visit (2026-10-08)
+
+- `src/phase-engine/steering.ts` union members on HEAD: grep `action: z.literal` returns exactly 4 — `proceed` (:113), `retry` (:117), `select_roster` (:124), `abort` (:132). Verified; AC2's "gains exactly one member" ⇒ fifth-member claim stands.
+- `src/phase-engine/roster/schema.ts:44-52,71-72` (self-compact extension + `compaction` thresholds field) — verified, no change.
+- `src/phase-engine/roster/schema.ts:141` (`HARD_CAP_FRACTION = 0.9` upstream cap note) — verified, no change.
+- `src/phase-engine/phases/roster-adapter.ts:46-48` (`--compact-*` argv flags) — verified, no change.
+- `steering.ts:101` ("there is no fourth") — verified, no change.
+- `src/judgment/schemas.ts:21` (`TYPESAFE_MODEL`) — verified, no change.
+- L9 leg amended: opensrc dep-source spans named as the second consumer of the per-file score machinery (Overview + one Trigger Surface row); locks unchanged per the content contract — recording-only until J2 arming, host-side only, flex-cut #1 unchanged, no new dep edges, binary baking deferred to the ops register.
