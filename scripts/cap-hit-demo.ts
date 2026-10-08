@@ -40,7 +40,11 @@ import {
   type KeyApi,
   type ProviderDriver,
   type ExecResult,
+  type TeardownDeps,
 } from "../src/providers/index.ts";
+// M2.2 / INV-M2-4: the per-run memory-key revoke-verify binding for the demo's
+// teardown deps (see demoTeardownDeps below).
+import { teardownMemoryKey } from "../src/fleet/run-completion.ts";
 import { newId, RunRecordStore, type RunRecord } from "../src/providers/run-record.ts";
 // The same redactor the credentials/step-log sinks use — a second copy of the
 // rule is how a sink drifts out of sync with it.
@@ -96,6 +100,27 @@ export interface CapHitDemoDeps {
    * main() to `openAuditStore().record` and closed in its finally.
    */
   recordAuditLink: (link: ProviderAuditLink) => void;
+}
+
+/**
+ * The demo's teardown deps — ONE construction for all three destroy sites (the
+ * signal-cleanup handler, finishEarly, and the happy-path teardown), so the
+ * M2.2 / INV-M2-4 memory-key revoke-verify binding rides inside
+ * teardownSandbox (fired ahead of its step-4 provider revoke) on every one of
+ * them, like every other destroy path. Env is the operator's exported
+ * environment (the hook's process.env default, `{}` deps); a hook fault
+ * aborts with the box alive.
+ */
+function demoTeardownDeps(deps: CapHitDemoDeps, requestId: string): TeardownDeps {
+  return {
+    driver: deps.driver,
+    store: deps.store,
+    keyApi: deps.keyApi,
+    requestId,
+    gitCwd: process.cwd(),
+    recordAuditLink: deps.recordAuditLink,
+    memoryKeyTeardown: (runId) => teardownMemoryKey({}, runId, { requestId }),
+  };
 }
 
 export interface CapHitDemoOptions {
@@ -580,7 +605,7 @@ export async function runCapHitDemo(
                 // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
               }
               await teardownSandbox(
-                { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
+                demoTeardownDeps(deps, requestId),
                 runId,
                 h,
               );
@@ -667,7 +692,7 @@ export async function runCapHitDemo(
         "cap-hit-demo teardown",
         (h) =>
           teardownSandbox(
-            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
+            demoTeardownDeps(deps, requestId),
             runId,
             h,
           ),
@@ -1350,7 +1375,7 @@ export async function runCapHitDemo(
         "cap-hit-demo teardown",
         (h) =>
           teardownSandbox(
-            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd(), recordAuditLink: deps.recordAuditLink },
+            demoTeardownDeps(deps, requestId),
             runId,
             h,
           ),

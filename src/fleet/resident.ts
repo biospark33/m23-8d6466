@@ -831,12 +831,19 @@ const SECRET_ENV_KEYS = [
  * subprocess. QDS_RESIDENT_ENV_PASSTHROUGH (comma-separated names, read from
  * the BASE env) is the documented escape hatch the e2e harness uses to reach
  * an env-scripted fake pi. `opts.env` bypasses the filter entirely.
+ *
+ * QDS_KG_RECALL_KEY / QDS_KG_GATEWAY_URL (M2.2, DD-28.23) are the memory-lane
+ * pair, delivered through the SAME KEY_ENV_FILE channel as the provider key
+ * (dispatch appends them to app/.env) and gated exactly like the OpenRouter
+ * key here.
  */
 const CHILD_ENV_ALLOWLIST: readonly string[] = [
   "PATH",
   "HOME",
   "TMPDIR",
   "OPENROUTER_API_KEY",
+  "QDS_KG_RECALL_KEY",
+  "QDS_KG_GATEWAY_URL",
   "HTTP_PROXY",
   "HTTPS_PROXY",
   "NO_PROXY",

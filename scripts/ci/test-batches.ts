@@ -94,7 +94,11 @@ for (const [i, batch] of batches.entries()) {
   // CONTAINS that string. One file could then run in several batches, which
   // defeats the point of bounding a batch. A leading `./` makes it an exact
   // path. https://bun.com/docs/test/discovery
-  const proc = Bun.spawnSync(["bun", "test", ...batch.map((f) => `./${f}`)], { stdio: ["inherit", "inherit", "inherit"] });
+  // `--timeout 15000`: the spawn-heavy fleet/cli e2e tests sit at 5-6s on a
+  // loaded host — right at bun's 5s default, so WHICH of them fails moves run
+  // to run (2026-10-08, M2.2: dev showed the same population flake). 15s never
+  // breaks a green test on a fast runner; it only stops the margin deaths.
+  const proc = Bun.spawnSync(["bun", "test", "--timeout", "15000", ...batch.map((f) => `./${f}`)], { stdio: ["inherit", "inherit", "inherit"] });
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`[batches] batch ${i + 1} exit=${proc.exitCode} signal=${proc.signalCode ?? "none"} in ${secs}s`);
   // The #250 crash arrives as a signal (SIGILL/SIGABRT) with a null exit code,

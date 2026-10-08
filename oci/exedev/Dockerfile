@@ -1100,8 +1100,15 @@ RUN set -e; \
 # sibling); only the keys dir is exedev's. The runtime `install -d -m 700`
 # re-asserts the mode on the existing dir as its owner.
 COPY pi-vs-claude-code-vendor/self-compact/extensions/self-compact /opt/qds/pi-ext/self-compact
+# The kg-recall extension (vendored) ROSTER-GRANTED seats load via their -e
+# pair (baked here at /opt/qds/pi-ext/kg-recall): one tool, kg_recall —
+# recall-only, sanitized, char-budgeted (M2.2). Files 0644 root:root like the
+# engine tree: pi reads this as source, and exedev — the user that runs
+# agent-authored code — must not be able to rewrite what a seat can load.
+COPY pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall /opt/qds/pi-ext/kg-recall
 RUN set -e; \
     [ -f /opt/qds/pi-ext/self-compact/self-compact.ts ]; \
+    [ -f /opt/qds/pi-ext/kg-recall/kg-recall.ts ]; \
     chown root:root /opt/qds; \
     chmod 0755 /opt/qds; \
     install -d -o exedev -g exedev -m 0700 /opt/qds/swarm-keys; \

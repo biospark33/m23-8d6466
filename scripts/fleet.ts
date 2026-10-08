@@ -119,6 +119,7 @@ import {
 import {
   DEFAULT_OBSERVATION_WINDOW_MS,
   observeAndDriveChain,
+  teardownMemoryKey,
   type ChainOutcome,
 } from "../src/fleet/run-completion.ts";
 // DF3.8: the `--all` sweep (src/fleet/observe.ts). A separate statement, not
@@ -5881,6 +5882,13 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
           count: info.count,
           auditRecord: (link) => audit.record(link),
         }),
+      // M2.2 AC4 / INV-M2-4: the per-run memory-key revoke-verify rides
+      // INSIDE teardownSandbox (injected, fired ahead of its step-4 provider
+      // revoke), so the CLI's own destroy path — this tdeps serves BOTH the
+      // `teardown` and `cancel` arms — is covered like the observe chain's.
+      // Env is the operator's exported environment (the hook's process.env
+      // default, `{}` deps); a fault aborts with the box alive.
+      memoryKeyTeardown: (runId) => teardownMemoryKey({}, runId, { requestId }),
     };
     if (verb === "harvest") {
       code = await runHarvest(ctx, tdeps, runIdArg);

@@ -1266,12 +1266,15 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       });
       // The deadline must clear the REAL git bundle-verify probe teardown runs
       // first (it is genuine host git, not a fake), while still bounding the
-      // hang to something a test can wait out.
+      // hang to something a test can wait out. 5s (was 2s): on slower hosts the
+      // SIBLING's genuine git verify also cleared 2s, so its disposal aborted
+      // before the close step and the fixture failed its own `toContain("close")`
+      // (2026-10-08, M2.2 — dev-red on this machine, identical pre/post branch).
       const res = await fanout(
         "race",
         3,
         brief(),
-        raceDeps({ rosterIds: ["r0", "r1", "r2"], driver: hangingDestroyDriver, loserTeardownTimeoutMs: 2_000 }),
+        raceDeps({ rosterIds: ["r0", "r1", "r2"], driver: hangingDestroyDriver, loserTeardownTimeoutMs: 5_000 }),
       );
 
       const won = res.arms.findIndex((a) => a.vmName === plantedVm);
@@ -1311,7 +1314,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(rec.winner).toBe(won);
       expect(rec.closedAt).not.toBeNull();
       expect(existsSync(lockPath)).toBe(false);
-    }, 20_000); // the injected deadline alone is 2s, plus a REAL git bundle-verify probe in the sibling's teardown — past bun's 5s default
+    }, 30_000); // the injected deadline alone is 5s, plus a REAL git bundle-verify probe in the sibling's teardown — past bun's 5s default
 
     test("corruption counting is CONSECUTIVE: unusable → absent → unusable ×2 leaves the arm pollable and it still wins", async () => {
       // CodeRabbit round-5 warning: unusableTicks accumulated across usable

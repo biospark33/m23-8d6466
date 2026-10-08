@@ -33,6 +33,7 @@
  * closure wired into the approval port passes the SAME handle — never a
  * `withRunLock` wrap, which would throw on re-entry.
  */
+import { existsSync } from "node:fs";
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { KeyApi } from "../providers/credentials.ts";
@@ -44,6 +45,9 @@ import { retainRunOutcomeBestEffort } from "./retain-best-effort.ts";
 import { recordApprovalPort } from "../reverify/approval.ts";
 import { runRedactionMap } from "../reverify/redaction.ts";
 import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
+import { memgateDeps, revokeRunMemoryKey } from "../memgate/gateway.ts";
+import { openReadOnly } from "../memgate/ledger.ts";
+import { MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, resolveMemgateLedgerPath } from "../memgate/schemas.ts";
 import { log } from "../swarmclaw/log.ts";
 import { DEFAULT_PER_CALL_DEADLINE_MS, DEFAULT_POLL_INTERVAL_MS, PROBE_SKIP_TICKS_LIMIT, boxMarkerPath, markerUnusableGivesUp, readMarkerVerdict, type MarkerVerdict } from "./fanout-primitive.ts";
 import { unitActivity } from "./run.ts";
@@ -133,6 +137,13 @@ export interface RunCompletionDeps {
    * The composition root binds it to `AuditStoreWriter.record`.
    */
   recordAuditLink: (link: ProviderAuditLink) => void;
+  /**
+   * M2.2 AC4: the env the per-run memory-key teardown resolves its gateway
+   * config from (MEMGATE_ADMIN_KEY / QDS_MEMGATE_SIGNING_KEY /
+   * QDS_MEMGATE_LEDGER). Optional; defaults to process.env — the chain reads
+   * the operator's exported environment, tests inject a scoped copy.
+   */
+  env?: Record<string, string | undefined>;
 }
 
 // ─── observability (the emitLine/log idiom, fanout-primitive.ts:1538-1550) ────
@@ -220,6 +231,117 @@ async function postHarvestRetain(
   });
 }
 
+/**
+ * The minimal deps shape the per-run memory-key teardown consumes — narrow so
+ * the three DIRECT destroy paths (`fleet teardown`, `sandbox-teardown`, fan-out
+ * loser disposal) can wire the hook without fabricating a whole
+ * RunCompletionDeps. RunCompletionDeps satisfies it structurally.
+ */
+export interface MemoryKeyTeardownDeps {
+  /**
+   * M2.2 AC4: the env the per-run memory-key teardown resolves its gateway
+   * config from (MEMGATE_ADMIN_KEY / QDS_MEMGATE_SIGNING_KEY /
+   * QDS_MEMGATE_LEDGER). Optional; defaults to process.env — hosts read the
+   * operator's exported environment, tests inject a scoped copy.
+   */
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * M2.2 AC4 / INV-M2-4: the run's per-run memory key is revoked AND verified
+ * BEFORE the box is destroyed — a destroyed box cannot revoke a gateway key,
+ * so this leg runs ahead of `teardownSandbox`'s destroy step, the same
+ * revoke → verify → destroy ordering the sequence itself holds for provider
+ * credentials (teardown.ts steps 4-6, mirroring credentials.ts :1622-1727).
+ * It reaches the sequence as the injected `TeardownDeps.memoryKeyTeardown`
+ * hook (fired just ahead of the step-4 provider revoke), so EVERY destroy
+ * path — the chain's guardedTeardown, the `fleet teardown` verb,
+ * `sandbox-teardown`, fan-out loser disposal — revokes before the box dies.
+ * Env absent, the ledger file absent (no mint ever happened on this host),
+ * or no per-run row for the run ⇒ ONE structured skip line, never a fake
+ * success (Observability Contract: absent is ABSENT). Any fault — unreadable
+ * ledger, refused admin, unverified revocation — propagates OUT: the caller's
+ * catch leaves the box alive, so a box is never destroyed while a gateway key
+ * may still be live. No retries: the key is being torn down, a fault is loud.
+ */
+export async function teardownMemoryKey(
+  deps: MemoryKeyTeardownDeps,
+  runId: string,
+  opts: { requestId: string },
+): Promise<void> {
+  // The skip facts ride the `memgate-skip` line (the Observability Contract's
+  // one vocabulary for this lifecycle); the return is void because every
+  // caller — guardedTeardown and the injected memoryKeyTeardown hook alike —
+  // discards it (TeardownDeps.memoryKeyTeardown is a Promise<void> seam).
+  const env = deps.env ?? (process.env as Record<string, string | undefined>);
+  if (
+    env[MEMGATE_ADMIN_KEY] === undefined || env[MEMGATE_ADMIN_KEY] === "" ||
+    env[QDS_MEMGATE_SIGNING_KEY] === undefined || env[QDS_MEMGATE_SIGNING_KEY] === ""
+  ) {
+    observeLine(opts.requestId, { runId, event: "memgate-skip", reason: "env-absent" });
+    return;
+  }
+  const ledgerPath = resolveMemgateLedgerPath(undefined, env);
+  // F-003: env-present + ledger-FILE-absent means no key was ever minted on
+  // this host (a mint is the only thing that creates the ledger) — SKIP, never
+  // wedge: openReadOnly would throw ledger-unreadable for what is absence, not
+  // corruption. The same resolver the open below uses resolves the path, so
+  // the exists-check and the open cannot disagree. A file that EXISTS but
+  // fails to open/read stays fail-closed — that is corruption.
+  if (!existsSync(ledgerPath)) {
+    observeLine(opts.requestId, { runId, event: "memgate-skip", reason: "ledger-absent" });
+    return;
+  }
+  // The scan is READ-ONLY (openReadOnly never creates); the revoke below
+  // re-opens WRITABLE through memgateDeps — revocation is a write.
+  let tokenIds: string[];
+  const scan = openReadOnly(ledgerPath);
+  try {
+    tokenIds = scan
+      .listIssued("per-run")
+      .filter((row) => row.run_id === runId)
+      .map((row) => row.token_id);
+  } finally {
+    scan.close();
+  }
+  if (tokenIds.length === 0) {
+    observeLine(opts.requestId, { runId, event: "memgate-skip", reason: "no-per-run-key-for-run" });
+    return;
+  }
+  const gateway = memgateDeps({ env, ledgerPath }); // the WRITABLE open — refusal throws, fail-closed
+  try {
+    for (const tokenId of tokenIds) {
+      // "revoked" and "already-gone" both satisfy INV-M2-4 (L4's dispatch
+      // compensation may have revoked first). "none" is the scan→revoke race —
+      // the gateway re-read the issuance (gateway.ts :241) and the row is gone;
+      // the ledger is append-only, so the honest reading is
+      // already-gone-with-audit — never an error. The gateway's own
+      // memgate-revoke / memgate-verify-revoked lines are the per-token record:
+      // this story adds no second vocabulary for the same lifecycle.
+      revokeRunMemoryKey(gateway, { tokenId, requestId: opts.requestId });
+    }
+  } finally {
+    // The writable open owns a ledger handle: close it on every path so a
+    // mid-loop revoke fault cannot leak it. Guarded close — a close fault is a
+    // line, never a mask for the revoke fault above, and never a teardown
+    // fault of its own: every token is revoke-VERIFIED through this same
+    // connection before the close (INV-M2-4 is already satisfied), so there is
+    // no live key a close fault could be about.
+    try {
+      gateway.ledger.close();
+    } catch (closeErr) {
+      observeLine(opts.requestId, {
+        runId,
+        event: "memgate-ledger-close-failed",
+        error: {
+          code: "ledger-close-failed",
+          message: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        },
+      });
+    }
+  }
+}
+
 function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): TeardownDeps {
   return {
     driver: deps.driver,
@@ -237,6 +359,13 @@ function chainTeardownDeps(deps: RunCompletionDeps, requestId: string): Teardown
     // the firing rules) and failure-isolated inside — and again by
     // teardown.ts's own wrap.
     postHarvest: (info) => postHarvestRetain(deps, info),
+    // M2.2 AC4 / INV-M2-4: the per-run memory-key revoke-verify rides INSIDE
+    // teardownSandbox (fired just ahead of its step-4 provider revoke), so
+    // every destroy of this chain's records — the settled arm, the approval
+    // port's teardown-at-pause (whatever runId the gate hands the seam) —
+    // revokes before the box dies. A fault aborts the sequence with the box
+    // alive; this wiring only binds, teardown.ts owns the firing rules.
+    memoryKeyTeardown: (runId) => teardownMemoryKey(deps, runId, { requestId }),
   };
 }
 
@@ -260,6 +389,12 @@ async function guardedTeardown(
   markRunLockDestructive(deps.runLock);
   let tornDown = false;
   try {
+    // M2.2 AC4 / INV-M2-4: the revoke-verify now lives INSIDE teardownSandbox
+    // (the injected memoryKeyTeardown hook chainTeardownDeps binds, fired
+    // ahead of its step-4 provider revoke), so this wrapper guards a revoke
+    // that runs within the call: a hook fault throws with tornDown still
+    // false — the finally keeps the destructive mark and the box stays alive
+    // with its evidence.
     await teardownSandbox(teardownDeps, runId, deps.runLock, opts);
     tornDown = true;
   } finally {

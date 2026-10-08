@@ -469,6 +469,15 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // probe DF3.6b added to catch exactly this regression runs at BUILD time, and
 // no build happens. Nothing else re-derives the id from the real tree.~~
 //
+// (2026-10-08, M2.2: the buildId literals in the strikethrough paragraphs
+// above are HISTORICAL — they describe a pin the constants have since left.
+// The live pairing is DEFAULT_IMAGE_REF's digest + DEFAULT_IMAGE_BUILD_ID
+// (both just below): gate B compares the box's baked marker against
+// DEFAULT_IMAGE_BUILD_ID, and the pin-adoption commit (scripts/adopt-image-pin.ts)
+// is the ONLY writer of those constants and never touches buildId-fed bytes.
+// The pairing can drift only if an image is adopted without running the
+// re-pin ritual — see the M2.2 re-pin ritual runbook.)
+//
 // ~~ONE DEBT SURVIVES, and it is DF3.6b's alone.~~ DEBT SETTLED 2026-09-24 by
 // the fifteenth pin: the publish rebuilds the MERGED tree, so sha256:9d1822c6…
 // bakes the `Delegate=memory` unit, the Dockerfile scan, `resident.ts` and

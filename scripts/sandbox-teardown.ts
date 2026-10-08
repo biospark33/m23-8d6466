@@ -38,6 +38,7 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
+import { teardownMemoryKey } from "../src/fleet/run-completion.ts";
 import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -236,6 +237,13 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // bundle/artifact paths must be under exactly that directory.
     runsDir: store.dir,
     recordAuditLink: (link) => audit.record(link),
+    // M2.2 AC4 / INV-M2-4: the per-run memory-key revoke-verify rides INSIDE
+    // teardownSandbox (injected, fired ahead of its step-4 provider revoke),
+    // so this CLI — the reaper's teardown unit and the operator's direct
+    // verb — destroys only after the run's gateway key is revoked and
+    // verified. Env is the operator's exported environment (the hook's
+    // process.env default, `{}` deps); a fault aborts with the box alive.
+    memoryKeyTeardown: (runId) => teardownMemoryKey({}, runId, { requestId }),
   };
   // Branded: only a lock THIS invocation acquired may reach teardownSandbox's
   // head check (and the release primitives) — a hand-joined path string would

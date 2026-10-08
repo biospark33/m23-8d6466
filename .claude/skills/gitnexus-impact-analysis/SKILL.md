@@ -45,17 +45,15 @@ Repository: <name> (<path>)   Worktree: <path>   Index: <commit>, <n> behind HEA
 ## Workflow
 
 ```
-0. list_repos {} or `node .gitnexus/run.cjs list`          → Bind repo (and worktree)
+0. list_repos {} (CLI fallback: `node .gitnexus/run.cjs list`)  → Bind repo (and worktree)
 1. impact({target: "X", direction: "upstream"}) or `node .gitnexus/run.cjs impact "X" --direction upstream --repo .`
-2. READ gitnexus://repo/{name}/processes                   → Check affected execution flows
-   (MCP-only; without MCP, read the affected_processes / affected_modules
-   sections of the step-1 `impact` output instead)
+2. READ gitnexus://repo/{name}/processes — or, on the CLI impact payload, `affected_processes` / `affected_modules`, but ONLY once the target resolved: an ambiguous target prints ranked candidates instead of an impact result, so disambiguate (file_path/kind/uid) before trusting those fields
 3. detect_changes({scope: "all"}) or `node .gitnexus/run.cjs detect-changes --scope all --repo .`
 4. Assess risk and report to user, echoing repo/worktree/index identity
 ```
 
 > If "Index is stale" → run `bash scripts/install-gitnexus-plus.sh` from the project root (never a bare `analyze`).
-> If `.gitnexus/run.cjs` is missing, replace `node .gitnexus/run.cjs` with `npx gitnexus` in the fallback commands.
+> If `.gitnexus/run.cjs` is missing, replace `node .gitnexus/run.cjs` with `npx gitnexus@1.6.12` in the fallback commands.
 
 ## Checklist
 

@@ -52,7 +52,14 @@ for (const p of [YAML, STORIES, EPICS, V6_STORIES, V6_EPICS]) if (!existsSync(p)
 // `src/reverify/report.ts` and `src/phase-engine/gates/report.ts`, i.e. the two
 // sides of R9's two-layer evidence doctrine. Picking the wrong one collapses both
 // layers, which is the exact failure the tier-2 ADR exists to prevent.
-const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".gitnexus", "coverage"]);
+// `worktrees` joins the skip set (2026-10-08, M2.2): linked worktrees under
+// `.claude/worktrees/**` duplicate the repo tree, so every `file.ts:NN`
+// citation resolved AMBIGUOUS (2 real files) and the checker exited 1 on a
+// machine that merely HAS a worktree checked out — dev-identical, zero story
+// drift behind it. A worktree is never a distinct citation target. The rest
+// of `.claude` (skills, settings) IS walked: those are real, distinct files
+// a story may legitimately cite by bare basename.
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".gitnexus", "coverage", "worktrees"]);
 const byBasename = new Map<string, string[]>();
 (function walk(dir: string) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {

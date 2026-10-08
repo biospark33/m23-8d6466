@@ -30,8 +30,8 @@ the bound repository and index freshness alongside your explanation.
 ```
 1. list_repos {} or READ gitnexus://repos                          → Discover indexed repos
 2. READ gitnexus://repo/{name}/context             → Codebase overview, check staleness
-3. query({search_query: "<what you want to understand>", repo})  → Find related execution flows
-4. context({name: "<symbol>", repo})               → Deep dive on specific symbol
+3. query({search_query: "<what you want to understand>"})  → Find related execution flows
+4. context({name: "<symbol>"})            → Deep dive on specific symbol
 5. READ gitnexus://repo/{name}/process/{name}      → Trace full execution flow
 ```
 

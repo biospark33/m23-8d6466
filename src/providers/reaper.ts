@@ -191,6 +191,16 @@ export interface SweepDeps {
    */
   costLedger?: TeardownDeps["costLedger"];
   /**
+   * M2.2 / INV-M2-4: the per-run memory-key revoke-verify hook, forwarded
+   * verbatim into the sweep's `teardownDeps` — a reaped run was dispatched, so
+   * it can hold a live per-run gateway key, and INV-M2-4 says any terminal
+   * state revokes. Optional passthrough in the costLedger shape: the provider
+   * layer never imports the memgate binding itself — the CLI composition root
+   * (scripts/sandbox-reap.ts) wires `teardownMemoryKey` here, exactly as it
+   * wires costLedger and recordAuditLink.
+   */
+  memoryKeyTeardown?: TeardownDeps["memoryKeyTeardown"];
+  /**
    * DF5.3: the audit emit seam, required so an unwired construction fails at
    * compile time. It serves the orphan-path `reap` link here and rides the
    * sweep's `teardownDeps` so a reaper-initiated `teardownSandbox` emits its
@@ -754,6 +764,9 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     // the same seam the orphan-path `reap` emit below uses.
     recordAuditLink: deps.recordAuditLink,
     ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
+    // M2.2 / INV-M2-4: the CLI's memory-key revoke-verify binding rides the
+    // sweep's teardown units (see SweepDeps.memoryKeyTeardown).
+    ...(deps.memoryKeyTeardown !== undefined ? { memoryKeyTeardown: deps.memoryKeyTeardown } : {}),
   };
   // W14B-3, narrowed. The posture is unchanged: `revokeAndVerify` runs under a
   // run-less step context (`runId: null`, credentials.ts) and
