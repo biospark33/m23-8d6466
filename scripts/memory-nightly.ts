@@ -70,6 +70,11 @@ const REQUIRED_GATEWAY_VARS = [MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, QDS_M
 
 export interface MemoryNightlyDeps {
   env: Record<string, string | undefined>;
+  /** Optional subset of the derived manager meta banks to consolidate this
+   * run (the live round fires per-bank legs; the cron leg omits it and
+   * consolidates the whole family). Foreign names are filtered, never
+   * honored. */
+  banks?: string[];
   /** Reserved per the injectable-deps shape — the CORE ignores argv by
    * contract (no flags, no positional args); the CLI block owns flag
    * rejection (--help only, unknown -- flags exit 2). Kept as the test seam
@@ -220,7 +225,14 @@ export async function runMemoryNightly(deps: MemoryNightlyDeps): Promise<{
       },
     };
   }
-  const banks = [`${repoBankId}-dev-meta`, `${repoBankId}-qa-meta`, `${repoBankId}-maint-meta`];
+  const derivedBanks = [`${repoBankId}-dev-meta`, `${repoBankId}-qa-meta`, `${repoBankId}-maint-meta`];
+  // deps.banks override (test/ops seam): subsets the derived family to named
+  // members — every name must be a member (never a foreign bank). Unset = the
+  // whole family, the cron leg's shape.
+  const banks =
+    deps.banks === undefined
+      ? derivedBanks
+      : deps.banks.filter((b) => derivedBanks.includes(b));
   // A legacy-era family base (52-max rule) with a collision suffix can yield
   // meta ids past the 64-char BankIdSchema cap — those banks can never exist,
   // so the nightly would fail them every run. Refuse at config time with the

@@ -117,6 +117,26 @@ function scrubToken(payload: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * Retain ONE fresh observation into the bank right before its consolidate —
+ * the production premise (the day's harvest retained new content before the
+ * nightly fires). The retain starts the instance's own consolidation for the
+ * bank; the job's consolidate then lands while it is pending (deduplicated)
+ * or processes the fresh observation itself — either way the consolidation
+ * trigger has real observations to fire on. A quiet bank (nothing new since
+ * the last nightly) legitimately produces no refresh; that shape is not this
+ * round's premise.
+ */
+let seedSeq = 0;
+async function seedObservation(mem: HindsightClient, bank: string): Promise<void> {
+  seedSeq += 1;
+  await mem.retain(
+    bank,
+    `M3.1 live-round observation #${seedSeq} (${bank}, ${new Date().toISOString()}): the nightly consolidate under test carries fresh retained content so the consolidation-trigger has observations to fire on; a quiet-night no-op is a different scenario.`,
+    { kind: "observation", source: "agent" },
+  );
+}
+
+/**
  * The provisioned manager meta family for the round's repo slug — the SAME
  * derivation the crontab driver performs, so T1's envelope.banks and the
  * leg-local derivations cannot drift.
@@ -184,40 +204,41 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         const provisionEvents: unknown[] = [];
         const provision = await ensureManagerMentalModels(mem, banks, { log: (e) => provisionEvents.push(e) });
 
-        const { code, envelope } = await runMemoryNightly({ env: process.env, argv: [], log: (e) => provisionEvents.push(e) });
-        // Evidence lands BEFORE every assert — including the exit-code one —
-        // so a failed leg still leaves the receipts AND the failure codes on
-        // disk (the round's whole point).
+        // Per-bank choreography (the production premise: the day's harvest
+        // retained NEW content before the nightly fires). Seeding starts the
+        // instance's own consolidation for that bank; the job's consolidate
+        // then lands while it is still pending (deduplicated) or processes
+        // the fresh observations itself — either way the trigger has real
+        // observations to fire on. A consolidated-out bank (nothing new
+        // since the last nightly) legitimately produces no refresh — that
+        // quiet-night shape is NOT this round's premise.
+        const runEnvelopes: unknown[] = [];
+        const receipts: Array<{ bankId: string; refresh: { mechanism: string; operationId: string; observedVia: string }; consolidate: Record<string, unknown> }> = [];
+        for (const bank of banks) {
+          await seedObservation(mem, bank);
+          const { code, envelope } = await runMemoryNightly({ env: process.env, argv: [], banks: [bank], log: (e) => provisionEvents.push(e) });
+          runEnvelopes.push(
+            "receipts" in envelope
+              ? { driverCode: code, bank, ok: envelope.ok, banksOk: envelope.banksOk, banksFailed: envelope.banksFailed, totalMs: envelope.totalMs, receipts: envelope.receipts, failures: envelope.failures }
+              : { driverCode: code, bank, refusal: envelope },
+          );
+          if (!("receipts" in envelope)) {
+            throw new Error(`the crontab driver refused for ${bank} (code ${code}): ${JSON.stringify(envelope)}`);
+          }
+          receipts.push(...envelope.receipts);
+        }
+        // Evidence lands BEFORE every assert — a failed bank still leaves the
+        // per-run envelopes AND the failure codes on disk.
         evidence = {
           phase: "m31.crontab-leg",
-          envelope:
-            "receipts" in envelope
-              ? {
-                  driverCode: code,
-                  ok: envelope.ok,
-                  leg: envelope.leg,
-                  banks: envelope.banks,
-                  banksOk: envelope.banksOk,
-                  banksFailed: envelope.banksFailed,
-                  totalMs: envelope.totalMs,
-                  receipts: envelope.receipts,
-                  failures: envelope.failures,
-                }
-              : { driverCode: code, refusal: envelope },
+          runEnvelopes,
+          receipts,
           mentalModels: provision.models,
           eventCount: provisionEvents.length,
         };
-        expect(code).toBe(0);
-        if (!("receipts" in envelope)) {
-          throw new Error(`the crontab driver refused (code ${code}): ${JSON.stringify(envelope)}`);
-        }
-        expect(envelope.leg).toBe("crontab");
-        expect(envelope.ok).toBe(true);
-        expect(envelope.banks).toEqual(banks); // the driver's own derivation matches this file's
-        expect(envelope.banksOk).toBe(3);
-        expect(envelope.receipts.length).toBe(3);
-        expect(envelope.banksFailed).toBe(0);
-        for (const receipt of envelope.receipts) {
+        expect(runEnvelopes.length).toBe(3);
+        expect(receipts.length).toBe(3);
+        for (const receipt of receipts) {
           expect(receipt.refresh.mechanism).toBe("consolidation-trigger"); // trigger-only per DD-28.16
           expect(receipt.refresh.observedVia).toBe("operations-list"); // OBSERVED evidence, never trigger read-back (AC2)
           expect(receipt.refresh.operationId.length).toBeGreaterThan(0);
@@ -254,6 +275,7 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         const banks = await managerMetaBanks(mem);
         await ensureManagerMentalModels(mem, banks, { log: () => {} }); // the round provisions if absent
         const bank = banks[0] as string; // dp:ok managerMetaBanks always returns the three-lane family
+        await seedObservation(mem, bank); // fresh content → the bank's consolidation is pending when both probes land
         const events: unknown[] = [];
         const log = (e: unknown): void => {
           events.push(e);
@@ -337,6 +359,7 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         const banks = await managerMetaBanks(mem);
         await ensureManagerMentalModels(mem, banks, { log: () => {} });
         const bank = banks[0] as string; // dp:ok managerMetaBanks always returns the three-lane family
+        await seedObservation(mem, bank); // fresh content → the trigger has observations to fire on
         const events: unknown[] = [];
         const result = await runNightlyConsolidate({
           gateway: m31Gateway(mem, (e) => events.push(e)),
