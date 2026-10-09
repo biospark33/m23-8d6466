@@ -96,9 +96,15 @@ describe("bank-provisioner: happy path", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const ids = result.banks.map((b) => b.bankId);
-    expect(ids).toEqual(["qds-factory", "qds-factory-dev-meta", COLLECTIVE_BANK_ID]);
+    expect(ids).toEqual([
+      "qds-factory",
+      "qds-factory-dev-meta",
+      "qds-factory-qa-meta",
+      "qds-factory-maint-meta",
+      COLLECTIVE_BANK_ID,
+    ]);
     expect(result.banks.every((b) => b.status === "created")).toBe(true);
-    expect(client.createBank).toHaveBeenCalledTimes(3);
+    expect(client.createBank).toHaveBeenCalledTimes(5);
   });
 
   test("a lock stolen mid-provision is a log line, not a thrown success", async () => {
@@ -317,7 +323,13 @@ describe("bank-provisioner: -32005 collision unresolvable", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const ids = result.banks.map((b) => b.bankId);
-    expect(ids).toEqual(["qds-factory-2", "qds-factory-2-dev-meta", COLLECTIVE_BANK_ID]);
+    expect(ids).toEqual([
+      "qds-factory-2",
+      "qds-factory-2-dev-meta",
+      "qds-factory-2-qa-meta",
+      "qds-factory-2-maint-meta",
+      COLLECTIVE_BANK_ID,
+    ]);
   });
 
   test("existing qds-collective is idempotent, not collision", async () => {
@@ -330,8 +342,8 @@ describe("bank-provisioner: -32005 collision unresolvable", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // createBank was still called 3 times (idempotent PUT).
-    expect(client.createBank).toHaveBeenCalledTimes(3);
+    // createBank was still called 5 times (idempotent PUT).
+    expect(client.createBank).toHaveBeenCalledTimes(5);
   });
 });
 
@@ -375,7 +387,7 @@ describe("bank-provisioner: single-flight (INV-HM6 / CC-10)", () => {
     // with NO code field. -32005 is reserved for collision-unresolvable only.
     expect(second.error.message).toBe("provision_in_progress");
     expect(second.error.code).toBeUndefined();
-    expect(firstCallCount).toBe(3);
+    expect(firstCallCount).toBe(5);
   });
 
   test("stale lock (old mtime) → recovered and provision succeeds (fix [3])", async () => {
@@ -393,8 +405,8 @@ describe("bank-provisioner: single-flight (INV-HM6 / CC-10)", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.banks).toHaveLength(3);
-    expect(client.createBank).toHaveBeenCalledTimes(3);
+    expect(result.banks).toHaveLength(5);
+    expect(client.createBank).toHaveBeenCalledTimes(5);
   });
 
   test("stale lock (dead PID, fresh mtime) → recovered (fix [3])", async () => {
@@ -410,7 +422,7 @@ describe("bank-provisioner: single-flight (INV-HM6 / CC-10)", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.banks).toHaveLength(3);
+    expect(result.banks).toHaveLength(5);
   });
 
   test("fresh lock held by live PID → provision_in_progress (no code) (fix [3])", async () => {
@@ -485,7 +497,7 @@ describe("bank-provisioner: observability (CC-9)", () => {
     const provisionLogs = logEntries.filter(
       (e) => e.operation === "provision" && e.requestId === "obs-1",
     );
-    expect(provisionLogs.length).toBe(3);
+    expect(provisionLogs.length).toBe(5);
     for (const e of provisionLogs) {
       expect(typeof e.provision_ms).toBe("number");
       expect(e.provision_ms).toBeGreaterThanOrEqual(0);
@@ -526,12 +538,12 @@ describe("bank-provisioner: envelope contract", () => {
 describe("bank-provisioner: fix [1] 64-char slug overflow (INV-HM2)", () => {
   test("64-char repo slug with colliding truncated base → suffixed valid id", async () => {
     // resolveBankId of a 64-char [a-z0-9] slug returns the same 64 chars,
-    // which the provisioner truncates to 52 (so `-dev-meta` AND a collision
-    // suffix both fit). If that 52-char truncated form collides in listBanks,
+    // which the provisioner truncates to 50 (so `-maint-meta` AND a collision
+    // suffix both fit). If that 50-char truncated form collides in listBanks,
     // the suffix loop runs and returns `<truncated>-2`, which must itself be
     // schema-valid, and `<truncated>-2-dev-meta` must also be schema-valid.
     const slug64 = "a".repeat(64);
-    const truncatedBase = "a".repeat(52);
+    const truncatedBase = "a".repeat(50);
     // Sanity: base + suffixed variants are invalid without truncation.
     expect(BankIdSchema.safeParse(`${slug64}-2`).success).toBe(false);
     expect(BankIdSchema.safeParse(`${slug64}-dev-meta`).success).toBe(false);
@@ -555,8 +567,8 @@ describe("bank-provisioner: fix [1] 64-char slug overflow (INV-HM2)", () => {
     // Suffixed form, not the bare truncated base.
     expect(repoBankId).toBe(`${truncatedBase}-2`);
     expect(devMetaId).toBe(`${repoBankId}-dev-meta`);
-    // createBank was called 3 times with valid ids only.
-    expect(client.createBank).toHaveBeenCalledTimes(3);
+    // createBank was called 5 times with valid ids only.
+    expect(client.createBank).toHaveBeenCalledTimes(5);
     for (const call of client.createBank.mock.calls) {
       const id = call[0] as string;
       expect(BankIdSchema.safeParse(id).success).toBe(true);
@@ -574,11 +586,11 @@ describe("bank-provisioner: fix [1] 64-char slug overflow (INV-HM2)", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // Base truncated to 52 chars max so `-dev-meta` (9) + worst-case collision
-    // suffix ("-11", 3) both still fit within the 64-char schema cap.
+    // Base truncated to 50 chars max so `-maint-meta` (11) + worst-case
+    // collision suffix ("-11", 3) both still fit within the 64-char schema cap.
     const repoBankId = result.banks[0]!.bankId;
     const devMetaId = result.banks[1]!.bankId;
-    expect(repoBankId.length).toBe(52);
+    expect(repoBankId.length).toBe(50);
     expect(BankIdSchema.safeParse(repoBankId).success).toBe(true);
     expect(BankIdSchema.safeParse(devMetaId).success).toBe(true);
   });
@@ -604,9 +616,15 @@ describe("bank-provisioner: fix [7] listBanks failure fallback", () => {
     // Base id is used as-is (no -2..-11 suffixing, since we can't detect
     // collisions without listBanks).
     const ids = result.banks.map((b) => b.bankId);
-    expect(ids).toEqual(["qds-factory", "qds-factory-dev-meta", COLLECTIVE_BANK_ID]);
-    // 3 idempotent PUTs.
-    expect(client.createBank).toHaveBeenCalledTimes(3);
+    expect(ids).toEqual([
+      "qds-factory",
+      "qds-factory-dev-meta",
+      "qds-factory-qa-meta",
+      "qds-factory-maint-meta",
+      COLLECTIVE_BANK_ID,
+    ]);
+    // 5 idempotent PUTs.
+    expect(client.createBank).toHaveBeenCalledTimes(5);
     // listBanks was attempted exactly once.
     expect(client.listBanks).toHaveBeenCalledTimes(1);
   });
@@ -673,12 +691,13 @@ describe("bank-provisioner: -32005 reserved for collision-unresolvable only", ()
 // ---------------------------------------------------------------------------
 
 describe("bank-provisioner: fix E-1 worst-case suffix length (INV-HM2)", () => {
-  test("base near cap, collision loop reaches -11 → repoBankId-dev-meta valid", async () => {
-    // 60-char slug → truncated to 52 (safeBase). Pre-populate existing banks
+  test("base near cap, collision loop reaches -11 → all manager meta banks valid", async () => {
+    // 60-char slug → truncated to 50 (safeBase). Pre-populate existing banks
     // with safeBase AND safeBase-2..safeBase-10 so the loop falls through to
-    // the LAST candidate (safeBase-11). Then `${safeBase}-11-dev-meta` must
-    // still satisfy BankIdSchema (52 + "-11" + "-dev-meta" = 64).
-    const safeBase = "c".repeat(52);
+    // the LAST candidate (safeBase-11). Then `${safeBase}-11-maint-meta` must
+    // still satisfy BankIdSchema: 50 + "-11" (3) + "-maint-meta" (11) = 64 —
+    // the longest family suffix lands exactly at the cap, never 65.
+    const safeBase = "c".repeat(50);
     const slug = "c".repeat(60);
     const existing = [safeBase];
     for (let n = 2; n <= 10; n++) existing.push(`${safeBase}-${n}`);
@@ -693,13 +712,19 @@ describe("bank-provisioner: fix E-1 worst-case suffix length (INV-HM2)", () => {
     if (!result.ok) return;
     const repoBankId = result.banks[0]!.bankId;
     const devMetaId = result.banks[1]!.bankId;
+    const qaMetaId = result.banks[2]!.bankId;
+    const maintMetaId = result.banks[3]!.bankId;
     expect(repoBankId).toBe(`${safeBase}-11`);
-    expect(repoBankId.length).toBe(55); // 52 + len("-11")
+    expect(repoBankId.length).toBe(53); // 50 + len("-11")
     expect(devMetaId).toBe(`${repoBankId}-dev-meta`);
-    // The load-bearing assertion: dev-meta id is exactly at the 64-char cap
-    // and still parses. Pre-fix this overflowed to 65 → createBank 422 mid-loop.
-    expect(devMetaId.length).toBe(64);
-    expect(BankIdSchema.safeParse(devMetaId).success).toBe(true);
+    expect(qaMetaId).toBe(`${repoBankId}-qa-meta`);
+    expect(maintMetaId).toBe(`${repoBankId}-maint-meta`);
+    for (const id of [devMetaId, qaMetaId, maintMetaId]) {
+      expect(BankIdSchema.safeParse(id).success).toBe(true);
+    }
+    // The load-bearing assertion: maint-meta (longest suffix) id is exactly at
+    // the 64-char cap and still parses. 50 + 3 + 11 = 64, never 65.
+    expect(maintMetaId.length).toBe(64);
   });
 });
 
@@ -742,7 +767,7 @@ describe("bank-provisioner: review R2 fixes", () => {
     // Pre-fix: the listBanks-fail fallback used the untruncated 64-char base
     // id, so `${base}-dev-meta` overflowed to 73 chars and failed inside
     // createBankIdempotent. Post-fix: the fallback truncates to MAX_BASE_LEN
-    // (52), so dev-meta = 61 chars and stays schema-valid.
+    // (50), so maint-meta = 61 chars and stays schema-valid.
     const longSlug = "a".repeat(64);
     const client = makeMockClient();
     client.listBanks.mockImplementation(() => Promise.reject(new Error("net err")));
@@ -755,6 +780,9 @@ describe("bank-provisioner: review R2 fixes", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    // All five targets still created on the truncated base.
+    expect(result.banks).toHaveLength(5);
+    expect(result.banks[0]!.bankId.length).toBeLessThanOrEqual(50);
     for (const b of result.banks) {
       expect(BankIdSchema.safeParse(b.bankId).success).toBe(true);
     }
@@ -850,5 +878,109 @@ describe("resolveProvisionedRepoBankId (read-side family resolver)", () => {
   test("foreign base without a -dev-meta sibling → null (never the bare base)", () => {
     const existing = new Set(["acme-widget", COLLECTIVE_BANK_ID]);
     expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
+  });
+
+  test("qa-meta sibling also identifies the family", () => {
+    const existing = new Set(["acme-widget", "acme-widget-qa-meta", COLLECTIVE_BANK_ID]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget");
+  });
+
+  test("maint-meta sibling (longest suffix) also identifies the family", () => {
+    const existing = new Set(["acme-widget", "acme-widget-maint-meta", COLLECTIVE_BANK_ID]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget");
+  });
+
+  test("suffixed family recognized via a maint-meta sibling too", () => {
+    const existing = new Set(["acme-widget", "acme-widget-2", "acme-widget-2-maint-meta"]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget-2");
+  });
+
+  test("unrelated sibling (-ops-meta) is NOT a family signature", () => {
+    // Only the manager meta banks the provisioner creates carry the signature;
+    // an outside sibling like -ops-meta must not make a foreign base ours.
+    const existing = new Set(["acme-widget", "acme-widget-ops-meta", COLLECTIVE_BANK_ID]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M3.1: manager meta-bank family extended to dev + qa + maint (five targets)
+// ---------------------------------------------------------------------------
+
+describe("bank-provisioner: M3.1 five-target roster", () => {
+  test("idempotent rerun over existing family → all five 'exists', five PUTs", async () => {
+    // Server already has the full family; every PUT comes back 409 → every
+    // target lands "exists", and the mock records all five PUT calls.
+    const family = [
+      "qds-factory",
+      "qds-factory-dev-meta",
+      "qds-factory-qa-meta",
+      "qds-factory-maint-meta",
+      COLLECTIVE_BANK_ID,
+    ];
+    const client = makeMockClient({
+      existingBankIds: family,
+      createBankThrows: () => new HindsightHttpError(409, "already exists", "r"),
+    });
+    const result = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.banks).toHaveLength(5);
+    expect(result.banks.every((b) => b.status === "exists")).toBe(true);
+    expect(client.createBank).toHaveBeenCalledTimes(5);
+    for (const call of client.createBank.mock.calls) {
+      expect(BankIdSchema.safeParse(call[0] as string).success).toBe(true);
+    }
+  });
+
+  test("51-char slug passes the -32003 gate, truncates to 50, all five valid", async () => {
+    // The pre-create gate only rejects invalid ids (cap 64); a 51-char base is
+    // valid there and is truncated to MAX_BASE_LEN=50 downstream so every
+    // manager meta variant stays ≤64.
+    const slug51 = "d".repeat(51);
+    const client = makeMockClient();
+    const result = await provisionBanks({
+      client,
+      repoSlug: slug51,
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.banks).toHaveLength(5);
+    expect(result.banks[0]!.bankId.length).toBe(50);
+    for (const b of result.banks) {
+      expect(BankIdSchema.safeParse(b.bankId).success).toBe(true);
+    }
+    expect(client.createBank).toHaveBeenCalledTimes(5);
+  });
+
+  test("MAX_BASE_LEN=50 corner: 50-char base + '-11' + '-maint-meta' = 64 exactly", async () => {
+    // Behavior probe for the retuned constant: a 50-char base whose collision
+    // loop reaches -11 mints ids of exactly 50+3+11=64 chars — schema-valid,
+    // never 65. (MAX_BASE_LEN itself is module-private; this pins it.)
+    const base50 = "e".repeat(50);
+    const existing = [base50];
+    for (let n = 2; n <= 10; n++) existing.push(`${base50}-${n}`);
+    const client = makeMockClient({ existingBankIds: existing });
+    const result = await provisionBanks({
+      client,
+      repoSlug: base50,
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.banks[0]!.bankId).toBe(`${base50}-11`);
+    expect(result.banks[3]!.bankId).toBe(`${base50}-11-maint-meta`);
+    expect(result.banks[3]!.bankId.length).toBe(64);
+    for (const b of result.banks) {
+      expect(BankIdSchema.safeParse(b.bankId).success).toBe(true);
+    }
   });
 });

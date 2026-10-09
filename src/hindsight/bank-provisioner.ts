@@ -1,7 +1,8 @@
 /**
- * Bank provisioner (P0.9) — creates the three Hindsight banks per story
- * Bank ID Resolution (CC-6): `{resolveBankId(repoSlug)}`, `…-dev-meta`, and
- * the fixed `qds-collective`.
+ * Bank provisioner (P0.9) — creates the five Hindsight banks per story
+ * Bank ID Resolution (CC-6): `{resolveBankId(repoSlug)}`, the manager meta
+ * banks `…-dev-meta` / `…-qa-meta` / `…-maint-meta`, and the fixed
+ * `qds-collective`.
  *
  * Surface (b) in the two-source error split (CC-W3): application-layer codes
  * `-32001..-32005` returned as `{ok:false,error:{code,message},requestId}`.
@@ -158,13 +159,15 @@ const MAX_SUFFIX = 11; // -2 .. -11 → 10 candidates, plus the base = 11 total
 /**
  * Truncate a base bank id so that base + the LONGEST suffix we'll ever
  * append stays within the BankIdSchema cap of 64 chars. Suffixes we use:
- *   - "-2" .. "-11"  (collision loop)  → up to 3 chars ("-11")
- *   - "-dev-meta"    (dev-meta bank)   → 9 chars, joined to repoBankId
- * Worst case: safeBase + "-11" + "-dev-meta" = safeBase + 12 chars. So
- * base ≤ 64 − 12 = 52 guarantees base, suffixed, AND `-dev-meta` variants
- * all stay schema-valid (≤64) even when the collision loop appends "-11".
+ *   - "-2" .. "-11"  (collision loop)         → up to 3 chars ("-11")
+ *   - "-dev-meta"    (dev manager meta bank)  → 9 chars, joined to repoBankId
+ *   - "-qa-meta"     (qa manager meta bank)   → 8 chars
+ *   - "-maint-meta"  (maint manager meta bank) → 11 chars — the LONGEST
+ * Worst case: safeBase + "-11" + "-maint-meta" = safeBase + 14 chars. So
+ * base ≤ 64 − 14 = 50 guarantees base, suffixed, AND every manager meta
+ * variant stays schema-valid (≤64) even when the collision loop appends "-11".
  */
-const MAX_BASE_LEN = 52; // 64 - len("-11") - len("-dev-meta")
+const MAX_BASE_LEN = 50; // 64 - len("-11") - len("-maint-meta")
 
 function truncateForSuffix(baseId: string): string {
   if (baseId.length <= MAX_BASE_LEN) return baseId;
@@ -186,7 +189,7 @@ export function resolveRepoBankId(
   existing: Set<string>,
 ): string | null {
   // ALWAYS truncate to the safe-max length first. This guarantees the
-  // returned id, AND its `-dev-meta` variant, stay schema-valid even when
+  // returned id, AND every manager meta variant, stay schema-valid even when
   // the base id is already at the 64-char schema cap.
   const safeBase = truncateForSuffix(baseId);
   // Try the (truncated) base as-is first.
@@ -213,22 +216,29 @@ export function resolveRepoBankId(
  * PREVIOUS provision call actually created. Nothing persists the provision-time
  * id (the spec's persistence alternative stays unimplemented by design), so the
  * provisioned repo bank is recognised by its family signature: a candidate `c`
- * that exists WITH its `-dev-meta` sibling — the pair only the provisioner
- * creates. Same candidate order as resolveRepoBankId; null when no candidate
- * carries the signature (a bare base without the sibling is a FOREIGN bank —
- * never recalled/written as ours).
+ * that exists WITH one of its manager meta siblings (`-dev-meta`, `-qa-meta`,
+ * `-maint-meta`) — the pairs only the provisioner creates. Same candidate order
+ * as resolveRepoBankId; null when no candidate carries the signature (a bare
+ * base without a meta sibling is a FOREIGN bank — never recalled/written as
+ * ours).
  */
+const META_SIBLINGS = ["dev", "qa", "maint"] as const;
+
+function hasMetaSibling(candidate: string, existing: Set<string>): boolean {
+  return META_SIBLINGS.some((s) => existing.has(`${candidate}-${s}-meta`));
+}
+
 export function resolveProvisionedRepoBankId(
   baseId: string,
   existing: Set<string>,
 ): string | null {
   const safeBase = truncateForSuffix(baseId);
-  if (existing.has(safeBase) && existing.has(`${safeBase}-dev-meta`)) {
+  if (existing.has(safeBase) && hasMetaSibling(safeBase, existing)) {
     return safeBase;
   }
   for (let n = 2; n <= MAX_SUFFIX; n++) {
     const candidate = `${safeBase}-${n}`;
-    if (existing.has(candidate) && existing.has(`${candidate}-dev-meta`)) {
+    if (existing.has(candidate) && hasMetaSibling(candidate, existing)) {
       return candidate;
     }
   }
@@ -468,14 +478,21 @@ export async function provisionBanks(opts: ProvisionOptions): Promise<ProvisionR
       repoBankId = resolved_id;
     } else {
       // listBanks failed → no collision loop. Truncate to the safe-max length
-      // so the `${repoBankId}-dev-meta` variant stays schema-valid (≤64). Using
-      // the untruncated baseId (up to 64 chars) here would make -dev-meta
-      // overflow to 73 chars and fail inside createBankIdempotent. A real
-      // collision is still caught by the idempotent PUT below.
+      // so the `${repoBankId}-maint-meta` variant (longest family suffix)
+      // stays schema-valid (≤64). Using the untruncated baseId (up to 64
+      // chars) here would make -maint-meta overflow to 75 chars and fail
+      // inside createBankIdempotent. A real collision is still caught by the
+      // idempotent PUT below.
       repoBankId = truncateForSuffix(baseId);
     }
 
-    const targets: string[] = [repoBankId, `${repoBankId}-dev-meta`, COLLECTIVE_BANK_ID];
+    const targets: string[] = [
+      repoBankId,
+      `${repoBankId}-dev-meta`,
+      `${repoBankId}-qa-meta`,
+      `${repoBankId}-maint-meta`,
+      COLLECTIVE_BANK_ID,
+    ];
 
     const banks: ProvisionedBank[] = [];
     try {

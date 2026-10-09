@@ -50,6 +50,18 @@
  *   path prints ONE envelope built from the ACTUAL result (R3-007/R3-008 —
  *   banks are bankId strings, [] on failure); a failed rerun compensates its
  *   claim-scoped creations and names the rest as residue (R3-004).
+ * - M3.1 (AC1): after a successful provision in EITHER lane, each manager
+ *   meta bank gets its manager mental model with
+ *   trigger.refresh_after_consolidation=true — create-if-absent under a
+ *   deterministic custom id `<repoBankId>-{dev|qa|maint}-mind` (0.10.0
+ *   REJECTS re-creating an existing custom id, so this is never an upsert),
+ *   PATCH-to-converge when present without the trigger, fresh read-back
+ *   verification that fails loud on drift, and post-pass confirmation that
+ *   every manager mental model carries the trigger. Rides the script's
+ *   env-bearer client — a bank write the {consolidate}-only agent token
+ *   cannot perform. Success envelopes carry
+ *   mentalModels:[{bankId,mentalModelId,action}]; a leg failure converts the
+ *   envelope to the existing failure idiom and the run exits non-zero.
  * - On {ok:false} → prints JSON envelope to stdout + exit(1).
  * - On {ok:true} → prints {ok,banks,requestId} JSON + exit(0).
  * - Single JSON object to stdout only (no interleaved log lines — the logger
@@ -67,7 +79,14 @@ import {
   type ProvisionOptions,
   type ProvisionResult,
 } from "../src/hindsight/bank-provisioner.ts";
-import { resolveBankId } from "../src/hindsight/schemas.ts";
+import {
+  resolveBankId,
+  type CreateMentalModelResponse,
+  type MentalModel,
+  type MentalModelList,
+  type MentalModelTrigger,
+  type OperationsList,
+} from "../src/hindsight/schemas.ts";
 import { setLogSink } from "../src/swarmclaw/mcp/stdio-transport.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 import {
@@ -405,6 +424,28 @@ export interface ProvisionEnvelope {
   deleteOutcomes?: Record<string, string>;
   /** Rerun-failure compensation (R3-004): bankId → why it still stands ("unclaimed-created" | "delete-failed"). */
   residue?: Record<string, string>;
+  /**
+   * M3.1 (AC1): the manager mental-model leg, added additively — present only
+   * when the leg ran AND passed; absent whenever the leg is skipped (any
+   * failure/refusal before it, or the leg itself failing).
+   */
+  mentalModels?: ManagerModelRow[];
+}
+
+/**
+ * M3.1: the canonical five-bank roster for a repo base — the same names and
+ * order provisionBanks targets (bank-provisioner.ts `targets`), so the
+ * rerun-envelope fallback and failure compensation agree with the fresh lane
+ * on what "this repo's family" means.
+ */
+export function canonicalRoster(repoBase: string): string[] {
+  return [
+    repoBase,
+    `${repoBase}-dev-meta`,
+    `${repoBase}-qa-meta`,
+    `${repoBase}-maint-meta`,
+    COLLECTIVE_BANK_ID,
+  ];
 }
 
 export function buildProvisionEnvelope(
@@ -422,7 +463,7 @@ export function buildProvisionEnvelope(
   };
   const banks = result.ok
     ? result.mode === "reupsert-existing"
-      ? (raw.roster ?? [base, `${base}-dev-meta`, COLLECTIVE_BANK_ID])
+      ? (raw.roster ?? canonicalRoster(base))
       : (raw.banks ?? []).map((b) => b.bankId)
     : [];
   return {
@@ -486,7 +527,7 @@ export async function compensateRerunFailure(
   preBankIds: string[],
 ): Promise<RerunCompensation> {
   const base = safeRepoBase(repoSlug);
-  const roster = [base, `${base}-dev-meta`, COLLECTIVE_BANK_ID];
+  const roster = canonicalRoster(base);
   const post = await takeRerunSnapshot(client);
   if (!post.ok) {
     return { deleteOutcomes: {}, residue: {} };
@@ -681,6 +722,268 @@ export async function openProvisionWindow(
   };
 }
 
+// ---------------------------------------------------------------------------
+// M3.1 manager mental models (AC1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural client surface the manager mental-model leg touches — the real
+ * HindsightClient is structurally compatible; tests inject plain fakes.
+ */
+export interface ManagerModelClient {
+  listMentalModels(
+    bankId: string,
+    detail?: "metadata" | "content" | "full",
+  ): Promise<MentalModelList>;
+  createMentalModel(
+    bankId: string,
+    input: {
+      id?: string;
+      name: string;
+      sourceQuery: string;
+      trigger?: MentalModelTrigger;
+      maxTokens?: number;
+    },
+  ): Promise<CreateMentalModelResponse>;
+  patchMentalModel(
+    bankId: string,
+    mentalModelId: string,
+    patch: { name?: string; trigger?: MentalModelTrigger },
+  ): Promise<MentalModel>;
+  listOperations(
+    bankId: string,
+    opts?: { type?: string; status?: string; limit?: number },
+  ): Promise<OperationsList>;
+}
+
+export interface ManagerModelRow {
+  bankId: string;
+  mentalModelId: string;
+  action: "created" | "patched" | "verified";
+}
+
+export interface EnsureMentalModelsResult {
+  models: ManagerModelRow[];
+}
+
+export interface EnsureMentalModelsOpts {
+  /** Clock override (tests). Default Date.now. */
+  now?: () => number;
+  pollIntervalMs?: number;
+  pollTimeoutMs?: number;
+  log?: (entry: unknown) => void;
+}
+
+/** Deterministic custom id: `<repoBankId>-{lane}-mind` (≤59 chars for a 50-char base, ≤64 cap). */
+export function managerMentalModelId(
+  repoBankId: string,
+  lane: "dev" | "qa" | "maint",
+): string {
+  return `${repoBankId}-${lane}-mind`;
+}
+
+const MANAGER_LANES = ["dev", "qa", "maint"] as const;
+type ManagerLane = (typeof MANAGER_LANES)[number];
+
+/** `{repoBankId}-dev-meta` → {repoBankId, "dev"}; the leg only ever receives names it built. */
+function splitManagerMetaBank(bankId: string): { repoBankId: string; lane: ManagerLane } {
+  const m = /-(dev|qa|maint)-meta$/.exec(bankId);
+  if (m === null) {
+    throw new Error(
+      `not a manager meta bank id: "${bankId}" (expected <repoBankId>-{dev|qa|maint}-meta)`,
+    );
+  }
+  return { repoBankId: bankId.slice(0, m.index), lane: m[1] as ManagerLane };
+}
+
+/** Fail-loud leg error; remediation is folded into `message` so envelopes quote it. */
+class MentalModelProvisionError extends Error {
+  code: string;
+  remediation: string;
+  constructor(code: string, message: string, remediation: string) {
+    super(`${message} — remediation: ${remediation}`);
+    this.name = "MentalModelProvisionError";
+    this.code = code;
+    this.remediation = remediation;
+  }
+}
+
+/**
+ * Poll a create operation to a terminal state on the same bank. Matched by id
+ * ONLY — create's task_type is not in the documented operation-type enum, so
+ * a type filter would silently miss it.
+ */
+// dp:ok: fail-loud by design — throws typed MentalModelProvisionError; the
+// caller (ensureManagerMentalModels → withManagerMentalModels) wraps it into
+// the failure envelope. A local try/catch would swallow the loud failure.
+async function waitForCreateOperation(
+  client: ManagerModelClient,
+  bankId: string,
+  operationId: string,
+  pollIntervalMs: number,
+  deadline: number,
+  now: () => number,
+): Promise<void> {
+  for (;;) {
+    const ops = await client.listOperations(bankId, { limit: 50 });
+    const op = ops.operations.find((o) => o.id === operationId);
+    if (op !== undefined) {
+      if (op.status === "completed") return;
+      if (op.status === "failed" || op.status === "cancelled") {
+        throw new MentalModelProvisionError(
+          "mental_model_create_failed",
+          `create operation ${operationId} for the mental model on bank ${bankId} reached ${op.status}${op.error_message ? ` (${op.error_message})` : ""}`,
+          `inspect operation ${operationId} on bank ${bankId}, fix the cause, and re-run provisioning (creates are absent-model-only, so a re-run retries cleanly)`,
+        );
+      }
+    }
+    if (now() >= deadline) {
+      throw new MentalModelProvisionError(
+        "mental_model_create_timeout",
+        `create operation ${operationId} for the mental model on bank ${bankId} did not reach a terminal state within the poll budget`,
+        "check the Hindsight instance's operation queue health, then re-run provisioning",
+      );
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+}
+
+/**
+ * M3.1 AC1: ensure every manager meta bank carries its manager mental model
+ * with trigger.refresh_after_consolidation=true.
+ *
+ * - Create-if-absent under a DETERMINISTIC custom id
+ *   (`<repoBankId>-{lane}-mind`): 0.10.0 REJECTS a create that reuses an
+ *   existing custom id, so this is never an upsert. Presence is checked via
+ *   listMentalModels + find by id — GET-by-custom-id semantics are unverified
+ *   in the spec; list+find is the robust path.
+ * - Present but missing the trigger → PATCH-to-converge, then read back with
+ *   a FRESH list and fail loud if it still is not set.
+ * - Creates run as background operations: poll listOperations to a terminal
+ *   state; failed/cancelled/timeout fails the leg loud.
+ * - Post-pass confirmation: every manager mental model must carry the
+ *   trigger, else the leg fails loud (AC1's converge guarantee).
+ *
+ * `sourceQuery: "*"` is match-all over the bank's observations — semantics
+ * UNVERIFIED in the 0.10.0 docs and validated by the live round; provisioning
+ * is the only place it is set.
+ *
+ * Admin/host credential: these are bank writes the {consolidate}-only agent
+ * token cannot perform — the leg only rides the script's env-bearer client.
+ * Token material never enters these log entries (bank/model ids only).
+ */
+// dp:ok: fail-loud by design — typed throws (create-failed / drift / timeout)
+// are the AC1 contract; withManagerMentalModels is the single wrapper that
+// converts them to the failure envelope + non-zero exit.
+export async function ensureManagerMentalModels(
+  client: ManagerModelClient,
+  managerMetaBanks: string[],
+  opts: EnsureMentalModelsOpts = {},
+): Promise<EnsureMentalModelsResult> {
+  const now = opts.now ?? Date.now;
+  const pollIntervalMs = opts.pollIntervalMs ?? 2_000;
+  const pollTimeoutMs = opts.pollTimeoutMs ?? 120_000;
+  const emit = opts.log ?? (() => {});
+  const models: ManagerModelRow[] = [];
+
+  for (const bankId of managerMetaBanks) {
+    const { repoBankId, lane } = splitManagerMetaBank(bankId);
+    const mmId = managerMentalModelId(repoBankId, lane);
+    const trigger: MentalModelTrigger = { refresh_after_consolidation: true };
+
+    const existing = (await client.listMentalModels(bankId, "content")).items.find(
+      (mm) => mm.id === mmId,
+    );
+    if (existing === undefined) {
+      const created = await client.createMentalModel(bankId, {
+        id: mmId,
+        name: `Manager overview (${lane})`,
+        // ponytail: match-all semantics validated by the live round (UNVERIFIED in 0.10.0 docs)
+        sourceQuery: "*",
+        trigger,
+      });
+      await waitForCreateOperation(
+        client,
+        bankId,
+        created.operation_id,
+        pollIntervalMs,
+        now() + pollTimeoutMs,
+        now,
+      );
+      emit({ event: "manager-mental-model", bankId, mentalModelId: mmId, action: "created" });
+      models.push({ bankId, mentalModelId: mmId, action: "created" });
+    } else if (existing.trigger?.refresh_after_consolidation !== true) {
+      await client.patchMentalModel(bankId, mmId, { trigger });
+      // Read back via a FRESH list — the PATCH response alone is not evidence.
+      const reread = (await client.listMentalModels(bankId, "content")).items.find(
+        (mm) => mm.id === mmId,
+      );
+      if (reread?.trigger?.refresh_after_consolidation !== true) {
+        throw new MentalModelProvisionError(
+          "mental_model_trigger_drift",
+          `PATCH read-back drift: mental model ${mmId} on bank ${bankId} still lacks refresh_after_consolidation=true`,
+          `inspect mental model ${mmId} on bank ${bankId} directly (PATCH accepted but not applied), then re-run provisioning`,
+        );
+      }
+      emit({ event: "manager-mental-model", bankId, mentalModelId: mmId, action: "patched" });
+      models.push({ bankId, mentalModelId: mmId, action: "patched" });
+    } else {
+      // Already converged → verify-only (no create, no patch).
+      emit({ event: "manager-mental-model", bankId, mentalModelId: mmId, action: "verified" });
+      models.push({ bankId, mentalModelId: mmId, action: "verified" });
+    }
+  }
+
+  // Post-pass confirmation (AC1): every manager mental model carries the trigger.
+  for (const bankId of managerMetaBanks) {
+    const { repoBankId, lane } = splitManagerMetaBank(bankId);
+    const mmId = managerMentalModelId(repoBankId, lane);
+    const mm = (await client.listMentalModels(bankId, "content")).items.find(
+      (m) => m.id === mmId,
+    );
+    if (mm?.trigger?.refresh_after_consolidation !== true) {
+      throw new MentalModelProvisionError(
+        "mental_model_trigger_drift",
+        `post-pass drift: mental model ${mmId} on bank ${bankId} does not carry refresh_after_consolidation=true`,
+        `re-run provisioning (absent models are created, drifted ones patched); if it persists, inspect bank ${bankId} on the instance`,
+      );
+    }
+  }
+
+  return { models };
+}
+
+/**
+ * The MM leg for either lane's SUCCESS envelope: derive the three manager
+ * meta bank ids from the provisioned repo base (envelope.banks[0] — the repo
+ * bank id in both lanes), run ensureManagerMentalModels on the same
+ * env-bearer client, and fold the rows in additively. A leg failure converts
+ * the envelope to the existing failure idiom (banks → [] once anything
+ * failed); the caller prints it and exits non-zero.
+ */
+async function withManagerMentalModels(
+  client: ManagerModelClient,
+  envelope: ProvisionEnvelope,
+): Promise<ProvisionEnvelope> {
+  if (!envelope.ok || envelope.banks[0] === undefined) return envelope;
+  const repoBankId = envelope.banks[0];
+  const managerMetaBanks = MANAGER_LANES.map((lane) => `${repoBankId}-${lane}-meta`);
+  try {
+    const mm = await ensureManagerMentalModels(client, managerMetaBanks);
+    return { ...envelope, mentalModels: mm.models };
+  } catch (e) {
+    return {
+      ...envelope,
+      ok: false,
+      banks: [],
+      error: {
+        code: "mental_model_provision_failed",
+        message: e instanceof Error ? e.message : String(e),
+      },
+    };
+  }
+}
+
 async function main(): Promise<number> {
   let args: ArgSpec;
   try {
@@ -764,8 +1067,11 @@ async function main(): Promise<number> {
     noBridgeProbe: args.noBridgeProbe,
   });
   if (opened.kind === "settled") {
-    process.stdout.write(`${JSON.stringify(opened.envelope)}\n`);
-    return opened.code;
+    // M3.1: a settled SUCCESS (rerun or dedicated-fresh) flows through the
+    // manager mental-model leg before printing; refusals pass through untouched.
+    const envelope = await withManagerMentalModels(client, opened.envelope);
+    process.stdout.write(`${JSON.stringify(envelope)}\n`);
+    return envelope.ok ? 0 : 1;
   }
   // R3-003/R3-007: the committed shared-fresh tail below is pinned verbatim
   // by the adds-only gate, so it routes through this LOCAL binding of
@@ -776,9 +1082,12 @@ async function main(): Promise<number> {
   const bridgeProbe = await realBridgeProbe(args.mcpServerId);
 
   const result = await provisionBanks({ client, repoSlug, bridgeProbe });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  // M3.1: the shared-fresh lane's MM leg — only a successful bank provision
+  // reaches it; a failed bank envelope prints as-is.
+  const envelope = await withManagerMentalModels(client, result);
+  process.stdout.write(`${JSON.stringify(envelope)}\n`);
   opened.release(); // guarded inside the window (R3-006)
-  return result.ok ? 0 : 1;
+  return envelope.ok ? 0 : 1;
 }
 
 // Only run when invoked directly (not when imported by tests / other scripts).
