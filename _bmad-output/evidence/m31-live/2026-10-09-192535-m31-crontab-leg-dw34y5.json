@@ -1,0 +1,140 @@
+{
+  "phase": "m31.crontab-leg",
+  "runEnvelopes": [
+    {
+      "driverCode": 0,
+      "bank": "qds-factory-dev-meta",
+      "ok": true,
+      "banksOk": 1,
+      "banksFailed": 0,
+      "totalMs": 24096,
+      "receipts": [
+        {
+          "bankId": "qds-factory-dev-meta",
+          "mentalModelId": "qds-factory-dev-mind",
+          "consolidate": {
+            "deduplicated": true
+          },
+          "refresh": {
+            "mechanism": "consolidation-trigger",
+            "operationId": "8cdfec67-4139-48f7-88a2-b025df6e9c75",
+            "status": "completed",
+            "observedVia": "operations-list"
+          }
+        }
+      ],
+      "failures": []
+    },
+    {
+      "driverCode": 0,
+      "bank": "qds-factory-qa-meta",
+      "ok": true,
+      "banksOk": 1,
+      "banksFailed": 0,
+      "totalMs": 20084,
+      "receipts": [
+        {
+          "bankId": "qds-factory-qa-meta",
+          "mentalModelId": "qds-factory-qa-mind",
+          "consolidate": {
+            "deduplicated": true
+          },
+          "refresh": {
+            "mechanism": "consolidation-trigger",
+            "operationId": "8269d7e2-527e-4419-b54e-1f6b239cae10",
+            "status": "completed",
+            "observedVia": "operations-list"
+          }
+        }
+      ],
+      "failures": []
+    },
+    {
+      "driverCode": 0,
+      "bank": "qds-factory-maint-meta",
+      "ok": true,
+      "banksOk": 1,
+      "banksFailed": 0,
+      "totalMs": 20080,
+      "receipts": [
+        {
+          "bankId": "qds-factory-maint-meta",
+          "mentalModelId": "qds-factory-maint-mind",
+          "consolidate": {
+            "deduplicated": true
+          },
+          "refresh": {
+            "mechanism": "consolidation-trigger",
+            "operationId": "03a7301d-2948-470d-9bb3-8f8624b56e7e",
+            "status": "completed",
+            "observedVia": "operations-list"
+          }
+        }
+      ],
+      "failures": []
+    }
+  ],
+  "receipts": [
+    {
+      "bankId": "qds-factory-dev-meta",
+      "mentalModelId": "qds-factory-dev-mind",
+      "consolidate": {
+        "deduplicated": true
+      },
+      "refresh": {
+        "mechanism": "consolidation-trigger",
+        "operationId": "8cdfec67-4139-48f7-88a2-b025df6e9c75",
+        "status": "completed",
+        "observedVia": "operations-list"
+      }
+    },
+    {
+      "bankId": "qds-factory-qa-meta",
+      "mentalModelId": "qds-factory-qa-mind",
+      "consolidate": {
+        "deduplicated": true
+      },
+      "refresh": {
+        "mechanism": "consolidation-trigger",
+        "operationId": "8269d7e2-527e-4419-b54e-1f6b239cae10",
+        "status": "completed",
+        "observedVia": "operations-list"
+      }
+    },
+    {
+      "bankId": "qds-factory-maint-meta",
+      "mentalModelId": "qds-factory-maint-mind",
+      "consolidate": {
+        "deduplicated": true
+      },
+      "refresh": {
+        "mechanism": "consolidation-trigger",
+        "operationId": "03a7301d-2948-470d-9bb3-8f8624b56e7e",
+        "status": "completed",
+        "observedVia": "operations-list"
+      }
+    }
+  ],
+  "mentalModels": [
+    {
+      "bankId": "qds-factory-dev-meta",
+      "mentalModelId": "qds-factory-dev-mind",
+      "action": "verified"
+    },
+    {
+      "bankId": "qds-factory-qa-meta",
+      "mentalModelId": "qds-factory-qa-mind",
+      "action": "verified"
+    },
+    {
+      "bankId": "qds-factory-maint-meta",
+      "mentalModelId": "qds-factory-maint-mind",
+      "action": "verified"
+    }
+  ],
+  "eventCount": 18,
+  "writtenAt": "2026-10-09T19:25:35.384Z",
+  "image": {
+    "note": "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only"
+  }
+}

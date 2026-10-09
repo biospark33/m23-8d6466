@@ -1,0 +1,59 @@
+{
+  "phase": "m31.dedup-claim",
+  "bank": "qds-factory-dev-meta",
+  "results": [
+    {
+      "ok": false,
+      "leg": "schedule",
+      "banksOk": 0,
+      "banksFailed": 1,
+      "totalMs": 299182,
+      "receipts": [],
+      "failures": [
+        {
+          "bankId": "qds-factory-dev-meta",
+          "code": "REFRESH_EVIDENCE_MISSING",
+          "message": "no refresh_mental_model operation for the triggered mental models (qds-factory-dev-mind) of bank qds-factory-dev-meta was observed after the consolidate within the evidence budget",
+          "remediation": "verify the instance fired the consolidation-trigger refresh; check the bank's mental-model history"
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "leg": "schedule",
+      "banksOk": 0,
+      "banksFailed": 1,
+      "totalMs": 299181,
+      "receipts": [],
+      "failures": [
+        {
+          "bankId": "qds-factory-dev-meta",
+          "code": "REFRESH_EVIDENCE_MISSING",
+          "message": "no refresh_mental_model operation for the triggered mental models (qds-factory-dev-mind) of bank qds-factory-dev-meta was observed after the consolidate within the evidence budget",
+          "remediation": "verify the instance fired the consolidation-trigger refresh; check the bank's mental-model history"
+        }
+      ]
+    }
+  ],
+  "receiptCount": 0,
+  "deduplicatedReceipts": 0,
+  "distinctOperationIds": [],
+  "caveatFailures": [
+    {
+      "bankId": "qds-factory-dev-meta",
+      "code": "REFRESH_EVIDENCE_MISSING"
+    },
+    {
+      "bankId": "qds-factory-dev-meta",
+      "code": "REFRESH_EVIDENCE_MISSING"
+    }
+  ],
+  "coalesced": false,
+  "verdict": "NOT-observed",
+  "eventCount": 2,
+  "error": "dedup claim NOT verified — two concurrent consolidates against one bank produced no deduplicated receipt; the v4 :578 coalescing claim fails on this instance and the named fallback (scripts/lib/run-lock.ts or operations-polling) must be adopted before merge",
+  "writtenAt": "2026-10-09T19:21:35.289Z",
+  "image": {
+    "note": "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only"
+  }
+}

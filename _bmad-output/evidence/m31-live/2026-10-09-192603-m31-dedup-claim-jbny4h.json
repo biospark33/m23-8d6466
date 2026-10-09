@@ -1,0 +1,63 @@
+{
+  "phase": "m31.dedup-claim",
+  "bank": "qds-factory-dev-meta",
+  "results": [
+    {
+      "ok": true,
+      "leg": "schedule",
+      "banksOk": 1,
+      "banksFailed": 0,
+      "totalMs": 22105,
+      "receipts": [
+        {
+          "bankId": "qds-factory-dev-meta",
+          "mentalModelId": "qds-factory-dev-mind",
+          "consolidate": {
+            "deduplicated": true
+          },
+          "refresh": {
+            "mechanism": "consolidation-trigger",
+            "operationId": "a8b4d3ce-4a0e-4b4f-96e5-74f9062a1f86",
+            "status": "completed",
+            "observedVia": "operations-list"
+          }
+        }
+      ],
+      "failures": []
+    },
+    {
+      "ok": true,
+      "leg": "schedule",
+      "banksOk": 1,
+      "banksFailed": 0,
+      "totalMs": 22104,
+      "receipts": [
+        {
+          "bankId": "qds-factory-dev-meta",
+          "mentalModelId": "qds-factory-dev-mind",
+          "consolidate": {
+            "deduplicated": true
+          },
+          "refresh": {
+            "mechanism": "consolidation-trigger",
+            "operationId": "a8b4d3ce-4a0e-4b4f-96e5-74f9062a1f86",
+            "status": "completed",
+            "observedVia": "operations-list"
+          }
+        }
+      ],
+      "failures": []
+    }
+  ],
+  "receiptCount": 2,
+  "deduplicatedReceipts": 2,
+  "distinctOperationIds": [],
+  "caveatFailures": [],
+  "coalesced": true,
+  "verdict": "coalescing-observed",
+  "eventCount": 2,
+  "writtenAt": "2026-10-09T19:26:03.172Z",
+  "image": {
+    "note": "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only"
+  }
+}

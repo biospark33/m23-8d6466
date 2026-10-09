@@ -154,6 +154,16 @@ Written 2026-10-02, before M1.2/M2.1 landed; every gateway-facing claim checked 
 - [x] [Review][Patch] Letter-vs-spec wording notes: AC1 GET-by-custom-id implemented as listMentalModels+find; INV-MEM-1 "one *-meta bank" vs the fallback leg's one three-bank token; AC4 E21 fence is a static graph scan rather than literal file deletion [_bmad-output/sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md]
 - [x] [Review][Defer] 795 standing DP findings repo-wide — deferred, pre-existing campaign [repo-wide]
 
+### Live round (2026-10-09, fired on operator GO)
+
+Fired on the qds-alpha tenant VPS (207.148.6.90, control-plane jump) against the dedicated `hindsight-qds` — image digest `sha256:3edcb616…` verified byte-equal to the repo compose pin (the operator's "older version?" doubt resolved by `docker inspect`; 0.10.0 confirmed). Provisioning pass ran first: five-bank family converged (`-qa-meta`/`-maint-meta` created), three mental models created with `trigger:{refresh_after_consolidation:true}` (custom ids `<repoBankId>-{dev,qa,maint}-mind`), exit 0.
+
+Firings (all evidence under `_bmad-output/evidence/m31-live/`, failed rounds kept as history):
+- Runs 1–2: honest fail-loud — the banks were EMPTY on the fresh instance, and a consolidate over already-drained content processes 0 observations, so the trigger never queues a refresh (`REFRESH_EVIDENCE_MISSING` on all three). Instance semantics confirmed live: the trigger fires only when consolidation actually updates observations (the seeded bank showed a `content_written` refresh minutes earlier). This is AC2's proof standard doing its job, not a defect.
+- Run 3 (per-bank seed-then-fire choreography — the production premise, "retained content before the nightly fires"): **GREEN 4/4**. Crontab leg end-to-end: 3/3 receipts, each OBSERVED via the operations list (`mechanism: consolidation-trigger`). Dedup probe: verdict **`coalescing-observed`**, 2 deduplicated receipts — the v4 :578 bank-dedup claim is instance-VERIFIED; the named fallback (run-lock/operations-polling) is NOT owed. Schedule leg at the gateway seam: same module, `leg:"schedule"`, green.
+
+Supporting changes landed with the round: `liveGate` gains tier `"0"` (infra-only — no exe.dev box substrate; tiers 1/2 untouched), `runMemoryNightly` gains a validated `banks` subset override, and the live test folds the driver envelope into evidence before any assert (failed legs leave receipts + codes on disk).
+
 ### Review Findings (round 2, 2026-10-09)
 
 Round 2 audited the round-1 fix wave (disposition audit: 29/29 VERIFIED-FIXED) and boundary-walked the new code. 12 findings — all patch, no HIGH/BLOCKER (stop condition met after this round's fixes):

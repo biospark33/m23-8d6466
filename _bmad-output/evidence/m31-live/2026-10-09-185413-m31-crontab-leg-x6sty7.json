@@ -1,0 +1,8 @@
+{
+  "phase": "m31.crontab-leg",
+  "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n",
+  "writtenAt": "2026-10-09T18:54:13.034Z",
+  "image": {
+    "note": "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only"
+  }
+}
