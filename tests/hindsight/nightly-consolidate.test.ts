@@ -923,6 +923,81 @@ describe("AC4 module-graph fences", () => {
 // CLI driver (scripts/memory-nightly.ts) — cases 16-21
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// round-2 hardening (review round 2): budget guards, evidence ordering, CLI
+// refusals found by the second adversarial pass over the fix wave
+// ---------------------------------------------------------------------------
+
+describe("round-2 hardening", () => {
+  test("NaN wallClockBudgetMs → typed nightly-budget-invalid throw before any work", async () => {
+    installRouter(() => {
+      throw new Error("round-2: budget validation must precede any network touch");
+    });
+    const { deps } = rig({ banks: [BANK], overrides: { wallClockBudgetMs: Number.NaN } });
+
+    await expect(runNightlyConsolidate(deps)).rejects.toMatchObject({ code: "nightly-budget-invalid" });
+    expect(calls.length).toBe(0);
+  });
+
+  test("NaN refreshEvidenceTimeoutMs → typed nightly-budget-invalid throw", async () => {
+    installRouter(() => {
+      throw new Error("round-2: budget validation must precede any network touch");
+    });
+    const { deps } = rig({ banks: [BANK], overrides: { refreshEvidenceTimeoutMs: Number.NaN } });
+
+    await expect(runNightlyConsolidate(deps)).rejects.toMatchObject({ code: "nightly-budget-invalid" });
+  });
+
+  test("two triggered models, failed refresh row FIRST then completed → the completed one is the receipt (page order never decides)", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      mmItems: { [BANK]: [triggeredMm(BANK, "mm-alpha"), triggeredMm(BANK, "mm-beta")] },
+      opsQueues: {
+        [BANK]: [
+          opsListBody(BANK, [
+            refreshOpRow(BANK, { createdAt: iso(NOW_MS), status: "failed", errorMessage: "alpha detonated", mmId: "mm-alpha" }),
+            refreshOpRow(BANK, { createdAt: iso(NOW_MS), opId: "op-refresh-beta", mmId: "mm-beta" }),
+          ]),
+        ],
+      },
+    });
+    const { events, deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(true);
+    expect(at(result.receipts, 0).mentalModelId).toBe("mm-beta");
+    expect(at(result.receipts, 0).refresh.operationId).toBe("op-refresh-beta");
+    expectLegEverywhere(events, "crontab");
+  });
+
+  test("bank whose evidence window is already gone when the poll begins → NIGHTLY_BUDGET_EXHAUSTED, not REFRESH_EVIDENCE_MISSING", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      opsQueues: { [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS) })])] },
+    });
+    // Aggressive clock tuned so the PRE-BANK check still passes (500 < 1500)
+    // but preflight + consolidate consume the rest before the evidence poll
+    // begins — poll 0 must attribute to the budget, not to a silent instance.
+    const { deps } = rig({
+      banks: [BANK],
+      overrides: {
+        wallClockBudgetMs: 1500,
+        now: () => {
+          clockMs += 500;
+          return clockMs;
+        },
+      },
+    });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.map((f) => f.code)).toEqual(["NIGHTLY_BUDGET_EXHAUSTED"]);
+    expect(result.failures[0]?.message).toContain("already exhausted");
+  });
+});
+
 describe("CLI driver (memory-nightly)", () => {
   const REPO_BANKS = {
     banks: [
@@ -1094,5 +1169,58 @@ describe("CLI driver (memory-nightly)", () => {
     expect(fault.code).toBe("BANK_LIST_UNREACHABLE");
     expect(fault.remediation).toContain("HINDSIGHT_BASE_URL");
     expect(calls.some((c) => c.url.includes("/consolidate"))).toBe(false);
+  });
+
+  test("case 22 — single-dash typo flag (-dry-run) → exit 2 unknown-flag usage line (the -- gate's class, closed for - too)", () => {
+    const proc = Bun.spawnSync({
+      cmd: ["bun", CLI_SCRIPT, "-dry-run"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(proc.exitCode).toBe(2);
+    const text = `${proc.stderr.toString()}${proc.stdout.toString()}`;
+    expect(text).toContain("unknown flag: -dry-run");
+    expect(text).toContain("usage:");
+  });
+
+  test("case 23 — legacy collision family resolves to a repoBankId whose maint-meta id overflows the 64-char cap → code 2 bank-id-overflow naming the convergence path", async () => {
+    // A 52-era slug collides to "<base52>-2" (55 chars): dev-meta still fits
+    // (64), maint-meta is 66 — that bank can never exist, so the nightly
+    // must refuse at config time instead of failing it every run.
+    const base52 = "a".repeat(52);
+    const legacyBank = `${base52}-2`;
+    installNightlyRouter({
+      banks: [],
+      listBanksBody: { banks: [{ bank_id: legacyBank }, { bank_id: `${legacyBank}-dev-meta` }] },
+      opsQueues: {},
+    });
+
+    const { code, envelope } = await runMemoryNightly({
+      env: { ...FULL_ENV, QDS_MEMGATE_LEDGER: join(dir, "case23-ledger.db"), QDS_MEMORY_REPO_SLUG: base52 },
+      now: tickClock,
+    });
+
+    expect(code).toBe(2);
+    expect(envelope.ok).toBe(false);
+    const fault = faultOf(envelope);
+    expect(fault.code).toBe("bank-id-overflow");
+    expect(fault.remediation).toContain("50-char rule");
+    expect(calls.some((c) => c.url.includes("/consolidate"))).toBe(false);
+  });
+
+  test("case 24 — HINDSIGHT_BASE_URL is REQUIRED (the client's silent 127.0.0.1:8888 default aims at the wrong instance) → config-refusal names it", async () => {
+    installRouter(() => {
+      throw new Error("round-2: config refusal must not touch the network");
+    });
+    const env: Record<string, string | undefined> = { ...FULL_ENV, QDS_MEMGATE_LEDGER: join(dir, "case24-ledger.db") };
+    env.HINDSIGHT_BASE_URL = undefined; // the case: the required var is absent
+
+    const { code, envelope } = await runMemoryNightly({ env, now: tickClock });
+
+    expect(code).toBe(2);
+    expect(envelope.ok).toBe(false);
+    if (!("missing" in envelope)) throw new Error("expected the config-refusal envelope");
+    expect(envelope.missing).toContain("HINDSIGHT_BASE_URL");
+    expect(calls.length).toBe(0);
   });
 });

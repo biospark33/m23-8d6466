@@ -75,6 +75,7 @@ import { httpRequest } from "../src/lib/http.ts";
 import {
   provisionBanks,
   type BridgeProbe,
+  safeRepoBaseCandidates,
   type ProvisionClient,
   type ProvisionOptions,
   type ProvisionResult,
@@ -526,7 +527,16 @@ export async function compensateRerunFailure(
   repoSlug: string,
   preBankIds: string[],
 ): Promise<RerunCompensation> {
-  const base = safeRepoBase(repoSlug);
+  // Claim the roster of the family form that ACTUALLY existed pre-run: a
+  // legacy 52-era family's qa/maint creations must be claimed in their own
+  // form, or they land in residue as unclaimed-created and are never
+  // compensated. Same dual-form detection as the rerun gate (leg-lib), with
+  // the strict dev-meta ownership signature; the 50-form fallback only fires
+  // when no family was detected (fresh-run failure compensation).
+  const base =
+    safeRepoBaseCandidates(resolveBankId(repoSlug)).find(
+      (c) => preBankIds.includes(c) && preBankIds.includes(`${c}-dev-meta`),
+    ) ?? safeRepoBase(repoSlug);
   const roster = canonicalRoster(base);
   const post = await takeRerunSnapshot(client);
   if (!post.ok) {

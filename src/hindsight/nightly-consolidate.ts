@@ -244,9 +244,18 @@ export async function runNightlyConsolidate(deps: NightlyDeps): Promise<NightlyR
   }
 
   const wallBudgetMs = deps.wallClockBudgetMs ?? NIGHTLY_WALL_CLOCK_BUDGET_MS;
+  const evidenceBudgetMs = deps.refreshEvidenceTimeoutMs ?? DEFAULT_REFRESH_EVIDENCE_TIMEOUT_MS;
+  // A non-finite budget poisons every Math.min below (NaN deadlines never
+  // trip) and turns the evidence poll into an unbounded loop — refuse at the
+  // seam, same class as the clock guard.
+  if (!Number.isFinite(wallBudgetMs) || !Number.isFinite(evidenceBudgetMs)) {
+    throw new MemgateError("nightly-budget-invalid",
+      "wallClockBudgetMs and refreshEvidenceTimeoutMs must be finite ms numbers",
+      "pass finite deps.wallClockBudgetMs / deps.refreshEvidenceTimeoutMs (or omit them for the defaults)");
+  }
   const started = nowMs(deps);
   const wallDeadlineMs = started + wallBudgetMs;
-  const evidenceDeadlineMs = started + (deps.refreshEvidenceTimeoutMs ?? DEFAULT_REFRESH_EVIDENCE_TIMEOUT_MS);
+  const evidenceDeadlineMs = started + evidenceBudgetMs;
 
   emit(deps, requestId, { event: "nightly-fire", leg: deps.leg, banks: [...banks] });
 
@@ -387,6 +396,13 @@ async function consolidateOneBank(
       op.unparseableMatches > 0
         ? `; ${op.unparseableMatches} matching refresh row(s) seen with unparseable created_at`
         : "";
+    if (op.budgetExhausted) {
+      // The bank's window was already gone when the poll began — attributing
+      // this to a silent instance would misdirect the operator.
+      return failOf(bank, "NIGHTLY_BUDGET_EXHAUSTED",
+        `bank ${bank}'s evidence window was already exhausted when its refresh-evidence poll began (wall-clock budget: NIGHTLY_WALL_CLOCK_BUDGET_MS; override via deps.wallClockBudgetMs)`,
+        "raise deps.wallClockBudgetMs or shrink the per-bank evidence work, then re-run the nightly pass");
+    }
     return failOf(bank, "REFRESH_EVIDENCE_MISSING",
       `no refresh_mental_model operation for the triggered mental models (${triggeredIds.join(", ")}) of bank ${bank} was observed after the consolidate within the evidence budget${diagnostic}`,
       "verify the instance fired the consolidation-trigger refresh; check the bank's mental-model history");
@@ -427,7 +443,13 @@ async function consolidateOneBank(
 type ObservedRefresh =
   | { kind: "observed"; row: MentalModelOperation; mentalModelId: string }
   | { kind: "terminal-failure"; row: MentalModelOperation; mentalModelId: string }
-  | { kind: "missing"; unparseableMatches: number };
+  | { kind: "missing"; unparseableMatches: number; budgetExhausted: boolean };
+
+/** Backstop against a FROZEN injected clock: the deadline check would never
+ * trip, and with real sleeps the poll would spin forever. 10k polls at the
+ * 50ms floor is ~8 minutes — far past any honest budget, never hit in
+ * production where Date.now advances. */
+const MAX_EVIDENCE_POLLS = 10_000;
 
 async function observeRefresh(
   deps: NightlyDeps,
@@ -444,10 +466,19 @@ async function observeRefresh(
       : Number.isFinite(rawInterval) && rawInterval > POLL_INTERVAL_FLOOR_MS
         ? rawInterval
         : POLL_INTERVAL_FLOOR_MS;
-  while (true) {
+  // Entered with no window left: report budget exhaustion, not missing
+  // evidence — one full page walk post-budget would only misattribute.
+  for (let poll = 0; poll < MAX_EVIDENCE_POLLS; poll++) {
+    if (nowMs(deps) >= deadlineMs) {
+      return { kind: "missing", unparseableMatches: 0, budgetExhausted: true };
+    }
     // Per-poll counter (not accumulated): newest-first pages are re-read on
-    // every poll, so accumulating would inflate the diagnostic.
+    // every poll, so accumulating would inflate the diagnostic. Successes
+    // are preferred over terminal failures WITHIN a poll: with multiple
+    // triggered models, page order must not decide the bank's outcome —
+    // a completed refresh for one model outranks a failed one for another.
     let unparseableMatches = 0;
+    let firstFailure: { row: MentalModelOperation; mentalModelId: string } | undefined;
     try {
       for (let page = 0; page < MAX_EVIDENCE_PAGES; page++) {
         const list = await read.listOperations(bank, {
@@ -464,7 +495,8 @@ async function observeRefresh(
           }
           if (createdAtMs <= consolidateCompletedAtMs - EVIDENCE_CLOCK_SKEW_MS) continue; // stale
           if (REFRESH_TERMINAL_FAILURE_STATUSES.has(o.status)) {
-            return { kind: "terminal-failure", row: o, mentalModelId: o.mental_model_id };
+            firstFailure ??= { row: o, mentalModelId: o.mental_model_id };
+            continue;
           }
           if (REFRESH_PENDING_STATUSES.has(o.status)) {
             continue; // still in flight — the next poll may see it terminal
@@ -476,9 +508,18 @@ async function observeRefresh(
     } catch {
       // a faulting read is retried until the budget — fail-loud lives in the deadline
     }
+    if (firstFailure !== undefined) {
+      return { kind: "terminal-failure", ...firstFailure };
+    }
     if (nowMs(deps) + pollIntervalMs >= deadlineMs) {
-      return { kind: "missing", unparseableMatches };
+      // Window consumed while polling a healthy entry — the evidence never
+      // appeared WITHIN its budget, which is REFRESH_EVIDENCE_MISSING's case.
+      // (Entering already-past-deadline is caught at the top of poll 0.)
+      return { kind: "missing", unparseableMatches, budgetExhausted: false };
     }
     await sleep(pollIntervalMs);
   }
+  throw new MemgateError("nightly-clock-frozen",
+    `the evidence poll hit its ${MAX_EVIDENCE_POLLS}-iteration cap without the deadline advancing — the injected clock is frozen`,
+    "check the deps.now seam (tests) or the host clock; a constant now() cannot bound any poll loop");
 }

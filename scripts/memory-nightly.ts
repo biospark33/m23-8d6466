@@ -39,7 +39,10 @@
  *   QDS_MEMGATE_SIGNING_KEY   gateway HMAC signing key; required
  *   QDS_MEMGATE_LEDGER        gateway ledger path; required (fail-closed —
  *                             the operator pins the ledger on this host)
- *   HINDSIGHT_BASE_URL        server client base URL; optional (client default)
+ *   HINDSIGHT_BASE_URL        server client base URL; required — the client's
+ *                             silent 127.0.0.1:8888 default would aim the
+ *                             whole nightly at the WRONG instance on any
+ *                             box running sidecar stacks (fail-closed)
  *   HINDSIGHT_BEARER_TOKEN    server client bearer token; optional (client
  *                             env-fallback INV-HM1)
  */
@@ -52,7 +55,7 @@ import {
   resolveProvisionedRepoBankId,
 } from "../src/hindsight/bank-provisioner.ts";
 import { runNightlyConsolidate, type NightlyFailure, type NightlyReceipt } from "../src/hindsight/nightly-consolidate.ts";
-import { resolveBankId } from "../src/hindsight/schemas.ts";
+import { BankIdSchema, resolveBankId } from "../src/hindsight/schemas.ts";
 import { memgateDeps } from "../src/memgate/gateway.ts";
 import { MEMGATE_ADMIN_KEY, QDS_MEMGATE_LEDGER, QDS_MEMGATE_SIGNING_KEY } from "../src/memgate/schemas.ts";
 
@@ -101,8 +104,16 @@ export type MemoryNightlyEnvelope =
     }
   | {
       ok: false;
+      code: "bank-id-overflow";
+      leg: "crontab";
+      repoSlug: string;
+      remediation: string;
+    }
+  | {
+      ok: false;
       code: "BANK_LIST_UNREACHABLE";
       leg: "crontab";
+      detail: string;
       remediation: string;
     }
   | {
@@ -135,7 +146,11 @@ export async function runMemoryNightly(deps: MemoryNightlyDeps): Promise<{
   envelope: MemoryNightlyEnvelope;
 }> {
   // 1. CONFIG — fail closed before any bank resolution or gateway state.
-  const required = [QDS_MEMORY_AGENT_TOKEN, ...REQUIRED_GATEWAY_VARS];
+  // HINDSIGHT_BASE_URL is deliberately required: HindsightClient would
+  // otherwise default to 127.0.0.1:8888, which on a co-tenanted box is the
+  // tenant sidecar, not the dedicated instance (D-2 — raw 8888 is addressed
+  // by neither leg).
+  const required = [QDS_MEMORY_AGENT_TOKEN, "HINDSIGHT_BASE_URL", ...REQUIRED_GATEWAY_VARS];
   const missing = required.filter((name) => !isNonEmpty(deps.env[name]));
   if (missing.length > 0) {
     return {
@@ -180,13 +195,14 @@ export async function runMemoryNightly(deps: MemoryNightlyDeps): Promise<{
   let existing: Set<string>;
   try {
     existing = extractExistingBankIds(await client.listBanks());
-  } catch {
+  } catch (e) {
     return {
       code: 1,
       envelope: {
         ok: false,
         code: "BANK_LIST_UNREACHABLE",
         leg: "crontab",
+        detail: e instanceof Error ? e.message : String(e),
         remediation: "check HINDSIGHT_BASE_URL reachability and the instance's health, then re-run",
       },
     };
@@ -205,6 +221,23 @@ export async function runMemoryNightly(deps: MemoryNightlyDeps): Promise<{
     };
   }
   const banks = [`${repoBankId}-dev-meta`, `${repoBankId}-qa-meta`, `${repoBankId}-maint-meta`];
+  // A legacy-era family base (52-max rule) with a collision suffix can yield
+  // meta ids past the 64-char BankIdSchema cap — those banks can never exist,
+  // so the nightly would fail them every run. Refuse at config time with the
+  // convergence path named.
+  const invalidBanks = banks.filter((b) => !BankIdSchema.safeParse(b).success);
+  if (invalidBanks.length > 0) {
+    return {
+      code: 2,
+      envelope: {
+        ok: false,
+        code: "bank-id-overflow",
+        leg: "crontab",
+        repoSlug,
+        remediation: `legacy-era family yields ids over the 64-char cap (${invalidBanks.join(", ")}) — re-provision the family under the 50-char rule with scripts/provision-hindsight-banks.ts`,
+      },
+    };
+  }
 
   // 3. GATEWAY — config vars passed BY NAME (never whole process.env).
   const gateway = memgateDeps({
@@ -249,7 +282,7 @@ if (import.meta.main) {
     writeSync(1, USAGE);
     process.exit(0);
   }
-  const unknownFlag = argv.find((arg) => arg.startsWith("--"));
+  const unknownFlag = argv.find((arg) => arg.startsWith("-") && arg !== "-");
   if (unknownFlag !== undefined) {
     writeSync(2, `unknown flag: ${unknownFlag}\n${USAGE.split("\n")[0]}\n`);
     process.exit(2);

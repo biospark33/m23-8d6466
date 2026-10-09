@@ -175,8 +175,10 @@ function callTool(name: string, args: Record<string, unknown>): { result: unknow
       if (arr === undefined) {
         return { error: { code: -32000, message: `bank not found: ${bankId}` } };
       }
-      // No-op merge: dedup by exact content, preserve order. The story's
-      // ConsolidateResponseSchema is {consolidatedCount, preservedCount, durationMs}.
+      // No-op merge: dedup by exact content, preserve order. (ConsolidateResponseSchema
+      // since round 1 of M3.1 review: {operation_id (required), deduplicated?} —
+      // counts only ride as tolerated extras folding to 0. This MCP body
+      // bypasses that parse.)
       const seen = new Set<string>();
       const merged: Memory[] = [];
       for (const m of arr) {
