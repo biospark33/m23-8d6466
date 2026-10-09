@@ -1304,7 +1304,21 @@ describe("buildIdFileInputs", () => {
       // run; trackedSetDigest did not move (not a files() entry).
       // ee802669/26b5ce57 adoption (2026-10-01): #396 re-pinned OPENRIG_TREE_SHA256 —
       // Dockerfile bytes only, measured here; publish run 36876842343 pushed the pair.
-      "oci/exedev/Dockerfile": "c52e96448c6e30de101a2ca2557e37e1e42b1d6cd268cb5eb862dd03f077f619",
+      //
+      // 056ad71c: m2.3 re-pinned OPENRIG_TREE_SHA256 8074bfe6 → 9f148862 (publish
+      // run 37831713339's refusal; hono 4.13.13 + zod 4.6.5 caret floats) — bytes
+      // only, so THIS entry moved while trackedSetDigest below did not. The commit
+      // left this literal red on purpose ("stays red until the post-merge green
+      // publish run"), but the post-merge publish run (37917090552) then refused at
+      // the TOFU RUN again — the tree measures fa2284d1…bdb95d now, a third
+      // float inside @openrig/cli@0.5.14's dependency range — so the
+      // workflow-run-first sequencing deadlocked with the build it was waiting
+      // for. Adopted offline from the failing run's Received
+      // (adopter section 3b's own derivation: the diff prints the Received pairs).
+      // OPEN PAIRING, now with a named next input: whoever adopts fa2284d1 into the
+      // ARG moves these bytes again, and section 3b re-adopts this entry from that
+      // failing run — the driver REF/BUILD_ID adoption stays owed behind it.
+      "oci/exedev/Dockerfile": "def062876a50493e01d6bab1fabb9aa79c73884ddd5ff7ed57f2b87ea874aa37",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1983,7 +1997,28 @@ describe("buildIdFileInputs", () => {
       // The image re-publish half of this ritual is OPS-side and operator-
       // gated (story Technical Notes) — it must run on a tree containing
       // M1.2 BEFORE the next T2 live round fires a box.
-            "9025082041dab842504a26f494120a4b662e05523550af66c4905d76e5d863e4",
+      //
+      // 02debde5: m2.2 + m2.3 (merged as #416/#418) added FOUR walked COPY
+      // inputs and edited none (measured: map-diffed this literal's tree
+      // against 69c09821's — 4 added, 0 changed, 0 removed):
+      //   · NEW `pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/
+      //     {client,kg-recall,sanitize}.ts` — m2.2's in-box kg_recall
+      //     extension, COPY'd at Dockerfile :1117;
+      //   · NEW `src/fleet/retain-best-effort.ts` — m1.2's CodeRabbit
+      //     round-4 (affc88c0), under the `src/fleet/` directory COPY :279,
+      //     landed after the 90250820 literal was computed on its branch's
+      //     final tree (the LIMITATION window above, at add-a-file
+      //     granularity: a new walk member never existed to be re-pinned).
+      // NOT walked: everything else m2.2/m2.3 touched — the test files,
+      // `src/hindsight/**` (host-only), `scripts/provision-hindsight-banks.ts`,
+      // `_bmad-output/**`. The Dockerfile's OPENRIG_TREE_SHA256 re-pin
+      // (056ad71c) moved the map entry above, not this digest (own field).
+      // Received from this test's own failing run — the adopter's section-3
+      // derivation ("not in the gate log — measure by running the test") —
+      // on the verified tree; 111 → 115 tracked inputs. The publish/
+      // adoption half stays owed: run 37917090552 refused at the TOFU RUN
+      // (fa2284d1…bdb95d) before its gate, so no image exists to adopt.
+            "02debde5bf77a769326c62ac6718582c927a2e8e4191c38bd1a7f783a0f6d0c9",
     );
   });
 });

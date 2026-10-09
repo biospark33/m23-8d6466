@@ -357,7 +357,11 @@ done
 # so a contract bump (the upgrade ritual's step 4/5) is the ONLY edit needed to
 # move the skill pins. Falls back to a literal for the tests' temp roots, where
 # tests/gitnexus/gitnexus-cli-contract.json does not exist.
-PINNED_CLI_VERSION="$(sed -n 's/.*"expectedCliVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$REPO_ROOT/tests/gitnexus/gitnexus-cli-contract.json" 2>/dev/null | head -1)"
+# `|| true`: sed exits 1 on a missing file, and under `set -euo pipefail` the
+# bare assignment would abort the script before the fallback below runs —
+# exactly what happened in the tests' temp roots (6/6 red, exit 1 right after
+# the version echo). Same guard style as the GN_VER capture at the top.
+PINNED_CLI_VERSION="$(sed -n 's/.*"expectedCliVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$REPO_ROOT/tests/gitnexus/gitnexus-cli-contract.json" 2>/dev/null | head -1 || true)"
 : "${PINNED_CLI_VERSION:=1.6.12}"
 
 # Repo-local edits to the bundled skills: upstream tells agents to run a bare
