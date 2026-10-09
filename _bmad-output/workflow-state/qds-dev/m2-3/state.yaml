@@ -1,7 +1,8 @@
 story: M2.3
 branch: feature/m2-3-combined-memory-live-round
-phase: 4-dev-story
+pr: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/418"
+phase: 5-pr-created
 orchestration: unlazy scope m2-3 (PLAN.md rev1; leaf-1.1.1 roster VERIFIED, leaf-1.1.2 battery VERIFIED, leaf-1.1.3 driver IN-FLIGHT)
-review: pending (bmad-code-review rounds 1-3 after branch gates)
+review: 3 bmad-code-review rounds complete (round1 16F/13patch, round2 12F/11patch, round3 12F/9patch; reports in _bmad-output/reviews/m2-3-round{1,2,3}/); PR #418
 t2-live-round: HANDOFF — operator-gated preconditions unmet at authoring (env QDS_EXEDEV_* / MEMGATE_ADMIN_KEY / HINDSIGHT_* absent; dev CI verify-image-pin + publish RED on M2.2 merge, operator-deferred; M1.2 T2 round never fired; m2-gateway image unpublished, ownership unowned) — handoff doc at _bmad-output/reviews/m2-3-t2-handoff.md per M1.2 precedent
-follow-ups: CI publish repair (operator-deferred this session); m2-gateway image publish ownership (Z4 G9 register row)
+follow-ups: CI publish chain repair (TOFU re-pin lands with this PR; adopt-image-pin on dev after green publish — turns the 2 buildIdFileInputs reds green); m2-gateway image publish ownership (Z4 G9); #417 worker-stderr observability

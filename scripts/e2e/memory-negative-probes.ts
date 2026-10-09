@@ -383,7 +383,7 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  let origin = (env[QDS_KG_GATEWAY_URL] ?? "").trim();
+  let origin = (env[QDS_KG_GATEWAY_URL] ?? "").trim(); // dp:ok blank is refused by REQUIRED_ENV_KEYS gate above; the trim loop only strips trailing slashes
   while (origin.endsWith("/")) origin = origin.slice(0, -1);
   // Wrong-instance trap (house rule, requireBaseUrl idiom): :8888/:18889 are
   // the shared-sidecar/tenant stack — never a legitimate gateway to probe.

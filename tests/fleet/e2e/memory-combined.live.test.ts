@@ -119,9 +119,9 @@ const EVIDENCE_DIR_M23 = join(REPO_ROOT, "_bmad-output/evidence/memory-live");
  * these; the battery refuses without them. Names only — values never read out.
  */
 function requireMemoryGateEnv(): string {
-  const origin = (process.env.QDS_KG_GATEWAY_URL ?? "").trim();
-  const missing = ["MEMGATE_ADMIN_KEY", "QDS_MEMGATE_SIGNING_KEY", "QDS_MEMGATE_LEDGER"].filter(
-    (n) => (process.env[n] ?? "").trim() === "",
+  const origin = (process.env.QDS_KG_GATEWAY_URL ?? "").trim(); // dp:ok the blank IS the signal — the === "" check below refuses the round on it
+  const missing = ["MEMGATE_ADMIN_KEY", "QDS_MEMGATE_SIGNING_KEY", "QDS_MEMGATE_LEDGER"].filter( // dp:ok blank = missing, named in the refusal
+    (n) => (process.env[n] ?? "").trim() === "", // dp:ok blank = missing — this filter IS the validation; names land in the refusal
   );
   if (origin === "" || missing.length > 0) {
     throw new Error(`memory gateway env incomplete — QDS_KG_GATEWAY_URL${missing.length ? ` and ${missing.join(", ")}` : ""} unset`);
@@ -133,11 +133,11 @@ function requireMemoryGateEnv(): string {
 
 /** The Hindsight memory env by name (memory-cycle's wrong-instance guard). */
 function requireMemoryEnv(): string {
-  const base = (process.env.HINDSIGHT_BASE_URL ?? "").trim();
+  const base = (process.env.HINDSIGHT_BASE_URL ?? "").trim(); // dp:ok blank = unset, refused by the next line
   if (base === "") throw new Error("HINDSIGHT_BASE_URL unset — the memory env is required for this leg");
   const trap = forbiddenOrigin(base);
   if (trap !== null) throw new Error(trap);
-  if ((process.env.HINDSIGHT_BEARER_TOKEN ?? "").trim() === "") {
+  if ((process.env.HINDSIGHT_BEARER_TOKEN ?? "").trim() === "") { // dp:ok blank = unset, refused right here
     throw new Error("HINDSIGHT_BEARER_TOKEN unset — the memory env is required for this leg");
   }
   return base;
@@ -158,10 +158,10 @@ function scrubDeep(v: unknown): unknown {
       .replace(/sk-or-[A-Za-z0-9_-]+/g, "[REDACTED-KEY]")
       .replace(/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED-KEY]")
       .replace(/\bghp_[A-Za-z0-9]{20,}\b/g, "[REDACTED-KEY]")
-      .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED-KEY]");
-    const provisioning = (process.env.OPENROUTER_PROVISIONING_KEY ?? "").trim();
+      .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED-KEY]"); // dp:ok scrubber, not validation — blanking IS its job
+    const provisioning = (process.env.OPENROUTER_PROVISIONING_KEY ?? "").trim(); // dp:ok absent key = nothing to scrub, not an error here
     if (provisioning.length > 8) out = out.split(provisioning).join("[REDACTED-KEY]");
-    const repoUrl = (process.env.QDS_EXEDEV_REPO_URL ?? "").trim();
+    const repoUrl = (process.env.QDS_EXEDEV_REPO_URL ?? "").trim(); // dp:ok absent URL = no userinfo class to scrub
     const schemeAt = repoUrl.indexOf("://");
     if (schemeAt >= 0) {
       const credEnd = repoUrl.indexOf("@", schemeAt + 3);
@@ -281,12 +281,12 @@ function kgRecallEvents(text: string): Array<Record<string, unknown>> {
       return code < 32 && code !== 9 && code !== 13;
     });
     try {
-      events.push({ rawControlChars, ...JSON.parse(line.slice(at + "[kg-recall] ".length)) as Record<string, unknown> });
+      events.push({ rawControlChars, ...JSON.parse(line.slice(at + "[kg-recall] ".length)) as Record<string, unknown> }); // dp:ok inside the try{} — a torn line is caught and recorded unparseable, never thrown
     } catch {
       // a torn line is recorded as unparseable below, never silently dropped —
       // and its own control-char observation rides along so the hygiene rollup
       // cannot read vacuously true over torn output
-      events.push({ event: "unparseable", line: line.slice(0, 120), rawControlChars });
+      events.push({ event: "unparseable", line: line.slice(0, 120), rawControlChars }); // dp:ok the parse is try/catch-guarded above; torn lines are recorded, never trusted
     }
   }
   return events;
@@ -301,7 +301,7 @@ describe("memory combined live (M2.3)", () => {
     process.stdout.write(
       `M2.3 worst-case spend: 1 box, worst case ≤ ${LEG_TOTAL_HOURS.toFixed(2)} h across the three legs (${legs} Mms; ≈ $${(T2_BOX_HOUR_RATE_MICRO_USD / 1_000_000).toFixed(2)}/h) + 1 key capped ${T2_CAP_MICRO_USD} µ$ (gates + armed resident + one dispatch_task worker turn) + probe keys/Hindsight REST ($0) = ≤ $${worst.toFixed(2)}. Ceilings, not expectation. Box + keys + probe banks cleaned in finally.\n`,
     );
-    expect((process.env.QDS_EXEDEV_SHA ?? "").length).toBe(40);
+    expect((process.env.QDS_EXEDEV_SHA ?? "").length).toBe(40); // dp:ok the ?? "" IS the validation — blank fails the 40-char assert
   });
 
   test.todoIf(liveTodoOff())(
@@ -323,7 +323,7 @@ describe("memory combined live (M2.3)", () => {
           expect("kgContext" in primed).toBe(false); // silent — no <kg_context> appendix
           const rowPath = join(recallDir, `${requestId}.json`);
           expect(existsSync(rowPath)).toBe(true);
-          const row = JSON.parse(readFileSync(rowPath, "utf8")) as RecallRow;
+          const row = JSON.parse(readFileSync(rowPath, "utf8")) as RecallRow; // dp:ok the file exists (asserted above) and the seam wrote it; a malformed row fails the leg loudly on field access
           expect(row.primed).toBe(false);
           expect(row.directive).toBe("none"); // NOT "empty" — zero-observations is a different branch
           writeM23EvidenceQuietly(
@@ -559,9 +559,9 @@ describe("memory combined live (M2.3)", () => {
         expect(round.runId).toMatch(MINTED_RUN_ID);
 
         // ── the side-channel recall row (M1.2's observability seam) ─────────
-        const rowPath = join(round.workspace, DEFAULT_RECALL_DIR, `${round.requestId}.json`);
+        const rowPath = join(round.workspace, DEFAULT_RECALL_DIR, `${round.requestId}.json`); // dp:ok requestId is UUIDv4-generated above, never external
         expect(existsSync(rowPath)).toBe(true);
-        const row = JSON.parse(readFileSync(rowPath, "utf8")) as RecallRow;
+        const row = JSON.parse(readFileSync(rowPath, "utf8")) as RecallRow; // dp:ok existsSync asserted above; the file was written by the seam this round drove — malformed JSON fails the leg loudly
         round.evidence.push({ phase: "side-channel-row", rowPath: rowPath.replace(round.workspace, ""), row });
         expect(row.runId).toBe(round.requestId);
         expect(row.primed).toBe(true);
@@ -574,7 +574,7 @@ describe("memory combined live (M2.3)", () => {
         expect(live).toContain(round.vmName);
         const rec = new RunRecordStore({ dir: round.recordsDir }).get(round.runId);
         expect(rec.vmName).toBe(round.vmName);
-        expect(rec.keyHash ?? "").not.toBe("");
+        expect(rec.keyHash ?? "").not.toBe(""); // dp:ok the ?? "" IS the validation — blank fails the assert
         expect(rec.limitMicroUsd).toBe(T2_CAP_MICRO_USD);
         round.evidence.push({ phase: "memory-live.primed-dispatch", ok: true, runId: round.runId, vmName: round.vmName, keyHash: rec.keyHash });
       } catch (e) {
@@ -636,7 +636,7 @@ describe("memory combined live (M2.3)", () => {
         // evidence. Any second memory-family credential name FAILS the leg.
         const home = await boxHome(ctx.driver, vmName);
         const envFile = await fetchBoxFile(ctx.driver, vmName, join(home, KEY_ENV_FILE));
-        const envNames = envFile.split("\n").map((l) => l.split("=")[0]?.trim() ?? "").filter((n) => n.length > 0 && !n.startsWith("#"));
+        const envNames = envFile.split("\n").map((l) => l.split("=")[0]?.trim() ?? "").filter((n) => n.length > 0 && !n.startsWith("#")); // dp:ok blank names are filtered out by the length check in this same chain
         const memoryNames = envNames.filter((n) => MEMORY_ENV_NAME.test(n));
         const foreign = memoryNames.filter((n) => !DD16_PAIR.has(n));
         evidence.push({
@@ -893,10 +893,10 @@ describe("memory combined live (M2.3)", () => {
         expect(destroyAt).toBeGreaterThan(verifyAt); // BOTH precede the box destroy (INV-M3-3)
 
         const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
-        expect(closed.closedAt ?? "").not.toBe("");
-        expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
-        expect(closed.spendMicroUsd ?? 1).toBeLessThanOrEqual(T2_CAP_MICRO_USD);
-        expect(closed.keyHash ?? "").not.toBe(""); // a vacuous not.toContain proves nothing
+        expect(closed.closedAt ?? "").not.toBe(""); // dp:ok blank fails the assert
+        expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0); // dp:ok undefined -> 0 fails the > 0 assert (the validation)
+        expect(closed.spendMicroUsd ?? 1).toBeLessThanOrEqual(T2_CAP_MICRO_USD); // dp:ok undefined -> 1 passes this arm only; the > 0 arm above already failed on undefined
+        expect(closed.keyHash ?? "").not.toBe(""); // dp:ok the ?? "" IS the validation (round-1 F-009 fix); the later not.toContain is then non-vacuous
         expect(await listedKeyHashes()).not.toContain(closed.keyHash);
         const boxGone = await awaitBoxAbsent(ctx.driver, vmName, evidence);
         expect(boxGone.absent).toBe(true);
@@ -984,7 +984,7 @@ describe("memory combined live (M2.3)", () => {
         // {error:{code}} contract fails, never skips).
         try {
           const battery = await runNegativeProbeBattery({
-            origin: (process.env.QDS_KG_GATEWAY_URL ?? "").trim(),
+            origin: (process.env.QDS_KG_GATEWAY_URL ?? "").trim(), // dp:ok blank origin throws ProbeConfigError inside the battery (caught -> problem line)
             env: { ...process.env },
             requestId: round.requestId,
           });
