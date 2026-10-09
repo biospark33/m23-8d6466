@@ -90,7 +90,10 @@ function mockBody(path: string, bankId: string): unknown {
     return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
   }
   if (path.endsWith("/consolidate")) {
-    return { consolidatedCount: 0, preservedCount: 0, durationMs: 0 };
+    // F-025: the real 0.10.0 wire is `{operation_id (required), deduplicated?}`
+    // — the canned body must pass the SAME strict parse a live one does, so it
+    // carries the wire shape, not the legacy counts (which now refuse).
+    return { operation_id: "mock-consolidate-op", deduplicated: false };
   }
   // createBank = PUT /v1/default/banks/<bankId>; listBanks = GET /v1/default/banks.
   if (/\/banks\/[^/]+$/.test(path)) return { bank_id: bankId };
@@ -507,6 +510,9 @@ export class HindsightClient {
   ): Promise<MentalModel> {
     const requestId = this.requestId ?? newRequestId();
     assertBankId(bankId, requestId);
+    // F-026: the id interpolates into the URL path — validate it against the
+    // same BankIdSchema charset the bank segment uses, BEFORE any fetch.
+    assertMentalModelId(mentalModelId, requestId);
     const body: Record<string, unknown> = {};
     if (patch.name !== undefined) body.name = patch.name;
     if (patch.trigger !== undefined) body.trigger = patch.trigger;
@@ -554,11 +560,13 @@ export class HindsightClient {
    * List async operations — GET /v1/default/banks/{bank_id}/operations
    * (openapi.json:4378-4512). status (:4396) / type (:4414) are free strings
    * server-side (pending..cancelled / retain..webhook_delivery); limit is
-   * 1..100 (:4432-4442). Query params URLSearchParams-encoded.
+   * 1..100 (:4432-4442); offset pages past the first window (edge-case round-1:
+   * >50 refresh ops on a bank must stay reachable). Query params
+   * URLSearchParams-encoded.
    */
   async listOperations(
     bankId: string,
-    opts?: { type?: string; status?: string; limit?: number },
+    opts?: { type?: string; status?: string; limit?: number; offset?: number },
   ): Promise<OperationsList> {
     const requestId = this.requestId ?? newRequestId();
     assertBankId(bankId, requestId);
@@ -568,6 +576,7 @@ export class HindsightClient {
       if (opts.type !== undefined) params.set("type", opts.type);
       if (opts.status !== undefined) params.set("status", opts.status);
       if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+      if (opts.offset !== undefined) params.set("offset", String(opts.offset));
       const query = params.toString();
       if (query.length > 0) path = `${path}?${query}`;
     }
@@ -804,5 +813,33 @@ function assertBankId(bankId: string, requestId: string): void {
       error: { code: "invalid_bank_id", message: `invalid bank_id: ${bankId}` },
     });
     throw new HindsightHttpError(422, `invalid bank_id: ${bankId}`, requestId);
+  }
+}
+
+/** F-026: validate a mental-model id at the client boundary before it reaches
+ *  the URL path — same BankIdSchema charset (lowercase alnum + hyphens, ≤64
+ *  chars, no leading/trailing hyphen), so path traversal / query injection
+ *  refuse before any fetch. assertBankId's shape, own labels (the log must
+ *  name the id kind that actually failed). */
+function assertMentalModelId(mentalModelId: string, requestId: string): void {
+  if (!BankIdSchema.safeParse(mentalModelId).success) {
+    log({
+      requestId,
+      operation: "assertMentalModelId",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      bankId: "",
+      error: {
+        code: "invalid_mental_model_id",
+        message: `invalid mental_model_id: ${mentalModelId}`,
+      },
+    });
+    throw new HindsightHttpError(
+      422,
+      `invalid mental_model_id: ${mentalModelId}`,
+      requestId,
+    );
   }
 }

@@ -169,12 +169,39 @@ const MAX_SUFFIX = 11; // -2 .. -11 → 10 candidates, plus the base = 11 total
  */
 const MAX_BASE_LEN = 50; // 64 - len("-11") - len("-maint-meta")
 
-function truncateForSuffix(baseId: string): string {
-  if (baseId.length <= MAX_BASE_LEN) return baseId;
+/**
+ * Pre-M3.1 eras truncated the base to 52 (64 − len("-11") − len("-dev-meta"),
+ * before the qa/maint manager meta banks widened the family and pushed the
+ * cap to 50). Families provisioned under that cap persist on live instances;
+ * read-side recognition must still find them.
+ */
+const LEGACY_MAX_BASE_LEN = 52;
+
+function truncateTo(baseId: string, max: number): string {
+  if (baseId.length <= max) return baseId;
   // Truncate, then strip a trailing hyphen so we don't emit "foo--11".
-  let truncated = baseId.slice(0, MAX_BASE_LEN);
+  let truncated = baseId.slice(0, max);
   while (truncated.endsWith("-")) truncated = truncated.slice(0, -1);
   return truncated;
+}
+
+function truncateForSuffix(baseId: string): string {
+  return truncateTo(baseId, MAX_BASE_LEN);
+}
+
+/**
+ * Every base-bank form a provisioned family may live under, current form
+ * first: the 50-char suffix-safe truncation — the WRITE-side form; new
+ * provisioning always truncates to this, so every new family is
+ * collision-safe for all three meta suffixes — then the legacy 52-era form.
+ * Read-side consumers (resolveProvisionedRepoBankId, leg-lib's rerun gate)
+ * must probe every form or a legacy family becomes unfindable and
+ * re-provisioning forks a duplicate.
+ */
+export function safeRepoBaseCandidates(baseId: string): [string, ...string[]] {
+  const current = truncateForSuffix(baseId);
+  const legacy = truncateTo(baseId, LEGACY_MAX_BASE_LEN);
+  return legacy === current ? [current] : [current, legacy];
 }
 
 /**
@@ -212,34 +239,32 @@ export function resolveRepoBankId(
 }
 
 /**
- * READ/WRITE-side counterpart of resolveRepoBankId — identifies the bank a
+ * READ-side counterpart of resolveRepoBankId — identifies the bank a
  * PREVIOUS provision call actually created. Nothing persists the provision-time
  * id (the spec's persistence alternative stays unimplemented by design), so the
  * provisioned repo bank is recognised by its family signature: a candidate `c`
- * that exists WITH one of its manager meta siblings (`-dev-meta`, `-qa-meta`,
- * `-maint-meta`) — the pairs only the provisioner creates. Same candidate order
- * as resolveRepoBankId; null when no candidate carries the signature (a bare
- * base without a meta sibling is a FOREIGN bank — never recalled/written as
- * ours).
+ * that exists WITH its `-dev-meta` sibling — the pair only the provisioner
+ * creates (every provisioned family carries -dev-meta; qa/maint siblings are
+ * NOT part of the signature). Same candidate order as resolveRepoBankId per
+ * base form; null when no candidate carries the signature (a bare base
+ * without the dev-meta sibling is a FOREIGN bank — never recalled/written as
+ * ours). Probes EVERY safeRepoBaseCandidates form: a family provisioned under
+ * the legacy 52-max era (base truncated to 52) is still recognized; the
+ * 50-char current form is probed first so new-era families win.
  */
-const META_SIBLINGS = ["dev", "qa", "maint"] as const;
-
-function hasMetaSibling(candidate: string, existing: Set<string>): boolean {
-  return META_SIBLINGS.some((s) => existing.has(`${candidate}-${s}-meta`));
-}
-
 export function resolveProvisionedRepoBankId(
   baseId: string,
   existing: Set<string>,
 ): string | null {
-  const safeBase = truncateForSuffix(baseId);
-  if (existing.has(safeBase) && hasMetaSibling(safeBase, existing)) {
-    return safeBase;
-  }
-  for (let n = 2; n <= MAX_SUFFIX; n++) {
-    const candidate = `${safeBase}-${n}`;
-    if (existing.has(candidate) && hasMetaSibling(candidate, existing)) {
-      return candidate;
+  for (const base of safeRepoBaseCandidates(baseId)) {
+    if (existing.has(base) && existing.has(`${base}-dev-meta`)) {
+      return base;
+    }
+    for (let n = 2; n <= MAX_SUFFIX; n++) {
+      const candidate = `${base}-${n}`;
+      if (existing.has(candidate) && existing.has(`${candidate}-dev-meta`)) {
+        return candidate;
+      }
     }
   }
   return null;

@@ -9,14 +9,20 @@
  * records every call). No network anywhere; no mock library — plain-object
  * structural fakes (R2 §7).
  *
- * Mandated-case map (story Trigger Surface + AC2/AC3/AC4 + DoD):
+ * Mandated-case map (story Trigger Surface + AC2/AC3/AC4 + DoD + round-1 fix
+ * pins):
  *   describe "both legs, one module"        → cases 1-3
- *   describe "coalescing (AC2)"             → case 4
+ *   describe "coalescing (AC2)"             → case 4 + the stale-coalesce pin
  *   describe "token scoping (AC3)"          → cases 5-6
- *   describe "fail-loud refresh proof (AC2)"→ cases 7-11
+ *   describe "fail-loud refresh proof (AC2)"→ cases 7-11 + cancelled/pending/
+ *                                             unparseable evidence pins
+ *   describe "nightly robustness gates"     → terminal-status gate, dedupe,
+ *                                             pagination, clock/poll-interval
+ *                                             validation, wall-clock budget,
+ *                                             multi-model evidence
  *   describe "in-box write-back fence"      → cases 12-14
  *   describe "AC4 module-graph fences"      → case 15
- *   describe "CLI driver (memory-nightly)"  → cases 16-18
+ *   describe "CLI driver (memory-nightly)"  → cases 16-21
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -27,7 +33,13 @@ import { fileURLToPath } from "node:url";
 
 import { runMemoryNightly } from "../../scripts/memory-nightly.ts";
 import { HindsightClient } from "../../src/hindsight/client.ts";
-import { runNightlyConsolidate, type NightlyDeps, type NightlyReceipt } from "../../src/hindsight/nightly-consolidate.ts";
+import {
+  NIGHTLY_WALL_CLOCK_BUDGET_MS,
+  POLL_INTERVAL_FLOOR_MS,
+  runNightlyConsolidate,
+  type NightlyDeps,
+  type NightlyReceipt,
+} from "../../src/hindsight/nightly-consolidate.ts";
 import {
   AGENT_GRANT_CLASSES,
   AGENT_TOKEN_VERBS,
@@ -55,7 +67,14 @@ const BANK = "alpha";
 const BASE_URL = "http://hindsight.test";
 /** 1 ms per clock read — monotonic, deterministic evidence/deadline progress. */
 const TICK_MS = 1;
-const EVIDENCE_BUDGET_MS = 40;
+/**
+ * Per-job evidence budget in tick-ms. Sized so the clamped poll-interval
+ * floor (POLL_INTERVAL_FLOOR_MS = 50, added in the deadline check as
+ * nowMs + interval) leaves room for several polls before the budget trips:
+ * the pre-consolidate reads burn ~6 ticks, so poll 1 checks ~7+50=57 < 60
+ * and the poll loop gets a handful of iterations (~150ms of real sleeps).
+ */
+const EVIDENCE_BUDGET_MS = 60;
 
 const ENV_KEYS = [
   MEMGATE_ADMIN_KEY,
@@ -162,8 +181,8 @@ function installRouter(r: Router): void {
 // --- wire-shape builders (the measured 0.10.0 bodies) ------------------------
 
 const mmOf = (bank: string): string => `mm-${bank}`;
-const triggeredMm = (bank: string): Record<string, unknown> => ({
-  id: mmOf(bank),
+const triggeredMm = (bank: string, id?: string): Record<string, unknown> => ({
+  id: id ?? mmOf(bank),
   name: `nightly model ${bank}`,
   bank_id: bank,
   trigger: { refresh_after_consolidation: true },
@@ -171,14 +190,14 @@ const triggeredMm = (bank: string): Record<string, unknown> => ({
 const mmListBody = (items: unknown[]): Record<string, unknown> => ({ items, total: items.length, limit: 100, offset: 0 });
 const refreshOpRow = (
   bank: string,
-  opts: { createdAt: string; opId?: string; status?: string; errorMessage?: string | null },
+  opts: { createdAt: string; opId?: string; status?: string; errorMessage?: string | null; mmId?: string },
 ): Record<string, unknown> => ({
   id: opts.opId ?? `op-refresh-${bank}`,
   task_type: "refresh_mental_model",
   operation_id: opts.opId ?? `op-refresh-${bank}`,
   operation_type: "refresh_mental_model",
   items_count: 0,
-  mental_model_id: mmOf(bank),
+  mental_model_id: opts.mmId ?? mmOf(bank),
   created_at: opts.createdAt,
   updated_at: opts.createdAt,
   status: opts.status ?? "completed",
@@ -333,6 +352,7 @@ describe("both legs, one module", () => {
     expect(fire.leg).toBe("crontab");
     const complete = at(events.filter((e) => evName(e) === "nightly-complete"), 0);
     expect(complete.banks_ok).toBe(1);
+    expect(complete.status).toBe("ok"); // a green run never logs as an error
   });
 
   test("case 2 — schedule leg consumes the SAME module: identical receipt shape, leg carried on every nightly event, no behavioral fork", async () => {
@@ -357,6 +377,7 @@ describe("both legs, one module", () => {
     expect(names).toContain("refresh-op");
     const complete = at(events.filter((e) => evName(e) === "nightly-complete"), 0);
     expect(complete.banks_ok).toBe(1);
+    expect(complete.status).toBe("ok");
     expect(names).not.toContain("nightly-bank-failed");
   });
 
@@ -386,7 +407,7 @@ describe("both legs, one module", () => {
 });
 
 // ---------------------------------------------------------------------------
-// coalescing (AC2) — case 4
+// coalescing (AC2) — case 4 + the honest-failure pin
 // ---------------------------------------------------------------------------
 
 describe("coalescing (AC2)", () => {
@@ -413,6 +434,22 @@ describe("coalescing (AC2)", () => {
     expect(names).not.toContain("consolidate-op");
     expect(names).toContain("refresh-op");
     expect(names).toContain("nightly-complete");
+  });
+
+  test("deduplicated:true whose only refresh op is STALE (created well before the re-fire) → REFRESH_EVIDENCE_MISSING, ok:false — success is never fabricated from a stale op", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      consolidateBody: () => ({ operation_id: "op-x", deduplicated: true }),
+      opsQueues: { [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS - 3_600_000), opId: "op-stale" })])] },
+    });
+    const { deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.receipts).toEqual([]);
+    const f = at(result.failures, 0);
+    expect(f.code).toBe("REFRESH_EVIDENCE_MISSING");
   });
 });
 
@@ -463,11 +500,11 @@ describe("token scoping (AC3)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// fail-loud refresh proof (AC2) — cases 7-11
+// fail-loud refresh proof (AC2) — cases 7-11 + terminal-status/evidence pins
 // ---------------------------------------------------------------------------
 
 describe("fail-loud refresh proof (AC2)", () => {
-  test("case 7 — MM present but trigger.refresh_after_consolidation=false → MM_TRIGGER_ABSENT and NO consolidate call (preflight gates the write)", async () => {
+  test("case 7 — MM present but trigger.refresh_after_consolidation=false → MM_TRIGGER_ABSENT naming the models seen, NO consolidate call (preflight gates the write)", async () => {
     installNightlyRouter({
       banks: [BANK],
       mmItems: {
@@ -481,6 +518,7 @@ describe("fail-loud refresh proof (AC2)", () => {
     expect(result.ok).toBe(false);
     const f = at(result.failures, 0);
     expect(f.code).toBe("MM_TRIGGER_ABSENT");
+    expect(f.message).toContain(mmOf(BANK)); // the message lists the models seen
     expect(calls.some((c) => c.url.includes("/consolidate"))).toBe(false);
     expect(calls.some((c) => c.url.includes("/operations"))).toBe(false);
   });
@@ -496,7 +534,7 @@ describe("fail-loud refresh proof (AC2)", () => {
     expect(calls.some((c) => c.url.includes("/consolidate"))).toBe(false);
   });
 
-  test("case 9 — ops poll never yields a refresh op within budget → REFRESH_EVIDENCE_MISSING, ok=false (trigger presence alone NEVER passes)", async () => {
+  test("case 9 — ops poll never yields a refresh op within budget → REFRESH_EVIDENCE_MISSING, ok=false (trigger presence alone NEVER passes); failure events carry status:error", async () => {
     installNightlyRouter({ banks: [BANK], opsQueues: { [BANK]: [emptyOps(BANK)] } }); // sticky-empty
     const { events, deps } = rig({ banks: [BANK] });
 
@@ -510,6 +548,9 @@ describe("fail-loud refresh proof (AC2)", () => {
     expect(calls.some((c) => c.url.includes("/operations?type=refresh_mental_model"))).toBe(true);
     const failed = at(events.filter((e) => evName(e) === "nightly-bank-failed"), 0);
     expect(failed.code).toBe("REFRESH_EVIDENCE_MISSING");
+    expect(failed.status).toBe("error"); // a log consumer keying on status sees the failure
+    const complete = at(events.filter((e) => evName(e) === "nightly-complete"), 0);
+    expect(complete.status).toBe("error");
     expect(result.banksOk).toBe(0);
   });
 
@@ -544,6 +585,234 @@ describe("fail-loud refresh proof (AC2)", () => {
     const f = at(result.failures, 0);
     expect(f.code).toBe("REFRESH_EVIDENCE_MISSING");
     expect(result.receipts).toEqual([]);
+  });
+
+  test("terminal status cancelled is NOT success evidence → REFRESH_FAILED naming the status (consistent with the provisioner's poll)", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      opsQueues: {
+        [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS), status: "cancelled", errorMessage: "cancelled upstream" })])],
+      },
+    });
+    const { deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.receipts).toEqual([]);
+    const f = at(result.failures, 0);
+    expect(f.code).toBe("REFRESH_FAILED");
+    expect(f.message).toContain("cancelled");
+    expect(f.message).toContain("cancelled upstream");
+  });
+
+  test("pending refresh keeps polling — a later poll sees it completed → observed (the poll loops through non-terminal statuses)", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      opsQueues: {
+        [BANK]: [
+          opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS), status: "pending", opId: "op-inflight" })]),
+          opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS), status: "completed", opId: "op-done" })]),
+        ],
+      },
+    });
+    const { deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(true);
+    const r = at(result.receipts, 0);
+    expect(r.refresh.operationId).toBe("op-done");
+    expect(r.refresh.status).toBe("completed");
+    // at least two ops polls happened (the pending one did not pass as evidence)
+    expect(calls.filter((c) => c.url.includes("/operations")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a matching row with an UNPARSEABLE created_at → REFRESH_EVIDENCE_MISSING whose message names the N-row diagnostic (the failure is honest about what was seen)", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      opsQueues: { [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: "not-a-timestamp", opId: "op-badts" })])] },
+    });
+    const { deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(false);
+    const f = at(result.failures, 0);
+    expect(f.code).toBe("REFRESH_EVIDENCE_MISSING");
+    expect(f.message).toContain("1 matching refresh row(s) seen with unparseable created_at");
+  });
+
+  test("multiple triggered models: the refresh fired for the SECOND model is matched; the receipt names it", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      mmItems: {
+        [BANK]: [
+          triggeredMm(BANK, "mm-alpha-one"),
+          triggeredMm(BANK, "mm-alpha-two"),
+        ],
+      },
+      opsQueues: {
+        [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS), opId: "op-second", mmId: "mm-alpha-two" })])],
+      },
+    });
+    const { deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(true);
+    const r = at(result.receipts, 0);
+    expect(r.mentalModelId).toBe("mm-alpha-two");
+    expect(r.refresh.operationId).toBe("op-second");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// nightly robustness gates (round-1 fixes) — dedupe, pagination, clock,
+// poll-interval floor, wall-clock budget
+// ---------------------------------------------------------------------------
+
+describe("nightly robustness gates", () => {
+  test("duplicate bank ids are deduped at entry — one consolidate per unique bank, a nightly-banks-deduped event, nightly-fire carries the deduped list", async () => {
+    const banks = ["alpha", "alpha", "beta"];
+    installNightlyRouter({
+      banks: ["alpha", "beta"],
+      opsQueues: Object.fromEntries(
+        ["alpha", "beta"].map((b) => [b, [opsListBody(b, [refreshOpRow(b, { createdAt: iso(NOW_MS) })])]]),
+      ),
+    });
+    const { events, deps } = rig({ banks });
+
+    const result = await runNightlyConsolidate(deps);
+
+    // the duplicate did NOT produce a second (coalescing, then failing) pass
+    expect(result.ok).toBe(true);
+    expect(result.receipts.map((r) => r.bankId)).toEqual(["alpha", "beta"]);
+    const consolidates = calls.filter((c) => c.method === "POST" && c.url.includes("/consolidate"));
+    expect(consolidates.length).toBe(2);
+    expect(new Set(consolidates.map((c) => c.url)).size).toBe(2);
+    const deduped = at(events.filter((e) => evName(e) === "nightly-banks-deduped"), 0);
+    expect(deduped.dropped).toBe(1);
+    const fire = at(events.filter((e) => evName(e) === "nightly-fire"), 0);
+    expect(fire.banks).toEqual(["alpha", "beta"]);
+  });
+
+  test("the evidence poll PAGINATES: a matching refresh op on page 2 (offset=50) is still observed — no silent 50-row cap", async () => {
+    // page 1: a FULL page of rows for a different model; page 2 (offset=50): the match
+    const chaff = Array.from({ length: 50 }, (_, i) =>
+      refreshOpRow(BANK, { createdAt: iso(NOW_MS), opId: `op-chaff-${i}`, mmId: "mm-some-other-model" }),
+    );
+    installRouter((method, url) => {
+      const m = BANK_PATH_RE.exec(url);
+      if (m === null) throw new Error(`nightly-consolidate.test: unrouted ${method} ${url}`);
+      const bank = at(m, 1);
+      const leaf = at(m, 2);
+      if (leaf === "mental-models") return { body: mmListBody([triggeredMm(bank)]) };
+      if (leaf === "consolidate") return { body: { operation_id: `op-c-${bank}`, deduplicated: false } };
+      if (url.includes("offset=50")) return { body: opsListBody(bank, [refreshOpRow(BANK, { createdAt: iso(NOW_MS), opId: "op-page2" })]) };
+      return { body: opsListBody(bank, chaff) };
+    });
+    const { deps } = rig({ banks: [BANK] });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(true);
+    expect(at(result.receipts, 0).refresh.operationId).toBe("op-page2");
+    expect(calls.some((c) => c.url.includes("/operations") && c.url.includes("offset=50"))).toBe(true);
+  });
+
+  test("a non-finite injected clock → typed nightly-clock-invalid naming the deps.now seam, NO network", async () => {
+    installRouter(() => {
+      throw new Error("nightly-consolidate.test: clock-invalid must not touch the network");
+    });
+    const { deps } = rig({ banks: [BANK], overrides: { now: () => Number.NaN } });
+
+    try {
+      await runNightlyConsolidate(deps);
+      throw new Error("expected MemgateError, none thrown");
+    } catch (e) {
+      if (!(e instanceof MemgateError)) throw e;
+      expect(e.code).toBe("nightly-clock-invalid");
+      expect(e.remediation).toContain("deps.now");
+    }
+    expect(calls.length).toBe(0);
+  });
+
+  test("pollIntervalMs below the floor is clamped — the poll loop never issues a sleep below POLL_INTERVAL_FLOOR_MS", async () => {
+    installNightlyRouter({ banks: [BANK], opsQueues: { [BANK]: [emptyOps(BANK)] } }); // sticky-empty → several polls
+    const { deps } = rig({ banks: [BANK], overrides: { pollIntervalMs: 0 } });
+
+    const sleeps: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const recorder = ((fn: () => void, ms?: number) => {
+      sleeps.push(ms ?? 0);
+      return realSetTimeout(fn, 0); // resolve fast — only the ISSUED interval is under test
+    }) as unknown as typeof globalThis.setTimeout;
+    globalThis.setTimeout = recorder;
+    try {
+      await runNightlyConsolidate(deps);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    // The recorder sees OTHER timers too (the client's own request-timeout
+    // guards, ~10s each) — the pin is that NOTHING was issued below the floor
+    // and the loop's clamped interval is visibly present.
+    expect(sleeps.some((ms) => ms === POLL_INTERVAL_FLOOR_MS)).toBe(true);
+    expect(sleeps.filter((ms) => ms < POLL_INTERVAL_FLOOR_MS)).toEqual([]);
+  });
+
+  test("wall-clock budget exhausted before ANY bank starts → every remaining bank NIGHTLY_BUDGET_EXHAUSTED, zero fetches", async () => {
+    installRouter(() => {
+      throw new Error("nightly-consolidate.test: a bank after budget exhaustion must not touch the network");
+    });
+    const { events, deps } = rig({ banks: [BANK, "beta"], overrides: { wallClockBudgetMs: 0 } });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.receipts).toEqual([]);
+    expect(result.failures.map((f) => f.code)).toEqual(["NIGHTLY_BUDGET_EXHAUSTED", "NIGHTLY_BUDGET_EXHAUSTED"]);
+    for (const f of result.failures) expect(f.message).toContain("NIGHTLY_WALL_CLOCK_BUDGET_MS");
+    expect(calls.length).toBe(0);
+    const failed = events.filter((e) => evName(e) === "nightly-bank-failed");
+    expect(failed.length).toBe(2);
+    for (const e of failed) expect(e.status).toBe("error");
+  });
+
+  test("wall-clock budget: the first bank still receipts inside the budget; a bank whose turn starts AFTER the deadline → NIGHTLY_BUDGET_EXHAUSTED", async () => {
+    // Deterministic stepped clock: each fetch call advances the injected clock
+    // one 60s step — the trace is call-count arithmetic, not wall time.
+    const stepClock = (): number => NOW_MS + 60_000 * calls.length;
+    installNightlyRouter({
+      banks: [BANK, "beta"],
+      opsQueues: {
+        [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS + 130_000) })])], // after the stepped completion
+        beta: [opsListBody("beta", [refreshOpRow("beta", { createdAt: iso(NOW_MS + 130_000) })])],
+      },
+    });
+    const { events, deps } = rig({
+      banks: [BANK, "beta"],
+      overrides: { now: stepClock, wallClockBudgetMs: 150_000, refreshEvidenceTimeoutMs: 10_000_000 },
+    });
+
+    const result = await runNightlyConsolidate(deps);
+
+    // bank 1: clock reads at calls=0/1/2 (start, consolidate timestamps) all < 150s → receipts
+    expect(result.receipts.map((r) => r.bankId)).toEqual([BANK]);
+    // bank 2's turn begins after a fetch that pushed the stepped clock past
+    // the 150s wall budget → skipped loud, not consolidated
+    const f = at(result.failures, 0);
+    expect(f.bankId).toBe("beta");
+    expect(f.code).toBe("NIGHTLY_BUDGET_EXHAUSTED");
+    expect(f.message).toContain("NIGHTLY_WALL_CLOCK_BUDGET_MS");
+    expect(result.banksFailed).toBe(1);
+    const complete = at(events.filter((e) => evName(e) === "nightly-complete"), 0);
+    expect(complete.status).toBe("error");
+  });
+
+  test("the exported wall-clock budget default is 15 minutes (the named guard the story's guards list pins)", () => {
+    expect(NIGHTLY_WALL_CLOCK_BUDGET_MS).toBe(900_000);
   });
 });
 
@@ -587,7 +856,13 @@ describe("in-box write-back + vocabulary negative controls (AC2 fence, INV-MEM-1
 // ---------------------------------------------------------------------------
 
 describe("AC4 module-graph fences", () => {
-  /** The E21 seam fakes, by symbol: the graph must contain NONE of them. */
+  /** The E21 seam fakes, by symbol. The in-source scan is restricted to files
+   * THIS story owns: a whole-file token grep matches comments and prose, so
+   * scanning files the branch does not own would let any future ADR-style
+   * mention of "E21" in an unrelated module flip this fence red while naming
+   * a file with no forbidden import. The import-SPECIFIER scan below still
+   * covers the full transitive closure — that half is the meaningful one: an
+   * actual seam import fails no matter which file it lives in. */
   const FORBIDDEN_IN_SOURCE = /home-bot|home_bot|\bE21\b|from "[^"]*fleet|pi-vs-claude-code-vendor|scripts\/lib\/run-lock/;
   const FORBIDDEN_SPECIFIER = /home-bot|home_bot|\bE21\b|fleet|pi-vs-claude-code-vendor|scripts\/lib\/run-lock/;
   const SPEC_PATTERNS = [
@@ -599,6 +874,10 @@ describe("AC4 module-graph fences", () => {
 
   const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
   const ENTRIES = [join(REPO_ROOT, "scripts/memory-nightly.ts"), join(REPO_ROOT, "src/hindsight/nightly-consolidate.ts")];
+  const OWNED_FILES = new Set([
+    join(REPO_ROOT, "src/hindsight/nightly-consolidate.ts"),
+    join(REPO_ROOT, "scripts/memory-nightly.ts"),
+  ]);
 
   /** Resolve a RELATIVE specifier to a repo file (append .tsx/.js/index.ts as
    * needed); bare/node/bun specifiers are outside the walk. */
@@ -615,7 +894,7 @@ describe("AC4 module-graph fences", () => {
     if (depth > 24 || seen.has(entry) || !existsSync(entry)) return; // cycle + depth guards
     seen.add(entry);
     const src = readFileSync(entry, "utf8");
-    if (FORBIDDEN_IN_SOURCE.test(src)) violations.push(`${entry}: forbidden E21-seam symbol in source`);
+    if (OWNED_FILES.has(entry) && FORBIDDEN_IN_SOURCE.test(src)) violations.push(`${entry}: forbidden E21-seam symbol in source`);
     for (const pattern of SPEC_PATTERNS) {
       pattern.lastIndex = 0;
       for (const m of src.matchAll(pattern)) {
@@ -641,7 +920,7 @@ describe("AC4 module-graph fences", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CLI driver (scripts/memory-nightly.ts) — cases 16-18
+// CLI driver (scripts/memory-nightly.ts) — cases 16-21
 // ---------------------------------------------------------------------------
 
 describe("CLI driver (memory-nightly)", () => {
@@ -654,6 +933,20 @@ describe("CLI driver (memory-nightly)", () => {
     ],
   };
   const DERIVED_BANKS = ["qds-factory-dev-meta", "qds-factory-qa-meta", "qds-factory-maint-meta"];
+  const CLI_SCRIPT = fileURLToPath(new URL("../../scripts/memory-nightly.ts", import.meta.url));
+  /** Complete gateway/job env (token material is fixture-only, never real). */
+  const FULL_ENV = {
+    QDS_MEMORY_AGENT_TOKEN: "mgat.fixture.material",
+    MEMGATE_ADMIN_KEY: ADMIN,
+    QDS_MEMGATE_SIGNING_KEY: SIGNING,
+    QDS_MEMGATE_LEDGER: "", // filled per-test — the ledger must land in the sandbox
+    HINDSIGHT_BASE_URL: BASE_URL,
+  };
+  /** Read the fault-envelope fields without coupling this suite to the
+   * driver's (evolving) envelope union — the runtime contract is what's
+   * pinned, and the union gains variants on the CLI side in step. */
+  const faultOf = (envelope: unknown): { code?: string; message?: string; remediation?: string } =>
+    envelope as { code?: string; message?: string; remediation?: string };
 
   test("case 16 — empty env → code 2 config refusal naming QDS_MEMORY_AGENT_TOKEN; NO fetch call, NO gateway side effects", async () => {
     installRouter(() => {
@@ -746,5 +1039,60 @@ describe("CLI driver (memory-nightly)", () => {
     // the gateway constructed — the pinned ledger path was never opened
     expect(existsSync(neverOpened)).toBe(false);
     expect(calls.some((c) => c.url.includes("/mental-models") || c.url.includes("/consolidate") || c.url.includes("/operations"))).toBe(false);
+  });
+
+  test("case 19 — QDS_MEMORY_REPO_SLUG=qds-collective → code 2, COLLECTIVE_SLUG_REFUSED naming the no-provisioning-circle rationale", async () => {
+    installNightlyRouter({ banks: [], listBanksBody: REPO_BANKS }); // bank list answered; the slug gate must fire without further reads
+    const neverOpened = join(dir, "case19-ledger.db");
+
+    const { code, envelope } = await runMemoryNightly({
+      env: { ...FULL_ENV, QDS_MEMGATE_LEDGER: neverOpened, QDS_MEMORY_REPO_SLUG: "qds-collective" },
+      now: tickClock,
+    });
+
+    expect(code).toBe(2);
+    expect(envelope.ok).toBe(false);
+    const fault = faultOf(envelope);
+    expect(fault.code).toBe("COLLECTIVE_SLUG_REFUSED");
+    const rendered = JSON.stringify(envelope);
+    expect(rendered).toContain("collective");
+    // the refusal must BREAK the circle, not create one: it explains that the
+    // provisioning script refuses the same slug instead of sending the
+    // operator there
+    expect(rendered).toContain("no provisioning circle");
+    expect(existsSync(neverOpened)).toBe(false); // fail-closed before any gateway state
+  });
+
+  test("case 20 — unknown argv flag (--dry-run) → exit 2 with an unknown-flag usage line at the real CLI boundary", () => {
+    // fx4 landed the unknown-flag gate in the script's import.meta.main block
+    // (MemoryNightlyDeps.argv is documented core-ignored), so the honest pin
+    // is the spawned CLI itself: the gate exits 2 before any config read,
+    // network call, or gateway state.
+    const proc = Bun.spawnSync({
+      cmd: ["bun", CLI_SCRIPT, "--dry-run"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(proc.exitCode).toBe(2);
+    const text = `${proc.stderr.toString()}${proc.stdout.toString()}`;
+    expect(text).toContain("unknown flag: --dry-run");
+    expect(text).toContain("usage:");
+  });
+
+  test("case 21 — listBanks unreachable (fetch 500) → code 1, structured fault envelope code BANK_LIST_UNREACHABLE with remediation naming HINDSIGHT_BASE_URL reachability", async () => {
+    installRouter(() => ({ status: 500, body: { error: "instance down" } }));
+    const neverOpened = join(dir, "case21-ledger.db");
+
+    const { code, envelope } = await runMemoryNightly({
+      env: { ...FULL_ENV, QDS_MEMGATE_LEDGER: neverOpened },
+      now: tickClock,
+    });
+
+    expect(code).toBe(1);
+    expect(envelope.ok).toBe(false);
+    const fault = faultOf(envelope);
+    expect(fault.code).toBe("BANK_LIST_UNREACHABLE");
+    expect(fault.remediation).toContain("HINDSIGHT_BASE_URL");
+    expect(calls.some((c) => c.url.includes("/consolidate"))).toBe(false);
   });
 });

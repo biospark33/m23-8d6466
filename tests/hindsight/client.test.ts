@@ -217,12 +217,15 @@ describe("HindsightClient success paths", () => {
   });
 
   test("consolidate success parses ConsolidateResponseSchema", async () => {
+    // F-025: wire truth carries operation_id (ConsolidationResponse required
+    // field); counts ride alongside and fold through the parse untouched.
     installMock({
-      body: { consolidatedCount: 5, preservedCount: 10, durationMs: 1000 },
+      body: { operation_id: "op-ok-1", consolidatedCount: 5, preservedCount: 10, durationMs: 1000 },
     });
     const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
     const r = await client.consolidate("qds-factory");
     expect(ConsolidateResponseSchema.safeParse(r).success).toBe(true);
+    expect(r.operation_id).toBe("op-ok-1");
     expect(r.consolidatedCount).toBe(5);
     expect(r.preservedCount).toBe(10);
     expect(lastCall?.url).toBe(
@@ -445,6 +448,9 @@ describe("HindsightClient mock mode", () => {
     expect(ReflectResponseSchema.safeParse(reflected).success).toBe(true);
     const consolidated = await c.consolidate("qds-factory");
     expect(ConsolidateResponseSchema.safeParse(consolidated).success).toBe(true);
+    // F-025: the canned body is the WIRE shape — operation_id required, so the
+    // mock parses through the tightened schema like a live body must.
+    expect(consolidated.operation_id).toBe("mock-consolidate-op");
     const created = await c.createBank("qds-factory");
     expect(created).toEqual({ bank_id: "qds-factory" });
     const listed = await c.listBanks();
@@ -943,20 +949,79 @@ describe("mental models + operations (M3.1 leaf 1.1.2)", () => {
     expect(r.operations[0]?.task_type).toBe("refresh_mental_model");
   });
 
-  test("consolidate parses BOTH the legacy mock body and the real 0.10.0 wire body", async () => {
-    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
-    // Legacy view (the pre-widening required-counts shape) — must keep parsing.
+  test("consolidate: counts-only legacy body REFUSES; wire body + counts+operation_id parse [F-025]", async () => {
+    const client = new HindsightClient({ baseUrl: "hindsight.test" });
+    // Legacy counts-only body (the pre-widening/pre-M2 mock shape) now REFUSES:
+    // the real 0.10.0 wire (ConsolidationResponse, openapi.json:10350) marks
+    // operation_id REQUIRED — with it optional, `{}` parsed as success and
+    // CONSOLIDATE_UNPARSEABLE was dead code (F-025). The refusal surfaces as
+    // the client's 502 HindsightHttpError (requestJSON safeParse failure).
     installMock({ body: { consolidatedCount: 1, preservedCount: 0, durationMs: 5 } });
-    const legacy = await client.consolidate("qds-factory");
-    expect(legacy.consolidatedCount).toBe(1);
-    expect(legacy.preservedCount).toBe(0);
-    expect(legacy.durationMs).toBe(5);
-    // Real 0.10.0 wire (ConsolidationResponse, openapi.json:10350) — the shape
-    // that 502'd through requestJSON safeParse before the widening.
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.consolidate("qds-factory");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(502);
+    expect(caught?.message).toContain("failed schema validation");
+    // Real 0.10.0 wire — the shape that 502'd through requestJSON safeParse
+    // before the widening.
     installMock({ body: { operation_id: "op-1", deduplicated: true } });
     const wire = await client.consolidate("qds-factory");
     expect(wire.operation_id).toBe("op-1");
     expect(wire.deduplicated).toBe(true);
+    // Wire truth PLUS legacy counts — operation_id present, counts parse and
+    // fold through untouched.
+    installMock({
+      body: { operation_id: "op-2", consolidatedCount: 7, preservedCount: 2, durationMs: 9 },
+    });
+    const both = await client.consolidate("qds-factory");
+    expect(both.operation_id).toBe("op-2");
+    expect(both.consolidatedCount).toBe(7);
+    expect(both.preservedCount).toBe(2);
+    expect(both.durationMs).toBe(9);
+  });
+
+  test("patchMentalModel invalid mentalModelId → 422 before any fetch (F-026)", async () => {
+    installMock({ body: {} });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    // Path-injection charset the BankIdSchema grammar refuses: `/`, `?`, empty,
+    // >64 chars. Same idiom as assertBankId (INV-HM2) — refusal BEFORE request.
+    for (const bad of ["mm/../etc", "mm-1?detail=full", "", "a".repeat(65)]) {
+      lastCall = undefined;
+      let caught: HindsightHttpError | undefined;
+      try {
+        await client.patchMentalModel("qds-factory", bad, {
+          trigger: { refresh_after_consolidation: true },
+        });
+      } catch (e) {
+        if (e instanceof HindsightHttpError) caught = e;
+      }
+      expect(caught).toBeDefined();
+      expect(caught?.status).toBe(422);
+      expect(caught?.message).toContain("invalid mental_model_id");
+      // Guard runs before request: no fetch should have been issued.
+      expect(lastCall).toBeUndefined();
+    }
+  });
+
+  test("listOperations forwards offset in the query string (pagination contract)", async () => {
+    installMock({
+      body: {
+        bank_id: "qds-factory",
+        total: 0,
+        limit: 50,
+        offset: 50,
+        operations: [],
+      },
+    });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    await client.listOperations("qds-factory", { type: "refresh_mental_model", limit: 50, offset: 50 });
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/operations?type=refresh_mental_model&limit=50&offset=50",
+    );
   });
 
   test("createMentalModel invalid bankId → 422 before any fetch (INV-HM2)", async () => {

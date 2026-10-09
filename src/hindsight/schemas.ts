@@ -233,14 +233,17 @@ export const ReflectResponseSchema = z.object({
 });
 
 export const ConsolidateResponseSchema = z.object({
-  // WIDENING (documented deviation from the M3.1 adds-only fence): the real
-  // 0.10.0 wire body is `{operation_id (required), deduplicated?}` —
-  // openapi.json:10350-10369 ConsolidationResponse. The pre-widening
-  // required-counts shape parse-FAILED against the real instance (502 via
-  // requestJSON safeParse). The three legacy camelCase fields stay in the
-  // OUTPUT type as required numbers via `.default(0)` — parse-tolerant
-  // (additive; every legacy mock body still parses) while the z.infer view
-  // keeps round-trip-verifier.ts:461-464's `number` assignments compiling
+  // WIDENING + TIGHTEN (F-025, round-1): the real 0.10.0 wire body is
+  // `{operation_id (required), deduplicated?}` — openapi.json:10350-10369
+  // ConsolidationResponse. The pre-widening required-counts shape parse-FAILED
+  // against the real instance (502 via requestJSON safeParse); the widening
+  // then went too far — with operation_id optional, `{}` parsed as success and
+  // CONSOLIDATE_UNPARSEABLE was dead code. operation_id is now REQUIRED per
+  // the openapi `required` list: a legacy-counts-only body (pre-M2 mocks)
+  // REFUSES (502 via requestJSON safeParse) — the real wire always carries
+  // operation_id. The three legacy camelCase fields stay in the OUTPUT type as
+  // required numbers via `.default(0)` — parse-tolerant — while the z.infer
+  // view keeps round-trip-verifier.ts:461-464's `number` assignments compiling
   // (strict mode; that file is outside this change's file fence). Absent
   // counts fold to 0 exactly like RetainResponseSchema's `durationMs → 0`
   // precedent (:146-183): on the async 0.10.0 wire the true counts live in
@@ -249,7 +252,7 @@ export const ConsolidateResponseSchema = z.object({
   consolidatedCount: z.number().default(0),
   preservedCount: z.number().default(0),
   durationMs: z.number().default(0),
-  operation_id: z.string().optional(),
+  operation_id: z.string(),
   deduplicated: z.boolean().optional(),
 });
 

@@ -3,8 +3,10 @@ import {
   canonicalRoster,
   ensureManagerMentalModels,
   managerMentalModelId,
+  withManagerMentalModels,
   type EnsureMentalModelsOpts,
   type ManagerModelClient,
+  type ProvisionEnvelope,
 } from "../../scripts/provision-hindsight-banks.ts";
 import type { MentalModel } from "../../src/hindsight/schemas.ts";
 
@@ -61,14 +63,16 @@ function makeFakeClient(opts: FakeOpts = {}) {
     mmId: string;
     patch: Parameters<ManagerModelClient["patchMentalModel"]>[2];
   }> = [];
-  let opPolls = 0;
   let opSeq = 0;
   const opIds: string[] = [];
+  /** One entry per listOperations call, in call order — the served statuses. */
+  const pollStatuses: OpStatus[] = [];
   const fixedStatus = opts.createOpStatus ?? "completed";
   const statusForPoll = (): OpStatus => {
     if (opts.createOpStatusSequence === undefined) return fixedStatus;
     const seq = opts.createOpStatusSequence;
-    return seq[Math.min(opPolls, seq.length - 1)]!;
+    // F-016: read-then-record — the FIRST poll sees sequence entry 0.
+    return seq[Math.min(pollStatuses.length, seq.length - 1)]!;
   };
 
   const client: ManagerModelClient = {
@@ -103,8 +107,9 @@ function makeFakeClient(opts: FakeOpts = {}) {
       return Promise.resolve(m ?? { id: mmId, name: "", trigger: patch.trigger ?? null });
     },
     listOperations: (bankId) => {
-      opPolls++;
+      // F-016: read-then-record — the first poll must return sequence[0].
       const status = statusForPoll();
+      pollStatuses.push(status);
       return Promise.resolve({
         bank_id: bankId,
         total: opIds.length,
@@ -121,7 +126,7 @@ function makeFakeClient(opts: FakeOpts = {}) {
       });
     },
   };
-  return { client, banks, createCalls, patchCalls, opIds };
+  return { client, banks, createCalls, patchCalls, opIds, pollStatuses };
 }
 
 function legOpts(extra: Partial<EnsureMentalModelsOpts> = {}): EnsureMentalModelsOpts {
@@ -169,14 +174,18 @@ describe("ensureManagerMentalModels: create-if-absent (AC1)", () => {
   });
 
   test("create op polled through processing → completed (not a single-shot read)", async () => {
-    const { client, opIds } = makeFakeClient({
+    const { client, opIds, pollStatuses } = makeFakeClient({
       createOpStatusSequence: ["processing", "completed"],
     });
     const res = await ensureManagerMentalModels(client, [BANKS[0]!], legOpts());
     expect(res.models.map((m) => m.action)).toEqual(["created"]);
     expect(opIds).toHaveLength(1);
-    // Two polls minimum: one that saw "processing", one that saw "completed".
-    expect(opIds).toBeDefined();
+    // F-016: two polls minimum — one that saw "processing", one "completed";
+    // the FIRST poll must be the one that saw "processing" (sequence entry 0
+    // is actually served, not skipped by an increment-before-read).
+    expect(pollStatuses.length).toBeGreaterThanOrEqual(2);
+    expect(pollStatuses[0]).toBe("processing");
+    expect(pollStatuses).toContain("completed");
   });
 });
 
@@ -299,5 +308,80 @@ describe("canonicalRoster (rerun-lane family roster)", () => {
     expect(canonicalRoster("qds-factory")).toEqual(expected);
     // Order stable across calls — compensation and the envelope fallback rely on it.
     expect(canonicalRoster("qds-factory")).toEqual(canonicalRoster("qds-factory"));
+  });
+});
+
+describe("withManagerMentalModels (M3.1 envelope fold, F-014)", () => {
+  const okEnvelope = (banks: string[]): ProvisionEnvelope => ({
+    ok: true,
+    banks,
+    requestId: "req-test",
+    createdInAttempt: [],
+  });
+
+  test("success fold — the ok envelope gains mentalModels rows for all three meta banks", async () => {
+    const { client, createCalls } = makeFakeClient();
+    const out = await withManagerMentalModels(
+      client,
+      okEnvelope(["qds-factory", "qds-factory-dev-meta", "qds-collective"]),
+    );
+    expect(out.ok).toBe(true);
+    expect(out.mentalModels).toHaveLength(3);
+    expect(out.mentalModels!.map((m) => m.action)).toEqual(["created", "created", "created"]);
+    expect(out.mentalModels!.map((m) => m.bankId)).toEqual(BANKS);
+    expect(createCalls).toHaveLength(3);
+  });
+
+  test("failure fold — a leg throw converts to the failure idiom quoting remediation", async () => {
+    const bankId = "qds-factory-maint-meta";
+    // The failing fake from the drift cases: the store ignores PATCHes, so the
+    // leg's read-back check throws (message carries remediation).
+    const { client } = makeFakeClient({
+      seed: { [bankId]: [seedModel(bankId, { refresh_after_consolidation: false })] },
+      applyPatches: false,
+    });
+    const out = await withManagerMentalModels(
+      client,
+      okEnvelope(["qds-factory", "qds-factory-dev-meta", "qds-collective"]),
+    );
+    expect(out.ok).toBe(false);
+    expect(out.banks).toEqual([]);
+    expect(out.mentalModels).toBeUndefined();
+    expect(out.error?.code).toBe("mental_model_provision_failed");
+    expect(out.error?.message).toContain("remediation");
+  });
+
+  test("passthrough — a non-ok envelope OR empty banks returns unchanged, no MM calls", async () => {
+    const { client } = makeFakeClient();
+    const calls: string[] = [];
+    const spy: ManagerModelClient = {
+      listMentalModels: (...a) => {
+        calls.push("list");
+        return client.listMentalModels(...a);
+      },
+      createMentalModel: (...a) => {
+        calls.push("create");
+        return client.createMentalModel(...a);
+      },
+      patchMentalModel: (...a) => {
+        calls.push("patch");
+        return client.patchMentalModel(...a);
+      },
+      listOperations: (...a) => {
+        calls.push("ops");
+        return client.listOperations(...a);
+      },
+    };
+    const failed: ProvisionEnvelope = {
+      ok: false,
+      banks: [],
+      requestId: "req-failed",
+      createdInAttempt: [],
+      error: { code: "provision_failed", message: "bank roster failed" },
+    };
+    expect(await withManagerMentalModels(spy, failed)).toBe(failed);
+    const emptyBanks = okEnvelope([]);
+    expect(await withManagerMentalModels(spy, emptyBanks)).toBe(emptyBanks);
+    expect(calls).toEqual([]); // neither passthrough touched the client
   });
 });

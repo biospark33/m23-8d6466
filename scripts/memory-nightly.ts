@@ -23,9 +23,12 @@
  *
  * Exit contract:
  *   0 — every bank consolidated (or coalesced) with observed refresh evidence
- *   1 — job failures (any per-bank failure) or an unexpected thrown fault
- *   2 — config refusal (fail-closed: never runs unconfigured — missing agent
- *       token, missing gateway config, or no provisioned repo bank)
+ *   1 — job failures (any per-bank failure), an unexpected thrown fault, or an
+ *       unreachable bank list at resolution time (BANK_LIST_UNREACHABLE)
+ *   2 — config + usage refusals (fail-closed: missing agent token, missing
+ *       gateway config, or no provisioned repo bank), a repo slug that
+ *       sanitizes to the collective (COLLECTIVE_SLUG_REFUSED — provisioning
+ *       refuses it too, so we refuse before resolution), or an unknown --flag
  *
  * Env-var table (names only — values are never logged, never echoed):
  *   QDS_MEMORY_AGENT_TOKEN    agent token material (mgat.…) for this leg;
@@ -43,7 +46,11 @@
 
 import { writeSync } from "node:fs";
 import { HindsightClient } from "../src/hindsight/client.ts";
-import { extractExistingBankIds, resolveProvisionedRepoBankId } from "../src/hindsight/bank-provisioner.ts";
+import {
+  COLLECTIVE_BANK_ID,
+  extractExistingBankIds,
+  resolveProvisionedRepoBankId,
+} from "../src/hindsight/bank-provisioner.ts";
 import { runNightlyConsolidate, type NightlyFailure, type NightlyReceipt } from "../src/hindsight/nightly-consolidate.ts";
 import { resolveBankId } from "../src/hindsight/schemas.ts";
 import { memgateDeps } from "../src/memgate/gateway.ts";
@@ -60,8 +67,10 @@ const REQUIRED_GATEWAY_VARS = [MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, QDS_M
 
 export interface MemoryNightlyDeps {
   env: Record<string, string | undefined>;
-  /** Reserved per the injectable-deps shape — the CLI consumes --help before
-   * the core runs; nothing else is parsed (no flags, no positional args). */
+  /** Reserved per the injectable-deps shape — the CORE ignores argv by
+   * contract (no flags, no positional args); the CLI block owns flag
+   * rejection (--help only, unknown -- flags exit 2). Kept as the test seam
+   * for driving the CLI path. */
   argv?: string[];
   now?: () => number;
   log?: (e: unknown) => void;
@@ -81,6 +90,19 @@ export type MemoryNightlyEnvelope =
       code: "bank-resolution-failed";
       leg: "crontab";
       repoSlug: string;
+      remediation: string;
+    }
+  | {
+      ok: false;
+      code: "COLLECTIVE_SLUG_REFUSED";
+      leg: "crontab";
+      repoSlug: string;
+      remediation: string;
+    }
+  | {
+      ok: false;
+      code: "BANK_LIST_UNREACHABLE";
+      leg: "crontab";
       remediation: string;
     }
   | {
@@ -133,14 +155,42 @@ export async function runMemoryNightly(deps: MemoryNightlyDeps): Promise<{
     ? (deps.env[QDS_MEMORY_REPO_SLUG] as string).trim()
     : DEFAULT_REPO_SLUG;
 
-  // 2. BANK DERIVATION — resolveBankId over the slug, then the landed
-  //    read-side resolver against the live bank list.
+  // 2. BANK DERIVATION — the collective-slug gate FIRST (never route the
+  //    operator into re-running provisioning for a slug provisioning itself
+  //    refuses), then resolveBankId over the slug, then the landed read-side
+  //    resolver against the live bank list.
   const baseId = resolveBankId(repoSlug);
+  if (baseId === COLLECTIVE_BANK_ID) {
+    return {
+      code: 2,
+      envelope: {
+        ok: false,
+        code: "COLLECTIVE_SLUG_REFUSED",
+        leg: "crontab",
+        repoSlug,
+        remediation:
+          "the collective bank is not a manager family — no provisioning circle: scripts/provision-hindsight-banks.ts refuses this slug for the same reason; pass a real repo slug via QDS_MEMORY_REPO_SLUG",
+      },
+    };
+  }
   const client = new HindsightClient({
     baseUrl: deps.env.HINDSIGHT_BASE_URL,
     apiKey: deps.env.HINDSIGHT_BEARER_TOKEN,
   });
-  const existing = extractExistingBankIds(await client.listBanks());
+  let existing: Set<string>;
+  try {
+    existing = extractExistingBankIds(await client.listBanks());
+  } catch {
+    return {
+      code: 1,
+      envelope: {
+        ok: false,
+        code: "BANK_LIST_UNREACHABLE",
+        leg: "crontab",
+        remediation: "check HINDSIGHT_BASE_URL reachability and the instance's health, then re-run",
+      },
+    };
+  }
   const repoBankId = resolveProvisionedRepoBankId(baseId, existing);
   if (repoBankId === null) {
     return {
@@ -198,6 +248,11 @@ if (import.meta.main) {
   if (argv.includes("--help")) {
     writeSync(1, USAGE);
     process.exit(0);
+  }
+  const unknownFlag = argv.find((arg) => arg.startsWith("--"));
+  if (unknownFlag !== undefined) {
+    writeSync(2, `unknown flag: ${unknownFlag}\n${USAGE.split("\n")[0]}\n`);
+    process.exit(2);
   }
   try {
     const { code, envelope } = await runMemoryNightly({

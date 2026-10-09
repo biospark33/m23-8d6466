@@ -15,6 +15,8 @@ import {
   LOCK_STALE_MS,
   provisionBanks,
   resolveProvisionedRepoBankId,
+  resolveRepoBankId,
+  safeRepoBaseCandidates,
   type BridgeProbe,
   type ProvisionClient,
   type ProvisionResult,
@@ -880,19 +882,33 @@ describe("resolveProvisionedRepoBankId (read-side family resolver)", () => {
     expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
   });
 
-  test("qa-meta sibling also identifies the family", () => {
+  test("a qa-meta sibling alone does NOT identify the family (strict dev-meta signature)", () => {
+    // Only -dev-meta co-presence proves ownership (M1.1 semantics, restored
+    // by round-1 fix F-004): qa/maint meta banks are not part of the
+    // signature.
     const existing = new Set(["acme-widget", "acme-widget-qa-meta", COLLECTIVE_BANK_ID]);
-    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget");
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
   });
 
-  test("maint-meta sibling (longest suffix) also identifies the family", () => {
+  test("a maint-meta sibling (longest suffix) alone does NOT identify the family", () => {
     const existing = new Set(["acme-widget", "acme-widget-maint-meta", COLLECTIVE_BANK_ID]);
-    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget");
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
   });
 
-  test("suffixed family recognized via a maint-meta sibling too", () => {
+  test("suffixed family NOT recognized via a maint-meta sibling without dev-meta", () => {
     const existing = new Set(["acme-widget", "acme-widget-2", "acme-widget-2-maint-meta"]);
-    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget-2");
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
+  });
+
+  test("recognized via dev-meta even when qa/maint siblings also exist", () => {
+    const existing = new Set([
+      "acme-widget",
+      "acme-widget-dev-meta",
+      "acme-widget-qa-meta",
+      "acme-widget-maint-meta",
+      COLLECTIVE_BANK_ID,
+    ]);
+    expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBe("acme-widget");
   });
 
   test("unrelated sibling (-ops-meta) is NOT a family signature", () => {
@@ -900,6 +916,49 @@ describe("resolveProvisionedRepoBankId (read-side family resolver)", () => {
     // an outside sibling like -ops-meta must not make a foreign base ours.
     const existing = new Set(["acme-widget", "acme-widget-ops-meta", COLLECTIVE_BANK_ID]);
     expect(resolveProvisionedRepoBankId("acme-widget", existing)).toBeNull();
+  });
+
+  test("legacy 52-max era family (52-char base + dev-meta) recognized read-side", () => {
+    // F-002: a family provisioned under the pre-M3.1 52-char cap has its base
+    // at 52 chars; the current 50-truncation differs, and without the legacy
+    // probe the family would be unfindable (re-provisioning forks a
+    // duplicate). 54-char slug → 50-form "qds-" + 46 x, legacy form
+    // "qds-" + 48 x.
+    const slug = `qds-${"x".repeat(50)}`; // 54 chars
+    const legacyBase = `qds-${"x".repeat(48)}`; // 52 chars
+    const existing = new Set([legacyBase, `${legacyBase}-dev-meta`, COLLECTIVE_BANK_ID]);
+    expect(resolveProvisionedRepoBankId(slug, existing)).toBe(legacyBase);
+    expect(safeRepoBaseCandidates(slug)[0].length).toBe(50);
+    expect(safeRepoBaseCandidates(slug)[1]).toBe(legacyBase);
+  });
+
+  test("legacy family with qa/maint siblings also found via dev-meta (strict predicate, legacy probe)", () => {
+    const slug = `qds-${"x".repeat(50)}`;
+    const legacyBase = `qds-${"x".repeat(48)}`;
+    const existing = new Set([
+      legacyBase,
+      `${legacyBase}-dev-meta`,
+      `${legacyBase}-qa-meta`,
+      `${legacyBase}-maint-meta`,
+      COLLECTIVE_BANK_ID,
+    ]);
+    expect(resolveProvisionedRepoBankId(slug, existing)).toBe(legacyBase);
+  });
+
+  test("collision loop probes legacy forms too (suffixed legacy family recognized)", () => {
+    const slug = `qds-${"x".repeat(50)}`;
+    const legacyBase = `qds-${"x".repeat(48)}`;
+    const existing = new Set([
+      `${legacyBase}-2`,
+      `${legacyBase}-2-dev-meta`,
+      COLLECTIVE_BANK_ID,
+    ]);
+    expect(resolveProvisionedRepoBankId(slug, existing)).toBe(`${legacyBase}-2`);
+  });
+
+  test("WRITE-side still truncates to 50 for a 52-char slug (no legacy-52 write regression)", () => {
+    const slug52 = `qds-${"y".repeat(48)}`; // 52 chars — the legacy cap
+    expect(resolveRepoBankId(slug52, new Set())).toHaveLength(50);
   });
 });
 

@@ -823,10 +823,23 @@ async function waitForCreateOperation(
   pollIntervalMs: number,
   deadline: number,
   now: () => number,
+  emit: (entry: unknown) => void,
 ): Promise<void> {
   for (;;) {
-    const ops = await client.listOperations(bankId, { limit: 50 });
-    const op = ops.operations.find((o) => o.id === operationId);
+    // F-017: a faulting listOperations read is retried until the budget —
+    // mirrors the nightly's evidence poll; fail-loud lives in the deadline.
+    let op: { status: string; error_message: string | null } | undefined;
+    try {
+      const ops = await client.listOperations(bankId, { limit: 50 });
+      op = ops.operations.find((o) => o.id === operationId);
+    } catch (e) {
+      emit({
+        event: "manager-mental-model-poll-fault",
+        bankId,
+        operationId,
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    }
     if (op !== undefined) {
       if (op.status === "completed") return;
       if (op.status === "failed" || op.status === "cancelled") {
@@ -883,7 +896,16 @@ export async function ensureManagerMentalModels(
   const now = opts.now ?? Date.now;
   const pollIntervalMs = opts.pollIntervalMs ?? 2_000;
   const pollTimeoutMs = opts.pollTimeoutMs ?? 120_000;
-  const emit = opts.log ?? (() => {});
+  const log = opts.log ?? (() => {});
+  // F-027: a throwing caller-provided log sink must never fail the leg (the
+  // nightly wraps its emit the same way) — sink failures are diagnostics.
+  const emit = (entry: unknown): void => {
+    try {
+      log(entry);
+    } catch {
+      /* log-sink fault: swallow, keep provisioning */
+    }
+  };
   const models: ManagerModelRow[] = [];
 
   for (const bankId of managerMetaBanks) {
@@ -909,6 +931,7 @@ export async function ensureManagerMentalModels(
         pollIntervalMs,
         now() + pollTimeoutMs,
         now,
+        emit,
       );
       emit({ event: "manager-mental-model", bankId, mentalModelId: mmId, action: "created" });
       models.push({ bankId, mentalModelId: mmId, action: "created" });
@@ -961,7 +984,7 @@ export async function ensureManagerMentalModels(
  * the envelope to the existing failure idiom (banks → [] once anything
  * failed); the caller prints it and exits non-zero.
  */
-async function withManagerMentalModels(
+export async function withManagerMentalModels(
   client: ManagerModelClient,
   envelope: ProvisionEnvelope,
 ): Promise<ProvisionEnvelope> {
@@ -1069,6 +1092,12 @@ async function main(): Promise<number> {
   if (opened.kind === "settled") {
     // M3.1: a settled SUCCESS (rerun or dedicated-fresh) flows through the
     // manager mental-model leg before printing; refusals pass through untouched.
+    // F-020 (deliberate ceiling): the MM leg runs INSIDE the held provision
+    // window — serial creates with pollTimeoutMs (default 120s) each extend the
+    // single-flight window by design. Releasing earlier would race the
+    // create-if-absent leg between concurrent runs; the window stays bounded
+    // by pollTimeoutMs and the stale-lock backstop (LEG_LOCK_STALE_MS +
+    // heartbeat), and operators tuning throughput lower pollTimeoutMs.
     const envelope = await withManagerMentalModels(client, opened.envelope);
     process.stdout.write(`${JSON.stringify(envelope)}\n`);
     return envelope.ok ? 0 : 1;
@@ -1083,7 +1112,13 @@ async function main(): Promise<number> {
 
   const result = await provisionBanks({ client, repoSlug, bridgeProbe });
   // M3.1: the shared-fresh lane's MM leg — only a successful bank provision
-  // reaches it; a failed bank envelope prints as-is.
+  // reaches it; a failed bank envelope prints as-is. F-020 (deliberate
+  // ceiling): the leg runs before opened.release(), holding the single-flight
+  // provision window through serial creates (pollTimeoutMs default 120s each).
+  // That is by design — an earlier release would race create-if-absent
+  // between concurrent runs; the window stays bounded by pollTimeoutMs and
+  // the stale-lock backstop (LEG_LOCK_STALE_MS + heartbeat), and operators
+  // tuning throughput lower pollTimeoutMs.
   const envelope = await withManagerMentalModels(client, result);
   process.stdout.write(`${JSON.stringify(envelope)}\n`);
   opened.release(); // guarded inside the window (R3-006)
