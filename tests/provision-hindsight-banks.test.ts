@@ -741,7 +741,15 @@ describe("provision-hindsight-banks CLI — lock-first provision window (R3-003/
     const opened = await openProvisionWindow(instance.client, "QDS-Factory", { lockPath });
     expect(opened.kind).toBe("settled");
     // R3-002: one lane — the roster PUT-upserts in canonical order, no -2 junk.
-    expect(instance.puts).toEqual(["qds-factory", "qds-factory-dev-meta", "qds-collective"]);
+    // M3.1: the canonical roster is five — base, three manager meta banks,
+    // collective (the rerun lane converges the family the MM leg requires).
+    expect(instance.puts).toEqual([
+      "qds-factory",
+      "qds-factory-dev-meta",
+      "qds-factory-qa-meta",
+      "qds-factory-maint-meta",
+      "qds-collective",
+    ]);
     if (opened.kind === "settled") {
       expect(opened.code).toBe(0);
       expect(opened.envelope.ok).toBe(true);
@@ -749,11 +757,15 @@ describe("provision-hindsight-banks CLI — lock-first provision window (R3-003/
       expect(opened.envelope.banks).toEqual([
         "qds-factory",
         "qds-factory-dev-meta",
+        "qds-factory-qa-meta",
+        "qds-factory-maint-meta",
         "qds-collective",
       ]);
-      // base existed pre-window → only dev-meta + collective are creations.
+      // base existed pre-window → only the meta banks + collective are creations.
       expect(opened.envelope.createdInAttempt).toEqual([
         "qds-factory-dev-meta",
+        "qds-factory-qa-meta",
+        "qds-factory-maint-meta",
         "qds-collective",
       ]);
       expect("error" in opened.envelope).toBe(false);

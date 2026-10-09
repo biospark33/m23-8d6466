@@ -859,18 +859,25 @@ describe("leg-lib", () => {
     );
     expect(rerun.ok).toBe(true);
     expect(rerun.mode).toBe("reupsert-existing");
-    expect(rerun.createdInAttempt).toEqual(["qds-factory-dev-meta"]);
+    // M3.1: the canonical roster is five — with only base+collective present,
+    // the recreated members are all three manager meta banks + dev-meta.
+    expect(rerun.createdInAttempt).toEqual([
+      "qds-factory-dev-meta",
+      "qds-factory-qa-meta",
+      "qds-factory-maint-meta",
+    ]);
     expect(rerunClient.calls.createBank).toContain("qds-factory-dev-meta");
     expect(rerunSteps.length).toBeGreaterThan(0);
     expect(rerunSteps.every((s) => s.mode === "reupsert-existing" && s.label === "provision")).toBe(true);
-    // full-roster-present rerun creates nothing
+    // dev-era roster rerun converges: the two manager meta banks M3.1 adds
+    // are this attempt's creations; base/dev-meta/collective are not.
     const rerun2 = await rerunAwareProvision(
       rerunClient as unknown as ProvisionClient,
       "qds-factory",
       { existingBankIds: ["qds-factory", "qds-factory-dev-meta", COLLECTIVE_BANK_ID] },
     );
     expect(rerun2.ok).toBe(true);
-    expect(rerun2.createdInAttempt).toEqual([]);
+    expect(rerun2.createdInAttempt).toEqual(["qds-factory-qa-meta", "qds-factory-maint-meta"]);
   });
 });
 

@@ -822,14 +822,16 @@ export async function rerunAwareProvision(
   // M3.1: the rerun gate recognizes BOTH base forms the read-side resolver
   // recognizes — the current 50-char truncation and the legacy 52-era form —
   // so a long-slug second run upserts the existing family instead of minting
-  // a junk -2 family. A candidate only counts as OUR family with its
-  // -dev-meta sibling present (same strict ownership signature as
-  // resolveProvisionedRepoBankId): a FOREIGN bank that merely shares the
-  // slug's truncated form must never be adopted and upserted as ours. The
-  // roster below is built from the DETECTED family base: upserting the
-  // 50-form over a legacy 52-form family would fork, not converge.
+  // a junk -2 family. The roster below is built from the DETECTED family
+  // base: upserting the 50-form over a legacy 52-form family would fork, not
+  // converge. Adoption stays BASE-MATCH ONLY (pre-M3.1 semantics, R2-011): a
+  // base whose dev-meta was lost must be CONVERGED by the rerun upsert, not
+  // forked via the fresh lane — that convergence is this lane's purpose. The
+  // strict dev-meta ownership signature lives read-side
+  // (resolveProvisionedRepoBankId); the provision-side leniency predates
+  // this story and is unchanged by it.
   const familyBase = safeRepoBaseCandidates(resolveBankId(repoSlug)).find((c) =>
-    opts.existingBankIds.includes(c) && opts.existingBankIds.includes(`${c}-dev-meta`),
+    opts.existingBankIds.includes(c),
   );
   if (familyBase === undefined) {
     const provision = opts.provisionImpl ?? provisionBanks;

@@ -150,7 +150,7 @@ Written 2026-10-02, before M1.2/M2.1 landed; every gateway-facing claim checked 
 - [x] [Review][Patch] The widened ConsolidateResponseSchema parses {} as success, making CONSOLIDATE_UNPARSEABLE nearly dead and misdirecting drift diagnosis to REFRESH_EVIDENCE_MISSING [src/hindsight/schemas.ts:238]
 - [x] [Review][Patch] patchMentalModel interpolates mentalModelId into the path with no boundary validation [src/hindsight/client.ts:503]
 - [x] [Review][Patch] ensureManagerMentalModels' emit is unguarded — a throwing caller log sink becomes a leg failure masking the real state [scripts/provision-hindsight-banks.ts:878]
-- [x] [Review][Patch] The E21 module-graph fence greps whole-file source of files this branch does not own — a future comment mentioning E21 in memgate flips it red; the specifier half is the meaningful one [tests/hindsight/nightly-consolidate.test.ts:3010]
+- [x] [Review][Patch] The E21 module-graph fence greps whole-file source of files this branch does not own — a future comment mentioning E21 in memgate flips it red; the specifier half is the meaningful one [tests/hindsight/nightly-consolidate.test.ts]
 - [x] [Review][Patch] Letter-vs-spec wording notes: AC1 GET-by-custom-id implemented as listMentalModels+find; INV-MEM-1 "one *-meta bank" vs the fallback leg's one three-bank token; AC4 E21 fence is a static graph scan rather than literal file deletion [_bmad-output/sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md]
 - [x] [Review][Defer] 795 standing DP findings repo-wide — deferred, pre-existing campaign [repo-wide]
 
