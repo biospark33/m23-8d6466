@@ -25,7 +25,14 @@ function traceNotes(traceFile: string): string[] {
 		.map((r) => r.plan!.toolCall!.arguments!.note_to_self!);
 }
 
-test("failed compaction keeps the note and the lock; /self-compact-now reuses the saved note; reload recovery finishes the handoff", async () => {
+// timeout: the scenario's own retry ladder floors at ~6s (attempt 2 after 2s,
+// attempt 3 after 4s) before the final-failure notice, so the repo-wide
+// `bun test` sweep — whose default test timeout is 5s — could never let it
+// finish; the native runner (`node --test`, package.json test:e2e) applies no
+// default timeout, so this option only tightens its behavior and never
+// loosens it, while bun's repo-wide sweep defaults every test to 5s and needs
+// the explicit ceiling. 600s mirrors the test:real convention.
+test("failed compaction keeps the note and the lock; /self-compact-now reuses the saved note; reload recovery finishes the handoff", { timeout: 600_000 }, async () => {
 	const t = makeTestDir("failure-recovery");
 	const env = { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "ignore-until-forced", SC_FAKE_TRACE: t.traceFile };
 

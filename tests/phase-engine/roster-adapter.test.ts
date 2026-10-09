@@ -38,6 +38,26 @@ describe("rosterRoleToTeamRole", () => {
     expect(teamRole.prompt).toBe("You are an analyst");
     expect(teamRole.lean).toBeUndefined();
     expect(teamRole.extensions).toBeUndefined();
+    expect(teamRole.tools).toBeUndefined(); // null = unrestricted → no manifest key
+  });
+
+  test("non-null tools propagate verbatim; null stays undefined", () => {
+    const restricted: ResolvedRole = {
+      name: "fixer",
+      model: "deepseek/deepseek-v3.2",
+      provider: "openrouter",
+      thinking: "medium",
+      tools: ["read", "grep", "bash", "kg_recall"],
+      writes: [],
+      harness_engineering: [],
+      slug: "openrouter/deepseek/deepseek-v3.2",
+      warnings: [],
+    };
+    const t = rosterRoleToTeamRole(restricted, { agentId: "fixer", prompt: "p" });
+    expect(t.tools).toEqual(["read", "grep", "bash", "kg_recall"]);
+
+    const unrestricted: ResolvedRole = { ...restricted, tools: null };
+    expect(rosterRoleToTeamRole(unrestricted, { agentId: "fixer", prompt: "p" }).tools).toBeUndefined();
   });
 
   test("worker role harness_engineering + compaction become extensions + extensionArgs", () => {
@@ -220,6 +240,47 @@ describe("rosterToTeamManifest", () => {
       expect(parsed.data.team.workers).toHaveLength(1);
       expect(parsed.data.team.workers[0]?.agentId).toBe("fixer");
     }
+  });
+
+  test("worker tools survive the manifest parse (strict schema keeps the key)", () => {
+    const roster: ResolvedRoster = {
+      path: "/fake/roster.yaml",
+      roles: [
+        {
+          name: "lead",
+          model: "claude-sonnet-4-5",
+          provider: "anthropic",
+          thinking: "low",
+          tools: null,
+          writes: [],
+          harness_engineering: [],
+          slug: "anthropic/claude-sonnet-4-5",
+          warnings: [],
+        },
+        {
+          name: "fixer",
+          model: "claude-haiku-4-5",
+          provider: "anthropic",
+          thinking: "off",
+          tools: ["read", "grep", "bash", "kg_recall"],
+          writes: [],
+          harness_engineering: [],
+          slug: "anthropic/claude-haiku-4-5",
+          warnings: [],
+        },
+      ],
+      warnings: [],
+    };
+    const manifest = rosterToTeamManifest(roster, {
+      name: "t",
+      project: "p",
+      leadRoleName: "lead",
+      workerRoleNames: ["fixer"],
+      prompts: { lead: "x", fixer: "y" },
+    });
+    expect(TeamManifestSchema.safeParse(manifest).success).toBe(true);
+    expect(manifest.team.workers[0]?.tools).toEqual(["read", "grep", "bash", "kg_recall"]);
+    expect(manifest.team.lead.tools).toBeUndefined();
   });
 
   test("accepts 1-3 workers per TeamManifestSchema", () => {

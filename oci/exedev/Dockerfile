@@ -988,7 +988,16 @@ ARG OPENRIG_VERSION=0.5.14
 # the tree-measured RUN, so the patched bytes are the pinned identity by
 # design. Nothing upstream drifted: the delta is exactly the patch (2 imports
 # + the qdsMemberEnv merge block) plus whatever npm re-resolved identically.
-ARG OPENRIG_TREE_SHA256=8074bfe608ef275076554831cc1c3b68ef7244ef6f9fa9754548b6c79bf72646
+# RE-PINNED 2026-10-08 from publish run 37831713339's refusal ("the /opt/openrig
+# tree hashes to 9f1488626ed4a655312cc0151e2cdfda2c135fcdbf4c3e0963a4dadd9a47e031"):
+# two caret floats inside @openrig/cli@0.5.14's dependency range since the
+# 2026-10-01 pin (c2b09bf5) — hono published 4.13.13 on 2026-10-08T05:35Z and
+# zod published 4.6.5 on 2026-10-02T16:52Z (the 2026-09-29→10-01 pin closed over
+# hono <=4.13.12; zod's ^4.3.6 floated 4.6.x in the same window). Same class as
+# the 2026-10-01 re-pin: openrig's own bundle is untouched at 0.5.14; only the
+# caret-resolved transitive deps under it moved. No same-version npm re-publish
+# is involved (@openrig/cli@0.5.14's dist.integrity is unchanged).
+ARG OPENRIG_TREE_SHA256=9f1488626ed4a655312cc0151e2cdfda2c135fcdbf4c3e0963a4dadd9a47e031
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a

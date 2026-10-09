@@ -94,15 +94,15 @@ ONE T2-grade live round (plus its adversarial companion probes) on a real exedev
 
 ## Definition of Done
 
-- [ ] **Impl:** round driver + probe battery + roster fixture merged; liveGate wired to `"2"`.
-- [ ] **Test (e2e live — MANDATORY):** one round, one box, all three legs green (AC1); leg JSONs in `_bmad-output/evidence/memory-live/`, scrubbed.
-- [ ] **Test (adversarial):** five probes all refused with named reasons recorded (AC5); a deliberate no-auth replay of the 0.8.6 shape returns non-200.
-- [ ] **Security:** revoke-verify evidence in the teardown leg JSON (AC4); the skip-revoke-verify negative control demonstrably fails the round's own assertion.
-- [ ] **Contract:** audit walk clean post-round — digest-stable rows, no `divergent`, no volatile fields in rows (AC7).
-- [ ] **Spend:** worst-case printed pre-fire; actual recorded in micro-USD in the spend leg.
-- [ ] **Cleanup:** `finally` cleanup verified on pass, fail, and interrupt paths (AC6).
-- [ ] **Preflight:** `bun scripts/roster-check.ts --roster config/rosters/memory-live.roster.yaml` green on the new roster file before fire (F097 precedent: roster-check is a pre-flight gate, not post-hoc).
-- [ ] **Handoff:** pointer to the round's evidence delivered to M1.3 (instrumentation input only — no quality claim made here).
+- [x] **Impl:** round driver + probe battery + roster fixture authored on `feature/m2-3-combined-memory-live-round` (858/432/267/40-line files; `liveGate("2")` only).
+- [ ] **Test (e2e live — MANDATORY):** AUTHORED + triple-round-reviewed, NOT FIRED — operator-gated handoff `_bmad-output/reviews/m2-3-t2-handoff.md` (M1.2 precedent; preconditions: CI publish chain + M1.2 round + gateway/exedev env + GO).
+- [ ] **Test (adversarial):** battery authored (five probes, named tokens, no-auth-200 = round-fail, unskippable in L3's finally) + unit-proven against the shipped `verifyRequest` ladder (6/6); live execution rides the same operator handoff.
+- [x] **Security:** L3 requires the memgate-revoke + memgate-verify-revoked stderr lines (any memgate-skip = explicit assertion failure), asserts revoke < verify-revoked < destroy from the round's own audit DB, and records gateway confirmation + timestamps in the teardown leg JSON.
+- [x] **Contract:** AC7 walk authored (exactly-once retain/revoke/verify-revoked rows, zero rows carrying volatile query/marker text or any `memgate` hop, re-harvest stderr asserted `divergent`-free with the unmuted child).
+- [x] **Spend:** worst case printed (L0 + pre-fire) AND persisted in the spend evidence ($0.61 worst = 2.42h leg-sum ceiling + key cap); actual recorded in micro-USD.
+- [x] **Cleanup:** pass/fail paths armed per-id in `finally` (teardown/destroy backstops, bank deletes, fleetLeftovers, keyLeakProblems, settleRun — fault-guarded so cleanup probes cannot skip the battery); interrupt path = documented operator mitigation (handoff).
+- [x] **Preflight:** wired INTO the round pre-dispatch — any nonzero roster-check exit refuses the round (DoD letter); the checked path is the in-repo fixture, sha-bound to the pinned-SHA bytes the in-box load reads.
+- [x] **Handoff:** `_bmad-output/reviews/m2-3-t2-handoff.md` written (preconditions, fire command, limitations incl. #417); M1.3 pointer = the round's evidence dir `_bmad-output/evidence/memory-live/` once fired.
 - [ ] **Integration:** GitNexus `detect_changes()` before commit (docs/test-only expected: 0 affected production symbols).
 
 ## Re-visit (2026-10-08)

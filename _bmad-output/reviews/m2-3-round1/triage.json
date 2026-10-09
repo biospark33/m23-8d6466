@@ -1,0 +1,151 @@
+{
+  "pr": 0,
+  "round": 1,
+  "duration_ms": 420000,
+  "findings": [
+    {
+      "finding_id": "F-001",
+      "finding_text": "L3 finally collects the probe-battery verdict and evidence-write failures into a local `problems` array but the settleRun call omits it \u2014 a failed or allRefused:false battery ships GREEN (AC5/INV-M3-2 negative control dead).",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "BLOCKER",
+      "disposition": "PATCH",
+      "rationale": "Confirmed by direct read; fix includes problems in both settleRun arms.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-002",
+      "finding_text": "L2 asserts in-box kg_recall from [kg-recall] stderr lines in harvested artifacts, but the worker chain discards worker stderr on success (runner stdio ignore-stderr; team-lead-driver logs stderr only when worker text is empty) \u2014 the assert can never see events; every green round fails L2.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "BLOCKER",
+      "disposition": "PATCH",
+      "rationale": "Re-seam: assert the dispatch_task worker_output (harvested trace/trace.db worker_output event) quotes the recalled marker content; stderr scan becomes record-only; observability gap filed as follow-up issue.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-003",
+      "finding_text": "No pre-spend check that the pinned QDS_EXEDEV_SHA tree carries config/rosters/memory-live.roster.yaml; in-box loadRoster reads the ctx.sha checkout while the host gate checks the working tree \u2014 spend fires then the phase refuses in-box.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "git cat-file -e ctx.sha:<fixture> before dispatch.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-004",
+      "finding_text": "Printed worst-case spend says box <= 1h while the summed leg ceilings are ~8.7ks (~2.42h) of box exposure.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "State the leg-sum ceiling honestly in the L0 and pre-fire prints.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-005",
+      "finding_text": "AC7 requires no divergent alarm on same-subject re-emit; the alarm is log-only in link-store and the walk cannot see it \u2014 assert the re-harvest verb's stderr is free of `divergent`.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Add stderr grep assertion on the re-harvest verb.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-006",
+      "finding_text": "ttl probe fires 1.5s past expiry measured on the TEST HOST clock vs the DEPLOYED GATEWAY clock; gateway clock lag flips the probe to refused:false with no clock evidence.",
+      "diff_context_ref": "scripts/e2e/memory-negative-probes.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Widen skew to 5s (cap 30s), record expiresAtMs + firedAtMs in the outcome evidence.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-007",
+      "finding_text": "Observability Contract's server-duration sub-timing is never recorded; a leg that did not run must report absent, not 0.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Record serverDurationMs as explicit absent markers in the in-box-recall evidence.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-008",
+      "finding_text": "Evidence mislabels: envFileBytes is actually chars; the dispatch .catch records dispatch-verb-timeout for non-timeout spawn failures.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Rename to envFileChars; split label with a timedOut flag.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-009",
+      "finding_text": "listedKeyHashes().not.toContain(closed.keyHash) is vacuous when keyHash is undefined.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Guard closed.keyHash non-empty before the toContain assert.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-010",
+      "finding_text": "kgRecallEvents rawControlChars flags a CRLF \\r as payload control char.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Treat \\r as formatting alongside \\t.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-011",
+      "finding_text": "Comment in the vendor test wrongly says node:test applies options.timeout as a no-op; node:test honors it natively.",
+      "diff_context_ref": "pi-vs-claude-code-vendor/self-compact/tests/e2e/failure-recovery.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Correct the comment wording.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-012",
+      "finding_text": "Battery unit CLI-spawn test rides bun's 5s default with no explicit ceiling (the same class the failure-recovery fix addresses).",
+      "diff_context_ref": "tests/scripts/memory-negative-probes.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Add {timeout: 30_000} to the spawn test.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-013",
+      "finding_text": "Cross-run probe is a duplicate of bank-allowlist (same keyA, same token, keyB never fired).",
+      "diff_context_ref": "scripts/e2e/memory-negative-probes.ts@working-tree",
+      "label": "MED",
+      "disposition": "DISMISS",
+      "rationale": "Story-mandated construction: Deviation-2/AC5 explicitly wants probe (b) built from two driver-minted run keys so the scenario is distinct from (c); the gateway's scope check is allowlist-membership so the same token is the expected result.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-014",
+      "finding_text": "DoD names cleanup verified on pass, fail, and interrupt paths; SIGINT mid-test skips finally \u2014 no in-test mechanism exists (repo-wide property; memory-cycle same shape).",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "DEFER",
+      "rationale": "Documented in the t2 handoff with the existing operator mitigation (post-interrupt ssh ls + destroy); fixing it means a harness-level signal scaffold owned outside this story.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-015",
+      "finding_text": "Diff carries out-of-scope content for the M2.3 story: Dockerfile TOFU re-pin + vendor timeout fix (operator-requested pre-existing fixes) and modified df1-4 evidence files (pre-existing dirty tree).",
+      "diff_context_ref": "(diff composition)",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Exclude the df1-4 evidence churn from the commit; the two operator-requested fixes ship in this PR, named in the PR body.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    },
+    {
+      "finding_id": "F-016",
+      "finding_text": "Battery mint plane assumes the deployed gateway shares the host's QDS_MEMGATE_LEDGER; a different ledger file classifies all authenticated probes as no-auth.",
+      "diff_context_ref": "scripts/e2e/memory-negative-probes.ts@working-tree",
+      "label": "MED",
+      "disposition": "DEFER",
+      "rationale": "Deployment precondition, unverifiable in code; named as a fire precondition in the t2 handoff doc.",
+      "created_at": "2026-10-09T02:44:02+00:00"
+    }
+  ]
+}

@@ -67,8 +67,16 @@ export const TeamRoleSchema = z
      * entry is a validation error, same contract as `extensions` (INV-2).
      */
     extensionArgs: z.array(z.string().trim().min(1)).optional(),
+    /**
+     * pi `--tools` allowlist (comma-separated at argv build). Absent = the
+     * role spawns with pi's full tool surface, as before this field existed.
+     * Unlike extensions/extensionArgs this is forwarded for the LEAD too — the
+     * merge turn spawns through the same argv builder, so a declared lead
+     * allowlist is honoured, never silently dropped.
+     */
+    tools: z.array(z.string().trim().min(1)).min(1).optional(),
   })
-  // Still .strict(): widening with two named optional keys must not make any
+  // Still .strict(): widening with named optional keys must not make any
   // OTHER unknown key acceptable as a side effect (INV-2).
   .strict();
 

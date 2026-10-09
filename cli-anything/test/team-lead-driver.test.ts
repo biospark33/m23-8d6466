@@ -148,6 +148,33 @@ describe("buildWorkerArgv — lean is opt-in (DF1.9)", () => {
   });
 });
 
+describe("buildWorkerArgv — pi --tools allowlist (roster tools propagation)", () => {
+  it("emits ONE --tools flag with a comma-joined value, before -p", () => {
+    const argv = buildWorkerArgv({ ...base, tools: ["read", "grep", "bash", "kg_recall"] });
+    expect(argv).toEqual([
+      "--provider",
+      "openrouter",
+      "--model",
+      "openai/gpt-oss-20b:free",
+      "--mode",
+      "json",
+      "--no-session",
+      "--tools",
+      "read,grep,bash,kg_recall",
+      "-p",
+      `do the thing\n\n${SCHEMA_INSTRUCTION}`,
+    ]);
+  });
+
+  it("keeps the default argv byte-identical when tools is absent", () => {
+    expect(buildWorkerArgv(base)).toEqual(TODAYS_ARGV);
+  });
+
+  it("throws on an empty allowlist rather than emitting an ambiguous flag", () => {
+    expect(() => buildWorkerArgv({ ...base, tools: [] })).toThrow("tools rejected");
+  });
+});
+
 describe("resolveExtensionPaths — repo-root containment (INV-2)", () => {
   const root = REPO_ROOT;
 

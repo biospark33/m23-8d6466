@@ -48,6 +48,10 @@ export function rosterRoleToTeamRole(
         "--compact-buffer", role.compaction.buffer,
       ]
     : undefined;
+  // ResolvedRole.tools is string[] | null where null = unrestricted — only a
+  // non-null allowlist narrows the spawn, so only that reaches the manifest
+  // (undefined on TeamRole = pi's full tool surface, byte-identical argv).
+  const tools = role.tools === null ? undefined : role.tools;
   return {
     agentId: opts.agentId,
     // Join: never split here. splitRoleModel decomposes.
@@ -58,6 +62,7 @@ export function rosterRoleToTeamRole(
     lean: undefined,
     ...(extensions !== undefined && { extensions }),
     ...(extensionArgs !== undefined && { extensionArgs }),
+    ...(tools !== undefined && { tools }),
   };
 }
 

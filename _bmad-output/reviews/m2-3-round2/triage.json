@@ -1,0 +1,115 @@
+{
+  "pr": 0,
+  "round": 2,
+  "duration_ms": 390000,
+  "findings": [
+    {
+      "finding_id": "R2-001",
+      "finding_text": "L1's staged manifest cannot pass the dispatch budget gate: requiredBudgetMs = 3 phases x (retries+1) x (PARSE_FIX_ATTEMPTS+1) x maxDurationMs + 3 x ROUTING_MARGIN_MS = 741,000 ms > runBudgetMs 600,000, and no --timeout-ms is passed so the 600,000 default caller ceiling refuses it too \u2014 dispatch exits 2 manifest-rejected pre-spend on every run.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "BLOCKER",
+      "disposition": "PATCH",
+      "rationale": "Constants verified (types.ts PARSE_FIX_ATTEMPTS=2, ROUTING_MARGIN_MS=5_000); fix = runBudgetMs 900_000 + explicit --timeout-ms 960_000 mirroring tier2-rig-swarm-mixed's dual-role shape.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-002",
+      "finding_text": "The staged-vs-committed roster byte-identity assert compares the staged copy to the same working-tree file it was copied from (tautology); the in-box roster is the ctx.sha copy and git cat-file -e checks existence only \u2014 worktree-vs-sha drift unguarded.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Compare staged sha256 against git cat-file blob ctx.sha:<fixture> content.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-003",
+      "finding_text": "The trace worker_output seam asserts includes(round.marker) but the marker is verbatim in the task prompt \u2014 a zero-result recall can pass; proves content availability, not tool invocation.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Assert a substring unique to the kg-recall client's data framing (\\\"documentId\\\":\\\"m23-prime- JSON shape) that the brief's [cite:] rendering never produces.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-004",
+      "finding_text": "The re-harvest divergent stderr assert is vacuous: that child runs NODE_ENV=test without QDS_LOG_VERBOSE so the fleet CLI skips the stderr sink \u2014 needs the same env the teardown verb uses.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Add QDS_LOG_VERBOSE:1 to the re-harvest runFleet env.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-005",
+      "finding_text": "DoD's roster-check preflight gate (bun scripts/roster-check.ts green on the new roster before fire) is not wired into the round.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Run it pre-dispatch on the STAGED roster; exit 1 (slug rejected) = refuse; exit 2 (unevaluable host) = record warning and proceed (F097 letter kept where evaluable).",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-006",
+      "finding_text": "If L1's listedKeyHashes throws (pre-dispatch), hashesBefore stays empty and L3's finally keyLeakProblems flags every account key as leaked with revoke-by-hand noise \u2014 a false storm on an already-failing path.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Skip keyLeakProblems when hashesBefore is empty; record a baseline-unavailable problem instead.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-007",
+      "finding_text": "ttl clock-skew evidence (ttlExpiresAtMs/ttlFiredAtMs) is dropped from L3's battery evidence mapping \u2014 only the CLI path carries it.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Map the two fields into the battery evidence outcomes.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-008",
+      "finding_text": "L1/L2 rethrow the body failure before their evidenceProblems check, so a failing body masks evidence-write refusals.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Rethrow a composite error appending evidence problems.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-009",
+      "finding_text": "Unparseable [kg-recall] lines are counted but invisible in evidence and never flagged.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Record unparseableCount; problem line when > 0.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-010",
+      "finding_text": "The roster grants the credential-carrying fixer src/tests writes while the round's task forbids modification \u2014 least privilege says writes: [] for this round.",
+      "diff_context_ref": "config/rosters/memory-live.roster.yaml@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Set fixer writes: [] with a comment.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-011",
+      "finding_text": "The cat-file guard conflates a locally-absent SHA with a fixture-absent-at-SHA \u2014 the operator cannot tell a fetch problem from a commit problem.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Check SHA existence first, then fixture-at-SHA, with distinct messages.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    },
+    {
+      "finding_id": "R2-012",
+      "finding_text": "Auditor F7 claimed the teardown QDS_LOG_VERBOSE unmute is unnecessary (fleet CLI stderr sink unconditional).",
+      "diff_context_ref": "scripts/fleet.ts@2421-2426",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "Verified wrong: run() skips the hardened fd-2 sink under NODE_ENV=test without QDS_LOG_VERBOSE (fleet.ts:2421-2426) \u2014 the env is load-bearing for the AC4 greps.",
+      "created_at": "2026-10-09T03:32:35+00:00"
+    }
+  ]
+}
