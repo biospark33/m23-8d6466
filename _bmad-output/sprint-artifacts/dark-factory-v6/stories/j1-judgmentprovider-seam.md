@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Foundation, Wave 1 — one of the four zero-gate roots; the story that makes D-4's "future jev-like tier-1 systems swap in" a named seam instead of a hope)
-**Status:** in-review (PR open; DoD e2e live round pending the operator key)
+**Status:** in-review (PR open; all DoD items met — live round fired 2026-10-09)
 
 ## Spec Reference
 
@@ -114,7 +114,7 @@ Extract the one pluggable step of `JudgmentClient.judge()` — **transport: `Jud
 - [x] **Security:** `git diff` shows zero changed lines in `egress.ts`, `ceiling.ts`, `envelope.ts`, `emit.ts`, `schemas.ts`; zero new entries in `package.json`; the recursive fence test is green (AC5, INV-J2/J4).
 - [x] **Test (probe gate):** probe refuses without key or without `QDS_LIVE_PROBE_CONFIRMED=1` before building any request; the registry path is asserted (AC6).
 - [x] **Integration:** `bun test tests/judgment/ tests/scripts/corpus/` green — existing suites pass with additive-only edits, proving behavior-identical extraction.
-- [ ] **Test (e2e demo — MANDATORY):** one operator-gated Jev-live probe round through the registered `jev` adapter — canonical machine-state call, contract diff clean, spend printed, evidence JSON under `_bmad-output/evidence/v6a/j1/`; offline suite stays keyless-green.
+- [x] **Test (e2e demo — MANDATORY):** one operator-gated Jev-live probe round through the registered `jev` adapter — canonical machine-state call, contract diff clean, spend printed, evidence JSON under `_bmad-output/evidence/v6a/j1/`; offline suite stays keyless-green.
 
 ## Dev Agent Record
 
@@ -132,7 +132,7 @@ Extract the one pluggable step of `JudgmentClient.judge()` — **transport: `Jud
 
 **Verification.** `bun test tests/judgment/ tests/scripts/corpus/ tests/scripts/judgment/` green; `bunx tsc --noEmit` 0; `bun run lint` exit 0; a 12-mutant negative-control battery (second model literal, `registerProvider`, mock boolean `noul`, mock missing usage key, adapter redaction import, adapter validation import, interface growth, adapter → `providers/`, probe registry bypass, barrel maker export, adapter dynamic import, literal hidden after a comment opener in a string) — every mutant killed by its named suite; full `bun test` introduces zero failures beyond `origin/dev`'s 34 pre-existing ones; the probe CLI runs as a real process (refuses without confirm; mock run prints MOCK).
 
-**Live round (DoD e2e):** `TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts --evidence-dir _bmad-output/evidence/v6a/j1` — operator-gated (handoff §8); status recorded in the DoD above.
+**Live round (DoD e2e):** `TYPESAFE_API_KEY=... QDS_LIVE_PROBE_CONFIRMED=1 bun scripts/judgment/live-probe.ts --evidence-dir _bmad-output/evidence/v6a/j1` — operator-gated (handoff §8). **Fired 2026-10-09 14:42Z on operator go** (rebased onto `dev` a3e00f04): provider `jev` registry-resolved, transport live, contract diff **clean**, 1 judgment / 291 input + 21 output tokens, latency 275 ms, requestId `ced1d8eb-072a-4b69-99a2-b2e57440e630` — evidence `_bmad-output/evidence/v6a/j1/live-probe-20261009T144209651Z-ced1d8eb.json`, provenance `_bmad-output/judgment/provenance/ced1d8eb-….json`; key-free (grep-verified).
 
 ## Review Findings (post-merge)
 
