@@ -68,13 +68,17 @@ const SUBSTRATE_ENV = [
  * the first statement of every live test body. Tier mismatch throws too: a
  * TIER-2 run is a real-money run and must be opt-in via QDS_E2E_TIER=2.
  */
-export function liveGate(tier: "1" | "2"): void {
+export function liveGate(tier: "0" | "1" | "2"): void {
   if (process.env.QDS_E2E_LIVE !== "1") {
     throw new Error("QDS_E2E_LIVE is not 1 — this todoIf-gated test must not run");
   }
   if (process.env.QDS_E2E_TIER !== tier) {
     throw new Error(`QDS_E2E_TIER is ${JSON.stringify(process.env.QDS_E2E_TIER)}, not "${tier}" — refusing to run at the wrong tier`);
   }
+  // Tier 0 = infra-only (VPS services + gateway, NO exe.dev box) — the box
+  // substrate names do not apply. Tiers 1/2 are box rounds and keep the
+  // substrate check (M3.1 review round 2 follow-through).
+  if (tier === "0") return;
   const missing = SUBSTRATE_ENV.filter((name) => (process.env[name] ?? "").trim() === "");
   if (missing.length > 0) {
     // NAMES only — never values (the provisioning key is a secret).

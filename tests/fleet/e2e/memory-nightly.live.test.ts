@@ -8,7 +8,7 @@
  * bank-dedup claim (v4 PRD :578) is instance-verified by firing TWO
  * CONCURRENT consolidates against ONE bank and counting the operations.
  *
- * INFRA TIER (QDS_E2E_TIER=1): no exe.dev box, no in-box model spend, no
+ * INFRA TIER (QDS_E2E_TIER=0): no exe.dev box, no in-box model spend, no
  * factory OpenRouter key — the only spend is the dedicated instance's own
  * configured consolidation-model calls, printed worst-case BEFORE anything
  * fires and gated on an explicit operator GO (QDS_M31_LIVE_GO=1; absence is
@@ -150,7 +150,7 @@ function m31Gateway(client: HindsightClient, log: (entry: unknown) => void) {
 
 describe("memory nightly live (M3.1, infra tier)", () => {
   test.todoIf(liveTodoOff())("L0 spend: worst-case printed before anything fires, GO gate named", () => {
-    liveGate("1");
+    liveGate("0");
     requireM31Env();
     process.stdout.write(
       [
@@ -161,7 +161,7 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         "  worst case = 6 consolidates + 6 refreshes = 12 instance-side LLM calls.",
         "Per-call cost is the dedicated instance's configured consolidation model",
         "(operator-billed on the instance; this file holds NO factory key, NO box,",
-        "NO OpenRouter spend). Firing requires QDS_E2E_LIVE=1, QDS_E2E_TIER=1 and an",
+        "NO OpenRouter spend). Firing requires QDS_E2E_LIVE=1, QDS_E2E_TIER=0 and an",
         "explicit operator GO: QDS_M31_LIVE_GO=1 — absence is a refusal, never silence.",
         "",
       ].join("\n"),
@@ -171,7 +171,7 @@ describe("memory nightly live (M3.1, infra tier)", () => {
   test.todoIf(liveTodoOff())(
     "T1 crontab leg end-to-end: runMemoryNightly — 3 banks, OBSERVED refresh receipts",
     async () => {
-      liveGate("1");
+      liveGate("0");
       requireM31Env();
       requireOperatorGo();
       setEffectiveImage(null, { note: "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only" });
@@ -237,7 +237,7 @@ describe("memory nightly live (M3.1, infra tier)", () => {
   test.todoIf(liveTodoOff())(
     "T2 dedup claim instance-verified: two CONCURRENT consolidates on ONE bank — coalescing counted",
     async () => {
-      liveGate("1");
+      liveGate("0");
       requireM31Env();
       requireOperatorGo();
       setEffectiveImage(null, { note: "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only" });
@@ -320,7 +320,7 @@ describe("memory nightly live (M3.1, infra tier)", () => {
   test.todoIf(liveTodoOff())(
     "T3 schedule leg at the gateway seam: same job module, leg schedule, one bank",
     async () => {
-      liveGate("1");
+      liveGate("0");
       requireM31Env();
       requireOperatorGo();
       setEffectiveImage(null, { note: "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only" });
