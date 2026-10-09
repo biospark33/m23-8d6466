@@ -181,7 +181,7 @@ Round 2 audited the round-1 fix wave (disposition audit: 29/29 VERIFIED-FIXED) a
 - [x] [Review][Patch] R2-011 stale schema comment in the swarmclaw MCP fixture [tests/swarmclaw/fixtures/fake-hindsight-mcp.ts]
 - [x] [Review][Patch] R2-012 round-1 non-add edits to owned files unrecorded in amendments → record-completion line added [story file]
 
-Round 2 reviewer layers: acceptance auditor + edge case hunter (blind hunter went dark mid-round — recorded as failed layer; the two landing layers ran the full disposition audit and boundary walk). Stop after round 2 per the only-lows-remain rule.
+Round 2 reviewer layers: acceptance auditor + edge case hunter + blind hunter (CORRECTION 2026-10-09 late-drain: the blind layer DID complete — a 429 rate-limit paused it mid-run and its report landed after the driver's 'went dark' call; 14 findings triaged in the triage.json blind_reconciliation block: 4 patched (HIGH: the refresh-evidence success decision is now a `completed` whitelist — unknown statuses keep polling to the fail-loud deadline, never default-success on an open set; rosterPatternClaim qa/maint shapes; F-C tail-band budget attribution; leg-lib header honesty), 10 dismissed (7 already fixed in the follow-through the reviewer could not see, 3 documented-accepted). The round-2 stop call stands re-examined: with the blind layer's HIGH now fixed, the no-HIGH/BLOCKER condition holds again.
 
 ### Review amendments (2026-10-09, round 1 — pre-merge record)
 

@@ -2249,4 +2249,22 @@ describe("rosterPatternClaim (leg-lib)", () => {
     // suffix-12 / singular -1 are outside the -2..-11 discipline
     expect(rosterPatternClaim("qds-factory", ["qds-factory-12", "qds-factory-1"])).toEqual([]);
   });
+
+  test("M3.1: the pattern claims qa/maint meta banks (the lanes create them; a failed fresh provision must not orphan them as unclaimedCreated)", () => {
+    expect(
+      rosterPatternClaim("QDS-Factory", [
+        "qds-factory-qa-meta",
+        "qds-factory-maint-meta",
+        "qds-factory-3-qa-meta",
+        "qds-factory-3-maint-meta",
+        "qds-factory-ops-meta", // not a family member — never claimed
+      ]),
+    ).toEqual(["qds-factory-qa-meta", "qds-factory-maint-meta", "qds-factory-3-qa-meta", "qds-factory-3-maint-meta"]);
+    // both base forms (current 50 + legacy 52) claim their own meta shapes
+    const base52 = "a".repeat(52);
+    expect(rosterPatternClaim(base52, [`${base52}-qa-meta`, `${base52}-maint-meta`])).toEqual([
+      `${base52}-qa-meta`,
+      `${base52}-maint-meta`,
+    ]);
+  });
 });

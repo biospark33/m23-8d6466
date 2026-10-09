@@ -118,6 +118,7 @@ export type MemoryNightlyEnvelope =
       ok: false;
       code: "BANK_LIST_UNREACHABLE";
       leg: "crontab";
+      repoSlug: string;
       detail: string;
       remediation: string;
     }
@@ -207,6 +208,7 @@ export async function runMemoryNightly(deps: MemoryNightlyDeps): Promise<{
         ok: false,
         code: "BANK_LIST_UNREACHABLE",
         leg: "crontab",
+        repoSlug,
         detail: e instanceof Error ? e.message : String(e),
         remediation: "check HINDSIGHT_BASE_URL reachability and the instance's health, then re-run",
       },

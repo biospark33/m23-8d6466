@@ -137,11 +137,17 @@ const MAX_EVIDENCE_PAGES = 5;
  * masking real refresh evidence (a false REFRESH_EVIDENCE_MISSING is a
  * fail-loud defect — keep the window honest in both directions). */
 const EVIDENCE_CLOCK_SKEW_MS = 5_000;
+/** The ONLY status that counts as success evidence — a whitelist, not a
+ * denylist: op status is a free string server-side, and an unknown status
+ * ("queued", a typo) must keep polling to the fail-loud deadline rather than
+ * fabricate a receipt. */
+const REFRESH_SUCCESS_STATUS = "completed";
 /** Terminal refresh statuses that are NOT success evidence (consistent with
- * the provisioner's create-op poll). Anything terminal-but-unlisted
- * (e.g. "completed") counts as evidence. */
+ * the provisioner's create-op poll). */
 const REFRESH_TERMINAL_FAILURE_STATUSES = new Set(["failed", "cancelled"]);
-/** Non-terminal refresh statuses: evidence-in-progress — keep polling. */
+/** Known non-terminal refresh statuses: evidence-in-progress — keep polling.
+ * Unknown statuses fall through to the same keep-polling arm (open-set
+ * default-poll, never default-success). */
 const REFRESH_PENDING_STATUSES = new Set(["pending", "processing"]);
 
 function nowMs(deps: NightlyDeps): number {
@@ -466,8 +472,10 @@ async function observeRefresh(
       : Number.isFinite(rawInterval) && rawInterval > POLL_INTERVAL_FLOOR_MS
         ? rawInterval
         : POLL_INTERVAL_FLOOR_MS;
-  // Entered with no window left: report budget exhaustion, not missing
-  // evidence — one full page walk post-budget would only misattribute.
+  // Entered with no window left — or a window smaller than one poll interval
+  // (F-C tail band): report budget exhaustion, not missing evidence — one
+  // full page walk post-budget would only misattribute.
+  const enteredWithWindow = deadlineMs - nowMs(deps) > pollIntervalMs;
   for (let poll = 0; poll < MAX_EVIDENCE_POLLS; poll++) {
     if (nowMs(deps) >= deadlineMs) {
       return { kind: "missing", unparseableMatches: 0, budgetExhausted: true };
@@ -498,8 +506,9 @@ async function observeRefresh(
             firstFailure ??= { row: o, mentalModelId: o.mental_model_id };
             continue;
           }
-          if (REFRESH_PENDING_STATUSES.has(o.status)) {
-            continue; // still in flight — the next poll may see it terminal
+          if (REFRESH_PENDING_STATUSES.has(o.status) || o.status !== REFRESH_SUCCESS_STATUS) {
+            continue; // in flight — or an UNKNOWN status: keep polling to the
+            // fail-loud deadline, never default-success on an open set
           }
           return { kind: "observed", row: o, mentalModelId: o.mental_model_id };
         }
@@ -515,7 +524,7 @@ async function observeRefresh(
       // Window consumed while polling a healthy entry — the evidence never
       // appeared WITHIN its budget, which is REFRESH_EVIDENCE_MISSING's case.
       // (Entering already-past-deadline is caught at the top of poll 0.)
-      return { kind: "missing", unparseableMatches, budgetExhausted: false };
+      return { kind: "missing", unparseableMatches, budgetExhausted: !enteredWithWindow };
     }
     await sleep(pollIntervalMs);
   }

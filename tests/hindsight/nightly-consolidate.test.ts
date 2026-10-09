@@ -929,6 +929,22 @@ describe("AC4 module-graph fences", () => {
 // ---------------------------------------------------------------------------
 
 describe("round-2 hardening", () => {
+  test("unknown op status (queued) is NEVER success evidence — whitelist: poll to budget, then REFRESH_EVIDENCE_MISSING (blind-R2 HIGH)", async () => {
+    installNightlyRouter({
+      banks: [BANK],
+      opsQueues: { [BANK]: [opsListBody(BANK, [refreshOpRow(BANK, { createdAt: iso(NOW_MS), status: "queued", opId: "op-queued" })])] },
+    });
+    const { events, deps } = rig({ banks: [BANK], overrides: { pollIntervalMs: 1, refreshEvidenceTimeoutMs: 200 } });
+
+    const result = await runNightlyConsolidate(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.map((f) => f.code)).toEqual(["REFRESH_EVIDENCE_MISSING"]);
+    // the consolidate DID happen — the failure is the open-set refusal, not a skipped write
+    expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/consolidate"))).toBe(true);
+    expectLegEverywhere(events, "crontab");
+  });
+
   test("NaN wallClockBudgetMs → typed nightly-budget-invalid throw before any work", async () => {
     installRouter(() => {
       throw new Error("round-2: budget validation must precede any network touch");

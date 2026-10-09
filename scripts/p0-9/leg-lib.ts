@@ -17,7 +17,11 @@
  *   - Hoisted driver helpers (m1-1 round-1 review, F-004/F-006/F-018/F-021/
  *     F-022/F-025): extractBankIds, safeRepoBase, rand6,
  *     PROBE_DOWN_URL_DEFAULT, scanLiveShapePrereq, rerunAwareProvision,
- *     assertQdsRepoSlug. Drivers migrate onto these next wave; additive only.
+ *     assertQdsRepoSlug. Drivers migrate onto these next wave; additive only
+ *     (one deliberate exception, M3.1 review round 2: the superseded
+ *     MAX_BASE_LEN mirror was DELETED in favor of deriving safeRepoBase from
+ *     the provisioner — a hoisted mirror that could silently disagree with
+ *     its source was the defect; tsc is the drift alarm for any importer).
  *   - m1-1 round-2 review additions: acquireHeartbeatLock (R2-002 lock
  *     asymmetry), sanitizeOrigin (R2-015 userinfo stripping),
  *     resolveRepoSlug (R2-018 the one slug default), exact-word maskTail
@@ -634,9 +638,16 @@ export function rosterPatternClaim(repoSlug: string, candidates: string[]): stri
   for (const base of safeRepoBaseCandidates(resolveBankId(repoSlug))) {
     shapes.add(base);
     shapes.add(`${base}-dev-meta`);
+    // M3.1: the family the lanes create is five banks — the pattern must
+    // claim qa/maint too, or a failed fresh provision that died after
+    // creating them records them as unclaimedCreated (never compensated).
+    shapes.add(`${base}-qa-meta`);
+    shapes.add(`${base}-maint-meta`);
     for (let n = 2; n <= 11; n++) {
       shapes.add(`${base}-${n}`);
       shapes.add(`${base}-${n}-dev-meta`);
+      shapes.add(`${base}-${n}-qa-meta`);
+      shapes.add(`${base}-${n}-maint-meta`);
     }
   }
   return candidates.filter((id) => shapes.has(id));
