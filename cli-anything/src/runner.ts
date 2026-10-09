@@ -1064,6 +1064,10 @@ export async function runTeamManifest(
       agentId: manifest.team.lead.agentId,
       ...splitRoleModel(manifest.team.lead.model),
       prompt: manifest.team.lead.prompt,
+      // pi --tools allowlist — forwarded for the lead too: the driver's merge
+      // turn spawns through the same buildWorkerArgv, so a declared lead
+      // allowlist is honoured rather than silently dropped.
+      ...(manifest.team.lead.tools !== undefined ? { tools: manifest.team.lead.tools } : {}),
     },
     workers: manifest.team.workers.map((w) => ({
       agentId: w.agentId,
@@ -1075,6 +1079,7 @@ export async function runTeamManifest(
       ...(w.lean !== undefined ? { lean: w.lean } : {}),
       ...(w.extensions !== undefined ? { extensions: w.extensions } : {}),
       ...(w.extensionArgs !== undefined ? { extensionArgs: w.extensionArgs } : {}),
+      ...(w.tools !== undefined ? { tools: w.tools } : {}),
     })),
     turnCap: manifest.team.turnCap,
   });

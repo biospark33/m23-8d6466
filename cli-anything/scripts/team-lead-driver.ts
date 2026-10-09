@@ -62,6 +62,13 @@ interface WorkerConfig {
    * flags (INV-EXT-ARGS).
    */
   extensionArgs?: string[];
+  /**
+   * pi `--tools` allowlist (comma-separated single flag). Absent = no flag =
+   * pi's full tool surface, argv byte-identical to before this field existed.
+   * Naming an extension-registered tool here is what keeps `--tools` from
+   * silently dropping it (roster schema advisory).
+   */
+  tools?: string[];
 }
 
 const say = (o: unknown): void => {
@@ -412,6 +419,13 @@ export function buildWorkerArgv(w: WorkerConfig): string[] {
     const checked = validateExtensionArgs(w.extensionArgs);
     if (!checked.ok) throw new Error(`extensionArgs rejected: ${checked.rejected}`);
     argv.push(...checked.argv);
+  }
+  // pi's --tools is ONE flag with a comma-separated value (pi --help: "Comma-
+  // separated allowlist of tool names to enable"). Emitted only when declared,
+  // so an undeclared role keeps the exact argv it had before this existed.
+  if (w.tools !== undefined) {
+    if (w.tools.length === 0) throw new Error("tools rejected: empty allowlist would disable every tool");
+    argv.push("--tools", w.tools.join(","));
   }
   argv.push("-p", `${w.prompt}\n\n${SCHEMA_INSTRUCTION}`);
   return argv;

@@ -33,8 +33,9 @@
  *     manifest's phase brief instructs the fixer worker to call kg_recall once
  *     against the round's probe bank. PRIMARY seam: the harvested trace DB's
  *     worker_output payload (the worker's structured reply must BOTH quote the
- *     round marker AND carry frameAsData's "UNTRUSTED RECALLED DATA (kg_recall)"
- *     framing — the marker alone is a prompt echo). The extension's `[kg-recall] {event:...}` stderr
+ *     round marker AND carry the round's recall witness — a token seeded ONLY
+ *     into the retained memory content, never the prompt; the marker alone is
+ *     an echo hole). The extension's `[kg-recall] {event:...}` stderr
  *     lines in the other harvested artifacts are RECORD-ONLY — team-lead-driver
  *     discards worker stderr on a green round, so that channel is unreachable
  *     on success (observability gap filed). KG_RECALL_CHAR_CEILING is IN-BOX
@@ -232,6 +233,13 @@ interface RoundState {
   vmName: string;
   repoBankId: string;
   marker: string;
+  /**
+   * Recall witness: a round-unique token seeded ONLY into the retained memory
+   * content — never in the task prompt. Its appearance in a worker_output
+   * payload proves real kg_recall data flowed (the marker alone is echoable —
+   * it sits verbatim in the prompt).
+   */
+  witness: string;
   recallQuery: string;
   banksWeCreated: string[];
   /** undefined = L1 never completed the listing; a Set (even empty) = measured. */
@@ -249,6 +257,7 @@ const round: RoundState = {
   vmName: "",
   repoBankId: "",
   marker: "",
+  witness: "",
   recallQuery: "",
   banksWeCreated: [],
   hashesBefore: undefined,
@@ -421,9 +430,14 @@ describe("memory combined live (M2.3)", () => {
         const marker = `m23 kg recall marker ${base}`;
         round.marker = marker;
         round.recallQuery = marker; // the in-box task recalls the seeded subject by this phrase
+        // The recall witness rides the RETAINED CONTENT only — never the task
+        // prompt — so its presence in the worker's structured output is proof
+        // of real recall, not echo (the marker is in the prompt and echoable).
+        const witness = `m23-witness-${randomUUID().slice(0, 8)}`;
+        round.witness = witness;
         await mem.retain(
           base,
-          `${marker}: the M2.3 combined-memory live round seeds this observation for the ${probe.slug} probe family (issue 46) so dispatch-time priming and the in-box kg_recall both have a subject to hit.`,
+          `${marker}: the M2.3 combined-memory live round seeds this observation (recall witness ${witness}) for the ${probe.slug} probe family (issue 46) so dispatch-time priming and the in-box kg_recall both have a subject to hit.`,
           { documentId: `m23-prime-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`, updateMode: "replace", kind: "observation", source: "agent" },
         );
 
@@ -618,8 +632,8 @@ describe("memory combined live (M2.3)", () => {
       const evidence: Record<string, unknown>[] = round.evidence;
       const evidenceProblems: string[] = [];
       try {
-        if (ctx === undefined || runId === "" || vmName === "") {
-          throw new Error("L1 did not reach dispatch — nothing to run; refusing a hollow leg");
+        if (ctx === undefined || runId === "" || vmName === "" || round.witness === "") {
+          throw new Error("L1 did not reach dispatch (or never seeded the recall witness) — nothing to run; refusing a hollow leg");
         }
         const env = { QDS_RUNS_DIR: recordsDir, QDS_AUDIT_DB: auditDb };
         const started = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 300_000 });
@@ -712,9 +726,11 @@ describe("memory combined live (M2.3)", () => {
         // ── PRIMARY: the dispatch_task worker's structured output ───────────
         // The marker alone is an echo hole (it sits verbatim in the task
         // prompt), so the verdict requires BOTH: the marker (task compliance)
-        // AND the extension's frameAsData header line — which only real
-        // kg_recall output can carry (the brief renders the record as a
-        // [cite:…] citation, never this header). This seam owns the verdict.
+        // AND the round's recall witness — a token seeded ONLY into the
+        // retained memory content, never the prompt. A payload carrying the
+        // witness can only have read it out of real kg_recall output (the
+        // seeded memory is the bank's sole document, so any quoted data line
+        // carries it). This seam owns the verdict.
         const traceDbPath = join(artifactsDir, "trace", "trace.db");
         expect(existsSync(traceDbPath)).toBeTrue();
         const reader = openTraceReader(traceDbPath);
@@ -743,25 +759,17 @@ describe("memory combined live (M2.3)", () => {
         const payloadText = (p: Record<string, unknown>): string =>
           [p.summary, p.output].filter((s): s is string => typeof s === "string").join("\n");
         const markerHits = workerPayloads.filter((p) => payloadText(p).includes(round.marker));
-        // The extension frames each returned memory as a JSON line — the
-        // kg_recall's frameAsData header — the framed block every real tool
-        // result carries and the prompt echo never does (the gateway returns
-        // documentId as a SIBLING of the text; the extension client lifts only
-        // the text, so a documentId-based discriminator is unreachable — see
-        // round-3 triage). The brief renders [cite:] lines, never this header —
-        // this substring is proof of recall output, not prompt echo.
-        const FRAME_HEADER = "UNTRUSTED RECALLED DATA (kg_recall)";
-        const docIdHits = workerPayloads.filter((p) => payloadText(p).includes(FRAME_HEADER));
+        const witnessHits = workerPayloads.filter((p) => payloadText(p).includes(round.witness));
         evidence.push({
           phase: "memory-live.worker-output-primary",
           source: "trace/trace.db events(requestId).worker_output.payload_json",
           workerOutputCount: workerPayloads.length,
           markerCarried: markerHits.length > 0,
-          carriesFrameHeader: docIdHits.length > 0,
+          witnessCarried: witnessHits.length > 0,
           markerSnippet: markerHits.length > 0 ? String(scrubDeep(payloadText(markerHits[0]!))).slice(0, 400) : null,
         });
         expect(markerHits.length).toBeGreaterThan(0); // task compliance: the output quotes the recalled marker
-        expect(docIdHits.length).toBeGreaterThan(0); // proof of recall: frameAsData's UNTRUSTED header, never in prompt or brief
+        expect(witnessHits.length).toBeGreaterThan(0); // proof of recall: the witness exists ONLY in the retained memory content
 
         // ── EXACTLY ONE memory-retain-receipt/retain row, then re-harvest ───
         const receiptRows = (): AuditLinkRow[] => {
@@ -912,7 +920,7 @@ describe("memory combined live (M2.3)", () => {
         });
 
         // ── AC7: the round's audit walk — digest-stable, volatile-free, frozen ──
-        const volatile = [round.recallQuery, round.marker].filter((s) => s.length > 0);
+        const volatile = [round.recallQuery, round.marker, round.witness].filter((s) => s.length > 0);
         const leaked = rows.filter((r) => {
           const flat = JSON.stringify(r);
           return flat.includes("memgate") || volatile.some((v) => flat.includes(v));

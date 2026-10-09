@@ -9,9 +9,12 @@
 #
 # Least privilege on a box holding a memory credential (story binding): the
 # credential-carrying role's `tools` is an EXPLICIT allowlist naming kg_recall,
-# NEVER null (null = unrestricted, src/phase-engine/roster/schema.ts:340) — a
-# non-null allowlist is also what keeps pi's --tools filter from silently
-# dropping the extension-registered tool (schema.ts:347-356 advisory). Base
+# NEVER null (null = unrestricted, src/phase-engine/roster/schema.ts:340). The
+# allowlist is ENFORCED, not advisory: it propagates through the roster adapter
+# into the manifest and QDS_AGENT_TEAM_CONFIG_JSON, and buildWorkerArgv emits
+# it as pi's comma-separated --tools flag — so the worker spawns WITHOUT
+# edit/write and WITH the extension-registered kg_recall (an allowlist that
+# didn't name it would filter the extension tool out; schema.ts:347-356). Base
 # names read/grep/bash are the only pi tool names verified in-repo
 # (qds-default.roster.yaml reviewer role); the round's phases are code-kind
 # (t2.pipeline.json shape), so the engine needs no write/edit tool to settle.
