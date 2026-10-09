@@ -185,27 +185,32 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         const provision = await ensureManagerMentalModels(mem, banks, { log: (e) => provisionEvents.push(e) });
 
         const { code, envelope } = await runMemoryNightly({ env: process.env, argv: [], log: (e) => provisionEvents.push(e) });
+        // Evidence lands BEFORE every assert — including the exit-code one —
+        // so a failed leg still leaves the receipts AND the failure codes on
+        // disk (the round's whole point).
+        evidence = {
+          phase: "m31.crontab-leg",
+          envelope:
+            "receipts" in envelope
+              ? {
+                  driverCode: code,
+                  ok: envelope.ok,
+                  leg: envelope.leg,
+                  banks: envelope.banks,
+                  banksOk: envelope.banksOk,
+                  banksFailed: envelope.banksFailed,
+                  totalMs: envelope.totalMs,
+                  receipts: envelope.receipts,
+                  failures: envelope.failures,
+                }
+              : { driverCode: code, refusal: envelope },
+          mentalModels: provision.models,
+          eventCount: provisionEvents.length,
+        };
         expect(code).toBe(0);
         if (!("receipts" in envelope)) {
           throw new Error(`the crontab driver refused (code ${code}): ${JSON.stringify(envelope)}`);
         }
-        // Evidence lands BEFORE the shape asserts, so a failed assert still
-        // leaves the receipts on disk (the round's whole point).
-        evidence = {
-          phase: "m31.crontab-leg",
-          envelope: {
-            ok: envelope.ok,
-            leg: envelope.leg,
-            banks: envelope.banks,
-            banksOk: envelope.banksOk,
-            banksFailed: envelope.banksFailed,
-            totalMs: envelope.totalMs,
-            receipts: envelope.receipts,
-            failures: envelope.failures,
-          },
-          mentalModels: provision.models,
-          eventCount: provisionEvents.length,
-        };
         expect(envelope.leg).toBe("crontab");
         expect(envelope.ok).toBe(true);
         expect(envelope.banks).toEqual(banks); // the driver's own derivation matches this file's
