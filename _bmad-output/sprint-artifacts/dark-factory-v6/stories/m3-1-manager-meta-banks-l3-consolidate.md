@@ -166,12 +166,12 @@ Supporting changes landed with the round: `liveGate` gains tier `"0"` (infra-onl
 
 ### Review Findings (round 2, 2026-10-09)
 
-Round 2 audited the round-1 fix wave (disposition audit: 29/29 VERIFIED-FIXED) and boundary-walked the new code. 12 findings — all patch, no HIGH/BLOCKER (stop condition met after this round's fixes):
+Round 2 audited the round-1 fix wave (disposition audit: 29/29 VERIFIED-FIXED) and boundary-walked the new code. 12 findings — 11 patch, 1 dismiss, no HIGH/BLOCKER (stop condition met after this round's fixes):
 
 - [x] [Review][Patch] R2-001 NaN budget overrides poison deadlines into an unbounded poll loop → typed nightly-budget-invalid entry guard [src/hindsight/nightly-consolidate.ts]
 - [x] [Review][Patch] R2-002 compensateRerunFailure claims 50-form roster over a legacy family → dual-form detection [scripts/provision-hindsight-banks.ts]
 - [x] [Review][Patch] R2-003 legacy collision family yields >64-char maint-meta ids forever → bank-id-overflow config refusal [scripts/memory-nightly.ts]
-- [x] [Review][Patch] R2-004 rerun gate adopts a foreign bare-form bank → strict dev-meta ownership signature [scripts/p0-9/leg-lib.ts]
+- [x] [Review][Dismiss] R2-004 rerun gate adopts a foreign bare-form bank → DISMISSED: the proposed strict-sibling gate was withdrawn at the full-suite gate because it broke damaged-family convergence (the rerun lane's own purpose, pinned by the R2-011 test); base-match-only provision-side adoption is pre-M3.1 M1.1 semantics this branch did not worsen, and the strict dev-meta ownership signature lives read-side (resolveProvisionedRepoBankId) [scripts/p0-9/leg-lib.ts]
 - [x] [Review][Patch] R2-005 post-deadline evidence poll misattributes to REFRESH_EVIDENCE_MISSING → NIGHTLY_BUDGET_EXHAUSTED at poll entry [src/hindsight/nightly-consolidate.ts]
 - [x] [Review][Patch] R2-006 multi-model evidence page-order sensitive → success preferred over terminal failure per poll [src/hindsight/nightly-consolidate.ts]
 - [x] [Review][Patch] R2-007 single-dash typo flags silently run the real nightly → leading-dash refusal [scripts/memory-nightly.ts]

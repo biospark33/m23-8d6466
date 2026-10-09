@@ -12,7 +12,7 @@ research:
   tracks:
     B-codebase: complete (shapes + line anchors)
     C-examples: complete (test idioms + live gating)
-    D-specs: complete (openapi + DD-28.16/DD-28.26 + INV-MEM anchors; GET-by-custom-id + create-dup status marked UNVERIFIED — design avoids both: listMentalModels+find, PATCH-converge)
+    D-specs: "complete (openapi + DD-28.16/DD-28.26 + INV-MEM anchors; GET-by-custom-id + create-dup status marked UNVERIFIED — design avoids both: listMentalModels+find, PATCH-converge)"
     E-deps: complete (M2.1 PR#414 + M1.1 PR#410 landed; no conflicts; A1 gated → schedule leg seam-fakes; CI = bun typecheck/lint/full test)
   key_findings:
     - ConsolidateResponseSchema (src/hindsight/schemas.ts:234-238) parse-fails against real 0.10.0 wire {operation_id, deduplicated} — widening is the one documented adds-only deviation

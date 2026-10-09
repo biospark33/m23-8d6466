@@ -530,12 +530,17 @@ export async function compensateRerunFailure(
   // Claim the roster of the family form that ACTUALLY existed pre-run: a
   // legacy 52-era family's qa/maint creations must be claimed in their own
   // form, or they land in residue as unclaimed-created and are never
-  // compensated. Same dual-form detection as the rerun gate (leg-lib), with
-  // the strict dev-meta ownership signature; the 50-form fallback only fires
-  // when no family was detected (fresh-run failure compensation).
+  // compensated. Detection is BASE-MATCH ONLY — the SAME predicate the
+  // rerun upsert uses (leg-lib rerunAwareProvision): the family the upsert
+  // adopted is the family compensation must claim, and a damaged family
+  // (dev-meta lost — exactly the shape the rerun lane converges) has no
+  // dev-meta sibling for a strict signature to find, so the strict form
+  // falls back to the 50-form base and misclaims the legacy creations.
+  // The 50-form fallback only fires when no family was detected (fresh-run
+  // failure compensation).
   const base =
-    safeRepoBaseCandidates(resolveBankId(repoSlug)).find(
-      (c) => preBankIds.includes(c) && preBankIds.includes(`${c}-dev-meta`),
+    safeRepoBaseCandidates(resolveBankId(repoSlug)).find((c) =>
+      preBankIds.includes(c),
     ) ?? safeRepoBase(repoSlug);
   const roster = canonicalRoster(base);
   const post = await takeRerunSnapshot(client);

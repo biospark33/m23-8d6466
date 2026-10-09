@@ -223,6 +223,10 @@ describe("memory nightly live (M3.1, infra tier)", () => {
               : { driverCode: code, bank, refusal: envelope },
           );
           if (!("receipts" in envelope)) {
+            // Fold the accumulated envelopes into evidence BEFORE the throw —
+            // the catch only appends `error`, so without this the refusal and
+            // every earlier bank's result are lost from the on-disk evidence.
+            evidence = { ...evidence, runEnvelopes };
             throw new Error(`the crontab driver refused for ${bank} (code ${code}): ${JSON.stringify(envelope)}`);
           }
           receipts.push(...envelope.receipts);
@@ -291,9 +295,14 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         const receipts = [...a.receipts, ...b.receipts];
         const coalesced = receipts.some((r) => r.consolidate.deduplicated === true);
         const verdict = coalesced ? "coalescing-observed" : "NOT-observed";
-        // The named caveat (nightly-consolidate header): a re-fire landing after
-        // the consolidation left pending yields REFRESH_EVIDENCE_MISSING on the
-        // coalesced leg — honest, recorded, not the claim's failure.
+        // REFRESH_EVIDENCE_MISSING is the nightly module's own honest failure
+        // code (recorded, never a crash), but HERE it is fatal: the probe
+        // proves coalescing AND evidence completeness together. Under real
+        // coalescing both legs observe the same consolidation-trigger
+        // operation via the operations list (the green live round's dedup
+        // evidence shows caveatFailures: [] beside two dedup receipts), so a
+        // missing refresh on any leg means the evidence pipeline broke —
+        // recorded for diagnosis, then failed loud.
         const caveatFailures = [...a.failures, ...b.failures].filter((f) => f.code === "REFRESH_EVIDENCE_MISSING");
         const hardFailures = [...a.failures, ...b.failures].filter((f) => f.code !== "REFRESH_EVIDENCE_MISSING");
         evidence = {
@@ -318,6 +327,11 @@ describe("memory nightly live (M3.1, infra tier)", () => {
         };
         if (hardFailures.length > 0) {
           throw new Error(`dedup probe hit hard failure(s): ${hardFailures.map((f) => `${f.bankId}:${f.code}`).join(", ")}`);
+        }
+        if (caveatFailures.length > 0) {
+          throw new Error(
+            `dedup probe missing observed refresh evidence: ${caveatFailures.map((f) => `${f.bankId}:${f.code}`).join(", ")}`,
+          );
         }
         if (!coalesced) {
           // The story's named-fallback trigger: evidence FIRST (written in the

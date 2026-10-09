@@ -663,6 +663,34 @@ describe("provision-hindsight-banks CLI — rerun-failure compensation (R3-004)"
       residue: {},
     });
   });
+
+  test("a legacy 52-era family with its dev-meta LOST is claimed in its OWN form — base-only detection matches the rerun upsert's, not a strict dev-meta signature", async () => {
+    // The exact shape the rerun lane exists to converge: the legacy family's
+    // dev-meta is gone, the upsert re-mints it, then the upsert fails
+    // partway. Compensation must detect the family BY BASE (the upsert's own
+    // predicate) so the re-minted legacy-form dev-meta is claimed and
+    // deleted — a strict dev-meta ownership signature finds no candidate
+    // (the sibling is precisely what is missing), falls back to the 50-form
+    // base, and the legacy creation lands in residue forever.
+    const longSlug = `qds-${"a".repeat(53)}`; // 50- and 52-char truncations differ
+    const legacy = `qds-${"a".repeat(48)}`; // the 52-era form
+    const pre = [legacy, `${legacy}-qa-meta`, `${legacy}-maint-meta`];
+    const deletes: string[] = [];
+    const client = {
+      listBanks: () =>
+        Promise.resolve({
+          banks: [...pre, `${legacy}-dev-meta`, "qds-probe-stray"],
+        }),
+      deleteBank: (id: string) => {
+        deletes.push(id);
+        return Promise.resolve({ deleted: true, alreadyGone: false, bankId: id });
+      },
+    };
+    const comp = await compensateRerunFailure(client, longSlug, pre);
+    expect(deletes).toEqual([`${legacy}-dev-meta`]); // re-minted creation — compensated
+    expect(comp.deleteOutcomes).toEqual({ [`${legacy}-dev-meta`]: "deleted" });
+    expect(comp.residue).toEqual({ "qds-probe-stray": "unclaimed-created" });
+  });
 });
 
 describe("provision-hindsight-banks CLI — lock-first provision window (R3-003/R3-006)", () => {
