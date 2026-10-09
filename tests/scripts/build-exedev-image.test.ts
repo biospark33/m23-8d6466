@@ -3695,7 +3695,11 @@ describe("checksumArgProblems", () => {
     // being the pinned identity by design — and a FIFTH time on 2026-09-29
     // from run 36611371706's refusal (e035abfa → f8071b8b, upstream ^-range
     // drift again, no CLI version change; the first CI-measured move since
-    // billing was restored). No external
+    // billing was restored) — and a SIXTH time on 2026-10-08 from run
+    // 37831713339's refusal (8074bfe6 → 9f148862: hono published 4.13.13 on
+    // 2026-10-08T05:35Z and zod published 4.6.5 on 2026-10-02 inside
+    // @openrig/cli@0.5.14's caret ranges; the CLI bundle itself unchanged).
+    // No external
     // cross-check exists for an npm-resolved tree, so the refusal output IS
     // the measurement, and the hash is what freezes ^-range resolution.
     const measuredDefault = (name: "NODE_SHA256" | "OPENRIG_TREE_SHA256"): string => {
@@ -3703,7 +3707,7 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "8074bfe608ef275076554831cc1c3b68ef7244ef6f9fa9754548b6c79bf72646";
+          return "9f1488626ed4a655312cc0151e2cdfda2c135fcdbf4c3e0963a4dadd9a47e031";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {

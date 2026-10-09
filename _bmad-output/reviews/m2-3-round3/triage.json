@@ -1,0 +1,115 @@
+{
+  "pr": 0,
+  "round": 3,
+  "duration_ms": 360000,
+  "findings": [
+    {
+      "finding_id": "R3-001",
+      "finding_text": "The dual-requirement seam's \\\"documentId\\\":\\\"m23-prime- limb is unreachable in honest output: the gateway returns documentId as a sibling of the text, the extension client lifts only the text, frameAsData JSON-quotes the text only \u2014 the limb fails every honest green round after full spend.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "Verified against sanitize.ts frameAsData + kg-recall client.ts; limb swapped to the frameAsData header literal UNTRUSTED RECALLED DATA (kg_recall), task text pinned to require quoting it.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-002",
+      "finding_text": "The roster-check preflight spawns with the STAGED TMP path, which loadRoster's repo-root confinement always refuses (exit 1) \u2014 the gate blocks every round pre-spend.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "--roster now targets the in-repo fixture (same bytes proven by the sha-bound compare); per the DoD letter, ANY nonzero exit now refuses the round.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-003",
+      "finding_text": "Empty-baseline guard conflates L1-threw with a genuinely empty listing \u2014 false red with a misleading diagnosis on a green round.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "hashesBefore is now a Set|undefined sentinel: undefined = unmeasured (problem), Set = measured (even empty).",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-004",
+      "finding_text": "Unguarded fleetLeftovers/keyLeakProblems in L3's finally can abort the cleanup chain, skipping the unskippable battery, the evidence write, and settleRun.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Block wrapped in try/catch pushing a problem line.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-005",
+      "finding_text": "The worker_output seam asserted structured fields (result.summary/output) without validating the envelope shape; brittle against driver nesting.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "Matching now runs on the raw payload text (structure-agnostic); both limbs are plain substring checks on payloadText.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-006",
+      "finding_text": "LD degrade control drops evidence-write problems when the body also fails.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Composite rethrow with cause, same shape as L1/L2.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-007",
+      "finding_text": "Torn [kg-recall] lines discard their computed control-char observation, letting the hygiene rollup read vacuously true.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Unparseable records now carry rawControlChars.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-008",
+      "finding_text": "Worst-case spend is printed but not persisted in the spend evidence phase (Observability Contract: worst-case pre-fire + actual).",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "worstCaseMicroUsd computed from the leg-sum ceiling and recorded in the memory-live.spend evidence.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-009",
+      "finding_text": "QDS_EXEDEV_ROSTER enforced-present but never consumed on the dispatch arm (drift from story prose).",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "Charter \u00a72.1 requires the env present (liveGate checks it); consumption is harness-arm-only by landed design (dispatch derives dirname(manifest)/roster.yaml) \u2014 disclosed in the test header; changing the dispatch arm is another story's surface.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-010",
+      "finding_text": "CLI scrub gate may false-positive on its own published identifiers; CLI happy path untested.",
+      "diff_context_ref": "scripts/e2e/memory-negative-probes.ts@working-tree",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "Checked: mintedTokenIds and cleanup records carry sha256 hex, never mgrun- material; memgate log entries are redacted by INV-MG-5 \u2014 no mgrun- literal reaches the payload. The CLI's parts are each tested (env-gate spawn test, battery direct tests); the wrapper adds no untested logic.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-011",
+      "finding_text": "RecallRow.runId === requestId is an unvalidated field-naming assumption.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "Verified: M1.2's round asserts the same correlation and the kg-context writer binds row.runId = requestId (kg-context.ts writeRecallRow); round-1 auditor verified the row shape.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    },
+    {
+      "finding_id": "R3-012",
+      "finding_text": "Roster-check spawn-failure (exitCode null) folds into the proceed arm.",
+      "diff_context_ref": "tests/fleet/e2e/memory-combined.live.test.ts@working-tree",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "Subsumed by R3-002: any nonzero (null included) now refuses.",
+      "created_at": "2026-10-09T04:15:41+00:00"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+# M2.3 combined memory live round — roster fixture (story: dark-factory-v6 M2.3).
+# Same proven-live T2 model pair as config/rosters/roster.yaml (lead
+# claude-haiku-4.5, fixer deepseek-v3.2): gate C pings every roster model, and
+# two roles is the minimum the gate-beside contract exercises. The round
+# dispatches a manifest beside THIS file (dispatch derives
+# dirname(manifestPath)/roster.yaml), so this roster is consumed only when the
+# round's manifest sits in this directory — the harness arm reads
+# QDS_EXEDEV_ROSTER verbatim.
+#
+# Least privilege on a box holding a memory credential (story binding): the
+# credential-carrying role's `tools` is an EXPLICIT allowlist naming kg_recall,
+# NEVER null (null = unrestricted, src/phase-engine/roster/schema.ts:340) — a
+# non-null allowlist is also what keeps pi's --tools filter from silently
+# dropping the extension-registered tool (schema.ts:347-356 advisory). Base
+# names read/grep/bash are the only pi tool names verified in-repo
+# (qds-default.roster.yaml reviewer role); the round's phases are code-kind
+# (t2.pipeline.json shape), so the engine needs no write/edit tool to settle.
+defaults:
+  provider: openrouter
+  thinking: medium
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: lead
+    model: anthropic/claude-haiku-4.5
+    thinking: high
+
+  - name: fixer
+    model: deepseek/deepseek-v3.2
+    # The memory credential enters ONLY the in-box worker's env via the DD-16
+    # delivery pair (QDS_KG_RECALL_KEY / QDS_KG_GATEWAY_URL, delivered by
+    # dispatch's mintAndDeliverMemoryKey); this roster's job is to make the
+    # in-box tool surface exactly one memory verb: kg_recall (recall-only).
+    # The round's task modifies nothing — no repo writes on a box holding a
+    # memory credential (least privilege).
+    writes: []
+    harness_engineering:
+      - pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/kg-recall.ts
+    tools: ["read", "grep", "bash", "kg_recall"]
