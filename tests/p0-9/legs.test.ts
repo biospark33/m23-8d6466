@@ -859,18 +859,25 @@ describe("leg-lib", () => {
     );
     expect(rerun.ok).toBe(true);
     expect(rerun.mode).toBe("reupsert-existing");
-    expect(rerun.createdInAttempt).toEqual(["qds-factory-dev-meta"]);
+    // M3.1: the canonical roster is five — with only base+collective present,
+    // the recreated members are all three manager meta banks + dev-meta.
+    expect(rerun.createdInAttempt).toEqual([
+      "qds-factory-dev-meta",
+      "qds-factory-qa-meta",
+      "qds-factory-maint-meta",
+    ]);
     expect(rerunClient.calls.createBank).toContain("qds-factory-dev-meta");
     expect(rerunSteps.length).toBeGreaterThan(0);
     expect(rerunSteps.every((s) => s.mode === "reupsert-existing" && s.label === "provision")).toBe(true);
-    // full-roster-present rerun creates nothing
+    // dev-era roster rerun converges: the two manager meta banks M3.1 adds
+    // are this attempt's creations; base/dev-meta/collective are not.
     const rerun2 = await rerunAwareProvision(
       rerunClient as unknown as ProvisionClient,
       "qds-factory",
       { existingBankIds: ["qds-factory", "qds-factory-dev-meta", COLLECTIVE_BANK_ID] },
     );
     expect(rerun2.ok).toBe(true);
-    expect(rerun2.createdInAttempt).toEqual([]);
+    expect(rerun2.createdInAttempt).toEqual(["qds-factory-qa-meta", "qds-factory-maint-meta"]);
   });
 });
 
@@ -2241,5 +2248,23 @@ describe("rosterPatternClaim (leg-lib)", () => {
     expect(() => assertQdsRepoSlug("qds-collective")).toThrow(/collective_id_slug/);
     // suffix-12 / singular -1 are outside the -2..-11 discipline
     expect(rosterPatternClaim("qds-factory", ["qds-factory-12", "qds-factory-1"])).toEqual([]);
+  });
+
+  test("M3.1: the pattern claims qa/maint meta banks (the lanes create them; a failed fresh provision must not orphan them as unclaimedCreated)", () => {
+    expect(
+      rosterPatternClaim("QDS-Factory", [
+        "qds-factory-qa-meta",
+        "qds-factory-maint-meta",
+        "qds-factory-3-qa-meta",
+        "qds-factory-3-maint-meta",
+        "qds-factory-ops-meta", // not a family member — never claimed
+      ]),
+    ).toEqual(["qds-factory-qa-meta", "qds-factory-maint-meta", "qds-factory-3-qa-meta", "qds-factory-3-maint-meta"]);
+    // both base forms (current 50 + legacy 52) claim their own meta shapes
+    const base52 = "a".repeat(52);
+    expect(rosterPatternClaim(base52, [`${base52}-qa-meta`, `${base52}-maint-meta`])).toEqual([
+      `${base52}-qa-meta`,
+      `${base52}-maint-meta`,
+    ]);
   });
 });

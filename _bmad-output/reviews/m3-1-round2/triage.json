@@ -1,0 +1,220 @@
+{
+  "pr": 0,
+  "round": 2,
+  "duration_ms": 420000,
+  "findings": [
+    {
+      "finding_id": "R2-001",
+      "finding_text": "NaN wallClockBudgetMs/refreshEvidenceTimeoutMs poisons deadlines into an unbounded poll loop.",
+      "diff_context_ref": "src/hindsight/nightly-consolidate.ts:246",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "typed nightly-budget-invalid entry guard; test-pinned."
+    },
+    {
+      "finding_id": "R2-002",
+      "finding_text": "compensateRerunFailure claims the 50-form roster over a legacy 52-form family \u2014 created legacy qa/maint banks land in residue uncompensated.",
+      "diff_context_ref": "scripts/provision-hindsight-banks.ts:529",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "dual-form detection from preBankIds with strict dev-meta signature."
+    },
+    {
+      "finding_id": "R2-003",
+      "finding_text": "A legacy collision-form family (52-char base + suffix) yields maint-meta ids past the 64-char cap \u2014 the nightly would fail that bank every run forever.",
+      "diff_context_ref": "scripts/memory-nightly.ts:207",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "config-time bank-id-overflow refusal (exit 2) naming the re-provision convergence path; case 23."
+    },
+    {
+      "finding_id": "R2-004",
+      "finding_text": "Rerun gate adopts a FOREIGN bank sharing the slug's truncated form (no dev-meta sibling) and upserts a manager family onto it.",
+      "diff_context_ref": "scripts/p0-9/leg-lib.ts:828",
+      "label": "MED",
+      "disposition": "DISMISS",
+      "rationale": "PATCH withdrawn at the full-suite gate: the strict-sibling rerun gate broke damaged-family convergence (the rerun lane's purpose, pinned by the R2-011 test). Base-match-only provision-side adoption is pre-M3.1 M1.1 semantics this branch did not worsen; the strict ownership signature lives read-side. Recorded in the follow-through commit."
+    },
+    {
+      "finding_id": "R2-005",
+      "finding_text": "observeRefresh entered post-deadline runs a full page walk and misattributes exhaustion to REFRESH_EVIDENCE_MISSING (auditor F-C same root).",
+      "diff_context_ref": "src/hindsight/nightly-consolidate.ts:447",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "top-of-poll deadline check \u2192 NIGHTLY_BUDGET_EXHAUSTED; healthy-entry consumption still attributes to missing evidence; test-pinned."
+    },
+    {
+      "finding_id": "R2-006",
+      "finding_text": "Multi-model evidence is page-order sensitive: a failed row encountered first short-circuits before a completed row for another triggered model (auditor F-A).",
+      "diff_context_ref": "src/hindsight/nightly-consolidate.ts:458",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "per-poll collection prefers observed success over terminal failure; test-pinned with failed-first ordering."
+    },
+    {
+      "finding_id": "R2-007",
+      "finding_text": "Single-dash typo flags (-dry-run) bypass the unknown-flag gate and silently RUN the real nightly with real spend.",
+      "diff_context_ref": "scripts/memory-nightly.ts:252",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "gate widened to any leading-dash arg; case 22 pins exit 2 at the real CLI boundary."
+    },
+    {
+      "finding_id": "R2-008",
+      "finding_text": "Every listBanks fault mode collapses to 'check reachability' \u2014 an unparseable-response or code defect reads as a network outage.",
+      "diff_context_ref": "scripts/memory-nightly.ts:181",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "BANK_LIST_UNREACHABLE envelope gains detail: the underlying error message."
+    },
+    {
+      "finding_id": "R2-009",
+      "finding_text": "HINDSIGHT_BASE_URL unset silently defaults the client to 127.0.0.1:8888 \u2014 on a co-tenanted box the whole nightly runs against the WRONG instance.",
+      "diff_context_ref": "scripts/memory-nightly.ts:138",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "HINDSIGHT_BASE_URL now required (fail-closed, D-2); case 24 pins the config refusal."
+    },
+    {
+      "finding_id": "R2-010",
+      "finding_text": "A frozen constant injected clock passes the finite guard and spins both poll loops forever.",
+      "diff_context_ref": "src/hindsight/nightly-consolidate.ts:479",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "MAX_EVIDENCE_POLLS cap \u2192 typed nightly-clock-frozen throw."
+    },
+    {
+      "finding_id": "R2-011",
+      "finding_text": "Stale fixture comment documents ConsolidateResponseSchema as the legacy counts shape (auditor F-D).",
+      "diff_context_ref": "tests/swarmclaw/fixtures/fake-hindsight-mcp.ts:179",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "comment updated to the tightened schema with the bypass note."
+    },
+    {
+      "finding_id": "R2-012",
+      "finding_text": "Spec-record gap: round-1 fix wave's non-add edits to M1.1/M2-owned files (resolver rewrite, safeRepoBaseCandidates, assertMentalModelId, listOperations offset) unrecorded under an amendments section declaring THE sanctioned deviation (auditor F-B).",
+      "diff_context_ref": "_bmad-output/sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "dated record-completion amendment added beside the deviation bullet."
+    }
+  ],
+  "blind_reconciliation": {
+    "note": "The round-2 blind hunter COMPLETED after the driver's 'went dark' call (a 429 mid-run, then finished). Its 14 findings are triaged here against the post-follow-through tree; 4 required patches (landed), 10 dismissed (7 already fixed in the follow-through the reviewer could not see, 3 documented-accepted).",
+    "findings": [
+      {
+        "finding_id": "R2B-01",
+        "finding_text": "Terminal-status machine is open-set default-success: unknown op statuses fall through to observed (fabricated receipts).",
+        "diff_context_ref": "src/hindsight/nightly-consolidate.ts:497",
+        "label": "HIGH",
+        "disposition": "PATCH",
+        "rationale": "REFRESH_SUCCESS_STATUS='completed' whitelist; unknown/pending keep polling to the fail-loud deadline; test-pinned."
+      },
+      {
+        "finding_id": "R2B-02",
+        "finding_text": "rosterPatternClaim never widened to qa/maint meta shapes \u2014 failed fresh provisions orphan created meta banks as unclaimedCreated.",
+        "diff_context_ref": "scripts/p0-9/leg-lib.ts:632",
+        "label": "MED",
+        "disposition": "PATCH",
+        "rationale": "qa/maint shapes added for both base forms + collision variants; test-pinned."
+      },
+      {
+        "finding_id": "R2B-03",
+        "finding_text": "Write-side resolveRepoBankId still truncates to 50 \u2014 an ungated fresh lane over a legacy family forks a duplicate.",
+        "diff_context_ref": "src/hindsight/bank-provisioner.ts:205",
+        "label": "MED",
+        "disposition": "DISMISS",
+        "rationale": "Documented asymmetry: the only production entry (provision script) is gated by the legacy-aware rerun gate; provisionBanks has no other caller. Read-probe + gate cover the real surface."
+      },
+      {
+        "finding_id": "R2B-04",
+        "finding_text": "NaN budgets disarm the new guards (?? misses NaN).",
+        "diff_context_ref": "src/hindsight/nightly-consolidate.ts:240",
+        "label": "MED",
+        "disposition": "DISMISS",
+        "rationale": "ALREADY FIXED in the follow-through commit (nightly-budget-invalid entry guard, test-pinned) \u2014 reviewer read the pre-fix diff."
+      },
+      {
+        "finding_id": "R2B-05",
+        "finding_text": "BANK_LIST_UNREACHABLE bare catch swallows the fault \u2014 401 vs DNS indistinguishable.",
+        "diff_context_ref": "scripts/memory-nightly.ts:182",
+        "label": "MED",
+        "disposition": "DISMISS",
+        "rationale": "ALREADY FIXED in the follow-through (detail: underlying error in the envelope)."
+      },
+      {
+        "finding_id": "R2B-06",
+        "finding_text": "Schema tighten's repo-wide blast radius on other consolidate-mocking fixtures unverified.",
+        "diff_context_ref": "src/hindsight/schemas.ts:236",
+        "label": "MED",
+        "disposition": "DISMISS",
+        "rationale": "Empirically verified: fx3 focal-adjacent 82/0, edge sweep 264/0 across 7 suites, full-suite gate green \u2014 only two parse sites exist."
+      },
+      {
+        "finding_id": "R2B-07",
+        "finding_text": "Shared evidence deadline starves later banks into misattributed failures; 1-tick entry band reports missing not exhausted (auditor F-C).",
+        "diff_context_ref": "src/hindsight/nightly-consolidate.ts:241",
+        "label": "MED",
+        "disposition": "PATCH",
+        "rationale": "Entry check (already landed) + enteredWithWindow closes the F-C tail band: window \u2264 one poll interval at entry \u2192 NIGHTLY_BUDGET_EXHAUSTED."
+      },
+      {
+        "finding_id": "R2B-08",
+        "finding_text": "Multi-model evidence order-dependent (first row wins).",
+        "diff_context_ref": "src/hindsight/nightly-consolidate.ts:465",
+        "label": "LOW",
+        "disposition": "DISMISS",
+        "rationale": "ALREADY FIXED in the follow-through (success preferred over terminal failure per poll)."
+      },
+      {
+        "finding_id": "R2B-09",
+        "finding_text": "assertMentalModelId applies the bank grammar to mm ids \u2014 a foreign server-minted id false-422s.",
+        "diff_context_ref": "src/hindsight/client.ts:819",
+        "label": "LOW",
+        "disposition": "DISMISS",
+        "rationale": "Documented seam: every caller passes provisioner-derived ids (bank-charset); the public-method hardening is the point of F-026."
+      },
+      {
+        "finding_id": "R2B-10",
+        "finding_text": "Unknown-flag gate misses single-dash typos.",
+        "diff_context_ref": "scripts/memory-nightly.ts:252",
+        "label": "LOW",
+        "disposition": "DISMISS",
+        "rationale": "ALREADY FIXED in the follow-through (any leading-dash arg refused; case 22)."
+      },
+      {
+        "finding_id": "R2B-11",
+        "finding_text": "leg-lib deleted the exported MAX_BASE_LEN against its own 'additive only' header policy.",
+        "diff_context_ref": "scripts/p0-9/leg-lib.ts:15",
+        "label": "LOW",
+        "disposition": "PATCH",
+        "rationale": "Header updated: the mirror deletion is the documented exception \u2014 a hoisted mirror that could silently disagree with its source was the defect; tsc is the drift alarm."
+      },
+      {
+        "finding_id": "R2B-12",
+        "finding_text": "BANK_LIST_UNREACHABLE omits repoSlug every sibling refusal carries.",
+        "diff_context_ref": "scripts/memory-nightly.ts:119",
+        "label": "LOW",
+        "disposition": "PATCH",
+        "rationale": "repoSlug added to envelope + union type."
+      },
+      {
+        "finding_id": "R2B-13",
+        "finding_text": "Story findings remain unticked although the commit claims 29 patched.",
+        "diff_context_ref": "_bmad-output/sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md",
+        "label": "LOW",
+        "disposition": "DISMISS",
+        "rationale": "ALREADY FIXED \u2014 all 29 ticked in the round-2 record pass (reviewer read the pre-fix diff)."
+      },
+      {
+        "finding_id": "R2B-14",
+        "finding_text": "Wall-budget constant test asserts the export equals itself \u2014 tautology.",
+        "diff_context_ref": "tests/hindsight/nightly-consolidate.test.ts",
+        "label": "LOW",
+        "disposition": "DISMISS",
+        "rationale": "Spec anchor; the two behavioral budget tests beside it carry the wiring pins (reviewer's own 'borderline acceptable')."
+      }
+    ]
+  }
+}

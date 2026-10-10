@@ -17,6 +17,7 @@ import {
   CONSOLIDATE_TIMEOUT_MS,
   HindsightClient,
   HindsightHttpError,
+  MENTAL_MODEL_TIMEOUT_MS,
   RECALL_TIMEOUT_MS,
   REFLECT_TIMEOUT_MS,
   RETAIN_TIMEOUT_MS,
@@ -216,12 +217,15 @@ describe("HindsightClient success paths", () => {
   });
 
   test("consolidate success parses ConsolidateResponseSchema", async () => {
+    // F-025: wire truth carries operation_id (ConsolidationResponse required
+    // field); counts ride alongside and fold through the parse untouched.
     installMock({
-      body: { consolidatedCount: 5, preservedCount: 10, durationMs: 1000 },
+      body: { operation_id: "op-ok-1", consolidatedCount: 5, preservedCount: 10, durationMs: 1000 },
     });
     const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
     const r = await client.consolidate("qds-factory");
     expect(ConsolidateResponseSchema.safeParse(r).success).toBe(true);
+    expect(r.operation_id).toBe("op-ok-1");
     expect(r.consolidatedCount).toBe(5);
     expect(r.preservedCount).toBe(10);
     expect(lastCall?.url).toBe(
@@ -444,6 +448,9 @@ describe("HindsightClient mock mode", () => {
     expect(ReflectResponseSchema.safeParse(reflected).success).toBe(true);
     const consolidated = await c.consolidate("qds-factory");
     expect(ConsolidateResponseSchema.safeParse(consolidated).success).toBe(true);
+    // F-025: the canned body is the WIRE shape — operation_id required, so the
+    // mock parses through the tightened schema like a live body must.
+    expect(consolidated.operation_id).toBe("mock-consolidate-op");
     const created = await c.createBank("qds-factory");
     expect(created).toEqual({ bank_id: "qds-factory" });
     const listed = await c.listBanks();
@@ -581,7 +588,7 @@ describe("HindsightClient.deleteBank", () => {
     // Sentinel: any fetch call here fails the test.
     globalThis.fetch = (async () => {
       throw new Error("mock mode MUST NOT call fetch");
-    }) as unknown as typeof globalThis.fetch;
+    }) as unknown as typeof globalThis.fetch; // dp:ok sentinel stub assigned to globalThis.fetch (mock mode must never fetch); no narrowing expresses a stub as the whole fetch type
     const c = new HindsightClient({ mode: "mock" });
     const r = await c.deleteBank("qds-factory");
     expect(r).toEqual({ deleted: true, alreadyGone: false, bankId: "qds-factory" });
@@ -612,7 +619,7 @@ describe("M1.2 retain surface", () => {
     // One whole-body assertion pins the mapping: document_id + tags are
     // TOP-LEVEL on the item (metadata.tags 422s on 0.10.0) and updateMode
     // leaks NOTHING to the wire — it IS the document_id upsert.
-    expect(JSON.parse(String(lastCall?.init?.body))).toEqual({
+    expect(JSON.parse(String(lastCall?.init?.body))).toEqual({ // dp:ok parses this test's own recorded stub body; a parse failure IS the test failing
       items: [
         {
           content: "outcome body",
@@ -711,7 +718,7 @@ describe("M1.2 retain surface", () => {
     try {
       await client.retain("qds-factory", "x", {
         source: "agent",
-        tags: "run-outcome" as unknown as string[],
+        tags: "run-outcome" as unknown as string[], // dp:ok deliberately type-erases an INVALID tags value to prove the schema refuses it at runtime [F20]
       });
     } catch (e) {
       if (e instanceof HindsightHttpError) caught = e;
@@ -725,7 +732,7 @@ describe("M1.2 retain surface", () => {
   test("mock retain round-trips through the strict schema with no network", async () => {
     globalThis.fetch = (async () => {
       throw new Error("mock mode MUST NOT call fetch");
-    }) as unknown as typeof globalThis.fetch;
+    }) as unknown as typeof globalThis.fetch; // dp:ok sentinel stub assigned to globalThis.fetch (mock mode must never fetch); no narrowing expresses a stub as the whole fetch type
     // The exact canned retain body mockBody returns must parse and transform —
     // a wire-drifted mock fails the SAME strict parse a live body does (AC5:
     // network-only short-circuit, never validation short-circuit).
@@ -791,7 +798,7 @@ describe("M1.2 retain surface", () => {
       await client.retain("qds-factory", "x", {
         source: "agent",
         updateMode: "append",
-      } as unknown as { source: "agent"; updateMode: "replace" });
+      } as unknown as { source: "agent"; updateMode: "replace" }); // dp:ok deliberately type-erases an INVALID updateMode to prove the schema refuses it at runtime
     } catch (e) {
       if (e instanceof HindsightHttpError) caught = e;
     }
@@ -799,6 +806,253 @@ describe("M1.2 retain surface", () => {
     expect(caught?.message).toContain("invalid retain extension");
     // Refusal happens at the client boundary, before request(): no fetch.
     expect(lastCall).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M3.1 mental models + operations surfaces (leaf 1.1.2). Request/response
+// shapes are the vendored 0.10.0 OpenAPI
+// (~/.claude/skills/hindsight-docs/references/openapi.json):
+// CreateMentalModelRequest :10926, CreateMentalModelResponse :10993,
+// PATCH body UpdateMentalModelRequest :19212, response MentalModelResponse
+// :15355, list envelope MentalModelListResponse :15057 (envelope key `items`,
+// NOT `mental_models`), OperationsListResponse :16666, OperationResponse
+// :16282, ConsolidationResponse :10350. Trigger-only per DD-28.16 — no
+// refresh method exists (pinned below).
+// ---------------------------------------------------------------------------
+
+describe("mental models + operations (M3.1 leaf 1.1.2)", () => {
+  test("createMentalModel POSTs the snake_case wire body and parses CreateMentalModelResponse", async () => {
+    // Real wire: mental_model_id null until background reflect finishes
+    // (openapi.json:10995 anyOf string|null); operation_id always present.
+    installMock({ body: { mental_model_id: null, operation_id: "op-create-1" } });
+    const client = new HindsightClient({
+      baseUrl: "http://hindsight.test",
+      requestId: "req-mm-create",
+    });
+    const r = await client.createMentalModel("qds-factory", {
+      id: "team-communication",
+      name: "Team Communication Preferences",
+      sourceQuery: "How does the team prefer to communicate?",
+      trigger: { refresh_after_consolidation: true },
+      maxTokens: 2048,
+    });
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/mental-models",
+    );
+    expect(lastCall?.init?.method).toBe("POST");
+    // camelCase args → snake_case wire keys (CreateMentalModelRequest :10926).
+    expect(JSON.parse(String(lastCall?.init?.body))).toEqual({ // dp:ok parses this test's own recorded stub body; a parse failure IS the test failing
+      id: "team-communication",
+      name: "Team Communication Preferences",
+      source_query: "How does the team prefer to communicate?",
+      trigger: { refresh_after_consolidation: true },
+      max_tokens: 2048,
+    });
+    expect(r.operation_id).toBe("op-create-1");
+    expect(r.mental_model_id).toBeNull();
+  });
+
+  test("patchMentalModel PATCHes the trigger and parses the MentalModelResponse shape", async () => {
+    installMock({
+      body: {
+        id: "mm-1",
+        bank_id: "qds-factory",
+        name: "Team Communication Preferences",
+        trigger: { refresh_after_consolidation: true },
+      },
+    });
+    const client = new HindsightClient({
+      baseUrl: "http://hindsight.test",
+      requestId: "req-mm-patch",
+    });
+    const r = await client.patchMentalModel("qds-factory", "mm-1", {
+      trigger: { refresh_after_consolidation: true },
+    });
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/mental-models/mm-1",
+    );
+    expect(lastCall?.init?.method).toBe("PATCH");
+    expect(JSON.parse(String(lastCall?.init?.body))).toEqual({ // dp:ok parses this test's own recorded stub body; parse failure = the test failing
+      trigger: { refresh_after_consolidation: true },
+    });
+    expect(r.id).toBe("mm-1");
+    expect(r.trigger?.refresh_after_consolidation).toBe(true);
+  });
+
+  test("listMentalModels forwards ?detail= and parses the `items` envelope (:15057)", async () => {
+    installMock({
+      body: {
+        items: [
+          {
+            id: "mm-1",
+            bank_id: "qds-factory",
+            name: "Team Communication Preferences",
+            trigger: { refresh_cron: "0 3 * * *" },
+          },
+        ],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      },
+    });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.listMentalModels("qds-factory", "content");
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/mental-models?detail=content",
+    );
+    expect(lastCall?.init?.method).toBe("GET");
+    expect(r.total).toBe(1);
+    expect(r.items[0]?.id).toBe("mm-1");
+    // Unseen trigger fields survive read-backs — MentalModelTriggerSchema is
+    // .passthrough() (openapi.json:15856+ carries min_refresh_interval_seconds,
+    // budget, fact_types, ... that the narrowed schema does not enumerate).
+    expect(r.items[0]?.trigger?.refresh_cron).toBe("0 3 * * *");
+  });
+
+  test("listOperations forwards type/status/limit and parses OperationsListResponse (:16666)", async () => {
+    installMock({
+      body: {
+        bank_id: "qds-factory",
+        total: 1,
+        limit: 20,
+        offset: 0,
+        operations: [
+          {
+            id: "550e8400-e29b-41d4-a716-446655440000",
+            task_type: "refresh_mental_model",
+            operation_id: "550e8400-e29b-41d4-a716-446655440000",
+            operation_type: "refresh_mental_model",
+            items_count: 0,
+            mental_model_id: "mm-1",
+            created_at: "2026-10-09T00:00:00Z",
+            updated_at: "2026-10-09T00:01:00Z",
+            status: "completed",
+            error_message: null,
+          },
+        ],
+      },
+    });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.listOperations("qds-factory", {
+      type: "refresh_mental_model",
+      status: "completed",
+      limit: 20,
+    });
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/operations?type=refresh_mental_model&status=completed&limit=20",
+    );
+    expect(lastCall?.init?.method).toBe("GET");
+    expect(r.bank_id).toBe("qds-factory");
+    // A refresh op row names the model it acted on (OperationResponse :16343).
+    expect(r.operations[0]?.mental_model_id).toBe("mm-1");
+    expect(r.operations[0]?.task_type).toBe("refresh_mental_model");
+  });
+
+  test("consolidate: counts-only legacy body REFUSES; wire body + counts+operation_id parse [F-025]", async () => {
+    const client = new HindsightClient({ baseUrl: "hindsight.test" });
+    // Legacy counts-only body (the pre-widening/pre-M2 mock shape) now REFUSES:
+    // the real 0.10.0 wire (ConsolidationResponse, openapi.json:10350) marks
+    // operation_id REQUIRED — with it optional, `{}` parsed as success and
+    // CONSOLIDATE_UNPARSEABLE was dead code (F-025). The refusal surfaces as
+    // the client's 502 HindsightHttpError (requestJSON safeParse failure).
+    installMock({ body: { consolidatedCount: 1, preservedCount: 0, durationMs: 5 } });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.consolidate("qds-factory");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(502);
+    expect(caught?.message).toContain("failed schema validation");
+    // Real 0.10.0 wire — the shape that 502'd through requestJSON safeParse
+    // before the widening.
+    installMock({ body: { operation_id: "op-1", deduplicated: true } });
+    const wire = await client.consolidate("qds-factory");
+    expect(wire.operation_id).toBe("op-1");
+    expect(wire.deduplicated).toBe(true);
+    // Wire truth PLUS legacy counts — operation_id present, counts parse and
+    // fold through untouched.
+    installMock({
+      body: { operation_id: "op-2", consolidatedCount: 7, preservedCount: 2, durationMs: 9 },
+    });
+    const both = await client.consolidate("qds-factory");
+    expect(both.operation_id).toBe("op-2");
+    expect(both.consolidatedCount).toBe(7);
+    expect(both.preservedCount).toBe(2);
+    expect(both.durationMs).toBe(9);
+  });
+
+  test("patchMentalModel invalid mentalModelId → 422 before any fetch (F-026)", async () => {
+    installMock({ body: {} });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    // Path-injection charset the BankIdSchema grammar refuses: `/`, `?`, empty,
+    // >64 chars. Same idiom as assertBankId (INV-HM2) — refusal BEFORE request.
+    for (const bad of ["mm/../etc", "mm-1?detail=full", "", "a".repeat(65)]) {
+      lastCall = undefined;
+      let caught: HindsightHttpError | undefined;
+      try {
+        await client.patchMentalModel("qds-factory", bad, {
+          trigger: { refresh_after_consolidation: true },
+        });
+      } catch (e) {
+        if (e instanceof HindsightHttpError) caught = e;
+      }
+      expect(caught).toBeDefined();
+      expect(caught?.status).toBe(422);
+      expect(caught?.message).toContain("invalid mental_model_id");
+      // Guard runs before request: no fetch should have been issued.
+      expect(lastCall).toBeUndefined();
+    }
+  });
+
+  test("listOperations forwards offset in the query string (pagination contract)", async () => {
+    installMock({
+      body: {
+        bank_id: "qds-factory",
+        total: 0,
+        limit: 50,
+        offset: 50,
+        operations: [],
+      },
+    });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    await client.listOperations("qds-factory", { type: "refresh_mental_model", limit: 50, offset: 50 });
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/operations?type=refresh_mental_model&limit=50&offset=50",
+    );
+  });
+
+  test("createMentalModel invalid bankId → 422 before any fetch (INV-HM2)", async () => {
+    installMock({ body: {} });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.createMentalModel("../../etc", {
+        name: "should never be sent",
+        sourceQuery: "q",
+      });
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(422);
+    // Guard runs before request: no fetch should have been issued.
+    expect(lastCall).toBeUndefined();
+  });
+
+  test("no refresh method exists on HindsightClient (trigger-only, DD-28.16)", () => {
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    expect("refreshMentalModel" in client).toBe(false);
+    // Grep-style guarantee: no method whose name matches /refresh/ at all —
+    // pins the absence, not just one spelling of it.
+    const names = Object.getOwnPropertyNames(HindsightClient.prototype);
+    expect(names.some((n) => /refresh/i.test(n))).toBe(false);
+  });
+
+  test("MENTAL_MODEL_TIMEOUT_MS is 30s", () => {
+    expect(MENTAL_MODEL_TIMEOUT_MS).toBe(30_000);
   });
 });
 

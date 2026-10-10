@@ -1,0 +1,33 @@
+{
+  "phase": "m31.schedule-leg",
+  "bank": "qds-factory-dev-meta",
+  "result": {
+    "ok": true,
+    "leg": "schedule",
+    "banksOk": 1,
+    "banksFailed": 0,
+    "totalMs": 188641,
+    "receipts": [
+      {
+        "bankId": "qds-factory-dev-meta",
+        "mentalModelId": "qds-factory-dev-mind",
+        "consolidate": {
+          "operationId": "6a2c8149-58bf-46d2-b9de-73d469a874ce",
+          "consolidateMs": 7
+        },
+        "refresh": {
+          "mechanism": "consolidation-trigger",
+          "operationId": "8cdfec67-4139-48f7-88a2-b025df6e9c75",
+          "status": "completed",
+          "observedVia": "operations-list"
+        }
+      }
+    ],
+    "failures": []
+  },
+  "eventCount": 1,
+  "writtenAt": "2026-10-09T19:24:43.970Z",
+  "image": {
+    "note": "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only"
+  }
+}

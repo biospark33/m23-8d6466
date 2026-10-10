@@ -28,11 +28,20 @@ import type { z } from "zod";
 import {
   BankIdSchema,
   ConsolidateResponseSchema,
+  CreateMentalModelResponseSchema,
+  MentalModelListSchema,
+  MentalModelSchema,
+  OperationsListSchema,
   RecallResponseSchema,
   ReflectResponseSchema,
   RetainExtensionSchema,
   RetainResponseSchema,
   type ConsolidateResponse,
+  type CreateMentalModelResponse,
+  type MentalModel,
+  type MentalModelList,
+  type MentalModelTrigger,
+  type OperationsList,
   type RecallResponse,
   type ReflectResponse,
   type RetainResponse,
@@ -46,6 +55,9 @@ export const RETAIN_TIMEOUT_MS = 30_000;
 export const RECALL_TIMEOUT_MS = 10_000;
 export const REFLECT_TIMEOUT_MS = 30_000;
 export const CONSOLIDATE_TIMEOUT_MS = 60_000;
+// Mental-model create/patch kick off a background reflect and answer fast, but
+// the reflect itself can be slow server-side — same budget as reflect/retain.
+export const MENTAL_MODEL_TIMEOUT_MS = 30_000;
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8888";
 
@@ -78,7 +90,10 @@ function mockBody(path: string, bankId: string): unknown {
     return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
   }
   if (path.endsWith("/consolidate")) {
-    return { consolidatedCount: 0, preservedCount: 0, durationMs: 0 };
+    // F-025: the real 0.10.0 wire is `{operation_id (required), deduplicated?}`
+    // — the canned body must pass the SAME strict parse a live one does, so it
+    // carries the wire shape, not the legacy counts (which now refuse).
+    return { operation_id: "mock-consolidate-op", deduplicated: false };
   }
   // createBank = PUT /v1/default/banks/<bankId>; listBanks = GET /v1/default/banks.
   if (/\/banks\/[^/]+$/.test(path)) return { bank_id: bankId };
@@ -434,6 +449,150 @@ export class HindsightClient {
   }
 
   // -------------------------------------------------------------------------
+  // Mental models + operations (M3.1 leaf 1.1.2) — trigger-only per DD-28.16:
+  // there is deliberately NO refresh method; a refresh happens when a model's
+  // trigger fires (refresh_after_consolidation / refresh_cron) or via the
+  // dedicated trigger path, never as an ad-hoc client call.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a mental model — POST /v1/default/banks/{bank_id}/mental-models
+   * (openapi.json:1981-2048). Runs reflect with `sourceQuery` in the
+   * background; the returned operation_id tracks it via listOperations.
+   * CamelCase args map onto the snake_case wire body
+   * (CreateMentalModelRequest :10926-10991 — name + source_query required;
+   * id/tags/max_tokens/trigger optional; only provided keys ride the wire).
+   * Response: CreateMentalModelResponse :10993-11018 — mental_model_id is
+   * null until the background reflect has generated content.
+   */
+  async createMentalModel(
+    bankId: string,
+    input: {
+      id?: string;
+      name: string;
+      sourceQuery: string;
+      trigger?: MentalModelTrigger;
+      maxTokens?: number;
+    },
+  ): Promise<CreateMentalModelResponse> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
+    const body: Record<string, unknown> = {
+      name: input.name,
+      source_query: input.sourceQuery,
+    };
+    if (input.id !== undefined) body.id = input.id;
+    if (input.trigger !== undefined) body.trigger = input.trigger;
+    if (input.maxTokens !== undefined) body.max_tokens = input.maxTokens;
+    return this.requestJSON(
+      "POST",
+      `/v1/default/banks/${bankId}/mental-models`,
+      body,
+      MENTAL_MODEL_TIMEOUT_MS,
+      "createMentalModel",
+      bankId,
+      CreateMentalModelResponseSchema,
+      requestId,
+    );
+  }
+
+  /**
+   * Update a mental model's name and/or trigger — PATCH
+   * /v1/default/banks/{bank_id}/mental-models/{mental_model_id}
+   * (openapi.json:2133-2208). UpdateMentalModelRequest (:19212-19281) is
+   * all-optional; only provided keys ride the wire. Returns the updated
+   * MentalModelResponse (:15355-15501).
+   */
+  async patchMentalModel(
+    bankId: string,
+    mentalModelId: string,
+    patch: { name?: string; trigger?: MentalModelTrigger },
+  ): Promise<MentalModel> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
+    // F-026: the id interpolates into the URL path — validate it against the
+    // same BankIdSchema charset the bank segment uses, BEFORE any fetch.
+    assertMentalModelId(mentalModelId, requestId);
+    const body: Record<string, unknown> = {};
+    if (patch.name !== undefined) body.name = patch.name;
+    if (patch.trigger !== undefined) body.trigger = patch.trigger;
+    return this.requestJSON(
+      "PATCH",
+      `/v1/default/banks/${bankId}/mental-models/${mentalModelId}`,
+      body,
+      MENTAL_MODEL_TIMEOUT_MS,
+      "patchMentalModel",
+      bankId,
+      MentalModelSchema,
+      requestId,
+    );
+  }
+
+  /**
+   * List mental models — GET /v1/default/banks/{bank_id}/mental-models
+   * (openapi.json:1843-1980). `detail`: metadata (wire default) | content |
+   * full (:1898-1914 — content is opt-in server-side). Envelope is the
+   * MentalModelListResponse `items` wrapper (:15057-15090).
+   */
+  async listMentalModels(
+    bankId: string,
+    detail?: "metadata" | "content" | "full",
+  ): Promise<MentalModelList> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
+    const path =
+      detail !== undefined
+        ? `/v1/default/banks/${bankId}/mental-models?detail=${detail}`
+        : `/v1/default/banks/${bankId}/mental-models`;
+    return this.requestJSON(
+      "GET",
+      path,
+      undefined,
+      RECALL_TIMEOUT_MS,
+      "listMentalModels",
+      bankId,
+      MentalModelListSchema,
+      requestId,
+    );
+  }
+
+  /**
+   * List async operations — GET /v1/default/banks/{bank_id}/operations
+   * (openapi.json:4378-4512). status (:4396) / type (:4414) are free strings
+   * server-side (pending..cancelled / retain..webhook_delivery); limit is
+   * 1..100 (:4432-4442); offset pages past the first window (edge-case round-1:
+   * >50 refresh ops on a bank must stay reachable). Query params
+   * URLSearchParams-encoded.
+   */
+  async listOperations(
+    bankId: string,
+    opts?: { type?: string; status?: string; limit?: number; offset?: number },
+  ): Promise<OperationsList> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
+    let path = `/v1/default/banks/${bankId}/operations`;
+    if (opts !== undefined) {
+      const params = new URLSearchParams();
+      if (opts.type !== undefined) params.set("type", opts.type);
+      if (opts.status !== undefined) params.set("status", opts.status);
+      if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+      if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+      const query = params.toString();
+      if (query.length > 0) path = `${path}?${query}`;
+    }
+    return this.requestJSON(
+      "GET",
+      path,
+      undefined,
+      RECALL_TIMEOUT_MS,
+      "listOperations",
+      bankId,
+      OperationsListSchema,
+      requestId,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Internal request machinery
   // -------------------------------------------------------------------------
 
@@ -654,5 +813,33 @@ function assertBankId(bankId: string, requestId: string): void {
       error: { code: "invalid_bank_id", message: `invalid bank_id: ${bankId}` },
     });
     throw new HindsightHttpError(422, `invalid bank_id: ${bankId}`, requestId);
+  }
+}
+
+/** F-026: validate a mental-model id at the client boundary before it reaches
+ *  the URL path — same BankIdSchema charset (lowercase alnum + hyphens, ≤64
+ *  chars, no leading/trailing hyphen), so path traversal / query injection
+ *  refuse before any fetch. assertBankId's shape, own labels (the log must
+ *  name the id kind that actually failed). */
+function assertMentalModelId(mentalModelId: string, requestId: string): void {
+  if (!BankIdSchema.safeParse(mentalModelId).success) {
+    log({
+      requestId,
+      operation: "assertMentalModelId",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      bankId: "",
+      error: {
+        code: "invalid_mental_model_id",
+        message: `invalid mental_model_id: ${mentalModelId}`,
+      },
+    });
+    throw new HindsightHttpError(
+      422,
+      `invalid mental_model_id: ${mentalModelId}`,
+      requestId,
+    );
   }
 }

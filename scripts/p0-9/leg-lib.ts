@@ -15,9 +15,13 @@
  *   - legLog: the story's observability contract — one JSON line per leg
  *     event on stderr, `{event:"p0-9-leg", ...}`.
  *   - Hoisted driver helpers (m1-1 round-1 review, F-004/F-006/F-018/F-021/
- *     F-022/F-025): extractBankIds, safeRepoBase/MAX_BASE_LEN, rand6,
+ *     F-022/F-025): extractBankIds, safeRepoBase, rand6,
  *     PROBE_DOWN_URL_DEFAULT, scanLiveShapePrereq, rerunAwareProvision,
- *     assertQdsRepoSlug. Drivers migrate onto these next wave; additive only.
+ *     assertQdsRepoSlug. Drivers migrate onto these next wave; additive only
+ *     (one deliberate exception, M3.1 review round 2: the superseded
+ *     MAX_BASE_LEN mirror was DELETED in favor of deriving safeRepoBase from
+ *     the provisioner — a hoisted mirror that could silently disagree with
+ *     its source was the defect; tsc is the drift alarm for any importer).
  *   - m1-1 round-2 review additions: acquireHeartbeatLock (R2-002 lock
  *     asymmetry), sanitizeOrigin (R2-015 userinfo stripping),
  *     resolveRepoSlug (R2-018 the one slug default), exact-word maskTail
@@ -46,6 +50,7 @@ import { BankIdSchema, resolveBankId } from "../../src/hindsight/index.ts";
 import {
   COLLECTIVE_BANK_ID,
   provisionBanks,
+  safeRepoBaseCandidates,
   type BridgeProbe,
   type ProvisionClient,
   type ProvisionOptions,
@@ -598,41 +603,52 @@ export function requireBaseUrl(env: Record<string, string | undefined>): string 
 // Hoisted bank-id / roster helpers (F-004, F-018, F-025)
 // ---------------------------------------------------------------------------
 
-/** Mirror of bank-provisioner MAX_BASE_LEN: 64 − len("-11") − len("-dev-meta") — see its truncateForSuffix derivation. */
-export const MAX_BASE_LEN = 52;
-
 /**
  * The base bank id the provisioner's resolver would land on (F-018 hoist of
- * the drivers' safeRepoBase): resolveBankId, truncated so base + the longest
- * collision suffix + "-dev-meta" all stay within BankIdSchema's 64-char cap.
+ * the drivers' safeRepoBase): resolveBankId, truncated by the provisioner's
+ * own canonical rule — bank-provisioner.ts truncateForSuffix (MAX_BASE_LEN
+ * 50 since the M3.1 retune, when qa/maint meta banks widened the family).
+ * Derived from the provisioner (safeRepoBaseCandidates[0]) so the mirror
+ * cannot drift again.
  */
 export function safeRepoBase(repoSlug: string): string {
-  let base = resolveBankId(repoSlug).slice(0, MAX_BASE_LEN);
-  while (base.endsWith("-")) base = base.slice(0, -1);
-  return base;
+  return safeRepoBaseCandidates(resolveBankId(repoSlug))[0];
 }
 
 /**
  * The attempt's own roster SHAPE, matched against candidate bank ids: base,
- * base-2..-11 (the collision discipline), and their -dev-meta forms. This is
- * the fallback ATTRIBUTION for a FAILED fresh provision whose failure
- * envelope is the provisioner's ProvisionErr — which carries NO banks (the
- * partial roster is dropped, bank-provisioner.ts:459-468), so the
- * status:"created" claim set is unavailable exactly when compensation is
- * needed. Within the serialized diff window (family lock held), a diff bank
- * matching the attempt's own roster shape is attributable to the attempt
- * with high confidence: family writers are serialized, probe banks are
- * `qds-probe-*`, and the collision discipline exists precisely to name these
- * ids. Collective is NOT claimable by pattern (canonical, pre-existing).
- * Callers intersect with the diff (claim ∩ diff stays the rule) and record
- * whatever falls outside both the claim and the pattern as unclaimedCreated.
+ * base-2..-11 (the collision discipline), and their -dev-meta forms — under
+ * BOTH base forms the read side recognizes (current 50-char truncation and
+ * the legacy 52-era form, safeRepoBaseCandidates), so an attempt that
+ * touches either shape is claimed. This is the fallback ATTRIBUTION for a
+ * FAILED fresh provision whose failure envelope is the provisioner's
+ * ProvisionErr — which carries NO banks (the partial roster is dropped,
+ * bank-provisioner.ts:459-468), so the status:"created" claim set is
+ * unavailable exactly when compensation is needed. Within the serialized
+ * diff window (family lock held), a diff bank matching the attempt's own
+ * roster shape is attributable to the attempt with high confidence: family
+ * writers are serialized, probe banks are `qds-probe-*`, and the collision
+ * discipline exists precisely to name these ids. Collective is NOT
+ * claimable by pattern (canonical, pre-existing). Callers intersect with the
+ * diff (claim ∩ diff stays the rule) and record whatever falls outside both
+ * the claim and the pattern as unclaimedCreated.
  */
 export function rosterPatternClaim(repoSlug: string, candidates: string[]): string[] {
-  const base = safeRepoBase(repoSlug);
-  const shapes = new Set<string>([base, `${base}-dev-meta`]);
-  for (let n = 2; n <= 11; n++) {
-    shapes.add(`${base}-${n}`);
-    shapes.add(`${base}-${n}-dev-meta`);
+  const shapes = new Set<string>();
+  for (const base of safeRepoBaseCandidates(resolveBankId(repoSlug))) {
+    shapes.add(base);
+    shapes.add(`${base}-dev-meta`);
+    // M3.1: the family the lanes create is five banks — the pattern must
+    // claim qa/maint too, or a failed fresh provision that died after
+    // creating them records them as unclaimedCreated (never compensated).
+    shapes.add(`${base}-qa-meta`);
+    shapes.add(`${base}-maint-meta`);
+    for (let n = 2; n <= 11; n++) {
+      shapes.add(`${base}-${n}`);
+      shapes.add(`${base}-${n}-dev-meta`);
+      shapes.add(`${base}-${n}-qa-meta`);
+      shapes.add(`${base}-${n}-maint-meta`);
+    }
   }
   return candidates.filter((id) => shapes.has(id));
 }
@@ -783,9 +799,11 @@ export interface RerunAwareProvisionResult {
  *     genuinely foreign collisions;
  *   - rerun (base bank PRESENT — this leg's own earlier run created it): the
  *     resolver would treat our OWN bank as a foreign collision and suffix -2,
- *     minting junk on every rerun; instead PUT-upsert the canonical roster
- *     [base, base-dev-meta, COLLECTIVE_BANK_ID] (story AC3 roster) via
- *     client.createBank. The mode is recorded per step, never silent.
+ *     minting junk on every rerun; instead PUT-upsert the canonical five-bank
+ *     roster (base + dev/qa/maint meta + COLLECTIVE_BANK_ID, M3.1 — the
+ *     stored pre-M3.1 three-name snapshot is stale, the run converges the
+ *     family) via client.createBank. The mode is recorded per step, never
+ *     silent.
  */
 export async function rerunAwareProvision(
   client: ProvisionClient,
@@ -812,8 +830,21 @@ export async function rerunAwareProvision(
     ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
   };
 
-  const base = safeRepoBase(repoSlug);
-  if (!opts.existingBankIds.includes(base)) {
+  // M3.1: the rerun gate recognizes BOTH base forms the read-side resolver
+  // recognizes — the current 50-char truncation and the legacy 52-era form —
+  // so a long-slug second run upserts the existing family instead of minting
+  // a junk -2 family. The roster below is built from the DETECTED family
+  // base: upserting the 50-form over a legacy 52-form family would fork, not
+  // converge. Adoption stays BASE-MATCH ONLY (pre-M3.1 semantics, R2-011): a
+  // base whose dev-meta was lost must be CONVERGED by the rerun upsert, not
+  // forked via the fresh lane — that convergence is this lane's purpose. The
+  // strict dev-meta ownership signature lives read-side
+  // (resolveProvisionedRepoBankId); the provision-side leniency predates
+  // this story and is unchanged by it.
+  const familyBase = safeRepoBaseCandidates(resolveBankId(repoSlug)).find((c) =>
+    opts.existingBankIds.includes(c),
+  );
+  if (familyBase === undefined) {
     const provision = opts.provisionImpl ?? provisionBanks;
     try {
       const result = await provision(provisionOpts);
@@ -854,7 +885,18 @@ export async function rerunAwareProvision(
     }
   }
 
-  const roster = [base, `${base}-dev-meta`, COLLECTIVE_BANK_ID];
+  // Canonical five-bank roster (M3.1 — matches bank-provisioner.ts `targets`
+  // and provision-hindsight-banks.ts canonicalRoster): a stored pre-M3.1
+  // three-name roster snapshot is a STALE snapshot, never a limit — the run
+  // converges the family by upserting all five, so reruns create the
+  // qa/maint meta banks the nightly MM leg requires.
+  const roster = [
+    familyBase,
+    `${familyBase}-dev-meta`,
+    `${familyBase}-qa-meta`,
+    `${familyBase}-maint-meta`,
+    COLLECTIVE_BANK_ID,
+  ];
   // R2-011: roster members ABSENT from the pre-snapshot are this attempt's
   // creations (the recreated -dev-meta case), not no-op PUTs.
   const created = roster.filter((id) => !opts.existingBankIds.includes(id));

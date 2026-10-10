@@ -1,0 +1,26 @@
+{
+  "phase": "m31.schedule-leg",
+  "bank": "qds-factory-dev-meta",
+  "result": {
+    "ok": false,
+    "leg": "schedule",
+    "banksOk": 0,
+    "banksFailed": 1,
+    "totalMs": 299036,
+    "receipts": [],
+    "failures": [
+      {
+        "bankId": "qds-factory-dev-meta",
+        "code": "REFRESH_EVIDENCE_MISSING",
+        "message": "no refresh_mental_model operation for the triggered mental models (qds-factory-dev-mind) of bank qds-factory-dev-meta was observed after the consolidate within the evidence budget",
+        "remediation": "verify the instance fired the consolidation-trigger refresh; check the bank's mental-model history"
+      }
+    ]
+  },
+  "eventCount": 1,
+  "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n",
+  "writtenAt": "2026-10-09T19:04:11.323Z",
+  "image": {
+    "note": "M3.1 infra tier — no box; VPS gateway + dedicated Hindsight instance only"
+  }
+}

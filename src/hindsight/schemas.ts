@@ -176,8 +176,8 @@ const RetainWireSchema = z.object({
 });
 
 export const RetainResponseSchema = RetainWireSchema.transform((w) => ({
-  memoryId: w.id ?? "",
-  bankId: w.bank_id ?? "",
+  memoryId: w.id ?? "", // dp:ok #408 OPEN DECISION placeholder — 0.10.0 has no wire source for memoryId; blanking is the documented legacy-view contract
+  bankId: w.bank_id ?? "", // dp:ok bank_id is optional on the measured wire; the legacy view pins string, absent folds to ""
   status: "created" as const,
   durationMs: w.durationMs ?? 0,
 }));
@@ -190,8 +190,9 @@ export const RetainResponseSchema = RetainWireSchema.transform((w) => ({
  * identity gets a server-assigned one, so a missing `document_id` → null, not
  * "" — and an empty-string wire id folds into absent the same way (the
  * null-tolerance contract gets no third state). `content`/`score` keep
- * old-name tolerance per the conformance contract — `text ?? content ?? ""`,
- * `score ?? 0`. The pre-change 0..1 score bound is DROPPED with the wire
+ * old-name tolerance per the conformance contract — `text` first, `content`
+ * as the old name, folded to the empty string when both are absent; `score`
+ * folds to 0. The pre-change 0..1 score bound is DROPPED with the wire
  * shape: the live scale is unmeasured (issue #408), and ranking tolerates any
  * finite number.
  */
@@ -210,8 +211,8 @@ export const RecallResponseSchema = z
   })
   .transform((w) => ({
     results: w.results.map((r) => ({
-      memoryId: r.id ?? "",
-      content: r.text ?? r.content ?? "",
+      memoryId: r.id ?? "", // dp:ok id is optional on the measured wire; expected-id matching consumes documentId, absent id folds to ""
+      content: r.text ?? r.content ?? "", // dp:ok old-name tolerance per the conformance contract (see above); both absent folds to ""
       score: r.score ?? 0,
       documentId: r.document_id ? r.document_id : null,
     })),
@@ -232,9 +233,130 @@ export const ReflectResponseSchema = z.object({
 });
 
 export const ConsolidateResponseSchema = z.object({
-  consolidatedCount: z.number(),
-  preservedCount: z.number(),
-  durationMs: z.number(),
+  // WIDENING + TIGHTEN (F-025, round-1): the real 0.10.0 wire body is
+  // `{operation_id (required), deduplicated?}` — openapi.json:10350-10369
+  // ConsolidationResponse. The pre-widening required-counts shape parse-FAILED
+  // against the real instance (502 via requestJSON safeParse); the widening
+  // then went too far — with operation_id optional, `{}` parsed as success and
+  // CONSOLIDATE_UNPARSEABLE was dead code. operation_id is now REQUIRED per
+  // the openapi `required` list: a legacy-counts-only body (pre-M2 mocks)
+  // REFUSES (502 via requestJSON safeParse) — the real wire always carries
+  // operation_id. The three legacy camelCase fields stay in the OUTPUT type as
+  // required numbers via `.default(0)` — parse-tolerant — while the z.infer
+  // view keeps round-trip-verifier.ts:461-464's `number` assignments compiling
+  // (strict mode; that file is outside this change's file fence). Absent
+  // counts fold to 0 exactly like RetainResponseSchema's `durationMs → 0`
+  // precedent (:146-183): on the async 0.10.0 wire the true counts live in
+  // the operation's result — consumers needing them must poll
+  // client.listOperations, not read them here.
+  consolidatedCount: z.number().default(0),
+  preservedCount: z.number().default(0),
+  durationMs: z.number().default(0),
+  operation_id: z.string(),
+  deduplicated: z.boolean().optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Mental models + operations (M3.1 leaf 1.1.2). Request/response shapes are
+// the vendored 0.10.0 OpenAPI — citations inline per schema. Read-back
+// schemas are `.passthrough()` where the wire carries fields this schema
+// does not enumerate, so server-side fields survive GET round-trips.
+// ---------------------------------------------------------------------------
+
+/**
+ * Trigger settings (openapi.json:15629 MentalModelTrigger-Input; the GET
+ * read-back shape :15856-16081 MentalModelTrigger-Output carries the same
+ * fields). Enumerated: refresh_after_consolidation (:15879, default false),
+ * mode (:15869, "full"|"delta"), refresh_cron (:15885, nullable string —
+ * mutually exclusive with refresh_after_consolidation). `.passthrough()`
+ * keeps the ~12 unenumerated fields (budget :15858,
+ * min_refresh_interval_seconds :15897, fact_types :15910, tag_groups :15970,
+ * ...) present on GET read-backs instead of stripped by the parse.
+ */
+export const MentalModelTriggerSchema = z
+  .object({
+    refresh_after_consolidation: z.boolean().optional(),
+    mode: z.enum(["full", "delta"]).optional(),
+    refresh_cron: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+/**
+ * Mental model body (openapi.json:15355-15501 MentalModelResponse — required
+ * id/bank_id/name :15495; content/config/reflect_response appear only at
+ * detail=content|full per the list `detail` param :1898-1914). Loose via
+ * `.passthrough()`; trigger is nullish (:15411-15420 — anyOf trigger|null)
+ * so a metadata-detail row (no trigger) parses.
+ */
+export const MentalModelSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    bank_id: z.string().optional(),
+    source_query: z.string().optional(),
+    trigger: MentalModelTriggerSchema.nullish(),
+  })
+  .passthrough();
+
+/**
+ * List envelope (openapi.json:15057-15090 MentalModelListResponse): the
+ * wrapper key is `items` — NOT `mental_models` and NOT a bare array; all
+ * four keys required (:15083-15088).
+ */
+export const MentalModelListSchema = z.object({
+  items: z.array(MentalModelSchema),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+});
+
+/**
+ * POST .../mental-models response (openapi.json:10993-11018
+ * CreateMentalModelResponse): operation_id required (:11014-11016);
+ * mental_model_id string|null (:10995-11006) — null until the background
+ * reflect has generated content; track it via client.listOperations.
+ */
+export const CreateMentalModelResponseSchema = z.object({
+  mental_model_id: z.string().nullable().optional(),
+  operation_id: z.string(),
+});
+
+/**
+ * One async-operation row (openapi.json:16282-16443 OperationResponse).
+ * Required (:16434-16441): id, task_type, items_count, created_at, status,
+ * error_message (nullable string). operation_id/operation_type
+ * (:16292/:16304 — same as id/task_type under the single-op read names) and
+ * mental_model_id (:16343 — set on refresh_mental_model rows, null
+ * otherwise) are nullable-optional. details (:16355) is a per-operation-type
+ * discriminated payload this schema does not enumerate — z.unknown keeps it
+ * inspectable without pinning a shape.
+ */
+export const MentalModelOperationSchema = z.object({
+  id: z.string(),
+  task_type: z.string(),
+  operation_id: z.string().nullable().optional(),
+  operation_type: z.string().nullable().optional(),
+  items_count: z.number(),
+  mental_model_id: z.string().nullable().optional(),
+  details: z.unknown().nullable().optional(),
+  created_at: z.string(),
+  updated_at: z.string().nullable().optional(),
+  status: z.string(),
+  error_message: z.string().nullable(),
+  retry_count: z.number().nullable().optional(),
+  next_retry_at: z.string().nullable().optional(),
+});
+
+/**
+ * GET .../operations envelope (openapi.json:16666-16701
+ * OperationsListResponse — all five keys required :16693-16699).
+ */
+export const OperationsListSchema = z.object({
+  bank_id: z.string(),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+  operations: z.array(MentalModelOperationSchema),
 });
 
 // ---------------------------------------------------------------------------
@@ -278,5 +400,12 @@ export type RetainResponse = z.infer<typeof RetainResponseSchema>;
 export type RecallResponse = z.infer<typeof RecallResponseSchema>;
 export type ReflectResponse = z.infer<typeof ReflectResponseSchema>;
 export type ConsolidateResponse = z.infer<typeof ConsolidateResponseSchema>;
+
+export type MentalModelTrigger = z.infer<typeof MentalModelTriggerSchema>;
+export type MentalModel = z.infer<typeof MentalModelSchema>;
+export type MentalModelList = z.infer<typeof MentalModelListSchema>;
+export type CreateMentalModelResponse = z.infer<typeof CreateMentalModelResponseSchema>;
+export type MentalModelOperation = z.infer<typeof MentalModelOperationSchema>;
+export type OperationsList = z.infer<typeof OperationsListSchema>;
 
 export type MulchExpertise = z.infer<typeof MulchExpertiseSchema>;

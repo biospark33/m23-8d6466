@@ -1,0 +1,40 @@
+story: m3.1
+story_file: _bmad-output/sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md
+branch: feature/m3-1-manager-meta-banks-l3-consolidate
+base: dev
+base_commit: a3e00f04
+target: dev
+phase: 4-dev-story
+orchestration: .unlazy/m3-1/PLAN.md
+research:
+  confidence: 0.95
+  approved: auto (>=0.8)
+  tracks:
+    B-codebase: complete (shapes + line anchors)
+    C-examples: complete (test idioms + live gating)
+    D-specs: "complete (openapi + DD-28.16/DD-28.26 + INV-MEM anchors; GET-by-custom-id + create-dup status marked UNVERIFIED — design avoids both: listMentalModels+find, PATCH-converge)"
+    E-deps: complete (M2.1 PR#414 + M1.1 PR#410 landed; no conflicts; A1 gated → schedule leg seam-fakes; CI = bun typecheck/lint/full test)
+  key_findings:
+    - ConsolidateResponseSchema (src/hindsight/schemas.ts:234-238) parse-fails against real 0.10.0 wire {operation_id, deduplicated} — widening is the one documented adds-only deviation
+    - bank-dedup claim (v4 :578) source-verified via hindsight-docs operations.md:65,80 — no factory lock needed
+    - AGENT_GRANT_CLASSES.bot=["consolidate"] already landed (schemas.ts:107-110)
+waves:
+  w1: [leaf-1.1.1-prov, leaf-1.1.2-client]  # dispatched 2026-10-09
+  w2: [leaf-1.2.1-provisioning, leaf-1.2.2-job]  # blocked on w1
+  w3: [leaf-1.3.1-cli, leaf-1.3.2-suite]  # blocked on w2
+gates: unlazy orchestrated ledgers under .unlazy/m3-1/
+operator_directives:
+  - subagents run targeted checks only (own suite, tsc, biome on owned files)
+  - driver alone runs full suite once at branch gate (node-1.4)
+  - 1-3 bmad-code-review rounds before PR; fix all incl lows in first two rounds
+  - live round requires explicit operator GO (AC5) — HITL before firing
+phase: 5-complete
+pr: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/422"
+live_round:
+  fired: 2026-10-09
+  host: qds-alpha tenant VPS 207.148.6.90 (control-plane jump)
+  instance: hindsight-qds 0.10.0 sha256:3edcb616 (== repo pin)
+  result: GREEN 4/4 — crontab 3/3 OBSERVED receipts; dedup coalescing-observed (2 dedup receipts, :578 verified, no fallback owed); schedule seam green
+  evidence: _bmad-output/evidence/m31-live/ (10 JSONs + provision envelope)
+  firings: 3 (runs 1-2 honest fail-loud on the empty-bank premise, kept as history)
+review_rounds: 2 (stop rule met — round 2 found no HIGH/BLOCKER) + gate follow-through
