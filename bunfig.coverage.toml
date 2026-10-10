@@ -98,8 +98,11 @@
 #     tests/providers/df2-11-teardown-race.test.ts.)
 #
 # THE GATE WENT RED ON dev AND STAYED RED ACROSS THREE PRs (2026-10-09, PR
-# #422). Ten files sat under the floor, none of them moved by the PR under
-# review -- the drag set had outgrown the run again, this time wholesale:
+# #422). Ten files sat under the floor; eight were untouched by the PR under
+# review, and the two it did edit (src/hindsight/bank-provisioner.ts,
+# src/hindsight/schemas.ts) were ALREADY under the floor on dev and stayed
+# there -- the red predates the PR either way. The drag set had outgrown the
+# run again, this time wholesale:
 # `scripts/p0-9/leg-lib.ts` (9.09 / 14.53 -- dragged in but its suite,
 # tests/p0-9/legs.test.ts, never ran here), `src/hindsight/bank-provisioner.ts`,
 # `run-retain.ts`, `schemas.ts` (0 funcs each -- their suites live in

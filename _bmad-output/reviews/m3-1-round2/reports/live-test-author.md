@@ -1,7 +1,7 @@
 # M3.1 live-round test — author report
 
 File: `tests/fleet/e2e/memory-nightly.live.test.ts` (new, 385 lines; nothing else touched — `git status` confirms one untracked file).
-Branch: `feature/m3-1-manager-meta-banks-l3-consolidate`. Authored only; NOT fired (operator GO owed).
+Branch: `feature/m3-1-manager-meta-banks-l3-consolidate`. Authored on this branch, then FIRED on operator GO (2026-10-09, qds-alpha tenant VPS) — the green round the T2 row below cites (two deduplicated receipts, `caveatFailures: []`) came from THIS suite's run 3; evidence under `_bmad-output/evidence/m31-live/`, firings recorded in the story's Live-round section.
 
 ## Test inventory (4 tests, every one `test.todoIf(liveTodoOff())`, first body statement `liveGate("1")`)
 
