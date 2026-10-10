@@ -2018,7 +2018,18 @@ describe("buildIdFileInputs", () => {
       // on the verified tree; 111 → 115 tracked inputs. The publish/
       // adoption half stays owed: run 37917090552 refused at the TOFU RUN
       // (fa2284d1…bdb95d) before its gate, so no image exists to adopt.
-            "02debde5bf77a769326c62ac6718582c927a2e8e4191c38bd1a7f783a0f6d0c9",
+      // 7d4002dc: m3.1 PR #422 coverage-gate repair — the only walked input
+      // that moved is `package.json` (the check:coverage run widened:
+      // tests/reverify, tests/p0-9, tests/hindsight, tests/memgate and
+      // tests/pr join the gate; see bunfig.coverage.toml's 2026-10-09 block
+      // for the run-vs-measured root cause). Everything else m3.1 touched is
+      // NOT walked (scripts/p0-9/leg-lib.ts, scripts/provision-hindsight-
+      // banks.ts, src/hindsight/**, tests/**, _bmad-output/**), per the map
+      // above; bun.lock untouched. Received from this test's own failing run
+      // on the final tree; the publish/adoption half is unchanged — still no
+      // image exists to adopt (37917090552's refusal predates this), so the
+      // offline half moves alone, same shape as the open pairing above.
+            "7d4002dc7fc236c0a42e885b31f5fad77ad3d37064291dee67ef8348ee9870b8",
     );
   });
 });
