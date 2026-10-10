@@ -4,7 +4,7 @@ branch: feature/m3-1-manager-meta-banks-l3-consolidate
 base: dev
 base_commit: a3e00f04
 target: dev
-phase: 4-dev-story
+phase: 5-complete  # (was 4-dev-story — stale duplicate of the phase below, corrected at merge)
 orchestration: .unlazy/m3-1/PLAN.md
 research:
   confidence: 0.95
@@ -30,6 +30,7 @@ operator_directives:
   - live round requires explicit operator GO (AC5) — HITL before firing
 phase: 5-complete
 pr: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/422"
+merged: 2026-10-10 (PR #422, merge commit 7c777bc9 on dev; branch pruned local+remote)
 live_round:
   fired: 2026-10-09
   host: qds-alpha tenant VPS 207.148.6.90 (control-plane jump)
