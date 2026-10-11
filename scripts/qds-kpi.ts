@@ -53,7 +53,8 @@
  * corrupt stores, malformed import); 2 usage.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -243,31 +244,65 @@ function resolveRepoSlug(flagValue: string | undefined): string | undefined {
   return repoSlugFromRemoteUrl(git.stdout) ?? undefined;
 }
 
-/** Append-only snapshot write: O_EXCL on the FINAL name, 0600, fsynced (run-record idiom). */
-function writeSnapshot(snapshotsDir: string, payload: KpiSnapshotPayload, now: Date): string {
+/**
+ * Append-only snapshot write, the run-record temp+rename idiom (F-001): bytes
+ * land in a unique temp file (wx 0600) in the snapshots dir, are fsynced, and
+ * only then rename onto the immutable ms-stamped FINAL name — the final name
+ * only ever appears complete. A crash or ENOSPC mid-write strands only the
+ * temp, unlinked best-effort on every pre-rename failure, so no truncated
+ * file ever persists under the final name. A same-ms collision with an
+ * existing final name refuses fail-loud (kpi-snapshot-exists, AC5 — a prior
+ * snapshot is never overwritten or mutated). The write loop carries the
+ * 0-return guard (a writeSync accepting 0 bytes would spin forever).
+ */
+export function writeSnapshot(snapshotsDir: string, payload: KpiSnapshotPayload, now: Date): string {
   mkdirSync(snapshotsDir, { recursive: true, mode: 0o700 });
-  const finalPath = join(snapshotsDir, `${now.toISOString().replace(/[:.]/g, "-")}.json`);
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const finalPath = join(snapshotsDir, `${stamp}.json`);
+  const tempPath = join(snapshotsDir, `.${stamp}.tmp-${process.pid}-${randomUUID()}`);
   const bytes = Buffer.from(stableStringify(payload), "utf8");
-  let fd: number;
+  let fd: number | undefined;
   try {
-    fd = openSync(finalPath, "wx", 0o600);
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "EEXIST") {
+    fd = openSync(tempPath, "wx", 0o600);
+    let off = 0;
+    while (off < bytes.length) {
+      const n = writeSync(fd, bytes, off, bytes.length - off);
+      if (n <= 0) {
+        throw new KpiScriptError(
+          "kpi-snapshot-write-failed",
+          `snapshot temp write accepted 0 of ${bytes.length - off} bytes`,
+          "re-run — the temp file is removed and the final name was never touched",
+        );
+      }
+      off += n;
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    if (existsSync(finalPath)) {
       throw new KpiScriptError(
         "kpi-snapshot-exists",
         `snapshot ${finalPath} already exists — same-millisecond filename collision; a prior snapshot is never overwritten or mutated (AC5)`,
         "re-run — the next millisecond mints a fresh filename; prior snapshots are immutable",
       );
     }
-    throw new KpiScriptError("kpi-snapshot-write-failed", `cannot create snapshot ${finalPath} (${code ?? (e as Error).message})`, "check the snapshots directory's permissions and re-run");
-  }
-  try {
-    let off = 0;
-    while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
+    renameSync(tempPath, finalPath);
+  } catch (e) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed — nothing to leak
+      }
+    }
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // best-effort: the temp name is unique per attempt, never the final name
+    }
+    if (e instanceof KpiScriptError) throw e;
+    const code = (e as NodeJS.ErrnoException).code;
+    throw new KpiScriptError("kpi-snapshot-write-failed", `cannot write snapshot ${finalPath} (${code ?? (e as Error).message})`, "check the snapshots directory's permissions and re-run");
   }
   // Best-effort directory sync (run-record's fsyncDir posture): a platform that
   // refuses it must not fail a durable-enough file.
@@ -285,6 +320,14 @@ function writeSnapshot(snapshotsDir: string, payload: KpiSnapshotPayload, now: D
  * Main run function — every path returns an exit code; no path throws past it.
  */
 export async function run(argv: readonly string[], out: (s: string) => void = (s) => writeAll(1, s)): Promise<number> {
+  // Help short-circuit (F-008): FIRST, before resolveNow/parseCli — garbage
+  // QDS_KPI_NOW still answers with usage, and the shared cli-args helper's
+  // process.exit(0) (which kills in-process callers and falsifies run()'s
+  // every-path-returns contract) is never reached for an exact --help/-h token.
+  if (argv.includes("--help") || argv.includes("-h")) {
+    out(`${HELP.join("\n")}\n`);
+    return 0;
+  }
   const startedAt = Date.now();
   const requestId = newRequestId();
   const skipLine: RetainSkipLine = (code, reason) => {
@@ -322,13 +365,25 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
     // Run records: read-only store, never created. Absent dir → typed absence.
     let records: RunRecordLike[] = [];
     let recordsSkipped: number | "absent" = "absent";
+    let recordsUndated: number | "absent" = "absent";
     let runsDirAbsent = true;
     try {
       statSync(opts.runsDir);
       runsDirAbsent = false;
       const listing = new RunRecordStore({ dir: opts.runsDir, create: false }).listWithAnomalies();
       recordsSkipped = listing.skipped.length;
-      records = listing.records.filter((r) => inWindow(typeof r.closedAt === "string" && r.closedAt !== "" ? r.closedAt : r.createdAt));
+      // F-009: an unparseable effective timestamp is COUNTED (records_undated),
+      // never silently dropped from every denominator the way a filtered miss is.
+      let undated = 0;
+      records = listing.records.filter((r) => {
+        const t = Date.parse(typeof r.closedAt === "string" && r.closedAt !== "" ? r.closedAt : r.createdAt);
+        if (Number.isNaN(t)) {
+          undated++;
+          return false;
+        }
+        return t >= startMs && t < endMs;
+      });
+      recordsUndated = undated;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }
@@ -382,7 +437,7 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
     let payload: KpiSnapshotPayload;
     try {
       payload = assembleSnapshot({
-        window, records, recordsSkipped, recordsStoreAbsent: runsDirAbsent, dispatch,
+        window, records, recordsSkipped, recordsUndated, recordsStoreAbsent: runsDirAbsent, dispatch,
         factorySpendRows, gatewayImport, dimensions, audit: { status: "absent" },
       });
     } catch (e) {
@@ -397,7 +452,7 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
 
     const durationMs = Date.now() - startedAt;
     log({
-      requestId, operation: "kpi-snapshot-written", agentId: null, timestamp: now.toISOString(),
+      requestId, operation: "kpi-snapshot-written", event: "kpi-snapshot-written", agentId: null, timestamp: now.toISOString(),
       duration: durationMs, status: "ok",
       window: opts.windowSpec, window_id: window.windowId,
       snapshot_path: snapshotPath,

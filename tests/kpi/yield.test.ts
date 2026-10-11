@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   KpiError,
@@ -80,7 +80,7 @@ const dispatchEntry = (over: Partial<DispatchEntry>): DispatchEntry => ({
   repoSlug: "o/r",
   issueId: null,
   requestId: null,
-  code: "fleet-busy",
+  code: "dispatch-timeout", // a REAL refuse() literal (src/fleet/dispatch.ts:1326) — F-002 fixtures cite real codes
   message: "m",
   ...over,
 });
@@ -106,13 +106,14 @@ const richInput = (): SnapshotInput => ({
     rec("run-open", {}),
   ],
   recordsSkipped: 0,
+  recordsUndated: 0,
   recordsStoreAbsent: false,
   dispatch: {
     status: "present",
     entries: [
       dispatchEntry({ issueId: 1, requestId: "req-1" }),
       dispatchEntry({ issueId: 2, requestId: "req-2", timestamp: "2026-10-03T02:00:00.000Z" }),
-      dispatchEntry({ issueId: 1, code: "invalid-run-id", timestamp: "2026-10-03T03:00:00.000Z" }),
+      dispatchEntry({ issueId: 1, code: "dispatch-timeout", timestamp: "2026-10-03T03:00:00.000Z" }),
     ],
   },
   factorySpendRows: [
@@ -148,6 +149,7 @@ const emptyInput = (over: Partial<SnapshotInput> = {}): SnapshotInput => ({
   window: parseWindow("7d", NOW),
   records: [],
   recordsSkipped: "absent",
+  recordsUndated: 0,
   recordsStoreAbsent: false,
   dispatch: { status: "absent" },
   factorySpendRows: [],
@@ -170,9 +172,13 @@ describe("parseWindow", () => {
   });
 
   test("garbage specs → kpi-window-invalid", () => {
-    for (const spec of ["7x", "month", "", "0d", "-3d", "d7"]) {
+    for (const spec of ["7x", "month", "", "0d", "-3d", "d7", "99999999999999999d"]) {
       throwsKpi(() => parseWindow(spec, NOW), "kpi-window-invalid");
     }
+  });
+
+  test("day count past the representable range → typed kpi-window-invalid, never a bare RangeError (F-018)", () => {
+    throwsKpi(() => parseWindow("99999999999999999d", NOW), "kpi-window-invalid");
   });
 
   test("same UTC day → same windowId (idempotent-retain key)", () => {
@@ -328,7 +334,7 @@ describe("readRoutingLogDimension (AC4 — joins by its owned key, runId)", () =
     });
   });
 
-  test("present → joined with the IN-WINDOW decision count only: stale runId, no-runId, and non-JSON lines not counted", () => {
+  test("present → joined with the IN-WINDOW decision count only: stale runId and no-runId lines not counted", () => {
     const p = join(dir, "routing.jsonl");
     writeFileSync(
       p,
@@ -337,13 +343,38 @@ describe("readRoutingLogDimension (AC4 — joins by its owned key, runId)", () =
         JSON.stringify({ runId: "r2", decision: "route-y" }),
         JSON.stringify({ runId: "r-stale", decision: "route-old" }), // outside the window
         JSON.stringify({ decision: "route-keyless" }), // no runId field — no joinable key
-        "{not json", // not a routing decision
       ].join("\n")}\n`,
     );
     expect(readRoutingLogDimension("j3-routing-log", p, new Set(["r1", "r2"]))).toEqual({
       source: "j3-routing-log",
       status: "joined",
       count: 2,
+    });
+  });
+
+  test("corrupt NON-tail line → typed routing-log-invalid, never joined:0-as-measured (F-011)", () => {
+    const p = join(dir, "routing.jsonl");
+    writeFileSync(p, `${JSON.stringify({ runId: "r1" })}\n{not json\n${JSON.stringify({ runId: "r2" })}\n`);
+    throwsKpi(() => readRoutingLogDimension("j3-routing-log", p, new Set(["r1", "r2"])), "routing-log-invalid");
+  });
+
+  test("corrupt FINAL line (torn tail, no trailing newline) → tolerated; count from the complete lines (F-011)", () => {
+    const p = join(dir, "routing.jsonl");
+    writeFileSync(p, `${JSON.stringify({ runId: "r1" })}\n${JSON.stringify({ runId: "r2" })}\n{"runId": "r3", "dec`);
+    expect(readRoutingLogDimension("j3-routing-log", p, new Set(["r1", "r2"]))).toEqual({
+      source: "j3-routing-log",
+      status: "joined",
+      count: 2,
+    });
+  });
+
+  test("torn tail with trailing blank lines after it → still the final non-blank line, tolerated", () => {
+    const p = join(dir, "routing.jsonl");
+    writeFileSync(p, `${JSON.stringify({ runId: "r1" })}\n{"runId": "r2\n\n`);
+    expect(readRoutingLogDimension("j3-routing-log", p, new Set(["r1"]))).toEqual({
+      source: "j3-routing-log",
+      status: "joined",
+      count: 1,
     });
   });
 });
@@ -377,13 +408,14 @@ describe("joinSpend (AC2 — DD-20 canonical key)", () => {
     expect(j.gateway_row_count).toBeNull();
     expect(j.gateway_micro_usd_total).toBeNull();
     expect(j.gateway_matched_micro_usd).toBeNull();
+    expect(j.gateway_duplicate_rows).toBeNull();
     expect(j.missing_gateway_rows).toBeNull();
     expect(j.unmatched_gateway_rows).toBeNull();
     expect(j.matched_gateway_rows).toBe(0);
     expect(j.spend_incomplete).toBe(true);
     expect(j.factory_micro_usd_total).toBe(1500);
     expect(j.factory_event_count).toBe(5);
-    expect(j.join_key).toBe("workKey+runId+botId");
+    expect(j.join_key).toBe("workKey+runId"); // F-005: certifies exactly the components the match performs
   });
 
   test("full join on (workKey, runId) → complete, no flag", () => {
@@ -463,6 +495,55 @@ describe("joinSpend (AC2 — DD-20 canonical key)", () => {
     expect(j.unmatched_gateway_rows).toBe(1);
     expect(j.matched_gateway_rows).toBe(2);
   });
+
+  test("exact-duplicate import rows coalesce: counted once in every sum, surfaced in gateway_duplicate_rows (F-006)", () => {
+    const dup = (): { workKey: string; runId: string; issueId: string; botId: string; cost_micro_usd: number } => ({
+      workKey: "w:1", runId: "run-a", issueId: "1", botId: "home-bot", cost_micro_usd: 250,
+    });
+    const imp: GatewayImport = {
+      status: "present",
+      rows: [dup(), dup(), dup(), { workKey: "w:2", runId: "run-b", issueId: "2", botId: "home-bot", cost_micro_usd: 100 }],
+    };
+    const j = joinSpend(rows, imp);
+    expect(j.gateway_duplicate_rows).toBe(2); // two byte-identical re-appends of the first row
+    expect(j.gateway_row_count).toBe(2); // coalesced — the row counts once
+    expect(j.gateway_micro_usd_total).toBe(350); // 250 once + 100, never 850
+    expect(j.gateway_matched_micro_usd).toBe(350);
+    expect(j.matched_gateway_rows).toBe(2);
+    expect(j.unmatched_gateway_rows).toBe(0);
+    expect(j.missing_gateway_rows).toBe(0);
+    expect(j.spend_incomplete).toBe(false);
+  });
+
+  test("different-content rows are distinct events — no false duplicate", () => {
+    const imp: GatewayImport = {
+      status: "present",
+      rows: [
+        { workKey: "w:1", runId: "run-a", issueId: "1", botId: "home-bot", cost_micro_usd: 250 },
+        { workKey: "w:1", runId: "run-a", issueId: "1", botId: "home-bot", cost_micro_usd: 260 },
+      ],
+    };
+    const j = joinSpend(rows, imp);
+    expect(j.gateway_duplicate_rows).toBe(0);
+    expect(j.gateway_micro_usd_total).toBe(510);
+    expect(j.matched_gateway_rows).toBe(2);
+  });
+
+  test("aggregate past MAX_SAFE_INTEGER → typed aggregate-overflow, never rounds (F-017)", () => {
+    const maxRows: FactorySpendRow[] = [
+      { runId: "r1", workKey: "w:1", microUsd: Number.MAX_SAFE_INTEGER, eventCount: 1 },
+      { runId: "r2", workKey: "w:2", microUsd: 1, eventCount: 1 },
+    ];
+    throwsKpi(() => joinSpend(maxRows, { status: "absent" }), "aggregate-overflow");
+    const maxImport: GatewayImport = {
+      status: "present",
+      rows: [
+        { workKey: "w:1", runId: "run-a", issueId: "1", botId: "b", cost_micro_usd: Number.MAX_SAFE_INTEGER },
+        { workKey: "w:2", runId: "run-b", issueId: "2", botId: "b", cost_micro_usd: 1 },
+      ],
+    };
+    throwsKpi(() => joinSpend(rows, maxImport), "aggregate-overflow");
+  });
 });
 
 describe("countChargedFixAttempts (AC3 charged-ness)", () => {
@@ -499,6 +580,15 @@ describe("countChargedFixAttempts (AC3 charged-ness)", () => {
     ];
     expect(countChargedFixAttempts(records)).toEqual({ charged: 0, uncharged: 1, unattributed: 0 });
   });
+
+  test("non-string fixOutcomeClass carrier → unattributed (corruption signal), same as a garbage string (F-016)", () => {
+    const records = [
+      rec("parent", { extensions: fixLoop({ fixAttemptRunIds: ["fix-num", "fix-obj"] }) }),
+      rec("fix-num", { extensions: fixLoop({ fixOutcomeClass: 42 }) }),
+      rec("fix-obj", { extensions: fixLoop({ fixOutcomeClass: { cls: "ci-red" } }) }),
+    ];
+    expect(countChargedFixAttempts(records)).toEqual({ charged: 0, uncharged: 0, unattributed: 2 });
+  });
 });
 
 describe("computeRetryStats", () => {
@@ -509,28 +599,69 @@ describe("computeRetryStats", () => {
   ];
   const records = [rec("r1", { requestId: "req-1" }), rec("r2", { requestId: "req-2" }), rec("r3")];
 
-  test("attempted/retried from records + unjoined dispatch; restarts beyond first; unknown code unclassified", () => {
+  test("correlation units: joined entries are their record's unit; synthetic units for null-requestId entries", () => {
     const stats = computeRetryStats(identities, records, {
       status: "present",
       entries: [
-        dispatchEntry({ issueId: 1, requestId: "req-1" }), // joined r1 — same attempt
-        dispatchEntry({ issueId: 1, requestId: "req-2" }), // joined r2 — same attempt
-        dispatchEntry({ issueId: 1, requestId: null, code: "mystery-crash" }), // unjoined → new attempt
-        dispatchEntry({ issueId: 2, requestId: null, code: "mystery-crash" }), // unjoined → new attempt
+        dispatchEntry({ issueId: 1, requestId: "req-1" }), // joined r1 — SAME unit, never re-bumped
+        dispatchEntry({ issueId: 1, requestId: "req-2" }), // joined r2 — a NEW unit, but joined → never a restart
+        dispatchEntry({ issueId: 1, requestId: null, code: "mystery-crash" }), // synthetic unit → new attempt
+        dispatchEntry({ issueId: 2, requestId: null, code: "mystery-crash" }), // w:2's only unit (r3 has no requestId)
       ],
     });
     expect(stats.attemptedWorkKeys).toBe(2);
-    expect(stats.retriedWorkKeys).toBe(2);
-    // w:1: 3 failure entries → restarts = 2 (2nd known, 3rd unknown); w:2: 1 entry → 0
-    expect(stats.restartsTotal).toBe(2);
-    expect(stats.unclassifiedRestarts).toBe(1);
+    expect(stats.retriedWorkKeys).toBe(1); // w:1 has 3 units {req-1, req-2, synthetic}; w:2 has 1
+    expect(stats.restartsTotal).toBe(1); // only the synthetic 3rd entry — joined entries never double-count
+    expect(stats.unclassifiedRestarts).toBe(1); // mystery-crash ∉ KNOWN_RESTART_CODES
+  });
+
+  test("blind scenario (a): 1 record + 2 entries sharing the requestId → 1 attempt, 0 restarts (F-003)", () => {
+    const stats = computeRetryStats(
+      [{ runId: "r1", workKey: "w:1", repoSlug: "o/r", requestId: "req-1" }],
+      [rec("r1", { requestId: "req-1" })],
+      {
+        status: "present",
+        entries: [
+          dispatchEntry({ issueId: 1, requestId: "req-1" }),
+          dispatchEntry({ issueId: 1, requestId: "req-1", timestamp: "2026-10-03T02:00:00.000Z" }),
+        ],
+      },
+    );
+    expect(stats.attemptedWorkKeys).toBe(1);
+    expect(stats.retriedWorkKeys).toBe(0); // one unit — retry_rate 0.0
+    expect(stats.restartsTotal).toBe(0);
+    expect(stats.unclassifiedRestarts).toBe(0);
+  });
+
+  test("blind scenario (b): 2 records + 1 entry sharing the requestId → 1 attempt, not 2 (F-004)", () => {
+    const stats = computeRetryStats(
+      [
+        { runId: "r1", workKey: "w:1", repoSlug: "o/r", requestId: "req-1" },
+        { runId: "r2", workKey: "w:1", repoSlug: "o/r", requestId: "req-1" },
+      ],
+      [rec("r1", { requestId: "req-1" }), rec("r2", { requestId: "req-1" })],
+      { status: "present", entries: [dispatchEntry({ issueId: 1, requestId: "req-1" })] },
+    );
+    expect(stats.attemptedWorkKeys).toBe(1);
+    expect(stats.retriedWorkKeys).toBe(0);
+  });
+
+  test("dispatch-timeout (a real refuse() code, dispatch.ts:1326) classifies KNOWN; unknown stays unclassified (F-002)", () => {
+    const entries = [
+      dispatchEntry({ issueId: 9, requestId: null, code: "dispatch-timeout" }),
+      dispatchEntry({ issueId: 9, requestId: null, code: "dispatch-timeout", timestamp: "2026-10-03T02:00:00.000Z" }),
+      dispatchEntry({ issueId: 9, requestId: null, code: "mystery-crash", timestamp: "2026-10-03T03:00:00.000Z" }),
+    ];
+    const stats = computeRetryStats([], [], { status: "present", entries });
+    expect(stats.restartsTotal).toBe(2); // entries beyond the first — all synthetic units
+    expect(stats.unclassifiedRestarts).toBe(1); // only mystery-crash
   });
 
   test("absent dispatch log → restartsTotal absent, never 0", () => {
     const stats = computeRetryStats(identities, records, { status: "absent" });
     expect(stats.restartsTotal).toBe("absent");
-    expect(stats.attemptedWorkKeys).toBe(2);
-    expect(stats.retriedWorkKeys).toBe(1); // w:1 has r1+r2
+    expect(stats.attemptedWorkKeys).toBe(1); // w:1 only — r3's null requestId proves no unit for w:2
+    expect(stats.retriedWorkKeys).toBe(1); // w:1 has {req-1, req-2}
   });
 });
 
@@ -683,7 +814,7 @@ describe("assembleSnapshot — rich fixture", () => {
       sources: ["run-records", "dispatch-log"],
     });
     expect(retry.counter.name).toBe("unclassified_restart_rate");
-    expect(retry.counter.value).toBe(0); // 1 restart, classified (invalid-run-id)
+    expect(retry.counter.value).toBe(0); // 1 restart, classified (dispatch-timeout — a real refuse code, F-002)
     expect(retry.counter.source).toBe("dispatch-log");
   });
 
@@ -702,6 +833,47 @@ describe("assembleSnapshot — rich fixture", () => {
     expect(p.spend.gateway_micro_usd_total).toBe(1250); // ALL rows — provenance
     expect(p.spend.gateway_matched_micro_usd).toBe(250);
     expect(p.spend.unmatched_gateway_rows).toBe(1);
+  });
+});
+
+describe("assembleSnapshot — round-1 accounting pins (F-009 / F-015 / F-023)", () => {
+  test("fixRun-marked records are excluded from terminal/accepted accounting but stay records_in_window (F-015)", () => {
+    const input = richInput();
+    input.records = [
+      ...input.records,
+      rec("run-fixmarked", {
+        closedAt: "2026-10-05T00:00:00.000Z",
+        requestId: "req-fix",
+        extensions: {
+          approval: { schemaVersion: 2, state: "approved" },
+          fixLoop: { schemaVersion: 1, fixRun: "true" }, // the fix-attempt marker, run-record.ts:223
+        },
+      }),
+    ];
+    const p = assembleSnapshot(input);
+    expect(p.run_accounting.records_in_window).toBe(5); // still a record in the window
+    expect(p.run_accounting.terminal_runs).toBe(2); // unchanged — a fix sub-run is not a standalone terminal run
+    expect(p.run_accounting.accepted_runs).toBe(2);
+    expect(KpiSnapshotSchema.safeParse(p).success).toBe(true);
+  });
+
+  test("records_undated surfaces the excluded undated records; denominators count only the in-window set (F-009)", () => {
+    const input = emptyInput({
+      records: [rec("run-dated", { closedAt: "2026-10-03T00:00:00.000Z", extensions: { approval: { schemaVersion: 2, state: "approved" } } })],
+      recordsSkipped: 0,
+      recordsUndated: 1, // the script counted one unparseable-effective-timestamp record
+    });
+    const p = assembleSnapshot(input);
+    expect(p.run_accounting.records_undated).toBe(1);
+    expect(p.run_accounting.records_in_window).toBe(1); // the undated record is excluded from every denominator
+    expect(p.run_accounting.terminal_runs).toBe(1);
+    expect(KpiSnapshotSchema.safeParse(p).success).toBe(true);
+  });
+
+  test("absent dispatch log → retry_rate names only run-records as a source (F-023)", () => {
+    const p = assembleSnapshot(emptyInput());
+    const retry = p.kpis.find((k) => k.name === "retry_rate") as KpiObject;
+    expect(retry.sources).toEqual(["run-records"]); // dispatch-log omitted when absent, like costSources/tdiSources
   });
 });
 
@@ -827,7 +999,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { CostLedger } from "../../src/providers/cost-ledger.ts";
-import { repoSlugFromRemoteUrl } from "../../scripts/qds-kpi.ts";
+import { repoSlugFromRemoteUrl, run as runKpiCli, writeSnapshot } from "../../scripts/qds-kpi.ts";
 import { retainSnapshot } from "../../scripts/lib/kpi-retain.ts";
 
 const KPI_CLI = join(process.cwd(), "scripts", "qds-kpi.ts");
@@ -916,7 +1088,7 @@ function seedSandbox(root: string, now: Date, withImport: boolean): SeededSandbo
 
   writeFileSync(
     join(sandbox, "dispatch-log.jsonl"),
-    `${JSON.stringify({ timestamp: ago(2).toISOString(), repoSlug: "o/r", issueId: 1, requestId: "req-kpi-1", code: "fleet-busy", message: "m" })}\n${JSON.stringify({ timestamp: ago(3).toISOString(), repoSlug: "o/r", issueId: 2, requestId: "req-kpi-2", code: "fleet-busy", message: "m" })}\n`,
+    `${JSON.stringify({ timestamp: ago(2).toISOString(), repoSlug: "o/r", issueId: 1, requestId: "req-kpi-1", code: "dispatch-timeout", message: "m" })}\n${JSON.stringify({ timestamp: ago(3).toISOString(), repoSlug: "o/r", issueId: 2, requestId: "req-kpi-2", code: "dispatch-timeout", message: "m" })}\n`,
   );
   writeFileSync(join(sandbox, "routing-log.jsonl"), `${JSON.stringify({ runId: "qds-kpi-parent1" })}\n`);
   mkdirSync(join(sandbox, "imports"), { recursive: true, mode: 0o700 });
@@ -934,9 +1106,18 @@ describe("qds-kpi CLI — e2e seeded arm (both import arms, AC5 + e2e slice)", (
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  test("seeded import arm: exit 0, 4/4 paired KPIs with directions, both-ledger provenance, typed absences, observability line", () => {
+  test("seeded import arm: exit 0, 4/4 paired KPIs with directions, both-ledger provenance, typed absences, observability line, retained document (F-014: same invocation)", () => {
     seedSandbox(root, T0, true);
-    const res = runKpi(["--window", "7d"], { cwd: root, env: childEnv({ QDS_KPI_NOW: T0.toISOString() }) });
+    const capturePath = join(root, "retain-capture.jsonl");
+    const res = runKpi(["--window", "7d", "--repo", "qds/demo"], {
+      cwd: root,
+      env: childEnv({
+        QDS_KPI_NOW: T0.toISOString(),
+        HINDSIGHT_BASE_URL: "http://hindsight.invalid",
+        HINDSIGHT_BEARER_TOKEN: "kpi-test-token",
+        QDS_KPI_RETAIN_CAPTURE: capturePath,
+      }),
+    });
     expect(res.status).toBe(0);
     const files = readdirSync(join(root, ".sandbox", "kpi-snapshots"));
     expect(files).toHaveLength(1);
@@ -949,7 +1130,7 @@ describe("qds-kpi CLI — e2e seeded arm (both import arms, AC5 + e2e slice)", (
       ["tdi_proxy", "down"], ["cost_per_story", "down"], ["first_pass_accept", "up"], ["retry_rate", "down"],
     ]);
     for (const k of p.kpis) expect(k.counter.name).toBe(COUNTER_PAIRS[k.name]);
-    expect(p.run_accounting).toEqual({ records_in_window: 4, records_skipped: 0, terminal_runs: 2, accepted_runs: 2 });
+    expect(p.run_accounting).toEqual({ records_in_window: 4, records_skipped: 0, records_undated: 0, terminal_runs: 2, accepted_runs: 2 });
     expect(p.spend).toMatchObject({
       factory_micro_usd_total: 1500, factory_event_count: 2,
       gateway_micro_usd_total: 250, gateway_row_count: 1,
@@ -960,6 +1141,7 @@ describe("qds-kpi CLI — e2e seeded arm (both import arms, AC5 + e2e slice)", (
     expect(dims.get("a2-qa-findings")).toEqual({ source: "a2-qa-findings", status: "absent" });
     expect(dims.get("z2-observe-artifacts")).toEqual({ source: "z2-observe-artifacts", status: "absent" });
     const line = obsLine(res);
+    expect(line.event).toBe("kpi-snapshot-written"); // F-013: event rides alongside operation
     expect(line.snapshot_path).toBe(join(".sandbox", "kpi-snapshots", files[0] as string)); // path as resolved from cwd
     expect(line.spend_incomplete).toBe(true);
     expect(line.missing_gateway_rows).toBe(1);
@@ -968,6 +1150,12 @@ describe("qds-kpi CLI — e2e seeded arm (both import arms, AC5 + e2e slice)", (
     expect(line.pairs).toBe(4);
     expect(typeof line.duration_ms).toBe("number");
     expect(line.factory_ledger_absent).toBeUndefined();
+    // F-014: the retained meta document verified in the SAME invocation —
+    // bankId is the provisioned family's -dev-meta sibling, documentId folded
+    // from the persisted payload's own hash.
+    const retained = JSON.parse(readFileSync(capturePath, "utf8")) as Record<string, unknown>; // dp:ok parses the capture file this child CLI's own retain seam just wrote
+    expect(retained.bankId).toBe("qds-demo-dev-meta");
+    expect(retained.documentId).toBe(`kpi-snapshot-20261001-20261008-${payloadHashHex(p).slice(0, 12)}`);
   });
 
   test("empty-imports arm: spend_incomplete true, gateway fields null, degraded factory-only curve green, exit 0", () => {
@@ -995,16 +1183,15 @@ describe("qds-kpi CLI — append-only posture (AC5)", () => {
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
   test("second invocation writes a NEW snapshot; the first is byte-identical, mtime untouched, 0600", () => {
-    seedSandbox(root, new Date(), false); // real clock: two runs land different filenames
-    const env = childEnv();
-    const first = runKpi(["--window", "7d"], { cwd: root, env });
+    seedSandbox(root, T0, false); // F-022: distinct FROZEN clocks per invocation — the same-ms collision path can't flake
+    const first = runKpi(["--window", "7d"], { cwd: root, env: childEnv({ QDS_KPI_NOW: T0.toISOString() }) });
     expect(first.status).toBe(0);
     const dir = join(root, ".sandbox", "kpi-snapshots");
     const firstFile = readdirSync(dir)[0] as string;
     const firstPath = join(dir, firstFile);
     const firstBytes = readFileSync(firstPath);
     const firstMtime = statSync(firstPath).mtimeMs;
-    const second = runKpi(["--window", "7d"], { cwd: root, env });
+    const second = runKpi(["--window", "7d"], { cwd: root, env: childEnv({ QDS_KPI_NOW: new Date(T0.getTime() + 1000).toISOString() }) });
     expect(second.status).toBe(0);
     const files = readdirSync(dir).sort();
     expect(files).toHaveLength(2);
@@ -1025,6 +1212,36 @@ describe("qds-kpi CLI — append-only posture (AC5)", () => {
     expect(res.stdout.toString()).toContain("kpi-snapshot-exists");
     expect(readFileSync(target, "utf8")).toBe("PRE-EXISTING\n");
     expect(readdirSync(dir)).toHaveLength(1);
+  });
+});
+
+describe("writeSnapshot (run-record temp+rename idiom, F-001)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "qds-kpi-wsnap-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("pre-existing final name refuses kpi-snapshot-exists and leaves NO temp file behind", () => {
+    const target = join(dir, `${T0.toISOString().replace(/[:.]/g, "-")}.json`);
+    writeFileSync(target, "PRE-EXISTING\n");
+    let thrown: Error | undefined;
+    try {
+      writeSnapshot(dir, assembleSnapshot(emptyInput()), T0);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect((thrown as { code?: string } | undefined)?.code).toBe("kpi-snapshot-exists");
+    expect(readdirSync(dir)).toEqual([basename(target)]); // the target ONLY — no temp residue
+  });
+
+  test("success path: one complete 0600 file lands, no temp residue", () => {
+    const finalPath = writeSnapshot(dir, assembleSnapshot(emptyInput()), T0);
+    const files = readdirSync(dir);
+    expect(files).toHaveLength(1);
+    expect(join(dir, files[0] as string)).toBe(finalPath);
+    expect(statSync(finalPath).mode & 0o777).toBe(0o600);
+    JSON.parse(readFileSync(finalPath, "utf8")); // dp:ok parses bytes writeSnapshot just wrote; incomplete bytes fail loudly
   });
 });
 
@@ -1119,6 +1336,27 @@ describe("qds-kpi CLI — usage surface", () => {
     expect(res.stdout.toString()).toContain("--window 7d");
   });
 
+  test("in-process run(['--help']) resolves 0 with the sink captured — no process.exit (F-008)", async () => {
+    const sink: string[] = [];
+    expect(await runKpiCli(["--help"], (s) => sink.push(s))).toBe(0);
+    expect(sink.join("")).toContain("Usage: qds-kpi");
+    expect(sink.join("")).toContain("cron");
+  });
+
+  test("garbage QDS_KPI_NOW + --help → help text, exit 0: help precedes now-resolution (F-008)", async () => {
+    const saved = process.env.QDS_KPI_NOW;
+    process.env.QDS_KPI_NOW = "not-a-date";
+    const sink: string[] = [];
+    const nowKey = "QDS_KPI_NOW";
+    try {
+      expect(await runKpiCli(["--help"], (s) => sink.push(s))).toBe(0);
+      expect(sink.join("")).toContain("Usage: qds-kpi");
+    } finally {
+      if (saved === undefined) delete process.env[nowKey];
+      else process.env.QDS_KPI_NOW = saved;
+    }
+  });
+
   test("unknown flag → exit 2 kpi-flag-invalid", () => {
     const res = runKpi(["--window", "7d", "--bogus", "x"], { cwd: root, env: childEnv() });
     expect(res.status).toBe(2);
@@ -1159,6 +1397,7 @@ describe("qds-kpi CLI — store-absent arms (absence typed, stores never created
     const p = readSnapshot(join(root, ".sandbox", "kpi-snapshots", files[0] as string));
     for (const k of p.kpis) expect(k.value.status).toBe("absent");
     expect(p.run_accounting.records_skipped).toBe("absent");
+    expect(p.run_accounting.records_undated).toBe("absent"); // F-009: mirrors records_skipped's absent-when-store-absent
     for (const d of p.dimensions) expect(d.status).toBe("absent");
     const line = obsLine(res);
     expect(line.factory_ledger_absent).toBe(true);
@@ -1282,11 +1521,10 @@ describe("retainSnapshot in-process (retain-path coverage the spawned arms canno
   });
 
   const captureRows = (): Record<string, unknown>[] =>
-    // dp:ok parses the capture jsonl this test's own in-process retain just wrote
     readFileSync(capturePath, "utf8")
       .split("\n")
       .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
+      .map((l) => JSON.parse(l) as Record<string, unknown>); // dp:ok parses the capture jsonl this test's own in-process retain just wrote
 
   test("capture client lands the document in {slug}-dev-meta with the folded documentId; no skip lines (AC5)", async () => {
     process.env.QDS_KPI_RETAIN_CAPTURE = capturePath;
@@ -1311,5 +1549,50 @@ describe("retainSnapshot in-process (retain-path coverage the spawned arms canno
     expect(skips[0]?.code).toBe("retain-skipped");
     expect(skips[0]?.reason).toContain("no repo slug resolvable");
     expect(existsSync(capturePath)).toBe(false);
+  });
+
+  test("set-but-empty QDS_KPI_RETAIN_CAPTURE behaves as unset: slug check names the truth before any client use (F-010)", async () => {
+    process.env.QDS_KPI_RETAIN_CAPTURE = "";
+    const payload = assembleSnapshot(richInput());
+    const skips: { code: string; reason: string }[] = [];
+    await retainSnapshot(payload, "20261004-20261011", undefined, (code, reason) => skips.push({ code, reason }));
+    expect(skips).toHaveLength(1);
+    expect(skips[0]?.code).toBe("retain-skipped"); // not retain-failed via appendFileSync('')
+    expect(skips[0]?.reason).toContain("no repo slug resolvable");
+  });
+
+  test("55-char slug resolves via the truncated bank candidate (F-019)", async () => {
+    process.env.QDS_KPI_RETAIN_CAPTURE = capturePath;
+    const payload = assembleSnapshot(richInput());
+    const skips: { code: string; reason: string }[] = [];
+    await retainSnapshot(payload, "20261004-20261011", "a".repeat(55), (code, reason) => skips.push({ code, reason }));
+    expect(skips).toEqual([]);
+    const rows = captureRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.bankId).toBe(`${"a".repeat(50)}-dev-meta`); // the ≤50 truncation live resolution probes (bank-provisioner.ts:197-205)
+  });
+
+  test("late retain delivery after the wall cap → retain-timeout THEN retain-delivered (F-024)", async () => {
+    const captureKey = "QDS_KPI_RETAIN_CAPTURE";
+    delete process.env[captureKey]; // real client path — a slow local server is the late body (computed delete: lint-clean, and `= undefined` would store the STRING "undefined" in Bun)
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => {
+        await Bun.sleep(25);
+        return Response.json({ banks: [] });
+      },
+    });
+    try {
+      process.env.HINDSIGHT_BASE_URL = `http://localhost:${server.port}`;
+      const payload = assembleSnapshot(richInput());
+      const skips: { code: string; reason: string }[] = [];
+      await retainSnapshot(payload, "20261004-20261011", "qds-demo", (code, reason) => skips.push({ code, reason }), { wallMs: 1 });
+      await Bun.sleep(80); // let the late body resolve and the delivered line land
+      const codes = skips.map((s) => s.code);
+      expect(codes).toContain("retain-timeout"); // stays as-is at cap time
+      expect(codes).toContain("retain-delivered"); // success-class line for the document that landed
+    } finally {
+      server.stop(true);
+    }
   });
 });

@@ -21,7 +21,11 @@
  */
 import { appendFileSync } from "node:fs";
 
-import { extractExistingBankIds, resolveProvisionedRepoBankId } from "../../src/hindsight/bank-provisioner.ts";
+import {
+  extractExistingBankIds,
+  resolveProvisionedRepoBankId,
+  safeRepoBaseCandidates,
+} from "../../src/hindsight/bank-provisioner.ts";
 import { HindsightClient } from "../../src/hindsight/client.ts";
 import { resolveBankId } from "../../src/hindsight/schemas.ts";
 import { payloadHashHex, stableStringify, type KpiSnapshotPayload } from "../../src/kpi/kpis.ts";
@@ -35,7 +39,9 @@ export async function retainSnapshot(
   windowId: string,
   repoSlug: string | undefined,
   skipLine: RetainSkipLine,
+  opts: { wallMs?: number } = {},
 ): Promise<void> {
+  const wallMs = opts.wallMs ?? RETAIN_WALL_MS;
   const envConfigured =
     Boolean(process.env.HINDSIGHT_BASE_URL) &&
     Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
@@ -52,11 +58,15 @@ export async function retainSnapshot(
       const documentId = `kpi-snapshot-${windowId}-${payloadHashHex(payload).slice(0, 12)}`;
       const capturePath = process.env.QDS_KPI_RETAIN_CAPTURE;
       const client: Pick<HindsightClient, "listBanks" | "retain"> =
-        capturePath !== undefined
+        capturePath !== undefined && capturePath.length > 0 // set-but-empty = unset (F-010), matching the HINDSIGHT gate's semantics three lines up
           ? {
               listBanks: async () => {
-                const base = resolveBankId(repoSlug);
-                return { banks: [base, `${base}-dev-meta`] };
+                // F-019: probe the same family forms live resolution probes —
+                // safeRepoBaseCandidates' ≤50 current + ≤52 legacy truncations
+                // (src/hindsight/bank-provisioner.ts:197-205) — each with its
+                // -dev-meta sibling, so a 51-64-char slug resolves identically.
+                const bases = safeRepoBaseCandidates(resolveBankId(repoSlug));
+                return { banks: bases.flatMap((b) => [b, `${b}-dev-meta`]) };
               },
               retain: async (bankId, content, metadata) => {
                 // `content` is stableStringify(payload) one frame up; hashing
@@ -99,9 +109,9 @@ export async function retainSnapshot(
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           timedOut = true;
-          skipLine("retain-timeout", `the retain exceeded its ${RETAIN_WALL_MS}ms wall-clock cap`);
+          skipLine("retain-timeout", `the retain exceeded its ${wallMs}ms wall-clock cap`);
           resolve();
-        }, RETAIN_WALL_MS);
+        }, wallMs);
       }),
     ]);
   } catch (e) {
@@ -109,4 +119,12 @@ export async function retainSnapshot(
   } finally {
     clearTimeout(timer);
   }
+  // F-024: a body that lands after the cap is a DELIVERED document, not just a
+  // timeout line — the documentId is idempotent, so the late write is a no-op
+  // replace, never a duplicate. (retainOnce never rejects: it catches its own.)
+  void body.then(() => {
+    if (timedOut) {
+      skipLine("retain-delivered", "the retain landed after the wall cap (idempotent documentId — no duplicate)");
+    }
+  });
 }

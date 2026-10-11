@@ -107,6 +107,7 @@ export const KpiSnapshotSchema = z.strictObject({
   run_accounting: z.strictObject({
     records_in_window: z.number().int(),
     records_skipped: z.union([z.number().int(), z.literal("absent")]),
+    records_undated: z.union([z.number().int(), z.literal("absent")]),
     terminal_runs: z.union([z.number().int(), z.literal("absent")]),
     accepted_runs: z.union([z.number().int(), z.literal("absent")]),
   }),

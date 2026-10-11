@@ -18,14 +18,15 @@
  * Denominator contract (story Technical Notes): a KPI whose denominator count
  * is 0 is `absent` with its source named — never 0, the same absent-not-0 law
  * as every missing source. Money is integer µ$ end-to-end (INV-A5-2); derived
- * money ratios are `Math.floor` with both raw totals in the payload.
+ * money ratios use integer floor division with both raw totals in the payload.
  */
 import type { z } from "zod";
 
-import { CHARGED_CLASSES, parseFixOutcomeClass } from "../fixloop/escalation.ts";
 import {
   KpiError,
+  attemptCountsByParent,
   buildRunIdentities,
+  countChargedFixAttempts,
   joinSpend,
   type DimensionSchema,
   type DispatchEntry,
@@ -58,6 +59,8 @@ export {
   KpiValueSchema,
   PerKpiFailureSchema,
 } from "./schema.ts";
+// Locked surface: these were defined here pre-split — re-exported from join.ts.
+export { countChargedFixAttempts, payloadHashHex, stableStringify } from "./join.ts";
 export type {
   CounterMetric,
   KpiName,
@@ -70,84 +73,49 @@ export type {
 // ─── the restart taxonomy (unclassified-restart counter) ─────────────────────
 
 /**
- * KNOWN dispatch/fixloop taxonomy: the `FleetError` code literals constructed
- * across src/fleet (class at src/fleet/dispatch.ts:327; the dispatch log's
- * `code` field carries exactly these — every `refuse()` site logs its code,
- * dispatch.ts:1126) plus the `EscalationClass` union
- * (src/fixloop/escalation.ts:45). A dispatch-failure code outside this set is
- * an UNCLASSIFIED restart — the retry-rate counter's signal.
+ * KNOWN restart taxonomy, rebuilt from the REAL `refuse()` vocabulary
+ * (round-1 F-002 — the prior set carried invented FleetError-style names that
+ * appear in no refuse site, so the first real dispatch failure classified
+ * unclassified). Every code below is grep-verified as a `refuse()` second-arg
+ * literal that reaches `appendDispatchFailure` (the dispatch log's `code`
+ * field carries exactly the refuse code — src/fleet/dispatch.ts:1126-1131):
+ * dispatch/correlation: dispatch.ts:1326 dispatch-timeout, :1566
+ * manifest-rejected, :2867 correlation-rejected, :2878 correlation-failed,
+ * :2955 env-file-invalid, :4301 dispatch-refused | dispatch-failed; identity:
+ * :2723 timeout-invalid, :2731 port-invalid, :2744 invalid-brief, :2796
+ * invalid-request-id, :2972 run-id-not-minted, :3049 run-id-in-use, :3062
+ * run-id-unmintable, :1603 roster-missing, :1621 roster-path-unsafe, :1702
+ * roster-rejected, :3039 record-read-failed; budget/cap: :3340 no-ceiling,
+ * :3377 resident-ceiling-unfundable, :3407 resident-cap-above-backstop, :3427
+ * budget-exceeded, :3101 quota-intent-in-flight, :3130 headroom-failed, :3146
+ * no-headroom, :3171 invalid-cap, fanout-primitive.ts:254 ledger-failed,
+ * :268 admission-failed; provision/gates/delivery: :3752 provision-failed,
+ * :3557 audit-store-unavailable, :4096 setup-gate-invalid, :4196
+ * setup-gate-failed, :2402 expose-no-url, :1977 key-delivery-refused |
+ * key-delivery-failed, :3447 ledger-failed; fixloop-side refuse vocabulary:
+ * src/fixloop/feedback-run.ts:670 fix-context-invalid. Plus the
+ * `EscalationClass` union (src/fixloop/escalation.ts:45-60, the fixOutcomeClass
+ * side). A dispatch-failure code outside this set is an UNCLASSIFIED restart —
+ * the retry-rate counter's signal.
  */
 const KNOWN_RESTART_CODES: ReadonlySet<string> = new Set<string>([
-  // FleetError codes (src/fleet, collected 2026-10-11)
-  "budget-group-exceeded", "fanout-not-found", "fleet-busy", "fleet-identity-unobservable",
-  "fleet-lock-dir-mode", "fleet-lock-invalid-request", "fleet-lock-reentrant", "invalid-fanout-record",
-  "invalid-list-timeout", "invalid-marker-deadline", "invalid-run-id", "invalid-step-output",
-  "list-unavailable", "record-read-failed", "record-store-unreadable", "run-id-check-failed",
-  "run-not-found",
+  "dispatch-timeout", "manifest-rejected", "correlation-rejected", "correlation-failed",
+  "env-file-invalid", "dispatch-refused", "dispatch-failed", "timeout-invalid", "port-invalid",
+  "invalid-brief", "invalid-request-id", "run-id-not-minted", "run-id-in-use", "run-id-unmintable",
+  "roster-missing", "roster-path-unsafe", "roster-rejected", "record-read-failed", "no-ceiling",
+  "resident-ceiling-unfundable", "resident-cap-above-backstop", "budget-exceeded",
+  "quota-intent-in-flight", "headroom-failed", "no-headroom", "invalid-cap", "ledger-failed",
+  "admission-failed", "provision-failed", "audit-store-unavailable", "setup-gate-invalid",
+  "setup-gate-failed", "expose-no-url", "key-delivery-refused", "key-delivery-failed",
+  "fix-context-invalid",
   // EscalationClass union (src/fixloop/escalation.ts:45-60)
   "green", "ci-red", "ci-verdict-unavailable", "transient", "lead_failure", "approval-timed-out",
-  "overflow", "orphaned", "dispatch-refused", "out-of-scope-diff", "scope-requires-privilege",
-  "approval-rejected", "bot-response-to-fix", "fix-scope-missing",
+  "overflow", "orphaned", "out-of-scope-diff", "scope-requires-privilege", "approval-rejected",
+  "bot-response-to-fix", "fix-scope-missing",
 ]);
 
-// ─── charged fix attempts (AC3) ──────────────────────────────────────────────
-
-const fixAttemptIds = (parent: RunRecordLike): string[] => {
-  const ids = parent.extensions?.fixLoop?.fixAttemptRunIds;
-  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
-};
-
-/** Per-parent attempt counts — first-pass-accept needs the per-run charged split. */
-function attemptCountsByParent(
-  records: RunRecordLike[],
-): Map<string, { charged: number; uncharged: number; unattributed: number }> {
-  const byRunId = new Map(records.map((r) => [r.runId, r]));
-  const perParent = new Map<string, { charged: number; uncharged: number; unattributed: number }>();
-  for (const parent of records) {
-    let charged = 0;
-    let uncharged = 0;
-    let unattributed = 0;
-    for (const id of fixAttemptIds(parent)) {
-      const target = byRunId.get(id);
-      if (target === undefined) {
-        unattributed++; // orphan ledger id — no outcome linkage
-        continue;
-      }
-      const raw = target.extensions?.fixLoop?.fixOutcomeClass;
-      const cls = parseFixOutcomeClass(raw);
-      if (cls !== undefined) {
-        if (CHARGED_CLASSES.has(cls)) charged++;
-        else uncharged++; // valid EscalationClass, charging nothing
-      } else if (typeof raw === "string") {
-        unattributed++; // written class outside the EscalationClass union
-      } else {
-        uncharged++; // no written class yet: attempt not terminal — neither charged nor a signal
-      }
-    }
-    perParent.set(parent.runId, { charged, uncharged, unattributed });
-  }
-  return perParent;
-}
-
-/**
- * Count fix attempts via the per-attempt `fixOutcomeClass` taxonomy: CHARGED =
- * {ci-red, ci-verdict-unavailable} (src/fixloop/escalation.ts:69). A class
- * string outside the EscalationClass union and a `fixAttemptRunIds` entry
- * resolving to no record are both UNATTRIBUTED — the TDI counter's signal
- * kind. A resolved attempt with no written class is uncharged (not terminal,
- * no defect signal yet).
- */
-export function countChargedFixAttempts(
-  records: RunRecordLike[],
-): { charged: number; uncharged: number; unattributed: number } {
-  const counts = { charged: 0, uncharged: 0, unattributed: 0 };
-  for (const perParent of attemptCountsByParent(records).values()) {
-    counts.charged += perParent.charged;
-    counts.uncharged += perParent.uncharged;
-    counts.unattributed += perParent.unattributed;
-  }
-  return counts;
-}
+// ─── charged fix attempts (AC3) — lives in ./join.ts with the other record joins;
+// re-exported below to keep this module's locked API surface. ─────────────────
 
 // ─── retry stats ─────────────────────────────────────────────────────────────
 
@@ -159,51 +127,68 @@ export interface RetryStats {
 }
 
 /**
- * A workKey is attempted once per record mapped to it plus once per dispatch
- * FAILURE entry whose requestId joined no record (a dispatch that never
- * produced a run — the log is the only witness); retried = more than one
- * attempt. Restarts are dispatch failure entries beyond a workKey's FIRST
- * attempt; a restart whose code sits outside KNOWN_RESTART_CODES is
- * unclassified. An absent dispatch log makes restartsTotal `absent`, never 0.
+ * Correlation-unit attempt model (round-1 F-003/F-004): per workKey, an
+ * ATTEMPT is one distinct correlation unit — a non-null requestId seen on the
+ * records mapped to that key OR on a dispatch entry carrying it, plus one
+ * synthetic unit per dispatch entry whose requestId is null (a dispatch that
+ * never correlated — the log is its only witness). N records sharing one
+ * requestId are ONE attempt, and a joined entry is the SAME unit as its
+ * record — never double-bumped, never double-counted as a restart. A RESTART
+ * is a dispatch entry beyond its workKey's first entry (log order, the
+ * append-only store's own chronology) that did not join a record's requestId;
+ * a restart whose code sits outside KNOWN_RESTART_CODES is unclassified. An
+ * absent dispatch log makes restartsTotal `absent`, never 0.
  */
 export function computeRetryStats(
   identities: RunIdentity[],
   _records: RunRecordLike[],
   dispatch: DispatchLog,
 ): RetryStats {
-  const attempts = new Map<string, number>();
-  const bump = (key: string): void => {
-    attempts.set(key, (attempts.get(key) ?? 0) + 1);
-  };
-  for (const id of identities) if (id.workKey !== null) bump(id.workKey);
+  // workKey → the record-side requestIds (the unit identities a run proves).
+  // Identities with workKey ≠ null always carry requestId ≠ null
+  // (buildRunIdentities derives the workKey from that requestId's entry).
+  const recordUnits = new Map<string, Set<string>>();
+  for (const id of identities) {
+    if (id.workKey === null || id.requestId === null) continue;
+    const s = recordUnits.get(id.workKey);
+    if (s === undefined) recordUnits.set(id.workKey, new Set([id.requestId]));
+    else s.add(id.requestId);
+  }
+  const units = new Map<string, number>();
+  for (const [key, s] of recordUnits) units.set(key, s.size);
 
   let restartsTotal: number | "absent" = "absent";
   let unclassifiedRestarts = 0;
   if (dispatch.status === "present") {
-    const joinedRequestIds = new Set(
-      identities.map((i) => i.requestId).filter((r): r is string => r !== null),
-    );
-    const failuresPerKey = new Map<string, DispatchEntry[]>();
+    restartsTotal = 0;
+    const entriesPerKey = new Map<string, DispatchEntry[]>();
     for (const e of dispatch.entries) {
       if (e.issueId === null) continue; // unmappable to a workKey — unattributed, not counted
       const key = `w:${e.issueId}`;
-      const prior = failuresPerKey.get(key) ?? [];
+      const prior = entriesPerKey.get(key) ?? [];
       prior.push(e);
-      failuresPerKey.set(key, prior);
-      if (e.requestId === null || !joinedRequestIds.has(e.requestId)) bump(key);
+      entriesPerKey.set(key, prior);
     }
-    restartsTotal = 0;
-    for (const entries of failuresPerKey.values()) {
-      for (let i = 1; i < entries.length; i++) {
-        restartsTotal++;
-        if (!KNOWN_RESTART_CODES.has((entries[i] as DispatchEntry).code)) unclassifiedRestarts++;
+    for (const [key, entries] of entriesPerKey) {
+      const recordIds = recordUnits.get(key);
+      const seen = new Set<string>(recordIds ?? []);
+      let synthetic = 0;
+      for (const [i, e] of entries.entries()) {
+        if (e.requestId !== null) seen.add(e.requestId);
+        else synthetic++; // one synthetic unit per null-requestId entry
+        const joined = e.requestId !== null && (recordIds?.has(e.requestId) ?? false);
+        if (i > 0 && !joined) {
+          restartsTotal++;
+          if (!KNOWN_RESTART_CODES.has(e.code)) unclassifiedRestarts++;
+        }
       }
+      units.set(key, seen.size + synthetic);
     }
   }
 
   let retriedWorkKeys = 0;
-  for (const n of attempts.values()) if (n > 1) retriedWorkKeys++;
-  return { attemptedWorkKeys: attempts.size, retriedWorkKeys, unclassifiedRestarts, restartsTotal };
+  for (const n of units.values()) if (n > 1) retriedWorkKeys++;
+  return { attemptedWorkKeys: units.size, retriedWorkKeys, unclassifiedRestarts, restartsTotal };
 }
 
 // ─── window ──────────────────────────────────────────────────────────────────
@@ -234,39 +219,35 @@ export function parseWindow(spec: string, now: Date = new Date()): Window {
   }
   const days = Number(m[1]) * (m[2] === "w" ? 7 : 1);
   const dayFloor = (d: Date): number => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-  const endMs = dayFloor(now);
-  const startMs = dayFloor(new Date(now.getTime() - days * DAY_MS));
-  const slug = (ms: number): string => new Date(ms).toISOString().slice(0, 10).replace(/-/g, "");
-  return {
-    startUtc: new Date(startMs).toISOString(),
-    endUtc: new Date(endMs).toISOString(),
-    windowId: `${slug(startMs)}-${slug(endMs)}`,
-  };
+  try {
+    const endMs = dayFloor(now);
+    const startMs = dayFloor(new Date(now.getTime() - days * DAY_MS));
+    const slug = (ms: number): string => new Date(ms).toISOString().slice(0, 10).replace(/-/g, "");
+    return {
+      startUtc: new Date(startMs).toISOString(),
+      endUtc: new Date(endMs).toISOString(),
+      windowId: `${slug(startMs)}-${slug(endMs)}`,
+    };
+  } catch (e) {
+    // A day count past the representable range surfaces as a bare RangeError
+    // ("Invalid time value") from toISOString — retype it like every garbage
+    // spec (F-018).
+    if (e instanceof RangeError) {
+      throw new KpiError(
+        "kpi-window-invalid",
+        `window spec ${JSON.stringify(spec)} spans beyond the representable date range`,
+        "pass a smaller day- or week-count",
+      );
+    }
+    throw e;
+  }
 }
 
 // ─── deterministic bytes + hash ──────────────────────────────────────────────
 
-/** Deterministic key-sorted JSON — same data, same bytes, whatever the key order. */
-export function stableStringify(value: unknown): string {
-  return JSON.stringify(sortForStable(value));
-}
-
-function sortForStable(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(sortForStable);
-  if (v !== null && typeof v === "object") {
-    return Object.fromEntries(
-      Object.keys(v as Record<string, unknown>)
-        .sort()
-        .map((k) => [k, sortForStable((v as Record<string, unknown>)[k])]),
-    );
-  }
-  return v;
-}
-
-/** sha256 over stableStringify, hex — the payload hash behind the retain documentId. */
-export function payloadHashHex(payload: unknown): string {
-  return new Bun.CryptoHasher("sha256").update(stableStringify(payload)).digest("hex");
-}
+// stableStringify/payloadHashHex live in ./join.ts (round-1: the duplicate-row
+// coalescing there needs stableStringify and kpis.ts cannot import join-side
+// helpers without a cycle) — re-exported below to keep this module's locked API.
 
 // ─── snapshot assembly ───────────────────────────────────────────────────────
 
@@ -287,6 +268,8 @@ export interface SnapshotInput {
   /** Records in-window, pre-filtered by the script. */
   records: RunRecordLike[];
   recordsSkipped: number | "absent";
+  /** Records whose effective timestamp was unparseable — excluded from the window but COUNTED (F-009); "absent" when the records store itself is absent. */
+  recordsUndated: number | "absent";
   /** True when the run-records store is wholly absent (script's runsDirAbsent) — the unattributed counter goes absent, never 0 (AC1). */
   recordsStoreAbsent: boolean;
   dispatch: DispatchLog;
@@ -336,6 +319,9 @@ function absentKpi(name: KpiName, sources: string[], detail: string, counter: Co
   };
 }
 
+/** Integer floor division (F-020, INV-A5-2 no-float-arithmetic): both operands stay safe ints. */
+const floorDiv = (total: number, n: number): number => (total - (total % n)) / n;
+
 function measuredKpi(
   name: KpiName, sources: string[], value: number, denominator: number, counter: CounterMetric,
 ): KpiObject {
@@ -362,7 +348,12 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
   const retry = computeRetryStats(identities, input.records, input.dispatch);
   const spend = joinSpend(input.factorySpendRows, input.gatewayImport);
   const vetoes = countReverifyVetoes(input.audit);
-  const terminal = input.records.filter(isTerminalRun);
+  // F-015: records carrying the fix-attempt marker (extensions.fixLoop.fixRun
+  // === "true", the mint-time marker at src/providers/run-record.ts:223) are
+  // sub-runs of a workKey's fix loop, charged via fixAttemptRunIds — they are
+  // NOT standalone terminal/accepted runs and never enter those denominators.
+  const standaloneRecords = input.records.filter((r) => r.extensions?.fixLoop?.fixRun !== "true");
+  const terminal = standaloneRecords.filter(isTerminalRun);
   const accepted = terminal.filter(isAcceptedRun);
   const acceptedRunIds = new Set(accepted.map((a) => a.runId));
   const acceptedStoryKeys = new Set(
@@ -412,17 +403,17 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
   // float money (INV-A5-2).
   const costSources = ["cost-ledger", ...(input.gatewayImport.status === "present" ? ["gateway-import"] : [])];
   const totalMicroUsd = spend.factory_micro_usd_total + (spend.gateway_matched_micro_usd ?? 0);
-  const prCount = countAcceptedPrs(input.records);
+  const prCount = countAcceptedPrs(standaloneRecords);
   const cost = guarded("cost_per_story", costSources, () =>
     acceptedStoryKeys.size === 0
       ? absentKpi("cost_per_story", costSources, "no accepted stories in window — denominator 0 is absent, never 0", {
           name: COUNTER_PAIRS.cost_per_story, value: "absent", source: "run-records",
           detail: "no accepted stories — cost per accepted PR unmeasurable",
         })
-      : measuredKpi("cost_per_story", costSources, Math.floor(totalMicroUsd / acceptedStoryKeys.size), acceptedStoryKeys.size,
+      : measuredKpi("cost_per_story", costSources, floorDiv(totalMicroUsd, acceptedStoryKeys.size), acceptedStoryKeys.size,
           prCount === 0
             ? { name: COUNTER_PAIRS.cost_per_story, value: "absent", source: "run-records", detail: "no accepted PRs in window" }
-            : { name: COUNTER_PAIRS.cost_per_story, value: Math.floor(totalMicroUsd / prCount), source: "cost-ledger" }));
+            : { name: COUNTER_PAIRS.cost_per_story, value: floorDiv(totalMicroUsd, prCount), source: "cost-ledger" }));
 
   // First-pass-accept: accepted terminal runs whose fix-loop ledger holds ZERO
   // charged attempts, over terminal runs.
@@ -437,8 +428,10 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
       ? absentKpi("first_pass_accept", fpaSources, "no terminal runs in window — denominator 0 is absent, never 0", escapedDefectCounter)
       : measuredKpi("first_pass_accept", fpaSources, firstPassNumerator / terminal.length, terminal.length, escapedDefectCounter));
 
-  // Retry-rate + unclassified-restart counter.
-  const retrySources = ["run-records", "dispatch-log"];
+  // Retry-rate + unclassified-restart counter. The dispatch log is named a
+  // source only when present (F-023) — an absent log means the rate was
+  // measured from records alone, mirroring costSources/tdiSources.
+  const retrySources = ["run-records", ...(input.dispatch.status === "present" ? ["dispatch-log"] : [])];
   const retryKpi = guarded("retry_rate", retrySources, () =>
     retry.attemptedWorkKeys === 0
       ? absentKpi("retry_rate", retrySources, "no attempted workKeys in window — denominator 0 is absent, never 0", retryCounter(retry))
@@ -454,6 +447,7 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
     run_accounting: {
       records_in_window: input.records.length,
       records_skipped: input.recordsSkipped,
+      records_undated: input.recordsUndated,
       terminal_runs: terminal.length,
       accepted_runs: accepted.length,
     },
