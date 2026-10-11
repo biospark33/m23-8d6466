@@ -22,6 +22,7 @@ import {
   readDispatchLog,
   readGatewaySpendImport,
   readJsonlDimension,
+  readRoutingLogDimension,
   type DispatchEntry,
   type FactorySpendRow,
   type GatewayImport,
@@ -105,6 +106,7 @@ const richInput = (): SnapshotInput => ({
     rec("run-open", {}),
   ],
   recordsSkipped: 0,
+  recordsStoreAbsent: false,
   dispatch: {
     status: "present",
     entries: [
@@ -146,6 +148,7 @@ const emptyInput = (over: Partial<SnapshotInput> = {}): SnapshotInput => ({
   window: parseWindow("7d", NOW),
   records: [],
   recordsSkipped: "absent",
+  recordsStoreAbsent: false,
   dispatch: { status: "absent" },
   factorySpendRows: [],
   gatewayImport: { status: "absent" },
@@ -311,6 +314,40 @@ describe("readJsonlDimension + absentDimension (AC4)", () => {
   });
 });
 
+describe("readRoutingLogDimension (AC4 — joins by its owned key, runId)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "qds-kpi-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("ENOENT → {source, status: absent}, never 0, never an error", () => {
+    expect(readRoutingLogDimension("j3-routing-log", join(dir, "nope.jsonl"), new Set(["r1"]))).toEqual({
+      source: "j3-routing-log",
+      status: "absent",
+    });
+  });
+
+  test("present → joined with the IN-WINDOW decision count only: stale runId, no-runId, and non-JSON lines not counted", () => {
+    const p = join(dir, "routing.jsonl");
+    writeFileSync(
+      p,
+      `${[
+        JSON.stringify({ runId: "r1", decision: "route-x" }),
+        JSON.stringify({ runId: "r2", decision: "route-y" }),
+        JSON.stringify({ runId: "r-stale", decision: "route-old" }), // outside the window
+        JSON.stringify({ decision: "route-keyless" }), // no runId field — no joinable key
+        "{not json", // not a routing decision
+      ].join("\n")}\n`,
+    );
+    expect(readRoutingLogDimension("j3-routing-log", p, new Set(["r1", "r2"]))).toEqual({
+      source: "j3-routing-log",
+      status: "joined",
+      count: 2,
+    });
+  });
+});
+
 describe("buildRunIdentities (requestId join)", () => {
   const entries: DispatchEntry[] = [
     dispatchEntry({ repoSlug: "o/r", issueId: 42, requestId: "req-1" }),
@@ -339,6 +376,7 @@ describe("joinSpend (AC2 — DD-20 canonical key)", () => {
     const j = joinSpend(rows, { status: "absent" });
     expect(j.gateway_row_count).toBeNull();
     expect(j.gateway_micro_usd_total).toBeNull();
+    expect(j.gateway_matched_micro_usd).toBeNull();
     expect(j.missing_gateway_rows).toBeNull();
     expect(j.unmatched_gateway_rows).toBeNull();
     expect(j.matched_gateway_rows).toBe(0);
@@ -408,6 +446,22 @@ describe("joinSpend (AC2 — DD-20 canonical key)", () => {
     const j = joinSpend(rows, imp);
     expect(j.unmatched_gateway_rows).toBe(1);
     expect(j.gateway_micro_usd_total).toBe(260);
+  });
+
+  test("gateway_matched_micro_usd sums MATCHED rows only; the total keeps ALL rows (F5)", () => {
+    const imp: GatewayImport = {
+      status: "present",
+      rows: [
+        { workKey: "w:1", runId: "run-a", issueId: "1", botId: "home-bot", cost_micro_usd: 250 },
+        { workKey: "w:2", runId: "run-b", issueId: "2", botId: "home-bot", cost_micro_usd: 100 },
+        { workKey: "w:99", runId: null, issueId: "99", botId: "home-bot", cost_micro_usd: 1000 }, // unmatched
+      ],
+    };
+    const j = joinSpend(rows, imp);
+    expect(j.gateway_matched_micro_usd).toBe(350); // matched rows only — the cost numerator
+    expect(j.gateway_micro_usd_total).toBe(1350); // ALL rows — provenance, unmatched never silently dropped
+    expect(j.unmatched_gateway_rows).toBe(1);
+    expect(j.matched_gateway_rows).toBe(2);
   });
 });
 
@@ -632,6 +686,23 @@ describe("assembleSnapshot — rich fixture", () => {
     expect(retry.counter.value).toBe(0); // 1 restart, classified (invalid-run-id)
     expect(retry.counter.source).toBe("dispatch-log");
   });
+
+  test("cost numerator = factory + MATCHED gateway µ$ only — unmatched spend never enters the ratio (F5)", () => {
+    const input = richInput();
+    input.gatewayImport = {
+      status: "present",
+      rows: [
+        { workKey: "w:1", runId: "run-parent", issueId: "1", botId: "home-bot", cost_micro_usd: 250 },
+        { workKey: "w:99", runId: null, issueId: "99", botId: "home-bot", cost_micro_usd: 1000 }, // unmatched
+      ],
+    };
+    const p = assembleSnapshot(input);
+    const cost = p.kpis.find((k) => k.name === "cost_per_story") as KpiObject;
+    expect(cost.value).toMatchObject({ status: "measured", value: 875, denominator: 2 }); // (1500 + 250 matched) / 2 — 1375 would be the all-rows bug
+    expect(p.spend.gateway_micro_usd_total).toBe(1250); // ALL rows — provenance
+    expect(p.spend.gateway_matched_micro_usd).toBe(250);
+    expect(p.spend.unmatched_gateway_rows).toBe(1);
+  });
 });
 
 describe("assembleSnapshot — determinism (AC5 payload purity)", () => {
@@ -694,6 +765,14 @@ describe("assembleSnapshot — absence arms (AC4: absence is typed, never 0, nev
     expect(p.per_kpi_failures).toEqual([]);
   });
 
+  test("run-records store wholly absent → unattributed counter absent, never 0 (AC1 exact negative control)", () => {
+    const p = assembleSnapshot(emptyInput({ recordsStoreAbsent: true }));
+    const tdi = p.kpis.find((k) => k.name === "tdi_proxy") as KpiObject;
+    expect(tdi.counter.value).toBe("absent");
+    expect(tdi.counter.source).toBe("run-records");
+    expect(KpiSnapshotSchema.safeParse(p).success).toBe(true);
+  });
+
   test("partial import on an otherwise-empty window still counts missing rows", () => {
     const p = assembleSnapshot(
       emptyInput({
@@ -744,11 +823,12 @@ describe("render-vs-store guard (AC1 third negative control)", () => {
 // store-absent arms (never creates ledger/runs), ledger-absent + import
 // (every import row unmatched), repoSlug derivation (unit + git remote).
 
-import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { CostLedger } from "../../src/providers/cost-ledger.ts";
 import { repoSlugFromRemoteUrl } from "../../scripts/qds-kpi.ts";
+import { retainSnapshot } from "../../scripts/lib/kpi-retain.ts";
 
 const KPI_CLI = join(process.cwd(), "scripts", "qds-kpi.ts");
 const T0 = new Date("2026-10-08T12:34:56.789Z"); // frozen clock → window 20261001-20261008
@@ -980,7 +1060,7 @@ describe("qds-kpi CLI — idempotent retain (AC5, capture seam)", () => {
     expect(documentId).toMatch(/^kpi-snapshot-20261001-20261008-[0-9a-f]{12}$/);
     expect(lines[1]?.documentId).toBe(documentId);
     expect(lines[1]?.content_sha256).toBe(lines[0]?.content_sha256);
-    expect(lines[0]?.bankId).toBe("qds-demo"); // provisioned-family resolution ran for real
+    expect(lines[0]?.bankId).toBe("qds-demo-dev-meta"); // family gate proved provision; the document lands in the meta sibling (AC5)
     const meta = lines[0]?.metadata as Record<string, unknown>;
     expect(meta.updateMode).toBe("replace");
     expect(meta.tags).toEqual(["kpi-snapshot", "20261001-20261008"]);
@@ -1101,6 +1181,23 @@ describe("qds-kpi CLI — store-absent arms (absence typed, stores never created
     });
     expect(obsLine(res).factory_ledger_absent).toBe(true);
   });
+
+  test("audit.db PRESENT: no walk ever runs — component typed absent (audit-chain-walk), db byte-identical (INV-A5-1)", () => {
+    seedSandbox(root, T0, true);
+    const auditDb = join(root, ".sandbox", "audit.db");
+    writeFileSync(auditDb, "PRE-EXISTING-AUDIT-BYTES\n");
+    const before = readFileSync(auditDb);
+    const res = runKpi(["--window", "7d"], { cwd: root, env: childEnv({ QDS_KPI_NOW: T0.toISOString() }) });
+    expect(res.status).toBe(0);
+    expect(readFileSync(auditDb).equals(before)).toBe(true); // fully offline, byte-identical truth stores
+    const files = readdirSync(join(root, ".sandbox", "kpi-snapshots"));
+    const p = readSnapshot(join(root, ".sandbox", "kpi-snapshots", files[0] as string));
+    const dims = new Map(p.dimensions.map((d) => [d.source, d]));
+    expect(dims.get("audit-chain-walk")).toEqual({ source: "audit-chain-walk", status: "absent" });
+    const tdi = p.kpis.find((k) => k.name === "tdi_proxy") as KpiObject;
+    expect(tdi.sources).toEqual(["run-records"]); // audit never named as a source
+    expect(obsLine(res).audit).toBe("absent");
+  });
 });
 
 describe("repoSlug derivation (--repo ?? $QDS_REPO_SLUG ?? git remote origin)", () => {
@@ -1128,7 +1225,7 @@ describe("repoSlug derivation (--repo ?? $QDS_REPO_SLUG ?? git remote origin)", 
       });
       expect(res.status).toBe(0);
       const line = JSON.parse(readFileSync(capturePath, "utf8")) as Record<string, unknown>;
-      expect(line.bankId).toBe("derived-slug");
+      expect(line.bankId).toBe("derived-slug-dev-meta"); // derived slug → meta sibling bank
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1154,5 +1251,65 @@ describe("repoSlug derivation (--repo ?? $QDS_REPO_SLUG ?? git remote origin)", 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// In-process coverage for the retain leg: the spawned e2e arms exercise it in
+// children, which coverage cannot score — these drive retainSnapshot directly
+// through the same QDS_KPI_RETAIN_CAPTURE seam the CLI arms use.
+describe("retainSnapshot in-process (retain-path coverage the spawned arms cannot score)", () => {
+  let root: string;
+  let capturePath: string;
+  const savedEnv: Record<string, string | undefined> = {};
+  const ENV_KEYS = ["HINDSIGHT_BASE_URL", "HINDSIGHT_BEARER_TOKEN", "HINDSIGHT_API_KEY", "QDS_KPI_RETAIN_CAPTURE"];
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "qds-kpi-retain-ip-"));
+    capturePath = join(root, "capture.jsonl");
+    for (const k of ENV_KEYS) {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env.HINDSIGHT_BASE_URL = "http://127.0.0.1:8888";
+    process.env.HINDSIGHT_BEARER_TOKEN = "test-token";
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  const captureRows = (): Record<string, unknown>[] =>
+    // dp:ok parses the capture jsonl this test's own in-process retain just wrote
+    readFileSync(capturePath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  test("capture client lands the document in {slug}-dev-meta with the folded documentId; no skip lines (AC5)", async () => {
+    process.env.QDS_KPI_RETAIN_CAPTURE = capturePath;
+    const payload = assembleSnapshot(richInput());
+    const skips: { code: string; reason: string }[] = [];
+    await retainSnapshot(payload, "20261004-20261011", "qds-demo", (code, reason) => skips.push({ code, reason }));
+    expect(skips).toEqual([]);
+    const rows = captureRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.bankId).toBe("qds-demo-dev-meta"); // AC5: the meta sibling, family-gated
+    expect(rows[0]?.documentId).toBe(`kpi-snapshot-20261004-20261011-${payloadHashHex(payload).slice(0, 12)}`);
+    expect(rows[0]?.content_sha256).toBe(payloadHashHex(payload));
+    expect(rows[0]?.metadata).toMatchObject({ updateMode: "replace", documentId: rows[0]?.documentId });
+  });
+
+  test("no repo slug → retain-skipped, no capture write", async () => {
+    process.env.QDS_KPI_RETAIN_CAPTURE = capturePath;
+    const payload = assembleSnapshot(richInput());
+    const skips: { code: string; reason: string }[] = [];
+    await retainSnapshot(payload, "20261004-20261011", undefined, (code, reason) => skips.push({ code, reason }));
+    expect(skips).toHaveLength(1);
+    expect(skips[0]?.code).toBe("retain-skipped");
+    expect(skips[0]?.reason).toContain("no repo slug resolvable");
+    expect(existsSync(capturePath)).toBe(false);
   });
 });

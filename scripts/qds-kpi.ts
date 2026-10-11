@@ -4,7 +4,7 @@
  *
  * Usage:
  *   qds-kpi --window <Nd|Nw> [--runs-dir <dir>] [--ledger <path>]
- *           [--audit-db <path>] [--dispatch-log <path>] [--imports-file <path>]
+ *           [--dispatch-log <path>] [--imports-file <path>]
  *           [--snapshots-dir <dir>] [--repo <slug>]
  *
  * Operator-invoked, strictly read-only over the truth stores, no daemon — the
@@ -32,13 +32,12 @@
  *   state is gateway-only and must be read only beside that flag (AC2's
  *   both-ledgers-or-flagged contract; the symmetric case of the sanctioned
  *   factory-only default).
- * - Audit walk: SKIPPED entirely when the audit-db file is absent — the walker
- *   is never constructed. When present, each terminal run in-window is walked
- *   best-effort (walkAuditChain, per-hop ceiling 500ms), capped at
- *   AUDIT_WALK_CAP terminal runs; a walk failure (ChainWalkError or otherwise)
- *   drops that run's report and is counted, never crashing the snapshot. Note
- *   the walker is the audit chain's own reader: its designed first-observation
- *   appends apply exactly as they do under `qds-audit`.
+ * - Audit walk: REMOVED (INV-A5-1). walkAuditChain persists first-observation
+ *   digests to audit.db (chain.ts:1607) — INV-A5-1 requires byte-identical
+ *   truth stores; the walk leg returns when a read-only walk mode exists
+ *   upstream. The script passes NO audit reports into SnapshotInput; the
+ *   audit component is typed absent with source "audit-chain-walk" in the
+ *   dimensions list.
  * - Retain seam: env-gated best-effort (HINDSIGHT_BASE_URL + bearer/api key —
  *   the same pair retain-best-effort gates on). Env absent → one skip line, no
  *   call, exit unchanged. `QDS_KPI_RETAIN_CAPTURE=<jsonl>` swaps the network
@@ -54,11 +53,10 @@
  * corrupt stores, malformed import); 2 usage.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { walkAuditChain } from "../src/audit/chain.ts";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../src/providers/run-record.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
@@ -66,7 +64,6 @@ import {
   assembleSnapshot,
   parseWindow,
   stableStringify,
-  type AuditReportLike,
   type KpiSnapshotPayload,
 } from "../src/kpi/kpis.ts";
 import {
@@ -75,7 +72,7 @@ import {
   buildRunIdentities,
   readDispatchLog,
   readGatewaySpendImport,
-  readJsonlDimension,
+  readRoutingLogDimension,
   type FactorySpendRow,
   type RunRecordLike,
 } from "../src/kpi/join.ts";
@@ -83,15 +80,13 @@ import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { retainSnapshot, type RetainSkipLine } from "./lib/kpi-retain.ts";
 
 const VALUE_FLAGS = [
-  "--window", "--runs-dir", "--ledger", "--audit-db", "--dispatch-log",
+  "--window", "--runs-dir", "--ledger", "--dispatch-log",
   "--imports-file", "--snapshots-dir", "--repo",
 ] as const;
 
 /** src/fleet/dispatch.ts's DISPATCH_FAILURE_LOG literal — consume-only fence. */
 const DEFAULT_DISPATCH_LOG = ".sandbox/dispatch-log.jsonl";
 const DEFAULT_ROUTING_LOG = ".sandbox/routing-log.jsonl";
-const AUDIT_WALK_CAP = 200;
-const AUDIT_HOP_CEILING_MS = 500;
 
 const HELP = [
   "Usage: qds-kpi --window <Nd|Nw> [flags]",
@@ -99,7 +94,6 @@ const HELP = [
   "  --window <spec>       required window: days or weeks (e.g. 7d, 2w)",
   "  --runs-dir <dir>      run records directory (default $QDS_RUNS_DIR | .sandbox/runs)",
   "  --ledger <path>       cost ledger (default $QDS_COST_LEDGER_FILE | .sandbox/cost-ledger.db)",
-  "  --audit-db <path>     audit chain db (default $QDS_AUDIT_DB | .sandbox/audit.db)",
   "  --dispatch-log <path> dispatch failure log (default .sandbox/dispatch-log.jsonl)",
   "  --imports-file <path> gateway-spend import (default .sandbox/imports/gateway-spend-<windowId>.jsonl)",
   "  --snapshots-dir <dir> snapshot directory (default .sandbox/kpi-snapshots)",
@@ -155,7 +149,6 @@ interface CliOptions {
   windowSpec: string;
   runsDir: string;
   ledgerPath: string;
-  auditDbPath: string;
   dispatchLogPath: string;
   importsFile: string | undefined;
   snapshotsDir: string;
@@ -209,7 +202,6 @@ function parseCli(argv: readonly string[], now: Date): CliOptions {
     windowSpec,
     runsDir: values["--runs-dir"] ?? process.env.QDS_RUNS_DIR?.trim() ?? ".sandbox/runs",
     ledgerPath: values["--ledger"] ?? process.env.QDS_COST_LEDGER_FILE ?? ".sandbox/cost-ledger.db",
-    auditDbPath: values["--audit-db"] ?? process.env.QDS_AUDIT_DB ?? ".sandbox/audit.db",
     dispatchLogPath: values["--dispatch-log"] ?? DEFAULT_DISPATCH_LOG,
     importsFile: values["--imports-file"],
     snapshotsDir: values["--snapshots-dir"] ?? ".sandbox/kpi-snapshots",
@@ -373,38 +365,25 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
     const importsPath = opts.importsFile ?? `.sandbox/imports/gateway-spend-${window.windowId}.jsonl`;
     const gatewayImport = readGatewaySpendImport(importsPath);
 
-    // Dimensions: routing log joins read-side when present; A2/Z2 are typed absent.
+    // Dimensions: routing decisions join by their owned key (runId) against
+    // the in-window records (AC4); A2/Z2 are typed absent.
+    const inWindowRunIds = new Set(records.map((r) => r.runId));
+    // Audit component: typed absent, never walked. walkAuditChain persists
+    // first-observation digests to audit.db (chain.ts:1607) — INV-A5-1
+    // requires byte-identical truth stores; the walk leg returns when a
+    // read-only walk mode exists upstream.
     const dimensions = [
-      readJsonlDimension("j3-routing-log", DEFAULT_ROUTING_LOG),
+      readRoutingLogDimension("j3-routing-log", DEFAULT_ROUTING_LOG, inWindowRunIds),
       absentDimension("a2-qa-findings"),
       absentDimension("z2-observe-artifacts"),
+      absentDimension("audit-chain-walk"),
     ];
-
-    // Audit walk: never constructed when the db file is absent; bounded otherwise.
-    let audit: { status: "present"; reports: AuditReportLike[] } | { status: "absent" } = { status: "absent" };
-    let auditWalked = 0;
-    let auditFailed = 0;
-    let auditCapped = false;
-    if (existsSync(opts.auditDbPath)) {
-      const terminal = records.filter((r) => typeof r.closedAt === "string" && r.closedAt !== "");
-      auditCapped = terminal.length > AUDIT_WALK_CAP;
-      const reports: AuditReportLike[] = [];
-      for (const r of terminal.slice(0, AUDIT_WALK_CAP)) {
-        try {
-          reports.push(await walkAuditChain(r.runId, { runsDir: opts.runsDir, auditDb: opts.auditDbPath, requestId, hopCeilingMs: AUDIT_HOP_CEILING_MS }));
-          auditWalked++;
-        } catch {
-          auditFailed++; // ChainWalkError or any walk fault: that run contributes nothing.
-        }
-      }
-      if (reports.length > 0) audit = { status: "present", reports };
-    }
 
     let payload: KpiSnapshotPayload;
     try {
       payload = assembleSnapshot({
-        window, records, recordsSkipped, dispatch,
-        factorySpendRows, gatewayImport, dimensions, audit,
+        window, records, recordsSkipped, recordsStoreAbsent: runsDirAbsent, dispatch,
+        factorySpendRows, gatewayImport, dimensions, audit: { status: "absent" },
       });
     } catch (e) {
       if (e instanceof KpiError) throw new KpiScriptError(e.code, e.message, e.remediation);
@@ -431,8 +410,7 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
       duration_ms: durationMs,
       ...(ledgerAbsent ? { factory_ledger_absent: true } : {}),
       ...(runsDirAbsent ? { runs_dir_absent: true } : {}),
-      audit: audit.status === "present" ? { walked: auditWalked, failed: auditFailed } : "absent",
-      ...(auditCapped ? { audit_walks_capped: AUDIT_WALK_CAP } : {}),
+      audit: "absent", // INV-A5-1: no audit walk — typed absent, never walked (see dimensions' audit-chain-walk)
     });
 
     await retainSnapshot(payload, window.windowId, repoSlug, skipLine);

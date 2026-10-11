@@ -216,6 +216,8 @@ export const SpendJoinSchema = z.strictObject({
   factory_event_count: z.number().int(),
   gateway_row_count: z.number().int().nullable(),
   gateway_micro_usd_total: z.number().int().nullable(),
+  /** MATCHED rows only (cost numerator); null exactly when the import is absent. */
+  gateway_matched_micro_usd: z.number().int().nullable(),
   matched_gateway_rows: z.number().int(),
   unmatched_gateway_rows: z.number().int().nullable(),
   missing_gateway_rows: z.number().int().nullable(),
@@ -230,9 +232,13 @@ export type SpendJoin = z.infer<typeof SpendJoinSchema>;
  * `runId`-null row joins via its issueId↔workKey correspondence (its workKey
  * against any factory row's workKey — AC2's parenthetical). Unmatched import
  * rows and factory rows missing an import row are COUNTED, never sampled, and
- * never silently dropped. `spend_incomplete` is the both-ledgers-or-flagged
- * contract: absent import, missing rows, or unmatched rows all set it — the
- * degraded factory-only curve stays green underneath the flag.
+ * never silently dropped. `gateway_matched_micro_usd` sums the MATCHED rows
+ * only (the cost KPIs' numerator — unmatched spend never enters a ratio);
+ * `gateway_micro_usd_total` keeps the ALL-rows sum for provenance, and
+ * `unmatched_gateway_rows` keeps the unmatched visible, never silently
+ * dropped. `spend_incomplete` is the both-ledgers-or-flagged contract: absent
+ * import, missing rows, or unmatched rows all set it — the degraded
+ * factory-only curve stays green underneath the flag.
  */
 export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: GatewayImport): SpendJoin {
   const factory_micro_usd_total = factoryRows.reduce((s, r) => s + r.microUsd, 0);
@@ -244,6 +250,7 @@ export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: Gateway
       factory_event_count,
       gateway_row_count: null,
       gateway_micro_usd_total: null,
+      gateway_matched_micro_usd: null,
       matched_gateway_rows: 0,
       unmatched_gateway_rows: null,
       missing_gateway_rows: null,
@@ -253,6 +260,7 @@ export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: Gateway
   const rows = gatewayImport.rows;
   const factoryMatched = new Array<boolean>(factoryRows.length).fill(false);
   let matched = 0;
+  let matchedMicro = 0;
   let unmatched = 0;
   for (const g of rows) {
     let hit = false;
@@ -265,8 +273,10 @@ export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: Gateway
         factoryMatched[i] = true;
       }
     }
-    if (hit) matched++;
-    else unmatched++;
+    if (hit) {
+      matched++;
+      matchedMicro += g.cost_micro_usd; // once per import row, however many factory rows it joins
+    } else unmatched++;
   }
   const missing = factoryMatched.filter((m) => !m).length;
   return {
@@ -275,6 +285,7 @@ export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: Gateway
     factory_event_count,
     gateway_row_count: rows.length,
     gateway_micro_usd_total: rows.reduce((s, r) => s + r.cost_micro_usd, 0),
+    gateway_matched_micro_usd: matchedMicro,
     matched_gateway_rows: matched,
     unmatched_gateway_rows: unmatched,
     missing_gateway_rows: missing,
@@ -311,5 +322,40 @@ export function readJsonlDimension(source: string, path: string): Dimension {
     throw e;
   }
   const count = text.split("\n").filter((l) => l.trim() !== "").length;
+  return { source, status: "joined", count };
+}
+
+/**
+ * Routing-decision dimension (AC4): joins each routing-log line by its OWNED
+ * key — `runId` — against the in-window run ids, and reports JOINED decisions
+ * only. A line whose runId is outside the window (stale), a line with no
+ * runId field, and a line that is not JSON at all each carry no joinable key
+ * and are not counted. ENOENT → typed absent, as every dimension.
+ */
+export function readRoutingLogDimension(
+  source: string,
+  path: string,
+  inWindowRunIds: ReadonlySet<string>,
+): Dimension {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return absentDimension(source);
+    throw e;
+  }
+  let count = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // not a routing decision — no runId to join, not counted
+    }
+    const runId = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>).runId : undefined;
+    if (typeof runId === "string" && inWindowRunIds.has(runId)) count++;
+  }
   return { source, status: "joined", count };
 }

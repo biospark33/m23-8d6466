@@ -72,7 +72,11 @@ export async function retainSnapshot(
         skipLine("retain-skipped", `memory banks are not provisioned for repo ${repoSlug}`);
         return;
       }
-      await client.retain(repoBankId, stableStringify(payload), {
+      // The family gate proves provision (resolveProvisionedRepoBankId returns
+      // the base only when its -dev-meta sibling exists too); the document
+      // itself lands in that meta sibling per AC5 — M3.1's *-meta family.
+      const metaBankId = `${repoBankId}-dev-meta`;
+      await client.retain(metaBankId, stableStringify(payload), {
         documentId,
         updateMode: "replace",
         kind: "observation",

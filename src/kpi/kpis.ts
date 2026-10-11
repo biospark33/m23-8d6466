@@ -287,6 +287,8 @@ export interface SnapshotInput {
   /** Records in-window, pre-filtered by the script. */
   records: RunRecordLike[];
   recordsSkipped: number | "absent";
+  /** True when the run-records store is wholly absent (script's runsDirAbsent) — the unattributed counter goes absent, never 0 (AC1). */
+  recordsStoreAbsent: boolean;
   dispatch: DispatchLog;
   factorySpendRows: FactorySpendRow[];
   gatewayImport: GatewayImport;
@@ -391,19 +393,25 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
   // window. Audit absent → fix signals only; the supplementary walk's absence
   // is visible because "audit-chain" is not named in sources.
   const tdiSources = ["run-records", ...(input.audit.status === "present" ? ["audit-chain"] : [])];
-  const unattributedCounter: CounterMetric = {
-    name: COUNTER_PAIRS.tdi_proxy, value: fixCounts.unattributed, source: "run-records",
-  };
+  const unattributedCounter: CounterMetric = input.recordsStoreAbsent
+    ? {
+        name: COUNTER_PAIRS.tdi_proxy, value: "absent", source: "run-records",
+        detail: "run-records store wholly absent — unattributed count unmeasurable, never 0 (AC1)",
+      }
+    : { name: COUNTER_PAIRS.tdi_proxy, value: fixCounts.unattributed, source: "run-records" };
   const tdi = guarded("tdi_proxy", tdiSources, () =>
     acceptedStoryKeys.size === 0
       ? absentKpi("tdi_proxy", tdiSources, "no accepted stories in window — denominator 0 is absent, never 0", unattributedCounter)
       : measuredKpi("tdi_proxy", tdiSources, (vetoes + fixCounts.charged) / acceptedStoryKeys.size, acceptedStoryKeys.size, unattributedCounter));
 
-  // Cost-per-story: integer µ$ only — total is the raw sum of both ledgers,
-  // per-story is floor(total/accepted), and both raw totals ride the payload
-  // (spend.*) so the ratio is auditable without float money (INV-A5-2).
+  // Cost-per-story: integer µ$ only — total is the raw sum of both ledgers
+  // with the gateway side counted at its MATCHED rows only (unmatched import
+  // spend never enters a ratio; it stays visible in spend.gateway_micro_usd_total
+  // and unmatched_gateway_rows), per-story is floor(total/accepted), and both
+  // raw totals ride the payload (spend.*) so the ratio is auditable without
+  // float money (INV-A5-2).
   const costSources = ["cost-ledger", ...(input.gatewayImport.status === "present" ? ["gateway-import"] : [])];
-  const totalMicroUsd = spend.factory_micro_usd_total + (spend.gateway_micro_usd_total ?? 0);
+  const totalMicroUsd = spend.factory_micro_usd_total + (spend.gateway_matched_micro_usd ?? 0);
   const prCount = countAcceptedPrs(input.records);
   const cost = guarded("cost_per_story", costSources, () =>
     acceptedStoryKeys.size === 0
