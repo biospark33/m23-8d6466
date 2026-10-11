@@ -1,19 +1,17 @@
 /**
  * A5 — the four v4 yield KPI computations and the snapshot assembly. Pure and
  * synchronous: every store read happens in the CLI script (leaf-1.2), which
- * hands `assembleSnapshot` pre-read inputs. The zod schemas and the
- * direction/pair tables live in ./schema.ts and are re-exported here so this
- * module keeps its locked API surface.
+ * hands `assembleSnapshot` pre-read inputs. The zod schemas and direction/pair
+ * tables live in ./schema.ts, re-exported here to keep the locked API surface.
  *
  * Terminal/accepted semantics (PINNED): a terminal run is one whose record
- * carries `closedAt` (`close()` is the terminal transition,
- * src/providers/run-record.ts:1718, first-close-wins); an accepted run is a
- * terminal run whose `extensions.approval.state === "approved"` (the DF3.4
- * pre-PR approval gate's terminal states, run-record.ts:323-325). The box-exit
- * convention those sit beside is `classifyRunExit` / `InBoxExit`
- * (src/providers/cap-rejection.ts:75/:18) — a pure classifier that is not
- * persisted on the record, so acceptance is read from the approval extension,
- * never from an exit string. Named tests pin both.
+ * carries `closedAt` (`close()` is the terminal transition, run-record.ts:1718,
+ * first-close-wins); an accepted run is a terminal run whose
+ * `extensions.approval.state === "approved"` (the DF3.4 pre-PR approval gate's
+ * terminal states, run-record.ts:323-325). `classifyRunExit`/`InBoxExit`
+ * (cap-rejection.ts:75/:18) is a pure classifier NOT persisted on the record —
+ * acceptance is read from the approval extension, never an exit string; named
+ * tests pin both.
  *
  * Denominator contract (story Technical Notes): a KPI whose denominator count
  * is 0 is `absent` with its source named — never 0, the same absent-not-0 law
@@ -22,13 +20,14 @@
  */
 import type { z } from "zod";
 
+import type { DimensionSchema } from "./dimensions.ts";
 import {
   KpiError,
   attemptCountsByParent,
   buildRunIdentities,
   countChargedFixAttempts,
+  guardedMicroUsd,
   joinSpend,
-  type DimensionSchema,
   type DispatchEntry,
   type DispatchLog,
   type FactorySpendRow,
@@ -114,8 +113,7 @@ const KNOWN_RESTART_CODES: ReadonlySet<string> = new Set<string>([
   "bot-response-to-fix", "fix-scope-missing",
 ]);
 
-// ─── charged fix attempts (AC3) — lives in ./join.ts with the other record joins;
-// re-exported below to keep this module's locked API surface. ─────────────────
+// ─── charged fix attempts (AC3) — lives in ./join.ts; re-exported below to keep this module's locked API surface.
 
 // ─── retry stats ─────────────────────────────────────────────────────────────
 
@@ -134,15 +132,19 @@ export interface RetryStats {
  * never correlated — the log is its only witness). N records sharing one
  * requestId are ONE attempt, and a joined entry is the SAME unit as its
  * record — never double-bumped, never double-counted as a restart. A RESTART
- * is a dispatch entry beyond its workKey's first entry (log order, the
- * append-only store's own chronology) that did not join a record's requestId;
- * a restart whose code sits outside KNOWN_RESTART_CODES is unclassified. An
- * absent dispatch log makes restartsTotal `absent`, never 0.
+ * is an IN-WINDOW dispatch entry whose per-key position in the FULL log
+ * (store order = array order) is beyond that key's first FULL-log entry and
+ * that did not join a record's requestId (R2-05 — a boundary-straddling
+ * workKey must not lose its first in-window failure); a restart whose code
+ * sits outside KNOWN_RESTART_CODES is unclassified. An absent dispatch log
+ * makes restartsTotal `absent`, never 0. `window` absent → every entry is
+ * in-window (the caller already filtered).
  */
 export function computeRetryStats(
   identities: RunIdentity[],
   _records: RunRecordLike[],
   dispatch: DispatchLog,
+  window?: Window,
 ): RetryStats {
   // workKey → the record-side requestIds (the unit identities a run proves).
   // Identities with workKey ≠ null always carry requestId ≠ null
@@ -161,6 +163,14 @@ export function computeRetryStats(
   let unclassifiedRestarts = 0;
   if (dispatch.status === "present") {
     restartsTotal = 0;
+    // R2-05: the script's in-window rule (unparseable timestamps kept).
+    const startMs = window === undefined ? Number.NEGATIVE_INFINITY : Date.parse(window.startUtc);
+    const endMs = window === undefined ? Number.POSITIVE_INFINITY : Date.parse(window.endUtc);
+    const inWindow = (e: DispatchEntry): boolean => {
+      if (window === undefined) return true;
+      const t = Date.parse(e.timestamp);
+      return Number.isNaN(t) || (t >= startMs && t < endMs);
+    };
     const entriesPerKey = new Map<string, DispatchEntry[]>();
     for (const e of dispatch.entries) {
       if (e.issueId === null) continue; // unmappable to a workKey — unattributed, not counted
@@ -174,15 +184,17 @@ export function computeRetryStats(
       const seen = new Set<string>(recordIds ?? []);
       let synthetic = 0;
       for (const [i, e] of entries.entries()) {
+        const joined = e.requestId !== null && (recordIds?.has(e.requestId) ?? false);
+        if (!inWindow(e)) continue; // pre-window history: baseline only — never an in-window unit or restart
         if (e.requestId !== null) seen.add(e.requestId);
         else synthetic++; // one synthetic unit per null-requestId entry
-        const joined = e.requestId !== null && (recordIds?.has(e.requestId) ?? false);
         if (i > 0 && !joined) {
           restartsTotal++;
           if (!KNOWN_RESTART_CODES.has(e.code)) unclassifiedRestarts++;
         }
       }
-      units.set(key, seen.size + synthetic);
+      const unitCount = seen.size + synthetic;
+      if (unitCount > 0) units.set(key, unitCount); // a pre-window-only key proves no in-window attempt
     }
   }
 
@@ -246,8 +258,7 @@ export function parseWindow(spec: string, now: Date = new Date()): Window {
 // ─── deterministic bytes + hash ──────────────────────────────────────────────
 
 // stableStringify/payloadHashHex live in ./join.ts (round-1: the duplicate-row
-// coalescing there needs stableStringify and kpis.ts cannot import join-side
-// helpers without a cycle) — re-exported below to keep this module's locked API.
+// coalescing there needs stableStringify) — re-exported to keep the locked API.
 
 // ─── snapshot assembly ───────────────────────────────────────────────────────
 
@@ -273,6 +284,8 @@ export interface SnapshotInput {
   /** True when the run-records store is wholly absent (script's runsDirAbsent) — the unattributed counter goes absent, never 0 (AC1). */
   recordsStoreAbsent: boolean;
   dispatch: DispatchLog;
+  /** The FULL pre-window-filter dispatch log (R2-05) — the restart baseline reads store chronology. Falls back to `dispatch` when absent. */
+  dispatchFull?: DispatchLog;
   factorySpendRows: FactorySpendRow[];
   gatewayImport: GatewayImport;
   dimensions: z.infer<typeof DimensionSchema>[];
@@ -319,8 +332,11 @@ function absentKpi(name: KpiName, sources: string[], detail: string, counter: Co
   };
 }
 
-/** Integer floor division (F-020, INV-A5-2 no-float-arithmetic): both operands stay safe ints. */
-const floorDiv = (total: number, n: number): number => (total - (total % n)) / n;
+/** Integer floor division (F-020, INV-A5-2 no-float-arithmetic), sign-correct true floor in pure integer math (R2-04): JS `%` truncates toward zero, so the mathematical remainder is `((a % n) + n) % n` — floorDiv(-5, 2) = -3, not -2. */
+const floorDiv = (total: number, n: number): number => {
+  const rem = ((total % n) + n) % n;
+  return (total - rem) / n;
+};
 
 function measuredKpi(
   name: KpiName, sources: string[], value: number, denominator: number, counter: CounterMetric,
@@ -345,7 +361,7 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
   const identities = buildRunIdentities(input.records, dispatchEntries);
   const fixCounts = countChargedFixAttempts(input.records);
   const chargedByParent = attemptCountsByParent(input.records);
-  const retry = computeRetryStats(identities, input.records, input.dispatch);
+  const retry = computeRetryStats(identities, input.records, input.dispatchFull ?? input.dispatch, input.window);
   const spend = joinSpend(input.factorySpendRows, input.gatewayImport);
   const vetoes = countReverifyVetoes(input.audit);
   // F-015: records carrying the fix-attempt marker (extensions.fixLoop.fixRun
@@ -402,10 +418,14 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
   // raw totals ride the payload (spend.*) so the ratio is auditable without
   // float money (INV-A5-2).
   const costSources = ["cost-ledger", ...(input.gatewayImport.status === "present" ? ["gateway-import"] : [])];
-  const totalMicroUsd = spend.factory_micro_usd_total + (spend.gateway_matched_micro_usd ?? 0);
   const prCount = countAcceptedPrs(standaloneRecords);
-  const cost = guarded("cost_per_story", costSources, () =>
-    acceptedStoryKeys.size === 0
+  const cost = guarded("cost_per_story", costSources, () => {
+    // R2-03: each ledger total is F-017-guarded; the cross-ledger SUM guards too — never round.
+    const totalMicroUsd = guardedMicroUsd(
+      spend.factory_micro_usd_total + (spend.gateway_matched_micro_usd ?? 0),
+      "cost_per_story cross-ledger numerator",
+    );
+    return acceptedStoryKeys.size === 0
       ? absentKpi("cost_per_story", costSources, "no accepted stories in window — denominator 0 is absent, never 0", {
           name: COUNTER_PAIRS.cost_per_story, value: "absent", source: "run-records",
           detail: "no accepted stories — cost per accepted PR unmeasurable",
@@ -413,7 +433,8 @@ export function assembleSnapshot(input: SnapshotInput): KpiSnapshotPayload {
       : measuredKpi("cost_per_story", costSources, floorDiv(totalMicroUsd, acceptedStoryKeys.size), acceptedStoryKeys.size,
           prCount === 0
             ? { name: COUNTER_PAIRS.cost_per_story, value: "absent", source: "run-records", detail: "no accepted PRs in window" }
-            : { name: COUNTER_PAIRS.cost_per_story, value: floorDiv(totalMicroUsd, prCount), source: "cost-ledger" }));
+            : { name: COUNTER_PAIRS.cost_per_story, value: floorDiv(totalMicroUsd, prCount), source: "cost-ledger" });
+  });
 
   // First-pass-accept: accepted terminal runs whose fix-loop ledger holds ZERO
   // charged attempts, over terminal runs.

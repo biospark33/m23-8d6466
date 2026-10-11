@@ -5,11 +5,13 @@
  * UNSCHEDULED solstice-side counterpart story per charter §5.5):
  * `.sandbox/imports/gateway-spend-<window>.jsonl`, one strict JSON object per
  * line — `{workKey, runId | null, issueId | null, botId, cost_micro_usd}`.
- * Unknown fields refuse; `cost_micro_usd` is integer micro-dollars AND
- * safe-integer-guarded (DD-9; `cost-convert-invalid` precedent,
- * src/providers/cost-ledger.ts:309-313) — a float or an out-of-range figure
- * fails the parse, never rounds; a row carrying NEITHER `runId` NOR `issueId`
- * refuses (the canonical join key would lose a component).
+ * Unknown fields refuse; `cost_micro_usd` is integer, NON-NEGATIVE
+ * micro-dollars, safe-integer-guarded (DD-9; `cost-convert-invalid` precedent,
+ * src/providers/cost-ledger.ts:309-313) — a float, a negative, or an
+ * out-of-range figure fails the parse, never rounds (DD-20's vocabulary is
+ * spend rows — refunds/credits are not producer rows, R2-04); a row carrying
+ * NEITHER `runId` NOR `issueId` refuses (the canonical join key would lose a
+ * component).
  *
  * The canonical DD-20 key is **workKey + runId + botId** — botId is validated
  * non-empty and preserved per row (the third canonical component). Factory-side
@@ -23,7 +25,8 @@
  * Absence law (story decision (1)): a wholly absent import is `absent`, never
  * an error and never `0` — the *|null SpendJoin fields are null exactly then.
  * Also hosts the record-side joins the KPI layer consumes (charged fix
- * attempts; stableStringify/payloadHashHex) — kpis.ts re-exports them.
+ * attempts; stableStringify/payloadHashHex) — kpis.ts re-exports them. The
+ * AC4 dimension readers live in ./dimensions.ts (split for the file rule).
  */
 import { readFileSync } from "node:fs";
 
@@ -77,9 +80,11 @@ export const GatewaySpendRowSchema = z
     issueId: z.string().min(1).nullable(),
     /** Validated non-empty at parse; preserved per row (DD-20 contract note above). */
     botId: z.string().min(1),
+    /** Integer µ$, ≥ 0 — spend rows only; the producer emits no refunds/credits (R2-04). */
     cost_micro_usd: z
       .number()
       .int()
+      .nonnegative()
       .refine((n) => Number.isSafeInteger(n), {
         message: "cost_micro_usd outside the safe-integer range (DD-9; cost-convert-invalid precedent)",
       }),
@@ -92,7 +97,15 @@ export type GatewaySpendRow = z.infer<typeof GatewaySpendRowSchema>;
 
 export type GatewayImport = { status: "present"; rows: GatewaySpendRow[] } | { status: "absent" };
 
-/** Read the import file. ENOENT → absent (decision (1)); any malformed line throws. */
+/**
+ * Read the import file. ENOENT → absent (decision (1)); any malformed line throws.
+ *
+ * Producer-side ownership (R2-09): A5 NEVER creates `.sandbox/imports/` — this
+ * reader is a read-only consumer, and INV-A5-1 bounds A5's writes to its own
+ * truth stores. The imports directory belongs to the unscheduled solstice-side
+ * DD-20 producer, which must establish the 0600-family directory posture when
+ * it lands (its dir, its mode contract).
+ */
 export function readGatewaySpendImport(path: string): GatewayImport {
   let text: string;
   try {
@@ -150,7 +163,11 @@ export type DispatchLog = { status: "present"; entries: DispatchEntry[] } | { st
 /**
  * Read `.sandbox/dispatch-log.jsonl` (src/fleet/dispatch.ts:126). This store
  * EXISTS — its writer landed — so a malformed line is a typed fault, not an
- * absence. Blank lines tolerated.
+ * absence. Blank lines tolerated. Tail rule (R2-06, the F-011 law
+ * readRoutingLogDimension applies to the routing log): a malformed line that
+ * is NOT the final non-blank line is a typed `dispatch-log-invalid` fault;
+ * the final non-blank line may be torn by a concurrent appender — tolerated,
+ * not counted.
  */
 export function readDispatchLog(path: string): DispatchLog {
   let text: string;
@@ -162,6 +179,10 @@ export function readDispatchLog(path: string): DispatchLog {
   }
   const entries: DispatchEntry[] = [];
   const lines = text.split("\n");
+  let lastNonBlank = -1;
+  for (const [i, raw] of lines.entries()) {
+    if (raw.trim() !== "") lastNonBlank = i;
+  }
   for (const [i, raw] of lines.entries()) {
     const line = raw.trim();
     if (line === "") continue;
@@ -169,6 +190,7 @@ export function readDispatchLog(path: string): DispatchLog {
     try {
       parsed = JSON.parse(line);
     } catch (e) {
+      if (i === lastNonBlank) continue; // torn tail — tolerated, not counted (R2-06)
       throw new KpiError(
         "dispatch-log-invalid",
         `dispatch log ${path} line ${i + 1} is not JSON: ${(e as Error).message}`,
@@ -325,8 +347,8 @@ export const SpendJoinSchema = z.strictObject({
 
 export type SpendJoin = z.infer<typeof SpendJoinSchema>;
 
-/** Aggregate µ$ guard (F-017): totals past 2^53 refuse typed — never round. */
-function guardedMicroUsd(total: number, field: string): number {
+/** Aggregate µ$ guard (F-017): totals past 2^53 refuse typed — never round. Exported for the cross-ledger sum in kpis.ts (R2-03). */
+export function guardedMicroUsd(total: number, field: string): number {
   if (!Number.isSafeInteger(total)) {
     throw new KpiError(
       "aggregate-overflow",
@@ -340,8 +362,9 @@ function guardedMicroUsd(total: number, field: string): number {
 /**
  * Join both spend ledgers on the DD-20 canonical key. Match rule: an import
  * row with a `runId` joins the factory row with the same (workKey, runId); a
- * `runId`-null row joins via its issueId↔workKey correspondence (its workKey
- * against any factory row's workKey — AC2's parenthetical). Import rows whose
+ * `runId`-null row joins via its issueId↔workKey correspondence, filling ONE
+ * factory row per fill row — the first in store order (AC2's parenthetical
+ * sanctions the fill per row, not one-fill-fills-all; R2-08). Import rows whose
  * canonical stableStringify equals an earlier row are COALESCED (F-006: a
  * torn/retried producer append must not double-count matched µ$): counted
  * once in every sum, surfaced in `gateway_duplicate_rows`; different-content
@@ -397,7 +420,12 @@ export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: Gateway
   let unmatched = 0;
   for (const g of rows) {
     const candidates = byWorkKey.get(g.workKey) ?? [];
-    const hits = g.runId !== null ? candidates.filter((f) => f.runId === g.runId) : candidates;
+    // R2-08: a runId-null fill row fills ONE factory row — the first in store
+    // order not already matched; remaining same-workKey factory rows stay
+    // unmatched-by-fill and count in missing_gateway_rows.
+    const hits = g.runId !== null
+      ? candidates.filter((f) => f.runId === g.runId)
+      : [candidates.find((f) => !matchedRows.has(f))].filter((f) => f !== undefined);
     if (hits.length > 0) {
       matched++;
       matchedMicro += g.cost_micro_usd; // once per import row, however many factory rows it joins
@@ -421,78 +449,4 @@ export function joinSpend(factoryRows: FactorySpendRow[], gatewayImport: Gateway
     missing_gateway_rows: missing,
     spend_incomplete: missing > 0 || unmatched > 0,
   };
-}
-
-// ─── dimensions (AC4) ────────────────────────────────────────────────────────
-
-export const DimensionSchema = z.union([
-  z.strictObject({ source: z.string(), status: z.literal("absent") }),
-  z.strictObject({ source: z.string(), status: z.literal("joined"), count: z.number().int() }),
-]);
-
-export type Dimension = z.infer<typeof DimensionSchema>;
-
-/** Type a named source absent — a dimension column is never `0`, never omitted. */
-export function absentDimension(source: string): Dimension {
-  return { source, status: "absent" };
-}
-
-/** Read-side dimension join over a JSONL source: ENOENT → typed absent; present → line count. Used for J3's routing log. */
-export function readJsonlDimension(source: string, path: string): Dimension {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return absentDimension(source);
-    throw e;
-  }
-  const count = text.split("\n").filter((l) => l.trim() !== "").length;
-  return { source, status: "joined", count };
-}
-
-/**
- * Routing-decision dimension (AC4): joins each routing-log line by its OWNED
- * key — `runId` — against the in-window run ids, and reports JOINED decisions
- * only. A line whose runId is outside the window (stale) and a line with no
- * runId field each carry no joinable key and are not counted. A non-JSON line
- * that is NOT the final non-blank line is a typed `routing-log-invalid` fault
- * (F-011); the final non-blank line failing to parse is TOLERATED and not
- * counted — a concurrent appender's torn tail. ENOENT → typed absent.
- */
-export function readRoutingLogDimension(
-  source: string,
-  path: string,
-  inWindowRunIds: ReadonlySet<string>,
-): Dimension {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return absentDimension(source);
-    throw e;
-  }
-  const rawLines = text.split("\n");
-  let lastNonBlank = -1;
-  for (const [i, raw] of rawLines.entries()) {
-    if (raw.trim() !== "") lastNonBlank = i;
-  }
-  let count = 0;
-  for (const [i, raw] of rawLines.entries()) {
-    const line = raw.trim();
-    if (line === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      if (i === lastNonBlank) continue; // torn tail — tolerated, not counted
-      throw new KpiError(
-        "routing-log-invalid",
-        `routing log ${path} line ${i + 1} is not JSON`,
-        "a corrupt non-tail routing line is a fault — inspect the log before recomputing KPIs (only a torn final line is tolerated)",
-      );
-    }
-    const runId = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>).runId : undefined;
-    if (typeof runId === "string" && inWindowRunIds.has(runId)) count++;
-  }
-  return { source, status: "joined", count };
 }

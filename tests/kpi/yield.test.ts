@@ -16,13 +16,10 @@ import { basename, join } from "node:path";
 
 import {
   KpiError,
-  absentDimension,
   buildRunIdentities,
   joinSpend,
   readDispatchLog,
   readGatewaySpendImport,
-  readJsonlDimension,
-  readRoutingLogDimension,
   type DispatchEntry,
   type FactorySpendRow,
   type GatewayImport,
@@ -30,6 +27,11 @@ import {
   type RunIdentity,
   type RunRecordLike,
 } from "../../src/kpi/join.ts";
+import {
+  absentDimension,
+  readJsonlDimension,
+  readRoutingLogDimension,
+} from "../../src/kpi/dimensions.ts";
 import {
   COUNTER_PAIRS,
   KPI_DIRECTIONS,
@@ -235,6 +237,11 @@ describe("gateway import reader (AC2 strict money)", () => {
     throwsKpi(() => readGatewaySpendImport(p), "gateway-import-invalid");
   });
 
+  test("negative cost_micro_usd refuses — DD-20's vocabulary is spend rows; refunds/credits are not producer rows (R2-04)", () => {
+    const p = write("imp.jsonl", `${row({ cost_micro_usd: -100 })}\n`);
+    throwsKpi(() => readGatewaySpendImport(p), "gateway-import-invalid");
+  });
+
   test("unknown extra field refuses (missing-and-extra-fail)", () => {
     const p = write("imp.jsonl", `${row({ tokenCount: 9000 })}\n`);
     throwsKpi(() => readGatewaySpendImport(p), "gateway-import-invalid");
@@ -282,10 +289,29 @@ describe("dispatch log reader", () => {
     if (log.status === "present") expect(log.entries).toHaveLength(2);
   });
 
-  test("malformed line → dispatch-log-invalid (the store exists; corruption is a fault)", () => {
+  test("corrupt NON-tail line → dispatch-log-invalid (the store exists; corruption is a fault)", () => {
     const p = join(dir, "log.jsonl");
-    writeFileSync(p, "{oops\n");
+    const ok = JSON.stringify({ timestamp: "t", repoSlug: null, issueId: 1, requestId: null, code: "c", message: "m" });
+    writeFileSync(p, `${ok}\n{oops\n${ok}\n`);
     throwsKpi(() => readDispatchLog(p), "dispatch-log-invalid");
+  });
+
+  test("torn FINAL line (no trailing newline) → tolerated; entries from the complete lines only (R2-06, F-011 tail rule)", () => {
+    const p = join(dir, "log.jsonl");
+    const ok = JSON.stringify({ timestamp: "t", repoSlug: null, issueId: 1, requestId: "r1", code: "c", message: "m" });
+    writeFileSync(p, `${ok}\n{"timestamp": "t", "iss`);
+    const log = readDispatchLog(p);
+    expect(log.status).toBe("present");
+    if (log.status === "present") expect(log.entries).toHaveLength(1);
+  });
+
+  test("torn tail with trailing blank lines after it → still the final non-blank line, tolerated (R2-06)", () => {
+    const p = join(dir, "log.jsonl");
+    const ok = JSON.stringify({ timestamp: "t", repoSlug: null, issueId: 1, requestId: "r1", code: "c", message: "m" });
+    writeFileSync(p, `${ok}\n{"timestamp"\n\n`);
+    const log = readDispatchLog(p);
+    expect(log.status).toBe("present");
+    if (log.status === "present") expect(log.entries).toHaveLength(1);
   });
 
   test("wrong-shape line (missing code) → dispatch-log-invalid", () => {
@@ -442,6 +468,23 @@ describe("joinSpend (AC2 — DD-20 canonical key)", () => {
     const j = joinSpend(rows, imp);
     expect(j.matched_gateway_rows).toBe(1);
     expect(j.missing_gateway_rows).toBe(1); // run-b still lacks its own import row
+    expect(j.spend_incomplete).toBe(true);
+  });
+
+  test("runId-null fill row fills ONE factory row; remaining same-workKey rows count in missing_gateway_rows (R2-08)", () => {
+    const rows3: FactorySpendRow[] = [
+      { runId: "run-a", workKey: "w:1", microUsd: 100, eventCount: 1 },
+      { runId: "run-b", workKey: "w:1", microUsd: 200, eventCount: 1 },
+      { runId: "run-c", workKey: "w:1", microUsd: 300, eventCount: 1 },
+    ];
+    const imp: GatewayImport = {
+      status: "present",
+      rows: [{ workKey: "w:1", runId: null, issueId: "1", botId: "home-bot", cost_micro_usd: 75 }],
+    };
+    const j = joinSpend(rows3, imp);
+    expect(j.matched_gateway_rows).toBe(1);
+    expect(j.missing_gateway_rows).toBe(2); // one fill row, three factory rows — the fill is per row, not one-fill-fills-all
+    expect(j.gateway_matched_micro_usd).toBe(75);
     expect(j.spend_incomplete).toBe(true);
   });
 
@@ -663,6 +706,31 @@ describe("computeRetryStats", () => {
     expect(stats.attemptedWorkKeys).toBe(1); // w:1 only — r3's null requestId proves no unit for w:2
     expect(stats.retriedWorkKeys).toBe(1); // w:1 has {req-1, req-2}
   });
+
+  test("restart baseline over FULL store chronology: pre-window history keeps EVERY in-window failure a restart (R2-05)", () => {
+    const stats = computeRetryStats([], [], {
+      status: "present",
+      entries: [
+        dispatchEntry({ issueId: 1, requestId: null, code: "dispatch-timeout", timestamp: "2026-09-20T00:00:00.000Z" }), // pre-window history
+        dispatchEntry({ issueId: 1, requestId: null, code: "dispatch-timeout" }),
+        dispatchEntry({ issueId: 1, requestId: null, code: "dispatch-timeout", timestamp: "2026-10-03T02:00:00.000Z" }),
+      ],
+    }, parseWindow("7d", NOW));
+    expect(stats.restartsTotal).toBe(2); // BOTH in-window failures sit beyond the FULL-log first entry — not 1
+    expect(stats.attemptedWorkKeys).toBe(1); // the pre-window entry proves no in-window unit
+    expect(stats.retriedWorkKeys).toBe(1); // 2 in-window synthetic units
+  });
+
+  test("keys whose ONLY entries are in-window keep the window-filtered behavior exactly (R2-05)", () => {
+    const stats = computeRetryStats([], [], {
+      status: "present",
+      entries: [
+        dispatchEntry({ issueId: 2, requestId: null, code: "dispatch-timeout" }),
+        dispatchEntry({ issueId: 2, requestId: null, code: "dispatch-timeout", timestamp: "2026-10-03T02:00:00.000Z" }),
+      ],
+    }, parseWindow("7d", NOW));
+    expect(stats.restartsTotal).toBe(1);
+  });
 });
 
 describe("counter + KPI object schemas (AC1/AC3 structural refusal)", () => {
@@ -834,6 +902,31 @@ describe("assembleSnapshot — rich fixture", () => {
     expect(p.spend.gateway_matched_micro_usd).toBe(250);
     expect(p.spend.unmatched_gateway_rows).toBe(1);
   });
+
+  test("cross-ledger SUM past MAX_SAFE_INTEGER → aggregate-overflow in per_kpi_failures, cost KPI absent — each component alone is safe (R2-03)", () => {
+    const input = richInput();
+    input.factorySpendRows = [{ runId: "run-parent", workKey: "w:1", microUsd: Number.MAX_SAFE_INTEGER, eventCount: 1 }];
+    input.gatewayImport = {
+      status: "present",
+      rows: [{ workKey: "w:1", runId: "run-parent", issueId: "1", botId: "home-bot", cost_micro_usd: 1 }],
+    };
+    const p = assembleSnapshot(input);
+    const cost = p.kpis.find((k) => k.name === "cost_per_story") as KpiObject;
+    expect(cost.value.status).toBe("absent");
+    expect(p.per_kpi_failures).toHaveLength(1);
+    expect(p.per_kpi_failures[0]?.kpi).toBe("cost_per_story");
+    expect(p.per_kpi_failures[0]?.message).toContain("cost_per_story cross-ledger numerator");
+    expect(KpiSnapshotSchema.safeParse(p).success).toBe(true); // a failed KPI never zeroes the snapshot
+  });
+
+  test("floorDiv is a true floor on negative numerators: −5 µ$ over 2 accepted stories = −3, not −2 (R2-04)", () => {
+    const input = richInput();
+    input.factorySpendRows = [{ runId: "run-parent", workKey: "w:1", microUsd: -5, eventCount: 1 }];
+    input.gatewayImport = { status: "absent" };
+    const p = assembleSnapshot(input);
+    const cost = p.kpis.find((k) => k.name === "cost_per_story") as KpiObject;
+    expect(cost.value).toMatchObject({ status: "measured", value: -3, denominator: 2 });
+  });
 });
 
 describe("assembleSnapshot — round-1 accounting pins (F-009 / F-015 / F-023)", () => {
@@ -874,6 +967,23 @@ describe("assembleSnapshot — round-1 accounting pins (F-009 / F-015 / F-023)",
     const p = assembleSnapshot(emptyInput());
     const retry = p.kpis.find((k) => k.name === "retry_rate") as KpiObject;
     expect(retry.sources).toEqual(["run-records"]); // dispatch-log omitted when absent, like costSources/tdiSources
+  });
+
+  test("dispatchFull carries store chronology: a key whose only in-window entry follows pre-window history counts its restart (R2-05)", () => {
+    const input = richInput();
+    const inWindowEntries = input.dispatch.status === "present" ? input.dispatch.entries : [];
+    input.dispatchFull = {
+      status: "present",
+      entries: [
+        dispatchEntry({ issueId: 3, requestId: null, code: "dispatch-timeout", timestamp: "2026-09-20T00:00:00.000Z" }), // w:3 pre-window history
+        ...inWindowEntries,
+        dispatchEntry({ issueId: 3, requestId: null, code: "dispatch-timeout", timestamp: "2026-10-03T04:00:00.000Z" }), // w:3's ONLY in-window entry
+      ],
+    };
+    const p = assembleSnapshot(input);
+    const retry = p.kpis.find((k) => k.name === "retry_rate") as KpiObject;
+    expect(retry.value).toMatchObject({ status: "measured", value: 1 / 3, denominator: 3 }); // w:3 joins the attempted set (1 retried key of 3)
+    expect(retry.counter).toMatchObject({ name: "unclassified_restart_rate", value: 0, detail: "restarts_total=2" }); // without dispatchFull this key's only entry sat at position 0 — no restart
   });
 });
 
@@ -995,11 +1105,12 @@ describe("render-vs-store guard (AC1 third negative control)", () => {
 // store-absent arms (never creates ledger/runs), ledger-absent + import
 // (every import row unmatched), repoSlug derivation (unit + git remote).
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { CostLedger } from "../../src/providers/cost-ledger.ts";
-import { repoSlugFromRemoteUrl, run as runKpiCli, writeSnapshot } from "../../scripts/qds-kpi.ts";
+import { repoSlugFromRemoteUrl, run as runKpiCli } from "../../scripts/qds-kpi.ts";
+import { writeSnapshot } from "../../scripts/lib/kpi-snapshot-write.ts";
 import { retainSnapshot } from "../../scripts/lib/kpi-retain.ts";
 
 const KPI_CLI = join(process.cwd(), "scripts", "qds-kpi.ts");
@@ -1215,14 +1326,14 @@ describe("qds-kpi CLI — append-only posture (AC5)", () => {
   });
 });
 
-describe("writeSnapshot (run-record temp+rename idiom, F-001)", () => {
+describe("writeSnapshot (temp+fsync+atomic link claim, F-001/R2-02)", () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-kpi-wsnap-"));
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("pre-existing final name refuses kpi-snapshot-exists and leaves NO temp file behind", () => {
+  test("pre-existing final name refuses kpi-snapshot-exists (link EEXIST — the claim is exclusive) and leaves NO temp file behind", () => {
     const target = join(dir, `${T0.toISOString().replace(/[:.]/g, "-")}.json`);
     writeFileSync(target, "PRE-EXISTING\n");
     let thrown: Error | undefined;
@@ -1232,15 +1343,31 @@ describe("writeSnapshot (run-record temp+rename idiom, F-001)", () => {
       thrown = e as Error;
     }
     expect((thrown as { code?: string } | undefined)?.code).toBe("kpi-snapshot-exists");
-    expect(readdirSync(dir)).toEqual([basename(target)]); // the target ONLY — no temp residue
+    expect(readdirSync(dir)).toEqual([basename(target)]); // the target ONLY — no temp residue on collision
+    expect(readFileSync(target, "utf8")).toBe("PRE-EXISTING\n"); // the prior snapshot is preserved, never clobbered
   });
 
-  test("success path: one complete 0600 file lands, no temp residue", () => {
+  test("pre-existing 0755 snapshots dir refuses kpi-snapshot-dir-mode; nothing written (R2-10)", () => {
+    const wide = join(dir, "wide");
+    mkdirSync(wide, { recursive: true, mode: 0o755 });
+    chmodSync(wide, 0o755); // pin the mode regardless of umask
+    let thrown: Error | undefined;
+    try {
+      writeSnapshot(wide, assembleSnapshot(emptyInput()), T0);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect((thrown as { code?: string } | undefined)?.code).toBe("kpi-snapshot-dir-mode");
+    expect(readdirSync(wide)).toEqual([]); // no snapshot, no temp — 0600 spend snapshots never land in a world-readable dir
+  });
+
+  test("success path: one complete 0600 file lands in a 0700 dir, no temp residue (fresh-create green, R2-10)", () => {
     const finalPath = writeSnapshot(dir, assembleSnapshot(emptyInput()), T0);
     const files = readdirSync(dir);
     expect(files).toHaveLength(1);
     expect(join(dir, files[0] as string)).toBe(finalPath);
     expect(statSync(finalPath).mode & 0o777).toBe(0o600);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
     JSON.parse(readFileSync(finalPath, "utf8")); // dp:ok parses bytes writeSnapshot just wrote; incomplete bytes fail loudly
   });
 });
@@ -1402,6 +1529,22 @@ describe("qds-kpi CLI — store-absent arms (absence typed, stores never created
     const line = obsLine(res);
     expect(line.factory_ledger_absent).toBe(true);
     expect(line.runs_dir_absent).toBe(true);
+  });
+
+  test("set-but-empty QDS_RUNS_DIR / QDS_COST_LEDGER_FILE fall back to the DEFAULT paths, never open('') (R2-07/F-010)", () => {
+    seedSandbox(root, T0, true); // the DEFAULT-location stores: .sandbox/runs + .sandbox/cost-ledger.db
+    const res = runKpi(["--window", "7d"], {
+      cwd: root,
+      env: childEnv({ QDS_KPI_NOW: T0.toISOString(), QDS_RUNS_DIR: "", QDS_COST_LEDGER_FILE: "" }),
+    });
+    expect(res.status).toBe(0);
+    const files = readdirSync(join(root, ".sandbox", "kpi-snapshots"));
+    const p = readSnapshot(join(root, ".sandbox", "kpi-snapshots", files[0] as string));
+    expect(p.run_accounting.records_in_window).toBe(4); // the DEFAULT .sandbox/runs opened — "" would have probed ENOENT as phantom-absent
+    expect(p.spend.factory_micro_usd_total).toBe(1500); // the DEFAULT .sandbox/cost-ledger.db opened
+    const line = obsLine(res);
+    expect(line.runs_dir_absent).toBeUndefined();
+    expect(line.factory_ledger_absent).toBeUndefined();
   });
 
   test("ledger absent + import present: factory component absent-typed, every import row unmatched, spend_incomplete", () => {
@@ -1572,14 +1715,17 @@ describe("retainSnapshot in-process (retain-path coverage the spawned arms canno
     expect(rows[0]?.bankId).toBe(`${"a".repeat(50)}-dev-meta`); // the ≤50 truncation live resolution probes (bank-provisioner.ts:197-205)
   });
 
-  test("late retain delivery after the wall cap → retain-timeout THEN retain-delivered (F-024)", async () => {
+  test("late REAL delivery after the wall cap → retain-timeout THEN retain-delivered (F-024/R2-01)", async () => {
     const captureKey = "QDS_KPI_RETAIN_CAPTURE";
     delete process.env[captureKey]; // real client path — a slow local server is the late body (computed delete: lint-clean, and `= undefined` would store the STRING "undefined" in Bun)
     const server = Bun.serve({
       port: 0,
-      fetch: async () => {
-        await Bun.sleep(25);
-        return Response.json({ banks: [] });
+      fetch: async (req) => {
+        await Bun.sleep(25); // every leg outlives the 1ms wall cap
+        if (req.method === "GET") {
+          return Response.json({ banks: ["qds-demo", "qds-demo-dev-meta"] }); // the provisioned family — resolution succeeds
+        }
+        return Response.json({ success: true, items_count: 1, async: false }); // a real RetainResponse — the retain resolves
       },
     });
     try {
@@ -1587,10 +1733,35 @@ describe("retainSnapshot in-process (retain-path coverage the spawned arms canno
       const payload = assembleSnapshot(richInput());
       const skips: { code: string; reason: string }[] = [];
       await retainSnapshot(payload, "20261004-20261011", "qds-demo", (code, reason) => skips.push({ code, reason }), { wallMs: 1 });
-      await Bun.sleep(80); // let the late body resolve and the delivered line land
+      await Bun.sleep(150); // let the late body resolve and the delivered line land
       const codes = skips.map((s) => s.code);
       expect(codes).toContain("retain-timeout"); // stays as-is at cap time
-      expect(codes).toContain("retain-delivered"); // success-class line for the document that landed
+      expect(codes).toContain("retain-delivered"); // the retain call RESOLVED — a real delivery landed late
+      expect(codes.indexOf("retain-delivered")).toBeGreaterThan(codes.indexOf("retain-timeout"));
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("late SKIP after the wall cap → retain-timeout, NEVER retain-delivered (R2-01)", async () => {
+    const captureKey = "QDS_KPI_RETAIN_CAPTURE";
+    delete process.env[captureKey];
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => {
+        await Bun.sleep(25);
+        return Response.json({ banks: [] }); // unprovisioned — the late settlement is a SKIP, not a delivery
+      },
+    });
+    try {
+      process.env.HINDSIGHT_BASE_URL = `http://localhost:${server.port}`;
+      const payload = assembleSnapshot(richInput());
+      const skips: { code: string; reason: string }[] = [];
+      await retainSnapshot(payload, "20261004-20261011", "qds-demo", (code, reason) => skips.push({ code, reason }), { wallMs: 1 });
+      await Bun.sleep(150);
+      const codes = skips.map((s) => s.code);
+      expect(codes).toContain("retain-timeout");
+      expect(codes).not.toContain("retain-delivered"); // nothing landed — no false SUCCESS line
     } finally {
       server.stop(true);
     }

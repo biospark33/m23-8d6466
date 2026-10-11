@@ -11,7 +11,8 @@
  */
 import { z } from "zod";
 
-import { DimensionSchema, SpendJoinSchema } from "./join.ts";
+import { DimensionSchema } from "./dimensions.ts";
+import { SpendJoinSchema } from "./join.ts";
 
 // ─── directions + pairs (AC3 / FR-LEARN-33) ──────────────────────────────────
 

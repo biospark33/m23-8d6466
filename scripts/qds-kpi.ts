@@ -21,7 +21,10 @@
  *   window bounds are parseWindow's UTC day-truncated bounds (end excludes the
  *   current, incomplete day). Dispatch-log entries filter by their `timestamp`
  *   the same way; an entry whose timestamp is unparseable is KEPT (its window
- *   position cannot be proven either way).
+ *   position cannot be proven either way). The window-filtered entries feed
+ *   the requestId joins; the restart baseline additionally reads the FULL log
+ *   (dispatchFull, R2-05) so a boundary-straddling workKey keeps its store
+ *   chronology.
  * - Ledger absent (ENOENT → `ledger-absent`): a truth store that may not exist
  *   in a fresh clone. Factory spend becomes an EMPTY row set — the SUM over no
  *   ledger is an empty sum — and the observability line types the factory
@@ -49,13 +52,11 @@
  *   for deterministic tests; unset in production.
  *
  * Exit codes: 0 success INCLUDING every absent/degraded arm (absence is never
- * an error); 1 store-verdict failure (same-ms snapshot collision, unreadable/
- * corrupt stores, malformed import); 2 usage.
+ * an error); 1 store-verdict failure (same-ms snapshot collision, wide-mode
+ * snapshots dir, unreadable/corrupt stores, malformed import); 2 usage.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { statSync, writeSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 import { CostLedger } from "../src/providers/cost-ledger.ts";
@@ -64,21 +65,20 @@ import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   assembleSnapshot,
   parseWindow,
-  stableStringify,
   type KpiSnapshotPayload,
 } from "../src/kpi/kpis.ts";
 import {
   KpiError,
-  absentDimension,
   buildRunIdentities,
   readDispatchLog,
   readGatewaySpendImport,
-  readRoutingLogDimension,
   type FactorySpendRow,
   type RunRecordLike,
 } from "../src/kpi/join.ts";
+import { absentDimension, readRoutingLogDimension } from "../src/kpi/dimensions.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { retainSnapshot, type RetainSkipLine } from "./lib/kpi-retain.ts";
+import { KpiScriptError, writeSnapshot } from "./lib/kpi-snapshot-write.ts";
 
 const VALUE_FLAGS = [
   "--window", "--runs-dir", "--ledger", "--dispatch-log",
@@ -109,17 +109,7 @@ const HELP = [
   "",
 ];
 
-/** Typed script failure: code + remediation ride the `!!` envelope, exit != 0. */
-class KpiScriptError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly remediation: string,
-  ) {
-    super(message);
-    this.name = "KpiScriptError";
-  }
-}
+/** Typed script failure (KpiScriptError) and the snapshot write leg live in ./lib/kpi-snapshot-write.ts. */
 
 /** writeSync can write short; a truncated envelope is worse than a slow one (qds-cost idiom). */
 function writeAll(fd: number, s: string): void {
@@ -161,6 +151,9 @@ function usageError(code: string, message: string, remediation: string): Error {
   return new Error(`!! ${code}: ${message}\nnext: ${remediation}\n${HELP.join("\n")}\n`);
 }
 
+/** F-010 law: a set-but-empty path env is UNSET — the default applies; the store opens at the default path, never "". */
+const envPath = (v: string | undefined): string | undefined => (v !== undefined && v.length > 0 ? v : undefined);
+
 function parseCli(argv: readonly string[], now: Date): CliOptions {
   const values: Record<string, string | undefined> = {};
   const seen = new Set<string>();
@@ -201,8 +194,8 @@ function parseCli(argv: readonly string[], now: Date): CliOptions {
   }
   return {
     windowSpec,
-    runsDir: values["--runs-dir"] ?? process.env.QDS_RUNS_DIR?.trim() ?? ".sandbox/runs",
-    ledgerPath: values["--ledger"] ?? process.env.QDS_COST_LEDGER_FILE ?? ".sandbox/cost-ledger.db",
+    runsDir: values["--runs-dir"] ?? envPath(process.env.QDS_RUNS_DIR) ?? ".sandbox/runs",
+    ledgerPath: values["--ledger"] ?? envPath(process.env.QDS_COST_LEDGER_FILE) ?? ".sandbox/cost-ledger.db",
     dispatchLogPath: values["--dispatch-log"] ?? DEFAULT_DISPATCH_LOG,
     importsFile: values["--imports-file"],
     snapshotsDir: values["--snapshots-dir"] ?? ".sandbox/kpi-snapshots",
@@ -242,78 +235,6 @@ function resolveRepoSlug(flagValue: string | undefined): string | undefined {
   const git = spawnSync("git", ["remote", "get-url", "origin"], { encoding: "utf8" });
   if (git.status !== 0 || typeof git.stdout !== "string") return undefined;
   return repoSlugFromRemoteUrl(git.stdout) ?? undefined;
-}
-
-/**
- * Append-only snapshot write, the run-record temp+rename idiom (F-001): bytes
- * land in a unique temp file (wx 0600) in the snapshots dir, are fsynced, and
- * only then rename onto the immutable ms-stamped FINAL name — the final name
- * only ever appears complete. A crash or ENOSPC mid-write strands only the
- * temp, unlinked best-effort on every pre-rename failure, so no truncated
- * file ever persists under the final name. A same-ms collision with an
- * existing final name refuses fail-loud (kpi-snapshot-exists, AC5 — a prior
- * snapshot is never overwritten or mutated). The write loop carries the
- * 0-return guard (a writeSync accepting 0 bytes would spin forever).
- */
-export function writeSnapshot(snapshotsDir: string, payload: KpiSnapshotPayload, now: Date): string {
-  mkdirSync(snapshotsDir, { recursive: true, mode: 0o700 });
-  const stamp = now.toISOString().replace(/[:.]/g, "-");
-  const finalPath = join(snapshotsDir, `${stamp}.json`);
-  const tempPath = join(snapshotsDir, `.${stamp}.tmp-${process.pid}-${randomUUID()}`);
-  const bytes = Buffer.from(stableStringify(payload), "utf8");
-  let fd: number | undefined;
-  try {
-    fd = openSync(tempPath, "wx", 0o600);
-    let off = 0;
-    while (off < bytes.length) {
-      const n = writeSync(fd, bytes, off, bytes.length - off);
-      if (n <= 0) {
-        throw new KpiScriptError(
-          "kpi-snapshot-write-failed",
-          `snapshot temp write accepted 0 of ${bytes.length - off} bytes`,
-          "re-run — the temp file is removed and the final name was never touched",
-        );
-      }
-      off += n;
-    }
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = undefined;
-    if (existsSync(finalPath)) {
-      throw new KpiScriptError(
-        "kpi-snapshot-exists",
-        `snapshot ${finalPath} already exists — same-millisecond filename collision; a prior snapshot is never overwritten or mutated (AC5)`,
-        "re-run — the next millisecond mints a fresh filename; prior snapshots are immutable",
-      );
-    }
-    renameSync(tempPath, finalPath);
-  } catch (e) {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // already closed — nothing to leak
-      }
-    }
-    try {
-      unlinkSync(tempPath);
-    } catch {
-      // best-effort: the temp name is unique per attempt, never the final name
-    }
-    if (e instanceof KpiScriptError) throw e;
-    const code = (e as NodeJS.ErrnoException).code;
-    throw new KpiScriptError("kpi-snapshot-write-failed", `cannot write snapshot ${finalPath} (${code ?? (e as Error).message})`, "check the snapshots directory's permissions and re-run");
-  }
-  // Best-effort directory sync (run-record's fsyncDir posture): a platform that
-  // refuses it must not fail a durable-enough file.
-  try {
-    const dirFd = openSync(snapshotsDir, "r");
-    fsyncSync(dirFd);
-    closeSync(dirFd);
-  } catch {
-    // Hygiene only.
-  }
-  return finalPath;
 }
 
 /**
@@ -367,6 +288,16 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
     let recordsSkipped: number | "absent" = "absent";
     let recordsUndated: number | "absent" = "absent";
     let runsDirAbsent = true;
+    // R2-11: BOTH ENOENT origins — statSync (dir absent) and listWithAnomalies
+    // (dir vanished between stat and list) — funnel through one reset so
+    // recordsStoreAbsent and the records_skipped/undated typing never disagree
+    // in one payload.
+    const markRunsAbsent = (): void => {
+      runsDirAbsent = true;
+      recordsSkipped = "absent";
+      recordsUndated = "absent";
+      records = [];
+    };
     try {
       statSync(opts.runsDir);
       runsDirAbsent = false;
@@ -385,10 +316,13 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
       });
       recordsUndated = undated;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") markRunsAbsent();
+      else throw e;
     }
 
-    // Dispatch log: window-filtered by entry timestamp (unparseable kept).
+    // Dispatch log: window-filtered by entry timestamp (unparseable kept). The
+    // FULL read rides the input as dispatchFull — computeRetryStats derives the
+    // restart baseline over store chronology, not the window-filtered order (R2-05).
     const dispatchLog = readDispatchLog(opts.dispatchLogPath);
     const dispatch = dispatchLog.status === "present"
       ? { status: "present" as const, entries: dispatchLog.entries.filter((en) => !Number.isNaN(Date.parse(en.timestamp)) ? inWindow(en.timestamp) : true) }
@@ -438,6 +372,7 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
     try {
       payload = assembleSnapshot({
         window, records, recordsSkipped, recordsUndated, recordsStoreAbsent: runsDirAbsent, dispatch,
+        dispatchFull: dispatchLog,
         factorySpendRows, gatewayImport, dimensions, audit: { status: "absent" },
       });
     } catch (e) {

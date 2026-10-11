@@ -17,7 +17,9 @@
  *   the resolution path (resolveBankId → provisioned-family signature) runs
  *   for real and the recorded bankId is the one the live arm targets.
  * - Wall-capped (retain-best-effort F17): a late rejection surfaces as a skip
- *   line, never an unhandled rejection or a changed exit code.
+ *   line, never an unhandled rejection or a changed exit code. A post-cap
+ *   `retain-delivered` certifies a REAL delivery (R2-01) — only a retain call
+ *   that resolved emits it; late skips/failures never claim one.
  */
 import { appendFileSync } from "node:fs";
 
@@ -49,6 +51,12 @@ export async function retainSnapshot(
     skipLine("retain-skipped", "Hindsight env not configured (HINDSIGHT_BASE_URL + token) — snapshot written, retain skipped");
     return;
   }
+  let timedOut = false;
+  // R2-01: `delivered` certifies an ACTUAL delivery — set only after
+  // client.retain resolves. A post-cap body settlement that was a skip
+  // (unprovisioned banks, no slug) or a suppressed late failure is NOT a
+  // delivery and must never emit retain-delivered.
+  let delivered = false;
   const retainOnce = async (): Promise<void> => {
     try {
       if (repoSlug === undefined || repoSlug.length === 0) {
@@ -93,13 +101,13 @@ export async function retainSnapshot(
         source: "agent",
         tags: ["kpi-snapshot", windowId],
       });
+      delivered = true;
     } catch (e) {
       // Best-effort contract: no throw escapes. After the wall cap already
       // surfaced retain-timeout, a late rejection stays swallowed (F17).
       if (!timedOut) skipLine("retain-failed", ((e as Error)?.message ?? String(e)).slice(0, 200) || "the retain call failed");
     }
   };
-  let timedOut = false;
   const body = retainOnce();
   body.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -119,11 +127,13 @@ export async function retainSnapshot(
   } finally {
     clearTimeout(timer);
   }
-  // F-024: a body that lands after the cap is a DELIVERED document, not just a
-  // timeout line — the documentId is idempotent, so the late write is a no-op
-  // replace, never a duplicate. (retainOnce never rejects: it catches its own.)
+  // F-024/R2-01: a body that lands after the cap emits the success-class line
+  // ONLY when the retain call actually resolved — the documentId is idempotent,
+  // so a real late delivery is a no-op replace, never a duplicate; a late
+  // skip/failure already emitted its own line (or none, post-cap by the F17
+  // contract) and claims no delivery. (retainOnce never rejects: it catches its own.)
   void body.then(() => {
-    if (timedOut) {
+    if (timedOut && delivered) {
       skipLine("retain-delivered", "the retain landed after the wall cap (idempotent documentId — no duplicate)");
     }
   });
