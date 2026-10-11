@@ -2029,7 +2029,25 @@ describe("buildIdFileInputs", () => {
       // on the final tree; the publish/adoption half is unchanged — still no
       // image exists to adopt (37917090552's refusal predates this), so the
       // offline half moves alone, same shape as the open pairing above.
-            "7d4002dc7fc236c0a42e885b31f5fad77ad3d37064291dee67ef8348ee9870b8",
+      // f8835759: a5 coverage-gate widening (C9) — again the only walked input
+      // that moved is `package.json` (tests/kpi joined the check:coverage run;
+      // bunfig.coverage.toml's 2026-10-11 block). src/kpi/**, scripts/qds-kpi.ts
+      // and scripts/lib/kpi-retain.ts are NOT walked — none is a COPY'd asset —
+      // so the story's no-image-pin claim holds for the feature code; only the
+      // gate-scope edit moved the set. Received from this test's own failing run
+      // on the final tree; the publish/adoption half is unchanged — still no
+      // image exists to adopt, so the offline half moves alone again.
+      // e2dc33cd: a5 review-round fix commits (e3756647, 3bf8fd04) moved it
+      // again — the walk granularity bit: oci/exedev/Dockerfile COPYs
+      // scripts/lib/ as a DIRECTORY (:278), so scripts/lib/kpi-snapshot-write.ts
+      // (new, the R2-02 write-leg split) entered the set and kpi-retain.ts's
+      // round-1/2 rewrites moved its bytes. src/kpi/** (incl. dimensions.ts)
+      // is still NOT walked — no COPY line reaches it. The story's
+      // engine-reachability claim holds for the feature code; the
+      // scripts/lib/ splits are the walked delta. Received from this test's
+      // own failing run on the final tree; publish/adoption still owed
+      // operator-side (no image exists to adopt).
+            "e2dc33cdab2f81d629295c89988dc889d3a00638052638a9dd266f7e6932d67f",
     );
   });
 });
