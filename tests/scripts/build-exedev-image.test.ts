@@ -2037,7 +2037,17 @@ describe("buildIdFileInputs", () => {
       // gate-scope edit moved the set. Received from this test's own failing run
       // on the final tree; the publish/adoption half is unchanged — still no
       // image exists to adopt, so the offline half moves alone again.
-            "f8835759c2d133ea9e2e30479dddd2dea72444ea7fee20673a38ffe28985cd98",
+      // e2dc33cd: a5 review-round fix commits (e3756647, 3bf8fd04) moved it
+      // again — the walk granularity bit: oci/exedev/Dockerfile COPYs
+      // scripts/lib/ as a DIRECTORY (:278), so scripts/lib/kpi-snapshot-write.ts
+      // (new, the R2-02 write-leg split) entered the set and kpi-retain.ts's
+      // round-1/2 rewrites moved its bytes. src/kpi/** (incl. dimensions.ts)
+      // is still NOT walked — no COPY line reaches it. The story's
+      // engine-reachability claim holds for the feature code; the
+      // scripts/lib/ splits are the walked delta. Received from this test's
+      // own failing run on the final tree; publish/adoption still owed
+      // operator-side (no image exists to adopt).
+            "e2dc33cdab2f81d629295c89988dc889d3a00638052638a9dd266f7e6932d67f",
     );
   });
 });
