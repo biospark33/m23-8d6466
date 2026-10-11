@@ -649,7 +649,7 @@ describe("assembleSnapshot — determinism (AC5 payload purity)", () => {
   });
 
   test("payload carries no snapshot_path / wall-clock / invocation-order field", () => {
-    const p = assembleSnapshot(richInput()) as unknown as Record<string, unknown>;
+    const p = assembleSnapshot(richInput());
     for (const banned of ["snapshot_path", "generatedAt", "writtenAt", "invocation", "duration_ms"]) {
       expect(banned in p).toBe(false);
     }
@@ -771,9 +771,12 @@ function childEnv(over: Record<string, string> = {}): Record<string, string> {
 const runKpi = (args: string[], opts: SpawnSyncOptions = {}): ReturnType<typeof spawnSync> =>
   spawnSync(KPI_CLI, args, { timeout: 30_000, ...opts });
 
+/** A snapshot file this suite's own child CLI just wrote, parsed — a parse failure IS the test failing loudly. */
+const readSnapshot = (path: string): ReturnType<typeof assembleSnapshot> => JSON.parse(readFileSync(path, "utf8")) as ReturnType<typeof assembleSnapshot>; // dp:ok parses bytes this suite's own child CLI just wrote; a parse failure is the test failing loudly
+
 /** stdout JSON log lines, parsed — the observability contract's surface. */
 const logLines = (res: ReturnType<typeof spawnSync>): Record<string, unknown>[] =>
-  res.stdout.toString().split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
+  res.stdout.toString().split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>); // dp:ok parses this child CLI's own stdout log lines; a parse failure is the test failing loudly
 const obsLine = (res: ReturnType<typeof spawnSync>): Record<string, unknown> => {
   const found = logLines(res).find((l) => l.operation === "kpi-snapshot-written");
   if (found === undefined) throw new Error(`no kpi-snapshot-written line in:\n${res.stdout.toString()}`);
@@ -860,7 +863,7 @@ describe("qds-kpi CLI — e2e seeded arm (both import arms, AC5 + e2e slice)", (
     const snapPath = join(root, ".sandbox", "kpi-snapshots", files[0] as string);
     expect(statSync(snapPath).mode & 0o777).toBe(0o600);
     expect(statSync(join(root, ".sandbox", "kpi-snapshots")).mode & 0o777).toBe(0o700);
-    const p = JSON.parse(readFileSync(snapPath, "utf8")) as ReturnType<typeof assembleSnapshot>;
+    const p = readSnapshot(snapPath);
     expect(p.window.window_id).toBe("20261001-20261008");
     expect(p.kpis.map((k) => [k.name, k.direction])).toEqual([
       ["tdi_proxy", "down"], ["cost_per_story", "down"], ["first_pass_accept", "up"], ["retry_rate", "down"],
@@ -892,7 +895,7 @@ describe("qds-kpi CLI — e2e seeded arm (both import arms, AC5 + e2e slice)", (
     const res = runKpi(["--window", "7d"], { cwd: root, env: childEnv({ QDS_KPI_NOW: T0.toISOString() }) });
     expect(res.status).toBe(0);
     const files = readdirSync(join(root, ".sandbox", "kpi-snapshots"));
-    const p = JSON.parse(readFileSync(join(root, ".sandbox", "kpi-snapshots", files[0] as string), "utf8")) as ReturnType<typeof assembleSnapshot>;
+    const p = readSnapshot(join(root, ".sandbox", "kpi-snapshots", files[0] as string));
     expect(p.spend.spend_incomplete).toBe(true);
     expect(p.spend.gateway_micro_usd_total).toBeNull();
     expect(p.spend.gateway_row_count).toBeNull();
@@ -961,7 +964,7 @@ describe("qds-kpi CLI — idempotent retain (AC5, capture seam)", () => {
     QDS_KPI_RETAIN_CAPTURE: capturePath,
   });
   const captureLines = (): Record<string, unknown>[] =>
-    readFileSync(capturePath, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as Record<string, unknown>);
+    readFileSync(capturePath, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as Record<string, unknown>); // dp:ok parses the capture file this suite's own retain seam just wrote; a parse failure is the test failing loudly
 
   test("two invocations over unchanged window data → SAME documentId, replace mode, identical content hash", () => {
     seedSandbox(root, T0, true);
@@ -1073,7 +1076,7 @@ describe("qds-kpi CLI — store-absent arms (absence typed, stores never created
     expect(() => statSync(join(root, ".sandbox", "runs"))).toThrow();
     const files = readdirSync(join(root, ".sandbox", "kpi-snapshots"));
     expect(files).toHaveLength(1);
-    const p = JSON.parse(readFileSync(join(root, ".sandbox", "kpi-snapshots", files[0] as string), "utf8")) as ReturnType<typeof assembleSnapshot>;
+    const p = readSnapshot(join(root, ".sandbox", "kpi-snapshots", files[0] as string));
     for (const k of p.kpis) expect(k.value.status).toBe("absent");
     expect(p.run_accounting.records_skipped).toBe("absent");
     for (const d of p.dimensions) expect(d.status).toBe("absent");
@@ -1088,7 +1091,7 @@ describe("qds-kpi CLI — store-absent arms (absence typed, stores never created
     const res = runKpi(["--window", "7d"], { cwd: root, env: childEnv({ QDS_KPI_NOW: T0.toISOString() }) });
     expect(res.status).toBe(0);
     const files = readdirSync(join(root, ".sandbox", "kpi-snapshots"));
-    const p = JSON.parse(readFileSync(join(root, ".sandbox", "kpi-snapshots", files[0] as string), "utf8")) as ReturnType<typeof assembleSnapshot>;
+    const p = readSnapshot(join(root, ".sandbox", "kpi-snapshots", files[0] as string));
     // Pinned semantics: factory-known keys = 0 → no key can match and none are "missing";
     // every import row is UNMATCHED and the join is flagged incomplete either way.
     expect(p.spend).toMatchObject({

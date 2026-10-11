@@ -391,7 +391,7 @@ export async function run(argv: readonly string[], out: (s: string) => void = (s
       const reports: AuditReportLike[] = [];
       for (const r of terminal.slice(0, AUDIT_WALK_CAP)) {
         try {
-          reports.push((await walkAuditChain(r.runId, { runsDir: opts.runsDir, auditDb: opts.auditDbPath, requestId, hopCeilingMs: AUDIT_HOP_CEILING_MS })) as unknown as AuditReportLike);
+          reports.push(await walkAuditChain(r.runId, { runsDir: opts.runsDir, auditDb: opts.auditDbPath, requestId, hopCeilingMs: AUDIT_HOP_CEILING_MS }));
           auditWalked++;
         } catch {
           auditFailed++; // ChainWalkError or any walk fault: that run contributes nothing.

@@ -44,38 +44,48 @@ export async function retainSnapshot(
     return;
   }
   const retainOnce = async (): Promise<void> => {
-    if (repoSlug === undefined || repoSlug.length === 0) {
-      skipLine("retain-skipped", "no repo slug resolvable (--repo / $QDS_REPO_SLUG / git remote origin) — the retain's bank is unknown");
-      return;
+    try {
+      if (repoSlug === undefined || repoSlug.length === 0) {
+        skipLine("retain-skipped", "no repo slug resolvable (--repo / $QDS_REPO_SLUG / git remote origin) — the retain's bank is unknown");
+        return;
+      }
+      const documentId = `kpi-snapshot-${windowId}-${payloadHashHex(payload).slice(0, 12)}`;
+      const capturePath = process.env.QDS_KPI_RETAIN_CAPTURE;
+      const client: Pick<HindsightClient, "listBanks" | "retain"> =
+        capturePath !== undefined
+          ? {
+              listBanks: async () => {
+                const base = resolveBankId(repoSlug);
+                return { banks: [base, `${base}-dev-meta`] };
+              },
+              retain: async (bankId, content, metadata) => {
+                // `content` is stableStringify(payload) one frame up; hashing
+                // `payload` directly is the same bytes (payloadHashHex
+                // re-serializes stably) without a JSON round-trip.
+                appendFileSync(capturePath, `${JSON.stringify({ bankId, documentId: metadata?.documentId, content_sha256: payloadHashHex(payload), content_bytes: content.length, metadata })}\n`);
+                return { memoryId: "", bankId, status: "created" as const, durationMs: 0 };
+              },
+            }
+          : new HindsightClient();
+      const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), extractExistingBankIds(await client.listBanks()));
+      if (repoBankId === null) {
+        skipLine("retain-skipped", `memory banks are not provisioned for repo ${repoSlug}`);
+        return;
+      }
+      await client.retain(repoBankId, stableStringify(payload), {
+        documentId,
+        updateMode: "replace",
+        kind: "observation",
+        source: "agent",
+        tags: ["kpi-snapshot", windowId],
+      });
+    } catch (e) {
+      // Best-effort contract: no throw escapes. After the wall cap already
+      // surfaced retain-timeout, a late rejection stays swallowed (F17).
+      if (!timedOut) skipLine("retain-failed", ((e as Error)?.message ?? String(e)).slice(0, 200) || "the retain call failed");
     }
-    const documentId = `kpi-snapshot-${windowId}-${payloadHashHex(payload).slice(0, 12)}`;
-    const capturePath = process.env.QDS_KPI_RETAIN_CAPTURE;
-    const client: Pick<HindsightClient, "listBanks" | "retain"> =
-      capturePath !== undefined
-        ? {
-            listBanks: async () => {
-              const base = resolveBankId(repoSlug);
-              return { banks: [base, `${base}-dev-meta`] };
-            },
-            retain: async (bankId, content, metadata) => {
-              appendFileSync(capturePath, `${JSON.stringify({ bankId, documentId: metadata?.documentId, content_sha256: payloadHashHex(JSON.parse(content)), content_bytes: content.length, metadata })}\n`);
-              return { memoryId: "", bankId, status: "created" as const, durationMs: 0 };
-            },
-          }
-        : new HindsightClient();
-    const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), extractExistingBankIds(await client.listBanks()));
-    if (repoBankId === null) {
-      skipLine("retain-skipped", `memory banks are not provisioned for repo ${repoSlug}`);
-      return;
-    }
-    await client.retain(repoBankId, stableStringify(payload), {
-      documentId,
-      updateMode: "replace",
-      kind: "observation",
-      source: "agent",
-      tags: ["kpi-snapshot", windowId],
-    });
   };
+  let timedOut = false;
   const body = retainOnce();
   body.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -84,6 +94,7 @@ export async function retainSnapshot(
       body,
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
+          timedOut = true;
           skipLine("retain-timeout", `the retain exceeded its ${RETAIN_WALL_MS}ms wall-clock cap`);
           resolve();
         }, RETAIN_WALL_MS);

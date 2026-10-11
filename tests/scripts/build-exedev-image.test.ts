@@ -2029,7 +2029,15 @@ describe("buildIdFileInputs", () => {
       // on the final tree; the publish/adoption half is unchanged — still no
       // image exists to adopt (37917090552's refusal predates this), so the
       // offline half moves alone, same shape as the open pairing above.
-            "7d4002dc7fc236c0a42e885b31f5fad77ad3d37064291dee67ef8348ee9870b8",
+      // f8835759: a5 coverage-gate widening (C9) — again the only walked input
+      // that moved is `package.json` (tests/kpi joined the check:coverage run;
+      // bunfig.coverage.toml's 2026-10-11 block). src/kpi/**, scripts/qds-kpi.ts
+      // and scripts/lib/kpi-retain.ts are NOT walked — none is a COPY'd asset —
+      // so the story's no-image-pin claim holds for the feature code; only the
+      // gate-scope edit moved the set. Received from this test's own failing run
+      // on the final tree; the publish/adoption half is unchanged — still no
+      // image exists to adopt, so the offline half moves alone again.
+            "f8835759c2d133ea9e2e30479dddd2dea72444ea7fee20673a38ffe28985cd98",
     );
   });
 });

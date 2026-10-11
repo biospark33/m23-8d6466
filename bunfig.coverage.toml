@@ -119,6 +119,15 @@
 # `src/reverify/redaction.ts` to 100/100; `github.test.ts` covers the
 # `src/pr/github.ts` its sibling drags in). Re-measured floor on the widened
 # run: every file in scope clears 0.60.
+#
+# A5 (2026-10-11) added `tests/kpi` to the run at story time, before the same
+# run-vs-measured artifact could happen to it: `src/kpi/join.ts` / `kpis.ts` /
+# `schema.ts` are covered only by tests/kpi, and without the dir in the run
+# they would score on transitive drag alone. `scripts/qds-kpi.ts` is argv
+# plumbing and stays under the existing `scripts/*.ts` exclusion;
+# `scripts/lib/kpi-retain.ts` is not imported by any test in this run, so it
+# does not enter the drag set (its behavior is exercised through spawned-child
+# e2e arms, which coverage cannot score — same shape as scripts/qds-cost.ts).
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 

@@ -92,8 +92,8 @@ export function readGatewaySpendImport(path: string): GatewayImport {
   }
   const rows: GatewaySpendRow[] = [];
   const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = (lines[i] ?? "").trim();
+  for (const [i, raw] of lines.entries()) {
+    const line = raw.trim();
     if (line === "") continue; // blank + trailing-newline lines tolerated
     let parsed: unknown;
     try {
@@ -151,8 +151,8 @@ export function readDispatchLog(path: string): DispatchLog {
   }
   const entries: DispatchEntry[] = [];
   const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = (lines[i] ?? "").trim();
+  for (const [i, raw] of lines.entries()) {
+    const line = raw.trim();
     if (line === "") continue;
     let parsed: unknown;
     try {
