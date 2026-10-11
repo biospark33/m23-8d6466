@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6b — Autonomy (A-epic; E21-independent, lane-2 — runs on v6a artifacts + local stores only)
-**Status:** ready-for-dev — pre-dev campaign (qds-story-review) runs before any dev lane starts
+**Status:** done — PR #423 merged to dev 2026-10-11 (e9052bb9); CodeRabbit full review approved; branch pruned
 
 > **Decisions of record (NET-NEW — flag for the DD-14+ register):**
 > **(1) Gateway-spend import artifact.** DD-20 joins BOTH spend ledgers (zeropoint LLM-gateway for Home-bot
@@ -153,3 +153,51 @@ so that M3.2's weekly reflect reads measured curves instead of vibes, and no KPI
 ## Dev Agent Record
 
 *(written at implementation time, not at spec time.)*
+
+### Review Findings (bmad-code-review round 1, 2026-10-11)
+
+24 findings triaged, all PATCH, 0 dismiss/defer/decision. Full triage: `_bmad-output/reviews/a5/round-1/triage.json`; layer reports in `round-1/reports/`. Highlights:
+
+- [ ] [Review][Patch] writeSnapshot lacks temp+rename leg + 0-return guard — crash strands truncated immutable snapshot (F-001, HIGH)
+- [ ] [Review][Patch] KNOWN_RESTART_CODES invents code names; real refuse() vocabulary unclassified → counter 1.0 on healthy fleet (F-002, HIGH)
+- [ ] [Review][Patch] retry/restart attempt model inconsistent on repeated-requestId inputs (F-003/F-004)
+- [ ] [Review][Patch] join_key literal asserts botId never compared (F-005); duplicate import rows double-count money (F-006)
+- [ ] [Review][Patch] --help unreachable through run(); garbage QDS_KPI_NOW blocks help (F-008)
+- [ ] [Review][Patch] undated record timestamps vanish silently (F-009); capture-env empty-string misconfig (F-010); corrupt routing lines skipped (F-011); bunfig note contradicts tree (F-007); buildId deviation unregistered (F-012)
+- [ ] [Review][Patch] LOWs: event key (F-013), fused e2e retain (F-014), fixRun denominator pin (F-015), non-string class (F-016), aggregate safe-int (F-017), huge-window refuse (F-018), capture truncation (F-019), integer floor (F-020), joinSpend index (F-021), append-only test clock race (F-022), retrySources absent-omit (F-023), retain late-delivery line (F-024)
+
+### Review Findings (round 2, 2026-10-11)
+
+24/24 round-1 fixes verified by the auditor. Round-2 triage: 11 findings (7 MED, 4 LOW, 0 HIGH) — all PATCH. Triage: `_bmad-output/reviews/a5/round-2/triage.json`.
+
+- [ ] [Review][Patch] retain-delivered false success on late skip/failure; delivered flag only after real retain (R2-01)
+- [ ] [Review][Patch] same-ms collision guard TOCTOU → atomic linkSync claim (R2-02)
+- [ ] [Review][Patch] cross-ledger money sum unguarded past 2^53 (R2-03)
+- [ ] [Review][Patch] negative import money refused + sign-correct floorDiv (R2-04)
+- [ ] [Review][Patch] restart baseline over store chronology, not window-filtered array (R2-05)
+- [ ] [Review][Patch] dispatch-log torn-tail tolerance (symmetry with routing log) (R2-06)
+- [ ] [Review][Patch] set-but-empty path envs shadow defaults (R2-07)
+- [ ] [Review][Patch] LOWs: fill fan-out cap (R2-08), import-dir posture doc (R2-09), snapshots-dir mode assert (R2-10), runs-dir ENOENT consistency (R2-11)
+
+## Dev Agent Record (2026-10-11)
+
+**Orchestration:** qds-dev full pipeline, unlazy orchestrated mode (`.unlazy/a5/`), GitNexus reindexed to 63dba5af before work. Research: 6 parallel tracks (context7/codebase/examples/specs/deps/crosstrack), confidence 0.95 auto-approved. Implementation: 2 leaves (kpi core; CLI+e2e) + driver gate node, TDD inside each leaf, subagents targeted-checks-only per operator directive.
+
+**Branch/commits:** `feature/a5-yield-kpis-goodhart` from dev @ 63dba5af — b0f1ad97 (impl), 423357b3 (DP hardening 12 findings + coverage widening C9), f3ffabf2 (self-review F1-F5 + retain in-process coverage), e3756647 (bmad-code-review R1: 24/24), 3bf8fd04 (R2: 11/11), 47d52c2f (buildId digest adoption).
+
+**Files:** src/kpi/{join,kpis,schema,dimensions}.ts, scripts/qds-kpi.ts, scripts/lib/{kpi-retain,kpi-snapshot-write}.ts, tests/kpi/yield.test.ts (115 tests) — all new; zero diff on frozen stores (link-store, gate-runner, classifyRunExit, classifyDiffScope, AUDIT_HOPS, provider layer).
+
+**Review rounds (bmad-code-review, 3 layers/round):** R1 = 24 findings (2 HIGH), all patched. R2 = auditor verified 24/24 fixed; 11 residuals (7 MED, 4 LOW, 0 HIGH), all patched. Stop rule met — no HIGHs standing → no round 3. Plus pre-PR self-review (5 findings incl. the INV-A5-1 audit-walk HIGH) and DP scanner (12 → 0). Triage ledgers: `_bmad-output/reviews/a5/round-{1,2}/`.
+
+**Gates:** focal suite 115/0; tsc 0; biome repo-wide 0; DP scanner 0; coverage floors pass (kpi-retain 77.78/87.50 after in-process lift; src/kpi ≥94.6); ONE full-suite branch gate run: 7,810 tests, 7,809 pass, sole failure = buildId digest pin stale (scripts/lib/ is a directory-COPY'd walked set; adopted e2dc33cd in 47d52c2f, suite 250/0 after) — the cap-hit-demo timing flake did NOT fire in the final run.
+
+**Recorded deviations/interpretations (also in PLAN rev log + PR body):**
+1. Retain = direct `client.retain` (not `retainRunOutcome` — RUN_ID_RE hard-codes runId vocabulary), documentId `kpi-snapshot-<windowId>-<hash12>`, into `{baseId}-dev-meta`, best-effort env-gated so the curve is offline-green; retain arms proven via capture seam + slow-server wall-cap arms.
+2. AC3's audit-walk parenthetical interpreted away under INV-A5-1: walkAuditChain persists first-observation digests (chain.ts:1607) + can fetch PRs — audit component typed absent with the invariant conflict named; returns when a read-only walk mode exists upstream.
+3. botId preserved-not-matched (no factory-side bot identity exists; registry verified); join_key literal = "workKey+runId" with the canonical triple documented.
+4. Terminal = closedAt set; accepted = approval.state approved; fixRun-marked records excluded from terminal/accepted denominators (attempts, not stories).
+5. QDS_KPI_NOW + QDS_KPI_RETAIN_CAPTURE test seams; same-ms collision = atomic link-claim fail-loud; runId-null import fill capped at one factory row.
+6. buildId digest moved twice (package.json gate-scope edit; scripts/lib/ directory-COPY swallows the split files) — adopted in-commit per ritual; image publish/adoption owed operator-side (no image exists to adopt).
+7. Visualizer render not built (optional AC per charter); M3.2 consumes the closed snapshot schema.
+
+**Coverage-gate widening (C9):** tests/kpi joined check:coverage RUN; bunfig.coverage.toml docblock documents the run-vs-measured rationale.
