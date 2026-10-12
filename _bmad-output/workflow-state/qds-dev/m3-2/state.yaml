@@ -1,0 +1,16 @@
+story: m3-2
+branch: feature/m3-2-l4-weekly-reflect-propose
+base: dev@87cb235b
+phase: gates-green-awaiting-review-rounds
+unlazy_scope: m3-2
+leaves:
+  leaf-1.1.1: verified
+  leaf-1.1.2: verified
+  leaf-1.2.1: verified
+  leaf-1.3.1: verified
+  node-1.1: verified
+  node-2.1: pending-final-gate-pass
+review:
+  round-0-selfreview: 9 findings, all dispositioned (fixed: 1 MED + 5 LOW; documented: #2 #3 #8)
+tests: tests/learning 77/0; tsc clean; biome clean
+next: bmad-code-review rounds 1-2 (fix all incl lows; round 3 only if highs) -> commit -> PR to dev
