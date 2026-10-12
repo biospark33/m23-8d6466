@@ -57,13 +57,21 @@ export function isoWeekOf(d: Date): string {
 /** UTC start (Monday 00:00:00.000Z, ms) of an ISO-8601 week label — the inverse
  *  half of `isoWeekOf`: every instant in `[isoWeekStartUtc(w), isoWeekStartUtc(w) + 7d)`
  *  labels back to `w`. Same Jan-4 anchoring (Jan 4 is always in week 1). A label
- *  outside ISO_WEEK_RE is a programmer error here (callers validate first) — throw. */
+ *  outside ISO_WEEK_RE, or a well-formed label naming a week that does not exist
+ *  in its year (2027-W53 — 2027 has 52 ISO weeks; its computed Monday labels back
+ *  to 2028-W01), throws: a window built from it would misattribute evidence. */
 export function isoWeekStartUtc(week: string): number {
   const m = /^([1-9]\d{3})-W(0[1-9]|[1-4]\d|5[0-3])$/.exec(week);
   if (m === null) throw new Error(`isoWeekStartUtc: "${week}" is not an ISO week label (YYYY-Wnn)`);
   const jan4 = new Date(Date.UTC(Number(m[1]), 0, 4));
   const week1Monday = jan4.getTime() - ((jan4.getUTCDay() || 7) - 1) * 86_400_000;
-  return week1Monday + (Number(m[2]) - 1) * 7 * 86_400_000;
+  const start = week1Monday + (Number(m[2]) - 1) * 7 * 86_400_000;
+  if (isoWeekOf(new Date(start)) !== week) {
+    throw new Error(
+      `isoWeekStartUtc: "${week}" names a week that does not exist in that year (the computed Monday labels back to ${isoWeekOf(new Date(start))})`,
+    );
+  }
+  return start;
 }
 
 // ─── proposal schema (AC2 refinement) ────────────────────────────────────────

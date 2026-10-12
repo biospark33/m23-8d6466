@@ -297,4 +297,14 @@ describe("isoWeekStartUtc", () => {
     expect(() => isoWeekStartUtc("2026-13")).toThrow(/ISO week label/);
     expect(() => isoWeekStartUtc("")).toThrow(/ISO week label/);
   });
+
+  test("nonexistent W53 in a 52-week year throws — its Monday labels back to the next year's W01", () => {
+    expect(() => isoWeekStartUtc("2027-W53")).toThrow(/does not exist/); // 2027-W53 → 2028-01-03 = 2028-W01
+    expect(() => isoWeekStartUtc("2021-W53")).toThrow(/does not exist/); // 2021-W53 → 2022-01-03 = 2022-W01
+  });
+
+  test("existing W53 rounds through — 2026 and 2020 have 53 ISO weeks", () => {
+    expect(isoWeekOf(new Date(isoWeekStartUtc("2026-W53")))).toBe("2026-W53");
+    expect(isoWeekOf(new Date(isoWeekStartUtc("2020-W53")))).toBe("2020-W53");
+  });
 });

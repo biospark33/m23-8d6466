@@ -30,8 +30,10 @@
  * ```
  *
  * Exit contract:
- *   0 — every bank reflected and every composed proposal landed (the job's
- *       `ok`), or a --help/-h request answered with the usage text
+ *   0 — every bank reflected, no landing fault occurred, and at least one
+ *       proposal landed or none was composed (the job's `ok` — a partial
+ *       divergence beside a landing exits 0), or a --help/-h request
+ *       answered with the usage text
  *   1 — job failures (any bank_failed, a retain/store fault, or an
  *       unexpected thrown fault), a firing where proposals were composed but
  *       NONE landed — a detected divergence (PROPOSAL_DIVERGENT) fails the
@@ -79,10 +81,10 @@ import { HindsightClient } from "../src/hindsight/client.ts";
 import { BankIdSchema, resolveBankId } from "../src/hindsight/schemas.ts";
 import {
   isoWeekOf,
+  isoWeekStartUtc,
   runWeeklyReflect,
   type WeeklyReceipt,
 } from "../src/learning/index.ts";
-import { ISO_WEEK_RE } from "../src/learning/proposal-schema.ts";
 import { memgateDeps } from "../src/memgate/gateway.ts";
 import { setLogSink } from "../src/swarmclaw/log.ts";
 import { MEMGATE_ADMIN_KEY, QDS_MEMGATE_LEDGER, QDS_MEMGATE_SIGNING_KEY } from "../src/memgate/schemas.ts";
@@ -193,16 +195,23 @@ export async function runMemoryWeekly(deps: MemoryWeeklyDeps): Promise<{
       },
     };
   }
-  if (weekArg !== undefined && !ISO_WEEK_RE.test(weekArg)) {
-    return {
-      code: 2,
-      envelope: {
-        ok: false,
-        code: "week-invalid",
-        leg: "crontab",
-        remediation: 'pass --week as an ISO week label like "2026-W41", or omit it to derive from the clock',
-      },
-    };
+  if (weekArg !== undefined) {
+    // isoWeekStartUtc is the existence proof: a syntactically-valid label that
+    // names a week absent from its year (2027-W53 — a 52-week year) is a typo,
+    // not a window — it would misattribute the next year's W01 evidence to it.
+    try {
+      isoWeekStartUtc(weekArg);
+    } catch {
+      return {
+        code: 2,
+        envelope: {
+          ok: false,
+          code: "week-invalid",
+          leg: "crontab",
+          remediation: 'pass --week as an existing ISO week label like "2026-W41", or omit it to derive from the clock',
+        },
+      };
+    }
   }
 
   // 1. CONFIG — fail closed before any bank resolution, seam parse, or gateway state.

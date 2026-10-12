@@ -747,6 +747,12 @@ describe("CLI driver (memory-weekly)", () => {
     expect(badWeek.code).toBe(2);
     if (!("remediation" in badWeek.envelope) || !("code" in badWeek.envelope)) throw new Error("expected refusal envelope");
     expect(badWeek.envelope.code).toBe("week-invalid");
+    // A well-formed label naming a week absent from its year (2027 has 52 ISO
+    // weeks) is the same refusal class — a typo, never a mislabeled window.
+    const ghostWeek = await runMemoryWeekly({ env, argv: ["--week", "2027-W53"] });
+    expect(ghostWeek.code).toBe(2);
+    if (!("code" in ghostWeek.envelope)) throw new Error("expected refusal envelope");
+    expect(ghostWeek.envelope.code).toBe("week-invalid");
   });
 
   test("bank resolution: an unreachable list is code 1 BANK_LIST_UNREACHABLE; a family-less instance is code 2", async () => {
