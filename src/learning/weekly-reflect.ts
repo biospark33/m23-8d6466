@@ -357,11 +357,12 @@ export async function runWeeklyReflect(deps: WeeklyDeps): Promise<WeeklyResult> 
 
   emit(deps, requestId, { event: "weekly-fire", requestId, leg: deps.leg, week: deps.week });
 
-  // 1. GATHER — read-only; absent sources are typed absence, but a CORRUPT source is a typed fault: logged, then
-  //    thrown before any bank work.
+  // 1. GATHER — read-only, scoped to the requested ISO week (a proposal's evidence
+  //    must be the week it reflects); absent sources are typed absence, but a CORRUPT source is a typed fault:
+  //    logged, then thrown before any bank work.
   let evidence: GatheredEvidence;
   try {
-    evidence = gatherEvidence({ routingLogPath: deps.routingLogPath, kpiSnapshotsDir: deps.kpiSnapshotsDir, runsDir: deps.runsDir });
+    evidence = gatherEvidence({ routingLogPath: deps.routingLogPath, kpiSnapshotsDir: deps.kpiSnapshotsDir, runsDir: deps.runsDir, week: deps.week });
   } catch (e) {
     const fault = e instanceof GatherFault
       ? e

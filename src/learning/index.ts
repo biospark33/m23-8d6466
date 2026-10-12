@@ -35,6 +35,7 @@ export {
   RECEIPT_SCHEMA_LITERAL,
   WeeklyReceiptSchema,
   isoWeekOf,
+  isoWeekStartUtc,
 } from "./proposal-schema.ts";
 export type { ProposalKind, ProposalRecord, WeeklyReceipt } from "./proposal-schema.ts";
 

@@ -115,13 +115,13 @@ const routingLine = (runId: string, applied_tier: string, quality: number): Reco
   applied_tier,
   score: { quality },
   jev_recommendation: null,
-  created_at: "2026-09-30T10:00:00.000Z",
+  created_at: "2026-10-08T10:00:00.000Z", // inside the 2026-W41 evidence window (Mon Oct 5 – Sun Oct 11)
 });
 const ROUTING_LOG_TEXT = [
-  routingLine("qds-20260901-000001", "opus", 0.5),
-  routingLine("qds-20260901-000002", "opus", 0.5),
-  routingLine("qds-20260901-000003", "sonnet", 0.8),
-  routingLine("qds-20260901-000004", "sonnet", 0.8),
+  routingLine("qds-20261008-000001", "opus", 0.5),
+  routingLine("qds-20261008-000002", "opus", 0.5),
+  routingLine("qds-20261008-000003", "sonnet", 0.8),
+  routingLine("qds-20261008-000004", "sonnet", 0.8),
 ]
   .map((l) => JSON.stringify(l))
   .join("\n");
@@ -136,7 +136,7 @@ const kpi = (name: string, counter: number): Record<string, unknown> => ({
 const snapshot = (counter = 3): Record<string, unknown> => ({
   schema: "qds.kpi-snapshot",
   schema_version: 1,
-  window: { start: "2026-09-28T00:00:00.000Z", end: "2026-10-05T00:00:00.000Z", window_id: "20260928-20261005" },
+  window: { start: "2026-10-05T00:00:00.000Z", end: "2026-10-12T00:00:00.000Z", window_id: "20261005-20261012" },
   kpis: [kpi("tdi_proxy", 0), kpi("cost_per_story", 0), kpi("first_pass_accept", 0), kpi("retry_rate", counter)],
   spend: {
     join_key: "workKey+runId", factory_micro_usd_total: 0, factory_event_count: 0, gateway_row_count: null,
@@ -161,8 +161,8 @@ function seed(o: { routing?: boolean; kpi?: boolean; runs?: boolean } = {}): { r
   }
   if (o.runs !== false) {
     mkdirSync(runs, { recursive: true });
-    writeFileSync(join(runs, "qds-20260920-120000.json"), JSON.stringify(RUN_RECORD));
-    writeFileSync(join(runs, "qds-20260921-120000.json"), JSON.stringify(RUN_RECORD));
+    writeFileSync(join(runs, "qds-20261009-120000.json"), JSON.stringify(RUN_RECORD));
+    writeFileSync(join(runs, "qds-20261010-120000.json"), JSON.stringify(RUN_RECORD));
   }
   return { routing, kpis, runs };
 }
@@ -911,8 +911,8 @@ s.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ port: s.address().po
     mkdirSync(join(sb, "kpi-snapshots"), { recursive: true });
     writeFileSync(join(sb, "kpi-snapshots", "2026-10-05T00-00-00-000Z.json"), JSON.stringify(snapshot(3)));
     mkdirSync(join(sb, "runs"), { recursive: true });
-    writeFileSync(join(sb, "runs", "qds-20260920-120000.json"), JSON.stringify(RUN_RECORD));
-    writeFileSync(join(sb, "runs", "qds-20260921-120000.json"), JSON.stringify(RUN_RECORD));
+    writeFileSync(join(sb, "runs", "qds-20261009-120000.json"), JSON.stringify(RUN_RECORD));
+    writeFileSync(join(sb, "runs", "qds-20261010-120000.json"), JSON.stringify(RUN_RECORD));
     mkdirSync(join(sb, "proposals"), { recursive: true, mode: 0o700 });
     writeFileSync(join(sb, "proposals", `${OLD_ID}.json`), JSON.stringify({
       schema: "qds.l4-proposal", proposal_id: OLD_ID, kind: "skill-update", week: WEEK,

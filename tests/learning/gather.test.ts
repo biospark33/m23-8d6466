@@ -264,6 +264,83 @@ describe("gatherEvidence — snapshots and run records", () => {
   });
 });
 
+// ─── week window (opts.week) ────────────────────────────────────────────────
+
+// 2026-W41 = Monday 2026-10-05T00:00:00.000Z → Monday 2026-10-12T00:00:00.000Z.
+describe("gatherEvidence — week window", () => {
+  test("routing lines restricted to the week: out-of-window and unparseable created_at excluded, in-window kept", () => {
+    seedRoutingLog([
+      routingLine({ runId: "qds-20261008-000001", created_at: "2026-10-08T10:00:00.000Z" }), // in W41
+      routingLine({ runId: "qds-20261001-000002", created_at: "2026-10-01T10:00:00.000Z" }), // W40
+      routingLine({ runId: "qds-20261012-000003", created_at: "2026-10-12T00:00:00.000Z" }), // W42 (exclusive end)
+      routingLine({ runId: "qds-20261008-000004", created_at: "not-a-date" }), // schema-valid, unattributable
+    ]);
+    const ev = gatherEvidence({ ...pathSet(), week: "2026-W41" });
+    expect(ev.routingLines.map((l) => l.runId)).toEqual(["qds-20261008-000001"]);
+    const unwindowed = gatherEvidence(pathSet());
+    expect(unwindowed.routingLines).toHaveLength(4); // no window = no filtering
+  });
+
+  test("kpi snapshots restricted by the name stamp, window binds BEFORE the recency cap", () => {
+    seedKpiSnapshots({
+      "2026-10-08T00-00-00-000Z.json": { week: "2026-W41" },
+      "2026-10-04T23-59-59-999Z.json": { week: "2026-W40" },
+      "2026-10-12T00-00-00-000Z.json": { week: "2026-W42" },
+      "2026-13-45T00-00-00-000Z.json": { junk: true }, // name passes the loose RE, stamp doesn't round-trip
+    });
+    const ev = gatherEvidence({ ...pathSet(), week: "2026-W41" });
+    expect(ev.kpiSnapshots.map((s) => s.ref)).toEqual(["2026-10-08T00-00-00-000Z.json"]);
+  });
+
+  test("snapshot cap applies within the window only — 52 in-window rows keep the most recent 50", () => {
+    const dir = pathSet().kpiSnapshotsDir;
+    mkdirSync(dir);
+    for (let i = 0; i < 52; i++) {
+      writeFileSync(join(dir, `2026-10-08T00-00-${String(i).padStart(2, "0")}-${String(i).padStart(3, "0")}Z.json`), "{}");
+    }
+    writeFileSync(join(dir, "2026-10-01T00-00-00-000Z.json"), "{}"); // W40 — must not crowd the window
+    const ev = gatherEvidence({ ...pathSet(), week: "2026-W41" });
+    expect(ev.kpiSnapshots).toHaveLength(50);
+    expect(ev.kpiSnapshots.every((s) => s.ref.startsWith("2026-10-08"))).toBe(true);
+  });
+
+  test("run records restricted by the qds-YYYYMMDD name stamp, window binds BEFORE the recency cap", () => {
+    const dir = pathSet().runsDir;
+    mkdirSync(dir);
+    for (let i = 0; i < 52; i++) {
+      writeFileSync(join(dir, `qds-20261008-1200${String(i).padStart(2, "0")}.json`), "{}");
+    }
+    writeFileSync(join(dir, "qds-20261001-120000.json"), "{}"); // W40
+    writeFileSync(join(dir, "qds-20261012-120000.json"), "{}"); // W42
+    const ev = gatherEvidence({ ...pathSet(), week: "2026-W41" });
+    expect(ev.runRecords).toHaveLength(50);
+    expect(ev.runRecords.every((r) => r.ref.startsWith("qds-20261008-"))).toBe(true);
+  });
+
+  test("absent-source reporting preserved with a window set", () => {
+    const ev = gatherEvidence({ ...pathSet(), week: "2026-W41" });
+    expect(ev.absentSources).toEqual([
+      { source: "routing-log", status: "absent" },
+      { source: "kpi-snapshots", status: "absent" },
+      { source: "run-records", status: "absent" },
+    ]);
+    expect(ev.routingLines).toEqual([]);
+  });
+
+  test("torn-tail + corrupt-mid-file semantics unchanged under a window (whole-file parse first, filter after)", () => {
+    seedRoutingLog([
+      routingLine({ created_at: "2026-10-01T10:00:00.000Z" }),
+      "this is not json {",
+      routingLine({ runId: "qds-20261008-000009", created_at: "2026-10-08T10:00:00.000Z" }),
+    ]);
+    expect(() => gatherEvidence({ ...pathSet(), week: "2026-W41" })).toThrow(GatherFault); // out-of-window corrupt line still faults
+  });
+
+  test("malformed week label throws — caller config fault, never a silent empty window", () => {
+    expect(() => gatherEvidence({ ...pathSet(), week: "2026-13" })).toThrow(/ISO week label/);
+  });
+});
+
 // ─── read-only guarantee (C4) ────────────────────────────────────────────────
 
 describe("gatherEvidence — read-only proof", () => {

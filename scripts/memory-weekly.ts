@@ -15,23 +15,29 @@
  * Documented crontab line (verbatim — the operator installs this):
  * ```
  * # Weekly L4 reflect → proposals (M3.2 crontab fallback leg):
- * #   23 6 * * 1 cd /opt/qds-factory && set -a && . /etc/qds/memory-weekly.env && set +a && bun scripts/memory-weekly.ts >> .sandbox/proposals/last-post.log 2>&1
+ * #   23 6 * * 1 cd /opt/qds-factory && set -a && . /etc/qds/memory-weekly.env && set +a && bun scripts/memory-weekly.ts >> .sandbox/proposals/last-post.log 2>> .sandbox/proposals/last-events.log
  * # /etc/qds/memory-weekly.env is operator-provisioned (0600, root) and holds
  * # QDS_MEMORY_WEEKLY_AGENT_TOKEN + the gateway config vars by NAME — the
  * # crontab line itself carries no secrets. The stdout redirect IS the
  * # crontab leg's operator carrier: every proposal's full text lands in
  * # .sandbox/proposals/last-post.log (the job prints it inside the envelope).
- * # NOTE: the shell opens the >> redirect BEFORE the job runs — provisioning
+ * # Stderr is redirected SEPARATELY to last-events.log: the JSONL telemetry
+ * # (client + gateway events) and any refusal/fault envelope ride stderr, and
+ * # a 2>&1 merge would pollute the operator carrier with them.
+ * # NOTE: the shell opens the >> redirects BEFORE the job runs — provisioning
  * # must create .sandbox/proposals/ (0700) on the host, or cron no-ops with
- * # "no such file or directory" in the cron mail, never in this log.
+ * # "no such file or directory" in the cron mail, never in these logs.
  * ```
  *
  * Exit contract:
  *   0 — every bank reflected and every composed proposal landed (the job's
  *       `ok`), or a --help/-h request answered with the usage text
- *   1 — job failures (any bank_failed, a divergent/retain/store fault, or an
- *       unexpected thrown fault), or an unreachable bank list at resolution
- *       time (BANK_LIST_UNREACHABLE)
+ *   1 — job failures (any bank_failed, a retain/store fault, or an
+ *       unexpected thrown fault), a firing where proposals were composed but
+ *       NONE landed — a detected divergence (PROPOSAL_DIVERGENT) fails the
+ *       run only when it leaves nothing landed, i.e. when every composed
+ *       proposal diverged; a partial divergence beside a landing exits 0 —
+ *       or an unreachable bank list at resolution time (BANK_LIST_UNREACHABLE)
  *   2 — config + usage refusals (fail-closed: missing agent token / gateway
  *       config, an invalid OR future-pinned clock/fired-at seam, a malformed
  *       or repeated --week value, a bank override naming no family member, no
@@ -436,8 +442,9 @@ export async function run(argv: string[], out: (s: string) => void = (s) => writ
       writeSync(1, `${JSON.stringify(envelope)}\n`);
     } else {
       // Refusal envelopes go to STDERR: under the documented crontab redirect
-      // (stdout >> last-post.log) a misprovisioned host must not silently
-      // no-op — the refusal names the missing/invalid pieces verbatim.
+      // (stdout >> last-post.log, stderr >> last-events.log) a misprovisioned
+      // host must not silently no-op — the refusal names the missing/invalid
+      // pieces verbatim.
       writeSync(2, `${JSON.stringify(envelope)}\n`);
     }
     return code;

@@ -20,6 +20,7 @@ import {
   RECEIPT_SCHEMA_LITERAL,
   WeeklyReceiptSchema,
   isoWeekOf,
+  isoWeekStartUtc,
   type ProposalRecord,
   type WeeklyReceipt,
 } from "../../src/learning/proposal-schema.ts";
@@ -265,5 +266,35 @@ describe("isoWeekOf", () => {
 
   test("known date — 2026-10-11 is 2026-W41", () => {
     expect(isoWeekOf(new Date("2026-10-11T06:23:00Z"))).toBe("2026-W41");
+  });
+});
+
+describe("isoWeekStartUtc", () => {
+  test("known week — 2026-W41 starts Monday 2026-10-05T00:00:00.000Z", () => {
+    expect(isoWeekStartUtc("2026-W41")).toBe(Date.parse("2026-10-05T00:00:00.000Z"));
+  });
+
+  test("W01 — 2026-W01 starts Monday 2025-12-29 (Jan 1 Thursday opens its own week)", () => {
+    expect(isoWeekStartUtc("2026-W01")).toBe(Date.parse("2025-12-29T00:00:00.000Z"));
+  });
+
+  test("round-trip with isoWeekOf — every day of a sampled week labels back to it", () => {
+    for (const week of ["2026-W01", "2026-W41", "2026-W53", "2020-W53", "2027-W01"]) {
+      const start = isoWeekStartUtc(week);
+      for (let day = 0; day < 7; day++) {
+        const d = new Date(start + day * 86_400_000);
+        expect(isoWeekOf(d)).toBe(week);
+      }
+    }
+  });
+
+  test("window is exclusive at the next Monday — Oct 4 is W40, Oct 5 is W41", () => {
+    expect(isoWeekOf(new Date(isoWeekStartUtc("2026-W41") - 1))).toBe("2026-W40");
+    expect(isoWeekOf(new Date(isoWeekStartUtc("2026-W41")))).toBe("2026-W41");
+  });
+
+  test("malformed label throws — caller config fault, never a silent NaN window", () => {
+    expect(() => isoWeekStartUtc("2026-13")).toThrow(/ISO week label/);
+    expect(() => isoWeekStartUtc("")).toThrow(/ISO week label/);
   });
 });

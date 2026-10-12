@@ -28,6 +28,12 @@
  *   MAX_RUN_RECORDS by name — record names embed `qds-YYYYMMDD-hhmmss`, so
  *   name order IS recency order and mtime statSync would buy nothing.
  *
+ * Week window (opts.week): when an ISO week label is given, every source is
+ * restricted to that week BEFORE the recency caps bind — routing lines by
+ * `created_at`, snapshot/record names by their embedded writer-managed stamps
+ * (a name whose stamp doesn't parse is not attributable to any week and is
+ * excluded). Unset = no window: every row of every source is returned.
+ *
  * Validation discipline mirrors src/kpi/join.ts: ENOENT/ENOTDIR → typed
  * absence; anything else (EACCES, EISDIR) propagates — a present-but-unreadable
  * store is not an absence.
@@ -36,6 +42,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { z } from "zod";
+
+import { isoWeekStartUtc } from "./proposal-schema.ts";
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -116,7 +124,51 @@ export type GatherEvidenceOpts = {
   routingLogPath?: string;
   kpiSnapshotsDir?: string;
   runsDir?: string;
+  /** ISO week label (e.g. "2026-W41") — restrict every source to that week's
+   *  [Mon 00:00, next Mon) window BEFORE the recency caps bind. Unset = no
+   *  window (every row of every source). A malformed label throws: it is a
+   *  caller config fault, not source absence. */
+  week?: string;
 };
+
+/** The active week window as [startMs, endMs), or null when none is requested. */
+const weekWindow = (week: string | undefined): { start: number; end: number } | null => {
+  if (week === undefined) return null;
+  const start = isoWeekStartUtc(week);
+  return { start, end: start + 7 * 86_400_000 };
+};
+
+/** In-window test; a non-finite stamp (unparseable created_at/name) is never
+ *  attributable to any week and is excluded whenever a window is active. */
+const inWindow = (w: { start: number; end: number } | null, t: number): boolean =>
+  w === null || (Number.isFinite(t) && t >= w.start && t < w.end);
+
+/** Snapshot names embed a writer-managed ISO stamp (kpi-snapshot-write.ts:52:
+ *  `YYYY-MM-DDTHH-MM-SS-sssZ.json`). Parse strictly — components must
+ *  round-trip, so `2026-13-45T…` junk is not silently rolled into February. */
+function snapshotStampMs(name: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.json$/.exec(name);
+  if (m === null) return null;
+  const [y, mo, d, h, mi, s, ms] = m.slice(1).map(Number) as [number, number, number, number, number, number, number];
+  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, s, ms));
+  const exact =
+    t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d &&
+    t.getUTCHours() === h && t.getUTCMinutes() === mi && t.getUTCSeconds() === s && t.getUTCMilliseconds() === ms;
+  return exact ? t.getTime() : null;
+}
+
+/** Run-record names embed the DF2.1 stamp (`qds-YYYYMMDD-hhmmss.json`). Same
+ *  strict round-trip discipline as snapshotStampMs. */
+function runRecordStampMs(name: string): number | null {
+  const m = /^qds-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.json$/.exec(name);
+  if (m === null) return null;
+  const [y, mo, d, h, mi, s] = m.slice(1).map(Number) as [number, number, number, number, number, number];
+  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+  const exact =
+    t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d &&
+    t.getUTCHours() === h && t.getUTCMinutes() === mi && t.getUTCSeconds() === s;
+  return exact ? t.getTime() : null;
+}
 
 // ─── source readers (null = wholly absent) ───────────────────────────────────
 
@@ -128,7 +180,12 @@ const isAbsentErr = (e: unknown): boolean => {
   return code === "ENOENT" || code === "ENOTDIR";
 };
 
-function readRoutingLogLines(path: string): RoutingLogLine[] | null {
+function readRoutingLogLines(path: string, window: { start: number; end: number } | null): RoutingLogLine[] | null {
+  // ponytail: whole-file read — a reverse chunk-scan bound buys nothing until
+  // this append-only log reaches ~GB scale, and it would need a new fault mode
+  // (scan boundary hit before a row older than window.start is seen) plus
+  // reworked torn-tail/line-number semantics. Upgrade path: readSync backwards
+  // from EOF, fault when the chunk ends before an out-of-window row appears.
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -172,7 +229,11 @@ function readRoutingLogLines(path: string): RoutingLogLine[] | null {
     }
     lines.push(row.data);
   }
-  return lines;
+  // Window filter AFTER the full parse: fault/torn-tail semantics stay exact
+  // over the whole file (an out-of-window corrupt line still faults), and a
+  // created_at that refuses to parse as a time (NaN) is excluded — it cannot
+  // be claimed as this week's evidence.
+  return lines.filter((l) => inWindow(window, Date.parse(l.created_at)));
 }
 
 const listJsonNames = (dir: string): string[] => readdirSync(dir).sort().filter((n) => n.endsWith(".json"));
@@ -181,11 +242,14 @@ const listJsonNames = (dir: string): string[] => readdirSync(dir).sort().filter(
  *  `YYYY-MM-DDTHH-MM-SS-sssZ.json`) — the filter keeps stray files out of the evidence set. */
 const KPI_SNAPSHOT_NAME_RE = /^\d{4}-\d{2}-\d{2}T.*\.json$/;
 
-function readKpiSnapshots(dir: string): KpiSnapshotRef[] | null {
+function readKpiSnapshots(dir: string, window: { start: number; end: number } | null): KpiSnapshotRef[] | null {
   let names: string[];
   try {
     names = listJsonNames(dir)
       .filter((n) => KPI_SNAPSHOT_NAME_RE.test(n))
+      // Window binds BEFORE the recency cap: in-window rows must not be evicted
+      // by the most-recent 50 cutting across week boundaries.
+      .filter((n) => inWindow(window, snapshotStampMs(n) ?? Number.NaN))
       .slice(-MAX_KPI_SNAPSHOTS);
   } catch (e) {
     if (isAbsentErr(e)) return null;
@@ -208,12 +272,16 @@ function readKpiSnapshots(dir: string): KpiSnapshotRef[] | null {
   });
 }
 
-function readRunRecords(dir: string): RunRecordRef[] | null {
+function readRunRecords(dir: string, window: { start: number; end: number } | null): RunRecordRef[] | null {
   let names: string[];
   try {
     // Record names follow the DF2.1 store layout (`qds-YYYYMMDD-hhmmss.json`,
     // src/providers/run-record.ts) — foreign *.json must not crowd the recency window.
-    names = listJsonNames(dir).filter((n) => n.startsWith("qds-"));
+    names = listJsonNames(dir)
+      .filter((n) => n.startsWith("qds-"))
+      // Window binds BEFORE the recency cap (same discipline as snapshots):
+      // a name whose stamp is out-of-window (or unparseable) never reaches it.
+      .filter((n) => inWindow(window, runRecordStampMs(n) ?? Number.NaN));
   } catch (e) {
     if (isAbsentErr(e)) return null;
     throw e;
@@ -238,11 +306,13 @@ function readRunRecords(dir: string): RunRecordRef[] | null {
 
 // ─── the gather ──────────────────────────────────────────────────────────────
 
-/** Read-only pass over the three consumed stores. Absent source ⇒ typed absence entry, never a throw, never a dir/file created. */
+/** Read-only pass over the three consumed stores. Absent source ⇒ typed absence entry, never a throw, never a
+ *  dir/file created. With opts.week, every source is restricted to that ISO week before returning. */
 export function gatherEvidence(opts: GatherEvidenceOpts): GatheredEvidence {
-  const lines = readRoutingLogLines(opts.routingLogPath ?? DEFAULT_ROUTING_LOG_PATH);
-  const kpiSnapshots = readKpiSnapshots(opts.kpiSnapshotsDir ?? DEFAULT_KPI_SNAPSHOTS_DIR);
-  const runRecords = readRunRecords(opts.runsDir ?? DEFAULT_RUNS_DIR);
+  const window = weekWindow(opts.week);
+  const lines = readRoutingLogLines(opts.routingLogPath ?? DEFAULT_ROUTING_LOG_PATH, window);
+  const kpiSnapshots = readKpiSnapshots(opts.kpiSnapshotsDir ?? DEFAULT_KPI_SNAPSHOTS_DIR, window);
+  const runRecords = readRunRecords(opts.runsDir ?? DEFAULT_RUNS_DIR, window);
   const absentSources: AbsentSource[] = [];
   if (lines === null) absentSources.push({ source: "routing-log", status: "absent" });
   if (kpiSnapshots === null) absentSources.push({ source: "kpi-snapshots", status: "absent" });

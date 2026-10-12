@@ -11,6 +11,6 @@ leaves:
   node-1.1: verified
   node-2.1: pending-final-gate-pass
 review:
-  round-0-selfreview: 9 findings, all dispositioned (fixed: 1 MED + 5 LOW; documented: #2 #3 #8)
+  round-0-selfreview: "9 findings, all dispositioned (fixed: 1 MED + 5 LOW; documented: #2 #3 #8)"
 tests: tests/learning 77/0; tsc clean; biome clean
 next: bmad-code-review rounds 1-2 (fix all incl lows; round 3 only if highs) -> commit -> PR to dev
