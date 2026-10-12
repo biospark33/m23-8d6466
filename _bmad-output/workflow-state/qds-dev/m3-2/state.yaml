@@ -1,7 +1,8 @@
 story: m3-2
-branch: feature/m3-2-l4-weekly-reflect-propose
+branch: feature/m3-2-l4-weekly-reflect-propose (pruned post-merge)
 base: dev@87cb235b
-phase: gates-green-awaiting-review-rounds
+merged: PR #424 -> dev f15f7ee1 (head 88ed5e8d)
+phase: done
 unlazy_scope: m3-2
 leaves:
   leaf-1.1.1: verified
@@ -9,8 +10,10 @@ leaves:
   leaf-1.2.1: verified
   leaf-1.3.1: verified
   node-1.1: verified
-  node-2.1: pending-final-gate-pass
+  node-2.1: verified
 review:
   round-0-selfreview: "9 findings, all dispositioned (fixed: 1 MED + 5 LOW; documented: #2 #3 #8)"
-tests: tests/learning 77/0; tsc clean; biome clean
-next: bmad-code-review rounds 1-2 (fix all incl lows; round 3 only if highs) -> commit -> PR to dev
+  round-1-coderabbit: "4 findings, all fixed (week-scoped gather + crontab stderr split + exit docs + state.yaml quote); byte-read bound withdrawn by reviewer"
+  round-2-coderabbit: "2 findings, both fixed (exit-0 doc formula; nonexistent-week rejection at helper + driver gate)"
+tests: tests/learning 116/0; tsc clean; biome clean
+next: none — story closed; M3 milestone complete (M3.1 + M3.2)

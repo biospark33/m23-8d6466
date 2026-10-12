@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6b — Autonomy (memory-ladder arc, after M3.1 — the second half of the L3/L4 learning cadence; DD-23(b)'s Layer-B safe subset, part 2)
-**Status:** ready-for-dev — deps M3.1 + A5 (dep edges, not gates; M3.1's fallback leg satisfies the M3.1 edge without A1). No E21 code enters the factory import graph on either leg.
+**Status:** done — merged PR #424 to dev 2026-10-12 (f15f7ee1; head 88ed5e8d). Deps M3.1 + A5 satisfied. No E21 code enters the factory import graph on either leg. Two CodeRabbit review rounds: r1 — week-scoped evidence gather (`isoWeekStartUtc` inverse of `isoWeekOf`; window binds before recency caps; fault/absence semantics unchanged), crontab stderr split to `last-events.log`, exit-contract doc truth; r2 — exit-0 clause corrected to the `ok` formula, nonexistent-week labels (2027-W53) rejected at the helper + refused exit-2 at the driver gate; whole-file routing-log read accepted with documented ceiling. tests/learning 116/0; tsc + biome clean.
 
 ## Spec Reference
 
