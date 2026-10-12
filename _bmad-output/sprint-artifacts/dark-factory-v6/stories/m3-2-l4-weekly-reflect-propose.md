@@ -117,4 +117,10 @@ A weekly job (M3.1's machinery, both legs) gathers its inputs read-only — J3's
 
 ## Dev Agent Record
 
-*(written at implementation time, not at spec time.)*
+**Implemented 2026-10-11** on `feature/m3-2-l4-weekly-reflect-propose` (from dev @ 87cb235b), orchestrated 4-leaf build (.unlazy/m3-2/).
+
+**Files (all new):** `src/learning/proposal-schema.ts` (156L), `src/learning/gather.ts` (233L), `src/learning/compose.ts` (308L+fixes), `src/learning/weekly-reflect.ts` (496L), `src/learning/index.ts` (49L), `scripts/memory-weekly.ts` (388L+fixes), `tests/learning/{proposal-schema,gather,compose,weekly-reflect}.test.ts` (77 tests). **Unmodified (consumed as-is):** `src/hindsight/client.ts`, `src/memgate/*`, all frozen surfaces (zero-diff vs dev, gate-proven).
+
+**Key decisions:** (1) retain path = `verifyRequest`→`forwardScoped` (nightly :349 idiom) — the client-at-gateway-origin primary is impossible (MemgateDeps is in-process, no origin). (2) Fresh-empty bank ⇒ REFLECT_UNPARSEABLE/banks_failed (honest red; M1.2+M3.1 guarantee content flow before weekly ever fires). (3) Retry byte-identity is LLM-determinism-dependent BY DESIGN — drift trips PROPOSAL_DIVERGENT (alarm, not silent). (4) File-list amendment (PLAN C14): per-leaf suite files + gather/compose split for the 500-line pin; disclosed in PR.
+
+**Verification:** tests/learning 77/0; tsc clean; biome clean; full-suite gate = zero failures outside the documented slow-host timeout class (baseline-proven: clean dev worktree fails 17/38 cap-hit on this host); INV-LEARN-1..5 test-proven (writer-import fence over transitive closure incl. src/gate, class-split grant proof, closure-wide port scan, absence arms, byte-identical consumed stores). Mandatory seeded-fixture spawned e2e green (non-live, loopback shim). Review: driver self-review round 0 — 9 findings (1 MED exit-2 envelope silent, 8 LOW), all dispositioned/patched (`_bmad-output/reviews/m3-2/round-0-selfreview.md`); bmad-code-review rounds follow.

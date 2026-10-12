@@ -1,0 +1,285 @@
+{
+ "pr": 0,
+ "round": 1,
+ "findings": [
+  {
+   "finding_id": "F-001",
+   "finding_text": "Exit contract contradiction: header documents exit 1 on banks_failed non-empty but ok = banksOk>=1 tolerates bank failures (M3.1 nightly precedent: ok = failures.length===0)",
+   "diff_context_ref": "scripts/memory-weekly.ts:29-34 + src/learning/weekly-reflect.ts:501",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Tighten ok to banks_failed.length===0, matching nightly semantics + header",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-002",
+   "finding_text": "Same-id store race: existsSync->rename check-then-write lets concurrent same-firedAt firings silently overwrite instead of PROPOSAL_DIVERGENT",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:190-213",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "link()-based exclusive create; EEXIST -> byte-compare (identical=kept-existing, divergent=fault)",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-003",
+   "finding_text": "AC3 refinement one-directional: posted rows without matching proposal pass; duplicate proposals ids pass",
+   "diff_context_ref": "src/learning/proposal-schema.ts:140-154",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Add posted->proposals direction + duplicate proposals check",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-004",
+   "finding_text": "AC5 severity leak: raw refs (runIds, filenames), insights_cited summaries flow unfiltered into store/carrier/retain",
+   "diff_context_ref": "src/learning/compose.ts:231-302 + src/learning/gather.ts:163",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Gather name-shape filters (qds- runs, ISO-stamp snapshots) + embed() refs in prose + safeName-filter insights at ingest",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-005",
+   "finding_text": "shape/status fabricate failure classes: two records with only shape 'review' compose a skill-update",
+   "diff_context_ref": "src/learning/compose.ts:44,198-212",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "RUN_CLASS_FIELDS = classification/outcome_class/fixOutcomeClass only",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-006",
+   "finding_text": "Gather faults abort whole job untyped with no receipt; header claims only config throws",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:396-400",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Typed catch + remediation-carrying fault + header comment fix",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-007",
+   "finding_text": "0700 dir gate skipped when final proposal file already exists",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:190-202",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Mode check before exists branch",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-008",
+   "finding_text": "Superseded never retires bank docs + future-pinned FIRED_AT poisons supersession forever",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:246 + scripts/memory-weekly.ts:228",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Future firedAt (> now+5min) = typed seam refusal; bank retirement = DEFER (story design, append-only)",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-009",
+   "finding_text": "Unbounded insights (schema-legal multi-MB) -> unbounded store rows + O(n^2) capBytes hang mid-firing",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:177-181 + src/learning/compose.ts ingest",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Cap insights at ingest (count+char budget); linear capBytes",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-010",
+   "finding_text": "proposalsDir as FILE: ENOTDIR escapes supersededIds untyped after side effects",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:234-237",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Tolerate ENOTDIR like ENOENT",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-011",
+   "finding_text": "No per-firing proposal-count bound: per-shape/per-snapshot fans out unbounded",
+   "diff_context_ref": "src/learning/compose.ts:242-292",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "MAX_PROPOSALS_PER_FIRING=16 named cap",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-012",
+   "finding_text": "deps.banks wholly-foreign filter yields [] -> untyped WEEKLY_DRIVER_FAULT instead of code-2 refusal",
+   "diff_context_ref": "scripts/memory-weekly.ts:297-300",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Empty filtered family -> bank-resolution-failed code 2",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-013",
+   "finding_text": "--help process.exit(0) inside lib parser kills in-process callers",
+   "diff_context_ref": "scripts/memory-weekly.ts + scripts/lib/cli-args.ts:17",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Intercept help tokens before parseValueFlags inside run()",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-014",
+   "finding_text": "ISO week regex accepts W00/W99/0000 across three sites",
+   "diff_context_ref": "proposal-schema.ts:31 + weekly-reflect.ts:68 + memory-weekly.ts:93",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Shared exported ISO_WEEK_RE with 01-53 range",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-015",
+   "finding_text": "UTF-8 BOM on routing log: multi-line hard fault, single-line silent empty",
+   "diff_context_ref": "src/learning/gather.ts:124-141",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Strip leading BOM at read",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-016",
+   "finding_text": "ENOTDIR on consumed-store paths escapes typed-absence law (parent .sandbox is a file)",
+   "diff_context_ref": "src/learning/gather.ts:124,170,195",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Treat ENOTDIR as absent alongside ENOENT",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-017",
+   "finding_text": "Non-finite end clock: NaN total_ms then raw ZodError after side effects; negative reflect_ms unclamped",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:426,497",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Clamp both to finite >=0",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-018",
+   "finding_text": "FIRED_AT_RE optional ms breaks fixed-width lexicographic supersession claim",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:69",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Mandate ms form in the seam",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-019",
+   "finding_text": "Foreign *.json crowds the runs last-50 recency window",
+   "diff_context_ref": "src/learning/gather.ts:163,199",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "qds- prefix filter (store-managed layout)",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-020",
+   "finding_text": "Duplicate runIds across routing lines double-count means + duplicate citations",
+   "diff_context_ref": "src/learning/compose.ts:157",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Dedup runId per shape/tier grouping",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-021",
+   "finding_text": "Repeated --week flags silently last-win",
+   "diff_context_ref": "scripts/memory-weekly.ts:161-162",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Reject repeated value flags with usage-refusal",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-022",
+   "finding_text": "KPI snapshots dir read unbounded (no MAX analog)",
+   "diff_context_ref": "src/learning/gather.ts:163-181",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Cap at 50 most recent by name",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-003b",
+   "finding_text": "Gateway ledger handle never closed in driver",
+   "diff_context_ref": "scripts/memory-weekly.ts:318-328",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Close in finally when handle present",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-024",
+   "finding_text": "MemgateError reused for store-mode fault; run() catch echoes any err.code",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:197-201",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Local ProposalStoreError with code/message/remediation",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-025",
+   "finding_text": "capBytes dead ternary + surrogate-pair split risk",
+   "diff_context_ref": "src/learning/weekly-reflect.ts:177-181",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Subsumed by F-009 linear code-point loop",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-026",
+   "finding_text": "Zod issue path mis-indexed in AC3 refinement",
+   "diff_context_ref": "src/learning/proposal-schema.ts:149",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Point at proposals index",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-027",
+   "finding_text": "Test infra: shim child leak on handshake reject; duplicated comment block",
+   "diff_context_ref": "tests/learning/weekly-reflect.test.ts:729-737,837-840",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Kill child on rejection; dedupe comment",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-028",
+   "finding_text": "weekly-reflect.ts at 508 lines > 500 pin; router-tuning cites all KPI refs it never reads",
+   "diff_context_ref": "src/learning/weekly-reflect.ts + src/learning/compose.ts:667",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Trim comments <500; router-tuning kpi_snapshot_refs -> [] + test update",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-029",
+   "finding_text": "J2-satisfaction-asserting note unrefusable in free text (compose pins canonical constant)",
+   "diff_context_ref": "src/learning/proposal-schema.ts:106-113",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "Free text not mechanically adjudicable; system-authored notes are constant-pinned + tested",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-030",
+   "finding_text": "advisory:false flavor on non-threshold kinds",
+   "diff_context_ref": "src/learning/compose.ts:250,300",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "AC2 letter satisfied; carrier text mitigates; pinned by test as design",
+   "created_at": "2026-10-12T02:30:00Z"
+  },
+  {
+   "finding_id": "F-031",
+   "finding_text": "documentId embeds sanitized stamp not raw ISO; byte-identical retry is kept-existing not rename-over; receipt two-way not three-way; schedule leg seam-fake",
+   "diff_context_ref": "weekly-reflect.ts various",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "rationale": "Spec-letter wordings; invariants hold; sanctioned by story text",
+   "created_at": "2026-10-12T02:30:00Z"
+  }
+ ]
+}
