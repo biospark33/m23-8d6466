@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Foundation, Wave 1 — one of the four zero-gate roots; the story that makes D-4's "future jev-like tier-1 systems swap in" a named seam instead of a hope)
-**Status:** in-review (PR open; all DoD items met — live round fired 2026-10-09)
+**Status:** DONE — MERGED to dev (PR #421, merge commit adf66aed, head b3579205: provider.ts closed registry + jev/mock adapters + errors.ts typed refusals; tests/judgment 165 pass / 0 fail at merge incl. the CodeRabbit round — story pre-existing-failure count 34→39, never-throw bodySnippet bodyText guard + errors.test.ts; three-layer review rounds 1–3 approved on all layers before the PR; DoD e2e live round fired 2026-10-09; branch feature/j1-judgmentprovider-seam pruned post-merge)
 
 ## Spec Reference
 
