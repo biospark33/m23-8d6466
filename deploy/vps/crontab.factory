@@ -1,0 +1,10 @@
+# A6 — GitNexus graph refresh cron (FR-MEM-6 / NFR-OBS-5; story:
+# _bmad-output/sprint-artifacts/dark-factory-v6/stories/a6-gitnexus-refresh-cron.md).
+# Install (operator, on the VPS, as the deploy user):
+#   crontab deploy/vps/crontab.factory
+# Cadence: 5h — inside FR-MEM-6's 4–6h window; one missed cycle still fits
+# the 8h staleness ceiling. Minute 7 keeps the tick off the top of the hour.
+# Env contract, stage order, and exit codes live in the wrapper header:
+#   scripts/gitnexus-refresh.sh
+SHELL=/bin/bash
+7 */5 * * * /opt/qds-factory/scripts/gitnexus-refresh.sh >> /var/log/qds/refresh-cron.log 2>&1
