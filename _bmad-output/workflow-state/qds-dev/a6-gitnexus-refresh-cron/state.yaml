@@ -1,23 +1,26 @@
 session:
   id: a6-qds-dev-20261013
   started_at: 2026-10-13T00:50:00Z
-  last_updated: 2026-10-13T00:50:00Z
+  last_updated: 2026-10-13T11:55:00Z
 story:
   id: A6
   key: a6-gitnexus-refresh-cron
   title: GitNexus graph-refresh cron on the VPS + staleness alarm (FR-MEM-6)
   path: _bmad-output/sprint-artifacts/dark-factory-v6/stories/a6-gitnexus-refresh-cron.md
   epic: A (Autonomy, v6a pull-forward)
-  status: in-progress
+  status: done (authored half landed; AC7 fired leg open by design — operator-gated, DD-26 flex-cut #2)
   dependencies:
     - Z4 (authored half DONE — PR #406 merged to dev 2026-10-04)
 workflow:
-  current_phase: dev_story
+  current_phase: pr_created
   phases_completed:
     - story_selection
     - branch_safety
     - research
     - research_hitl
+    - dev_story
+    - verification
+    - review_rounds_1_to_3_closed
   flags:
     yolo: false
     verbose: false
@@ -43,14 +46,16 @@ research:
     E_dependencies: success (Z4 landed, crontab ownership disclaimed to A6)
     F_cross_track: success (no open-PR conflicts, solo sprint, single worktree)
 dev_story:
-  started: false
-  completed: false
+  started: true
+  completed: true
 guardrails:
   violations: []
   overrides: []
 pr:
-  created: false
+  created: true
 notes: >-
   Fired half (AC7) operator-gated on VPS day — lands open by design, zero agent spend.
   Unlazy orchestrated scope: a6. Driver-only full suite at branch gate; subagents run
-  targeted checks on owned files only (operator directive).
+  targeted checks on owned files only (operator directive). Review rounds 1-3 closed
+  (18+12+1 findings all fixed/dispositioned); root gates ALL MET. SHAs rewritten
+  post-review for email privacy (mapping in the evidence JSON shaRewrite note).
