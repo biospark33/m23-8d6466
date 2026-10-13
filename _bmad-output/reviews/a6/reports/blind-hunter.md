@@ -34,3 +34,12 @@ BH2-001 ($HOME/$PATH unguarded under set -u in the probe; = EH2-002),
 BH2-002 (crontab comment self-undermining: root-owned 755 dir blocks the deploy user's log creation),
 BH2-004 (waitForLine comment/code drift on newline-termination).
 All regression lanes flagged in the round-2 brief verified clean. Full dispositions: round-2-triage.json.
+
+## Round 3 (2026-10-13, scope: fix commit d4b92f9d — round-2 diff)
+
+Verdict: one LOW, in test code the round-2 fixes introduced.
+
+- **BH3-001 · LOW · tests/gitnexus/refresh-cron.test.ts (HOME/PATH-unset FATAL test)** — the round-2 EH2-002 test carries unconditional exit-code/no-side-effect assertions while its stripped-PATH sibling (EH2-003) got the `it.skipIf(STRIPPED_PATH_HOST_PASSES_EVERYTHING)` named skip. On the conceded every-prereq host class (flock reachable via bash's compiled-in default path, `/usr/local/bin/bun` present) the wrapper legitimately proceeds: with PATH deleted bash still resolves flock from its built-in default and the probe's third leg finds bun → exit 1 + side effects → all three assertions false-red exactly where the host is healthy.
+  Fix: same named skip as the sibling, with a comment naming the host class and the bash-default-PATH reasoning; the FATAL contract stays pinned on missing-prereq hosts (macOS dev: no system flock → flock leg false; Linux CI: `/usr/bin/flock` present but setup-bun installs bun only into the tool cache, so the probe's bun leg fails → test runs and pins the named-FATAL path).
+
+Review CLOSED after round 3 per the round rule (rounds 1–2 fix-all; stop when only LOWs remain). BH3-001 patched in the round-3 commit; dispositions: round-3-triage.json.

@@ -1072,7 +1072,13 @@ describe("pre-cycle configuration failures — FATAL, exit 3, no log line", () =
     });
   });
 
-  it("a HOME-and-PATH-UNSET invocation (the env -i / minimal-systemd class) still FATALs with exit 3 — the bun probe degrades to its named FATAL, never an unbound-variable death", async () => {
+  it.skipIf(STRIPPED_PATH_HOST_PASSES_EVERYTHING)(
+    // BH3-001: same host class as the stripped-PATH sibling — with PATH
+    // DELETED, bash falls back to its compiled-in default path (which still
+    // carries /usr/bin), so flock resolves from disk and /usr/local/bin/bun
+    // remains the reachable probe leg. On that healthy host every guard
+    // legitimately passes and this test has no FATAL to assert.
+    "a HOME-and-PATH-UNSET invocation (the env -i / minimal-systemd class) still FATALs with exit 3 — the bun probe degrades to its named FATAL, never an unbound-variable death", async () => {
     await withFixture("unset-env-fatal", (fx) => {
       const neverGraph = join(fx.dir, "never-created-graph");
       const env: NodeJS.ProcessEnv = {

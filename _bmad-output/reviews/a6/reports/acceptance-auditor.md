@@ -26,3 +26,7 @@ Verdict: all five are bookkeeping-vs-code splits; only AA-001 demands a committe
 ## Round 2 (2026-10-13, scope: fix commit 12941273 + uncommitted story amendments)
 
 AA2-001 · MED — the determinized coalesce fixture dropped AC5's holder-completes-under-contention proof (ordered [skip, success] assertion gone; a post-[d] fd release would pass every test); AA2-002/003 · LOW — story stage enum still omits crossCheck, amendment line refs stale; AA2-005 · LOW — triage.json invalid JSON; AA2-006/007 · LOW — tripwire regex token gaps, missing behavioral bun-probe test; AA2-004 · LOW — AA-005 Status-header gap (closure). The 6 round-1 tests otherwise pin their claims; story amendment sentences match landed tests. Full dispositions: round-2-triage.json.
+
+## Round 3 (2026-10-13, scope: fix commit d4b92f9d — round-2 diff)
+
+Verdict: **CLEAN** — no findings. AC/DoD coverage re-traced against the round-2 diff: the two MED patches (EH2-001/BH2-003 split-brain coherence arm; AA2-001 holder-completes-under-contention fixture) land committed tests that strengthen, not weaken, AC3/AC5 pins; the story amendment blockquote now names rounds 1+2 with test-title-primary citations; the only open item remains AA-005/AA2-004 (Status header → landed truth), dispositioned CLOSURE and executed in the closure commit per plan.
