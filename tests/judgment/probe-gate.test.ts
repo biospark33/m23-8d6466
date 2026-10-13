@@ -5,15 +5,32 @@
  * network. The gate is the security control: no key, no wire; no explicit
  * steve go (QDS_LIVE_PROBE_CONFIRMED=1), no wire.
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   canonicalRequest,
   diffEnvelope,
   main as liveProbeMain,
+  PROBE_PROVIDER,
   probeGate,
 } from "../../scripts/judgment/live-probe.ts";
 import { DEFAULT_MAX_EGRESS_CLASS } from "../../src/judgment/egress.ts";
-import { JudgmentClient } from "../../src/judgment/index.ts";
+import { JudgmentClient, TYPESAFE_API_URL, TYPESAFE_MODEL } from "../../src/judgment/index.ts";
+
+/**
+ * Every main()/client in this file writes provenance to a per-file tmp dir —
+ * never the REAL default side-channel dir, which holds tracked files and is
+ * shared with any live judge run in the same checkout.
+ */
+let TMP_PROVENANCE = "";
+beforeAll(() => {
+  TMP_PROVENANCE = mkdtempSync(join(tmpdir(), "probe-gate-prov-"));
+});
+afterAll(() => {
+  rmSync(TMP_PROVENANCE, { recursive: true, force: true });
+});
 
 describe("live-probe gate", () => {
   test("no key → refuse", () => {
@@ -87,7 +104,7 @@ describe("live-probe main + contract diff (mock mode, never the network)", () =>
       probedErr.push(String(s));
     });
     try {
-      await expect(liveProbeMain()).resolves.toBeUndefined();
+      await expect(liveProbeMain([], { provenanceDir: TMP_PROVENANCE })).resolves.toBeUndefined();
       expect(probedLog.join("")).toContain("contract matches");
       expect(probedErr.join("")).not.toContain("CONTRACT DRIFT");
     } finally {
@@ -97,7 +114,7 @@ describe("live-probe main + contract diff (mock mode, never the network)", () =>
   });
 
   test("diffEnvelope accepts a contract-shaped envelope and drifts (exit 2) on a moved model", async () => {
-    const client = new JudgmentClient({ mode: "mock" });
+    const client = new JudgmentClient({ mode: "mock", provenanceDir: TMP_PROVENANCE });
     const env = await client.judge(
       "probe diff check",
       { probe_ok: { type: "noul", instructions: "ok" } },
@@ -118,4 +135,279 @@ describe("live-probe main + contract diff (mock mode, never the network)", () =>
       err.mockRestore();
     }
   });
+});
+
+/**
+ * v6 J1 AC6 — the probe reaches the wire through the REGISTRY-resolved `jev`
+ * adapter, never a hand-constructed transport, and the INV-J5 double gate
+ * still refuses before any request exists. The live arms run against a
+ * `globalThis.fetch` stub — no test touches the network.
+ */
+describe("live-probe through the provider registry (J1 AC6)", () => {
+  const PROBE_SRC = join(import.meta.dir, "..", "..", "scripts", "judgment", "live-probe.ts");
+  const ENV_KEYS = ["TYPESAFE_API_KEY", "QDS_LIVE_PROBE_CONFIRMED", "TYPESAFE_MOCK"] as const;
+  const KEY = "test-key-not-a-real-credential";
+  const GOOD_BODY = {
+    model: TYPESAFE_MODEL,
+    answers: { probe_ok: { type: "noul", noul: 0.97 } },
+    usage: { input_tokens: 42, output_tokens: 1 },
+  };
+  const originalFetch = globalThis.fetch;
+  let savedEnv: [string, string | undefined][] = [];
+  let fetched: { url: string; body: unknown }[] = [];
+  let out: string[] = [];
+  let tmp: string;
+
+  function serve(status: number, body: unknown): void {
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> => {
+      fetched.push({
+        url: typeof input === "string" ? input : input.toString(),
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return new Response(JSON.stringify(body), { status });
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    savedEnv = ENV_KEYS.map((k) => [k, process.env[k]]);
+    for (const k of ENV_KEYS) delete process.env[k];
+    fetched = [];
+    out = [];
+    tmp = mkdtempSync(join(tmpdir(), "live-probe-"));
+    serve(200, GOOD_BODY);
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function go(): void {
+    process.env.TYPESAFE_API_KEY = KEY;
+    process.env.QDS_LIVE_PROBE_CONFIRMED = "1";
+  }
+
+  /** Run main with console captured and process.exit turned into a throw. */
+  async function runMain(argv: string[]): Promise<{ exit?: number; error?: Error }> {
+    const log = spyOn(console, "log").mockImplementation((s: unknown) => {
+      out.push(String(s));
+    });
+    const err = spyOn(console, "error").mockImplementation((s: unknown) => {
+      out.push(String(s));
+    });
+    const exit = spyOn(process, "exit").mockImplementation(((code: number) => {
+      throw new Error(`exit:${code}`);
+    }) as never);
+    try {
+      await liveProbeMain(argv, { provenanceDir: TMP_PROVENANCE });
+      return {};
+    } catch (e) {
+      const m = (e as Error).message.match(/^exit:(\d+)$/);
+      return m ? { exit: Number(m[1]) } : { error: e as Error };
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+      exit.mockRestore();
+    }
+  }
+
+  function evidence(): Record<string, unknown>[] {
+    return readdirSync(tmp).map((f) => JSON.parse(readFileSync(join(tmp, f), "utf8")));
+  }
+
+  test("the probe has no route to a transport but the client — no adapter import, no maker, no raw HTTP", () => {
+    const src = readFileSync(PROBE_SRC, "utf8");
+    expect(src).not.toMatch(/src\/judgment\/(adapters\/|provider\.ts)/);
+    expect(src).not.toMatch(/\b(makeJevProvider|makeMockProvider|JUDGMENT_PROVIDERS|resolveProvider)\b/);
+    expect(src).not.toMatch(/\bhttpRequest\(|\bfetch\(/);
+    expect(PROBE_PROVIDER).toBe("jev");
+  });
+
+  test("live arm: one request through the registry-resolved jev adapter to the pinned endpoint; provider + spend named before fire", async () => {
+    go();
+    const provBefore = readdirSync(TMP_PROVENANCE).length;
+    expect(await runMain([])).toEqual({});
+    expect(fetched.length).toBe(1);
+    expect(fetched[0]!.url).toBe(TYPESAFE_API_URL);
+    expect((fetched[0]!.body as { model: string }).model).toBe(TYPESAFE_MODEL);
+    const text = out.join("\n");
+    expect(text).toContain("provider jev (registry-resolved, transport live; probe proves jev)");
+    expect(text).toContain("contract matches. envelope:");
+    expect(text.indexOf("spend:")).toBeGreaterThan(-1);
+    expect(text.indexOf("spend:")).toBeLessThan(text.indexOf("contract matches"));
+    expect(text).not.toContain(KEY);
+    expect(readdirSync(TMP_PROVENANCE).length).toBe(provBefore + 1);
+  });
+
+  test("--evidence-dir writes one scrubbed, ms-stamped evidence JSON naming provider, transport and the clean diff", async () => {
+    go();
+    expect(await runMain(["--evidence-dir", tmp])).toEqual({});
+    const files = readdirSync(tmp);
+    expect(files.length).toBe(1);
+    expect(files[0]).toMatch(/^live-probe-\d{8}T\d{9}Z-[\w-]{1,8}\.json$/);
+    expect(readFileSync(join(tmp, files[0]!), "utf8")).not.toContain(KEY);
+    // one id for the round: the evidence filename, the envelope and the wire header agree
+    const rid = (evidence()[0]?.envelope as { requestId: string }).requestId;
+    expect(files[0]).toContain(`-${rid.slice(0, 8)}.json`);
+    expect(evidence()[0]).toMatchObject({
+      provider: "jev",
+      transport: "live",
+      contractDiff: "clean",
+      endpoint: TYPESAFE_API_URL,
+      spend: { judgments: 1, maxWireAttempts: 2, input_tokens: 42, output_tokens: 1 },
+      envelope: { model: TYPESAFE_MODEL, egress_class: "machine-state" },
+    });
+  });
+
+  test("two rounds into the same evidence dir never collide", async () => {
+    go();
+    expect(await runMain(["--evidence-dir", tmp])).toEqual({});
+    expect(await runMain(["--evidence-dir", tmp])).toEqual({});
+    expect(readdirSync(tmp).length).toBe(2);
+  });
+
+  test("under TYPESAFE_MOCK=1 the evidence says transport mock with no endpoint — a mock run can never pass as live evidence", async () => {
+    go();
+    process.env.TYPESAFE_MOCK = "1";
+    expect(await runMain(["--evidence-dir", tmp])).toEqual({});
+    expect(fetched.length).toBe(0);
+    expect(evidence()[0]).toMatchObject({ provider: "mock", transport: "mock", endpoint: null });
+    expect(out.join("\n")).toContain("provider mock (registry-resolved, transport mock");
+    expect(out.join("\n")).toContain("NOT live evidence");
+  });
+
+  test("a drifting live body is recorded as drift evidence, then exits 2", async () => {
+    go();
+    serve(200, { ...GOOD_BODY, answers: { probe_ok: { type: "noul", noul: true } } });
+    expect(await runMain(["--evidence-dir", tmp])).toEqual({ exit: 2 });
+    const [ev] = evidence();
+    expect(String(ev?.contractDiff)).toStartWith("drift: ");
+    expect(ev).toMatchObject({ transport: "live", envelope: null, error: { status: 502, name: "JudgmentSchemaError" } });
+    expect(out.join("\n")).toContain("CONTRACT DRIFT");
+  });
+
+  test("a non-JSON live body is drift too (the body arrived, it is not the contract)", async () => {
+    go();
+    globalThis.fetch = (async () => new Response("<html>oops</html>", { status: 200 })) as unknown as typeof fetch;
+    expect(await runMain(["--evidence-dir", tmp])).toEqual({ exit: 2 });
+    expect(String(evidence()[0]?.contractDiff)).toStartWith("drift: TypeSafe returned a non-JSON body");
+  });
+
+  for (const [name, arrange, diff] of [
+    [
+      "transport failure (DNS / refused)",
+      () => {
+        globalThis.fetch = (async () => {
+          throw new TypeError("getaddrinfo ENOTFOUND api.typesafe.ai");
+        }) as unknown as typeof fetch;
+      },
+      "error: http_502",
+    ],
+    ["upstream 502 bad gateway", () => serve(502, { message: "bad gateway" }), "error: http_502"],
+  ] as const) {
+    test(`${name} is an ERROR (exit via throw, evidence error) — never mislabelled contract drift`, async () => {
+      go();
+      arrange();
+      const r = await runMain(["--evidence-dir", tmp]);
+      expect(r.exit).toBeUndefined();
+      expect(r.error).toBeDefined();
+      expect(out.join("\n")).not.toContain("CONTRACT DRIFT");
+      expect(evidence()[0]).toMatchObject({ contractDiff: diff, envelope: null, error: { name: "JudgmentHttpError", status: 502 } });
+    });
+  }
+
+  test("a failure AFTER the paid response (provenance emit) is still recorded", async () => {
+    go();
+    const notADir = join(tmp, "prov-is-a-file");
+    writeFileSync(notADir, "x");
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    let caught: unknown;
+    try {
+      await liveProbeMain(["--evidence-dir", join(tmp, "ev")], { provenanceDir: notADir });
+    } catch (e) {
+      caught = e;
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+    }
+    expect(caught).toBeDefined();
+    expect(fetched.length).toBe(1);
+    const files = readdirSync(join(tmp, "ev"));
+    expect(files.length).toBe(1);
+    const ev = JSON.parse(readFileSync(join(tmp, "ev", files[0]!), "utf8"));
+    expect(String(ev.contractDiff)).toStartWith("error: ");
+    expect(ev.envelope).toBeNull();
+    expect(files[0]).not.toContain("unknown"); // a non-HTTP failure still carries the round's id
+  });
+
+  // root ignores 0o555 (Docker parity / exe.dev boxes) — same guard as tests/audit/link-store.test.ts
+  test.skipIf(process.getuid?.() === 0)("an evidence write that fails after the spend keeps the round's exit code (drift stays 2) and dumps the record", async () => {
+    go();
+    const evDir = join(tmp, "ev");
+    globalThis.fetch = (async () => {
+      chmodSync(evDir, 0o555); // dir validated pre-fire, made unwritable mid-round
+      return new Response(JSON.stringify({ ...GOOD_BODY, answers: { probe_ok: { type: "noul", noul: true } } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      expect(await runMain(["--evidence-dir", evDir])).toEqual({ exit: 2 });
+    } finally {
+      chmodSync(evDir, 0o755);
+    }
+    const text = out.join("\n");
+    expect(text).toContain("evidence write failed");
+    expect(text).toContain("CONTRACT DRIFT");
+    expect(text).toContain('"contractDiff": "drift: ');
+  });
+
+  test("an HTTP refusal is recorded as error evidence and rethrown (not mislabelled drift)", async () => {
+    go();
+    serve(401, { message: "bad key" });
+    const r = await runMain(["--evidence-dir", tmp]);
+    expect(r.error?.message).toContain("HTTP 401");
+    expect(evidence()[0]).toMatchObject({ contractDiff: "error: http_401", error: { status: 401 }, envelope: null });
+  });
+
+  test("an unusable --evidence-dir is refused BEFORE the paid request", async () => {
+    go();
+    const file = join(tmp, "not-a-dir");
+    writeFileSync(file, "x");
+    const r = await runMain(["--evidence-dir", file]);
+    expect(r.error?.message).toContain("is not a directory");
+    expect(fetched.length).toBe(0);
+    expect(out.join("\n")).not.toContain("spend:");
+  });
+
+  for (const [name, env] of [
+    ["no key", { QDS_LIVE_PROBE_CONFIRMED: "1" }],
+    ["no confirm flag", { TYPESAFE_API_KEY: KEY }],
+  ] as const) {
+    test(`${name} → refused before any request is built or sent`, async () => {
+      Object.assign(process.env, env);
+      expect(await runMain(["--evidence-dir", tmp])).toEqual({ exit: 1 });
+      expect(fetched.length).toBe(0);
+      expect(readdirSync(tmp)).toEqual([]);
+      expect(out.join("\n")).toContain("refusing to run");
+      expect(out.join("\n")).not.toContain("spend:");
+    });
+  }
+
+  for (const [argv, msg] of [
+    [["--evidence", "x"], /unknown argument/],
+    [["--evidence-dir"], /needs a directory value/],
+    [["--evidence-dir", ""], /needs a directory value/],
+    [["--evidence-dir", "-out"], /needs a directory value/],
+    [["--evidence-dir", "a", "--evidence-dir", "b"], /given twice/],
+  ] as const) {
+    test(`argv ${JSON.stringify(argv)} is refused before the gate (${msg.source})`, async () => {
+      go();
+      const r = await runMain([...argv]);
+      expect(r.error?.message).toMatch(msg);
+      expect(fetched.length).toBe(0);
+    });
+  }
 });

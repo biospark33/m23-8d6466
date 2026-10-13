@@ -1,0 +1,38 @@
+{
+  "round": "live-probe",
+  "provider": "jev",
+  "transport": "live",
+  "endpoint": "https://api.typesafe.ai/v1/systemone",
+  "contractPin": "jev-1.13.0",
+  "at": "2026-10-09T14:42:09.647Z",
+  "contractDiff": "clean",
+  "spend": {
+    "judgments": 1,
+    "maxWireAttempts": 2,
+    "input_tokens": 291,
+    "output_tokens": 21
+  },
+  "envelope": {
+    "requestId": "ced1d8eb-072a-4b69-99a2-b2e57440e630",
+    "model": "jev-1.13.0",
+    "questions": {
+      "probe_ok": {
+        "type": "noul",
+        "instructions": "Answer true if this request reached you intact."
+      }
+    },
+    "answers": {
+      "probe_ok": {
+        "type": "noul",
+        "noul": 0.61
+      }
+    },
+    "usage": {
+      "input_tokens": 291,
+      "output_tokens": 21
+    },
+    "latency_ms": 275,
+    "egress_class": "machine-state",
+    "created_at": "2026-10-09T14:42:09.647Z"
+  }
+}

@@ -14,6 +14,9 @@
  * contract json and exiting 2 on drift.
  */
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+import ts from "typescript";
 import contract from "./typesafe-api-contract.json";
 import {
   DEFAULT_MAX_ATTEMPTS,
@@ -21,8 +24,10 @@ import {
   TYPESAFE_MODEL,
 } from "../../src/judgment/client.ts";
 import { DEFAULT_MAX_EGRESS_CLASS } from "../../src/judgment/egress.ts";
+import { JUDGMENT_PROVIDER_IDS, resolveProvider } from "../../src/judgment/provider.ts";
 import {
   ChoiceQuestionSchema,
+  type JudgmentRequest,
   JudgmentRequestSchema,
   makeJudgmentResponseSchema,
   ScoreQuestionSchema,
@@ -162,5 +167,99 @@ describe("contract pin: response schemas match the contract's shape rules", () =
     const schema = makeJudgmentResponseSchema(["c"]);
     const c = { type: "choice", choice: "patch", probabilities: { patch: 1.5 }, confidence: 0.5 };
     expect(schema.safeParse({ model: TYPESAFE_MODEL, answers: { c }, usage: USAGE }).success).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v6 J1 AC3 — the drift alarm stays THE alarm behind the JudgmentProvider seam.
+// ---------------------------------------------------------------------------
+
+const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
+
+/**
+ * Every `jev-…` string literal in a source text — the model-id family.
+ * Parsed to an AST, so comments are skipped (schemas.ts's doc comment names
+ * the banned `jev-latest` alias on purpose) and no regex literal, `/*` or
+ * `//` inside a string can desynchronize the scan.
+ */
+function modelLiterals(source: string): string[] {
+  const sf = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    ) {
+      for (const m of node.text.matchAll(/\bjev-[^\s"'`]*/g)) found.push(m[0]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+function walkTs(root: string): string[] {
+  return readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => join(root, f));
+}
+
+describe("contract pin: one model literal behind the provider seam (J1 AC3)", () => {
+  test("the literal scanner sees every quote style (positive control)", () => {
+    expect(modelLiterals(`const a = "jev-2.0.0"; const b = 'jev-x'; const c = \`jev-latest\`;`)).toEqual([
+      "jev-2.0.0",
+      "jev-x",
+      "jev-latest",
+    ]);
+    // prose is not a literal; comment openers inside strings hide nothing
+    expect(modelLiterals('/** never `jev-latest` */\n// "jev-x"\nconst u = "https://h"; const m = "jev-z";')).toEqual(["jev-z"]);
+    expect(modelLiterals('const g = "src/**/*.ts"; const m = "jev-2"; const e = "*/";')).toEqual(["jev-2"]);
+    expect(modelLiterals("const t = `a ${x} jev-3 ${y} b`;")).toEqual(["jev-3"]);
+    expect(modelLiterals("function f() { if (a) { b(); } } const m = `${{ k: 1 }.k} jev-4`;")).toEqual(["jev-4"]);
+    expect(modelLiterals('const r = /"/; const m = "jev-5";')).toEqual(["jev-5"]);
+  });
+
+  test("TYPESAFE_MODEL is the ONLY model literal anywhere under src/judgment/ (recursive, adapters included)", () => {
+    const found: string[] = [];
+    for (const file of walkTs(JUDGMENT_SRC)) {
+      for (const lit of modelLiterals(readFileSync(file, "utf8"))) {
+        found.push(`${relative(JUDGMENT_SRC, file)}: ${lit}`);
+      }
+    }
+    // A second literal (e.g. a `jev-2` constant wired into an adapter but not
+    // the contract json) fails HERE, named in the diff.
+    expect(found).toEqual([`schemas.ts: ${contract.model}`]);
+    expect(TYPESAFE_MODEL).toBe(contract.model);
+  });
+
+  test("every registered adapter's body carries TYPESAFE_MODEL — jev forwards the seam's request verbatim, mock answers with the pin", async () => {
+    const request: JudgmentRequest = { model: TYPESAFE_MODEL, state: "s", questions: { q: { type: "noul", instructions: "i" } } };
+    const saved = globalThis.fetch;
+    let wire: { model?: string } | undefined;
+    globalThis.fetch = (async (_: unknown, init?: RequestInit) => {
+      wire = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ model: TYPESAFE_MODEL, answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }));
+    }) as unknown as typeof fetch;
+    try {
+      const seen: Record<string, string | undefined> = {};
+      for (const id of JUDGMENT_PROVIDER_IDS) {
+        const adapter =
+          id === "jev"
+            ? resolveProvider("jev")({ apiKey: "k", baseUrl: "http://judgment.test", timeoutMs: 1_000, retryDelayMs: 0 })
+            : resolveProvider(id)();
+        const body = (await adapter.ask(request, "rid")) as { model?: string };
+        seen[id] = id === "jev" ? wire?.model : body.model;
+      }
+      expect(seen).toEqual(Object.fromEntries(JUDGMENT_PROVIDER_IDS.map((id) => [id, TYPESAFE_MODEL])));
+    } finally {
+      globalThis.fetch = saved;
+    }
+  });
+
+  test("registry membership is pinned: exactly jev + mock serve the contract", () => {
+    expect([...JUDGMENT_PROVIDER_IDS]).toEqual(["jev", "mock"]);
   });
 });
