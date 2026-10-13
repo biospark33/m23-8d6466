@@ -232,6 +232,54 @@ describe("A6 staleness check (scripts/gitnexus-staleness.ts)", () => {
     });
   });
 
+  it("INV-A6-2: a timezone-free indexedAt reads invalid — never a host-local age guess", () => {
+    // Writer-shaped minus the Z. Date.parse ACCEPTS this and reads it as
+    // host-local time — on a non-UTC host the derived age is silently off by
+    // the UTC offset and the verdict is confidently wrong, not NaN. The zone
+    // gate must refuse it as invalid (age null) BEFORE any parse.
+    const zoneFree = hoursAgoIso(1).replace(/\.\d{3}Z$/, "");
+    expect(zoneFree).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/); // the ambiguous shape itself
+    withFixture(stampJson(zoneFree), (dir, stampPath) => {
+      const r = runScript(envWithHome(dir));
+      expect(r.exitCode).toBe(2);
+      const json = parseSingleLineJson(r.stdout);
+      expect(json.verdict).toBe("invalid");
+      expect(json.ageHours).toBeNull();
+      expect(json.stampPath).toBe(stampPath);
+    });
+  });
+
+  it("INV-A6-2: a loose-format indexedAt Date.parse would accept reads invalid", () => {
+    // "Oct 13 2026" parses on lenient engines (mutated positive: a NaN-only
+    // gate lets it through and coerces a fabricated age).
+    withFixture(stampJson("Oct 13 2026"), (dir, stampPath) => {
+      const r = runScript(envWithHome(dir));
+      expect(r.exitCode).toBe(2);
+      const json = parseSingleLineJson(r.stdout);
+      expect(json.verdict).toBe("invalid");
+      expect(json.ageHours).toBeNull();
+      expect(json.stampPath).toBe(stampPath);
+    });
+  });
+
+  it("explicit non-UTC offset is honored: a 9h-old stamp in +05:30 reads stale with the real age", () => {
+    // Positive control for the zone gate: an explicit offset must PARSE, and
+    // to the correct instant — the same moment spelled in +05:30 local digits
+    // (+5h30m on the clock face). A gate that rejected offsets, or parsed the
+    // digits as UTC, flips this named assertion.
+    const instant = new Date(Date.now() - 9 * HOUR_MS);
+    const offsetForm = `${new Date(instant.getTime() + 5.5 * HOUR_MS).toISOString().slice(0, 19)}+05:30`;
+    withFixture(stampJson(offsetForm), (dir, stampPath) => {
+      const r = runScript(envWithHome(dir));
+      expect(r.exitCode).toBe(1);
+      const json = parseSingleLineJson(r.stdout);
+      expect(json.verdict).toBe("stale");
+      expect(json.ageHours).toBeGreaterThan(8.5);
+      expect(json.ageHours).toBeLessThan(9.5);
+      expect(json.stampPath).toBe(stampPath);
+    });
+  });
+
   it("INV-A6-2: a non-string or missing indexedAt reads invalid — exit 2, ageHours null", () => {
     // numeric indexedAt — typeof must be checked BEFORE any parse attempt, so
     // this arm catches an implementation that skips the guard.

@@ -25,7 +25,10 @@
  *   AC3 — log-line vocabulary: exactly one line per cycle, the 9 base fields
  *     in contract order, a real durationMs (never 0 on a failed cycle), the
  *     skipped-overlapping sha with crossCheck n/a, and crossCheck
- *     match/mismatch on full cycles only;
+ *     match/mismatch on full cycles only — mismatch is a CLAIM (both shas
+ *     read and differ); a cross-check that could not run records n/a with
+ *     the reason in detail, fail-closed (result failed), never a false
+ *     mismatch;
  *   AC4 — a red contract suite marks the cycle FAILED naming cliInstalled vs
  *     cliExpected from the stamp;
  *   AC5 — flock coalesce: a tick arriving mid-cycle exits 0 skipped-
@@ -860,9 +863,37 @@ describe("AC3 stage f — crossCheck (full cycles only)", () => {
       const [line] = readSink(fx, 1);
       expect(line?.result).toBe("failed");
       expect(line?.stage).toBe("crossCheck");
-      expect(line?.crossCheck).toBe("mismatch");
+      // Could-not-verify is n/a, never a mismatch claim about a comparison
+      // that did not run — and never match (fail-closed, INV-A6-2 spirit).
+      expect(line?.crossCheck).toBe("n/a");
       expect(line?.indexedHeadSha).toBe("unknown");
+      expect(line?.detail).toContain("could not verify");
       expect(line?.detail).toContain(REAL_HEAD); // the one sha that IS known is named
+    });
+  });
+
+  it("fail-closed: git HEAD unavailable (poisoned GIT_DIR) fails the cycle with crossCheck n/a — an unverifiable cross-check is never a mismatch", async () => {
+    await withFixture("cross-no-git", (fx) => {
+      // GIT_DIR pointing nowhere breaks every git rev-parse in the wrapper
+      // (git stays ON PATH, so stage [a] takes its WARN fallback and the
+      // cycle proceeds) — the same empty-GIT_SHA branch as a cron whose PATH
+      // lacks git entirely. Full cycle succeeds through reindex + contract
+      // (the cure must survive without git), then the crossCheck honestly
+      // records that it could not run.
+      const env = {
+        ...baseEnv(fx, fakeReindex(fx, { head: REAL_HEAD }), fakeContract(fx, 0).cmd),
+        GIT_DIR: "/nonexistent-a6-crosscheck-no-git",
+      };
+      const r = runWrapper(env);
+      expect(r.exitCode).toBe(1);
+      const [line] = readSink(fx, 1);
+      expect(line?.result).toBe("failed");
+      expect(line?.stage).toBe("crossCheck");
+      expect(line?.crossCheck).toBe("n/a"); // NOT "mismatch" — nothing was compared
+      expect(line?.indexedHeadSha).toBe(REAL_HEAD); // the post-cycle stamp sha is recorded
+      expect(line?.detail).toContain("git rev-parse HEAD failed");
+      expect(line?.detail).toContain(REAL_HEAD); // the stamp sha is named in the reason
+      expect(line?.durationMs).toBeGreaterThan(0); // a real attempt, never 0
     });
   });
 });

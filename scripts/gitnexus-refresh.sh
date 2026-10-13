@@ -54,9 +54,12 @@
 #   [e] contract suite — QDS_REFRESH_CONTRACT_CMD (the drift ALARM, never
 #       the adopter); failure → result failed stage contract
 #   [f] crossCheck (full cycles only): post-cycle stamp indexedHead vs
-#       `git rev-parse HEAD`; mismatch (or an unreadable post-cycle stamp —
-#       fail-closed, never match-on-unknown) → result failed stage
-#       crossCheck with a detail naming both shas
+#       `git rev-parse HEAD`. Both shas read and different → crossCheck
+#       mismatch, result failed, detail naming both. Could NOT verify
+#       (unreadable post-cycle stamp, git HEAD unavailable) → crossCheck
+#       n/a, result failed with the reason in detail — fail-closed, never
+#       match-on-unknown, and never a mismatch claim about a comparison
+#       that did not happen
 #   [g] ONE JSON log line appended to the sink; exit 0 (success or
 #       skipped-overlapping) or 1 (failed)
 #
@@ -64,6 +67,10 @@
 #   {ts, cycle, result: success|failed|skipped-overlapping, durationMs,
 #    indexedHeadSha, stampAgeHours, cliInstalled, cliExpected,
 #    crossCheck: match|mismatch|n/a}
+#   crossCheck semantics: match = verified equal; mismatch = both shas read
+#    and DIFFERENT (a claim — never used for an unverifiable cross-check);
+#    n/a = no verdict (coalesced, an earlier stage failed, or the cross-check
+#    could not run — the reason then rides the detail field)
 #   plus, only where truthfully applicable:
 #    stage            ("reindex"|"contract"|"crossCheck") on result=failed —
 #                     "staleness" is documented-but-never-emitted: the
@@ -71,8 +78,8 @@
 #    stalenessAlarm   {fired:true, ageHours, ceilingHours, stampPath} when
 #                     the INCOMING verdict was stale — the alarm survives
 #                     the cure in the record
-#    detail           string on crossCheck-mismatch failures naming both
-#                     shas
+#    detail           string on crossCheck failures — both shas on a
+#                     mismatch, the could-not-verify reason otherwise
 #   stampAgeHours is null on absent/invalid stamps (never 0 — INV-A6-2).
 #   durationMs is the real elapsed attempt time (never 0 on a failed
 #   cycle). cliInstalled/cliExpected read the CURRENT stamp at log time
@@ -453,16 +460,23 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 # ── [f] crossCheck: post-cycle stamp vs git HEAD (full cycles only, AC3) ─────
+# Vocabulary: `mismatch` is a CLAIM — both shas were read and differ. A
+# cross-check that could not RUN (unreadable post-cycle stamp, git HEAD
+# unavailable) records `n/a` with the reason in detail: fail-closed (the
+# cycle still fails, never match-on-unknown) but never a false mismatch a
+# downstream reader would diagnose as "graph diverged from HEAD" — a state a
+# reindex cannot cure when git itself is the broken leg. (cwd is REPO_ROOT:
+# the stage-[a] cd is in this shell.)
 POST_SHA_RAW="$(stamp_str indexedHead "$STAMP_PATH")"
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
 if [ -z "$POST_SHA_RAW" ]; then
   # A completed reindex whose stamp cannot be read cannot be verified —
   # fail-closed (INV-A6-2 spirit): never report match on an unknown sha.
-  emit_and_exit "failed" "crossCheck" "mismatch" "unknown" \
+  emit_and_exit "failed" "crossCheck" "n/a" "unknown" \
     "crossCheck could not verify: post-cycle stamp has no readable indexedHead; git HEAD: ${GIT_SHA:-unavailable}"
 fi
 if [ -z "$GIT_SHA" ]; then
-  emit_and_exit "failed" "crossCheck" "mismatch" "$(json_escape "$POST_SHA_RAW")" \
+  emit_and_exit "failed" "crossCheck" "n/a" "$(json_escape "$POST_SHA_RAW")" \
     "crossCheck could not verify: git rev-parse HEAD failed; stamp sha: $POST_SHA_RAW"
 fi
 if [ "$POST_SHA_RAW" = "$GIT_SHA" ]; then

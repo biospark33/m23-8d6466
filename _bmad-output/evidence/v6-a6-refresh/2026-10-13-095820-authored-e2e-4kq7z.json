@@ -67,13 +67,13 @@
     "note": "Incoming stamp was 7.25h old — the cycle cured it 45 minutes before it would have crossed the 8h ceiling. stampAgeHours is the real measured incoming age; no stalenessAlarm on the line (fresh incoming verdict); crossCheck match (post-cycle stamp indexedHead == git rev-parse HEAD = 625e27c6)."
   },
   "fixtureVerdictDemonstrations": {
-    "mechanism": "Every suite spawn carries QDS_REFRESH_LOG / QDS_REFRESH_REINDEX_CMD / QDS_REFRESH_CONTRACT_CMD / QDS_GITNEXUS_HOME overrides; runWrapper refuses to spawn without them (refresh-cron.test.ts:269-280) and the fixture reindex refuses an unset QDS_GITNEXUS_HOME (exit 90, :217); a final hygiene canary (:921) proves live sink + live stamp byte-identical to suite start.",
+    "mechanism": "Every suite spawn carries QDS_REFRESH_LOG / QDS_REFRESH_REINDEX_CMD / QDS_REFRESH_CONTRACT_CMD / QDS_GITNEXUS_HOME overrides; runWrapper refuses to spawn without them (the runWrapper/baseEnv guard in tests/gitnexus/refresh-cron.test.ts) and the fixture reindex refuses an unset QDS_GITNEXUS_HOME (exit 90, its generated-script refusal line); a final \"fixture hygiene\" canary test proves live sink + live stamp byte-identical to suite start.",
     "stalenessDemos": [
-      "refresh-cron.test.ts:528 — stale incoming stamp still cycles to success, stalenessAlarm survives the cure in the record (record-then-cure)",
-      "refresh-cron.test.ts:563 — absent incoming stamp records stampAgeHours null, never 0 (INV-A6-2), cycle still cures",
-      "refresh-cron.test.ts:584 — unparseable incoming stamp records stampAgeHours null"
+      "refresh-cron.test.ts test \"AC2 record-then-cure: a stale incoming stamp still cycles to success — stalenessAlarm survives the cure in the record\" — stale incoming stamp still cycles to success, stalenessAlarm survives the cure in the record (record-then-cure)",
+      "refresh-cron.test.ts test \"INV-A6-2 negative control: an absent incoming stamp records stampAgeHours null — never age 0 — and the cycle still cures\" — absent incoming stamp records stampAgeHours null, never 0 (INV-A6-2), cycle still cures",
+      "refresh-cron.test.ts test \"INV-A6-2: an unparseable incoming stamp records stampAgeHours null — never age 0\" — unparseable incoming stamp records stampAgeHours null"
     ],
-    "suiteResult": "21 pass / 0 fail / 471 expect() calls (bun test ./tests/gitnexus/refresh-cron.test.ts)"
+    "suiteResult": "21 pass / 0 fail / 471 expect() calls at the recorded e2e commit a00f4958 (bun test ./tests/gitnexus/refresh-cron.test.ts; the suite grew to 30 pass / 1 skip at the closure HEAD — see closure.suiteAtClosure)"
   },
   "branchGate": {
     "fullTestsGitnexus": {
@@ -86,8 +86,8 @@
     }
   },
   "invariants": {
-    "INV-A6-1": "canonical reindex only — suite scan refuses bare `gitnexus analyze` by name (mutated positives :503/:515)",
-    "INV-A6-2": "fail-closed freshness — absent/invalid never age 0 (staleness suite :197/:213/:224/:235 + wrapper legs :563/:584)",
+    "INV-A6-1": "canonical reindex only — suite scan refuses bare `gitnexus analyze` by name (the two \"AC1 negative control (mutated positive)\" tests: bare-analyze wrapper scan, crontab bare-binary scan)",
+    "INV-A6-2": "fail-closed freshness — absent/invalid never age 0 (staleness suite absent / unparseable / non-ISO / non-string-or-missing-indexedAt cases + wrapper legs: the absent-stamp and unparseable-stamp record-then-cure tests)",
     "INV-A6-3": "no credentials, no egress — env tables names-only; values never logged"
   },
   "closure": {

@@ -20,7 +20,9 @@
  *       age / ceiling / stamp path)
  *   2 — absent: stamp missing — NEVER age 0, a wiped .gitnexus reads as
  *       unknown, not fresh (INV-A6-2); invalid: unparseable JSON, or
- *       missing/non-string/unparseable `indexedAt` — also never age 0; or
+ *       missing/non-string/unparseable/timezone-free `indexedAt` (an
+ *       explicit zone is required — lenient local-time parsing would age
+ *       the stamp wrongly on non-UTC hosts) — also never age 0; or
  *       usage: any argv beyond the script path
  *
  * Repo root: `git rev-parse --show-toplevel` first (house idiom —
@@ -107,11 +109,19 @@ function main(): void {
     emit("invalid", null, 2, stampPath);
   }
   if (typeof stamp !== "object" || stamp === null) emit("invalid", null, 2, stampPath);
-  // The real writer (install-gitnexus-plus.sh) emits `date -u +%Y-%m-%dT%H:%M:%SZ`;
-  // parseability is the gate, Date.parse NaN is the refusal — anything stricter
-  // is format-policing beyond the contract.
+  // The real writer (install-gitnexus-plus.sh) emits `date -u +%Y-%m-%dT%H:%M:%SZ`.
+  // Zone-awareness is gated BEFORE Date.parse, not as format-policing: ES
+  // lenient parsing reads a timezone-free string ("2026-10-13T09:58:16") as
+  // HOST-LOCAL time — on a non-UTC cron host the derived age is silently off
+  // by the UTC offset and the verdict (fresh/stale) is confidently WRONG, not
+  // NaN. Loose formats ("Oct 13 2026") parse too. Ambiguous input fails
+  // closed as invalid (INV-A6-2: never an age derived from a guess); the NaN
+  // gate stays behind it for regex-legal nonsense (component overflow).
   const indexedAt = (stamp as Record<string, unknown>).indexedAt;
   if (typeof indexedAt !== "string") emit("invalid", null, 2, stampPath);
+  // Explicit zone REQUIRED: the writer's `Z`, or a numeric ±HH:MM offset.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(indexedAt))
+    emit("invalid", null, 2, stampPath);
   const t = Date.parse(indexedAt);
   if (Number.isNaN(t)) emit("invalid", null, 2, stampPath);
 
