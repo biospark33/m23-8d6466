@@ -1,7 +1,7 @@
 session:
   id: a6-qds-dev-20261013
   started_at: 2026-10-13T00:50:00Z
-  last_updated: 2026-10-13T11:55:00Z
+  last_updated: 2026-10-13T13:35:00Z
 story:
   id: A6
   key: a6-gitnexus-refresh-cron
@@ -12,7 +12,7 @@ story:
   dependencies:
     - Z4 (authored half DONE — PR #406 merged to dev 2026-10-04)
 workflow:
-  current_phase: pr_created
+  current_phase: done (PR #425 merged to dev 91945689)
   phases_completed:
     - story_selection
     - branch_safety
@@ -21,13 +21,15 @@ workflow:
     - dev_story
     - verification
     - review_rounds_1_to_3_closed
+    - coderabbit_round_closed
+    - pr_merged
   flags:
     yolo: false
     verbose: false
     dry_run: false
     skip_research: false
 branch:
-  name: feature/a6-gitnexus-refresh-cron
+  name: feature/a6-gitnexus-refresh-cron (pruned post-merge, local + remote)
   created: 2026-10-13
   base: dev
   target: dev
@@ -53,6 +55,7 @@ guardrails:
   overrides: []
 pr:
   created: true
+  merged: true (PR #425 -> dev, merge commit 91945689, head fd8a7fca, 2026-10-13T13:21:04Z)
 notes: >-
   Fired half (AC7) operator-gated on VPS day — lands open by design, zero agent spend.
   Unlazy orchestrated scope: a6. Driver-only full suite at branch gate; subagents run
