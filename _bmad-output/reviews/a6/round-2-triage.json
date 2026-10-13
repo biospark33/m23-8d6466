@@ -1,0 +1,118 @@
+{
+ "pr": 0,
+ "round": 2,
+ "story": "a6-gitnexus-refresh-cron",
+ "reviewers": ["blind-hunter", "edge-case-hunter", "acceptance-auditor"],
+ "scope": "commit 91f171b2 (round-1 fix diff) + the uncommitted story amendments",
+ "dedup_notes": "EH2-001 == BH2-003 (split-brain override-shaped door; two hunters independently) and EH2-002 == BH2-001 (set -u unbound vars in the probe); deduplicated below to two findings",
+ "findings": [
+  {
+   "finding_id": "AA2-001",
+   "finding_text": "The EH-002 determinized lock-coalesce fixture kills the holder mid-reindex and asserts exactly ONE line — the round-1 rework deleted the proof that the holder COMPLETES its own cycle under contention and that the lock holds through contract/crossCheck/emit (a wrapper releasing fd 9 after stage [d] passes every current test)",
+   "diff_context_ref": "tests/gitnexus/refresh-cron.test.ts:826-885",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Handshake redesign: the holder's contract fake PARKS inside the contract stage until a release file the test writes after B's refusal is observed; the holder then completes crossCheck+emit on its own — assertions: holderExit 0 (completed, never killed), ordered 2-line sink [skip, success+match]. No fixed sleeps; bounded waits only. B's skip records the stamp current at B's tick (A's post-reindex stamp, REAL_HEAD — the park lives in contract, not reindex); the INCOMING-sha + stale-alarm skip arm stays pinned by the external-holder test",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "EH2-001",
+   "finding_text": "The BH-002 split-brain guard keys on override PRESENCE, not coherence — QDS_REFRESH_REINDEX_CMD='bash scripts/install-gitnexus-plus.sh' (the production default spelled explicitly) combined with a non-empty home passes the guard yet is the exact split-brain it exists to prevent (independently found by blind-hunter as BH2-003)",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:224-227",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Coherence arm: the guard additionally refuses a non-empty home when the reindex override REFERENCES the canonical writer (substring install-gitnexus-plus — spelling-tolerant: env-prefixed, absolute, ./ all caught); header env-table row + fakeReindex doc updated; two new tests (exact default spelling; env-prefixed absolute spelling)",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "EH2-002",
+   "finding_text": "The bun fallback probe dereferences $HOME (twice) and $PATH unguarded under set -u — an env -i / minimal-systemd invocation dies on 'HOME: unbound variable' exit 1 with no named FATAL, bypassing the exit-3 contract (independently found by blind-hunter as BH2-001)",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:179,185",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Conditional ${HOME:+...} probe entries (vanish when unset) + ${PATH:-/usr/bin:/bin} in the prepend; new test: HOME and PATH keys DELETED from the spawn env → exit 3, named FATAL, no side effects",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "EH2-003",
+   "finding_text": "The stripped-PATH FATAL test keeps unconditional exit-code and no-side-effect assertions while its own comment concedes a legitimate host class (flock on /usr/bin:/bin AND /usr/local/bin/bun) where the wrapper proceeds — the suite false-reds exactly where it has nothing to prove",
+   "diff_context_ref": "tests/gitnexus/refresh-cron.test.ts:953-985",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "it.skipIf(STRIPPED_PATH_HOST_PASSES_EVERYTHING) with the host condition named in a comment (house named-skip pattern); the FATAL contract stays pinned on missing-prereq hosts (macOS dev: flock leg; CI's setup-bun: bun leg)",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "AA2-002",
+   "finding_text": "The story Observability Contract amendment removed the never-emitted 'staleness' stage but still omits crossCheck, which the wrapper emits on the fail-closed arm and the tests assert by name (:790/:808 pre-shift)",
+   "diff_context_ref": "story file, Observability Contract",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Stage enum reconciled to 'reindex | contract | crossCheck'; amendment blockquote extended with the round-2 ids",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "AA2-003",
+   "finding_text": "The amendment's own line pointers (:528/:563/:584) are pre-fix — commit 91f171b2's inserted tests moved the cited pins; stale refs in the truth record the next reader will trust",
+   "diff_context_ref": "story file, amendment blockquote",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Refs updated to the CURRENT positions (:666/:701/:722) and downgraded to secondary — the citation names the test TITLES primarily so future edits cannot silently stale it again",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "AA2-005",
+   "finding_text": "The committed round-1 triage.json is invalid JSON (line 9: backslash + string-terminating quote where a literal backslash-then-escaped-quote was meant) — the artifact C12's gate points at cannot be machine-read",
+   "diff_context_ref": "_bmad-output/reviews/a6/triage.json:9",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Escape repaired; python3 json.load now parses (18 findings)",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "AA2-006",
+   "finding_text": "The committed AC6 tripwire regex misses the two most plausible non-import integration tokens: QDS_GITNEXUS_HOME and the .gitnexus stamp directory — a dispatch gate consuming graph age via the env var or reading the stamp dir directly evades it",
+   "diff_context_ref": "tests/gitnexus/refresh-cron.test.ts:569-575",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "REFRESH_SURFACE_RE extended with QDS_GITNEXUS_HOME|\\.gitnexus — zero current src/ hits verified (measured) before extending",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "AA2-007",
+   "finding_text": "No fixture exercises the bun fallback's positive recovery: a wrapper spawned with bun absent from PATH yet present at a probed location — a BUN_FOUND-without-PATH-prepend regression is invisible to every existing test",
+   "diff_context_ref": "tests/gitnexus/refresh-cron.test.ts:550-560",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Behavioral case: a working bun shim (execs the running bun) parked at $HOME/.bun/bin, PATH stripped to /usr/bin:/bin — the cycle can only succeed THROUGH the probe; asserts exit 0 + success + crossCheck match. it.skipIf(!existsSync('/usr/bin/flock')): runs on Linux CI (which has /usr/bin/flock), named skip on macOS dev (no system flock)",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "BH2-002",
+   "finding_text": "The crontab prerequisite comment is self-undermining: a root-owned 755 /var/log/qds prevents the deploy user's cron shell from creating refresh-cron.log at redirect-open time — reproducing the silent pre-wrapper entry death the same comment warns about",
+   "diff_context_ref": "deploy/vps/crontab.factory:7-9",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Comment amended: after the root-owned mkdir, the log FILE is pre-created and handed to the deploy user (install -o deploy -m 0644 /dev/null /var/log/qds/refresh-cron.log)",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "BH2-004",
+   "finding_text": "waitForLine's doc comment claims 'present AND newline-terminated' but the implemented gate is only first-line-non-empty — a partial final line would pass the gate (comment/code drift a later refactor will trust)",
+   "diff_context_ref": "tests/gitnexus/refresh-cron.test.ts:347-357",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Gate strengthened to content.endsWith('\\n') (matching the comment), plus a new waitForLines count-gate helper for the holder-completion wait",
+   "created_at": "2026-10-13T11:40:00Z"
+  },
+  {
+   "finding_id": "AA2-004",
+   "finding_text": "AA-005 disposition gap: the story Status header still reads ready-for-dev and the story amendments are uncommitted while the triage record says PATCH",
+   "diff_context_ref": "story file line 5; .unlazy/a6/GATES.md G3",
+   "label": "LOW",
+   "disposition": "CLOSURE",
+   "rationale": "Already-planned C11/G3 closure work: Status header to landed truth + review-round summary in the closure commit, which also commits the story amendments; G3 checked with that evidence",
+   "created_at": "2026-10-13T11:40:00Z"
+  }
+ ]
+}

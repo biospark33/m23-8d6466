@@ -1,0 +1,170 @@
+{
+ "pr": 0,
+ "round": 1,
+ "story": "a6-gitnexus-refresh-cron",
+ "reviewers": ["round-0 driver self-review", "blind-hunter", "edge-case-hunter", "acceptance-auditor"],
+ "findings": [
+  {
+   "finding_id": "BH-001",
+   "finding_text": "emit_and_exit interpolates stalenessAlarm.stampPath into the JSON log line RAW (no json_escape) — unlike indexedHeadSha/cliInstalled/cliExpected/detail; sed capture truncation at I1's backslash-escaped quotes leaves a dangling backslash and the raw interpolation can swallow the closing quote, producing an unparseable line while the wrapper exits 0",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:286-288 (json_str_field at 224-226)",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "json_escape around the interpolation — same pattern as the neighboring fields; also strips control chars, closing EH-006's TAB/CR variant",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "EH-006",
+   "finding_text": "stampPath control characters (TAB/CR) pass the sed [^\"]* extractor and land raw inside the JSON line — parseCycleLine rejects unescaped control chars, poisoning the whole cycle record",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:286-288",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Same fix as BH-001 (json_escape drops \\000-\\037)",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "BH-002",
+   "finding_text": "QDS_GITNEXUS_HOME split-brain: wrapper pins lock dir + stamp reads + I1 reader to the override home, but the default canonical reindex hardcodes <repoRoot>/.gitnexus (install-gitnexus-plus.sh:509-515) — with only the home overridden, crossCheck fails every cycle naming crossCheck, not the real cause",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:79-81,175,252,299-303; tests/gitnexus/refresh-cron.test.ts:196-199",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Split-brain guard: QDS_GITNEXUS_HOME set non-empty while REINDEX_CMD is still the production default → pre-cycle FATAL exit 3 naming both vars and the writer's hardcoded target (fixtures always override the reindex command, so the suite path stays open). Header env-table clarification + suite prose fix at :196-199 + new fixture test",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "EH-001",
+   "finding_text": "crontab.factory ships no PATH; Debian cron PATH=/usr/bin:/bin excludes bun's install locations, so every tick exit-3s pre-cycle; /var/log/qds may not exist and a failed redirect kills the entry before the wrapper runs — the entire observable output silently absent",
+   "diff_context_ref": "deploy/vps/crontab.factory:9-10",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Wrapper gains documented bun-location fallback resolution (command -v bun → $HOME/.bun/bin, /usr/local/bin, $HOME/.local/bin → export PATH) mirroring the canonical script's gitnexus fallback idiom; crontab header comment names the PATH prerequisite and the one-time operator creation of /var/log/qds; suite source-pin asserts the fallback lines exist",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "BH-006",
+   "finding_text": "PATH prerequisite documented only in the wrapper header one hop from the file the operator installs; first fired tick likely FATALs until operator hand-edits crontab",
+   "diff_context_ref": "deploy/vps/crontab.factory:1-10 vs scripts/gitnexus-refresh.sh:82-84,147-154",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Covered by the EH-001 fix (wrapper fallback + crontab header comment)",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "EH-002",
+   "finding_text": "Both AC5 lock fixtures synchronize via a fixed 2s sleep inside the holder while tick B must complete bash boot + git rev-parse + bun staleness spawn inside that window — under CI load B arrives after release and the coalesce proof flakes",
+   "diff_context_ref": "tests/gitnexus/refresh-cron.test.ts:756,763-771,800-803",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Determinize: holder holds ≥30s; B's skip line is polled with a bounded waitFor; the holder is killed (SIGTERM) only after B's refusal is observed — no fixed sleep gates any assertion",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "AA-001",
+   "finding_text": "AC6 (no dispatch gating, output surface = stamp+alarm+log, zero src/ bytes) is the only AC with no committed test — its MUST-fail negative control rests on the driver's one-shot manual N4 git-diff scan and decays at merge",
+   "diff_context_ref": "AC6; tests/gitnexus/refresh-cron.test.ts (no boundary case)",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Committed boundary test: walk src/ and assert zero references to the refresh surface (gitnexus-staleness | refresh-cron | INDEX_STALENESS | cli-version.json | refresh-cron.jsonl) — a future dispatch-path integration lands in src/ first and trips this. Verified zero hits today",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "BH-004",
+   "finding_text": "Sink-append failure inside emit_and_exit exits 3, contradicting the header's exit-3 definition (pre-cycle config failure, NO cycle ran) — a fully-executed cycle is mislabeled as a config no-op and AC3's exactly-one-line invariant has no trace",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:22-28 vs 290-293",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "A cycle that ran and could not record IS a failed cycle: exit 1 + FATAL on stderr; header exit-3/exit-1 lines updated; new test: QDS_REFRESH_LOG under a read-only fixture dir → exit 1, FATAL names the sink, no line anywhere",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "EH-004",
+   "finding_text": "Set-but-empty QDS_REFRESH_LOG keeps :- semantics — a fixture run computing an empty log override silently aims the cycle's record at the LIVE sink; guard asymmetry vs the command overrides",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:155-175",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Extend the set-but-empty guard family to QDS_REFRESH_LOG (FATAL exit 3, no cycle) + fixture test; QDS_GITNEXUS_HOME keeps F-017 set-but-empty-as-unset semantics (safe: the fixture reindex refuses an unset home by name)",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "BH-003",
+   "finding_text": "num_or_null rejects JSON exponential notation — JSON.stringify emits e.g. 2.77e-7 for |ageHours| < 1e-6 (stamp within ±3.6ms of the reading clock), silently coercing a measured age to null on a fresh verdict",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:233-236 vs scripts/gitnexus-staleness.ts:48,120",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Regex accepts optional [eE][-+]?[0-9]+ exponent + comment citing the producer (JSON.stringify). No deterministic end-to-end test exists (the window is ~3.6ms wide and drive-through-the-real-wrapper timing cannot reliably hit it) — documented in the comment per the house measured-not-assumed idiom",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "EH-003",
+   "finding_text": "exec 9>> without close-on-exec: reindex/contract children inherit fd 9 sharing the open-file description — a selective wrapper kill leaves the lock held by an orphaned cycle that never writes its line; the header's 'kernel releases on ANY exit' claim is inaccurate while children live",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:308-318,332,344",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Invoke both children with 9>&- (bash -c \"$CMD\" 9>&- </dev/null) so the lock's only holder is the wrapper itself and the header claim becomes true; header comment updated; suite source-pin asserts the redirection on both invocation lines",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "EH-005",
+   "finding_text": "emit path's date leg is bare under set -e — a transient date(1) failure aborts emit after reindex+contract succeeded, losing the record the adjacent code explicitly hardened the clock for",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:262-276",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Harden: now=$(date ... || true); if empty fall back to $CYCLE (tick-start UTC — skew beats a lost record); comment explains the degradation",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "BH-005",
+   "finding_text": "flock error vs refusal conflated: every non-zero flock -n exit records skipped-overlapping exit 0 — a broken lock (ENOLCK-class) degrades to silent never-refresh with healthy-looking skip lines",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:314-325",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Portable flock cannot distinguish (exit 1 covers both; no -E on macOS brew flock — measured). Honest fix is truth in docs: header + inline comment state the conflation and its observability signature (recurring skip lines with rising stalenessAlarm = broken lock, not contention); behavior unchanged",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "R0-3",
+   "finding_text": "Double blank line between stage [d] and [e] (round-0 driver self-review)",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:338-339",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Cosmetic",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "AA-002",
+   "finding_text": "Story Observability Contract documents stage 'staleness' but record-then-cure makes that value structurally unproducible; wrapper header admits 'documented-but-never-emitted'; story text and asserted behavior permanently disagree",
+   "diff_context_ref": "scripts/gitnexus-refresh.sh:58-60; story Observability Contract vs AC2",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Story-text amendment at closure (driver-owned): AC2 mechanism clause + Observability Contract stage enum reconciled to the landed semantics (stalenessAlarm {fired,ageHours,ceilingHours,stampPath} on the cycle line; result stays success when the same cycle cures) with a dated amendment note. Behavior is correct per PLAN I2; this patches the story's truth, not the code",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "AA-003",
+   "finding_text": "Story contract sentence 'missing or unparseable stamp reports stampAgeHours null with result failed' is contradicted by the cured-case tests (:563/:584 pin success + null) and matched only by the red-reindex arm (:675)",
+   "diff_context_ref": "story Observability Contract (final sentence) vs tests/gitnexus/refresh-cron.test.ts:563,:584,:675",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Same closure amendment: null age is recorded on any verdict; result reflects the cure outcome (failed only when a stage fails, e.g. red reindex)",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "AA-004",
+   "finding_text": "DoD Security bullet enumerates paths that exclude the CLAUDE.md-mandated SKILL.md reindex-ritual refresh actually carried by the branch (+2 lines, chore 9cb461e7, PLAN C9a)",
+   "diff_context_ref": "DoD Security bullet; .claude/skills/gitnexus-cli/SKILL.md",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Closure amendment: DoD security bullet gains the disclosed exception (reindex-ritual skill refresh per repo CLAUDE.md upgrade ritual)",
+   "created_at": "2026-10-13T10:30:00Z"
+  },
+  {
+   "finding_id": "AA-005",
+   "finding_text": "Story Status header still 'ready-for-dev'; root GATES.md G1-G4 pending; branch fails its own C11/G3 closure contract at audit time (honestly tracked, not faked)",
+   "diff_context_ref": "story Status header; .unlazy/a6/GATES.md",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Already-planned closure work (C11/G3): story header to landed truth with review-round summary; root gates run after fixes land",
+   "created_at": "2026-10-13T10:30:00Z"
+  }
+ ]
+}

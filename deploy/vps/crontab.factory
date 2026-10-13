@@ -1,0 +1,22 @@
+# A6 — GitNexus graph refresh cron (FR-MEM-6 / NFR-OBS-5; story:
+# _bmad-output/sprint-artifacts/dark-factory-v6/stories/a6-gitnexus-refresh-cron.md).
+# Install (operator, on the VPS, as the deploy user):
+#   crontab deploy/vps/crontab.factory
+# Cadence: 5h — inside FR-MEM-6's 4–6h window; one missed cycle still fits
+# the 8h staleness ceiling. Minute 7 keeps the tick off the top of the hour.
+# Prerequisites (one-time, operator):
+#   mkdir -p /var/log/qds   — root-owned so only the deploy user's writes land
+#     there; AND the log FILE itself must exist and be writable by the deploy
+#     user (a root-owned 755 dir blocks the deploy user from CREATING the log
+#     at redirect-open time — the same silent pre-wrapper entry death warned
+#     about below), so hand it over after the mkdir:
+#       install -o deploy -m 0644 /dev/null /var/log/qds/refresh-cron.log
+#   bun on the host         — the wrapper resolves it itself (PATH probe, then
+#     ~/.bun/bin, /usr/local/bin, ~/.local/bin); do NOT add a PATH= line here:
+#     cron env values are literal (no shell expansion), so a PATH copied from
+#     an interactive shell rots silently — the wrapper's probe list is the
+#     durable resolver.
+# Env contract, stage order, and exit codes live in the wrapper header:
+#   scripts/gitnexus-refresh.sh
+SHELL=/bin/bash
+7 */5 * * * /opt/qds-factory/scripts/gitnexus-refresh.sh >> /var/log/qds/refresh-cron.log 2>&1

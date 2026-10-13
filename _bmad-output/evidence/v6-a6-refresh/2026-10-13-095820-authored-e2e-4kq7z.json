@@ -1,0 +1,99 @@
+{
+  "story": "A6 — GitNexus graph-refresh cron + staleness alarm (authored half)",
+  "sprint": "dark-factory-v6",
+  "storyFile": "_bmad-output/sprint-artifacts/dark-factory-v6/stories/a6-gitnexus-refresh-cron.md",
+  "leg": "authored-half DoD e2e",
+  "date": "2026-10-13",
+  "branch": "feature/a6-gitnexus-refresh-cron",
+  "commits": {
+    "code": "a00f4958",
+    "skillChore": "9cb461e7"
+  },
+  "shaRewrite": {
+    "date": "2026-10-13",
+    "reason": "GitHub push rejected under the account's email-privacy restriction: the six branch commits carried the private configured email; rewritten to the repo-conventional noreply address (filter-branch, emails only — trees, messages, and dates unchanged)",
+    "mapping": {
+      "c9d03b51": "a00f4958",
+      "625e27c6": "9cb461e7",
+      "12941273": "91f171b2",
+      "d4b92f9d": "abe342c3",
+      "52d833b5": "573a8a06",
+      "d5bcbebf": "b5a4420f"
+    },
+    "measurementPolicy": "Measured values below (liveCycle.logLine, reindex.indexedCommit, liveCycle.note's crossCheck equality, stampAfter.indexedHead) are PRE-REWRITE historical shas captured at e2e time and left untouched — they record what was measured. Commit-reference fields above and in reviewRounds are repointed to the post-rewrite shas."
+  },
+  "reviewRounds": {
+    "rule": "rounds 1–2 fix all (incl. LOWs); stop after any round where only LOWs remain",
+    "round1": {
+      "verdict": "18 findings (1 HIGH / 4 MED / 13 LOW) — all 13 code findings patched (commit 91f171b2); story amendments AA-002/003/004 applied driver-side; AA-005 → closure",
+      "triage": "_bmad-output/reviews/a6/triage.json"
+    },
+    "round2": {
+      "verdict": "12 entries (2 MED + 9 LOW + 1 closure item, after dedup) — all patched (commit abe342c3); EH2-001≡BH2-003 and EH2-002≡BH2-001 deduped (two hunters independently rediscovered)",
+      "triage": "_bmad-output/reviews/a6/round-2-triage.json"
+    },
+    "round3": {
+      "verdict": "acceptance-auditor CLEAN, edge-case-hunter CLEAN, blind-hunter 1 LOW (BH3-001 skip consistency) — patched (commit 573a8a06); review CLOSED (only LOWs remained)",
+      "triage": "_bmad-output/reviews/a6/round-3-triage.json"
+    },
+    "reports": "_bmad-output/reviews/a6/reports/{blind-hunter,edge-case-hunter,acceptance-auditor}.md — per-reviewer round sections"
+  },
+  "liveCycle": {
+    "command": "bash scripts/gitnexus-refresh.sh",
+    "wrapperExit": 0,
+    "logLine": "{\"ts\":\"2026-10-13T09:58:20Z\",\"cycle\":\"2026-10-13T09:55:55Z\",\"result\":\"success\",\"durationMs\":145015,\"indexedHeadSha\":\"625e27c63d560b53a09edeb261139850ebb2ebbb\",\"stampAgeHours\":7.246489722222222,\"cliInstalled\":\"1.6.12\",\"cliExpected\":\"1.6.12\",\"crossCheck\":\"match\"}",
+    "sink": ".sandbox/refresh-cron.jsonl (gitignored)",
+    "reindex": {
+      "canonical": "bash scripts/install-gitnexus-plus.sh",
+      "durationSeconds": 139.4,
+      "indexedCommit": "625e27c",
+      "graphNodes": 39800,
+      "graphEdges": 114711,
+      "status": "up-to-date, index content matches all 2565 covered files"
+    },
+    "contractLeg": "8 pass / 0 fail (tests/gitnexus/contract.test.ts, the drift alarm)",
+    "stampAfter": {
+      "installedCliVersion": "1.6.12",
+      "expectedCliVersion": "1.6.12",
+      "indexedAt": "2026-10-13T09:58:16Z",
+      "indexedHead": "625e27c63d560b53a09edeb261139850ebb2ebbb"
+    },
+    "stalenessAfterCycle": {
+      "verdict": "fresh",
+      "ageHours": 0.0036,
+      "ceilingHours": 8,
+      "exit": 0
+    },
+    "note": "Incoming stamp was 7.25h old — the cycle cured it 45 minutes before it would have crossed the 8h ceiling. stampAgeHours is the real measured incoming age; no stalenessAlarm on the line (fresh incoming verdict); crossCheck match (post-cycle stamp indexedHead == git rev-parse HEAD = 625e27c6)."
+  },
+  "fixtureVerdictDemonstrations": {
+    "mechanism": "Every suite spawn carries QDS_REFRESH_LOG / QDS_REFRESH_REINDEX_CMD / QDS_REFRESH_CONTRACT_CMD / QDS_GITNEXUS_HOME overrides; runWrapper refuses to spawn without them (the runWrapper/baseEnv guard in tests/gitnexus/refresh-cron.test.ts) and the fixture reindex refuses an unset QDS_GITNEXUS_HOME (exit 90, its generated-script refusal line); a final \"fixture hygiene\" canary test proves live sink + live stamp byte-identical to suite start.",
+    "stalenessDemos": [
+      "refresh-cron.test.ts test \"AC2 record-then-cure: a stale incoming stamp still cycles to success — stalenessAlarm survives the cure in the record\" — stale incoming stamp still cycles to success, stalenessAlarm survives the cure in the record (record-then-cure)",
+      "refresh-cron.test.ts test \"INV-A6-2 negative control: an absent incoming stamp records stampAgeHours null — never age 0 — and the cycle still cures\" — absent incoming stamp records stampAgeHours null, never 0 (INV-A6-2), cycle still cures",
+      "refresh-cron.test.ts test \"INV-A6-2: an unparseable incoming stamp records stampAgeHours null — never age 0\" — unparseable incoming stamp records stampAgeHours null"
+    ],
+    "suiteResult": "21 pass / 0 fail / 471 expect() calls at the recorded e2e commit a00f4958 (bun test ./tests/gitnexus/refresh-cron.test.ts; the suite grew to 30 pass / 1 skip at the closure HEAD — see closure.suiteAtClosure)"
+  },
+  "branchGate": {
+    "fullTestsGitnexus": {
+      "note": "First branch-gate run: 65 pass / 1 fail — the fail was the contract suite's detect-changes text leg tripping on the UNCOMMITTED working tree (C9a SKILL.md modification), not drift: installed=pinned 1.6.12; controlled experiment (stash mod → 'No changes detected.' pinned zero-change form; pop → third form). Attributed and logged in .unlazy/a6/status.log. Post-commit rerun below matches CI conditions.",
+      "postCommit": "see node-1.1:N2 stamped evidence (clean-tree run)"
+    },
+    "staticGates": {
+      "tsc": "bunx tsc --noEmit → exit 0",
+      "lint": "bun run lint → exit 0 (580 files) after fixing one biome useTemplate finding in staleness.test.ts:304"
+    }
+  },
+  "invariants": {
+    "INV-A6-1": "canonical reindex only — suite scan refuses bare `gitnexus analyze` by name (the two \"AC1 negative control (mutated positive)\" tests: bare-analyze wrapper scan, crontab bare-binary scan)",
+    "INV-A6-2": "fail-closed freshness — absent/invalid never age 0 (staleness suite absent / unparseable / non-ISO / non-string-or-missing-indexedAt cases + wrapper legs: the absent-stamp and unparseable-stamp record-then-cure tests)",
+    "INV-A6-3": "no credentials, no egress — env tables names-only; values never logged"
+  },
+  "closure": {
+    "storyStatusHeader": "updated to landed truth in this closure commit (see story line 5)",
+    "closureLiveCycle": "run AFTER this commit at the closure HEAD — the canonical reindex refreshes the then-stale GitNexus index (last indexed 625e27c); the measured log line + stamp are recorded in .unlazy/a6/status.log and the G1 gate evidence (untracked ledger), with crossCheck required to match at the closure HEAD",
+    "whyAfterCommit": "the reindex stamps indexedHead = HEAD at reindex time and N2's detect-changes leg requires a clean tree matching HEAD — any tracked-file write after the cycle would re-stale the branch gate",
+    "suiteAtClosure": "refresh-cron 30 pass / 1 skip / 0 fail; tsc 0 errors; repo-wide lint exit 0"
+  }
+}
