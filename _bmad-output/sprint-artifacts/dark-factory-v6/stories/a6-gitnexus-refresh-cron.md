@@ -2,7 +2,7 @@
 
 **Story Points:** 2
 **Sprint:** v6a (Epic A — the sole Autonomy-epic story pulled forward pre-E21; Wave 2 authored, VPS-day fired, Live tier: infra)
-**Status:** ready-for-dev after Z4 authored (deploy/vps/ exists); fired half rides Z4 fired + ops G1–G7 + operator GO
+**Status:** authored half LANDED (feature/a6-gitnexus-refresh-cron: wrapper + crontab.factory + staleness/refresh-cron suites, 30 pass / 1 skip / 0 fail; bmad review rounds 1–3: 18+12+1 findings all fixed or closure-dispositioned, closed after round 3 — only LOWs remained); fired half open by design (AC7 — operator-gated per DD-26 flex-cut #2: rides Z4 fired + ops G1–G7 + operator GO)
 
 > **FLEX-CUT (DD-26):** A6's FIRED half is v6a's second named flex-cut — it rides ops and can slip to v6b without breaking v6a's exit evidence (exit evidence = primed T2 green, gateway round-trip, re-pinned CI, M1.3 interim report; A6 appears in none). The AUTHORED half is never cut. Pre-authorized trigger: post-review v6a total > 42.
 
