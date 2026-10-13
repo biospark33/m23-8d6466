@@ -32,7 +32,7 @@ import { DEFAULT_MAX_ATTEMPTS } from "./adapters/jev.ts";
 import { CeilingExceededError, type JudgmentCeiling } from "./ceiling.ts";
 import { DEFAULT_PROVENANCE_DIR, detailFromEnvelope, emitProvenance } from "./emit.ts";
 import { egress, EgressRefusedError, type EgressClass } from "./egress.ts";
-import { JudgmentHttpError, JudgmentSchemaError } from "./errors.ts";
+import { bodySnippet, JudgmentHttpError, JudgmentSchemaError } from "./errors.ts";
 import { resolveProvider, type JudgmentProvider, type JudgmentProviderId } from "./provider.ts";
 import {
   makeJudgmentResponseSchema,
@@ -173,7 +173,7 @@ export class JudgmentClient {
         throw new JudgmentSchemaError(
           `TypeSafe response failed schema validation: ${parsed.error.message}`,
           requestId,
-          JSON.stringify(body).slice(0, 512),
+          bodySnippet(body),
         );
       }
 

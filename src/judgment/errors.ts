@@ -35,6 +35,20 @@ export class JudgmentSchemaError extends JudgmentHttpError {
 }
 
 /**
+ * A never-throwing, 512-char snippet of a raw adapter body for the typed
+ * refusal's `bodyText`. `JSON.stringify` returns undefined for
+ * undefined/symbol/function bodies and throws for BigInt/cyclic ones —
+ * either would replace the seam's typed error with a bare TypeError.
+ */
+export function bodySnippet(body: unknown): string {
+  try {
+    return String(JSON.stringify(body) ?? body).slice(0, 512);
+  } catch {
+    return `<unserializable ${typeof body}>`;
+  }
+}
+
+/**
  * A provider id that is not an own key of the closed registry (J1
  * Observability Contract: typed `unknown-provider`, refused before any
  * request exists).
