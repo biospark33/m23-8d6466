@@ -42,10 +42,12 @@
 import { describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -194,9 +196,14 @@ interface ReindexOpts {
 }
 
 /** A generated fake reindex command string. The stamp target is the FIXTURE
- * graph home named by QDS_GITNEXUS_HOME — the same variable the real writer's
- * target resolves through — and the fake REFUSES to run without it, so a
- * wiring mistake fails loudly instead of defaulting toward the live graph. */
+ * graph home named by QDS_GITNEXUS_HOME, and the fake REFUSES to run without
+ * it, so a wiring mistake fails loudly instead of defaulting toward the live
+ * graph. Every fixture spawn MUST pair the home with an explicit
+ * QDS_REFRESH_REINDEX_CMD override — the BH-002 split-brain guard refuses
+ * (pre-cycle exit 3) a non-empty home override left with the production
+ * default, because the canonical reindex hardcodes <repoRoot>/.gitnexus as
+ * its stamp target regardless of the home. No fixture spawns the production
+ * default, so no fixture trips that guard. */
 function fakeReindex(fx: Fixture, o: ReindexOpts = {}): string {
   const stampBody = `${JSON.stringify(
     {
@@ -335,6 +342,23 @@ async function waitFor(marker: string, timeoutMs: number, what: string): Promise
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error(`timed out after ${timeoutMs}ms waiting for ${what} (${marker})`);
+}
+
+/** Poll for the sink's FIRST line to be present AND newline-terminated — the
+ * lock-coalesce handshake's observation primitive. Mere file-existence is not
+ * enough: the wrapper's `>>` creates the file a moment before the line's
+ * single atomic append lands, and a raced read would parse an empty file.
+ * Bounded wait, 25ms interval — no fixed sleep gates any assertion. */
+async function waitForLine(sink: string, timeoutMs: number, what: string): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(sink)) {
+      const first = readFileSync(sink, "utf8").split("\n")[0] ?? "";
+      if (first.trim().length > 0) return first;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${what} (${sink})`);
 }
 
 // ── log-line parsing (the exactly-one-JSON-line contract) ───────────────────
@@ -519,6 +543,66 @@ describe("AC1/INV-A6-1 — no-bare-analyze scan (real wrapper + real crontab)", 
     expect(violations.length).toBeGreaterThan(0);
     expect(violations.join("\n")).toContain("gitnexus analyze");
     expect(entryLines(mutant)).toHaveLength(2); // the one-entry rule detects the second line too
+  });
+});
+
+// ── source pins: bun fallback (EH-001) and lock-fd hygiene (EH-003) ─────────
+// These pin WRAPPER SOURCE, not behavior: the failure modes they guard
+// (a cron PATH with no bun; a child inheriting the lock fd) only manifest on
+// hosts/paths a fixture spawn cannot reach deterministically.
+
+describe("source pins — bun fallback (EH-001) and lock-fd hygiene (EH-003)", () => {
+  it("EH-001: the wrapper carries the bun fallback probe as CODE — PATH, then the three standard install locations — because a Debian cron PATH ships neither bun nor a probe rescue", () => {
+    const code = readFileSync(WRAPPER, "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    // The fallback MARKER and all three probed locations must be executable
+    // lines — header prose documenting the fallback is not the fallback.
+    expect(code).toContain("$HOME/.bun/bin/bun");
+    expect(code).toContain('"/usr/local/bin/bun"');
+    expect(code).toContain("$HOME/.local/bin/bun");
+  });
+
+  it("EH-003: BOTH child invocations drop the lock fd (9>&-) — the wrapper is the lock's only holder and the kernel-releases-on-any-exit claim stays true", () => {
+    const code = readFileSync(WRAPPER, "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    // Two independent pins: losing the redirection on EITHER child silently
+    // re-opens the orphaned-holder hole the fix closes.
+    expect(code).toMatch(/bash -c "\$REINDEX_CMD" 9>&- <\/dev\/null/);
+    expect(code).toMatch(/bash -c "\$CONTRACT_CMD" 9>&- <\/dev\/null/);
+  });
+});
+
+// ── AC6: output-surface boundary — no dispatch-path integration in src/ ─────
+
+describe("AC6 boundary — the refresh surface never crosses into src/", () => {
+  it("AC6 negative control: src/ carries ZERO references to the refresh surface (staleness reader, cron wrapper, stamp, sink)", () => {
+    // The negative control, committed: A6's output surface is exactly the
+    // stamp + the alarm + the sink — NO src/ bytes. A future dispatch-path
+    // integration (gating deploys or scheduling on staleness) lands in src/
+    // FIRST and MUST trip this test before it ships. Verified zero hits when
+    // committed; any hit names the offending file.
+    const srcDir = join(REPO_ROOT, "src");
+    if (!existsSync(srcDir)) return; // vacuous without src/ — it exists today
+    const REFRESH_SURFACE_RE =
+      /gitnexus-staleness|refresh-cron|INDEX_STALENESS|cli-version\.json|refresh-cron\.jsonl/;
+    const hits: string[] = [];
+    const walk = (dir: string): void => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, ent.name);
+        if (ent.isDirectory()) {
+          walk(p);
+          continue;
+        }
+        if (!ent.isFile()) continue;
+        if (REFRESH_SURFACE_RE.test(readFileSync(p, "utf8"))) hits.push(p);
+      }
+    };
+    walk(srcDir);
+    expect(hits).toEqual([]);
   });
 });
 
@@ -739,7 +823,7 @@ const FLOCK_SKIP_REASON =
 
 describe.skipIf(!hasFlock)(`AC5/C5 — whole-cycle lock coalesce${hasFlock ? "" : ` (skipped: ${FLOCK_SKIP_REASON})`}`, () => {
   it(
-    "AC5: a tick arriving mid-cycle exits 0 skipped-overlapping (incoming sha, crossCheck n/a) while the holder completes — one line per cycle",
+    "AC5: a tick arriving mid-cycle exits 0 skipped-overlapping (incoming sha, crossCheck n/a) — one line per cycle, proven without a fixed sleep",
     async () => {
       await withFixture("lock-coalesce", async (fx) => {
         const INCOMING_SHA = OTHER_SHA;
@@ -751,37 +835,53 @@ describe.skipIf(!hasFlock)(`AC5/C5 — whole-cycle lock coalesce${hasFlock ? "" 
             head: REAL_HEAD,
             installed: "9.9.9",
             expected: "0.0.1-pin",
-            sleepSec: 2,
+            sleepSec: 30, // hold ≫ worst-case tick-B latency — never an assertion gate
             marker,
           }),
           fakeContract(fx, 0).cmd,
         );
-        // Holder cycle A: acquires the lock at stage c, then sleeps INSIDE its
-        // reindex — the lock is provably held for the whole cycle, not just at
-        // startup.
-        const holder = spawnWrapperAsync(holderEnv);
+        // Handshake (determinized, EH-002): holder A acquires the lock at
+        // stage c and parks INSIDE its reindex (marker touched, sleep 30 ≫
+        // B's worst-case bash-boot + rev-parse + staleness latency). Tick B
+        // then runs; B's skip line ON THE SINK is the observed refusal — the
+        // release signal. Only then is A killed: no assertion is gated on a
+        // fixed sleep, and the kill guarantees cleanup.
+        const holder = spawn("/bin/bash", [WRAPPER], {
+          cwd: REPO_ROOT,
+          env: holderEnv,
+          stdio: "ignore",
+          detached: true, // own process group — the tree dies with one kill
+        });
+        const holderExit = new Promise<number | null>((resolve) => {
+          holder.on("exit", (code) => resolve(code));
+        });
         await waitFor(marker, 8_000, "the holder cycle to reach its reindex stage");
         // Second real tick B while A holds the lock mid-cycle:
-        const second = runWrapper(holderEnv);
-        expect(second.exitCode).toBe(0); // coalesce, never collide — exit 0
-        // B's line is already on the sink (the holder appends only at its end).
+        const second = spawnWrapperAsync(holderEnv);
+        await waitForLine(fx.sink, 15_000, "tick B's skipped-overlapping refusal line");
+        // B's refusal is observed — the handshake is complete. Kill A's tree
+        // (wrapper + its reindex child share the detached group) and reap it:
+        // A dies MID-reindex, before its own emit, by construction.
+        const pgid = holder.pid;
+        if (typeof pgid === "number") {
+          try {
+            process.kill(-pgid, "SIGTERM");
+          } catch {
+            // already gone — the lock claim died with it either way
+          }
+        }
+        expect(await holderExit).toBeNull(); // reaped: signal death, not a completed cycle
+        expect(await second).toMatchObject({ code: 0 }); // coalesce, never collide — exit 0
+        // Exactly ONE line: B's skip. A was killed mid-reindex and produced
+        // no line — the one-cycle-per-tick invariant read off the final sink.
         const [skip] = readSink(fx, 1);
         expect(skip?.result).toBe("skipped-overlapping");
         expect(skip?.crossCheck).toBe("n/a"); // no work ran to cross-check
         expect(skip?.indexedHeadSha).toBe(INCOMING_SHA); // the INCOMING stamp sha — no reindex this cycle
         expect(skip?.stage).toBeUndefined(); // a skip is not a failure
-        // The holder completes normally: its own line, then exactly one line
-        // per cycle in the sink (two cycles, two lines, in order).
-        const done = await holder;
-        expect(done.code).toBe(0);
-        const lines = readSink(fx, 2);
-        expect(lines[0]?.result).toBe("skipped-overlapping");
-        expect(lines[1]?.result).toBe("success");
-        expect(lines[1]?.indexedHeadSha).toBe(REAL_HEAD);
-        expect(lines[1]?.crossCheck).toBe("match");
       });
     },
-    30_000,
+    60_000,
   );
 
   it("AC5/AC2: the lock target is exactly <graph-home>/.refresh.lock — an external holder there skips the tick, and a stale incoming stamp still truthfully carries stalenessAlarm on the skip line", async () => {
@@ -795,13 +895,36 @@ describe.skipIf(!hasFlock)(`AC5/C5 — whole-cycle lock coalesce${hasFlock ? "" 
       // then touches its marker — marker exists ⟺ the lock is held, so the
       // wrapper below cannot race the acquisition. (If the wrapper locked any
       // OTHER path, it would acquire and run — this test's named failure.)
-      const holder = spawn("/bin/bash", [
-        "-c",
-        `flock ${shq(lockFile)} bash -c 'touch ${shq(holderMarker)}; sleep 2'`,
-      ]);
+      // The hold is 30 s ≫ the wrapper's worst-case latency; it is a hold,
+      // never an assertion gate — the wrapper's observed refusal is the
+      // handshake's release signal, and the kill afterwards guarantees
+      // cleanup (determinized, EH-002: no fixed sleep gates any assertion).
+      const holder = spawn(
+        "/bin/bash",
+        ["-c", `flock ${shq(lockFile)} bash -c 'touch ${shq(holderMarker)}; sleep 30'`],
+        { stdio: "ignore", detached: true }, // own process group — one kill reaps the tree
+      );
+      const holderExit = new Promise<number | null>((resolve) => {
+        holder.on("error", () => resolve(null));
+        holder.on("exit", (code) => resolve(code));
+      });
       await waitFor(holderMarker, 8_000, "the external holder to acquire the interface lock");
-      const r = runWrapper(baseEnv(fx, fakeReindex(fx, { head: REAL_HEAD }), fakeContract(fx, 0).cmd));
-      expect(r.exitCode).toBe(0); // coalesce — exit 0 even with a stale incoming stamp
+      const second = spawnWrapperAsync(
+        baseEnv(fx, fakeReindex(fx, { head: REAL_HEAD }), fakeContract(fx, 0).cmd),
+      );
+      await waitForLine(fx.sink, 15_000, "the wrapper's skipped-overlapping refusal line");
+      expect(await second).toMatchObject({ code: 0 }); // coalesce — exit 0 even with a stale incoming stamp
+      // Refusal observed; release the handshake. The holder is NOT a cycle:
+      // its kill is cleanup, and its signal death is the deterministic end.
+      const pgid = holder.pid;
+      if (typeof pgid === "number") {
+        try {
+          process.kill(-pgid, "SIGTERM");
+        } catch {
+          // already gone
+        }
+      }
+      expect(await holderExit).toBeNull(); // reaped: killed, never completed
       const [skip] = readSink(fx, 1); // the skip is the ONLY line — the holder is not a cycle
       expect(skip?.result).toBe("skipped-overlapping");
       expect(skip?.crossCheck).toBe("n/a");
@@ -816,11 +939,6 @@ describe.skipIf(!hasFlock)(`AC5/C5 — whole-cycle lock coalesce${hasFlock ? "" 
       expect(skip?.stalenessAlarm?.stampPath).toBe(fx.stampPath);
       expect(skip?.stampAgeHours).toBe(skip?.stalenessAlarm?.ageHours);
       expect(skip?.stage).toBeUndefined();
-      const done = await new Promise<number | null>((resolve, reject) => {
-        holder.on("error", reject);
-        holder.on("exit", (code) => resolve(code));
-      });
-      expect(done).toBe(0);
     });
   }, 30_000);
 });
@@ -835,6 +953,16 @@ describe("pre-cycle configuration failures — FATAL, exit 3, no log line", () =
         ...baseEnv(fx, "bash /nonexistent-reindex.sh", "bash /nonexistent-contract.sh"),
         QDS_GITNEXUS_HOME: neverGraph,
         PATH: "/usr/bin:/bin", // measured on this host: neither bun nor brew's flock lives here
+        // HOME is neutered so the bun fallback probe's $HOME-derived legs
+        // (~/.bun/bin, ~/.local/bin) miss deterministically: a Linux dev box
+        // with curl-installed bun would otherwise sail past the bun leg and
+        // find no missing prereq to FATAL on. The last probe
+        // (/usr/local/bin/bun, a root install) is irreducible host state — on
+        // a host where EVERY prereq resolves (flock + a probed bun) this
+        // test legitimately has no FATAL to assert; the exit-3 contract is
+        // pinned by the missing-prereq hosts (macOS dev: flock leg; CI's
+        // setup-bun tool-cache bun: bun leg).
+        HOME: fx.dir,
       };
       const r = runWrapper(env);
       expect(r.exitCode).toBe(3);
@@ -869,6 +997,87 @@ describe("pre-cycle configuration failures — FATAL, exit 3, no log line", () =
       expect(existsSync(fx.sink)).toBe(false);
     });
   });
+
+  it("EH-004: a set-but-empty QDS_REFRESH_LOG is a FATAL exit 3 — the `:-` default would aim the record at the LIVE sink", async () => {
+    await withFixture("empty-log", (fx) => {
+      writeStamp(fx, stampJson({ hoursAgo: 1 }));
+      const env: NodeJS.ProcessEnv = {
+        ...baseEnv(fx, fakeReindex(fx, { head: REAL_HEAD }), fakeContract(fx, 0).cmd),
+        QDS_REFRESH_LOG: "", // the misconfiguration under test
+      };
+      const r = runWrapper(env, 30_000, { allowEmptyOverride: true }); // the sanctioned exception — this IS the refusal leg
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toMatch(/FATAL/);
+      expect(r.stderr).toContain("QDS_REFRESH_LOG"); // refusal names the env var — never its value
+      // The guard fires BEFORE the defaults resolve: no sink dir was created
+      // (mkdir -p of the empty name would target the cwd), no line anywhere.
+      expect(existsSync(fx.sinkDir)).toBe(false);
+      expect(existsSync(fx.sink)).toBe(false);
+    });
+  });
+
+  it("BH-002 split-brain guard: a non-empty QDS_GITNEXUS_HOME with NO reindex override FATALs exit 3 — the canonical reindex would write a different graph home than the wrapper reads", async () => {
+    await withFixture("split-brain", (fx) => {
+      writeStamp(fx, stampJson({ hoursAgo: 1 }));
+      // All overrides EXCEPT the reindex command — that absence is the
+      // misconfiguration under test (the production default would run).
+      const stripped: Record<string, string | undefined> = { ...process.env };
+      for (const k of OVERRIDE_KEYS) delete stripped[k];
+      const env: NodeJS.ProcessEnv = {
+        ...stripped,
+        QDS_GITNEXUS_HOME: fx.graphHome,
+        QDS_REFRESH_LOG: fx.sink,
+        QDS_REFRESH_CONTRACT_CMD: fakeContract(fx, 0).cmd,
+      };
+      const r = runWrapper(env, 30_000, { allowEmptyOverride: true }); // the sanctioned exception — the MISSING override IS the refusal leg
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toMatch(/FATAL/);
+      // The refusal names BOTH variables and the reason by name — every past
+      // cycle failing as `crossCheck` is exactly the misdiagnosis this guard
+      // exists to prevent.
+      expect(r.stderr).toContain("QDS_GITNEXUS_HOME");
+      expect(r.stderr).toContain("QDS_REFRESH_REINDEX_CMD");
+      expect(r.stderr).toContain("split-brain");
+      // Pre-cycle, nothing ran: no lock file (stage c never reached — and the
+      // canonical reindex never spawned, so no stamp was written here; the
+      // live graph's integrity is pinned by the fixture-hygiene test).
+      expect(existsSync(join(fx.graphHome, ".refresh.lock"))).toBe(false);
+      expect(existsSync(fx.sinkDir)).toBe(false);
+      expect(existsSync(fx.sink)).toBe(false);
+    });
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "BH-004: a completed cycle whose record cannot be appended to the sink is a FAILED cycle — exit 1 with a FATAL naming the sink, never exit 3",
+    async () => {
+      await withFixture("sink-readonly", async (fx) => {
+        // The sink lives in a read-only dir: the cycle runs fully green (all
+        // four overrides, fresh stamp) and must STILL fail loudly at the
+        // append — a ran-but-unrecorded cycle is a failed cycle, not a
+        // pre-cycle config no-op. (Root ignores dir perms — skipped there;
+        // CI runs unprivileged.)
+        const roDir = join(fx.dir, "sink-readonly");
+        mkdirSync(roDir);
+        chmodSync(roDir, 0o555);
+        const roSink = join(roDir, "refresh-cron.jsonl");
+        try {
+          writeStamp(fx, stampJson({ hoursAgo: 1 }));
+          const env: NodeJS.ProcessEnv = {
+            ...baseEnv(fx, fakeReindex(fx, { head: REAL_HEAD }), fakeContract(fx, 0).cmd),
+            QDS_REFRESH_LOG: roSink,
+          };
+          const r = runWrapper(env);
+          expect(r.exitCode).toBe(1);
+          expect(r.stderr).toMatch(/FATAL/);
+          expect(r.stderr).toContain(roSink); // the FATAL names the sink — the operator can fix the cause
+          expect(existsSync(roSink)).toBe(false); // no line was written anywhere
+        } finally {
+          chmodSync(roDir, 0o755); // restore before the fixture teardown's rmSync
+        }
+      });
+    },
+    30_000,
+  );
 
   it("exit contract: a successful cycle exits 0 and a failed cycle exits 1", async () => {
     await withFixture("exit-contract", (fx) => {

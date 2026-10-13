@@ -18,7 +18,9 @@
 #       holds the lock — no work ran, exit is still 0)
 #   1 — cycle failed (the log line names the stage: reindex | contract |
 #       crossCheck; a stale staleness verdict NEVER produces exit 1 — it is
-#       recorded and cured in the same cycle)
+#       recorded and cured in the same cycle). Also includes a completed
+#       cycle whose record could not be appended to the sink — a cycle that
+#       RAN but cannot be recorded is a failed cycle, not a config no-op.
 #   3 — pre-cycle configuration failure, NO log line (no cycle ran): missing
 #       flock, missing bun, unresolvable repo root, the I1 staleness reader
 #       missing, the lock/sink locations uncreatable, no usable millisecond
@@ -36,8 +38,16 @@
 #   [b] staleness on the INCOMING stamp via scripts/gitnexus-staleness.ts
 #       (I1) — verdict recorded, never aborts
 #   [c] flock -n fd 9 on <graph-home>/.refresh.lock (mkdir -p first; fd 9
-#       held for the whole cycle) — refusal → log skipped-overlapping,
-#       exit 0
+#       held for the whole cycle; both children run with 9>&- so the
+#       wrapper is the fd's ONLY holder and the kernel releases the lock on
+#       ANY wrapper exit, signal-killed included) — refusal → log
+#       skipped-overlapping, exit 0. flock -n cannot distinguish a refusal
+#       (EWOULDBLOCK) from a real error on any portable host (no -E on
+#       macOS brew flock — measured): every non-zero exit records
+#       skipped-overlapping, exit 0. Observability signature of a BROKEN
+#       lock: recurring skipped-overlapping lines with a RISING
+#       stalenessAlarm age — that is a lock that never releases, not
+#       contention (contention self-heals as the next cycle cures).
 #   [d] reindex — QDS_REFRESH_REINDEX_CMD (default: the canonical script
 #       from the repo root, never a bare `gitnexus analyze` — AC1); failure
 #       → result failed stage reindex, contract skipped
@@ -78,10 +88,17 @@
 #                              override)
 #   QDS_GITNEXUS_HOME          graph-home passthrough to the I1 staleness
 #                              reader; also pins the lock dir; unset-or-empty
-#                              → <root>/.gitnexus
+#                              → <root>/.gitnexus. CONSTRAINT: set NON-EMPTY
+#                              only together with a QDS_REFRESH_REINDEX_CMD
+#                              override — the canonical reindex hardcodes
+#                              <repoRoot>/.gitnexus regardless (split-brain
+#                              guard, exit 3)
 #   PATH                       must carry bun + flock on the cron host (a
-#                              default cron PATH may carry neither — the
-#                              missing one is a named exit-3 FATAL)
+#                              default cron PATH may carry neither). bun is
+#                              also probed at the standard install locations
+#                              (~/.bun/bin, /usr/local/bin, ~/.local/bin —
+#                              first hit prepended to PATH); a flock with no
+#                              probe fallback is a named exit-3 FATAL
 set -euo pipefail
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -148,23 +165,64 @@ command -v flock >/dev/null 2>&1 || {
   echo "FATAL: flock not found on PATH — the whole-cycle advisory lock (AC5) cannot be taken" >&2
   exit 3
 }
-command -v bun >/dev/null 2>&1 || {
-  echo "FATAL: bun not found on PATH — the I1 staleness reader and the contract suite cannot run" >&2
+# bun is NOT guaranteed on a cron PATH (Debian cron ships /usr/bin:/bin; bun
+# installs to ~/.bun/bin et al.) — resolve it with the canonical script's own
+# fallback idiom (its gitnexus probe: command -v, then a fixed list of known
+# install locations, then a named FATAL; same shape as the fleet-wrapper
+# probe pattern). First hit is PREPENDED to PATH so the staleness reader and
+# the default contract command both see it; PATH mutation beats aliasing the
+# binary because the contract cmd may shell out to bun transitively.
+BUN_FOUND=""
+if command -v bun >/dev/null 2>&1; then
+  BUN_FOUND="$(command -v bun)"
+else
+  for probe in "$HOME/.bun/bin/bun" "/usr/local/bin/bun" "$HOME/.local/bin/bun"; do
+    if [ -x "$probe" ]; then
+      BUN_FOUND="$probe"
+      PATH="$(dirname "$probe"):$PATH"
+      export PATH
+      break
+    fi
+  done
+fi
+[ -n "$BUN_FOUND" ] || {
+  echo "FATAL: bun not found — probed PATH, \$HOME/.bun/bin/bun, /usr/local/bin/bun, \$HOME/.local/bin/bun; the I1 staleness reader and the contract suite cannot run" >&2
   exit 3
 }
 # A SET-BUT-EMPTY override command must FATAL before the defaults resolve:
 # `:-` would silently substitute the PRODUCTION command for an empty fixture
 # override — aiming a fixture run at the live graph. (Measured, not assumed:
 # this exact hole ran a real canonical reindex before the guard existed.)
-# QDS_GITNEXUS_HOME and QDS_REFRESH_LOG keep the I1 reader's set-but-empty
-# counts-as-unset semantics (F-017) — their defaults are locations, not
-# actions, and an empty value cannot cause work to run.
+# QDS_REFRESH_LOG joins this family (EH): a computed-empty log override would
+# resolve through the same `:-` to the LIVE sink — a fixture cycle's record
+# would silently land in production. QDS_GITNEXUS_HOME is deliberately NOT in
+# this family: its set-but-empty counts-as-unset semantics are F-017, pinned
+# by tests/gitnexus/staleness.test.ts (the empty home reads the default
+# stamp), and safe here because an empty home is a LOCATION resolution, not
+# an action — no work runs differently for it.
 if [ -n "${QDS_REFRESH_REINDEX_CMD+x}" ] && [ -z "$QDS_REFRESH_REINDEX_CMD" ]; then
   echo "FATAL: QDS_REFRESH_REINDEX_CMD is set but empty — refusing to substitute the production reindex command" >&2
   exit 3
 fi
 if [ -n "${QDS_REFRESH_CONTRACT_CMD+x}" ] && [ -z "$QDS_REFRESH_CONTRACT_CMD" ]; then
   echo "FATAL: QDS_REFRESH_CONTRACT_CMD is set but empty — refusing to substitute the production contract-suite command" >&2
+  exit 3
+fi
+if [ -n "${QDS_REFRESH_LOG+x}" ] && [ -z "$QDS_REFRESH_LOG" ]; then
+  echo "FATAL: QDS_REFRESH_LOG is set but empty — refusing to substitute the production log sink" >&2
+  exit 3
+fi
+# Split-brain guard (BH-002): a NON-EMPTY home override while the reindex
+# command stays the production default can never be coherent — the canonical
+# reindex hardcodes <repoRoot>/.gitnexus as its stamp target
+# (install-gitnexus-plus.sh:509-515), so the wrapper would read the stamp and
+# hold the lock under the OVERRIDE home while the reindex writes the OTHER
+# one: crossCheck would fail every cycle naming `crossCheck`, never the
+# cause. Refuse pre-cycle, naming both variables. Set-but-empty home is NOT a
+# split brain (F-017: it counts as unset and resolves to <root>/.gitnexus —
+# the same place the canonical reindex writes).
+if [ -n "${QDS_GITNEXUS_HOME:-}" ] && [ -z "${QDS_REFRESH_REINDEX_CMD+x}" ]; then
+  echo "FATAL: QDS_GITNEXUS_HOME is set without a QDS_REFRESH_REINDEX_CMD override — the canonical reindex hardcodes <repoRoot>/.gitnexus as its stamp target, so the overridden home and the writer's home would diverge (split-brain: lock + stamp reads here, stamp writes there); override the reindex command to match" >&2
   exit 3
 fi
 
@@ -229,10 +287,17 @@ json_num_field() { # $1 = json text, $2 = key — I1's bare number-or-null field
 }
 # Number-or-null validation BEFORE any token reaches the log line: I1 emits
 # JSON numbers/null; a foreign stdout must never inject raw bytes into the
-# record. Negative ages (clock skew) are valid numbers and preserved.
+# record. Negative ages (clock skew) are valid numbers and preserved. The
+# optional exponent is REQUIRED by the producer, not defensive: JSON.stringify
+# (gitnexus-staleness.ts ageHours) emits exponential form for |x| < 1e-6 — a
+# stamp within ~3.6ms of the reading clock — and rejecting it would silently
+# coerce a measured age to null on a fresh verdict. No deterministic
+# end-to-end test covers that window (it is ~3.6ms wide; driving the real
+# wrapper into it is timing roulette) — documented here per the
+# measured-not-assumed idiom.
 num_or_null() {
   if [ "$1" = "null" ]; then printf 'null'; return 0; fi
-  if printf '%s' "$1" | grep -Eq -- '^-?[0-9]+(\.[0-9]+)?$'; then printf '%s' "$1"; else printf 'null'; fi
+  if printf '%s' "$1" | grep -Eq -- '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'; then printf '%s' "$1"; else printf 'null'; fi
 }
 
 IN_VERDICT="$(json_str_field "$STALE_JSON" verdict)"
@@ -273,7 +338,12 @@ emit_and_exit() {
   # negative control the suite refuses.
   [ "$dur" -ge 1 ] || dur=1
   local now
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # The ts leg is hardened like the clock legs: a transient date(1) failure
+  # here must not abort the emit (set -e) AFTER reindex+contract succeeded —
+  # a lost record is worse than a skewed one. Degradation: fall back to
+  # $CYCLE (tick-start UTC) — skew beats absence.
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [ -n "$now" ] || now="$CYCLE"
   # cliInstalled/cliExpected: the CURRENT stamp at log time — post-reindex
   # when the reindex completed, the incoming stamp otherwise; the writer's
   # own fallback vocabulary when the stamp is missing or lacks the keys.
@@ -284,12 +354,16 @@ emit_and_exit() {
   line="{\"ts\":\"$now\",\"cycle\":\"$CYCLE\",\"result\":\"$result\",\"durationMs\":$dur,\"indexedHeadSha\":\"$head_sha\",\"stampAgeHours\":$IN_AGE_JSON,\"cliInstalled\":\"$(json_escape "${cur_installed:-unknown}")\",\"cliExpected\":\"$(json_escape "${cur_expected:-unpinned}")\",\"crossCheck\":\"$cross\""
   if [ -n "$stage" ]; then line="$line,\"stage\":\"$stage\""; fi
   if [ "$IN_VERDICT" = "stale" ]; then
-    line="$line,\"stalenessAlarm\":{\"fired\":true,\"ageHours\":$IN_AGE_JSON,\"ceilingHours\":$IN_CEIL_JSON,\"stampPath\":\"$IN_STAMP_PATH_RAW\"}"
+    line="$line,\"stalenessAlarm\":{\"fired\":true,\"ageHours\":$IN_AGE_JSON,\"ceilingHours\":$IN_CEIL_JSON,\"stampPath\":\"$(json_escape "$IN_STAMP_PATH_RAW")\"}"
   fi
   if [ -n "$detail" ]; then line="$line,\"detail\":\"$(json_escape "$detail")\""; fi
   printf '%s\n' "$line}" >>"$LOG_FILE" || {
-    echo "FATAL: cannot append to the log sink" >&2
-    exit 3
+    # A cycle that RAN but cannot be recorded is a FAILED cycle, not a config
+    # no-op — exit 3 here would mislabel a fully-executed cycle and leave the
+    # exactly-one-line invariant (AC3) with no trace. Name the sink path so
+    # the operator can fix the real cause (perms, disk, read-only mount).
+    echo "FATAL: cannot append the cycle record to the log sink: $LOG_FILE" >&2
+    exit 1
   }
   if [ "$result" = "failed" ]; then exit 1; fi
   exit 0
@@ -308,9 +382,18 @@ LOCK_FILE="$GRAPH_HOME/.refresh.lock"
 # No signal traps, deliberately: the wrapper owns no transient filesystem
 # state for a cleanup() to restore (the canonical script's EXIT-trap hygiene
 # exists for its .gitnexusignore and skills backups — none here). The lock is
-# an fd flock the kernel releases on ANY exit, signal-killed included; a
-# killed cycle leaves no log line, and the next tick's staleness verdict
-# describes reality.
+# an fd flock whose ONLY holder is this wrapper — both children are spawned
+# with 9>&- so none can inherit the open file description — and the kernel
+# releases it on ANY wrapper exit, signal-killed included; a killed cycle
+# leaves no log line, and the next tick's staleness verdict describes reality.
+# flock error vs refusal are CONFLATED here, deliberately (measured): a
+# portable `flock -n` surfaces both as exit 1 and there is no -E on macOS
+# brew flock to separate them, so every non-zero flock exit records
+# skipped-overlapping, exit 0. The cost is honesty in observability, not
+# behavior: a BROKEN lock (ENOLCK-class) degrades to recurring
+# skipped-overlapping lines with a RISING stalenessAlarm age — that signature
+# is a lock that never releases, not contention (contention self-heals when
+# the next cycle cures). Behavior unchanged: exit 1 covers both.
 : >>"$LOCK_FILE" 2>/dev/null || {
   echo "FATAL: cannot create the refresh lock file" >&2
   exit 3
@@ -329,19 +412,21 @@ fi
 # .gitnexusignore negation — never invoked here, and the suite's scan refuses
 # the bare form by name.
 RC=0
-bash -c "$REINDEX_CMD" </dev/null || RC=$?
+# 9>&-: the child NEVER inherits fd 9 — the lock's only holder is the wrapper
+# itself, so the kernel releases the claim on any wrapper death (a selective
+# kill cannot strand the lock in an orphaned child; see the [c] comment).
+bash -c "$REINDEX_CMD" 9>&- </dev/null || RC=$?
 if [ "$RC" -ne 0 ]; then
   # No completed reindex: the incoming stamp remains current; no cross-check
   # can run; the contract stage is skipped (the graph was not rebuilt).
   emit_and_exit "failed" "reindex" "n/a" "$IN_SHA" ""
 fi
-
-
 # ── [e] contract suite: the drift ALARM, never the adopter (AC4) ─────────────
 # The reindex COMPLETED — the post-cycle stamp is now the current one; its sha
 # is recorded even though a contract-red cycle never reaches the crossCheck.
 RC=0
-bash -c "$CONTRACT_CMD" </dev/null || RC=$?
+# 9>&- as at [d]: the contract child must not hold the lock fd either.
+bash -c "$CONTRACT_CMD" 9>&- </dev/null || RC=$?
 if [ "$RC" -ne 0 ]; then
   POST_SHA="$(json_escape "$(stamp_str indexedHead "$STAMP_PATH")")"
   emit_and_exit "failed" "contract" "n/a" "${POST_SHA:-unknown}" ""

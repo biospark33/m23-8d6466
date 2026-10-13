@@ -4,6 +4,15 @@
 #   crontab deploy/vps/crontab.factory
 # Cadence: 5h — inside FR-MEM-6's 4–6h window; one missed cycle still fits
 # the 8h staleness ceiling. Minute 7 keeps the tick off the top of the hour.
+# Prerequisites (one-time, operator):
+#   mkdir -p /var/log/qds   — root-owned so only the deploy user's writes land
+#     there; if the redirect target is uncreatable, cron kills the entry
+#     BEFORE the wrapper ever runs (silently — no FATAL, no log).
+#   bun on the host         — the wrapper resolves it itself (PATH probe, then
+#     ~/.bun/bin, /usr/local/bin, ~/.local/bin); do NOT add a PATH= line here:
+#     cron env values are literal (no shell expansion), so a PATH copied from
+#     an interactive shell rots silently — the wrapper's probe list is the
+#     durable resolver.
 # Env contract, stage order, and exit codes live in the wrapper header:
 #   scripts/gitnexus-refresh.sh
 SHELL=/bin/bash
