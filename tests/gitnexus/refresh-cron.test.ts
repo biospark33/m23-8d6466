@@ -199,11 +199,12 @@ interface ReindexOpts {
  * graph home named by QDS_GITNEXUS_HOME, and the fake REFUSES to run without
  * it, so a wiring mistake fails loudly instead of defaulting toward the live
  * graph. Every fixture spawn MUST pair the home with an explicit
- * QDS_REFRESH_REINDEX_CMD override — the BH-002 split-brain guard refuses
- * (pre-cycle exit 3) a non-empty home override left with the production
- * default, because the canonical reindex hardcodes <repoRoot>/.gitnexus as
- * its stamp target regardless of the home. No fixture spawns the production
- * default, so no fixture trips that guard. */
+ * QDS_REFRESH_REINDEX_CMD override that is not the canonical writer — the
+ * BH-002 split-brain guard refuses (pre-cycle exit 3) a non-empty home
+ * override left with the production default OR pointed at a command naming
+ * install-gitnexus-plus (any spelling: the canonical writer hardcodes
+ * <repoRoot>/.gitnexus as its stamp target). No fixture spawns either form,
+ * so no fixture trips that guard. */
 function fakeReindex(fx: Fixture, o: ReindexOpts = {}): string {
   const stampBody = `${JSON.stringify(
     {
@@ -344,21 +345,40 @@ async function waitFor(marker: string, timeoutMs: number, what: string): Promise
   throw new Error(`timed out after ${timeoutMs}ms waiting for ${what} (${marker})`);
 }
 
-/** Poll for the sink's FIRST line to be present AND newline-terminated — the
- * lock-coalesce handshake's observation primitive. Mere file-existence is not
- * enough: the wrapper's `>>` creates the file a moment before the line's
- * single atomic append lands, and a raced read would parse an empty file.
- * Bounded wait, 25ms interval — no fixed sleep gates any assertion. */
+/** Poll for the sink's FIRST line to be present, non-empty, AND
+ * newline-terminated — the lock-coalesce handshake's observation primitive.
+ * A partial final line must not pass the gate: the real assertions re-read
+ * via readSink (which itself pins the trailing newline), so a raced read
+ * here would hand it a broken barrier. Bounded wait, 25 ms interval — no
+ * fixed sleep gates any assertion. */
 async function waitForLine(sink: string, timeoutMs: number, what: string): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (existsSync(sink)) {
-      const first = readFileSync(sink, "utf8").split("\n")[0] ?? "";
-      if (first.trim().length > 0) return first;
+      const content = readFileSync(sink, "utf8");
+      const first = content.split("\n")[0] ?? "";
+      if (first.trim().length > 0 && content.endsWith("\n")) return first;
     }
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error(`timed out after ${timeoutMs}ms waiting for ${what} (${sink})`);
+}
+
+/** Poll until the sink holds AT LEAST `count` newline-terminated lines — the
+ * holder-completion gate of the AC5 coalesce fixture (the holder's own emit
+ * is the deterministic release signal, so the test waits for its line rather
+ * than killing it mid-cycle). */
+async function waitForLines(sink: string, count: number, timeoutMs: number, what: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(sink)) {
+      const content = readFileSync(sink, "utf8");
+      const complete = content.endsWith("\n") ? content.slice(0, -1) : content.slice(0, content.lastIndexOf("\n") + 1);
+      if (complete.split("\n").filter((l) => l.trim().length > 0).length >= count) return;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}: ${count} lines (${sink})`);
 }
 
 // ── log-line parsing (the exactly-one-JSON-line contract) ───────────────────
@@ -564,6 +584,37 @@ describe("source pins — bun fallback (EH-001) and lock-fd hygiene (EH-003)", (
     expect(code).toContain("$HOME/.local/bin/bun");
   });
 
+  it.skipIf(!existsSync("/usr/bin/flock"))(
+    "EH-001 positive: bun absent from PATH yet present at a probed location — the fallback rescues a REAL cycle end-to-end (runs where /usr/bin/flock exists — Linux CI; skipped on macOS dev, which ships no system flock)",
+    async () => {
+      await withFixture("bun-fallback-rescue", (fx) => {
+        writeStamp(fx, stampJson({ hoursAgo: 1 }));
+        // The shim IS a working bun (execs the running one), parked at the
+        // probe's $HOME leg. PATH strips to /usr/bin:/bin: flock + git
+        // resolve (Linux), the real bun does not — so the cycle can only
+        // succeed THROUGH the probe, which must also make the reader SEE the
+        // shim: a wrapper that records BUN_FOUND without exporting the dir
+        // would fail here at stage [b] with the reader unspawnable — the
+        // prepend regression no source pin can catch (AA2-007).
+        const bunDir = join(fx.dir, ".bun", "bin");
+        mkdirSync(bunDir, { recursive: true });
+        const shim = join(bunDir, "bun");
+        writeFileSync(shim, `#!/bin/sh\nexec '${process.execPath}' "$@"\n`);
+        chmodSync(shim, 0o755);
+        const env: NodeJS.ProcessEnv = {
+          ...baseEnv(fx, fakeReindex(fx, { head: REAL_HEAD }), fakeContract(fx, 0).cmd),
+          HOME: fx.dir,
+          PATH: "/usr/bin:/bin",
+        };
+        const r = runWrapper(env);
+        expect(r.exitCode).toBe(0);
+        const [line] = readSink(fx, 1);
+        expect(line?.result).toBe("success");
+        expect(line?.crossCheck).toBe("match");
+      });
+    },
+  );
+
   it("EH-003: BOTH child invocations drop the lock fd (9>&-) — the wrapper is the lock's only holder and the kernel-releases-on-any-exit claim stays true", () => {
     const code = readFileSync(WRAPPER, "utf8")
       .split("\n")
@@ -584,11 +635,14 @@ describe("AC6 boundary — the refresh surface never crosses into src/", () => {
     // stamp + the alarm + the sink — NO src/ bytes. A future dispatch-path
     // integration (gating deploys or scheduling on staleness) lands in src/
     // FIRST and MUST trip this test before it ships. Verified zero hits when
-    // committed; any hit names the offending file.
+    // committed; any hit names the offending file. The token set covers the
+    // integration shapes that matter, not just names: a dispatch gate could
+    // consume graph age via the env var or read the stamp DIRECTORY directly
+    // without naming the reader or the file (AA2-006).
     const srcDir = join(REPO_ROOT, "src");
     if (!existsSync(srcDir)) return; // vacuous without src/ — it exists today
     const REFRESH_SURFACE_RE =
-      /gitnexus-staleness|refresh-cron|INDEX_STALENESS|cli-version\.json|refresh-cron\.jsonl/;
+      /gitnexus-staleness|refresh-cron|INDEX_STALENESS|cli-version\.json|refresh-cron\.jsonl|QDS_GITNEXUS_HOME|\.gitnexus/;
     const hits: string[] = [];
     const walk = (dir: string): void => {
       for (const ent of readdirSync(dir, { withFileTypes: true })) {
@@ -823,62 +877,88 @@ const FLOCK_SKIP_REASON =
 
 describe.skipIf(!hasFlock)(`AC5/C5 — whole-cycle lock coalesce${hasFlock ? "" : ` (skipped: ${FLOCK_SKIP_REASON})`}`, () => {
   it(
-    "AC5: a tick arriving mid-cycle exits 0 skipped-overlapping (incoming sha, crossCheck n/a) — one line per cycle, proven without a fixed sleep",
+    "AC5: a tick arriving mid-cycle exits 0 skipped-overlapping while the HOLDER COMPLETES its own cycle under contention — the lock provably holds through the contract stage, and the sink ends [skip, success] in order",
     async () => {
       await withFixture("lock-coalesce", async (fx) => {
         const INCOMING_SHA = OTHER_SHA;
         writeStamp(fx, stampJson({ hoursAgo: 1, head: INCOMING_SHA }));
-        const marker = join(fx.dir, "reindex-started");
+        const reindexStarted = join(fx.dir, "reindex-started");
+        const contractMarker = join(fx.dir, "contract-parked");
+        const release = join(fx.dir, "contract-release");
+        // The holder's contract fake PARKS inside the contract stage (after
+        // reindex, before crossCheck/emit) until the release file appears,
+        // bounded at ~30 s so a failed handshake still exits. The park IS the
+        // AC5 letter under test: the lock must hold through contract,
+        // crossCheck, and emit — and the holder must COMPLETE under
+        // contention (AA2-001: the round-1 kill-based holder proved the
+        // refusal but not the completion, so a wrapper that released the fd
+        // after stage [d] would have passed every test).
+        const parkPath = join(fx.dir, `fake-contract-park-${fakeCounter++}.sh`);
+        writeFileSync(
+          parkPath,
+          [
+            "#!/usr/bin/env bash",
+            `touch ${shq(contractMarker)}`,
+            `for i in $(seq 300); do [ -f ${shq(release)} ] && break; sleep 0.1; done`,
+            `echo ran > ${shq(contractMarker)}`,
+            "exit 0",
+            "",
+          ].join("\n"),
+        );
         const holderEnv = baseEnv(
           fx,
           fakeReindex(fx, {
             head: REAL_HEAD,
             installed: "9.9.9",
             expected: "0.0.1-pin",
-            sleepSec: 30, // hold ≫ worst-case tick-B latency — never an assertion gate
-            marker,
+            marker: reindexStarted,
           }),
-          fakeContract(fx, 0).cmd,
+          `bash ${parkPath}`,
         );
-        // Handshake (determinized, EH-002): holder A acquires the lock at
-        // stage c and parks INSIDE its reindex (marker touched, sleep 30 ≫
-        // B's worst-case bash-boot + rev-parse + staleness latency). Tick B
-        // then runs; B's skip line ON THE SINK is the observed refusal — the
-        // release signal. Only then is A killed: no assertion is gated on a
-        // fixed sleep, and the kill guarantees cleanup.
+        // Handshake (deterministic, no fixed sleep gates an assertion): A
+        // parks INSIDE its contract stage (marker touched — the lock is
+        // verifiably held at stage [e]) → tick B runs and its refusal line
+        // ON THE SINK is the observed coalesce → the test releases A → A
+        // finishes crossCheck + emit → its line is the second observation.
+        // Both exits are A's OWN completion, never a kill.
         const holder = spawn("/bin/bash", [WRAPPER], {
           cwd: REPO_ROOT,
           env: holderEnv,
           stdio: "ignore",
-          detached: true, // own process group — the tree dies with one kill
+          detached: true, // own process group — hygiene only, nothing is killed
         });
         const holderExit = new Promise<number | null>((resolve) => {
           holder.on("exit", (code) => resolve(code));
         });
-        await waitFor(marker, 8_000, "the holder cycle to reach its reindex stage");
-        // Second real tick B while A holds the lock mid-cycle:
+        await waitFor(reindexStarted, 8_000, "the holder cycle to reach its reindex stage");
+        await waitFor(contractMarker, 8_000, "the holder to park inside its contract stage");
+        // Second real tick B while A holds the lock mid-contract:
         const second = spawnWrapperAsync(holderEnv);
         await waitForLine(fx.sink, 15_000, "tick B's skipped-overlapping refusal line");
-        // B's refusal is observed — the handshake is complete. Kill A's tree
-        // (wrapper + its reindex child share the detached group) and reap it:
-        // A dies MID-reindex, before its own emit, by construction.
-        const pgid = holder.pid;
-        if (typeof pgid === "number") {
-          try {
-            process.kill(-pgid, "SIGTERM");
-          } catch {
-            // already gone — the lock claim died with it either way
-          }
-        }
-        expect(await holderExit).toBeNull(); // reaped: signal death, not a completed cycle
+        // B's refusal observed. Release A; its completion is deterministic:
+        writeFileSync(release, "go\n");
+        await waitForLines(fx.sink, 2, 15_000, "the holder's completing success line");
+        expect(await holderExit).toBe(0); // A COMPLETED its cycle under contention — the AC5 letter
         expect(await second).toMatchObject({ code: 0 }); // coalesce, never collide — exit 0
-        // Exactly ONE line: B's skip. A was killed mid-reindex and produced
-        // no line — the one-cycle-per-tick invariant read off the final sink.
-        const [skip] = readSink(fx, 1);
+        // Exactly TWO lines, IN ORDER: B's skip first (observed above), then
+        // A's success — the one-cycle-per-tick invariant AND the
+        // holder-completes proof read off the final sink. B's skip records
+        // the stamp CURRENT at B's tick — A's reindex has already rewritten
+        // it (the park lives in contract, not reindex), so that sha is
+        // REAL_HEAD and the verdict fresh; the INCOMING-sha + stale-alarm
+        // arm of skip accounting is pinned by the external-holder test
+        // below, where no competing writer exists.
+        const [skip, holderLine] = readSink(fx, 2);
         expect(skip?.result).toBe("skipped-overlapping");
         expect(skip?.crossCheck).toBe("n/a"); // no work ran to cross-check
-        expect(skip?.indexedHeadSha).toBe(INCOMING_SHA); // the INCOMING stamp sha — no reindex this cycle
+        expect(skip?.indexedHeadSha).toBe(REAL_HEAD); // the stamp current at B's tick (A's post-reindex stamp)
         expect(skip?.stage).toBeUndefined(); // a skip is not a failure
+        expect(holderLine?.result).toBe("success"); // the holder finished what it started
+        expect(holderLine?.crossCheck).toBe("match"); // post-cycle stamp sha == git HEAD
+        expect(holderLine?.indexedHeadSha).toBe(REAL_HEAD); // A's reindex wrote THIS stamp
+        expect(holderLine?.cliInstalled).toBe("9.9.9"); // A's fake writer's vocabulary
+        expect(holderLine?.stage).toBeUndefined();
+        expect(holderLine?.stalenessAlarm).toBeUndefined(); // fresh incoming verdict, no alarm
       });
     },
     60_000,
@@ -945,8 +1025,18 @@ describe.skipIf(!hasFlock)(`AC5/C5 — whole-cycle lock coalesce${hasFlock ? "" 
 
 // ── pre-cycle configuration failures: FATAL, exit 3, NO log line ────────────
 
+// EH2-003: on a host where every prereq resolves WITHOUT operator PATH —
+// flock in /usr/bin:/bin (Linux util-linux) AND /usr/local/bin/bun (a root
+// install; the only probe leg a neutered HOME cannot hide) — the wrapper
+// legitimately proceeds past every guard and this test has NO FATAL to
+// assert; running it there would false-red on a healthy host. Named skip,
+// house pattern (staleness.test.ts DEFAULT_HOME_SKIP_REASON).
+const STRIPPED_PATH_HOST_PASSES_EVERYTHING =
+  (existsSync("/usr/bin/flock") || existsSync("/bin/flock")) && existsSync("/usr/local/bin/bun");
+
 describe("pre-cycle configuration failures — FATAL, exit 3, no log line", () => {
-  it("a PATH stripped of flock/bun FATALs with exit 3 BEFORE any cycle — no sink dir, no graph home, nothing spawned", async () => {
+  it.skipIf(STRIPPED_PATH_HOST_PASSES_EVERYTHING)(
+    "a PATH stripped of flock/bun FATALs with exit 3 BEFORE any cycle — no sink dir, no graph home, nothing spawned", async () => {
     await withFixture("config-fatal", (fx) => {
       const neverGraph = join(fx.dir, "never-created-graph");
       const env: NodeJS.ProcessEnv = {
@@ -979,6 +1069,67 @@ describe("pre-cycle configuration failures — FATAL, exit 3, no log line", () =
       expect(existsSync(fx.sinkDir)).toBe(false);
       expect(existsSync(fx.sink)).toBe(false);
       expect(existsSync(neverGraph)).toBe(false);
+    });
+  });
+
+  it("a HOME-and-PATH-UNSET invocation (the env -i / minimal-systemd class) still FATALs with exit 3 — the bun probe degrades to its named FATAL, never an unbound-variable death", async () => {
+    await withFixture("unset-env-fatal", (fx) => {
+      const neverGraph = join(fx.dir, "never-created-graph");
+      const env: NodeJS.ProcessEnv = {
+        ...baseEnv(fx, "bash /nonexistent-reindex.sh", "bash /nonexistent-contract.sh"),
+        QDS_GITNEXUS_HOME: neverGraph,
+      };
+      for (const k of ["HOME", "PATH"] as const) delete env[k]; // ABSENT, not empty — the `${HOME:+...}` probe legs must vanish
+      const r = runWrapper(env);
+      // set -u would otherwise kill the probe at `$HOME: unbound variable`
+      // (exit 1, unnamed) in exactly the stripped environments the probe
+      // exists for (EH2-002/BH2-001). Which NAMED leg fires is host weather
+      // (flock first, then bun — same contract as the stripped-PATH test);
+      // exit 3 + no side effects are the invariants.
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toMatch(/FATAL/);
+      expect(existsSync(fx.sinkDir)).toBe(false);
+      expect(existsSync(neverGraph)).toBe(false);
+    });
+  });
+
+  it("BH-002/EH2-001 coherence arm: a home override plus a reindex override that NAMES the canonical writer is the same split-brain — FATAL exit 3 through the override-shaped door", async () => {
+    await withFixture("split-brain-canonical", (fx) => {
+      writeStamp(fx, stampJson({ hoursAgo: 1 }));
+      const env: NodeJS.ProcessEnv = {
+        ...baseEnv(
+          fx,
+          "bash scripts/install-gitnexus-plus.sh", // the production default, spelled explicitly
+          fakeContract(fx, 0).cmd,
+        ),
+        QDS_GITNEXUS_HOME: fx.graphHome,
+      };
+      const r = runWrapper(env);
+      // The presence-only guard passed this spelling; the writer still
+      // hardcodes <repoRoot>/.gitnexus — the coherence arm must refuse it.
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toMatch(/FATAL/);
+      expect(r.stderr).toContain("split-brain");
+      expect(r.stderr).toContain("install-gitnexus-plus"); // names the writer it refuses to mismatch
+      expect(existsSync(fx.sink)).toBe(false); // pre-cycle: no cycle ran
+    });
+  });
+
+  it("EH2-001 spelling tolerance: a reindex override merely REFERENCING the canonical writer (env-prefixed, absolute) trips the same split-brain guard", async () => {
+    await withFixture("split-brain-spelling", (fx) => {
+      writeStamp(fx, stampJson({ hoursAgo: 1 }));
+      const env: NodeJS.ProcessEnv = {
+        ...baseEnv(
+          fx,
+          "env BASH_ENV=/dev/null bash /opt/qds-factory/scripts/install-gitnexus-plus.sh",
+          fakeContract(fx, 0).cmd,
+        ),
+        QDS_GITNEXUS_HOME: fx.graphHome,
+      };
+      const r = runWrapper(env);
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toContain("split-brain"); // substring match, not an exact-spelling allowlist
+      expect(existsSync(fx.sink)).toBe(false);
     });
   });
 

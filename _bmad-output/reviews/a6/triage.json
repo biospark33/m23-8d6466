@@ -6,7 +6,7 @@
  "findings": [
   {
    "finding_id": "BH-001",
-   "finding_text": "emit_and_exit interpolates stalenessAlarm.stampPath into the JSON log line RAW (no json_escape) — unlike indexedHeadSha/cliInstalled/cliExpected/detail; sed capture truncation at I1's \\" escapes leaves a dangling backslash and the raw interpolation can swallow the closing quote, producing an unparseable line while the wrapper exits 0",
+   "finding_text": "emit_and_exit interpolates stalenessAlarm.stampPath into the JSON log line RAW (no json_escape) — unlike indexedHeadSha/cliInstalled/cliExpected/detail; sed capture truncation at I1's backslash-escaped quotes leaves a dangling backslash and the raw interpolation can swallow the closing quote, producing an unparseable line while the wrapper exits 0",
    "diff_context_ref": "scripts/gitnexus-refresh.sh:286-288 (json_str_field at 224-226)",
    "label": "HIGH",
    "disposition": "PATCH",

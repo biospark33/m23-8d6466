@@ -25,3 +25,12 @@ Method: adversarial correctness hunt over production behavior — exit contracts
   Fix: covered by the EH-001 fix (wrapper bun-location fallback + crontab header comment).
 
 Sensitivity check: the seeded round-0 finding R0-1 (= BH-001) was independently rediscovered and rated HIGH — sensitivity confirmed.
+
+## Round 2 (2026-10-13, scope: fix commit 12941273)
+
+Verdict: no HIGH/MED in the round-1 fixes. Four LOWs, all in code/comments the fix introduced:
+BH2-003 (split-brain guard keys on presence, not coherence — the canonical-writer-spelled-as-override door; = EH2-001),
+BH2-001 ($HOME/$PATH unguarded under set -u in the probe; = EH2-002),
+BH2-002 (crontab comment self-undermining: root-owned 755 dir blocks the deploy user's log creation),
+BH2-004 (waitForLine comment/code drift on newline-termination).
+All regression lanes flagged in the round-2 brief verified clean. Full dispositions: round-2-triage.json.

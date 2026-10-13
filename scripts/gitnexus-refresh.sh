@@ -90,9 +90,10 @@
 #                              reader; also pins the lock dir; unset-or-empty
 #                              → <root>/.gitnexus. CONSTRAINT: set NON-EMPTY
 #                              only together with a QDS_REFRESH_REINDEX_CMD
-#                              override — the canonical reindex hardcodes
-#                              <repoRoot>/.gitnexus regardless (split-brain
-#                              guard, exit 3)
+#                              override that does NOT name the canonical
+#                              writer — install-gitnexus-plus.sh hardcodes
+#                              <repoRoot>/.gitnexus whatever the spelling
+#                              (both split-brain arms are exit-3 FATALs)
 #   PATH                       must carry bun + flock on the cron host (a
 #                              default cron PATH may carry neither). bun is
 #                              also probed at the standard install locations
@@ -176,10 +177,17 @@ BUN_FOUND=""
 if command -v bun >/dev/null 2>&1; then
   BUN_FOUND="$(command -v bun)"
 else
-  for probe in "$HOME/.bun/bin/bun" "/usr/local/bin/bun" "$HOME/.local/bin/bun"; do
+  # set -u safety: $HOME/$PATH may be UNSET in exactly the stripped
+  # environments this probe exists for (`env -i`, `sudo -u deploy env -i`,
+  # a minimal systemd oneshot) — the probe must fall through to its named
+  # exit-3 FATAL below, never die on an unbound variable (exit 1, no name).
+  # ${HOME:+...} entries vanish when HOME is unset; the prepend substitutes a
+  # sane default for an unset PATH so the found bun's dir is never joined to
+  # nothing.
+  for probe in ${HOME:+"$HOME/.bun/bin/bun"} "/usr/local/bin/bun" ${HOME:+"$HOME/.local/bin/bun"}; do
     if [ -x "$probe" ]; then
       BUN_FOUND="$probe"
-      PATH="$(dirname "$probe"):$PATH"
+      PATH="$(dirname "$probe"):${PATH:-/usr/bin:/bin}"
       export PATH
       break
     fi
@@ -223,6 +231,18 @@ fi
 # the same place the canonical reindex writes).
 if [ -n "${QDS_GITNEXUS_HOME:-}" ] && [ -z "${QDS_REFRESH_REINDEX_CMD+x}" ]; then
   echo "FATAL: QDS_GITNEXUS_HOME is set without a QDS_REFRESH_REINDEX_CMD override — the canonical reindex hardcodes <repoRoot>/.gitnexus as its stamp target, so the overridden home and the writer's home would diverge (split-brain: lock + stamp reads here, stamp writes there); override the reindex command to match" >&2
+  exit 3
+fi
+# Coherence arm: an override that NAMES the canonical writer is not an
+# override — install-gitnexus-plus.sh hardcodes <repoRoot>/.gitnexus whatever
+# spelling carries it, so a non-empty home + canonical-named command is the
+# same split-brain through the override-shaped door (the natural
+# copy-paste `QDS_REFRESH_REINDEX_CMD='bash scripts/install-gitnexus-plus.sh'`
+# plus a home override). Substring match on purpose: `env FOO=1 bash
+# scripts/install-gitnexus-plus.sh`, `bash ./scripts/...`, an absolute path —
+# all spellings of the same hardcoded writer.
+if [ -n "${QDS_GITNEXUS_HOME:-}" ] && [[ "${QDS_REFRESH_REINDEX_CMD:-}" == *install-gitnexus-plus* ]]; then
+  echo "FATAL: QDS_GITNEXUS_HOME is set while the reindex command names the canonical writer (install-gitnexus-plus.sh) — that writer hardcodes <repoRoot>/.gitnexus as its stamp target regardless of spelling, so the overridden home and the writer's home would diverge (split-brain); drop the home override or point the reindex override at a writer that honors it" >&2
   exit 3
 fi
 

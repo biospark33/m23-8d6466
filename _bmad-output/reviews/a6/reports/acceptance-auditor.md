@@ -22,3 +22,7 @@ Method: acceptance-criteria trace — each AC/DoD bullet mapped to committed pro
   Fix: already-planned closure work (C11/G3): story header to landed truth with review-round summary; root gates run after fixes land.
 
 Verdict: all five are bookkeeping-vs-code splits; only AA-001 demands a committed artifact before the PR. No AC is left uncovered after the AA-001 test plus the closure amendments land.
+
+## Round 2 (2026-10-13, scope: fix commit 12941273 + uncommitted story amendments)
+
+AA2-001 · MED — the determinized coalesce fixture dropped AC5's holder-completes-under-contention proof (ordered [skip, success] assertion gone; a post-[d] fd release would pass every test); AA2-002/003 · LOW — story stage enum still omits crossCheck, amendment line refs stale; AA2-005 · LOW — triage.json invalid JSON; AA2-006/007 · LOW — tripwire regex token gaps, missing behavioral bun-probe test; AA2-004 · LOW — AA-005 Status-header gap (closure). The 6 round-1 tests otherwise pin their claims; story amendment sentences match landed tests. Full dispositions: round-2-triage.json.

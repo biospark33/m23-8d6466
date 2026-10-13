@@ -6,8 +6,11 @@
 # the 8h staleness ceiling. Minute 7 keeps the tick off the top of the hour.
 # Prerequisites (one-time, operator):
 #   mkdir -p /var/log/qds   — root-owned so only the deploy user's writes land
-#     there; if the redirect target is uncreatable, cron kills the entry
-#     BEFORE the wrapper ever runs (silently — no FATAL, no log).
+#     there; AND the log FILE itself must exist and be writable by the deploy
+#     user (a root-owned 755 dir blocks the deploy user from CREATING the log
+#     at redirect-open time — the same silent pre-wrapper entry death warned
+#     about below), so hand it over after the mkdir:
+#       install -o deploy -m 0644 /dev/null /var/log/qds/refresh-cron.log
 #   bun on the host         — the wrapper resolves it itself (PATH probe, then
 #     ~/.bun/bin, /usr/local/bin, ~/.local/bin); do NOT add a PATH= line here:
 #     cron env values are literal (no shell expansion), so a PATH copied from

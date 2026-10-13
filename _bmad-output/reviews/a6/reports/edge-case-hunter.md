@@ -23,3 +23,7 @@ Method: environmental and boundary hunting — cron portability, test determinis
 
 - **EH-006 · LOW · scripts/gitnexus-refresh.sh:286-288** — stampPath control characters (TAB/CR) pass the sed `[^"]*` extractor and land raw inside the JSON line — parseCycleLine rejects unescaped control chars, poisoning the whole cycle record.
   Fix: same fix as BH-001 (`json_escape` drops `\000`-`\037` control chars).
+
+## Round 2 (2026-10-13, scope: fix commit 12941273)
+
+EH2-001 · MED — split-brain guard bypass via the override-shaped door (canonical writer spelled as the override); EH2-002 · LOW — set -u unbound-variable death in the probe (= BH2-001); EH2-003 · LOW — stripped-PATH test's unconditional assertions on the conceded every-prereq host. Verified clean: guard vs F-017, 9>&- vs fixture commands, exit-1 sink path vs contract, handshake timing bounds, chmod restore windows. Full dispositions: round-2-triage.json.
