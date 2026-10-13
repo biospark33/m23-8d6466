@@ -3,7 +3,7 @@
  "round": 2,
  "story": "a6-gitnexus-refresh-cron",
  "reviewers": ["blind-hunter", "edge-case-hunter", "acceptance-auditor"],
- "scope": "commit 12941273 (round-1 fix diff) + the uncommitted story amendments",
+ "scope": "commit 91f171b2 (round-1 fix diff) + the uncommitted story amendments",
  "dedup_notes": "EH2-001 == BH2-003 (split-brain override-shaped door; two hunters independently) and EH2-002 == BH2-001 (set -u unbound vars in the probe); deduplicated below to two findings",
  "findings": [
   {
@@ -53,7 +53,7 @@
   },
   {
    "finding_id": "AA2-003",
-   "finding_text": "The amendment's own line pointers (:528/:563/:584) are pre-fix — commit 12941273's inserted tests moved the cited pins; stale refs in the truth record the next reader will trust",
+   "finding_text": "The amendment's own line pointers (:528/:563/:584) are pre-fix — commit 91f171b2's inserted tests moved the cited pins; stale refs in the truth record the next reader will trust",
    "diff_context_ref": "story file, amendment blockquote",
    "label": "LOW",
    "disposition": "PATCH",

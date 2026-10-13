@@ -1,6 +1,6 @@
 # A6 round-0 — driver self-review (2026-10-13)
 
-Reviewer: driver (this session). Scope: `git diff dev...HEAD` = c9d03b51 (5 files) + 625e27c6 (SKILL.md chore).
+Reviewer: driver (this session). Scope: `git diff dev...HEAD` = a00f4958 (5 files) + 9cb461e7 (SKILL.md chore).
 Method: full reads of both production files (wrapper 367 lines, staleness 125 lines) plus crontab.factory, targeted
 reads of both suites, independent byte-diff, refutation passes, live e2e cycle. Every claim re-measured.
 

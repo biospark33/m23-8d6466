@@ -1,7 +1,7 @@
 # A6 round-1 review — acceptance-auditor report
 
 Reviewer: acceptance-auditor subagent (read-only, no authoring context).
-Scope: story `_bmad-output/sprint-artifacts/dark-factory-v6/stories/a6-gitnexus-refresh-cron.md` (ACs, DoD, Observability Contract) audited against `git diff dev...HEAD` = c9d03b51 + 625e27c6 and the landed suite.
+Scope: story `_bmad-output/sprint-artifacts/dark-factory-v6/stories/a6-gitnexus-refresh-cron.md` (ACs, DoD, Observability Contract) audited against `git diff dev...HEAD` = a00f4958 + 9cb461e7 and the landed suite.
 Method: acceptance-criteria trace — each AC/DoD bullet mapped to committed proof (test, gate evidence, or story text).
 
 ## Findings
@@ -15,7 +15,7 @@ Method: acceptance-criteria trace — each AC/DoD bullet mapped to committed pro
 - **AA-003 · LOW · story contract final sentence vs tests :563/:584/:675** — "missing or unparseable stamp reports stampAgeHours null with result failed" is contradicted by the cured-case tests (:563/:584 pin success + null) and matched only by the red-reindex arm (:675).
   Fix: same closure amendment: null age is recorded on any verdict; result reflects the cure outcome (failed only when a stage fails, e.g. red reindex).
 
-- **AA-004 · LOW · DoD Security bullet vs .claude/skills/gitnexus-cli/SKILL.md** — the bullet enumerates paths that exclude the CLAUDE.md-mandated SKILL.md reindex-ritual refresh actually carried by the branch (+2 lines, chore 625e27c6, PLAN C9a).
+- **AA-004 · LOW · DoD Security bullet vs .claude/skills/gitnexus-cli/SKILL.md** — the bullet enumerates paths that exclude the CLAUDE.md-mandated SKILL.md reindex-ritual refresh actually carried by the branch (+2 lines, chore 9cb461e7, PLAN C9a).
   Fix: closure amendment — DoD security bullet gains the disclosed exception (reindex-ritual skill refresh per repo CLAUDE.md upgrade ritual).
 
 - **AA-005 · LOW · story Status header + .unlazy/a6/GATES.md** — story header still `ready-for-dev`; root GATES.md G1-G4 pending; branch fails its own C11/G3 closure contract at audit time (honestly tracked, not faked).
@@ -23,10 +23,10 @@ Method: acceptance-criteria trace — each AC/DoD bullet mapped to committed pro
 
 Verdict: all five are bookkeeping-vs-code splits; only AA-001 demands a committed artifact before the PR. No AC is left uncovered after the AA-001 test plus the closure amendments land.
 
-## Round 2 (2026-10-13, scope: fix commit 12941273 + uncommitted story amendments)
+## Round 2 (2026-10-13, scope: fix commit 91f171b2 + uncommitted story amendments)
 
 AA2-001 · MED — the determinized coalesce fixture dropped AC5's holder-completes-under-contention proof (ordered [skip, success] assertion gone; a post-[d] fd release would pass every test); AA2-002/003 · LOW — story stage enum still omits crossCheck, amendment line refs stale; AA2-005 · LOW — triage.json invalid JSON; AA2-006/007 · LOW — tripwire regex token gaps, missing behavioral bun-probe test; AA2-004 · LOW — AA-005 Status-header gap (closure). The 6 round-1 tests otherwise pin their claims; story amendment sentences match landed tests. Full dispositions: round-2-triage.json.
 
-## Round 3 (2026-10-13, scope: fix commit d4b92f9d — round-2 diff)
+## Round 3 (2026-10-13, scope: fix commit abe342c3 — round-2 diff)
 
 Verdict: **CLEAN** — no findings. AC/DoD coverage re-traced against the round-2 diff: the two MED patches (EH2-001/BH2-003 split-brain coherence arm; AA2-001 holder-completes-under-contention fixture) land committed tests that strengthen, not weaken, AC3/AC5 pins; the story amendment blockquote now names rounds 1+2 with test-title-primary citations; the only open item remains AA-005/AA2-004 (Status header → landed truth), dispositioned CLOSURE and executed in the closure commit per plan.

@@ -1,7 +1,7 @@
 # A6 round-1 review — blind-hunter report
 
 Reviewer: blind-hunter subagent (read-only, no authoring context).
-Scope: `git diff dev...HEAD` = c9d03b51 (wrapper, leaf, crontab.factory, two suites) + 625e27c6 (SKILL.md chore).
+Scope: `git diff dev...HEAD` = a00f4958 (wrapper, leaf, crontab.factory, two suites) + 9cb461e7 (SKILL.md chore).
 Method: adversarial correctness hunt over production behavior — exit contracts, JSON emission, env resolution, locking, timing.
 
 ## Findings
@@ -26,7 +26,7 @@ Method: adversarial correctness hunt over production behavior — exit contracts
 
 Sensitivity check: the seeded round-0 finding R0-1 (= BH-001) was independently rediscovered and rated HIGH — sensitivity confirmed.
 
-## Round 2 (2026-10-13, scope: fix commit 12941273)
+## Round 2 (2026-10-13, scope: fix commit 91f171b2)
 
 Verdict: no HIGH/MED in the round-1 fixes. Four LOWs, all in code/comments the fix introduced:
 BH2-003 (split-brain guard keys on presence, not coherence — the canonical-writer-spelled-as-override door; = EH2-001),
@@ -35,7 +35,7 @@ BH2-002 (crontab comment self-undermining: root-owned 755 dir blocks the deploy 
 BH2-004 (waitForLine comment/code drift on newline-termination).
 All regression lanes flagged in the round-2 brief verified clean. Full dispositions: round-2-triage.json.
 
-## Round 3 (2026-10-13, scope: fix commit d4b92f9d — round-2 diff)
+## Round 3 (2026-10-13, scope: fix commit abe342c3 — round-2 diff)
 
 Verdict: one LOW, in test code the round-2 fixes introduced.
 

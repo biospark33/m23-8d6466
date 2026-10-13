@@ -1,7 +1,7 @@
 # A6 round-1 review — edge-case-hunter report
 
 Reviewer: edge-case-hunter subagent (read-only, no authoring context).
-Scope: `git diff dev...HEAD` = c9d03b51 (wrapper, leaf, crontab.factory, two suites) + 625e27c6 (SKILL.md chore).
+Scope: `git diff dev...HEAD` = a00f4958 (wrapper, leaf, crontab.factory, two suites) + 9cb461e7 (SKILL.md chore).
 Method: environmental and boundary hunting — cron portability, test determinism, fd inheritance, guard symmetry, emit-path robustness.
 
 ## Findings
@@ -24,10 +24,10 @@ Method: environmental and boundary hunting — cron portability, test determinis
 - **EH-006 · LOW · scripts/gitnexus-refresh.sh:286-288** — stampPath control characters (TAB/CR) pass the sed `[^"]*` extractor and land raw inside the JSON line — parseCycleLine rejects unescaped control chars, poisoning the whole cycle record.
   Fix: same fix as BH-001 (`json_escape` drops `\000`-`\037` control chars).
 
-## Round 2 (2026-10-13, scope: fix commit 12941273)
+## Round 2 (2026-10-13, scope: fix commit 91f171b2)
 
 EH2-001 · MED — split-brain guard bypass via the override-shaped door (canonical writer spelled as the override); EH2-002 · LOW — set -u unbound-variable death in the probe (= BH2-001); EH2-003 · LOW — stripped-PATH test's unconditional assertions on the conceded every-prereq host. Verified clean: guard vs F-017, 9>&- vs fixture commands, exit-1 sink path vs contract, handshake timing bounds, chmod restore windows. Full dispositions: round-2-triage.json.
 
-## Round 3 (2026-10-13, scope: fix commit d4b92f9d — round-2 diff)
+## Round 3 (2026-10-13, scope: fix commit abe342c3 — round-2 diff)
 
 Verdict: **CLEAN** — no findings. The round-2 patches re-probed for the round-1 regression classes (cron portability, test determinism, fd inheritance, guard symmetry, emit robustness) and the environmental matrix gained two new named-skip host conditions verified consistent: `STRIPPED_PATH_HOST_PASSES_EVERYTHING` guards both stripped-env tests symmetrically after the round-3 BH3-001 patch, and the behavioral bun-probe rescue test's `skipIf(!existsSync("/usr/bin/flock"))` matches the AA2-007 rationale (runs on Linux CI, named skip on macOS dev).

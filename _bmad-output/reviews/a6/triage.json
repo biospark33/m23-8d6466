@@ -150,7 +150,7 @@
   },
   {
    "finding_id": "AA-004",
-   "finding_text": "DoD Security bullet enumerates paths that exclude the CLAUDE.md-mandated SKILL.md reindex-ritual refresh actually carried by the branch (+2 lines, chore 625e27c6, PLAN C9a)",
+   "finding_text": "DoD Security bullet enumerates paths that exclude the CLAUDE.md-mandated SKILL.md reindex-ritual refresh actually carried by the branch (+2 lines, chore 9cb461e7, PLAN C9a)",
    "diff_context_ref": "DoD Security bullet; .claude/skills/gitnexus-cli/SKILL.md",
    "label": "LOW",
    "disposition": "PATCH",

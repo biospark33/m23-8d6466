@@ -6,21 +6,34 @@
   "date": "2026-10-13",
   "branch": "feature/a6-gitnexus-refresh-cron",
   "commits": {
-    "code": "c9d03b51",
-    "skillChore": "625e27c6"
+    "code": "a00f4958",
+    "skillChore": "9cb461e7"
+  },
+  "shaRewrite": {
+    "date": "2026-10-13",
+    "reason": "GitHub push rejected under the account's email-privacy restriction: the six branch commits carried the private configured email; rewritten to the repo-conventional noreply address (filter-branch, emails only — trees, messages, and dates unchanged)",
+    "mapping": {
+      "c9d03b51": "a00f4958",
+      "625e27c6": "9cb461e7",
+      "12941273": "91f171b2",
+      "d4b92f9d": "abe342c3",
+      "52d833b5": "573a8a06",
+      "d5bcbebf": "b5a4420f"
+    },
+    "measurementPolicy": "Measured values below (liveCycle.logLine, reindex.indexedCommit, liveCycle.note's crossCheck equality, stampAfter.indexedHead) are PRE-REWRITE historical shas captured at e2e time and left untouched — they record what was measured. Commit-reference fields above and in reviewRounds are repointed to the post-rewrite shas."
   },
   "reviewRounds": {
     "rule": "rounds 1–2 fix all (incl. LOWs); stop after any round where only LOWs remain",
     "round1": {
-      "verdict": "18 findings (1 HIGH / 4 MED / 13 LOW) — all 13 code findings patched (commit 12941273); story amendments AA-002/003/004 applied driver-side; AA-005 → closure",
+      "verdict": "18 findings (1 HIGH / 4 MED / 13 LOW) — all 13 code findings patched (commit 91f171b2); story amendments AA-002/003/004 applied driver-side; AA-005 → closure",
       "triage": "_bmad-output/reviews/a6/triage.json"
     },
     "round2": {
-      "verdict": "12 entries (2 MED + 9 LOW + 1 closure item, after dedup) — all patched (commit d4b92f9d); EH2-001≡BH2-003 and EH2-002≡BH2-001 deduped (two hunters independently rediscovered)",
+      "verdict": "12 entries (2 MED + 9 LOW + 1 closure item, after dedup) — all patched (commit abe342c3); EH2-001≡BH2-003 and EH2-002≡BH2-001 deduped (two hunters independently rediscovered)",
       "triage": "_bmad-output/reviews/a6/round-2-triage.json"
     },
     "round3": {
-      "verdict": "acceptance-auditor CLEAN, edge-case-hunter CLEAN, blind-hunter 1 LOW (BH3-001 skip consistency) — patched (commit 52d833b5); review CLOSED (only LOWs remained)",
+      "verdict": "acceptance-auditor CLEAN, edge-case-hunter CLEAN, blind-hunter 1 LOW (BH3-001 skip consistency) — patched (commit 573a8a06); review CLOSED (only LOWs remained)",
       "triage": "_bmad-output/reviews/a6/round-3-triage.json"
     },
     "reports": "_bmad-output/reviews/a6/reports/{blind-hunter,edge-case-hunter,acceptance-auditor}.md — per-reviewer round sections"
