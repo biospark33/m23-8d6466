@@ -16,7 +16,7 @@
 
 import { FakeDriver } from "./fake-driver.ts";
 import { ExeDevDriverError, exeDevDriverFromEnv } from "./exedev/driver.ts";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 import { redactSecrets } from "./step-log.ts";
 

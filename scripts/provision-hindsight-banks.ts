@@ -88,7 +88,7 @@ import {
   type MentalModelTrigger,
   type OperationsList,
 } from "../src/hindsight/schemas.ts";
-import { setLogSink } from "../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink } from "../src/lib/log.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 import {
   acquireHeartbeatLock,

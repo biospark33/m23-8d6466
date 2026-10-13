@@ -13,7 +13,8 @@
  */
 
 import { z } from "zod";
-import { log, newRequestId, type StdioTransport } from "../mcp/stdio-transport.ts";
+import { log, newRequestId } from "../../lib/log.ts";
+import type { StdioTransport } from "../mcp/stdio-transport.ts";
 import type { ToolBridge } from "../mcp/tool-bridge.ts";
 import { CapacityError } from "./agent-store.ts";
 

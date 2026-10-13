@@ -9,7 +9,7 @@
  * the only per-caller differences, so they are the only parameters.
  */
 
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { redactKeyManagementUrls } from "./cap-rejection.ts";
 import { SECRET_PREFIXES } from "./run-record.ts";
 

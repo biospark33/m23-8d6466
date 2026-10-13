@@ -58,7 +58,7 @@ import { writeSync } from "node:fs";
 import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
 import { classifyHarvestedTokens } from "../src/providers/cost-ledger-bridge.ts";
 import { resolveRunsDir } from "../src/providers/run-record.ts";
-import { setLogSink } from "../src/swarmclaw/log.ts";
+import { setLogSink } from "../src/lib/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 

@@ -39,7 +39,7 @@ import type { ExecResult } from "../../src/providers/driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger, useTempAuditStore } from "../fleet/helpers.ts";
 import { dispatch, type DispatchDeps } from "../../src/fleet/dispatch.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import { observeAndDriveChain, type RunCompletionDeps } from "../../src/fleet/run-completion.ts";
 import { MemgateLedger, openReadOnly } from "../../src/memgate/ledger.ts";

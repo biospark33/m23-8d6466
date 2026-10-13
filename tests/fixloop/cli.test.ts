@@ -48,7 +48,7 @@ import { RunRecordStore, type RunRecord } from "../../src/providers/run-record.t
 import type { PrReviewComment, PullRequestInfo } from "../../src/pr/github.ts";
 import type { PushOutcome } from "../../src/pr/push.ts";
 import { appendReport, sealReport, type ReverifyEvidence, type ReverifyReport } from "../../src/reverify/report.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError } from "../../scripts/lib/run-lock.ts";
 import { fakeGitHub, type FakeGitHub } from "../pr/helpers.ts";
 import { run, type FixRunDeps, type FixRunPushOpts } from "../../scripts/fix-run.ts";

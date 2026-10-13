@@ -20,7 +20,7 @@ import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { useTempAuditStore } from "./helpers.ts";
 import { listVerbs } from "../../src/fleet/verbs.ts";
 import { scryptToken, SCRYPT_PARAMS, authenticateApprover } from "../../src/fleet/approvers.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
 import { FleetError } from "../../src/fleet/dispatch.ts";
@@ -1951,7 +1951,7 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     // not fd 2, and a spy keeps bytes the real pipe would have lost).
     store.create(RUN);
     const CLI_TS = JSON.stringify(path.join(import.meta.dir, "../../scripts/fleet.ts"));
-    const LOG_TS = JSON.stringify(path.join(import.meta.dir, "../../src/swarmclaw/log.ts"));
+    const LOG_TS = JSON.stringify(path.join(import.meta.dir, "../../src/lib/log.ts"));
     const child = `
       const { run } = await import(${CLI_TS});
       const { setLogSink } = await import(${LOG_TS});

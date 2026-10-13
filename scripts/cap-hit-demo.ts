@@ -52,7 +52,7 @@ import { redactSecrets } from "../src/providers/step-log.ts";
 import { shQuote } from "../src/providers/exedev/transport.ts";
 import type { ProviderAuditLink } from "../src/providers/driver.ts";
 import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
-import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import { log, newRequestId, setLogSink } from "../src/lib/log.ts";
 import {
   classifyRunExit,
   isValidMicroUsd,

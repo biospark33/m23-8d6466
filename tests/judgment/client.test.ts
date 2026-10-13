@@ -19,7 +19,7 @@ import {
   TYPESAFE_MODEL,
 } from "../../src/judgment/client.ts";
 import { EnvelopeSchema } from "../../src/judgment/envelope.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import type { Question } from "../../src/judgment/schemas.ts";
 
 // ---------------------------------------------------------------------------

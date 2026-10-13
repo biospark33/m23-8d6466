@@ -123,7 +123,7 @@ import { pushVerifiedSha, type PushOutcome } from "../src/pr/push.ts";
 import { PrRefusalError, resolveRepoEntry } from "../src/pr/repos.ts";
 import { DEFAULT_REVERIFY_DIR, readReportsWithTail } from "../src/reverify/report.ts";
 import { exec as hostExec, type ExecResult } from "../src/reverify/worktree.ts";
-import { log, newRequestId } from "../src/swarmclaw/log.ts";
+import { log, newRequestId } from "../src/lib/log.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import { acquireRunLock, releaseRunLock, RunLockedError, type RunLockHandle } from "./lib/run-lock.ts";
 

@@ -49,7 +49,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { LogEntry } from "../../src/swarmclaw/log.ts";
+import type { LogEntry } from "../../src/lib/log.ts";
 import {
   MEMGATE_ADMIN_KEY,
   MEMGATE_REFUSAL_REASONS,

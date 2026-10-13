@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { kgContextSanitize } from "../fleet/brief-schema.ts";
 import { isValidUuidV4 } from "../phase-engine/issue-correlation.ts";
 import { atomicReplaceFile } from "../providers/fs-atomic.ts";
-import { log } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log } from "../lib/log.ts";
 import {
   COLLECTIVE_BANK_ID,
   extractExistingBankIds,

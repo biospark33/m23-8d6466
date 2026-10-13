@@ -34,7 +34,7 @@ import { VIZ_PIDFILE, createRun, type ExecResult, type ProviderAuditLink, type P
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { CostLedger, type RunCostRecord } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { teardownSandbox, type TeardownDeps } from "../../src/providers/teardown.ts";
 import { acquireRunLock, releaseRunLock, withRunLock, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";

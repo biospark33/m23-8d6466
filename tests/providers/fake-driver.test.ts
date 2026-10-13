@@ -36,7 +36,7 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS } from "../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { resolveDriver } from "../../src/providers/index.ts";
-import { setLogSink } from "../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../src/lib/log.ts";
 import { runDriverContract } from "./driver-contract.test.ts";
 // The block below drives FLEET-layer entry points (`provisionAdmittedRun`,
 // `reapRuns`) against this driver, so it shares the fleet suite's fixtures.

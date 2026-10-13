@@ -47,7 +47,7 @@ import { applyMigrations, SCHEMA_DDL } from "../../src/phase-engine/trace/schema
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { CostLedger } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { setLogSink } from "../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../src/lib/log.ts";
 import { canonicalJson, openAuditStore, sha256Hex } from "../../src/audit/link-store.ts";
 
 // ─── fixture constants ───────────────────────────────────────────────────────

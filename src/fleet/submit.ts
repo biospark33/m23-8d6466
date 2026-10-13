@@ -30,7 +30,7 @@
 import { chmodSync, mkdirSync, openSync, readFileSync, closeSync, fchmodSync, writeSync, fsyncSync, statSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { dispatch, FleetError, type DispatchDeps, type DispatchResult } from "./dispatch.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { isValidUuidV4, resolveRunCorrelation, type IssueRef } from "../phase-engine/issue-correlation.ts";
 import type { RunRecordStore } from "../providers/run-record.ts";
 import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";

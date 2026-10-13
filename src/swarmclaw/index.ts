@@ -13,7 +13,7 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
-import { log, newRequestId } from "./mcp/stdio-transport.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { handleRegisterAgent } from "./routes/agents.ts";
 import {
   handleDeleteMCPServer,

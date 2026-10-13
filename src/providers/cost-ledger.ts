@@ -49,7 +49,7 @@ import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 // The orphan guard's stat cross-check resolves the record filename the same way
 // the DF2.1 store does, and admits its READ-path id grammar — both live there,
 // and a second copy of either is a grammar that drifts.

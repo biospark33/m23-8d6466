@@ -55,7 +55,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createGunzip } from "node:zlib";
 
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { assertRunIdPathComponent } from "../phase-engine/journal.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import {

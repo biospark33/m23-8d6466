@@ -50,7 +50,7 @@
 
 import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { log } from "../../swarmclaw/log.ts";
+import { log } from "../../lib/log.ts";
 import { parseRoster, ROSTER_MAX_BYTES, RosterError } from "../../phase-engine/roster/schema.ts";
 import { assertValidRunId } from "../run-record.ts";
 import { KEY_ENV_FILE } from "../credentials.ts";

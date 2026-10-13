@@ -37,7 +37,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { COST_ROLES, type CostRole, type CostWireEvent, type IngestCtx, type IngestResult } from "./cost-ledger.ts";
 import { resolveRunsDir } from "./run-record.ts";
 

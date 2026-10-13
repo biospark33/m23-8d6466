@@ -61,7 +61,7 @@ import { spawnSync } from "node:child_process";
 
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../src/providers/run-record.ts";
-import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import { log, newRequestId, setLogSink } from "../src/lib/log.ts";
 import {
   assembleSnapshot,
   parseWindow,

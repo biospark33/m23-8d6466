@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { HindsightHttpError } from "../../src/hindsight/client.ts";
 import {
   verifyRoundTrip,

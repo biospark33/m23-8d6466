@@ -71,7 +71,7 @@ import {
 import { DEFAULT_COST_LEDGER_FILE } from "../src/providers/cost-ledger.ts";
 import { resolveRunsDir } from "../src/providers/run-record.ts";
 import { DEFAULT_REVERIFY_DIR } from "../src/reverify/report.ts";
-import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import { log, newRequestId, setLogSink } from "../src/lib/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
 const USAGE =

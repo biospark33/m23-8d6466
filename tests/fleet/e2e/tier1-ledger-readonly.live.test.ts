@@ -47,7 +47,7 @@ import { dirname, join } from "node:path";
 
 import { CostLedger, CostLedgerError } from "../../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { setLogSink } from "../../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../../src/lib/log.ts";
 import { liveGate, liveTodoOff, REPO_ROOT, setEffectiveImage, tmpWorkspace, writeEvidence } from "./live-harness.ts";
 
 /** The one contract line the read path must emit on every exit. */

@@ -19,7 +19,7 @@ import type { ProviderAuditLink } from "../../../src/providers/driver.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS, ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
 import { bundlePushTimeoutMs, PUSH_MIN_THROUGHPUT_BPS, PUSH_TIMEOUT_MARGIN_MS } from "../../../src/providers/exedev/fill.ts";
-import { setLogSink } from "../../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../../src/lib/log.ts";
 import {
   fakeExeDev,
   writePostureAttestation,

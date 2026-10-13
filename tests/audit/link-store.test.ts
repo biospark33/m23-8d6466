@@ -60,7 +60,7 @@ import {
   type AuditLinkRow,
   AuditStoreError,
 } from "../../src/audit/link-store.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 
 let dir: string;
 let prevAuditEnv: string | undefined;

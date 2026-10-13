@@ -41,7 +41,7 @@ import type { KeyApi } from "../providers/credentials.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { acquireRunLock, releaseRunLock, RunLockedError, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import { DEFAULT_PER_CALL_DEADLINE_MS, boxMarkerPath } from "./fanout-primitive.ts";
 import { observeAndDriveChain, type ChainOutcome } from "./run-completion.ts";

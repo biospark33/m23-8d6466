@@ -53,7 +53,13 @@ BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 MB="$(git merge-base "${BASE}" HEAD)"
 CHANGED="$(git diff --name-only "${MB}" | sort -u)"
 if [[ -n "$CHANGED" ]]; then
-  mapfile -t MINE <<< "$CHANGED"
+  # bash-3.2 portable mapfile -t (macOS ships 3.2). The here-string appends
+  # the trailing newline that command substitution strips, so every element
+  # is read normally; the `|| [[ -n $line ]]` arm is retained for shape
+  # uniformity with the sibling script's command-output instance, where it
+  # is live.
+  MINE=()
+  while IFS= read -r line || [[ -n $line ]]; do MINE+=("$line"); done <<< "$CHANGED"
 else
   MINE=()
 fi

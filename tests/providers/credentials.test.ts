@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { createRun , type ProviderAuditLink, type ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import {
   SBX_KEY_PREFIX,
   SWARM_KEYS_DIR,

@@ -39,7 +39,7 @@ import {
   memgateDeps,
   verifyRequest,
 } from "../../src/memgate/index.ts";
-import type { LogEntry } from "../../src/swarmclaw/log.ts";
+import type { LogEntry } from "../../src/lib/log.ts";
 
 // ─── fixtures + env discipline ───────────────────────────────────────────────
 

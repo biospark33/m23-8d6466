@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
+import { setLogSink } from "../../src/lib/log.ts";
 import {
   buildSubprocessEnv,
   CommandValidationError,
@@ -7,7 +8,6 @@ import {
   resolveCommandAllowlist,
   resolveEnvAllowlist,
   resolveNpxPackageAllowlist,
-  setLogSink,
   StdioTransport,
   validateCommand,
 } from "../../src/swarmclaw/mcp/stdio-transport.ts";

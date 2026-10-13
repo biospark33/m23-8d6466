@@ -25,7 +25,7 @@ import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { SWARM_KEYS_DIR } from "../../src/providers/credentials.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import {
   FleetError,
   dispatch,

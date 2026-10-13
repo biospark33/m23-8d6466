@@ -37,7 +37,7 @@ import { TimeoutError } from "../../src/providers/timeout.ts";
 import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger, useTempAuditStore } from "./helpers.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import {
   BOX_MARKER_PATH_RE,

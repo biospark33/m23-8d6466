@@ -17,7 +17,7 @@
 import { rmSync } from "node:fs";
 import type { RunRecord, RunRecordErrorCode, RunRecordStore } from "./run-record.ts";
 import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE } from "./run-record.ts";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";

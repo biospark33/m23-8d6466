@@ -20,7 +20,7 @@ import {
   sealReport,
   type ReverifyEvidence,
 } from "../../src/reverify/report.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 
 function evidence(over: Partial<ReverifyEvidence> = {}): ReverifyEvidence {
   return {

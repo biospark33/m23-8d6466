@@ -22,7 +22,7 @@ import {
   log,
   newRequestId,
   type LogEntry,
-} from "../swarmclaw/mcp/stdio-transport.ts";
+} from "../lib/log.ts";
 import {
   BankIdSchema,
   ERR_BANK_COLLISION,

@@ -21,7 +21,7 @@ import {
   sha256Hex,
   type AuditStoreWriter,
 } from "../../src/audit/link-store.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import type { HindsightClient } from "../../src/hindsight/client.ts";
 import {
   RETAIN_PAYLOAD_MAX_BYTES,

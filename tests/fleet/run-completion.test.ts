@@ -39,7 +39,7 @@ import { FakeDriver, FakeDriverError } from "../../src/providers/fake-driver.ts"
 import { createRun, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { RunRecordStore, type ExtensionEntry } from "../../src/providers/run-record.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { setLogSink } from "../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../src/lib/log.ts";
 import { clearRunLockDestructive, isRunLockDestructive } from "../../scripts/lib/run-lock.ts";
 import {
   BOX_MARKER_PATH_RE,

@@ -2,7 +2,7 @@
  * POST /api/agents — register a SwarmClaw agent (INV-SC1 + SSRF-safe endpointUrl).
  */
 
-import { log, newRequestId } from "../mcp/stdio-transport.ts";
+import { log, newRequestId } from "../../lib/log.ts";
 import {
   type AgentStore,
   CapacityError,

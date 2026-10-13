@@ -86,7 +86,7 @@ import {
   type WeeklyReceipt,
 } from "../src/learning/index.ts";
 import { memgateDeps } from "../src/memgate/gateway.ts";
-import { setLogSink } from "../src/swarmclaw/log.ts";
+import { setLogSink } from "../src/lib/log.ts";
 import { MEMGATE_ADMIN_KEY, QDS_MEMGATE_LEDGER, QDS_MEMGATE_SIGNING_KEY } from "../src/memgate/schemas.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 

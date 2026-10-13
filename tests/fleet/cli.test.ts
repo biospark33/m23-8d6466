@@ -62,7 +62,7 @@ import { CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import { defaultKeyCapMicroUsd, type KeyApi } from "../../src/providers/credentials.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import { goodLedger, overBudgetLedger, useTempAuditStore, type RecordingLedger } from "./helpers.ts";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));

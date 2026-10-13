@@ -48,7 +48,7 @@ import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
 import { memgateDeps, revokeRunMemoryKey } from "../memgate/gateway.ts";
 import { openReadOnly } from "../memgate/ledger.ts";
 import { MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, resolveMemgateLedgerPath } from "../memgate/schemas.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { DEFAULT_PER_CALL_DEADLINE_MS, DEFAULT_POLL_INTERVAL_MS, PROBE_SKIP_TICKS_LIMIT, boxMarkerPath, markerUnusableGivesUp, readMarkerVerdict, type MarkerVerdict } from "./fanout-primitive.ts";
 import { unitActivity } from "./run.ts";
 

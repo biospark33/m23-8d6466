@@ -28,7 +28,7 @@ import {
   newId,
   type RunRecordPatch,
 } from "../src/providers/run-record.ts";
-import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import { newRequestId, setLogSink } from "../src/lib/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
 // Structured logs go to stderr so stdout carries only the command's output.

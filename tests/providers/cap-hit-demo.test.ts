@@ -26,7 +26,7 @@ import { join } from "node:path";
 import type { ProviderAuditLink, ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore, CORE_FIELDS, type RunRecord } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 import { leakScan } from "./fixtures/leak-scan.ts";

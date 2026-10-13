@@ -21,7 +21,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
 import { ProviderError } from "./errors.ts";
 import { countQuotaIntents } from "./quota-intents.ts";

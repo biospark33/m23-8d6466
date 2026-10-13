@@ -63,7 +63,7 @@ import { CostLedger, DEFAULT_COST_LEDGER_FILE } from "../providers/cost-ledger.t
 import { LEGACY_RUN_ID_RE, resolveRunsDir, RunRecordStore, RUN_ID_MAX, type RunRecord } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { DEFAULT_REVERIFY_DIR, readReports, reportPath, type ReverifyReport } from "../reverify/report.ts";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { OQ4_VOID_REASON } from "./index.ts";
 import {
   type AuditHop,

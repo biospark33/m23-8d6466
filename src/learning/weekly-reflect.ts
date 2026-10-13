@@ -37,7 +37,7 @@ import { ISO_WEEK_RE, WeeklyReceiptSchema, type ProposalRecord, type WeeklyRecei
 import { ReflectResponseSchema } from "../hindsight/schemas.ts";
 import { forwardScoped, verifyRequest, type MemgateDeps } from "../memgate/gateway.ts";
 import { MemgateError, type MemgateRefusalReason } from "../memgate/schemas.ts";
-import { log, type LogEntry } from "../swarmclaw/log.ts";
+import { log, type LogEntry } from "../lib/log.ts";
 
 // ─── constants ───────────────────────────────────────────────────────────────
 

@@ -39,7 +39,7 @@ import { recordApprovalPort } from "../../../src/reverify/approval.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import { CostLedger, harvestRun, openRouterKeyApi, teardownSandbox } from "../../../src/providers/index.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { setLogSink } from "../../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../../src/lib/log.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import { withRunLock } from "../../../scripts/lib/run-lock.ts";
 import {

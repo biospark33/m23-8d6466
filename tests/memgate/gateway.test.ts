@@ -36,7 +36,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 
 import { HindsightClient } from "../../src/hindsight/client.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { bankOfPath, MAX_RETAIN_CONTENT_CHARS, sha256Hex } from "../../src/memgate/schemas.ts";
 import {
   AGENT_GRANT_CLASSES,

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type LogEntry, setLogSink, StdioTransport } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
+import { StdioTransport } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 import { handleRegisterAgent } from "../../src/swarmclaw/routes/agents.ts";
 import {
   handleDeleteMCPServer,

@@ -735,7 +735,7 @@ console.log("ALL_OK");
   // regression — and the qualification says exactly that, plus where the
   // per-run evidence lives.
   //
-  // `QDS_LOG_VERBOSE=1` because src/swarmclaw/log.ts mutes the JSONL sink
+  // `QDS_LOG_VERBOSE=1` because src/lib/log.ts mutes the JSONL sink
   // under NODE_ENV=test (which `bun test` sets and spawnSync inherits); in
   // production the line is on stdout unconditionally.
   describe("zero-token-row ledger qualification", () => {

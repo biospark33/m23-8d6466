@@ -36,7 +36,7 @@ import { join } from "node:path";
 // Named import, not the global: the wait budget below must be MONOTONIC, and
 // spelling the source makes that impossible to satisfy accidentally.
 import { performance } from "node:perf_hooks";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { assertDirMode0700, atomicReplaceFile, fsyncDir, rmQuiet } from "./fs-atomic.ts";
 
 // ---------------------------------------------------------------------------
