@@ -134,6 +134,14 @@ export const SteeringDirectiveSchema = z.discriminatedUnion("action", [
       note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional(),
     })
     .strict(),
+  // J4 (AC2): the L7 compact signal — appended LAST, adds-only, a register-
+  // ratified amendment of this closed union (DD register, J4 line). Host-only:
+  // DIRECTIVE_INSTRUCTION deliberately does not advertise it. No in-box
+  // applier exists yet (the arming PR owns it); the runner treats an accepted
+  // compact as proceed-equivalent.
+  z
+    .object({ action: z.literal("compact"), note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional() })
+    .strict(),
 ]);
 export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
 
@@ -147,10 +155,12 @@ const KNOWN_ACTIONS = SteeringDirectiveSchema.options.map((m) => m.shape.action.
  *  fail transition) and select_roster (the dispatch_task pick);
  *  post_gate_failure applies retry (guidance into promptContext) and abort
  *  (declining the authorized retry); at run_end the run is already settled —
- *  proceed only. */
+ *  proceed only. J4: compact at run_start (carried-context compaction at the
+ *  run boundary) and post_gate_failure; compacting a settled run is
+ *  meaningless, so run_end stays proceed-only. */
 const POINT_ALLOWLIST: Record<SteeringPoint, readonly SteeringDirective["action"][]> = {
-  run_start: ["proceed", "abort", "select_roster"],
-  post_gate_failure: ["proceed", "retry", "abort"],
+  run_start: ["proceed", "abort", "select_roster", "compact"],
+  post_gate_failure: ["proceed", "retry", "abort", "compact"],
   run_end: ["proceed"],
 };
 
@@ -328,6 +338,11 @@ export interface SteeringController {
 /** The deterministic default every degradation path lands on (INV-RES-5). */
 const PROCEED: SteeringDirective = { action: "proceed" };
 
+// The resident-facing union: `compact` is intentionally ABSENT. It is a
+// host-originated L7 signal (J4), never a resident decision — advertising it
+// would invite the resident to originate a control action the story reserves
+// for the host, and recording-only (PACK_SIGNALS_ARMED=false) means nothing
+// writes one today.
 const DIRECTIVE_INSTRUCTION = [
   "You are the resident orchestrator for this run. Reply with ONE JSON object and nothing else.",
   `Keep the reply at or under ${MAX_OUTPUT_TOKENS} output tokens.`,

@@ -82,6 +82,42 @@ export const TriageRecordSchema = z
   .strict();
 export type TriageRecord = z.infer<typeof TriageRecordSchema>;
 
+// ===== J4 machine-state variant (adds-only region; J2's OutcomeRecordSchema region lives elsewhere) =====
+
+/** Closed disposition set for machine-state asks (L7). The review DISPOSITIONS enum above stays LOCKED. */
+export const MACHINE_STATE_DISPOSITIONS = ["compact", "no-compact"] as const;
+export type MachineStateDisposition = (typeof MACHINE_STATE_DISPOSITIONS)[number];
+
+/**
+ * A machine-state ask record (L7). Same `recordKey` grammar as triage
+ * (`finding_id` carries the `${runId}@${tickKey}` idempotence key); `state_ref`
+ * replaces `finding_text`+`diff_context_ref`; `pr`/`round` are always null — such
+ * asks belong to no PR round. `created_at`/`latency_ms` reuse the triage rules.
+ * `.strict()`: the two arms of CorpusRecordSchema never blend.
+ */
+export const MachineStateRecordSchema = z
+  .object({
+    finding_id: z.string().min(1),
+    state_ref: z.string().min(1),
+    label: z.string().min(1),
+    disposition: z.enum(MACHINE_STATE_DISPOSITIONS),
+    rationale: z.string().optional(),
+    labeler: z.string().min(1),
+    answer_mode: z.enum(["live", "mock"]),
+    pr: z.null(),
+    round: z.null(),
+    created_at: isoTimestamp.nullable(),
+    latency_ms: abReserved.latency_ms,
+  })
+  .strict();
+export type MachineStateRecord = z.infer<typeof MachineStateRecordSchema>;
+
+/** Two-arm strict union: a corpus line is a triage record or a machine-state record. */
+export const CorpusRecordSchema = z.union([TriageRecordSchema, MachineStateRecordSchema]);
+export type CorpusRecord = z.infer<typeof CorpusRecordSchema>;
+
+// ===== end J4 machine-state variant =====
+
 /**
  * `<workdir>/triage.json` — the sidecar the bmad-code-review skill writes
  * (Appendix A of the story). It is the record's INPUT projection: unified

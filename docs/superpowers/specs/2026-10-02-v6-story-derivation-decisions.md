@@ -360,6 +360,17 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     standing-index gate probe pins the symbol — `src/gate/assertions/p0-10-gitnexus.ts:27`
     probes `createServer` in `src/swarmclaw/index.ts` (NET-NEW vs R3, flagged by Z5), so the
     retained surface is load-bearing twice (ADR-2 restoration path + this probe).
+16. **J4 `compact` amendment (DD-28.14 executed, 2026-10-14):** J4 amends DF1.11's closed
+    `SteeringDirectiveSchema` union adds-only with a fifth `.strict()` member
+    `{action:"compact", note?}`; `POINT_ALLOWLIST` gains it at `run_start` +
+    `post_gate_failure` only (`run_end` stays proceed-only; no fourth steering point). The
+    resident-facing directive prompt does not advertise it (host-only signal). It moves
+    `deriveBuildId` (`src/phase-engine/` is COPY-set) — the DD-28.2 re-pin ritual is owed. No
+    in-box applier exists: the box-side applier is unowned follow-up work of the J4 arming
+    PR (its own re-pin owed); until then the runner treats an accepted `compact` as
+    proceed-equivalent. Origin is NOT code-enforced: a resident reply of `{action:"compact"}` is
+    schema-valid and accepted (non-advertisement is the only barrier), so the arming PR must add a
+    host-to-engine directive path or an origin check before any applier trusts a `compact`.
 
 ## 8b. DD-29 — SWARMCLAW_FORK_REV adoption ritual (Z1, 2026-10-02)
 

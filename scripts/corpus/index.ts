@@ -11,6 +11,20 @@
  * from `./schema.ts` / `./merge.ts` directly; only these names are public.
  */
 
-export { DISPOSITIONS, TriageRecordSchema, TriageSidecarSchema } from "./schema.ts";
-export { appendRecord } from "./merge.ts";
-export type { Disposition, TriageRecord, TriageSidecar } from "./schema.ts";
+export {
+  CorpusRecordSchema,
+  DISPOSITIONS,
+  MACHINE_STATE_DISPOSITIONS,
+  MachineStateRecordSchema,
+  TriageRecordSchema,
+  TriageSidecarSchema,
+} from "./schema.ts";
+export { DEFAULT_MACHINE_STATE_CORPUS_DIR, appendRecord, readCorpusRecords } from "./merge.ts";
+export type {
+  CorpusRecord,
+  Disposition,
+  MachineStateDisposition,
+  MachineStateRecord,
+  TriageRecord,
+  TriageSidecar,
+} from "./schema.ts";

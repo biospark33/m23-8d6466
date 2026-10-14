@@ -41,6 +41,7 @@ import type { KeyApi } from "../providers/credentials.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
+import { withTimeout } from "../providers/timeout.ts";
 import { log } from "../lib/log.ts";
 import { acquireRunLock, releaseRunLock, RunLockedError, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import { DEFAULT_PER_CALL_DEADLINE_MS, boxMarkerPath } from "./fanout-primitive.ts";
@@ -183,6 +184,27 @@ export interface SweepChainCtx {
   close: () => void;
 }
 
+/**
+ * Wall-clock bound on ONE `onTick` call. The hook is a host-side judgment
+ * ask (one box read plus one model call), so the per-call box deadline is too
+ * tight; 60 s keeps a hung hook from eating more than 1/20 of
+ * SWEEP_WALL_CLOCK_BUDGET_MS per resident. `withTimeout` cannot cancel the
+ * hook's work, only stop the sweep waiting on it — the orphaned promise is
+ * the hook owner's to make cancellable.
+ */
+export const ON_TICK_DEADLINE_MS = 60_000;
+
+/** What `onTick` receives for one still-running resident (interface I3). */
+export interface ObserveTickInfo {
+  readonly runId: string;
+  readonly vm: string;
+  /** The in-lock re-read record (`nowRec`). */
+  readonly record: RunRecord;
+  readonly driver: ProviderDriver;
+  /** `deps.requestId` — the sweep invocation's id, the tick's idempotence key. */
+  readonly sweepRequestId: string;
+}
+
 export interface ObserveSweepDeps {
   driver: ProviderDriver;
   /** Read-mode is fine: enumeration and the in-lock re-reads never write — the chain writes through `writableStore()`. */
@@ -208,6 +230,16 @@ export interface ObserveSweepDeps {
   writableStore?: () => RunRecordStore;
   maxCandidatesPerPass?: number;
   wallClockBudgetMs?: number;
+  /**
+   * Optional host-side tick hook: called at most once per pass for each
+   * resident whose box is still alive and whose run has not settled, inside
+   * its lock, awaited but bounded by `onTickDeadlineMs`. Any throw, rejection
+   * or timeout is swallowed (logged) and never touches counters, dispositions
+   * or the lock. Absent = today's behavior.
+   */
+  onTick?: (info: ObserveTickInfo) => void | Promise<void>;
+  /** Override of ON_TICK_DEADLINE_MS (tests). */
+  onTickDeadlineMs?: number;
 }
 
 // ─── observability (the observeLine idiom, run-completion.ts:115-129) ────────
@@ -678,6 +710,22 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
             // terminal, so the misfiling is bounded by the tick and heals on
             // the next pass's fresh read.)
             summary.runs_unsettled += 1;
+            // The one arm where the box is alive AND the run unsettled: engine-dead
+            // retires the run, skip means the box could not be read (no trustworthy
+            // state to tick on), and every other kind tore the box down or closed it.
+            if (deps.onTick !== undefined) {
+              const onTick = deps.onTick;
+              const deadline = deps.onTickDeadlineMs ?? ON_TICK_DEADLINE_MS;
+              try {
+                await withTimeout(
+                  (async () => onTick({ runId, vm, record: nowRec, driver: deps.driver, sweepRequestId: deps.requestId }))(),
+                  deadline,
+                  `onTick(${runId})`,
+                );
+              } catch (e) {
+                sweepLine(deps.requestId, { runId, event: "sweep-ontick-failed", error: errText(e), sweep_ms: el() });
+              }
+            }
           }
         } else if (outcome.kind === "refused") {
           // Design decision of record: the chain-side pre-flight refusals that

@@ -101,14 +101,16 @@ describe("SteeringDirectiveSchema — closed union (AC2 contract)", () => {
   });
 
   test("the derived action list and the schema literals cannot drift (A8)", () => {
-    // Mirror the instruction text's four members; any schema change that
-    // drops or renames one must update this list (and DIRECTIVE_INSTRUCTION)
-    // in the same commit.
+    // Mirror the instruction text's four members plus J4's host-only
+    // `compact` (deliberately NOT in DIRECTIVE_INSTRUCTION); any schema change
+    // that drops or renames one must update this list (and
+    // DIRECTIVE_INSTRUCTION) in the same commit.
     expect(SteeringDirectiveSchema.options.map((m) => m.shape.action.value)).toEqual([
       "proceed",
       "retry",
       "select_roster",
       "abort",
+      "compact",
     ]);
   });
 
@@ -1981,5 +1983,139 @@ describe("DF3.6b AC1/AC5 — a kernel OOM-kill stops the resident and says so", 
     // observable that does is the degradation reason, which the wrong order
     // sets and the right one never touches.
     expect(c.lastDegradationReason).toBeNull();
+  });
+});
+
+describe("J4 AC2 — compact: the fifth strict member, run_start + post_gate_failure only", () => {
+  test("accepts compact with an optional note", () => {
+    expect(SteeringDirectiveSchema.safeParse({ action: "compact" }).success).toBe(true);
+    expect(SteeringDirectiveSchema.safeParse({ action: "compact", note: "ctx at 0.82" }).success).toBe(true);
+  });
+
+  test("compact is member-level .strict(): extra keys, a wrong-typed or over-ceiling note are REJECTED", () => {
+    for (const extra of [{ evil: true }, { guidance: "g" }, { reason: "r" }, { fraction: 0.9 }]) {
+      expect(SteeringDirectiveSchema.safeParse({ action: "compact", ...extra }).success).toBe(false);
+    }
+    expect(SteeringDirectiveSchema.safeParse({ action: "compact", note: 42 }).success).toBe(false);
+    expect(
+      SteeringDirectiveSchema.safeParse({ action: "compact", note: "x".repeat(DIRECTIVE_TEXT_CHAR_CEILING + 1) })
+        .success,
+    ).toBe(false);
+  });
+
+  for (const point of ["run_start", "post_gate_failure"] as const) {
+    test(`compact at ${point} is accepted and counted, never a retry iteration`, async () => {
+      const s = scriptedCaller([{ raw: '{"action":"compact","note":"soft_at crossed"}' }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      const d = await c.solicit(point, ctx({ phase: "build" }));
+      expect(d).toEqual({ action: "compact", note: "soft_at crossed" });
+      expect(c.telemetry.directives).toBe(1);
+      expect(c.telemetry.directivesRejected).toBe(0);
+      expect(c.telemetry.tripwires).toHaveLength(0);
+      expect(c.telemetry.steeringIterations).toEqual({});
+    });
+  }
+
+  test("compact at run_end is an off-point REJECTION — tripwire-recorded, never counted", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"compact"}' }]);
+    const tripwires: ResidentTripwire[] = [];
+    const c = createSteering({ caller: s.caller, rate: RATE, onTripwire: (t) => tripwires.push(t) });
+    const d = await c.solicit("run_end", ctx({ phase: "build", rosterIds: ["r1"], phaseIds: ["build"] }));
+    expect(d).toEqual(PROCEED);
+    expect(s.calls()).toBe(1);
+    expect(c.telemetry.status).toBe("active");
+    expect(c.telemetry.directives).toBe(0);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.cause).toBe("gate_bypass_attempt");
+    expect(c.telemetry.tripwires[0]!.detail).toContain("compact");
+    expect(c.telemetry.tripwires[0]!.detail).toContain("run_end");
+    expect(tripwires).toEqual(c.telemetry.tripwires);
+  });
+
+  test("compact with an extra key via solicit is a schema rejection naming the action", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"compact","threshold":0.5}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.detail).toContain("action compact rejected:");
+    expect(s.calls()).toBe(1);
+  });
+
+  test("the resident-facing prompt (and its correction) never advertises compact — host-only", async () => {
+    const s = scriptedCaller([{ raw: "not json" }, { raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("post_gate_failure", ctx({ phase: "build", promptContext: [] }));
+    expect(s.prompts).toHaveLength(2);
+    for (const prompt of s.prompts) expect(prompt).not.toContain("compact");
+  });
+
+  test("negative controls: raw NDJSON and note-overloaded proceed/retry never carry a compact directive", async () => {
+    const cases: { raw: string; point: "run_start" | "post_gate_failure"; want: unknown }[] = [
+      // A trailing NDJSON compact line: the first balanced object wins.
+      { raw: '{"action":"proceed"}\n{"action":"compact"}', point: "run_start", want: PROCEED },
+      // pi --mode json envelope carrying compact as an escaped string: no action → rejected.
+      {
+        raw: '{"type":"message_end","message":{"content":"{\\"action\\":\\"compact\\"}"}}',
+        point: "post_gate_failure",
+        want: PROCEED,
+      },
+      // A compact signal smuggled through a note / extra key / guidance text.
+      { raw: '{"action":"proceed","note":"compact"}', point: "run_start", want: { action: "proceed", note: "compact" } },
+      { raw: '{"action":"proceed","compact":true}', point: "run_start", want: PROCEED },
+      {
+        raw: '{"action":"retry","guidance":"{\\"action\\":\\"compact\\"}"}',
+        point: "post_gate_failure",
+        want: { action: "retry", guidance: '{"action":"compact"}' },
+      },
+      // Discriminator spelled wrong: not a member.
+      { raw: '{"type":"compact"}', point: "run_start", want: PROCEED },
+      { raw: '{"action":"COMPACT"}', point: "run_start", want: PROCEED },
+    ];
+    for (const { raw, point, want } of cases) {
+      const c = createSteering({ caller: scriptedCaller([{ raw }]).caller, rate: RATE });
+      const d = await c.solicit(point, ctx({ phase: "build" }));
+      expect(d).toEqual(want as typeof d);
+      expect(d.action).not.toBe("compact");
+    }
+  });
+
+  test("end-to-end through the drain/ack inbox: compact validates on the reply, an inbox line is context only", async () => {
+    // DF3.4's inbox folds operator text into prompt CONTEXT and acks it at fold
+    // time; it never parses a directive (INV-APPROVE-5). So a compact JSON line
+    // queued in the inbox is input the resident sees, and the only way compact
+    // reaches the runner is the resident's validated reply.
+    const acks: { id: string; point: string }[] = [];
+    const inbox = {
+      drain: async () => [{ messageId: "m-compact", message: '{"action":"compact"}' }],
+      ack: async (id: string, point: string) => {
+        acks.push({ id, point });
+      },
+    };
+    // Reply proceed: the queued compact line does NOT become a directive.
+    const quiet = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
+    const c1 = createSteering({ caller: quiet.caller, rate: RATE, inbox });
+    const shared1 = ctx({ phase: "build", promptContext: [] });
+    expect(await c1.solicit("post_gate_failure", shared1)).toEqual(PROCEED);
+    expect(shared1.promptContext.some((l) => l.startsWith("operator attach m-compact: "))).toBe(true);
+    expect(quiet.prompts[0]).toContain("operator attach m-compact");
+    expect(acks).toEqual([{ id: "m-compact", point: "post_gate_failure" }]);
+
+    // Reply compact: accepted at post_gate_failure through the same drain/ack pass.
+    acks.length = 0;
+    const steer = scriptedCaller([{ raw: '{"action":"compact"}' }]);
+    const c2 = createSteering({ caller: steer.caller, rate: RATE, inbox });
+    expect(await c2.solicit("post_gate_failure", ctx({ phase: "build", promptContext: [] }))).toEqual({
+      action: "compact",
+    });
+    expect(c2.telemetry.directives).toBe(1);
+    expect(acks).toEqual([{ id: "m-compact", point: "post_gate_failure" }]);
+
+    // At run_end the fold-time ack still lands, and compact is still rejected.
+    acks.length = 0;
+    const late = createSteering({ caller: scriptedCaller([{ raw: '{"action":"compact"}' }]).caller, rate: RATE, inbox });
+    expect(await late.solicit("run_end", ctx({ promptContext: [] }))).toEqual(PROCEED);
+    expect(late.telemetry.directivesRejected).toBe(1);
+    expect(acks).toEqual([{ id: "m-compact", point: "run_end" }]);
   });
 });

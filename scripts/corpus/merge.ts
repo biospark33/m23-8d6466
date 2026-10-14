@@ -23,13 +23,26 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { z } from "zod";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
 import { acquireRunLock, releaseRunLock } from "../lib/run-lock.ts";
-import { TriageRecordSchema, TriageSidecarSchema, recordKey, zodErrors, type TriageRecord, type TriageSidecar } from "./schema.ts";
+import {
+  CorpusRecordSchema,
+  MachineStateRecordSchema,
+  TriageRecordSchema,
+  TriageSidecarSchema,
+  recordKey,
+  zodErrors,
+  type CorpusRecord,
+  type TriageRecord,
+  type TriageSidecar,
+} from "./schema.ts";
 
 /** Forward labeler — the triage lead identity (the sidecar carries none). */
 export const DEFAULT_LABELER = "frontier-lead";
 export const DEFAULT_CORPUS_DIR = "_bmad-output/judgment/corpus";
+/** Machine-state (L7) records live in their own dir so triage files never contain them. */
+export const DEFAULT_MACHINE_STATE_CORPUS_DIR = "_bmad-output/judgment/corpus/machine-state";
 /** Single-writer discipline: both corpus writers share one lock id. */
 export const CORPUS_LOCK_ID = "corpus-writer";
 
@@ -112,14 +125,14 @@ export function sidecarToRecords(sidecar: TriageSidecar, opts: ProjectOptions = 
   );
 }
 
-/** Existing records of one JSONL corpus file; a malformed line fails loudly (a torn write is an operator fact). */
-export function readRecords(file: string): TriageRecord[] {
+/** Parse every non-blank line of one JSONL file; a malformed line fails loudly (a torn write is an operator fact). */
+function readLines<T>(file: string, schema: { safeParse(v: unknown): { success: true; data: T } | { success: false; error: z.ZodError } }): T[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8")
     .split("\n")
     .filter((l) => l.trim() !== "")
     .map((l, i) => {
-      const parsed = TriageRecordSchema.safeParse(JSON.parse(l));
+      const parsed = schema.safeParse(JSON.parse(l));
       if (!parsed.success) {
         throw new Error(`corpus file ${file} line ${i + 1} failed schema validation: ${zodErrors(parsed.error).join("; ")}`);
       }
@@ -127,20 +140,36 @@ export function readRecords(file: string): TriageRecord[] {
     });
 }
 
+/** Existing triage records of one JSONL corpus file (ab-report's contract; machine-state lines are a loud error here). */
+export function readRecords(file: string): TriageRecord[] {
+  return readLines(file, TriageRecordSchema);
+}
+
+/** Existing records of either arm — what `appendRecord`'s dedupe reads. */
+export function readCorpusRecords(file: string): CorpusRecord[] {
+  return readLines(file, CorpusRecordSchema);
+}
+
 /**
- * The Wave-3 observer's entry point: schema-validate then append one record.
- * Callers hold the corpus run-lock around their batch of these — the lock owns
- * the read-test-append discipline, this owns validation and the append itself.
+ * The Wave-3 observer's entry point: schema-validate then append one record
+ * (triage or machine-state arm). Callers hold the corpus run-lock around their
+ * batch of these — the lock owns the read-test-append discipline, this owns
+ * validation and the append itself.
  */
 export function appendRecord(outDir: string, record: unknown): "written" | "duplicate" {
-  const parsed = TriageRecordSchema.safeParse(record);
+  const parsed = CorpusRecordSchema.safeParse(record);
   if (!parsed.success) {
-    throw new Error(`record failed schema validation: ${zodErrors(parsed.error).join("; ")}`);
+    // A union reports one opaque issue; surface the intended arm's named-field errors
+    // (triage by default, so triage messages stay exactly as before).
+    const isMachine = typeof record === "object" && record !== null && "state_ref" in record;
+    const arm = (isMachine ? MachineStateRecordSchema : TriageRecordSchema).safeParse(record);
+    const errors = arm.success ? zodErrors(parsed.error) : zodErrors(arm.error);
+    throw new Error(`record failed schema validation: ${errors.join("; ")}`);
   }
   const r = parsed.data;
   const file = corpusFilePath(outDir, r.pr, r.round);
   const key = recordKey(r);
-  if (readRecords(file).some((existing) => recordKey(existing) === key)) return "duplicate";
+  if (readCorpusRecords(file).some((existing) => recordKey(existing) === key)) return "duplicate";
   appendFileSync(file, `${JSON.stringify(r)}\n`);
   return "written";
 }
