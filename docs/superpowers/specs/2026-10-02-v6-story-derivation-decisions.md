@@ -370,7 +370,7 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     detail `unrecognized action: compact (host-only: …)`). The allowlist entries, read via
     `directiveAllowedAt`, govern only the future host-originated path.
     (a) **buildId:** BOTH `src/phase-engine/steering.ts` and `src/fleet/observe.ts` (the `onTick`
-    seam) are COPY-set and move `deriveBuildId`; re-pinned `2328187`→`1b988fc` on the branch
+    seam) are COPY-set and move `deriveBuildId`; re-pinned `285156f` (J3's pin)→`348e5d4` on the branch
     (DD-28.2 ritual; publish/adopt stays operator-gated).
     (b) **Arming PR owes:** a host-to-engine directive path (DF1.11's inbox is context-only, and
     production builds the L7 hook with no steering writer, so arming today only logs

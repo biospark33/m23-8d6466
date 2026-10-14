@@ -2104,7 +2104,16 @@ describe("buildIdFileInputs", () => {
       // judgment-surface changes moved the walked inputs (deriveBuildId). The
       // IMAGE RE-PUBLISH stays ops-gated (wave-0 ritual: J3 + J4 + A2 + the
       // M2.2 surface, DD-28.26(4)); only the pin adopts here.
-      "285156feb2948a0d821919abd67099793e3e7cb77f76759df28b51195b5ff039",
+      //
+      // 348e5d4: moved from 285156f by J4 (host-side judgment pack) — TWO
+      // walked inputs, both adds-only and priced by the story (AC4):
+      // `src/phase-engine/steering.ts` (the fifth `compact` union member, two
+      // POINT_ALLOWLIST entries, the resident-origin refusal and the
+      // `directiveAllowedAt` predicate) and `src/fleet/observe.ts` (the optional
+      // budget-aware `onTick` seam). Everything else J4 touched is absent from
+      // the walk: src/autonomy/, scripts/fleet.ts, scripts/corpus/, docs, tests.
+      // The image re-publish rides the same ops-gated wave-0 ritual as J3's.
+      "348e5d4237cda6b88623433e3e79d415400cc1724eaefd916e7f21ea92977a62",
     );
   });
 });
