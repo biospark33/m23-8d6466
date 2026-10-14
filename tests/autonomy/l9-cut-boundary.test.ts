@@ -8,10 +8,13 @@
  *    computed import(), require();
  *  - host-pack.ts and host-pack.test.ts carry no L9 string at all;
  *  - the fallback consumer path (`orderSweepHotspots` with no ranker) returns
- *    the deterministic order.
+ *    the deterministic order;
+ *  - (R1-15) the cut itself, executed: the tree is materialised in a tmp dir
+ *    WITHOUT L9's two files and `bun test tests/autonomy/` must pass there.
  */
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import ts from "typescript";
 import { orderSweepHotspots, type SweepHotspot } from "../../src/autonomy/host-pack.ts";
@@ -85,4 +88,48 @@ describe("L9 cut boundary (survives the cut)", () => {
     expect((await orderSweepHotspots(hs)).map((h) => h.path)).toEqual(["src/c.ts", "src/a.ts", "src/b.ts", "src/d.ts"]);
     expect((await orderSweepHotspots([])).length).toBe(0);
   });
+});
+
+/** Set in the child run so the materialised tree does not recurse into itself. */
+const CUT_CHILD_ENV = "QDS_J4_CUT_CHILD";
+const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`, "g");
+
+describe("L9 cut, executed (R1-15)", () => {
+  test.skipIf(process.env[CUT_CHILD_ENV] === "1")(
+    "the autonomy suite is green on a materialised tree with L9's two files deleted",
+    () => {
+      const tree = mkdtempSync(join(tmpdir(), "qds-j4-cut-"));
+      try {
+        // The three trees the cut touches or that import across it are COPIED; every other top-level
+        // entry (workspaces, oci, config, node_modules) is symlinked read-only. Never .git or outputs.
+        const COPY = new Set(["src", "scripts", "tests"]);
+        const SKIP = new Set([".git", "_bmad-output", ".unlazy", ".gitnexus", "artifacts"]);
+        for (const e of readdirSync(ROOT)) {
+          if (SKIP.has(e)) continue;
+          if (COPY.has(e)) cpSync(join(ROOT, e), join(tree, e), { recursive: true });
+          else symlinkSync(join(ROOT, e), join(tree, e));
+        }
+        // THE cut: delete the two files, flip nothing else.
+        const cut = ["src/autonomy/l9-repo-sweep-triage.ts", "tests/autonomy/l9-repo-sweep-triage.test.ts"];
+        for (const f of cut) rmSync(join(tree, f), { force: true });
+        for (const f of cut) expect(existsSync(join(tree, f))).toBe(false);
+        // `fleet observe --all` (exercised by the suite) refuses a non-worktree cwd.
+        expect(Bun.spawnSync(["git", "init", "-q"], { cwd: tree }).exitCode).toBe(0);
+        const child = Bun.spawnSync(["bun", "test", "tests/autonomy/"], {
+          cwd: tree,
+          env: { ...process.env, [CUT_CHILD_ENV]: "1" },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const text = `${child.stdout.toString()}${child.stderr.toString()}`.replace(/\r/g, "\n").replace(ANSI, "");
+        if (child.exitCode !== 0) throw new Error(`L9-less tree suite failed (exit ${child.exitCode}):\n${text.slice(-4000)}`);
+        expect(text).toMatch(/\b0 fail\b/);
+        expect(text).toMatch(/\b[1-9]\d* pass\b/);
+        expect(text).not.toMatch(/l9-repo-sweep-triage\.test\.ts/);
+      } finally {
+        rmSync(tree, { recursive: true, force: true });
+      }
+    },
+    300_000,
+  );
 });

@@ -1,10 +1,10 @@
 /**
  * J4 — the `MachineStateRecordSchema` arm of the corpus union and
- * `appendRecord`'s acceptance of it. Triage behavior must be unchanged.
+ * `appendMachineStateRecord` (appendRecord stays triage-only). Triage behavior must be unchanged.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CorpusRecordSchema,
@@ -12,6 +12,7 @@ import {
   MACHINE_STATE_DISPOSITIONS,
   MachineStateRecordSchema,
   TriageRecordSchema,
+  appendMachineStateRecord,
   appendRecord,
   readCorpusRecords,
 } from "../../../scripts/corpus/index.ts";
@@ -89,30 +90,38 @@ describe("MachineStateRecordSchema", () => {
   });
 });
 
-describe("appendRecord with machine-state records", () => {
+describe("appendMachineStateRecord", () => {
   test("writes then detects duplicate", () => {
-    expect(appendRecord(dir, machine)).toBe("written");
-    expect(appendRecord(dir, machine)).toBe("duplicate");
+    expect(appendMachineStateRecord(dir, machine)).toBe("written");
+    expect(appendMachineStateRecord(dir, machine)).toBe("duplicate");
     const lines = readFileSync(corpusFilePath(dir, null, null), "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
     expect(MachineStateRecordSchema.safeParse(JSON.parse(lines[0]!)).success).toBe(true);
+    expect(appendMachineStateRecord(dir, { ...machine, finding_id: "run2@t1" })).toBe("written");
+    expect(readCorpusRecords(corpusFilePath(dir, null, null))).toHaveLength(2);
   });
 
-  test("invalid machine record names its fields, prefix unchanged", () => {
-    expect(() => appendRecord(dir, { ...machine, finding_text: "x" })).toThrow(/record failed schema validation: /);
-    expect(() => appendRecord(dir, { ...machine, disposition: "PATCH" })).toThrow(/record failed schema validation: disposition/);
+  test("invalid record names its fields", () => {
+    expect(() => appendMachineStateRecord(dir, { ...machine, finding_text: "x" })).toThrow(/record failed schema validation: /);
+    expect(() => appendMachineStateRecord(dir, { ...machine, disposition: "PATCH" })).toThrow(/record failed schema validation: disposition/);
+    expect(() => appendMachineStateRecord(dir, triage)).toThrow(/record failed schema validation: /);
+    expect(() => appendMachineStateRecord(dir, 42)).toThrow(/record failed schema validation/);
+  });
+});
+
+describe("appendRecord stays triage-only", () => {
+  test("refuses a machine-state record exactly as on dev", () => {
+    expect(() => appendRecord(dir, machine)).toThrow(/record failed schema validation: /);
+    expect(existsSync(corpusFilePath(dir, null, null))).toBe(false);
   });
 
-  test("a mixed file does not break dedupe", () => {
+  test("mixed files: each writer and readRecords fail loudly on the foreign arm", () => {
     const f = corpusFilePath(dir, null, null);
-    const other = { ...machine, finding_id: "run2@t1" };
     writeFileSync(f, `${JSON.stringify(TriageRecordSchema.parse({ ...triage, pr: null, round: null }))}\n`);
-    expect(appendRecord(dir, machine)).toBe("written");
-    expect(appendRecord(dir, machine)).toBe("duplicate");
-    expect(appendRecord(dir, other)).toBe("written");
-    expect(appendRecord(dir, { ...triage, pr: null, round: null })).toBe("duplicate");
-    expect(readCorpusRecords(f)).toHaveLength(3);
-    // readRecords keeps its triage-only contract: machine lines are a loud error there.
+    expect(() => appendMachineStateRecord(dir, machine)).toThrow(/failed schema validation/);
+    rmSync(f);
+    expect(appendMachineStateRecord(dir, machine)).toBe("written");
+    expect(() => appendRecord(dir, { ...triage, pr: null, round: null })).toThrow(/failed schema validation/);
     expect(() => readRecords(f)).toThrow(/failed schema validation/);
   });
 

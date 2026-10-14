@@ -36,32 +36,53 @@
  *    evaluate only the metrics that are present.
  *
  * The state sent is numbers and ids only (`assertMachineState`): finite
- * numbers, null, or strings matching a strict id grammar. Anything else —
- * conversation content, prose, nested objects — is refused as a recorded miss
- * before any request exists, never sent raw.
+ * numbers, null, or strings matching a strict id grammar, under keys that
+ * match the same grammar. Anything else — conversation content, prose, nested
+ * objects — is refused as a recorded miss before any request exists.
+ *
+ * L7 bounds (review round 1): the ask is capped by `L7_ASK_DEADLINE_MS`, so
+ * journal read + ask finish inside observe's ON_TICK_DEADLINE_MS and the
+ * corpus lock is released in `finally`, never orphaned. Records shard per run
+ * (`<machineStateCorpusDir>/<runId>/x-rx.jsonl`); an unchanged state digest
+ * (`state_ref`, tick-independent) skips the ask with a `state-unchanged` line.
+ * Default dirs anchor to the factory repo root (`FACTORY_ROOT`), never cwd.
+ *
+ * Known ceilings, documented not fixed (round-1 DISMISS):
+ *  - R1-10: thresholds compare against the catalog defaults (8,000 µ$, 3
+ *    retries), not a per-run manifest override; the RunRecord carries no
+ *    resident bounds host-side. Thresholds-in-code is LOCKED.
+ *  - R1-18: the unarmed hook costs one probe+cat box read pair per unsettled
+ *    run per pass (bounded by DEFAULT_PER_CALL_DEADLINE_MS); recording while
+ *    unarmed is the point of LOCKED #5.
+ *  - R1-22: a live ask in flight at CLI exit can be paid but unrecorded. The
+ *    CLI wiring is mock-only (no live flag), and provenance is emitted inside
+ *    `judge` before it returns.
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, renameSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
+  appendMachineStateRecord,
   appendRecord,
   DEFAULT_MACHINE_STATE_CORPUS_DIR,
   MachineStateRecordSchema,
   readCorpusRecords,
   TriageRecordSchema,
+  type CorpusRecord,
   type Disposition,
   type MachineStateRecord,
   type TriageRecord,
 } from "../../scripts/corpus/index.ts";
 // DEFAULT_CORPUS_DIR / CORPUS_LOCK_ID / corpusFilePath are not on the barrel; merge.ts is import-safe (its main is import.meta.main-guarded).
 import { CORPUS_LOCK_ID, DEFAULT_CORPUS_DIR, corpusFilePath } from "../../scripts/corpus/merge.ts";
-import { acquireRunLock, releaseRunLock, RunLockedError } from "../../scripts/lib/run-lock.ts";
+import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError } from "../../scripts/lib/run-lock.ts";
 import type { ObserveTickInfo } from "../fleet/observe.ts";
 import { DEFAULT_PER_CALL_DEADLINE_MS } from "../fleet/fanout-primitive.ts";
 import {
   CeilingExceededError,
+  DEFAULT_PROVENANCE_DIR,
   DEFAULT_STAGE_CEILING_INPUT_TOKENS,
   DigestDivergenceError,
   EgressRefusedError,
@@ -81,6 +102,7 @@ import {
 } from "../phase-engine/resident-bounds.ts";
 import { SteeringDirectiveSchema, type SteeringDirective } from "../phase-engine/steering.ts";
 import { readBoxFile as defaultReadBoxFile } from "../providers/exedev/transport.ts";
+import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 
 // ─── arming + bounds (code-pinned, AC5) ───────────────────────────────────────
 
@@ -96,6 +118,26 @@ export const L7_EGRESS_CLASS = "machine-state" as const satisfies EgressClass;
 export const L8_EGRESS_CLASS = "finding-text" as const satisfies EgressClass;
 export const SANITY_EGRESS_CLASS = "machine-state" as const satisfies EgressClass;
 
+/**
+ * Bound on ONE L7 judge call (both attempts + retry delay). The hook spends at
+ * most DEFAULT_PER_CALL_DEADLINE_MS (10 s, the journal probe+cat pair) plus
+ * this, so it completes or gives up before observe's ON_TICK_DEADLINE_MS (60 s)
+ * abandons it — no orphaned ask can hold the corpus lock past its tick.
+ */
+export const L7_ASK_DEADLINE_MS = 40_000;
+/** Per-attempt HTTP timeout of the DEFAULT client (live mode), so a slow attempt fails inside L7_ASK_DEADLINE_MS. */
+export const PACK_JUDGE_TIMEOUT_MS = 15_000;
+
+/**
+ * The factory repo root, from this module's own location — never cwd.
+ * `fleet observe --all` runs with cwd = the DISPATCHED repo; default pack
+ * output must not land in that repo's worktree.
+ */
+export const FACTORY_ROOT = resolve(import.meta.dir, "..", "..");
+export const PACK_PROVENANCE_DIR = join(FACTORY_ROOT, DEFAULT_PROVENANCE_DIR);
+export const PACK_MACHINE_STATE_CORPUS_DIR = join(FACTORY_ROOT, DEFAULT_MACHINE_STATE_CORPUS_DIR);
+export const PACK_CORPUS_DIR = join(FACTORY_ROOT, DEFAULT_CORPUS_DIR);
+
 export const L7_LABELER = `${TYPESAFE_MODEL}-l7-host-pack`;
 /**
  * Mock-mode L8 records default to a SUBDIR of the triage corpus: ab-report
@@ -103,7 +145,7 @@ export const L7_LABELER = `${TYPESAFE_MODEL}-l7-host-pack`;
  * enter a measured-agreement denominator (Observability Contract).
  * L7 records carry `answer_mode` themselves.
  */
-export const L8_MOCK_CORPUS_DIR = join(DEFAULT_CORPUS_DIR, "mock");
+export const L8_MOCK_CORPUS_DIR = join(PACK_CORPUS_DIR, "mock");
 export const L8_LABELER = `${TYPESAFE_MODEL}-l8-host-pack`;
 
 /**
@@ -191,11 +233,11 @@ export type SteeringWriter = (runId: string, directive: SteeringDirective) => vo
 export interface PackDeps {
   /** Default: a mock-default JudgmentClient on `provenanceDir`. */
   client?: Judge;
-  /** Provenance side-channel dir for the default client. Tests MUST set it. */
+  /** Provenance side-channel dir for the default client. Default PACK_PROVENANCE_DIR. Tests MUST set it. */
   provenanceDir?: string;
-  /** L7 records. Default DEFAULT_MACHINE_STATE_CORPUS_DIR. Tests MUST set it. */
+  /** L7 records (sharded per run beneath it). Default PACK_MACHINE_STATE_CORPUS_DIR. Tests MUST set it. */
   machineStateCorpusDir?: string;
-  /** L8 records. Default DEFAULT_CORPUS_DIR (live) / L8_MOCK_CORPUS_DIR (mock). Tests MUST set it. */
+  /** L8 records. Default PACK_CORPUS_DIR (live) / L8_MOCK_CORPUS_DIR (mock). Tests MUST set it. */
   corpusDir?: string;
   log?: (entry: LogEntry) => void;
   now?: () => number;
@@ -205,6 +247,8 @@ export interface PackDeps {
   boxJournalPath?: (runId: string) => string;
   /** Per-leg ceiling (input tokens). Default 1M. */
   ceilingTokens?: number;
+  /** Override of L7_ASK_DEADLINE_MS (tests). */
+  l7AskDeadlineMs?: number;
 }
 
 /** Resolved deps: one context per hook/caller, so each leg's ceiling persists across its asks. */
@@ -217,21 +261,23 @@ export interface PackContext {
   readonly writeSteering: SteeringWriter | undefined;
   readonly readBoxFile: typeof defaultReadBoxFile;
   readonly boxJournalPath: (runId: string) => string;
+  readonly l7AskDeadlineMs: number;
   readonly ceilings: { readonly l7: JudgmentCeiling; readonly l8: JudgmentCeiling; readonly sanity: JudgmentCeiling };
 }
 
 export function packContext(deps: PackDeps = {}): PackContext {
   const tokens = deps.ceilingTokens ?? DEFAULT_STAGE_CEILING_INPUT_TOKENS;
-  const client = deps.client ?? new JudgmentClient({ provenanceDir: deps.provenanceDir });
+  const client = deps.client ?? new JudgmentClient({ provenanceDir: deps.provenanceDir ?? PACK_PROVENANCE_DIR, timeoutMs: PACK_JUDGE_TIMEOUT_MS });
   return {
     client,
-    machineStateCorpusDir: deps.machineStateCorpusDir ?? DEFAULT_MACHINE_STATE_CORPUS_DIR,
-    corpusDir: deps.corpusDir ?? (client.mode === "mock" ? L8_MOCK_CORPUS_DIR : DEFAULT_CORPUS_DIR),
+    machineStateCorpusDir: deps.machineStateCorpusDir ?? PACK_MACHINE_STATE_CORPUS_DIR,
+    corpusDir: deps.corpusDir ?? (client.mode === "mock" ? L8_MOCK_CORPUS_DIR : PACK_CORPUS_DIR),
     log: deps.log ?? log,
     now: deps.now ?? Date.now,
     writeSteering: deps.writeSteering,
     readBoxFile: deps.readBoxFile ?? defaultReadBoxFile,
     boxJournalPath: deps.boxJournalPath ?? defaultBoxJournalPath,
+    l7AskDeadlineMs: deps.l7AskDeadlineMs ?? L7_ASK_DEADLINE_MS,
     ceilings: { l7: new JudgmentCeiling(tokens), l8: new JudgmentCeiling(tokens), sanity: new JudgmentCeiling(tokens) },
   };
 }
@@ -296,6 +342,9 @@ export function assertMachineState(state: unknown): void {
     throw new EgressRefusedError("machine-state refused: state must be a flat object", "machine-state");
   }
   for (const [k, v] of Object.entries(state)) {
+    if (!MACHINE_STATE_ID_RE.test(k)) {
+      throw new EgressRefusedError("machine-state refused: a key is not an id (prose in a key name)", "machine-state");
+    }
     const ok =
       v === null ||
       (typeof v === "number" && Number.isFinite(v)) ||
@@ -351,8 +400,26 @@ function missReason(e: unknown): string {
   if (e instanceof CeilingExceededError) return "ceiling-exceeded";
   if (e instanceof JudgmentSchemaError) return "schema-error";
   if (e instanceof DigestDivergenceError) return "digest-divergence";
-  if (e instanceof RunLockedError) return "corpus-locked";
+  if (e instanceof RunLockedError || e instanceof RunLockReentrantError) return "corpus-locked";
+  if (e instanceof CorpusUnreadableError) return "corpus-unreadable";
+  if (e instanceof TimeoutError) return "ask-deadline";
   return "judge-failed";
+}
+
+/** A corpus file with a torn or schema-invalid line: an operator fact, its own miss reason. */
+class CorpusUnreadableError extends Error {
+  constructor(file: string, cause: unknown) {
+    super(`corpus file ${file} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "CorpusUnreadableError";
+  }
+}
+
+function readCorpusOrThrow(file: string): CorpusRecord[] {
+  try {
+    return readCorpusRecords(file);
+  } catch (e) {
+    throw new CorpusUnreadableError(file, e);
+  }
 }
 
 type Leg = "l7" | "l8" | "sanity";
@@ -403,13 +470,29 @@ function choiceOf(env: JudgmentEnvelope, id: string, allowed: readonly string[])
 
 /** Was this key already recorded by this labeler? (Avoids a second PAID ask; appendRecord's dedupe is the at-most-once backstop.) */
 function alreadyRecorded(dir: string, findingId: string, labeler: string): boolean {
-  return readCorpusRecords(corpusFilePath(dir, null, null)).some((r) => r.finding_id === findingId && r.labeler === labeler);
+  return readCorpusOrThrow(corpusFilePath(dir, null, null)).some((r) => r.finding_id === findingId && r.labeler === labeler);
 }
 
-function withCorpusLock<T>(dir: string, holder: string, fn: () => Promise<T>): Promise<T> {
+/** The lock is released in `finally` on every path, including a rejected or deadline-abandoned ask. */
+async function withCorpusLock<T>(dir: string, holder: string, fn: () => Promise<T>): Promise<T> {
   mkdirSync(dir, { recursive: true });
   const lock = acquireRunLock(dir, CORPUS_LOCK_ID, holder);
-  return fn().finally(() => releaseRunLock(lock));
+  try {
+    return await fn();
+  } finally {
+    releaseRunLock(lock);
+  }
+}
+
+/** Per-run shard of the machine-state corpus: one file never grows across runs. */
+export function l7ShardDir(machineStateCorpusDir: string, runId: string): string {
+  return join(machineStateCorpusDir, runId.replace(/[^A-Za-z0-9._-]/g, "_"));
+}
+
+/** Tick-independent digest of the state (tickKey excluded), so an unchanged state across sweeps is detectable. */
+export function l7StateRef(state: ResidentMachineState): string {
+  const stable = Object.fromEntries(Object.entries(state).filter(([k]) => k !== "tickKey"));
+  return `machine-state:sha256:${createHash("sha256").update(JSON.stringify(stable)).digest("hex")}`;
 }
 
 // ─── L7 ───────────────────────────────────────────────────────────────────────
@@ -417,12 +500,16 @@ function withCorpusLock<T>(dir: string, holder: string, fn: () => Promise<T>): P
 export type L7Result =
   | { kind: "not-asked" }
   | { kind: "duplicate" }
+  | { kind: "state-unchanged" }
   | { kind: "miss"; reason: string }
   | { kind: "asked"; envelope: JudgmentEnvelope; wouldSignal: boolean; record: MachineStateRecord };
 
 /**
  * One L7 ask for one resident at one tick. Below every threshold ⇒ nothing
- * asked, nothing logged. Idempotent on `${runId}@${tickKey}`.
+ * asked, nothing logged. Idempotent on `${runId}@${tickKey}`; a state whose
+ * digest equals the run's last recorded `state_ref` is not re-asked (one
+ * `state-unchanged` line). A torn shard is set aside (renamed, kept for the
+ * operator) after its `corpus-unreadable` miss, so the next tick can record.
  */
 export async function l7Ask(ctx: PackContext, state: ResidentMachineState): Promise<L7Result> {
   const started = ctx.now();
@@ -435,16 +522,41 @@ export async function l7Ask(ctx: PackContext, state: ResidentMachineState): Prom
     }
     if (!l7ShouldAsk(state)) return { kind: "not-asked" };
     const findingId = `${state.runId}@${state.tickKey}`;
-    return await withCorpusLock(ctx.machineStateCorpusDir, "l7 host-pack", async (): Promise<L7Result> => {
-      if (alreadyRecorded(ctx.machineStateCorpusDir, findingId, L7_LABELER)) return { kind: "duplicate" };
-      const envelope = await ctx.client.judge(state, L7_QUESTIONS, { egressClass: L7_EGRESS_CLASS, ceiling: ctx.ceilings.l7 });
+    const shard = l7ShardDir(ctx.machineStateCorpusDir, state.runId);
+    const stateRef = l7StateRef(state);
+    return await withCorpusLock(shard, "l7 host-pack", async (): Promise<L7Result> => {
+      const file = corpusFilePath(shard, null, null);
+      let prior: CorpusRecord[];
+      try {
+        prior = readCorpusOrThrow(file);
+      } catch (e) {
+        // ponytail: set the torn shard aside so one bad line costs one miss, not the run's leg; the file is kept for the operator.
+        try {
+          renameSync(file, `${file}.unreadable-${ctx.now()}`);
+        } catch {
+          // a failed rename leaves the next tick to miss again — still a recorded miss, never a throw
+        }
+        throw e;
+      }
+      const mine = prior.filter((r) => r.labeler === L7_LABELER && r.finding_id.startsWith(`${state.runId}@`));
+      if (mine.some((r) => r.finding_id === findingId)) return { kind: "duplicate" };
+      const last = mine.at(-1);
+      if (last !== undefined && "state_ref" in last && last.state_ref === stateRef) {
+        packLine(ctx, "l7", requestId, started, { skip: "state-unchanged", state_ref: stateRef, runId: state.runId });
+        return { kind: "state-unchanged" };
+      }
+      const envelope = await withTimeout(
+        ctx.client.judge(state, L7_QUESTIONS, { egressClass: L7_EGRESS_CLASS, ceiling: ctx.ceilings.l7 }),
+        ctx.l7AskDeadlineMs,
+        `l7 ask (${state.runId})`,
+      );
       requestId = envelope.requestId;
       const shouldCompact = noulOf(envelope, "should_compact");
       const choice = choiceOf(envelope, "compact_choice", ["compact", "no-compact"]);
       const wouldSignal = shouldCompact >= L7_SHOULD_COMPACT_MIN && choice === "compact";
       const record = MachineStateRecordSchema.parse({
         finding_id: findingId,
-        state_ref: `machine-state:sha256:${createHash("sha256").update(stateText).digest("hex")}`,
+        state_ref: stateRef,
         label: wouldSignal ? "would-signal" : "would-hold",
         disposition: choice,
         rationale: `jev: should_compact=${shouldCompact}; compact_choice=${choice}`,
@@ -455,7 +567,7 @@ export async function l7Ask(ctx: PackContext, state: ResidentMachineState): Prom
         created_at: envelope.created_at,
         latency_ms: Math.round(envelope.latency_ms),
       });
-      appendRecord(ctx.machineStateCorpusDir, record);
+      appendMachineStateRecord(shard, record);
       if (PACK_SIGNALS_ARMED && wouldSignal) {
         // Unreachable in the merged default. When armed, the ONLY write is a schema-parsed compact directive.
         if (ctx.writeSteering === undefined) {
@@ -491,9 +603,14 @@ const JournalResidentSchema = z.object({
 
 /**
  * The observe hook (interface I3's `onTick`): read the resident block of the
- * box journal, build the numbers-only state, ask L7. Never throws. A missing
- * journal or a run with no armed resident is silence (nothing observable,
- * nothing to report); an unreadable/unparseable journal is a recorded miss.
+ * box journal, build the numbers-only state, ask L7. Never throws. A cleanly
+ * absent journal, a journal with no resident block, or a resident that is not
+ * `active` is silence. `active` is the only live status: `degraded` is a
+ * one-way latch (steering.ts: nothing writes "active" back, the resident is
+ * never solicited again), `stopped` is past run_end, `disabled` never ran —
+ * a compact signal could reach none of them. An unproven absence (the probe
+ * never answered), an unreadable/unparseable journal, or a resident block
+ * that fails its schema is a recorded miss.
  */
 export function makeL7ObserveHook(deps: PackDeps = {}): (info: ObserveTickInfo) => Promise<void> {
   const ctx = packContext(deps);
@@ -501,18 +618,31 @@ export function makeL7ObserveHook(deps: PackDeps = {}): (info: ObserveTickInfo) 
     const started = ctx.now();
     try {
       const read = await ctx.readBoxFile(info.driver, info.vm, ctx.boxJournalPath(info.runId), DEFAULT_PER_CALL_DEADLINE_MS);
-      if (read.kind === "absent") return;
+      if (read.kind === "absent") {
+        // probeExit 1 (or none) is `test -f` saying "not there"; 255/137/… means the box never answered.
+        if (read.probeExit !== undefined && read.probeExit !== 1) {
+          packLine(ctx, "l7", newRequestId(), started, { miss: "journal-absent-unproven", probe_exit: read.probeExit, runId: info.runId });
+        }
+        return;
+      }
       if (read.kind !== "content") {
         packLine(ctx, "l7", newRequestId(), started, { miss: `journal-${read.kind}`, runId: info.runId });
         return;
       }
-      const parsed = JournalResidentSchema.safeParse(JSON.parse(read.content));
+      const doc: unknown = JSON.parse(read.content);
+      if (typeof doc !== "object" || doc === null || Array.isArray(doc)) {
+        packLine(ctx, "l7", newRequestId(), started, { miss: "journal-unparseable", runId: info.runId });
+        return;
+      }
+      // No resident block: no resident to nudge.
+      if (!("resident" in doc) || doc.resident === undefined || doc.resident === null) return;
+      const parsed = JournalResidentSchema.safeParse(doc);
       if (!parsed.success) {
-        // No resident block (or a closed shape this leg cannot read): no resident to nudge.
+        packLine(ctx, "l7", newRequestId(), started, { miss: "resident-block-invalid", runId: info.runId });
         return;
       }
       const r = parsed.data.resident;
-      if (r.status === "disabled") return;
+      if (r.status !== "active") return;
       const iterations = Object.values(r.steeringIterations);
       await l7Ask(ctx, {
         runId: info.runId,
@@ -541,14 +671,17 @@ export function makeL7ObserveHook(deps: PackDeps = {}): (info: ObserveTickInfo) 
  */
 export async function l8Prefilter(ctx: PackContext, findings: readonly PackFinding[]): Promise<readonly PackFinding[]> {
   const unchanged = [...findings];
-  const wouldKeep: string[] = [];
+  // Only an ANSWERED would-filter enters this set: a miss, a refusal, a lock failure or an
+  // already-recorded finding is never filtered (fail-open to deep adjudication).
+  const filtered = new Set<string>();
+  const key = (f: PackFinding): string => `${f.runId}/${f.findingId}`;
   const started = ctx.now();
   try {
     await withCorpusLock(ctx.corpusDir, "l8 host-pack", async () => {
       for (const f of findings) {
         const t0 = ctx.now();
         let requestId = newRequestId();
-        const findingId = `${f.runId}/${f.findingId}`;
+        const findingId = key(f);
         try {
           if (f.author !== "factory") {
             throw new EgressRefusedError(`finding-text refused: author "${f.author}" is not factory (INV-7 fence)`, "finding-text");
@@ -556,10 +689,7 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
           if (f.text.length === 0 || f.text.length > L8_FINDING_MAX_CHARS) {
             throw new EgressRefusedError(`finding-text refused: ${f.text.length} chars outside 1..${L8_FINDING_MAX_CHARS}`, "finding-text");
           }
-          if (alreadyRecorded(ctx.corpusDir, findingId, L8_LABELER)) {
-            wouldKeep.push(f.findingId);
-            continue;
-          }
+          if (alreadyRecorded(ctx.corpusDir, findingId, L8_LABELER)) continue;
           const envelope = await ctx.client.judge(
             { finding_id: findingId, lens: f.lens, finding_text: f.text },
             L8_QUESTIONS,
@@ -585,7 +715,7 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
             cost_exact_usd: (envelope.usage.input_tokens * 0.042) / 1_000_000,
           });
           appendRecord(ctx.corpusDir, record);
-          if (!wouldFilter) wouldKeep.push(f.findingId);
+          if (wouldFilter) filtered.add(findingId);
           packLine(ctx, "l8", requestId, t0, {
             answer: { is_real_defect: real, disposition: choice },
             would_signal: wouldFilter,
@@ -593,16 +723,16 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
           });
         } catch (e) {
           // A refused/missed finding is never filtered: it stays for deep adjudication.
-          wouldKeep.push(f.findingId);
           packLine(ctx, "l8", requestId, t0, { miss: missReason(e), findingId: f.findingId });
         }
       }
     });
-    packLine(ctx, "l8", newRequestId(), started, { would_keep: wouldKeep, input_count: findings.length });
   } catch (e) {
     packLine(ctx, "l8", newRequestId(), started, { miss: missReason(e) });
   }
-  return PACK_SIGNALS_ARMED ? findings.filter((f) => wouldKeep.includes(f.findingId)) : unchanged;
+  const kept = findings.filter((f) => !filtered.has(key(f)));
+  packLine(ctx, "l8", newRequestId(), started, { would_keep: kept.map(key), input_count: findings.length });
+  return PACK_SIGNALS_ARMED ? kept : unchanged;
 }
 
 // ─── pre-dispatch sanity ──────────────────────────────────────────────────────

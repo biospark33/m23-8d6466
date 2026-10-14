@@ -225,4 +225,33 @@ describe("observeSweep onTick seam", () => {
     expect(withHook).toEqual(without);
     expect(without.runs_unsettled).toBe(1);
   });
+
+  test("R1-05: low remaining budget skips the hook (logged) and later candidates are processed as in a hook-free run", async () => {
+    const f = fixture();
+    for (const id of ["run-a", "run-b", "run-c"]) await f.seed(id);
+    const base = sweep(await observeSweep(f.deps({ wallClockBudgetMs: 300 })));
+    const lines = captureLogs();
+    let calls = 0;
+    const slow = async (): Promise<void> => {
+      calls += 1;
+      await new Promise((r) => setTimeout(r, 400));
+    };
+    const out = await observeSweep(f.deps({ wallClockBudgetMs: 300, onTick: slow, onTickDeadlineMs: 200 }));
+    expect(calls).toBe(0);
+    expect(sweep(out)).toEqual(base);
+    expect(base.candidates_skipped).toBe(0);
+    const skips = lines.filter((l) => l.event === "sweep-ontick-skipped");
+    expect(skips).toHaveLength(3);
+    expect(skips[0]!.reason).toBe("wall-clock-budget");
+  });
+
+  test("R1-05: normal budget still calls the hook and emits no skip line", async () => {
+    const f = fixture();
+    await f.seed("run-a");
+    const lines = captureLogs();
+    let calls = 0;
+    await observeSweep(f.deps({ onTick: () => { calls += 1; } }));
+    expect(calls).toBe(1);
+    expect(lines.some((l) => l.event === "sweep-ontick-skipped")).toBe(false);
+  });
 });

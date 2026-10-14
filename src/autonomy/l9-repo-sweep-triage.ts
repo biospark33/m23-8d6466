@@ -25,12 +25,13 @@
  * latest), fed through the same ranker. See its doc for the egress decision.
  */
 
-import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { appendRecord, TriageRecordSchema, type Disposition } from "../../scripts/corpus/index.ts";
 // DEFAULT_CORPUS_DIR is not on the barrel; merge.ts is import-safe (main is import.meta.main-guarded).
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
-import { CORPUS_LOCK_ID, DEFAULT_CORPUS_DIR } from "../../scripts/corpus/merge.ts";
+import { CORPUS_LOCK_ID, DEFAULT_CORPUS_DIR, corpusFilePath, readCorpusRecords } from "../../scripts/corpus/merge.ts";
 import {
   CeilingExceededError,
   DEFAULT_STAGE_CEILING_INPUT_TOKENS,
@@ -67,6 +68,19 @@ export const WORTH_BRIEF_THRESHOLD = 0.5;
 /** Max dependency-source spans produced per package. */
 export const MAX_OPENSRC_SPANS = 200;
 export const OPENSRC_TIMEOUT_MS = 30_000;
+/** Same value as host-pack's L8_MOCK_CORPUS_DIR (not imported: no edge into the pack core). ab-report reads only top-level *.jsonl. */
+export const L9_MOCK_CORPUS_DIR = join(DEFAULT_CORPUS_DIR, "mock");
+/** Defaults anchor to the factory repo (this module's location), never cwd — same rule as the pack core. */
+const FACTORY_ROOT = resolve(import.meta.dir, "..", "..");
+
+/** Where a ranker writes: the injected dir, else mock → `mock/` subdir, live → the measured corpus. */
+export function resolveTriageCorpusDir(client: { mode?: string }, injected?: string): string {
+  if (injected !== undefined) return injected;
+  return resolve(FACTORY_ROOT, client.mode === "mock" ? L9_MOCK_CORPUS_DIR : DEFAULT_CORPUS_DIR);
+}
+/** Bounds of the default opensrc walk. */
+export const MAX_WALK_ENTRIES = 5_000;
+export const MAX_WALK_DEPTH = 8;
 export const L9_LABELER = `${TYPESAFE_MODEL}-l9-triage`;
 
 /**
@@ -102,15 +116,29 @@ export interface TriageDeps {
   client?: Judge;
   /** Used only when `client` is absent. Tests MUST set it. */
   provenanceDir?: string;
-  /** Corpus dir for records. Default DEFAULT_CORPUS_DIR. Tests MUST set it. */
+  /** Corpus dir for records. Default DEFAULT_CORPUS_DIR (live) / L9_MOCK_CORPUS_DIR (mock client). Tests MUST set it. */
   corpusDir?: string;
   /** One ceiling per leg. Default a fresh 1M one per ranker. */
   ceiling?: JudgmentCeiling;
   log?: (entry: LogEntry) => void;
 }
 
+// Non-finite scores sort after every finite one (then by path), so the comparator is a total order.
+const sk = (h: SweepHotspot): number => (Number.isFinite(h.score) ? h.score : Number.NEGATIVE_INFINITY);
 const deterministic = (hs: readonly SweepHotspot[]): SweepHotspot[] =>
-  [...hs].sort((a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  [...hs].sort((a, b) => {
+    const ka = sk(a);
+    const kb = sk(b);
+    if (ka !== kb) return ka < kb ? 1 : -1;
+    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  });
+
+const digest = (s: string, n = 8): string => createHash("sha256").update(s).digest("hex").slice(0, n);
+/** Path as used in ids: truncated paths carry a digest of the FULL path so long siblings never collide. */
+const idPath = (full: string): string => {
+  const c = full.replace(CONTROL, " ");
+  return c.length > PATH_MAX_CHARS ? `${c.slice(0, PATH_MAX_CHARS)}~${digest(full)}` : c;
+};
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
 const CONTROL = /[\u0000-\u001f\u007f]/g;
@@ -124,16 +152,16 @@ function missReason(e: unknown): string {
 }
 
 /** Project one envelope into a TriageRecord input; throws on off-shape answers (caught as a miss). */
-function recordFrom(h: SweepHotspot, path: string, brief: string, env: JudgmentEnvelope) {
+function recordFrom(h: SweepHotspot, ref: string, id: string, brief: string, env: JudgmentEnvelope) {
   const w = env.answers.worth_brief;
   const d = env.answers.disposition;
   if (!w || w.type !== "noul" || !d || d.type !== "choice") throw new JudgmentSchemaError("L9 envelope answers off-shape", env.requestId, "");
   const disposition = DISPOSITION_BY_CHOICE[d.choice];
   if (disposition === undefined) throw new JudgmentSchemaError(`L9 disposition "${d.choice}" is not an asked criterion`, env.requestId, "");
   const record = TriageRecordSchema.parse({
-    finding_id: `sweep:${path}`,
+    finding_id: id,
     finding_text: brief,
-    diff_context_ref: `sweep:${path}`,
+    diff_context_ref: ref,
     label: w.noul >= WORTH_BRIEF_THRESHOLD ? "worth-brief" : "skip-brief",
     disposition,
     rationale: `jev: worth_brief=${w.noul}; disposition=${d.choice}; host_score=${h.score}`,
@@ -150,8 +178,9 @@ function recordFrom(h: SweepHotspot, path: string, brief: string, env: JudgmentE
 
 export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
   const emit = deps.log ?? log;
-  const corpusDir = deps.corpusDir ?? DEFAULT_CORPUS_DIR;
   const client: Judge = deps.client ?? new JudgmentClient({ provenanceDir: deps.provenanceDir });
+  // Mock records must never reach the measured corpus ab-report reads (top-level *.jsonl).
+  const corpusDir = resolveTriageCorpusDir(client as { mode?: string }, deps.corpusDir);
   const ceiling = deps.ceiling ?? new JudgmentCeiling(DEFAULT_STAGE_CEILING_INPUT_TOKENS);
 
   const line = (requestId: string, started: number, extra: Record<string, unknown>, status: "ok" | "error"): void => {
@@ -186,10 +215,15 @@ export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
         lock = acquireRunLock(corpusDir, CORPUS_LOCK_ID, "l9 triage");
         const worthByPath = new Map<string, number>();
         let ceilingHit = false;
+        const corpusFile = corpusFilePath(corpusDir, null, null);
         for (const [i, h] of order.entries()) {
           const started = Date.now();
           const path = clip(h.path, PATH_MAX_CHARS);
           const miss = (reason: string, requestId = newRequestId()) => line(requestId, started, { miss: reason, path }, "error");
+          if (!Number.isFinite(h.score)) {
+            miss("non-finite-score");
+            continue;
+          }
           if (i >= MAX_HOTSPOTS_PER_CALL) {
             miss("capped");
             continue;
@@ -199,13 +233,20 @@ export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
             continue;
           }
           const brief = clip(h.brief, BRIEF_MAX_CHARS) || path;
+          // Key incorporates the brief digest: unchanged brief => already recorded, no (paid) re-ask.
+          const ref = `sweep:${idPath(h.path)}`;
+          const id = `${ref}@${digest(brief)}`;
+          if (existsSync(corpusFile) && readCorpusRecords(corpusFile).some((r) => r.finding_id === id && r.labeler === L9_LABELER)) {
+            miss("already-recorded");
+            continue;
+          }
           let env: JudgmentEnvelope | undefined;
           try {
             env = await client.judge({ kind: "sweep-hotspot", path, brief }, L9_QUESTIONS, {
               egressClass: L9_EGRESS_CLASS,
               ceiling,
             });
-            const { record, worth, choice } = recordFrom(h, path, brief, env);
+            const { record, worth, choice } = recordFrom(h, ref, id, brief, env);
             appendRecord(corpusDir, record);
             worthByPath.set(h.path, worth);
             line(env.requestId, started, { answer: { worth_brief: worth, disposition: choice }, path }, "ok");
@@ -271,13 +312,40 @@ const defaultExec: Exec = (cmd, args) => {
   return { exitCode: r.exitCode, stdout: r.stdout.toString() };
 };
 
+/**
+ * Bounded walk: at most MAX_WALK_ENTRIES entries visited, MAX_WALK_DEPTH deep;
+ * skips node_modules and VCS dirs; lstat only, symlinks skipped; an
+ * unreadable entry is skipped rather than failing the package.
+ */
 function defaultListFiles(dir: string): SpanFile[] {
   const out: SpanFile[] = [];
-  for (const rel of readdirSync(dir, { recursive: true, encoding: "utf8" })) {
-    if (rel.split("/").includes("node_modules") || rel.endsWith(".d.ts") || rel.includes(".min.") || !SOURCE_FILE.test(rel)) continue;
-    const st = statSync(join(dir, rel));
-    if (st.isFile()) out.push({ rel, bytes: st.size });
-  }
+  let visited = 0;
+  const walk = (abs: string, rel: string, depth: number): void => {
+    let names: string[];
+    try {
+      names = readdirSync(abs);
+    } catch {
+      return;
+    }
+    for (const name of names.sort()) {
+      if (visited++ >= MAX_WALK_ENTRIES) return;
+      if (name === "node_modules" || name === ".git" || name === ".hg" || name === ".svn") continue;
+      const childRel = rel ? `${rel}/${name}` : name;
+      let st: ReturnType<typeof lstatSync>;
+      try {
+        st = lstatSync(join(abs, name));
+      } catch {
+        continue;
+      }
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        if (depth < MAX_WALK_DEPTH) walk(join(abs, name), childRel, depth + 1);
+      } else if (st.isFile() && !childRel.endsWith(".d.ts") && !childRel.includes(".min.") && SOURCE_FILE.test(childRel)) {
+        out.push({ rel: childRel, bytes: st.size });
+      }
+    }
+  };
+  walk(dir, "", 0);
   return out;
 }
 

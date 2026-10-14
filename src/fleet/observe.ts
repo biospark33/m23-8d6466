@@ -716,7 +716,20 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
             if (deps.onTick !== undefined) {
               const onTick = deps.onTick;
               const deadline = deps.onTickDeadlineMs ?? ON_TICK_DEADLINE_MS;
-              try {
+              // J4 (R1-05): budget-aware. A hook may burn a full deadline per resident,
+              // which would starve later candidates (settled runs awaiting teardown)
+              // pass after pass. Run it only if the remaining pass budget still covers
+              // this hook PLUS one more deadline of margin for the rest of the pass.
+              const remainingMs = budgetMs - el();
+              if (remainingMs < deadline * 2) {
+                sweepLine(deps.requestId, {
+                  runId,
+                  event: "sweep-ontick-skipped",
+                  reason: "wall-clock-budget",
+                  remaining_ms: Math.max(0, remainingMs),
+                  sweep_ms: el(),
+                });
+              } else try {
                 await withTimeout(
                   (async () => onTick({ runId, vm, record: nowRec, driver: deps.driver, sweepRequestId: deps.requestId }))(),
                   deadline,

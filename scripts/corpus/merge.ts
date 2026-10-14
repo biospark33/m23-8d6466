@@ -150,28 +150,37 @@ export function readCorpusRecords(file: string): CorpusRecord[] {
   return readLines(file, CorpusRecordSchema);
 }
 
-/**
- * The Wave-3 observer's entry point: schema-validate then append one record
- * (triage or machine-state arm). Callers hold the corpus run-lock around their
- * batch of these — the lock owns the read-test-append discipline, this owns
- * validation and the append itself.
- */
-export function appendRecord(outDir: string, record: unknown): "written" | "duplicate" {
-  const parsed = CorpusRecordSchema.safeParse(record);
+/** Shared validate -> dedupe -> append; `schema` decides which arm this file may hold (a foreign line fails loudly). */
+function appendValidated<T extends { pr: number | null; round: number | null; finding_id: string; labeler: string }>(
+  outDir: string,
+  record: unknown,
+  schema: { safeParse(v: unknown): { success: true; data: T } | { success: false; error: z.ZodError } },
+): "written" | "duplicate" {
+  const parsed = schema.safeParse(record);
   if (!parsed.success) {
-    // A union reports one opaque issue; surface the intended arm's named-field errors
-    // (triage by default, so triage messages stay exactly as before).
-    const isMachine = typeof record === "object" && record !== null && "state_ref" in record;
-    const arm = (isMachine ? MachineStateRecordSchema : TriageRecordSchema).safeParse(record);
-    const errors = arm.success ? zodErrors(parsed.error) : zodErrors(arm.error);
-    throw new Error(`record failed schema validation: ${errors.join("; ")}`);
+    throw new Error(`record failed schema validation: ${zodErrors(parsed.error).join("; ")}`);
   }
   const r = parsed.data;
   const file = corpusFilePath(outDir, r.pr, r.round);
   const key = recordKey(r);
-  if (readCorpusRecords(file).some((existing) => recordKey(existing) === key)) return "duplicate";
+  if (readLines(file, schema).some((existing) => recordKey(existing) === key)) return "duplicate";
   appendFileSync(file, `${JSON.stringify(r)}\n`);
   return "written";
+}
+
+/**
+ * The Wave-3 observer's entry point: schema-validate then append one TRIAGE record.
+ * Callers hold the corpus run-lock around their batch of these — the lock owns
+ * the read-test-append discipline, this owns validation and the append itself.
+ * Triage-only: a machine-state record is refused (use `appendMachineStateRecord`).
+ */
+export function appendRecord(outDir: string, record: unknown): "written" | "duplicate" {
+  return appendValidated(outDir, record, TriageRecordSchema);
+}
+
+/** Machine-state (L7) twin of `appendRecord`; same lock discipline, caller creates `outDir`. Triage records are refused. */
+export function appendMachineStateRecord(outDir: string, record: unknown): "written" | "duplicate" {
+  return appendValidated(outDir, record, MachineStateRecordSchema);
 }
 
 export async function main(argv: string[]): Promise<number> {

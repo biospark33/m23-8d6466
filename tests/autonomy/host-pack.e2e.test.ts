@@ -129,7 +129,7 @@ test("mock pack round: observe tick → L7 ask → envelope → record + provena
 
   // exactly one machine-state corpus record
   const recs = fs
-    .readFileSync(path.join(msDir, "x-rx.jsonl"), "utf8")
+    .readFileSync(path.join(msDir, "run-e2e", "x-rx.jsonl"), "utf8")
     .split("\n")
     .filter((l) => l.trim() !== "")
     .map((l) => MachineStateRecordSchema.parse(JSON.parse(l)));
@@ -151,4 +151,20 @@ test("mock pack round: observe tick → L7 ask → envelope → record + provena
   });
   expect(lines.filter((l) => l.event === "l7-ask")).toHaveLength(1);
   expect(fs.readdirSync(prov)).toHaveLength(1);
+
+  // a NEW sweep over the same unchanged resident state is not re-asked: one state-unchanged line
+  await observeSweep({
+    driver,
+    store,
+    runsDir,
+    hostRoot,
+    requestId: "req-j4-e2e-sweep-2",
+    buildChainCtx: () => ({ keyApi: new FakeKeyApi() as never, costLedger: { ingestBoxHours: () => {} } as never, recordAuditLink: () => {}, close: () => {} }),
+    onTick,
+  });
+  const l7 = lines.filter((l) => l.event === "l7-ask");
+  expect(l7).toHaveLength(2);
+  expect(l7[1]).toMatchObject({ skip: "state-unchanged", state_ref: recs[0]?.state_ref, armed: false });
+  expect(fs.readdirSync(prov)).toHaveLength(1);
+  expect(writes).toEqual([]);
 });

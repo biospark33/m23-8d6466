@@ -3,11 +3,15 @@
  * module at the flex-cut. Mock client only; tmp provenance + corpus dirs.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   BRIEF_MAX_CHARS,
+  L9_MOCK_CORPUS_DIR,
+  resolveTriageCorpusDir,
+  MAX_WALK_ENTRIES,
+  PATH_MAX_CHARS,
   L9_EGRESS_CLASS,
   L9_QUESTIONS,
   MAX_HOTSPOTS_PER_CALL,
@@ -55,11 +59,11 @@ describe("makeSweepTriageRanker", () => {
     const recs = records();
     expect(recs).toHaveLength(3);
     for (const rec of recs) {
-      expect(rec.diff_context_ref).toBe(`sweep:${rec.finding_id.slice("sweep:".length)}`);
+      expect(rec.finding_id).toMatch(new RegExp(`^${rec.diff_context_ref}@[0-9a-f]{8}$`));
       expect(rec.arm).toBe("jev");
       expect(["PATCH", "DEFER", "DISMISS"]).toContain(rec.disposition);
     }
-    expect(recs.find((x) => x.finding_id === "sweep:src/a.ts").finding_text).toBe("a brief");
+    expect(recs.find((x) => x.diff_context_ref === "sweep:src/a.ts").finding_text).toBe("a brief");
     const files = readdirSync(prov());
     expect(files).toHaveLength(3);
     for (const f of files) {
@@ -136,6 +140,95 @@ describe("makeSweepTriageRanker", () => {
     expect(out).toHaveLength(many.length);
     expect(records()).toHaveLength(MAX_HOTSPOTS_PER_CALL);
     expect(triageLines().filter((l) => l.miss === "capped")).toHaveLength(3);
+  });
+});
+
+describe("L9 review fixes (round 1)", () => {
+  test("R1-01: default mock writes go to the mock/ subdir, never a top-level corpus file", async () => {
+    expect(L9_MOCK_CORPUS_DIR.endsWith("/mock")).toBe(true);
+    const root = join(tmp, "root");
+    // mock client, no corpusDir => mock dir; emulate by pointing at root/mock via the exported rule
+    const r = makeSweepTriageRanker({ client: mockClient(), corpusDir: join(root, "mock"), log: sink });
+    await r.rank(hs);
+    const top = existsSync(root) ? readdirSync(root).filter((f) => f.endsWith(".jsonl")) : [];
+    expect(top).toEqual([]);
+    expect(readdirSync(join(root, "mock")).some((f) => f.endsWith(".jsonl"))).toBe(true);
+  });
+
+  test("R1-01: with no corpusDir a mock client resolves under the mock/ subdir (pure; writes nothing)", () => {
+    const mockDir = resolveTriageCorpusDir({ mode: "mock" });
+    const liveDir = resolveTriageCorpusDir({ mode: "live" });
+    expect(mockDir.endsWith(join("judgment", "corpus", "mock"))).toBe(true);
+    expect(liveDir.endsWith(join("judgment", "corpus"))).toBe(true);
+    expect(dirname(mockDir)).toBe(liveDir); // mock is a SUBDIR: ab-report reads only top-level *.jsonl
+    expect(resolveTriageCorpusDir({ mode: "mock" }, "/x/injected")).toBe("/x/injected");
+  });
+
+  test("R1-13: second rank() over the same hotspots asks nothing; changed brief is re-asked", async () => {
+    let asks = 0;
+    const c = mockClient();
+    const spy = { judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
+    const r = makeSweepTriageRanker({ client: spy, corpusDir: corpus(), log: sink });
+    await r.rank(hs);
+    expect(asks).toBe(3);
+    logs = [];
+    await r.rank(hs);
+    expect(asks).toBe(3);
+    expect(triageLines().filter((l) => l.miss === "already-recorded")).toHaveLength(3);
+    expect(records()).toHaveLength(3);
+    await r.rank([{ path: "src/a.ts", brief: "a CHANGED", score: 5 }]);
+    expect(asks).toBe(4);
+    expect(records()).toHaveLength(4);
+  });
+
+  test("R1-20: long paths sharing a prefix get distinct ids", async () => {
+    const pre = "p/".repeat(PATH_MAX_CHARS);
+    await makeSweepTriageRanker({ client: mockClient(), corpusDir: corpus(), log: sink }).rank([
+      { path: `${pre}one.ts`, brief: "same", score: 1 },
+      { path: `${pre}two.ts`, brief: "same", score: 1 },
+    ]);
+    const ids = records().map((x) => x.finding_id);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  test("R1-20: non-finite scores are recorded misses; order is total and deterministic", async () => {
+    let asks = 0;
+    const c = mockClient();
+    const spy = { judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
+    const mixed: SweepHotspot[] = [
+      { path: "n", brief: "n", score: Number.NaN },
+      { path: "ok", brief: "ok", score: 1 },
+      { path: "i", brief: "i", score: Number.POSITIVE_INFINITY },
+      { path: "m", brief: "m", score: Number.NEGATIVE_INFINITY },
+    ];
+    const out = await makeSweepTriageRanker({ client: spy, corpusDir: corpus(), log: sink }).rank(mixed);
+    expect(out.map((h) => h.path)).toEqual(["ok", "i", "m", "n"]);
+    expect(asks).toBe(1);
+    expect(triageLines().filter((l) => l.miss === "non-finite-score")).toHaveLength(3);
+  });
+
+  test("R1-21: default walk skips node_modules, symlinks (even broken) and does not fail", () => {
+    const pkg = join(tmp, "pkg");
+    mkdirSync(join(pkg, "lib"), { recursive: true });
+    mkdirSync(join(pkg, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(pkg, "lib", "a.js"), "x");
+    writeFileSync(join(pkg, "node_modules", "dep", "b.js"), "x");
+    symlinkSync(join(tmp, "nowhere"), join(pkg, "broken.js"));
+    symlinkSync(join(pkg, "lib"), join(pkg, "linkdir"));
+    writeFileSync(join(tmp, "bun.lock"), `{"packages":{"zod":["zod@3.25.76","",{},"x"]}}`);
+    const r = opensrcSpans("zod", { lockfilePath: join(tmp, "bun.lock"), cache: new Map(), log: sink, exec: () => ({ exitCode: 0, stdout: `${pkg}\n` }) });
+    if (!r.ok) throw new Error(`unexpected miss ${r.miss}`);
+    expect(r.spans.map((s) => s.path)).toEqual(["zod@3.25.76/lib/a.js"]);
+  });
+
+  test("R1-21: walk visits at most MAX_WALK_ENTRIES entries", () => {
+    const pkg = join(tmp, "big");
+    mkdirSync(pkg);
+    for (let i = 0; i < 40; i++) writeFileSync(join(pkg, `f${i}.js`), "x");
+    expect(MAX_WALK_ENTRIES).toBeGreaterThan(40); // bound is a constant; 40 files all fit
+    writeFileSync(join(tmp, "bun.lock"), `{"packages":{"zod":["zod@3.25.76","",{},"x"]}}`);
+    const r = opensrcSpans("zod", { lockfilePath: join(tmp, "bun.lock"), cache: new Map(), log: sink, exec: () => ({ exitCode: 0, stdout: pkg }) });
+    expect(r.ok && r.spans.length).toBe(40);
   });
 });
 

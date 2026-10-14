@@ -364,13 +364,25 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     `SteeringDirectiveSchema` union adds-only with a fifth `.strict()` member
     `{action:"compact", note?}`; `POINT_ALLOWLIST` gains it at `run_start` +
     `post_gate_failure` only (`run_end` stays proceed-only; no fourth steering point). The
-    resident-facing directive prompt does not advertise it (host-only signal). It moves
-    `deriveBuildId` (`src/phase-engine/` is COPY-set) — the DD-28.2 re-pin ritual is owed. No
-    in-box applier exists: the box-side applier is unowned follow-up work of the J4 arming
-    PR (its own re-pin owed); until then the runner treats an accepted `compact` as
-    proceed-equivalent. Origin is NOT code-enforced: a resident reply of `{action:"compact"}` is
-    schema-valid and accepted (non-advertisement is the only barrier), so the arming PR must add a
-    host-to-engine directive path or an origin check before any applier trusts a `compact`.
+    resident-facing directive prompt does not advertise it, and origin IS code-enforced:
+    `solicit()` refuses a resident reply naming `compact` at every point with the exact pre-J4
+    unknown-action rejection (PROCEED, `directivesRejected` +1, `gate_bypass_attempt` row,
+    detail `unrecognized action: compact (host-only: …)`). The allowlist entries, read via
+    `directiveAllowedAt`, govern only the future host-originated path.
+    (a) **buildId:** BOTH `src/phase-engine/steering.ts` and `src/fleet/observe.ts` (the `onTick`
+    seam) are COPY-set and move `deriveBuildId`; re-pinned `2328187`→`1b988fc` on the branch
+    (DD-28.2 ritual; publish/adopt stays operator-gated).
+    (b) **Arming PR owes:** a host-to-engine directive path (DF1.11's inbox is context-only, and
+    production builds the L7 hook with no steering writer, so arming today only logs
+    `no-steering-writer`) plus the box-side `compact` applier (its own re-pin). Both are unowned
+    follow-up work that rides the arming PR.
+    (c) **Honestly unproven:** the box journal's resident block is written only pre-walk and
+    post-`run_end`, so L7 sees real spend/iterations only near run end, and RSS/context
+    utilization are not host-observable (null). A mid-run resident refresh is box-side follow-up
+    work. It is unowned and rides the arming PR.
+    (d) **Pre-dispatch sanity leg:** asks a provisional noul `manifest_consistent` question purely
+    to emit provenance. It names no disposition values and stays provenance-only until a register
+    amendment names its answer pair.
 
 ## 8b. DD-29 — SWARMCLAW_FORK_REV adoption ritual (Z1, 2026-10-02)
 

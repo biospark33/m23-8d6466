@@ -136,9 +136,10 @@ export const SteeringDirectiveSchema = z.discriminatedUnion("action", [
     .strict(),
   // J4 (AC2): the L7 compact signal — appended LAST, adds-only, a register-
   // ratified amendment of this closed union (DD register, J4 line). Host-only:
-  // DIRECTIVE_INSTRUCTION deliberately does not advertise it. No in-box
-  // applier exists yet (the arming PR owns it); the runner treats an accepted
-  // compact as proceed-equivalent.
+  // DIRECTIVE_INSTRUCTION deliberately does not advertise it, and solicit()
+  // refuses a RESIDENT-originated compact by origin (HOST_ONLY_COMPACT_DETAIL)
+  // before this schema is consulted. No in-box applier or host-to-engine
+  // directive path exists yet (the arming PR owns both).
   z
     .object({ action: z.literal("compact"), note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional() })
     .strict(),
@@ -163,6 +164,19 @@ const POINT_ALLOWLIST: Record<SteeringPoint, readonly SteeringDirective["action"
   post_gate_failure: ["proceed", "retry", "abort", "compact"],
   run_end: ["proceed"],
 };
+
+/** J4: the pure view of POINT_ALLOWLIST — where a directive is valid. For
+ *  `compact` this governs only the future host-originated path; a resident
+ *  reply naming compact is refused by origin in solicit() at every point. */
+export function directiveAllowedAt(point: SteeringPoint, action: SteeringDirective["action"]): boolean {
+  return POINT_ALLOWLIST[point].includes(action);
+}
+
+/** J4 (R1-02): tripwire detail for a resident-originated compact. Prefixed with
+ *  the pre-J4 schema-rejection detail ("unrecognized action: compact") so the
+ *  journal row stays the row an unknown action produced before J4. */
+export const HOST_ONLY_COMPACT_DETAIL =
+  "unrecognized action: compact (host-only: a resident reply never originates compact)";
 
 /** Fleet-supplied agent caller. Engine never imports fleet (INV-RES-1). */
 export interface ResidentCaller {
@@ -1375,6 +1389,14 @@ export function createSteering(deps: {
         }
         prompt = malformedCorrectionPrompt(parsed.reason, point, ctx);
         continue;
+      }
+      // J4 (R1-02): compact is host-originated only. A resident reply naming
+      // it — well-formed or not, at ANY point — is refused by origin here,
+      // before the schema (which now has the member) could accept it: the
+      // exact pre-J4 unknown-action rejection (PROCEED, directivesRejected +1,
+      // gate_bypass_attempt row, directives untouched).
+      if ((parsed.parsed as { action?: unknown } | null)?.action === "compact") {
+        return reject(ctx, HOST_ONLY_COMPACT_DETAIL);
       }
       const result = SteeringDirectiveSchema.safeParse(parsed.parsed);
       if (!result.success) {

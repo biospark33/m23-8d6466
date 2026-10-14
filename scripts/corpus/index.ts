@@ -19,7 +19,7 @@ export {
   TriageRecordSchema,
   TriageSidecarSchema,
 } from "./schema.ts";
-export { DEFAULT_MACHINE_STATE_CORPUS_DIR, appendRecord, readCorpusRecords } from "./merge.ts";
+export { DEFAULT_MACHINE_STATE_CORPUS_DIR, appendMachineStateRecord, appendRecord, readCorpusRecords } from "./merge.ts";
 export type {
   CorpusRecord,
   Disposition,
