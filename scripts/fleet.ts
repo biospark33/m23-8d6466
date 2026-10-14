@@ -73,6 +73,7 @@ import {
   writeSync,
 } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 
 import {
   CostLedger,
@@ -200,6 +201,35 @@ import { sanitizeForMessage } from "../src/phase-engine/types.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
 import { defaultKeyCapMicroUsd, type KeyApi } from "../src/providers/credentials.ts";
 import type { ExitStatus } from "../cli-anything/src/types.ts";
+// J3 (contracts I1 + I6 FINAL): the model-routing decision layer. scripts/
+// imports src/judgment freely — the fence binds router.ts's own imports, never
+// its host-side consumers — and the barrel is the ONE door (AC1). These are
+// the hook's deterministic pick (runRouting, which owns the I4 house lines and
+// the .sandbox/routing-log.jsonl write), the strict read seam for the harvest
+// retain leg (readRoutingLog + RoutingLogLine) and the log's path constant.
+import {
+  readRoutingLog,
+  runRouting,
+  type JudgmentClient,
+  type RoutingFeatures,
+  type RoutingLogLine,
+} from "../src/judgment/index.ts";
+// J3 (I1): a SECOND import line from dispatch.ts — this file's (and
+// dispatch.ts's own) adds-only second-import form, so the existing dispatch
+// import block stays byte-identical while the typed hook dep's shapes make
+// makeRoutingHook's closure a compile-checked contract, not a hope.
+import type { RoutingDecisionInput, RoutingHook } from "../src/fleet/dispatch.ts";
+// J3: the roster re-parse for `roster_role_count` + the appliedPairs keys —
+// the SAME parse dispatch's pre-check runs, re-read here so feature
+// derivation is fleet-local and dispatch's internal roster never leaks.
+import { parseRoster, ROSTER_MAX_BYTES } from "../src/phase-engine/roster/schema.ts";
+// J3 (I6): the retain leg's memory seam — family-signature bank resolution
+// (G1) and the same client M1.2's twin uses, plus the digest pair the audit
+// receipt re-digests.
+import { HindsightClient } from "../src/hindsight/client.ts";
+import { extractExistingBankIds, resolveProvisionedRepoBankId } from "../src/hindsight/bank-provisioner.ts";
+import { resolveBankId } from "../src/hindsight/schemas.ts";
+import { canonicalJson, sha256Hex } from "../src/audit/link-store.ts";
 
 const HELP = renderHelp(listVerbs());
 
@@ -2851,6 +2881,14 @@ async function runDispatch(ctx: VerbCtx): Promise<number> {
       }),
       ledgerFactory,
       requestId,
+      // J3 (AC1/AC2, contract I1): the host-side routing decision hook — the
+      // closure derives the feature vector from what this verb already holds
+      // (the loaded manifest, the vetted roster, the brief, this run-record
+      // store) and lets runRouting make the deterministic pick, write the ONE
+      // log line and emit the I4 house lines. NEVER throws (the factory's
+      // contract): a fold lands the deterministic tier and the line anyway.
+      // Trusted configuration, like every field here — never brief-reachable.
+      router: makeRoutingHook({ store, note }),
       ...(port === undefined ? {} : { port }),
       // LAST, like port: the explicit key wins over the `...seams` spread, so
       // argv is the authority whenever the flag is given — an injected
@@ -6115,6 +6153,17 @@ async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): 
     count: res.outcome === "harvested" ? res.count : undefined,
     auditRecord: tdeps.recordAuditLink,
   });
+  // J3 (AC5, contract I6 FINAL): the run's routing-decision summary joins the
+  // SAME harvest seam — ONE `-dev-meta` document per run, env-gated, folded,
+  // wall-capped exactly like the twin above, so this await cannot move the
+  // exit code off what the leg itself earned either.
+  await retainRoutingDecisionsBestEffort({
+    runId: runIdArg,
+    requestId: tdeps.requestId ?? "",
+    store: tdeps.store,
+    harvestedCount: res.outcome === "harvested" ? res.count : 0,
+    auditRecord: tdeps.recordAuditLink,
+  });
   // Through `reportCompletion`, not a bare `emit` (see it): the harvest
   // has already run, so a lost result line is 6, never a retryable 1. Folded
   // with `outputIncomplete()` like every sibling arm (A12): `reportCompletion`
@@ -6126,6 +6175,584 @@ async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): 
   ]) && !outputIncomplete()
     ? 0
     : 6;
+}
+
+// ---------------------------------------------------------------------------
+// J3 (contracts I1 + I6 FINAL) — the host-side model-routing layer this CLI
+// owns: the dispatch hook's feature derivation + closure, and the harvest's
+// routing-decision retain leg. Everything here FOLDS (AC2/INV-JR-2): routing
+// is a recording-only sidecar over the applied path, so any failure costs one
+// structured line — never the dispatch, never the harvest exit code.
+// ---------------------------------------------------------------------------
+
+/** J3: prior-outcome lookback — the newest N records for this repoSlug, bounded
+ * so a long-lived fleet never turns a routing decision into a directory sweep. */
+const ROUTING_PRIOR_LOOKBACK_RUNS = 20;
+/** J3: the neutral prior when a repo has NO history — a coin flip. Named
+ * because it is policy ("unproven is neither trusted nor distrusted"), not an
+ * inline magic number, and the fixture battery pins it. */
+const ROUTING_PRIOR_COMPLETION_RATE_DEFAULT = 0.5;
+/** J3 (I6): the retained summary's byte ceiling — refused BEFORE any network
+ * call, never truncated (M1.2's buildRetainPayload discipline, copied not
+ * imported: that builder owns the run-outcome shape, this one the summary). */
+const ROUTING_RETAIN_PAYLOAD_MAX_BYTES = 4096;
+/** J3 (I6/F17): the retain leg's wall clock — the twin's figure verbatim. */
+const ROUTING_RETAIN_WALL_MS = 10_000;
+/** J3: the dispatch hook's wall clock. Sits ABOVE the ask's own worst chain —
+ * DEFAULT_MAX_ATTEMPTS(2) × JUDGE_TIMEOUT_MS(30s) + Retry-After backoff — so a
+ * merely-slow ask times out INSIDE runRouting, whose degradation fold still
+ * writes the ONE routing-log line (AC2: exactly one line either way). Only a
+ * true wedge — runRouting stuck OUTSIDE the ask — reaches this cap, and that
+ * drop is loud: the guarded skip note + a plain throw into dispatch's existing
+ * fold (catch → proceed unchanged). Test-only `hookWallMs` overrides. */
+const ROUTING_HOOK_WALL_MS = 300_000;
+/** J3: conservative file-path token shape — `word/word`, nothing fancier.
+ * repoUrl/repoSlug/manifestPath contribute a small CONSTANT offset on every
+ * brief (identity fields are path-shaped); constant offsets cancel in the
+ * relative score comparisons that matter (across dispatches of ONE repo), so
+ * the scan stays a proxy for path-shaped prose, never a filesystem count. The
+ * scan runs over the WHOLE brief JSON with no char bound: the brief is
+ * schema-capped per field, so the string is already bounded, and the count is
+ * raw — the cap lives in the score normalization (FEATURE_CAPS), so no slice
+ * can silently zero a dense later field. */
+const ROUTING_PATH_MENTION_RE = /[\w.-]+\/[\w.-]+/g;
+/** J3: the catastrophic-fold feature vector — all-zero, keys in sorted order.
+ * Zero still scores deterministically (lowest band/tier), so a derivation that
+ * failed CATASTROPHICALLY still lands the pick and the log line (the hook's
+ * never-throw contract forbids "return nothing"). */
+const ROUTING_ZERO_FEATURES: RoutingFeatures = {
+  brief_path_mentions: 0,
+  manifest_phase_count: 0,
+  manifest_task_count: 0,
+  prior_completion_rate: 0,
+  prior_spend_micro_usd: 0,
+  roster_role_count: 0,
+};
+
+/**
+ * J3: ONE house error line, F9-postured (the emission itself is guarded — a
+ * raising sink must never convert a fold into a throw).
+ */
+function routingHouseError(note: (s: string) => void, message: string): void {
+  try {
+    printError(
+      note,
+      "routing-features-unavailable",
+      message,
+      "the dispatch proceeds on the remaining features — check the manifest/roster beside the brief",
+    );
+  } catch {
+    // Silence is the last resort.
+  }
+}
+
+/**
+ * J3 (I1): derive the routing feature vector + the appliedPairs keys from what
+ * dispatch already validated. Every member folds to a default on ITS OWN
+ * failure — the roster fold emits the story's one `routing-features-unavailable`
+ * house line; the manifest narrowing and the record-store sweep fold silently
+ * because an already-validated manifest and a constructed store cannot fail
+ * here without a deeper breakage the hook's catastrophic fold still covers.
+ * Exported for the routing suite's unit coverage — the feature vector is
+ * contract-bearing (it IS the log line's `score`), so its folds are pinned.
+ */
+export function deriveRoutingContext(input: {
+  manifest: unknown;
+  brief: Brief;
+  rosterPath: string;
+  store: RunRecordStore;
+  repoSlug: string;
+  note: (s: string) => void;
+}): { features: RoutingFeatures; rosterRoles: string[] } {
+  // Manifest counts: `loadManifest` validated this shape end-to-end before the
+  // hook fired, so the narrowing only defends the type, never the data.
+  const phases = (input.manifest as { phases?: readonly unknown[] } | null | undefined)?.phases ?? [];
+  let taskCount = 0;
+  for (const phase of phases) {
+    if ((phase as { kind?: unknown } | null)?.kind === "dispatch_task") taskCount += 1;
+  }
+  // Roster: the SAME parse dispatch's pre-check ran, and the SAME byte
+  // ceiling — size is stat'd FIRST so an over-ceiling roster never enters
+  // memory (the round-1 dispatch-side discipline, mirrored here), and a
+  // failure after that is a raced/deleted file — feature-unavailable, not a
+  // bad roster: count folds to 0, ONE house line says so, routing continues.
+  let rosterRoles: string[] = [];
+  try {
+    const rosterStat = statSync(input.rosterPath);
+    if (rosterStat.size > ROSTER_MAX_BYTES) {
+      routingHouseError(
+        input.note,
+        `roster is ${rosterStat.size} bytes, over the ${ROSTER_MAX_BYTES}-byte ceiling — refused unread, roster_role_count folds to 0`,
+      );
+    } else {
+      rosterRoles = parseRoster(readFileSync(input.rosterPath, "utf8"), input.rosterPath).roles.map(
+        (role) => role.name,
+      );
+    }
+  } catch (e) {
+    rosterRoles = [];
+    routingHouseError(
+      input.note,
+      `roster re-parse failed, roster_role_count folds to 0: ${redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200)}`,
+    );
+  }
+  // Prior outcomes: this repo's records, newest-first, bounded lookback.
+  const priors = input.store
+    .list()
+    .filter((r) => r.extensions?.budget?.repoSlug === input.repoSlug)
+    .sort((a, b) => (a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 : 0))
+    .slice(0, ROUTING_PRIOR_LOOKBACK_RUNS);
+  // Measured semantics, stated honestly: closedAt marks records the store
+  // CLOSED — store.create happens early in dispatch and close() fires on the
+  // completion paths regardless of how the run exited — so this is a
+  // "reached-completion" rate, NOT a success rate. Refining it (exit
+  // classification, outcome weighting) is M3.2's measured-proposal business.
+  const completionRate =
+    priors.length === 0
+      ? ROUTING_PRIOR_COMPLETION_RATE_DEFAULT
+      : priors.filter((r) => typeof r.closedAt === "string" && r.closedAt !== "").length / priors.length;
+  // A non-finite spend would poison the whole sum to NaN and drop the score's
+  // band to premium; the real store schema-rejects non-integers, so this
+  // guards a drifted/foreign record shape — such a prior simply counts as 0.
+  const priorSpend = priors.reduce(
+    (sum, r) => sum + (typeof r.spendMicroUsd === "number" && Number.isFinite(r.spendMicroUsd) ? r.spendMicroUsd : 0),
+    0,
+  );
+  return {
+    features: {
+      manifest_task_count: taskCount,
+      manifest_phase_count: phases.length,
+      roster_role_count: rosterRoles.length,
+      // Raw count — the cap lives in the score normalization (FEATURE_CAPS),
+      // never in a char slice that would zero dense later fields.
+      brief_path_mentions: (JSON.stringify(input.brief).match(ROUTING_PATH_MENTION_RE) ?? []).length,
+      prior_completion_rate: completionRate,
+      prior_spend_micro_usd: priorSpend,
+    },
+    rosterRoles,
+  };
+}
+
+/**
+ * J3 (I1): the dispatch hook's factory — captures exactly what the verb holds
+ * (the run-record store, the stderr sink). The returned closure NEVER throws
+ * (AC2): derivation folds per-feature above and catastrophically here (all-
+ * default zero vector), and runRouting itself folds its own ask/log failures —
+ * so the deterministic tier and the routing-log line land on every path. The
+ * roster-role names are the appliedPairs keys because role NAME is the only
+ * key `parseRoster` guarantees unique (dispatch materializes the pairs
+ * verbatim). No config gate is scoped: the story's flex-cut revert point is
+ * this hook wiring itself.
+ */
+export function makeRoutingHook(ctx: {
+  store: RunRecordStore;
+  note: (s: string) => void;
+  /** Test-only: threaded to runRouting (seam client, log dir + provenance rooting, wall-cap override) so an e2e running the REAL hook stays out of the repo's own .sandbox/ and judgment provenance. Production passes nothing. `logDir` overrides the store-derived default (`dirname(store.dir)`) rather than being clobbered by it. */
+  routingOptions?: {
+    clientFactory?: () => JudgmentClient;
+    logDir?: string;
+    provenanceDir?: string;
+    hookWallMs?: number;
+  };
+}): RoutingHook {
+  return async (input: RoutingDecisionInput) => {
+    let context: { features: RoutingFeatures; rosterRoles: string[] };
+    try {
+      context = deriveRoutingContext({
+        manifest: input.manifest,
+        brief: input.brief,
+        rosterPath: input.rosterPath,
+        store: ctx.store,
+        repoSlug: input.repoSlug,
+        note: ctx.note,
+      });
+    } catch (e) {
+      // Belt-and-braces around the per-feature folds: a catastrophic
+      // derivation failure must not take the decision down with it.
+      routingHouseError(
+        ctx.note,
+        `routing feature derivation failed, all features fold to 0: ${redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200)}`,
+      );
+      context = { features: ROUTING_ZERO_FEATURES, rosterRoles: [] };
+    }
+    // The pick, the log line and the I4 house lines are runRouting's (AC1: the
+    // barrel is the one door); this closure adds NO logging of its own. The
+    // issue identity rides as the issueKey string it already is at the
+    // correlation layer; null (headless) folds to the minted runId — the run's
+    // honest unique identity, because the log schema's workKey min(1) refuses
+    // "" and a refused line is one the run's own reader (and the retain leg)
+    // silently skips.
+    // The wall cap: a hung Jev ask (adapter attempts × the 30s per-attempt
+    // budget can reach minutes) must not delay dispatch. The timeout throws a
+    // plain error past dispatch's existing fold (catch → proceed unchanged);
+    // production wiring composes runRouting with runRoutingWithWallCap HERE.
+    const result = await runRoutingWithWallCap(
+      () =>
+        runRouting(
+          {
+            runId: input.runId,
+            requestId: input.requestId,
+            repoSlug: input.repoSlug,
+            issueKey: input.issueId === null ? input.runId : String(input.issueId),
+            features: context.features,
+            rosterRoles: context.rosterRoles,
+          },
+          // The log roots at the store's own .sandbox (the runs the line
+          // describes live there) — dispatch and harvest derive ONE root from
+          // the SAME store, and a tmp store roots its own log (no repo
+          // pollution). The provenance side channel keeps its production
+          // default (_bmad-output/judgment/provenance) but honors the
+          // QDS_JUDGMENT_PROVENANCE_DIR env override — the SAME
+          // test-rooting idiom as QDS_AUDIT_DB (this suite's
+          // useTempAuditStore), because the default is cwd-relative and a
+          // full-provisioning probe at the repo cwd would drop files into a
+          // tracked subtree on every run.
+          {
+            ...(ctx.routingOptions ?? {}),
+            // The store-derived root is the DEFAULT; an explicit logDir override wins.
+            logDir: ctx.routingOptions?.logDir ?? dirname(ctx.store.dir),
+            ...(process.env.QDS_JUDGMENT_PROVENANCE_DIR === undefined
+              ? {}
+              : { provenanceDir: process.env.QDS_JUDGMENT_PROVENANCE_DIR }),
+          },
+        ),
+      ctx.routingOptions?.hookWallMs ?? ROUTING_HOOK_WALL_MS,
+      ctx.note,
+    );
+    return {
+      shape: result.shape,
+      riskTier: result.risk_tier,
+      appliedTier: result.applied_tier,
+      appliedPairs: result.appliedPairs,
+      score: result.score,
+    };
+  };
+}
+
+/**
+ * J3: the dispatch hook's wall cap over the routing ask. Promise.race against
+ * a timer sentinel; on timeout it emits ONE guarded house line
+ * ({event:"routing-skip", reason:"timeout"}-shaped, via the note sink) and
+ * throws a plain error so dispatch's existing fold (catch → proceed unchanged)
+ * takes over. A routingFn that throws synchronously lands the same guarded
+ * note before propagating (the note is never timer-path-only). The losing body
+ * keeps running but its late rejection is
+ * swallowed — the house line is the only witness the cap owes. Production
+ * wiring composes runRouting with this INSIDE makeRoutingHook (see above);
+ * it is exported so the suite can pin the race itself with a never-resolving
+ * ask and a millisecond cap.
+ */
+export async function runRoutingWithWallCap<T>(
+  routingFn: () => Promise<T>,
+  wallMs: number,
+  note: (s: string) => void,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // A routingFn that throws SYNCHRONOUSLY must still land the guarded note —
+  // the same skip/timeout-shaped line the timer path prints — before its error
+  // propagates to dispatch's fold.
+  let body: Promise<T>;
+  try {
+    body = routingFn();
+  } catch (e) {
+    try {
+      printError(
+        note,
+        "routing-hook-timeout",
+        "the routing ask failed synchronously — dispatch proceeds unchanged",
+        undefined,
+        { event: "routing-skip", reason: "timeout" },
+      );
+    } catch {
+      // The throw below never depends on the sink having survived.
+    }
+    throw e;
+  }
+  try {
+    return await Promise.race([
+      body,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            printError(
+              note,
+              "routing-hook-timeout",
+              `the routing ask exceeded its ${wallMs}ms wall cap — dispatch proceeds unchanged`,
+              undefined,
+              { event: "routing-skip", reason: "timeout" },
+            );
+          } catch {
+            // The throw below never depends on the sink having survived.
+          }
+          reject(new Error("routing hook wall cap exceeded"));
+        }, wallMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    // A body that loses the race keeps running; its late failure must never
+    // surface as an unhandled rejection.
+    void body.catch(() => {});
+  }
+}
+
+/**
+ * J3 (I6/AC5, INV-JR-2/INV-J3): the run's routing-decision summary — the ONE
+ * canonical retained document. Sorted-key exact-shape literal, ONLY the stable
+ * fields the routing-log schema already carries (never the whole line, never
+ * the envelope volatiles: no answers, confidence, probabilities, latency or
+ * usage anywhere), bounded ≤4KiB refused-before-network. Deterministic by
+ * construction: same inputs ⇒ byte-identical payload ⇒ a re-harvest replays
+ * into the substrate's document_id upsert (REPLACE, idempotent).
+ */
+export function buildRoutingRetainPayload(input: {
+  runId: string;
+  repoSlug: string;
+  requestId: string;
+  decisions: ReadonlyArray<RoutingLogLine>;
+  harvestedCount: number;
+}): string {
+  const payload = {
+    decisions: input.decisions.map((d) => ({
+      applied_tier: d.applied_tier,
+      jev_recommendation: d.jev_recommendation,
+      jev_requestId: d.jev_requestId,
+      jev_skipped: d.jev_skipped,
+      risk_tier: d.risk_tier,
+      score: d.score,
+      shape: d.shape,
+    })),
+    outcomeLinkage: { harvested: input.harvestedCount },
+    repoSlug: input.repoSlug,
+    requestId: input.requestId,
+    runId: input.runId,
+  };
+  const json = JSON.stringify(payload);
+  if (Buffer.byteLength(json, "utf8") > ROUTING_RETAIN_PAYLOAD_MAX_BYTES) {
+    throw new Error(
+      `routing-retain-payload-oversize: payload is ${Buffer.byteLength(json, "utf8")} bytes — past the ${ROUTING_RETAIN_PAYLOAD_MAX_BYTES}-byte ceiling (refused before any network call, never truncated)`,
+    );
+  }
+  return json;
+}
+
+/**
+ * J3 (I6): the retain leg's single attempt — every refusal here is a SKIP LINE
+ * the wrapper owns, never a throw. The join keys and the bank resolution
+ * mirror `retainRunOutcomeBestEffort` exactly: the RECORD's requestId wins
+ * (record-stamp-wins), the bank is resolved by FAMILY SIGNATURE against the
+ * LIVE list (G1 — only bank + `-dev-meta` pairs a provision created).
+ */
+async function retainRoutingOnce(
+  input: {
+    store: RunRecordStore;
+    runId: string;
+    requestId: string;
+    harvestedCount: number;
+    auditRecord: (link: ProviderAuditLink) => void;
+    /** Test-only + ops symmetry: root the log read here (dispatch/harvest cwd split) instead of the cwd-relative default. Production passes nothing. */
+    logDir?: string;
+    clientFactory?: () => {
+      listBanks(): Promise<unknown>;
+      retain(
+        bankId: string,
+        content: string,
+        metadata?: Parameters<HindsightClient["retain"]>[2],
+      ): Promise<unknown>;
+    };
+  },
+  skipLine: (code: string, reason: string) => void,
+): Promise<void> {
+  const rec = input.store.get(input.runId);
+  // Record-stamp-wins join key (the twin's rule): the invocation's id is only
+  // the fallback, and NEITHER carrying one is a benign skip, not a failure.
+  const requestId =
+    typeof rec.requestId === "string" && rec.requestId !== "" ? rec.requestId : input.requestId;
+  if (requestId.length === 0) {
+    skipLine("routing-retain-skipped", `run ${input.runId} carries no requestId — the retain's join key is unknown`);
+    return;
+  }
+  const repoSlug = rec.extensions?.budget?.repoSlug;
+  if (typeof repoSlug !== "string" || repoSlug.length === 0) {
+    skipLine("routing-retain-skipped", `run ${input.runId} carries no budget.repoSlug — the retain's bank is unknown`);
+    return;
+  }
+  // Strict per-line read (a corrupt line skips loudly inside; ENOENT reads []);
+  // nothing for THIS run is the silent case — there is nothing to retain.
+  // logDir roots the read beside the dispatch that wrote it (dispatch/harvest
+  // cwd split); the default stays the cwd-relative ROUTING_LOG_PATH.
+  // The log roots at the store's own .sandbox — the SAME derivation the
+  // dispatch-side hook uses, so harvest from any cwd (or any --dir) reads the
+  // sandbox the runs actually live in; input.logDir stays as an explicit
+  // override (e2e/tests) for the sandbox dir itself.
+  const logPath =
+    typeof input.logDir === "string" && input.logDir !== ""
+      ? resolvePath(input.logDir, "routing-log.jsonl")
+      : resolvePath(dirname(input.store.dir), "routing-log.jsonl");
+  // The byte-level runId needle (wave A's filter) keeps a grown log from
+  // paying a zod parse per foreign line; the post-parse filter stays as the
+  // exactness belt (the needle only narrows candidates).
+  const lines = readRoutingLog(logPath, { runId: input.runId }).filter((l) => l.runId === input.runId);
+  if (lines.length === 0) return;
+  const client = input.clientFactory?.() ?? new HindsightClient();
+  const existing = extractExistingBankIds(await client.listBanks());
+  const repoBankId = resolveProvisionedRepoBankId(resolveBankId(repoSlug), existing);
+  if (repoBankId === null) {
+    skipLine("routing-retain-skipped", "banks not provisioned");
+    return;
+  }
+  // ONE `-dev-meta` document per RUN (AC5), not per line — the summary is the
+  // unit the weekly review reads.
+  const documentId = `routing-${input.runId}-dev-meta`;
+  const bank = `${repoBankId}-dev-meta`;
+  const payload = buildRoutingRetainPayload({
+    runId: input.runId,
+    repoSlug,
+    requestId,
+    decisions: lines,
+    harvestedCount: input.harvestedCount,
+  });
+  await client.retain(bank, payload, {
+    documentId,
+    updateMode: "replace",
+    tags: ["factory-run", "routing-decision"],
+    kind: "observation",
+    source: "agent",
+  });
+  // The Observability Contract line, M1.2's shape minus latency (INV-J3: the
+  // volatile never rides the digest-stable emit). G5-postured: a landed
+  // retain must not read as failed because a sink threw.
+  const contentDigest = sha256Hex(payload);
+  try {
+    log({
+      requestId,
+      operation: "memory-retain",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+      runId: input.runId,
+      documentId,
+      bank,
+    });
+  } catch {
+    // The retain landed; losing the log line is not losing the retain.
+  }
+  // Best-effort receipt (M1.2's posture): the coalesce identity is
+  // (runId, memory-retain-receipt, retain, documentId), so a byte-identical
+  // re-harvest dedups to one row — never a duplicate audit trail.
+  try {
+    const now = new Date().toISOString();
+    input.auditRecord({
+      runId: input.runId,
+      repoSlug,
+      requestId,
+      hop: "memory-retain-receipt",
+      event: "retain",
+      subjectId: documentId,
+      subjectKind: "document",
+      evidenceDigest: sha256Hex(canonicalJson({ bank, documentId, contentDigest })),
+      detail: { documentId, bank },
+      occurredAt: now,
+      recordedAt: now,
+    });
+  } catch (e) {
+    try {
+      log({
+        requestId,
+        operation: "memory-retain-receipt",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        error: {
+          code: typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "receipt-refused",
+          message: redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200),
+        },
+        runId: input.runId,
+        documentId,
+      });
+    } catch {
+      // The receipt is already gone; refusing to report that is not a failure.
+    }
+  }
+}
+
+/**
+ * J3 (I6/AC5): the harvest's routing-decision retain leg — `fleet harvest`'s
+ * twin of `retainRunOutcomeBestEffort` at the seam right below it. Env-gated
+ * FIRST (same coercion, same env pair — the host token INV-HM1 is the only
+ * retain credential there is); everything else folds to ONE structured line
+ * and NEVER moves the harvest exit. Wall-capped (F17) like the twin: a body
+ * that loses the race keeps running but its late rejection is swallowed — the
+ * timeout line is the only witness the cap owes.
+ */
+export async function retainRoutingDecisionsBestEffort(input: {
+  store: RunRecordStore;
+  runId: string;
+  requestId: string;
+  harvestedCount: number;
+  auditRecord: (link: ProviderAuditLink) => void;
+  /** Test-only + ops symmetry: root the log read here (dispatch/harvest cwd split) instead of the cwd-relative default. Production passes nothing. */
+  logDir?: string;
+  /** Test-only seam: build the Hindsight client (tests inject a recorder). */
+  clientFactory?: () => {
+    listBanks(): Promise<unknown>;
+    retain(
+      bankId: string,
+      content: string,
+      metadata?: Parameters<HindsightClient["retain"]>[2],
+    ): Promise<unknown>;
+  };
+}): Promise<void> {
+  // Empty strings count as unconfigured — the twin's exact coercion.
+  const envConfigured =
+    Boolean(process.env.HINDSIGHT_BASE_URL) &&
+    Boolean(process.env.HINDSIGHT_BEARER_TOKEN || process.env.HINDSIGHT_API_KEY);
+  if (!envConfigured) return;
+  // F9: this helper's LAST resort — its own emission must never throw past it.
+  const skipLine = (code: string, reason: string): void => {
+    try {
+      log({
+        requestId: input.requestId,
+        operation: "memory-retain",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        runId: input.runId,
+        error: { code, message: reason },
+        reason: "routing retain is best-effort — the harvest leg landed and its exit is unchanged (J3 I6)",
+      });
+    } catch {
+      // Silence is the last resort.
+    }
+  };
+  const body = retainRoutingOnce(input, skipLine);
+  body.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      body,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          skipLine("routing-retain-timeout", `the routing retain exceeded its ${ROUTING_RETAIN_WALL_MS}ms wall-clock cap`);
+          resolve();
+        }, ROUTING_RETAIN_WALL_MS);
+      }),
+    ]);
+  } catch (e) {
+    try {
+      skipLine(
+        "routing-retain-failed",
+        redactSecrets(String((e as Error)?.message ?? e)).slice(0, 200) || "the routing retain call failed",
+      );
+    } catch {
+      // Silence — F9.
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b — Autonomy (judgment tier; E21-independent, runs on v6a artifacts only)
-**Status:** ready-for-dev — pre-dev campaign (qds-story-review) runs before any dev lane starts
+**Status:** done — merged behavior landed on feature/j3-model-router-decision-layer (PR to dev at closure); 2 bmad-code-review rounds; branch gates green
 
 > **Decision of record (NET-NEW — flag for the DD-14+ register, Jev-register note):** the tier **applied** at dispatch is picked
 > by the deterministic composite score — weights in code. The cheap Jev L5 ask's tier answer is **recorded as a recommendation**,
@@ -138,4 +138,70 @@ Provenance, stated once for this whole section: the M2.2 surface (working tree o
 
 ## Dev Agent Record
 
-*(written at implementation time, not at spec time.)*
+**Status: done — implemented, 2 bmad-code-review rounds, branch-gated, PR to dev.**
+
+### Completion summary
+
+All 5 ACs + DoD landed on `feature/j3-model-router-decision-layer` (uncommitted at PR time; see
+the PR for the commit). Orchestrated build (.unlazy/j3/: 4 leaves across 3 waves, every leaf
+parent-reverified, node gates 1.1/1.2/1.3 ALL MET). Final state: grand sweep 784 pass / 0 fail
+across the 11 touched suites; `bunx tsc --noEmit` 0; `bun run lint` 0; zero-diff gate (adds-only +
+INV-JR-4 frozen surfaces byte-identical) passed; GitNexus detect_changes(compare vs dev) = 8 files
+= the PLAN ownership set exactly, all affected processes route through `dispatch` (the designed
+insert point; M2.2 precedent).
+
+- **src/judgment/router.ts (new):** deterministic composite score (6 named features, weights sum
+  1, caps with derivations), shape bands + risk projection (RISK_LIFT_THRESHOLD named), code-owned
+  frozen tier table (economy/standard/premium, proven-live openrouter pairs), ONE seam-mediated
+  recording-only ask per dispatch (barrel-imported JudgmentClient.judge(), ac-prose, own 1M
+  ceiling, mock default), single-writer .sandbox/routing-log.jsonl append (acquireFileLock,
+  retry-once, never unlocked; fence sanctioned +../lib/file-lock.ts), strict zod line schema with
+  schema_version (forward-compat), write-side schema guard, never throws past the folds (AC2).
+- **src/judgment/index.ts:** adds-only barrel export of the router surface.
+- **src/phase-engine/roster/schema.ts (adds-only):** TierOverridePair, applyTierOverride (pure,
+  role-name keyed, slug recomputed), renderRoster (deterministic parseRoster-compatible YAML).
+- **src/fleet/dispatch.ts (+~280/-0 adds-only):** RoutingHook structural dep + DispatchDeps.router?
+  (never-brief-reachable, unset = byte-identical legacy), single hook call after runId settlement
+  before admission with throw-to-undefined fold; tier carry materializing the override as the
+  host-side gate copy + .qds/roster.yaml fill BoxFile + conditional spec.roster repoint (only the
+  ACTIVE roster's phases); absent-roster / roster-drift / over-ceiling carry folds (one guarded
+  house line each); adds-only shadow over the gate's rosterPath shorthand.
+- **scripts/fleet.ts (+~700/-0 adds-only):** makeRoutingHook host-side closure (feature derivation
+  with capped roster read, NaN-guarded spend, whole-brief mention scan; runRoutingWithWallCap
+  300s > the ask's own worst chain so a slow ask folds INSIDE runRouting and the line lands);
+  harvest-time retainRoutingDecisionsBestEffort (one routing-<runId>-dev-meta doc into the
+  -dev-meta bank, updateMode replace, 4KiB refused-before-network, 10s wall, store-rooted log
+  read, best-effort, zero volatile fields).
+- **Tests:** router.test.ts (55), roster-override.test.ts (10), dispatch-router.test.ts (16 incl.
+  the MANDATORY 3-stage e2e demo + concurrency + wiring pins with teeth), fleet-routing-retain.test.ts
+  (25); fence.test.ts sanctioned allowed-set amendment; cli/q1/skill-contract probe rooting
+  (QDS_JUDGMENT_PROVENANCE_DIR — the QDS_AUDIT_DB idiom — + scoped chdir + roster fixtures).
+
+### Review rounds
+
+Two bmad-code-review rounds (4 layers each: blind-hunter / edge-case-hunter / verification-gap /
+acceptance-auditor). Round 1: 23 findings → 19 patched, 1 false (roster-warnings flatten), 3 DAR
+notes. Round 2: 28 findings → 19 patched, 1 deferred, rest DAR notes. Full record + sanctioned
+interpretations: _bmad-output/workflow-state/code-review/j3/rounds.md. Per operator directive the
+round stopped after round 2 (remaining items: one recorded defer — the retain wall-const seam,
+house-norm-consistent — and DAR notes only).
+
+### Recorded interpretations (see rounds.md for the full set)
+
+routing-skip house line carries a fresh non-Jev requestId (LogEntry requires the field; the JEV id
+is what is absent) and the enumerated jev reason on ask-skips; the lock-timeout and (r2) wall-cap
+line-drop paths are the two enumerated loss paths — appending without the lock is the named
+torn-line class and never happens; the log line records the PICKED tier at hook time — a later
+carry fold never rewrites it (append-only), application is evidenced by the carry artifacts and
+the carry-skip house lines (M3.2 joins on those); the routing-skip reason vocabulary divergence
+from the Observability Contract's letter is recorded, not changed.
+
+### Re-visit refresh (2026-10-14, implementation time)
+
+M2.2 landed on dev via PR #416 (e3ad55ef) since this story's Re-visit: its dispatch delta is
+5 hunks, +210/−0 (story said +201/−0; hunk count exact); merged positions — mintAndDeliverMemoryKey
+:2144 (story :2134), single call site :3863 (story :3778), Dockerfile kg-recall COPY :1117 (story
+:1108). Also dispatch.ts:83→:84 (parseRoster import). All four are line-drift only; content holds.
+J3's own regions were coordinated as DISJOINT adds-only insertions (final dispatch delta ~+280/−0
+on the merged tree; wave-0 re-pin tree = J3 + J4 + A2 + the M2.2 surface, ops-gated, NOT fired by
+this story).

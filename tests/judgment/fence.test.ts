@@ -15,7 +15,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
-const ALLOWED_REPO_IMPORTS = new Set(["../lib/http.ts", "../lib/log.ts"]);
+// J3 router: the routing log's single-writer append (AC2 corpus-lock idiom)
+// uses the src/lib hardened file lock — the ONE sanctioned src/lib member
+// beyond http+log (plan C11).
+const ALLOWED_REPO_IMPORTS = new Set(["../lib/http.ts", "../lib/log.ts", "../lib/file-lock.ts"]);
 
 function importSpecifiers(source: string): string[] {
   // Both module edges: import-from AND export-from — a re-export is an import
@@ -76,7 +79,12 @@ describe("src/judgment import fence", () => {
  * and a sibling edge is any path that stays inside src/judgment/.
  */
 const SRC = join(JUDGMENT_SRC, "..");
-const ALLOWED_REPO_TARGETS = new Set([join(SRC, "lib", "http.ts"), join(SRC, "lib", "log.ts")]);
+// Same J3 sanctioned addition, resolved-path form (plan C11).
+const ALLOWED_REPO_TARGETS = new Set([
+  join(SRC, "lib", "http.ts"),
+  join(SRC, "lib", "log.ts"),
+  join(SRC, "lib", "file-lock.ts"),
+]);
 
 function judgmentFiles(): string[] {
   return readdirSync(JUDGMENT_SRC, { recursive: true, encoding: "utf8" })

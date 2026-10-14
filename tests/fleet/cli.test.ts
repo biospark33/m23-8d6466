@@ -65,6 +65,25 @@ import { defaultKeyCapMicroUsd, type KeyApi } from "../../src/providers/credenti
 import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import { goodLedger, overBudgetLedger, useTempAuditStore, type RecordingLedger } from "./helpers.ts";
 
+/**
+ * J3 review fix: the production routing hook (armed in runDispatch's deps)
+ * writes .sandbox/routing-log.jsonl and the judgment provenance side channel
+ * relative to process.cwd() — the repo root in production, and therefore also
+ * under every full-provisioning dispatch probe here. Rooting THOSE probes at
+ * a throwaway dir keeps the repo's own .sandbox/ and _bmad-output/ clean. The
+ * file-wide no-chdir discipline stands: the save/restore is scoped to the
+ * wrapped probe, exactly like the pre-existing chdir case below.
+ */
+async function withRoutingCwd<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const saved = process.cwd();
+  process.chdir(dir);
+  try {
+    return await fn();
+  } finally {
+    process.chdir(saved);
+  }
+}
+
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
@@ -469,6 +488,24 @@ const MANIFEST_REL = join("manifests", "pipeline.json");
 function validBriefJson(dir: string, runBudgetMs = 200_000): string {
   const manifestDir = join(dir, "manifests");
   mkdirSync(manifestDir, { recursive: true });
+  // J3: the armed routing hook parses the roster beside the manifest for its
+  // features — production fixtures carry one, so this one does too (its
+  // absence folded the derivation to a stderr note and tripped the
+  // errCaptured-must-be-empty assertions).
+  writeFileSync(
+    join(manifestDir, "roster.yaml"),
+    [
+      "defaults:",
+      "  provider: anthropic",
+      "  tools: null",
+      "  writes: []",
+      "  harness_engineering: []",
+      "roles:",
+      "  - name: lead",
+      "    model: claude-haiku-4-5",
+      "",
+    ].join("\n"),
+  );
   const manifestPath = join(manifestDir, "pipeline.json");
   writeFileSync(
     manifestPath,
@@ -512,6 +549,11 @@ function validBriefJson(dir: string, runBudgetMs = 200_000): string {
 const CLI_ENV_KEYS = [
   "QDS_RUNS_DIR",
   "QDS_FAKE_BOXES_DIR",
+  // J3: the armed routing hook's provenance side channel honors this
+  // override (the QDS_AUDIT_DB idiom); the beforeEach roots it at the case's
+  // tmpdir so full-provisioning probes never drop files into the tracked
+  // _bmad-output/ subtree.
+  "QDS_JUDGMENT_PROVENANCE_DIR",
   "QDS_COST_LEDGER_FILE",
   "QDS_COST_CONFIG_FILE",
   // Not redirected, only snapshotted: the cases that care unset it (a host
@@ -571,6 +613,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     outOnly = [];
     errCaptured = [];
     savedEnv = Object.fromEntries(CLI_ENV_KEYS.map((k) => [k, process.env[k]]));
+    process.env.QDS_JUDGMENT_PROVENANCE_DIR = join(dir, "judgment-provenance");
     // An explicit ledger/config file would follow the CLI's env tier and defeat
     // the --dir scoping case; the two directories are redirected, not deleted,
     // so the CLI's cwd-relative defaults land inside the case's tmpdir.
@@ -741,8 +784,10 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     };
 
     // dispatch: 0 (a real provisioning run) and 2 (a brief that will not parse).
-    await record("dispatch", ["dispatch", "--driver", "fake"]);
-    await record("dispatch", ["dispatch", "--driver", "fake"], deps("{not json"));
+    await withRoutingCwd(dir, async () => {
+      await record("dispatch", ["dispatch", "--driver", "fake"]);
+      await record("dispatch", ["dispatch", "--driver", "fake"], deps("{not json"));
+    });
     // dispatch 6: the box is LIVE and the ack could not be written. The code
     // that was missing from the registry, reachable only this way.
     reset();
@@ -756,7 +801,12 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       e.code = "EPIPE";
       throw e;
     };
-    observed.push(["dispatch", await run(["dispatch", "--driver", "fake"], brokenStdout, deps(validBriefJson(dir)), errOut)]);
+    observed.push(["dispatch", await withRoutingCwd(dir, () => run(["dispatch", "--driver", "fake"], brokenStdout, deps(validBriefJson(dir)), errOut))]);
+    // J3 (QDS_JUDGMENT_PROVENANCE_DIR observed): the armed hook's mock ask
+    // emitted the provenance side channel INTO the env-rooted dir — the
+    // override branch of the wiring is load-bearing (the cwd-relative
+    // default would drop files into the tracked _bmad-output/ subtree).
+    expect(readdirSync(join(dir, "judgment-provenance")).length).toBeGreaterThan(0);
 
     // status: 0 over the runs the dispatches above left, 4 for an id with no
     // record and no box, 2 for a malformed one.
@@ -3614,7 +3664,7 @@ process.on = ((sig, listener) => {
     const nullSink = (): never => {
       throw null;
     };
-    const code = await run(["dispatch", "--driver", "fake"], nullSink, shared, errOut);
+    const code = await withRoutingCwd(dir, () => run(["dispatch", "--driver", "fake"], nullSink, shared, errOut));
     expect(code).toBe(6);
     const line = errCaptured.find((l) => l.includes("ack-unwritable"));
     expect(line).toBeDefined();
@@ -3633,7 +3683,7 @@ process.on = ((sig, listener) => {
       e.code = "ENOSPC";
       throw e;
     };
-    const code = await run(["dispatch", "--driver", "fake"], enospc, shared, errOut);
+    const code = await withRoutingCwd(dir, () => run(["dispatch", "--driver", "fake"], enospc, shared, errOut));
     // 6, not 1. A lost dispatch ack means a box was provisioned and its run id
     // never reached the caller: exit 1 is `exitStatus: "transient"` = "retry
     // me", and retrying dispatch provisions a SECOND box while the first keeps
@@ -4881,7 +4931,7 @@ process.on = ((sig, listener) => {
       e.code = "EPIPE";
       throw e;
     };
-    const code = await run(["dispatch", "--driver", "fake"], brokenStdout, shared, errOut);
+    const code = await withRoutingCwd(dir, () => run(["dispatch", "--driver", "fake"], brokenStdout, shared, errOut));
     expect(code).toBe(6);
 
     const envelope = errCaptured

@@ -82,8 +82,24 @@ import {
 import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../providers/exedev/fill.ts";
 import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
+// J3 (I2): a SECOND import line from the roster schema module rather than
+// extending the one above — dispatch.ts is adds-only on this branch (the M2.2-
+// coordinated surface), so existing lines are never rewritten. Duplicate-module
+// imports share one module record; `parseRoster` above stays the single parse
+// entry, and these two are the override pair's render path.
+import { applyTierOverride, renderRoster } from "../phase-engine/roster/schema.ts";
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+// J3 (I2): same adds-only second-import form, for the carry's one read and one
+// write. The read sits AFTER the pre-admission roster vetting (the capped
+// open/fstat/read at the top of `loadManifestAndRoster`) has already run for
+// this exact path, so that block's FIFO/TOCTOU/size defenses cover it.
+import { readFileSync, writeFileSync } from "node:fs";
+// J3 (round-1 review): same adds-only import form — the tier-carry's capped
+// re-read stats the source BEFORE each readFileSync so the reads are bounded
+// by the same argument the pre-admission pre-check uses (see the carry block).
+import { statSync } from "node:fs";
+import { basename, dirname, join, posix, resolve } from "node:path";
+import { sep } from "node:path";
 import { log } from "../lib/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 // M2.2 (DD-16): the per-run recall-only memory key — the M2.1 gateway mint and
@@ -565,6 +581,22 @@ export interface DispatchDeps {
    * brief-reachable.
    */
   memoryBankList?: { listBanks(): Promise<unknown> };
+  /**
+   * J3 (AC1/AC2, contract I1): the model-routing decision hook — the
+   * `setupGate?` form a third time: an optional, function-valued,
+   * trusted-configuration field, and like every other field here NEVER
+   * brief-reachable. The caller (scripts/fleet.ts) builds the real closure;
+   * tests inject fakes. Unset — the default every existing caller has — means
+   * zero routing, zero artifacts, byte-identical legacy behavior. NEVER-THROW
+   * is the IMPLEMENTATION's contract (the router folds its own ask failures
+   * per AC2, so a throw is the router failing after its own fold); dispatch's
+   * wrapper at the hook point is belt-and-braces: any throw proceeds on the
+   * untouched roster, so the router can never FAIL or ABORT the dispatch or
+   * reorder the mint/admission steps — though the ask's adapter budget (per-
+   * attempt timeout × attempts) still imposes its own bounded wall-clock
+   * delay on the pre-admission path, by design.
+   */
+  router?: RoutingHook;
 }
 
 export interface GateOpts {
@@ -572,6 +604,64 @@ export interface GateOpts {
   commitSha: string;
   requestId: string;
 }
+
+/**
+ * J3 (contract I1) — the routing hook's input, supplied by dispatch at the ONE
+ * hook point (between runId-mint completion and the admission section).
+ * Primitives only: feature derivation is the hook CLOSURE's job (scripts/
+ * fleet.ts — manifest counts, the roster re-parse, brief path mentions, prior
+ * outcomes from the run-record store), so dispatch's add stays this flat
+ * record.
+ */
+export interface RoutingDecisionInput {
+  requestId: string;
+  runId: string;
+  repoSlug: string;
+  /**
+   * The correlation issue identity — exactly the `ctx.issueId` figure set at
+   * the resolved step: an integer issueId, a headless workId, or null. The
+   * number/string union is the correlation layer's own spelling (INV-RUN-3's
+   * pair member), not a normalizer here.
+   */
+  issueId: string | number | null;
+  /** The VALIDATED brief. */
+  brief: Brief;
+  /** The loaded manifest, verbatim — the closure derives manifest features. */
+  manifest: unknown;
+  /** Absolute path of the roster beside the manifest, already vetted. */
+  rosterPath: string;
+  /**
+   * The manifest's remaining budget window in ms (`ctx.remaining()` at the
+   * load). A seam-contract input, NOT a value runRouting times off: the hook
+   * closure may weigh it, and the ordering pin consumes it to hold the seam
+   * open.
+   */
+  manifestBudgetMs: number;
+  /**
+   * dispatch's own clock (the `deps.clock` seam) — also a seam-contract input,
+   * NOT the router's timer: runRouting times itself with Date.now(). Hook
+   * implementations may use it, and the ordering test consumes it to pin the
+   * hook's placement.
+   */
+  now: () => number;
+}
+
+/**
+ * J3 (contract I1) — the hook's resolution. `appliedPairs` is keyed by role
+ * NAME (the only key `parseRoster` guarantees unique) and dispatch
+ * materializes it verbatim; `score`, `shape` and the tiers ride the routing
+ * log's own schema (I3) — dispatch reads nothing here but `appliedPairs`.
+ */
+export interface RoutingHookResult {
+  shape: string;
+  riskTier: string;
+  appliedTier: string;
+  appliedPairs: Record<string, { provider: string; model: string }>;
+  score: Record<string, number>;
+}
+
+/** J3 (contract I1) — the typed dep; see `DispatchDeps.router`. */
+export type RoutingHook = (input: RoutingDecisionInput) => Promise<RoutingHookResult>;
 
 export interface DispatchResult {
   runId: string;
@@ -3067,6 +3157,52 @@ export async function dispatch(
     runId = mintRunId();
   }
 
+  // ── 4.5 J3 routing decision (adds-only region; story AC1/AC2, contract I1) ─
+  // ONE hook invocation, placed after the runId is SETTLED (the mint/collision
+  // loop above may have re-minted, so the hook always sees the id the run will
+  // actually carry) and BEFORE the admission section — off the mint/admission
+  // ordering (AC2). The never-throw fold: a hook throw means the ROUTER failed
+  // after its own AC2 fold — dispatch proceeds on the untouched roster, and
+  // the fold guarantees the router can never FAIL or ABORT this dispatch and
+  // never reorders the mint/admission steps. It does not make the hook
+  // instantaneous: the ask's adapter budget (per-attempt timeout × attempts)
+  // and the routing log's single-writer lock with its bounded retry do impose
+  // a bounded wall-clock delay on the pre-admission path, by design (~220ms
+  // mean vendor ask; worst case bounded by the seam client's own budget). No
+  // log line is owed by dispatch (the router's own contract is to log before
+  // it can throw).
+  let routing: RoutingHookResult | undefined;
+  if (deps.router !== undefined) {
+    try {
+      routing = await deps.router({
+        requestId,
+        runId,
+        repoSlug,
+        issueId: ctx.issueId,
+        brief: valid,
+        manifest: loaded.manifest,
+        rosterPath,
+        manifestBudgetMs,
+        now,
+      });
+    } catch {
+      routing = undefined;
+    }
+  }
+  // J3 (I2): the SOURCE roster path, captured under its own name BEFORE the
+  // tier-carry block below shadows `rosterPath` for the setup-gate literal —
+  // the hook read and the carry's re-read ride this name, the gate rides the
+  // shadow.
+  const j3SourceRosterPath = rosterPath;
+  // The active roster's runRoot-relative spelling (what a dispatch_task
+  // phase's `roster` field names when it means THIS roster — round-2 accept:
+  // a phase naming a DIFFERENT roster file resolved in-box pre-J3 and must
+  // survive the carry untouched; only the active roster's phases repoint).
+  // `valid.manifestPath` is the brief's repo-relative POSIX spelling — the
+  // same root the in-box engine resolves phase rosters against — so
+  // dirname(manifestPath)/roster.yaml IS that spelling for the active roster.
+  const j3SourceRosterRelativePlain = `${join(dirname(valid.manifestPath), "roster.yaml").split(sep).join("/")}`;
+
   // ── 5–6 single-flight: the admission critical section (DF3.2, finding DF13) ─
   // DF3.6a: the manifest's resolved resident ceiling, captured BEFORE the
   // critical section (loaded is this scope's; the section below returns the
@@ -3815,6 +3951,20 @@ export async function dispatch(
   // priced. A compensating release here would under-report live risk and let a
   // second dispatch overcommit the same cap.
   ctx.httpsUrl = vm.httpsUrl;
+  // ── J3 (I2) tier-carry scope (adds-only) ──────────────────────────────────
+  // Adds-only cannot rewrite the setup-gate literal's `rosterPath,` shorthand
+  // below — that would be a DELETED line on this branch's coordinated surface —
+  // so the redirect is done with SCOPE instead: this block redeclares
+  // `rosterPath` for everything from here through the ack, seeded with the
+  // source path and rebound to the overridden copy only when a router armed
+  // one. Unset router ⇒ the shadow carries the identical value and nothing
+  // downstream can tell the block exists. The indentation of the enclosed
+  // region is deliberately left untouched — every line inside must stay a pure
+  // INSERTION (the formatter is disabled repo-wide; biome.json), and only this
+  // block's own lines are new.
+  {
+    let rosterPath = j3SourceRosterPath; // J3 (I2) shadow — see the block comment above
+    let j3RosterText = ""; // the rendered override; set iff `routing` resolved
   try {
     // `store.create` takes only an id, so between it and this line the record
     // exists WITHOUT a `requestId` — for the whole of `driver.create()`, which
@@ -3878,6 +4028,159 @@ export async function dispatch(
       capMicroUsd: effectiveCeilingMicros,
       defaultKeyCapMicroUsd,
     });
+    // ── J3 (I2) tier carry (adds-only; AC4) ──────────────────────────────────
+    // The router RESOLVED: materialize the override WITHOUT touching the source
+    // roster.yaml — (1) a host-side dispatch-owned copy beside the run record,
+    // handed to the setup gate as its rosterPath via the block shadow; (2) the
+    // same rendered text as a fill BoxFile at the checkout's `.qds/roster.yaml`;
+    // (3) the stamped manifest's dispatch_task phases repointed at it, so the
+    // in-box `loadRoster(spec.roster, {cwd: runRoot})` resolves the COPY rather
+    // than a repo-relative roster.yaml the checkout may not have. The re-read
+    // is safe here: the pre-admission vetting (the capped open/fstat/read in
+    // `loadManifestAndRoster`) already ran for this exact path, and the re-parse
+    // re-derives every slug from the OVERRIDE pairs. A carry failure (vanished
+    // roster, unwritable store dir) is an ordinary post-provisioning dispatch
+    // failure (the INV-5 catch below), not a routing fold — the router already
+    // succeeded by the time this runs.
+    //
+    // ONE ACTIVE ROSTER (round-1 review, derivation): dispatch's model is ONE
+    // active roster beside the manifest — the gate pre-check reads exactly
+    // `roster.yaml` there, and every dispatch_task phase's repoint below
+    // targets the overridden copy of THAT roster. A manifest whose phases name
+    // different roster files is outside the gate's own contract and was
+    // already unresolvable pre-J3 (the in-box engine would not find them
+    // either); this block does not widen that assumption.
+    //
+    //
+    // APPLIED vs FOLDED (round-2, the recorded semantic — not a defect for this
+    // story): the routing-log line is written at HOOK time with the PICKED
+    // tier, and a later carry fold (absent / over-ceiling / drift) does NOT
+    // rewrite it — the log is append-only. Application is evidenced by the
+    // carry artifacts themselves (the gate copy + the in-box .qds/roster.yaml +
+    // the repointed spec.roster), and the carry-skip house lines below carry
+    // the runId; M3.2's reader joins on those.
+    //
+    // ONE guarded house line per fold — the helper below writes it; a sink
+    // failure is never the run's failure (see `refuse`).
+    const j3CarrySkipLine = (
+      code: "routing-roster-unavailable" | "routing-roster-over-ceiling" | "routing-roster-drift",
+    ): void => {
+      try {
+        log({
+          requestId,
+          operation: "fleet.dispatch",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: now() - wallStart,
+          durationMs: now() - wallStart,
+          status: "ok",
+          code,
+          runId,
+          verb: "dispatch",
+          phase: "routing-carry-skipped",
+        });
+      } catch {
+        // guarded — a sink failure is never the run's failure (see `refuse`)
+      }
+    };
+    if (routing !== undefined) {
+      // CAPPED RE-READ (round-1 review), one probe for the WHOLE carry
+      // (round-2): stat FIRST and inside a try — the stat is both the size
+      // verdict and the existence probe, so the existsSync→statSync gap a
+      // concurrent delete used to turn into an ENOENT throw past the fold is
+      // closed: ANY stat failure is the absent fold. The roster can grow in
+      // the minutes of provisioning between the pre-admission vetting and this
+      // re-read, and a plain readFileSync would be unbounded on exactly that
+      // growth; size ≤ ceiling ⇒ the single readFileSync below is bounded by
+      // the same argument the pre-check uses (a file no larger than
+      // ROSTER_MAX_BYTES reads at most ROSTER_MAX_BYTES bytes; the residual
+      // stat→read race is the same one the pre-check's post-read re-fstat
+      // accepts).
+      let j3ReStat: ReturnType<typeof statSync> | undefined;
+      try {
+        j3ReStat = statSync(j3SourceRosterPath);
+      } catch {
+        j3ReStat = undefined; // absent or unreadable — the unavailable fold
+      }
+      if (j3ReStat === undefined) {
+        // ABSENT roster ⇒ fold, not refuse (round-1 review integration fix): a
+        // fake/driver-without-gate dispatch never had a roster beside the
+        // manifest (the pre-admission vetting block only runs for an exedev
+        // driver with the default gate), so the source roster is OPTIONAL at
+        // the carry. The hook already folded its own features the same way
+        // (routing-features-unavailable); the carry folds identically instead
+        // of failing a provisioned run over a file the run never needed.
+        routing = undefined;
+        j3CarrySkipLine("routing-roster-unavailable");
+      } else if (j3ReStat.size > ROSTER_MAX_BYTES) {
+        // OVER-CEILING at carry ⇒ the SAME fold (round-2): both over-ceiling
+        // branches used to `refuse` AFTER provisioning (store.create, box,
+        // key mint all done), killing a provisioned run over the same
+        // changed-roster failure class round-1 decided folds. The
+        // pre-admission pre-check still refuses over-ceiling rosters pre-box,
+        // unchanged.
+        routing = undefined;
+        j3CarrySkipLine("routing-roster-over-ceiling");
+      } else {
+        // ONE full parse per routed dispatch at carry (round-2): this
+        // stat-guarded read IS the drift guard's re-read AND the carry body's
+        // read — the old shape stat+read+parsed the same file twice, so the
+        // body's `parsed` described a file the drift verdict had not seen.
+        let j3ReRead: ReturnType<typeof parseRoster> | undefined;
+        try {
+          j3ReRead = parseRoster(readFileSync(j3SourceRosterPath, "utf8"), j3SourceRosterPath);
+        } catch {
+          j3ReRead = undefined; // unparseable rewrite mid-flight — same fold family
+        }
+        if (j3ReRead === undefined) {
+          // UNPARSEABLE at carry ⇒ the same fold: a roster that parsed at the
+          // hook and at pre-admission vetting but no longer parses here is the
+          // same mid-flight rewrite the stat guard and the drift guard fold —
+          // the router's pick is stale, not the run broken.
+          routing = undefined;
+          j3CarrySkipLine("routing-roster-unavailable");
+        } else {
+          // ROSTER-DRIFT CARRY GUARD (round-1 review): between the hook's parse
+          // and this re-read the roster may have been renamed or rewritten — an
+          // identity change, not content drift. If NO role named by appliedPairs
+          // exists in the re-parsed roles, the roster the override was computed
+          // against is gone: SKIP the carry — the gate shadow stays on the
+          // source, no copy is written, the manifest is not repointed, and
+          // folding `routing` to undefined is what suppresses every downstream
+          // surface at once (the fill BoxFile spread below keys on that same
+          // literal). At least one matching role ⇒ proceed: partial drift just
+          // leaves the drifted pairs unused, because applyTierOverride ignores
+          // unknown keys by design.
+          const j3CarryRoles = new Set(j3ReRead.roles.map((r) => r.name));
+          if (Object.keys(routing.appliedPairs).some((role) => j3CarryRoles.has(role))) {
+            const rendered = renderRoster(applyTierOverride(j3ReRead, routing.appliedPairs));
+            const overridePath = join(storeDir, `${runId}.roster.yaml`);
+            writeFileSync(overridePath, rendered);
+            rosterPath = overridePath;
+            j3RosterText = rendered;
+            // `stampResidentBounds` hands back a deep-frozen manifest, so the repoint
+            // REPLACES the property rather than mutating into it. The compare
+            // NORMALIZES the phase's roster spelling (posix.normalize — "./x",
+            // "a//b", "a/./b" all equal the canonical spelling) so equivalent
+            // spellings of the active roster repoint with it; a roster a
+            // normalize can't equate is a different file and survives untouched.
+            stampedBounds.manifest = {
+              ...stampedBounds.manifest,
+              phases: stampedBounds.manifest.phases.map((p) =>
+                p.kind === "dispatch_task" &&
+                typeof p.roster === "string" &&
+                posix.normalize(p.roster) === j3SourceRosterRelativePlain
+                  ? { ...p, roster: `${QDS_IN_BOX_DIR}/roster.yaml` }
+                  : p,
+              ),
+            };
+          } else {
+            routing = undefined;
+            j3CarrySkipLine("routing-roster-drift");
+          }
+        }
+      }
+    }
     // AC9: the manifest is the cap's only in-box source (9a); the run context
     // carries the same computed-once ceiling for DF1.6's spawn seam (9b), plus
     // the issue deep link the brief supplied — the box's own back-reference to
@@ -4001,6 +4304,13 @@ export async function dispatch(
           ...(valid.kgContext === undefined ? {} : { kgContext: valid.kgContext }),
         }),
       },
+      // J3 (I2): the override rides the SAME fill, placed at the checkout's
+      // `.qds/roster.yaml` so the repointed manifest above resolves it in-box
+      // (`loadRoster` walks runRoot-relative). Absent router ⇒ an empty spread
+      // and a byte-identical files array.
+      ...(routing === undefined
+        ? []
+        : [{ path: `${IN_BOX_QDS_DIR}/roster.yaml`, content: j3RosterText }]),
     ];
     const exedevDriver = isExedevDriver(deps.driver) ? deps.driver : undefined;
     if (exedevDriver !== undefined) {
@@ -4362,5 +4672,6 @@ export async function dispatch(
     vmName: vm.name,
     ...(ctx.httpsUrl === undefined ? {} : { httpsUrl: ctx.httpsUrl }),
   };
+  } // J3 (I2) tier-carry scope closes — see the block comment at its open
 }
 

@@ -268,7 +268,20 @@ describe("Q1.8 contract: fleet cancel's surface", () => {
       manifestPath: manifestRel,
       repoUrl: "https://github.com/owner/repo",
     });
-    expect(await runCli(["dispatch", "--driver", "fake"], { readBrief: async () => brief })).toBe(0);
+    // J3: the armed routing hook writes the provenance side channel relative
+    // to cwd — root this full-provisioning probe at a throwaway dir (the
+    // cli.test.ts withRoutingCwd pattern, scoped save/restore).
+    const j3SavedCwd = process.cwd();
+    const j3Tmp = mkdtempSync(join(tmpdir(), "q1-dispatch-"));
+    let j3Code: number;
+    try {
+      process.chdir(j3Tmp);
+      j3Code = await runCli(["dispatch", "--driver", "fake"], { readBrief: async () => brief });
+    } finally {
+      process.chdir(j3SavedCwd);
+      rmSync(j3Tmp, { recursive: true, force: true });
+    }
+    expect(j3Code).toBe(0);
     const { runId } = JSON.parse(outLines.find((l) => l.includes("runId")) as string) as { runId: string };
 
     outLines = [];
