@@ -118,6 +118,8 @@ export const PACK_SIGNALS_ARMED = false as const;
 export const L7_ASK_STATE_MAX_CHARS = 2_000;
 /** L8 finding-text cap: an over-cap finding is a recorded miss, never truncated into a different finding. */
 export const L8_FINDING_MAX_CHARS = 8_000;
+/** Max L8 asks per call: bounds the corpus-lock hold (cap x ask deadline). The rest are recorded `capped` misses (R3-02). */
+export const L8_MAX_FINDINGS_PER_CALL = 20;
 
 export const L7_EGRESS_CLASS = "machine-state" as const satisfies EgressClass;
 export const L8_EGRESS_CLASS = "finding-text" as const satisfies EgressClass;
@@ -276,7 +278,7 @@ export function packContext(deps: PackDeps = {}): PackContext {
   return {
     client,
     machineStateCorpusDir: deps.machineStateCorpusDir ?? PACK_MACHINE_STATE_CORPUS_DIR,
-    corpusDir: deps.corpusDir ?? (client.mode === "mock" ? L8_MOCK_CORPUS_DIR : PACK_CORPUS_DIR),
+    corpusDir: deps.corpusDir ?? (client.mode === "live" ? PACK_CORPUS_DIR : L8_MOCK_CORPUS_DIR),
     log: deps.log ?? log,
     now: deps.now ?? Date.now,
     writeSteering: deps.writeSteering,
@@ -377,9 +379,17 @@ export function compactDirective(note?: string): SteeringDirective {
   return SteeringDirectiveSchema.parse(note === undefined ? { action: "compact" } : { action: "compact", note });
 }
 
-/** Deterministic hotspot order: score desc, then path asc. */
+/** Non-finite scores sort after every finite one (then by path), so the comparator is a total order (R3-01). */
+const scoreKey = (h: SweepHotspot): number => (Number.isFinite(h.score) ? h.score : Number.NEGATIVE_INFINITY);
+
+/** Deterministic hotspot order: score desc (non-finite last), then path asc. */
 function deterministicOrder(h: readonly SweepHotspot[]): SweepHotspot[] {
-  return [...h].sort((a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return [...h].sort((a, b) => {
+    const ka = scoreKey(a);
+    const kb = scoreKey(b);
+    if (ka !== kb) return ka < kb ? 1 : -1;
+    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  });
 }
 
 /**
@@ -708,13 +718,16 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
   // lock failure is never filtered (fail-open to deep adjudication).
   const filtered = new Set<string>();
   const key = (f: PackFinding): string => `${f.runId}/${f.findingId}`;
+  // Recorded-answer key adds a text digest: an edited finding is a new finding and is re-asked (R3-09).
+  const recordKey = (f: PackFinding): string => `${key(f)}@${createHash("sha256").update(f.text).digest("hex").slice(0, 12)}`;
+  let asked = 0;
   const started = ctx.now();
   try {
     await withCorpusLock(ctx.corpusDir, "l8 host-pack", async () => {
       for (const f of findings) {
         const t0 = ctx.now();
         let requestId = newRequestId();
-        const findingId = key(f);
+        const findingId = recordKey(f);
         try {
           if (f.author !== "factory") {
             throw new EgressRefusedError(`finding-text refused: author "${f.author}" is not factory (INV-7 fence)`, "finding-text");
@@ -722,13 +735,23 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
           if (f.text.length === 0 || f.text.length > L8_FINDING_MAX_CHARS) {
             throw new EgressRefusedError(`finding-text refused: ${f.text.length} chars outside 1..${L8_FINDING_MAX_CHARS}`, "finding-text");
           }
+          // The record's label/ref carry the lens: validate before the paid ask (R3-03), never after payment.
+          if (typeof f.lens !== "string" || f.lens.length === 0 || f.runId.length === 0) {
+            packLine(ctx, "l8", requestId, t0, { miss: "invalid-record", findingId: f.findingId });
+            continue;
+          }
           const recorded = recordedFor(ctx.corpusDir, findingId, L8_LABELER);
           if (recorded !== undefined) {
             const wouldFilter = recordedWouldFilter(recorded);
-            if (wouldFilter) filtered.add(findingId);
+            if (wouldFilter) filtered.add(key(f));
             packLine(ctx, "l8", requestId, t0, { skip: "already-recorded", would_signal: wouldFilter, findingId: f.findingId });
             continue;
           }
+          if (asked >= L8_MAX_FINDINGS_PER_CALL) {
+            packLine(ctx, "l8", requestId, t0, { miss: "capped", findingId: f.findingId });
+            continue;
+          }
+          asked++;
           // Per-ask deadline (as L7): the corpus lock is held across the loop, so no single ask may hold it unbounded.
           const envelope = await withTimeout(
             ctx.client.judge({ finding_id: findingId, lens: f.lens, finding_text: f.text }, L8_QUESTIONS, {
@@ -758,7 +781,7 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
             cost_exact_usd: (envelope.usage.input_tokens * 0.042) / 1_000_000,
           });
           appendRecord(ctx.corpusDir, record);
-          if (wouldFilter) filtered.add(findingId);
+          if (wouldFilter) filtered.add(key(f));
           packLine(ctx, "l8", requestId, t0, {
             answer: { is_real_defect: real, disposition: choice },
             would_signal: wouldFilter,

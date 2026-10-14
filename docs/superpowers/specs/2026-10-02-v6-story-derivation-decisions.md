@@ -372,7 +372,7 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     (a) **buildId:** BOTH `src/phase-engine/steering.ts` and `src/fleet/observe.ts` (the `onTick`
     seam) are COPY-set and move `deriveBuildId`; origin/dev's literal `285156f` was already stale: J3's CodeRabbit round-3 commit `dac6e6c2`
     edited the walked input `src/fleet/dispatch.ts` without a re-pin, so dev's real digest is
-    `b34dc6b` and dev's own pin test is red. J4 moves `b34dc6b`→`4095eff` via `steering.ts` +
+    `b34dc6b` and dev's own pin test is red. J4 moves `b34dc6b`→`37e749e` via `steering.ts` +
     `observe.ts` only (and incidentally restores dev's pin test) (DD-28.2 ritual; publish/adopt
     stays operator-gated).
     (b) **Arming PR owes:** a host-to-engine directive path (DF1.11's inbox is context-only, and

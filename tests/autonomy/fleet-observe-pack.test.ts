@@ -150,6 +150,8 @@ test("observeTickHookFor: production (no deps) gets the L7 hook; deps without ju
   const injected = observeTickHookFor({
     judgmentPack: {
       provenanceDir: path.join(tmp("qds-j4-sel-out-"), "prov"),
+      machineStateCorpusDir: path.join(tmp("qds-j4-sel-ms-"), "ms"),
+      corpusDir: path.join(tmp("qds-j4-sel-corpus-"), "corpus"),
       readBoxFile: async (_d, _vm, p) => {
         reads.push(p);
         return { kind: "absent", probeExit: 1 };

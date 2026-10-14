@@ -79,6 +79,10 @@ export function resolveTriageCorpusDir(client: { mode?: string }, injected?: str
   if (injected !== undefined) return injected;
   return resolve(FACTORY_ROOT, client.mode === "live" ? DEFAULT_CORPUS_DIR : L9_MOCK_CORPUS_DIR);
 }
+/** Default opensrc lockfile: the factory's own bun.lock, never cwd (R3-13). Pure. */
+export function resolveLockfilePath(injected?: string): string {
+  return injected ?? join(FACTORY_ROOT, "bun.lock");
+}
 /** Default provenance dir anchors to the factory root, never cwd. Pure. */
 export function resolveProvenanceDir(injected?: string): string {
   return injected ?? resolve(FACTORY_ROOT, DEFAULT_PROVENANCE_DIR);
@@ -242,7 +246,11 @@ export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
           // Key incorporates the brief digest: unchanged brief => already recorded, no (paid) re-ask.
           const ref = `sweep:${idPath(h.path)}`;
           const id = `${ref}@${digest(brief)}`;
-          if (existsSync(corpusFile) && readCorpusRecords(corpusFile).some((r) => r.finding_id === id && r.labeler === L9_LABELER)) {
+          const prior = existsSync(corpusFile) ? readCorpusRecords(corpusFile).find((r) => r.finding_id === id && r.labeler === L9_LABELER) : undefined;
+          if (prior !== undefined) {
+            // Keep the recorded worth at its judged position in the logged would-be order (R3-08).
+            const w = /worth_brief=([0-9.eE+-]+);/.exec(prior.rationale ?? "");
+            if (w !== null && Number.isFinite(Number(w[1]))) worthByPath.set(h.path, Number(w[1]));
             miss("already-recorded");
             continue;
           }
@@ -294,7 +302,7 @@ export interface SpanFile {
 }
 
 export interface OpensrcDeps {
-  /** Path to bun.lock. Default `<cwd>/bun.lock`. */
+  /** Path to bun.lock. Default `<FACTORY_ROOT>/bun.lock`. */
   lockfilePath?: string;
   /** Injected in tests; the default spawns the real binary (absent on most hosts => miss). */
   exec?: Exec;
@@ -407,7 +415,7 @@ export function opensrcSpans(pkg: string, deps: OpensrcDeps = {}): OpensrcResult
   if (!NPM_NAME.test(pkg)) return miss("invalid-package-name");
   let version: string | undefined;
   try {
-    version = lockedVersion(readFileSync(deps.lockfilePath ?? join(process.cwd(), "bun.lock"), "utf8"), pkg);
+    version = lockedVersion(readFileSync(resolveLockfilePath(deps.lockfilePath), "utf8"), pkg);
   } catch {
     return miss("lockfile-unreadable");
   }

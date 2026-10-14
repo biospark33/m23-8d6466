@@ -484,7 +484,9 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
     }
     const t0 = Date.now();
     try {
-      await withTimeout((async () => onTick(info))(), deadline, `onTick(${info.runId})`);
+      // Clamp to the pass hook budget still unspent, so the pass cap cannot overrun by a full deadline (R3-06).
+      const effective = Math.max(1, Math.min(deadline, hookBudgetMs - hookSpentMs));
+      await withTimeout((async () => onTick(info))(), effective, `onTick(${info.runId})`);
     } catch (e) {
       sweepLine(deps.requestId, { runId: info.runId, event: "sweep-ontick-failed", error: errText(e), sweep_ms: el() });
     } finally {

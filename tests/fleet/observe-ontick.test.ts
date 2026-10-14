@@ -170,6 +170,16 @@ describe("observeSweep onTick seam", () => {
     expect(skips.every((l) => l.reason === "pass-hook-budget")).toBe(true);
   });
 
+  test("R3-06: a hook's deadline is clamped to the remaining pass hook budget (no full-deadline overrun)", async () => {
+    const f = fixture();
+    await f.seed("run-a");
+    const lines = captureLogs();
+    const t0 = Date.now();
+    await observeSweep(f.deps({ onTickPassBudgetMs: 100, onTickDeadlineMs: 5_000, onTick: () => new Promise<void>(() => {}) }));
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(lines.some((l) => l.event === "sweep-ontick-failed")).toBe(true);
+  });
+
   test("not called for engine-dead, unreachable, settled, locked-out or skipped residents", async () => {
     const f = fixture();
     const holder = liveChild();

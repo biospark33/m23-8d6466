@@ -20,6 +20,7 @@ import { DISPOSITIONS, MachineStateRecordSchema, TriageRecordSchema } from "../.
 import { CORPUS_LOCK_ID, DEFAULT_CORPUS_DIR, DEFAULT_MACHINE_STATE_CORPUS_DIR } from "../../scripts/corpus/merge.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import {
+  L8_MAX_FINDINGS_PER_CALL,
   compactDirective,
   FACTORY_ROOT,
   L7_ASK_DEADLINE_MS,
@@ -290,6 +291,7 @@ describe("AC5 — recording-only", () => {
     const src = readFileSync(join(ROOT, "src", "autonomy", "host-pack.ts"), "utf8");
     expect(src).toMatch(/export const PACK_SIGNALS_ARMED = false as const;/);
     // No ambient read of any kind (R2-11): env in every spelling, and no config-file read.
+    // Tripwire only: the guarantee is the `false as const` literal above plus the absence of any arming code path.
     const ambient = [
       /process\.env/,
       /Bun\.env/,
@@ -498,7 +500,8 @@ describe("AC6 — binary/choice only, provenance + records, one ceiling per leg"
     const r = rig();
     await l8Prefilter(packContext(r.deps), [finding("f1"), finding("f2")]);
     const recs = jsonl(join(r.corpus, "x-rx.jsonl")).map((x) => TriageRecordSchema.parse(x));
-    expect(recs.map((x) => x.finding_id)).toEqual(["run-a/f1", "run-a/f2"]);
+    expect(recs.map((x) => x.finding_id.split("@")[0])).toEqual(["run-a/f1", "run-a/f2"]);
+    expect(recs.every((x) => /@[0-9a-f]{12}$/.test(x.finding_id))).toBe(true);
     for (const x of recs) {
       expect(DISPOSITIONS).toContain(x.disposition);
       expect(x.arm).toBe("jev");
@@ -838,7 +841,7 @@ describe("armed L8 kept-set (R1-07)", () => {
       mode: "mock",
       judge: async (s, questions, opts) => {
         const id = (s as { finding_id: string }).finding_id;
-        const no = dismiss.includes(id);
+        const no = dismiss.includes(id.split("@")[0] ?? id);
         return scriptedJudge(() => ({
           is_real_defect: { type: "noul", noul: no ? 0.1 : 0.9 },
           disposition: { type: "choice", choice: no ? "dismiss" : "patch", probabilities: { dismiss: no ? 1 : 0 }, confidence: 1 },
@@ -975,5 +978,57 @@ describe("named negative controls (R1-24)", () => {
     expect(/HARD_CAP_FRACTION\s*=|soft_at\s*[:=]|compaction\s*[:=]/.test(src)).toBe(false);
     // the only steering artifact the leg can ever produce carries no threshold field
     expect(Object.keys(compactDirective("n")).sort()).toEqual(["action", "note"]);
+  });
+});
+
+// ─── review round 3 ───────────────────────────────────────────────────────────
+
+describe("round 3 hardening", () => {
+  const keepAnswer = () => ({
+    is_real_defect: { type: "noul" as const, noul: 0.9 },
+    disposition: { type: "choice" as const, choice: "patch", probabilities: { patch: 1 }, confidence: 1 },
+  });
+
+  test("R3-01: NaN / Infinity scores sort last, independent of input order", async () => {
+    const mk = (path: string, score: number) => ({ path, brief: path, score });
+    const items = [mk("n", Number.NaN), mk("a", 1), mk("i", Number.POSITIVE_INFINITY), mk("b", 3), mk("m", Number.NEGATIVE_INFINITY)];
+    const want = ["b", "a", "i", "m", "n"];
+    expect((await orderSweepHotspots(items)).map((h) => h.path)).toEqual(want);
+    expect((await orderSweepHotspots([...items].reverse())).map((h) => h.path)).toEqual(want);
+  });
+
+  test("R3-02: L8 asks at most L8_MAX_FINDINGS_PER_CALL per call; the excess is a recorded `capped` miss", async () => {
+    const j = scriptedJudge(keepAnswer);
+    const r = rig({ client: j });
+    const input = Array.from({ length: L8_MAX_FINDINGS_PER_CALL + 3 }, (_, i) => finding(`f${i}`));
+    expect(await l8Prefilter(packContext(r.deps), input)).toEqual(input);
+    expect(j.calls).toBe(L8_MAX_FINDINGS_PER_CALL);
+    expect(r.lines.filter((l) => l.miss === "capped")).toHaveLength(3);
+  });
+
+  test("R3-03: an invalid lens is a recorded miss BEFORE the paid ask", async () => {
+    const j = scriptedJudge(keepAnswer);
+    const r = rig({ client: j });
+    const input = [finding("f1", { lens: "" }), finding("f2")];
+    await l8Prefilter(packContext(r.deps), input);
+    expect(j.calls).toBe(1);
+    expect(r.lines.find((l) => l.findingId === "f1")).toMatchObject({ miss: "invalid-record" });
+  });
+
+  test("R3-07: a client without an explicit mode `live` routes L8 to the mock corpus dir", () => {
+    const loose = { mode: undefined, judge: scriptedJudge(keepAnswer).judge } as unknown as Judge; // dp:ok deliberate mode-less wrapper
+    expect(packContext({ provenanceDir: join(tmp(), "p"), client: loose }).corpusDir).toBe(L8_MOCK_CORPUS_DIR);
+    expect(packContext({ provenanceDir: join(tmp(), "p"), client: { ...loose, mode: "live" } }).corpusDir).toBe(PACK_CORPUS_DIR);
+  });
+
+  test("R3-09: an edited finding (same id, new text) is re-asked; unchanged text is not", async () => {
+    const j = scriptedJudge(keepAnswer);
+    const r = rig({ client: j });
+    const ctx = packContext(r.deps);
+    await l8Prefilter(ctx, [finding("f1")]);
+    await l8Prefilter(ctx, [finding("f1")]);
+    expect(j.calls).toBe(1);
+    await l8Prefilter(ctx, [finding("f1", { text: "a rewritten finding" })]);
+    expect(j.calls).toBe(2);
   });
 });

@@ -11,6 +11,7 @@ import {
   L9_MOCK_CORPUS_DIR,
   resolveTriageCorpusDir,
   resolveProvenanceDir,
+  resolveLockfilePath,
   MAX_WALK_ENTRIES,
   PATH_MAX_CHARS,
   L9_EGRESS_CLASS,
@@ -180,6 +181,31 @@ describe("L9 review fixes (round 1)", () => {
     await r.rank([{ path: "src/a.ts", brief: "a CHANGED", score: 5 }]);
     expect(asks).toBe(4);
     expect(records()).toHaveLength(4);
+  });
+
+  test("R3-08: repeat call over recorded hotspots logs the judged would-be order, not the deterministic one", async () => {
+    const worth: Record<string, number> = { "src/a.ts": 0.1, "src/b.ts": 0.9, "src/c.ts": 0.5 };
+    const c = mockClient();
+    const judged = {
+      mode: "mock" as const,
+      judge: async (...a: Parameters<JudgmentClient["judge"]>) => {
+        const env = await c.judge(...a);
+        const p = (a[0] as { path: string }).path;
+        return { ...env, answers: { ...env.answers, worth_brief: { type: "noul" as const, noul: worth[p] ?? 0 } } } as typeof env;
+      },
+    };
+    const r = makeSweepTriageRanker({ client: judged, corpusDir: corpus(), log: sink });
+    const order = () => (logs.filter((l) => l.would_order !== undefined).at(-1)?.would_order as string[]);
+    await r.rank(hs);
+    const first = order();
+    expect(first).toEqual(["src/b.ts", "src/c.ts", "src/a.ts"]);
+    await r.rank(hs);
+    expect(order()).toEqual(first);
+  });
+
+  test("R3-13: the default opensrc lockfile is FACTORY_ROOT/bun.lock, never cwd", () => {
+    expect(resolveLockfilePath("/x/bun.lock")).toBe("/x/bun.lock");
+    expect(resolveLockfilePath()).toBe(join(import.meta.dir, "..", "..", "bun.lock"));
   });
 
   test("R1-20: long paths sharing a prefix get distinct ids", async () => {
