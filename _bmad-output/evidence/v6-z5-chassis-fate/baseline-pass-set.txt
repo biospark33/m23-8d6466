@@ -1,0 +1,50 @@
+# Z5 baseline full-suite pass-set (pre-change, feature/z5-chassis-fate @ HEAD)
+
+- captured: 2026-10-13, working tree clean except sanctioned untracked (.unlazy/, _bmad-output/workflow-state/qds-dev/z5/, _bmad-output/evidence/)
+- HEAD: e9321a6c (same as .gitnexus/cli-version.json indexedHead)
+- command: `bun test > /tmp/z5-baseline.log 2>&1` (exit 0 recorded by runner task), cleaned via
+  `tr '\r' '\n' < log | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g'`
+- bun summary: **8005 pass / 12 skip / 18 fail** — "Ran 8103 tests across 277 files. [1199.11s]"
+- marker note: exactly 17 `(fail)` markers appear; bun's summary counts 18. Recorded as an
+  observed baseline artifact (count 18 AND named set of 17 are both part of the baseline;
+  branch gate = same named set, no additions, and pass count >= 8005).
+
+## Standing reds at baseline (pre-existing, NOT introduced by Z5; must be identical post-change)
+
+### tests/gitnexus/ — CLI contract drift alarm (8 named failures)
+The gitnexus CLI was upgraded; the contract-ritual ADOPT step (update cli-contract.ts +
+bump expectedCliVersion) is a separate workstream per CLAUDE.md. These failures are the
+alarm doing its job, expected at HEAD:
+1. AC-1 (make-or-break): all three tools return non-empty structured results > gitnexus_query — 'SwarmClaw routes' returns non-empty structured definitions
+2. INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & normalized > query/context result file paths are repo-relative
+3. strict payload contracts (the drift alarm) > query payload matches the strict contract
+4. strict payload contracts (the drift alarm) > context found-payload matches the strict contract
+5. strict payload contracts (the drift alarm) > impact resolved payload matches the strict contract (disambiguated target)
+6. strict payload contracts (the drift alarm) > impact ambiguous payload matches the strict contract (bare 'dispatch' probe)
+7. strict payload contracts (the drift alarm) > cypher result matches the strict contract
+8. strict payload contracts (the drift alarm) > detect-changes text contract holds (the AGENTS.md pre-commit tool)
+
+### pi-vs-claude-code-vendor/self-compact/tests/parity/extension.test.mjs (9 named failures)
+Vendor parity suite: `Cannot find module .../pi-coding-agent/dist/core/extensions/loader.js`
+plus done-callback timeouts; pre-existing at HEAD, outside story scope:
+9.  launch 1: defaults on a 1M model resolve to 100k / 200k / 300k (10% / 20% / 30%); info starts no LLM turn
+10. launch 2: 100k / 200k / 50k on a 1M model -> 10% / 20% / 25% markers
+11. launch 3: 20% / 50% / 0 with --compact-prompt: zero buffer, literal summary prompt, note-free /compact
+12. invalid settings are rejected: info reports it and every tool is blocked
+13. failed compaction keeps the note and the lock; /self-compact-now reuses the saved note; reload recovery finishes the handoff
+14. lifecycle: thresholds, lock, self_compact, compaction, verbatim note, continuation, clean transcript
+15. sibling tools in the self_compact batch are blocked in either order
+16. two cycles: guidance and the forced lock re-arm after a completed handoff
+17. note validation: blank rejected, 24001 chars rejected, 24000 chars accepted, whitespace preserved
+
+### Other baseline noise (informational)
+- `error: log boom` / `error: callback boom` — expected negative-control log lines from passing tests.
+- Multiple `!! lock-held: .../df3-1-cli-*/runs/*.lock was NOT released` teardown warnings
+  from df3 CLI e2e tests (interrupted-run teardown noise, pre-existing).
+- Non-failing `error: JSON Parse error: Unexpected EOF` swarm.phase log lines.
+
+## Branch-gate rule (root GATES.md BG1/BG2)
+Post-change full suite must show: (a) zero NEW `(fail)` markers vs the 17 named above;
+(b) bun summary fail count <= 18; (c) pass count >= 8005 (minus nothing — Z5 must not
+delete or skip any test; the dormancy guard ADDS tests); (d) tests/gitnexus and vendor
+parity failures byte-identical in name-set (standing reds, untouched by Z5).

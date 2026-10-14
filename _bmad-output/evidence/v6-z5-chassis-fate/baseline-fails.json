@@ -1,0 +1,27 @@
+{
+  "head": "e9321a6c",
+  "captured": "2026-10-13",
+  "pass": 8005,
+  "skip": 12,
+  "fail": 18,
+  "markerNote": "bun summary counts 18 fail; exactly 17 (fail) markers appear in the log. Both numbers are baseline truth (see baseline-pass-set.txt).",
+  "failNames": [
+    "AC-1 (make-or-break): all three tools return non-empty structured results > gitnexus_query — 'SwarmClaw routes' returns non-empty structured definitions",
+    "INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & normalized > query/context result file paths are repo-relative (no leading slash, no ..)",
+    "strict payload contracts (the drift alarm) > query payload matches the strict contract",
+    "strict payload contracts (the drift alarm) > context found-payload matches the strict contract",
+    "strict payload contracts (the drift alarm) > impact resolved payload matches the strict contract (disambiguated target)",
+    "strict payload contracts (the drift alarm) > impact ambiguous payload matches the strict contract (bare 'dispatch' probe)",
+    "strict payload contracts (the drift alarm) > cypher result matches the strict contract",
+    "strict payload contracts (the drift alarm) > detect-changes text contract holds (the AGENTS.md pre-commit tool)",
+    "launch 1: defaults on a 1M model resolve to 100k / 200k / 300k (10% / 20% / 30%); info starts no LLM turn",
+    "launch 2: 100k / 200k / 50k on a 1M model -> 10% / 20% / 25% markers",
+    "launch 3: 20% / 50% / 0 with --compact-prompt: zero buffer, literal summary prompt, note-free /compact",
+    "invalid settings are rejected: info reports it and every tool is blocked",
+    "failed compaction keeps the note and the lock; /self-compact-now reuses the saved note; reload recovery finishes the handoff",
+    "lifecycle: thresholds, lock, self_compact, compaction, verbatim note, continuation, clean transcript",
+    "sibling tools in the self_compact batch are blocked in either order",
+    "two cycles: guidance and the forced lock re-arm after a completed handoff",
+    "note validation: blank rejected, 24001 chars rejected, 24000 chars accepted, whitespace preserved"
+  ]
+}
