@@ -176,7 +176,7 @@ describe("dispatch routing hook + tier carry (J3)", () => {
   });
 
   /** Manifest with one dispatch_task phase (its `roster` is what J3 repoints). */
-  function validBrief(): Record<string, unknown> {
+  function validBrief(rosterRef = "manifests/roster.yaml"): Record<string, unknown> {
     const manifestPath = join(dir, MANIFEST_REL);
     mkdirSync(dirname(manifestPath), { recursive: true });
     writeFileSync(join(dirname(manifestPath), "roster.yaml"), ROSTER_YAML);
@@ -193,7 +193,7 @@ describe("dispatch routing hook + tier carry (J3)", () => {
             description: "Run the routed build",
             maxDurationMs: 10_000,
             retries: 0,
-            roster: "manifests/roster.yaml",
+            roster: rosterRef,
             task: "Build the widget",
           },
           {
@@ -637,6 +637,52 @@ describe("dispatch routing hook + tier carry (J3)", () => {
     expect(skipLines[0]!.phase).toBe("routing-carry-skipped");
     expect(skipLines[0]!.status).toBe("ok");
     expect(skipLines[0]!.runId).toBe(result.runId);
+  });
+
+  // ─── (10) unparseable roster at carry: the fold the stat guard cannot see ────
+
+  test("unparseable roster at carry → dispatch completes, unavailable house line", async () => {
+    // The roster rewritten to INVALID YAML between the hook's parse and the
+    // carry's re-read: present, right size — the stat guard passes — but
+    // parseRoster throws RosterError. Same mid-flight-change family as (7)-(9),
+    // so it folds instead of failing a provisioned run.
+    const brief = validBrief();
+    writeFileSync(sourceRosterPath(), "not: [valid: yaml");
+    const result = await dispatch(brief, deps({ router: async () => routingResult() }));
+    // The dispatch completes — a stale router pick is a skip, never a failure.
+    expect(result.state).toBe("ready");
+
+    // Zero routing artifacts on every surface, exactly like the other folds:
+    expect(existsSync(gateCopyPath(result.runId))).toBe(false);
+    expect(existsSync(boxRosterPath(result.vmName))).toBe(false);
+    // spec.roster unrepointed — the box manifest keeps the authored reference.
+    expect(boxManifestRosterField(result.vmName)).toBe("manifests/roster.yaml");
+    // The source roster is exactly the invalid rewrite — untouched.
+    expect(readFileSync(sourceRosterPath(), "utf8")).toBe("not: [valid: yaml");
+
+    // ONE guarded house line names the fold.
+    const skipLines = entries.filter((e) => e.code === "routing-roster-unavailable");
+    expect(skipLines).toHaveLength(1);
+    expect(skipLines[0]!.phase).toBe("routing-carry-skipped");
+    expect(skipLines[0]!.status).toBe("ok");
+    expect(skipLines[0]!.runId).toBe(result.runId);
+  });
+
+  // ─── (11) equivalent roster spellings repoint with the canonical one ─────────
+
+  test("equivalent roster spelling ('./manifests/roster.yaml') repoints like the canonical one", async () => {
+    // posix.normalize equates the leading "./" spelling with the canonical
+    // relative path — the same file in-box either way, so the carry repoints
+    // it and every routing artifact lands, exactly like test (2)'s canonical
+    // dispatch.
+    const result = await dispatch(
+      validBrief("./manifests/roster.yaml"),
+      deps({ router: async () => routingResult() }),
+    );
+    expect(result.state).toBe("ready");
+    expect(boxManifestRosterField(result.vmName)).toBe(".qds/roster.yaml");
+    expect(existsSync(gateCopyPath(result.runId))).toBe(true);
+    expect(existsSync(boxRosterPath(result.vmName))).toBe(true);
   });
 });
 

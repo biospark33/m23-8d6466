@@ -109,7 +109,8 @@ beforeEach(() => {
   process.chdir(tmpDir);
   process.env.HINDSIGHT_BASE_URL = "http://127.0.0.1:1";
   process.env.HINDSIGHT_BEARER_TOKEN = "test-token";
-  process.env.HINDSIGHT_API_KEY = undefined;
+  // biome-ignore lint/performance/noDelete: env deletion, not object property perf
+  delete process.env.HINDSIGHT_API_KEY;
 });
 
 afterEach(() => {
@@ -221,7 +222,14 @@ describe("retainRoutingDecisionsBestEffort", () => {
   });
 
   test("unconfigured env: zero client calls, zero lines", async () => {
-    process.env.HINDSIGHT_BASE_URL = undefined;
+    // A genuine deletion, not `= undefined`: Bun stores the STRING "undefined"
+    // (truthy), so the assignment read as CONFIGURED and the zero-call verdict
+    // came from the empty-log silent return, never the env gate. The seeded
+    // line + non-zero harvest make the gate itself the only thing standing
+    // between this run and a retain.
+    // biome-ignore lint/performance/noDelete: env deletion, not object property perf
+    delete process.env.HINDSIGHT_BASE_URL;
+    seedRoutingLog([JSON.stringify(makeLine(RUN_A))]);
     const store = makeStore(join(process.cwd(), "runs"), { requestId: "req-rec", repoSlug: REPO_SLUG });
     const client = makeClient();
     const lines = await withLogSink(() =>
@@ -229,7 +237,7 @@ describe("retainRoutingDecisionsBestEffort", () => {
         runId: RUN_A,
         requestId: "req-invocation",
         store,
-        harvestedCount: 0,
+        harvestedCount: 3,
         auditRecord: () => {},
         clientFactory: () => client,
       }),

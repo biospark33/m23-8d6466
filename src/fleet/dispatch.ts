@@ -98,7 +98,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 // re-read stats the source BEFORE each readFileSync so the reads are bounded
 // by the same argument the pre-admission pre-check uses (see the carry block).
 import { statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { sep } from "node:path";
 import { log } from "../lib/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
@@ -4126,38 +4126,58 @@ export async function dispatch(
         // stat-guarded read IS the drift guard's re-read AND the carry body's
         // read — the old shape stat+read+parsed the same file twice, so the
         // body's `parsed` described a file the drift verdict had not seen.
-        const j3ReRead = parseRoster(readFileSync(j3SourceRosterPath, "utf8"), j3SourceRosterPath);
-        // ROSTER-DRIFT CARRY GUARD (round-1 review): between the hook's parse
-        // and this re-read the roster may have been renamed or rewritten — an
-        // identity change, not content drift. If NO role named by appliedPairs
-        // exists in the re-parsed roles, the roster the override was computed
-        // against is gone: SKIP the carry — the gate shadow stays on the
-        // source, no copy is written, the manifest is not repointed, and
-        // folding `routing` to undefined is what suppresses every downstream
-        // surface at once (the fill BoxFile spread below keys on that same
-        // literal). At least one matching role ⇒ proceed: partial drift just
-        // leaves the drifted pairs unused, because applyTierOverride ignores
-        // unknown keys by design.
-        const j3CarryRoles = new Set(j3ReRead.roles.map((r) => r.name));
-        if (Object.keys(routing.appliedPairs).some((role) => j3CarryRoles.has(role))) {
-          const rendered = renderRoster(applyTierOverride(j3ReRead, routing.appliedPairs));
-          const overridePath = join(storeDir, `${runId}.roster.yaml`);
-          writeFileSync(overridePath, rendered);
-          rosterPath = overridePath;
-          j3RosterText = rendered;
-          // `stampResidentBounds` hands back a deep-frozen manifest, so the repoint
-          // REPLACES the property rather than mutating into it.
-          stampedBounds.manifest = {
-            ...stampedBounds.manifest,
-            phases: stampedBounds.manifest.phases.map((p) =>
-              p.kind === "dispatch_task" && p.roster === j3SourceRosterRelativePlain
-                ? { ...p, roster: `${QDS_IN_BOX_DIR}/roster.yaml` }
-                : p,
-            ),
-          };
-        } else {
+        let j3ReRead: ReturnType<typeof parseRoster> | undefined;
+        try {
+          j3ReRead = parseRoster(readFileSync(j3SourceRosterPath, "utf8"), j3SourceRosterPath);
+        } catch {
+          j3ReRead = undefined; // unparseable rewrite mid-flight — same fold family
+        }
+        if (j3ReRead === undefined) {
+          // UNPARSEABLE at carry ⇒ the same fold: a roster that parsed at the
+          // hook and at pre-admission vetting but no longer parses here is the
+          // same mid-flight rewrite the stat guard and the drift guard fold —
+          // the router's pick is stale, not the run broken.
           routing = undefined;
-          j3CarrySkipLine("routing-roster-drift");
+          j3CarrySkipLine("routing-roster-unavailable");
+        } else {
+          // ROSTER-DRIFT CARRY GUARD (round-1 review): between the hook's parse
+          // and this re-read the roster may have been renamed or rewritten — an
+          // identity change, not content drift. If NO role named by appliedPairs
+          // exists in the re-parsed roles, the roster the override was computed
+          // against is gone: SKIP the carry — the gate shadow stays on the
+          // source, no copy is written, the manifest is not repointed, and
+          // folding `routing` to undefined is what suppresses every downstream
+          // surface at once (the fill BoxFile spread below keys on that same
+          // literal). At least one matching role ⇒ proceed: partial drift just
+          // leaves the drifted pairs unused, because applyTierOverride ignores
+          // unknown keys by design.
+          const j3CarryRoles = new Set(j3ReRead.roles.map((r) => r.name));
+          if (Object.keys(routing.appliedPairs).some((role) => j3CarryRoles.has(role))) {
+            const rendered = renderRoster(applyTierOverride(j3ReRead, routing.appliedPairs));
+            const overridePath = join(storeDir, `${runId}.roster.yaml`);
+            writeFileSync(overridePath, rendered);
+            rosterPath = overridePath;
+            j3RosterText = rendered;
+            // `stampResidentBounds` hands back a deep-frozen manifest, so the repoint
+            // REPLACES the property rather than mutating into it. The compare
+            // NORMALIZES the phase's roster spelling (posix.normalize — "./x",
+            // "a//b", "a/./b" all equal the canonical spelling) so equivalent
+            // spellings of the active roster repoint with it; a roster a
+            // normalize can't equate is a different file and survives untouched.
+            stampedBounds.manifest = {
+              ...stampedBounds.manifest,
+              phases: stampedBounds.manifest.phases.map((p) =>
+                p.kind === "dispatch_task" &&
+                typeof p.roster === "string" &&
+                posix.normalize(p.roster) === j3SourceRosterRelativePlain
+                  ? { ...p, roster: `${QDS_IN_BOX_DIR}/roster.yaml` }
+                  : p,
+              ),
+            };
+          } else {
+            routing = undefined;
+            j3CarrySkipLine("routing-roster-drift");
+          }
         }
       }
     }

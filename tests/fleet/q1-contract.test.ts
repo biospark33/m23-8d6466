@@ -275,6 +275,7 @@ describe("Q1.8 contract: fleet cancel's surface", () => {
     const j3Tmp = mkdtempSync(join(tmpdir(), "q1-dispatch-"));
     let j3Code: number;
     try {
+      process.chdir(j3Tmp);
       j3Code = await runCli(["dispatch", "--driver", "fake"], { readBrief: async () => brief });
     } finally {
       process.chdir(j3SavedCwd);
