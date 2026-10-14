@@ -14,7 +14,7 @@ import { z } from "zod";
 
 import { BankIdSchema } from "../hindsight/schemas.ts";
 import { assertPlainBoxPath } from "../providers/path-guard.ts";
-import { log, type LogEntry } from "../swarmclaw/log.ts";
+import { log, type LogEntry } from "../lib/log.ts";
 import type { MemgateIssuanceRow, MemgateLedger } from "./ledger.ts";
 
 /**

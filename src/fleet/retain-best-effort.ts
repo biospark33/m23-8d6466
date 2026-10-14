@@ -46,7 +46,7 @@ import { resolveBankId } from "../hindsight/schemas.ts";
 import type { ProviderAuditLink } from "../providers/driver.ts";
 import type { RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 
 // F17: the retain's wall-clock cap — best-effort never dwells past it on the
 // harvest/teardown critical path.

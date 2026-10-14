@@ -66,7 +66,7 @@ import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
 import type { ApproverAuth } from "../../src/fleet/approvers.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 
 /**
  * Await a refusal and hand back the TYPED error — never a bare "something threw".

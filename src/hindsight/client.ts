@@ -13,17 +13,17 @@
  *    error message (never the raw object). AbortController timers are cleared
  *    in `finally`.
  *
- * Uses P0.7's `log()` (CC-9) + `newRequestId()` from stdio-transport.ts and
- * `maskEnv` from tool-bridge.ts — no bespoke redactor / logger.
+ * Uses P0.7's `log()` (CC-9) + `newRequestId()` from lib/log.ts and
+ * `maskEnv` from lib/mask-env.ts — no bespoke redactor / logger.
  */
 
 import {
   log,
   newRequestId,
   type LogEntry,
-} from "../swarmclaw/mcp/stdio-transport.ts";
+} from "../lib/log.ts";
 import { httpRequest } from "../lib/http.ts";
-import { maskEnv } from "../swarmclaw/mcp/tool-bridge.ts";
+import { maskEnv } from "../lib/mask-env.ts";
 import type { z } from "zod";
 import {
   BankIdSchema,

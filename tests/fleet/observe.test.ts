@@ -25,7 +25,7 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { createRun, type ExecResult, type ProviderAuditLink, type ProviderVmListing } from "../../src/providers/driver.ts";
 import { RunRecordStore, type ExtensionEntry, type RunRecord } from "../../src/providers/run-record.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { setLogSink } from "../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../src/lib/log.ts";
 import { acquireRunLock, clearRunLockDestructive, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { deadPid, liveChild } from "./helpers.ts";
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";

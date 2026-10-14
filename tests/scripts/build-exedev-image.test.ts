@@ -2047,7 +2047,60 @@ describe("buildIdFileInputs", () => {
       // scripts/lib/ splits are the walked delta. Received from this test's
       // own failing run on the final tree; publish/adoption still owed
       // operator-side (no image exists to adopt).
-            "e2dc33cdab2f81d629295c89988dc889d3a00638052638a9dd266f7e6932d67f",
+            //
+            // 91eabeb3: moved from e2dc33cd by Z5 chassis-fate (log/maskEnv
+            // relocation to src/lib). Measured via `buildIdFileInputs`
+            // membership over the branch's changed tracked files — 21
+            // walked-input edits: 20 import-path-line-only re-points plus
+            // `src/swarmclaw/mcp/tool-bridge.ts`, whose edit is a re-point
+            // AND the mandated 19-line maskEnv block deletion. The 20 pure
+            // re-points: `src/fleet/{approval-gate,dispatch,fanout-primitive,
+            // fanout,observe,retain-best-effort,run-completion,status,submit}.ts`
+            // (9), `src/providers/{credentials,driver,harvest,quota,
+            // run-record,step-log}.ts` (6), and five of the six swarmclaw
+            // files (`index`, `mcp/stdio-transport`, `routes/agents`,
+            // `routes/mcp-servers`, `store/mcp-store`). The walk's
+            // COMPOSITION moved too: the origin log module left it (origin
+            // deleted) and NEW `src/lib/{log,mask-env}.ts` entered it (both
+            // under directory COPYs). Measured on the committed tree
+            // (e9321a6c..HEAD = 124 files): 23 walk members among the changed
+            // files, the other 101 absent — outside the COPY enumeration
+            // entirely: every test file, `scripts/**`, `visualizer/**`, and
+            // 22 `src/` files (hindsight ×7, audit ×2, judgment, learning,
+            // memgate, reverify, and 9 non-COPY'd providers including the
+            // exedev trio). Received
+            // from this test's own failing run on the post-wave-3 tree;
+            // re-pinned by the driver at integration per the same-commit
+            // ritual above.
+            //
+            // 3fcd0fca: moved from 91eabeb3 on adoption-commit day, recorded
+            // EMPIRICALLY per the ritual above: 91eabeb3 was received twice on
+            // the uncommitted post-wave-3 working tree; the only content deltas
+            // between that tree and the committed one were NON-walked (the
+            // scripts/dev portability patch — measured absent from the walk —
+            // and this file's own provenance-comment scrub), yet the digest
+            // moved on the committed tree. The walk reads the working tree's
+            // TRACKED walk set, so the adoption commit itself is the tree this
+            // literal binds. Any further walked-input edit moves it again and
+            // the close gate re-runs this pin on whatever tree is final then.
+            //
+            // 25e068ee: moved from 3fcd0fca by the review round 1 fix wave —
+            // ONE walked input: `src/swarmclaw/mcp/tool-bridge.ts`'s :2 header
+            // scrub (the stale "mask secrets (INV-SC5)" claim replaced with
+            // the post-extraction truth, per the blind-hunter finding). The
+            // round's other edits are absent from the walk: hindsight/client.ts
+            // is not COPY'd, the guard/test files are tests/, the dev scripts
+            // are not walked. Adopted LAST, after the wave's final edit landed,
+            // on the tree the close gate runs — the discipline above.
+            //
+            // 2328187: moved from 25e068ee by review round 2 — ONE walked
+            // input: `src/swarmclaw/mcp/tool-bridge.ts`'s :3 header completed
+            // ("routes AND hindsight import the masking primitive directly" —
+            // the blind-hunter half-truth finding). Everything else this round
+            // touched is absent from the walk: the dormancy/mask-env test
+            // files, the dev scripts, visualizer/server (not COPY'd). Adopted
+            // LAST on the final tree, per the discipline above.
+            "2328187438731c9962f9f28a7e7d3ce49e72e2c211eb17c1a4b3b919c5fcfb96",
     );
   });
 });

@@ -14,7 +14,7 @@ import {
   MAX_FILE_BYTES,
 } from "../../src/hindsight/mulch-importer.ts";
 import { ERR_MULCH_FILE_COUNT } from "../../src/hindsight/schemas.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // Mock HindsightClient — records retain calls; recall returns programmable

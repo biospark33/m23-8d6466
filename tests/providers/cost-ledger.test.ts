@@ -50,7 +50,7 @@ import {
   loadCostConfig,
   type RunCostRecord,
 } from "../../src/providers/cost-ledger.ts";
-import { setLogSink } from "../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../src/lib/log.ts";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 

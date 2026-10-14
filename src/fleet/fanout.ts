@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { assertDirMode0700, atomicReplaceFile, fsyncDir, rmQuiet } from "../providers/fs-atomic.ts";
 import { newId } from "../providers/run-record.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // Section 1 — the fan-out record store (AC9)

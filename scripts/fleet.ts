@@ -139,7 +139,7 @@ import type { ProviderAuditLink } from "../src/providers/driver.ts";
 // extending THAT block would edit its lines.
 import { withRunLock } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
-import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
+import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/lib/log.ts";
 // M1.2 (AC1/AC4): the memory cycle's two host legs. This file is their
 // composition root — the dispatch prime rides the ONE brief ingress
 // (ingestBriefJson, below) and the harvest retain rides the shared

@@ -38,7 +38,7 @@ import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { boxRunRoot } from "../providers/harvest.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
 // M2.2 / INV-M2-4: the loser-disposal hook below. The fanout → run-completion

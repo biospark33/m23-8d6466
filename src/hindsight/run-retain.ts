@@ -21,7 +21,7 @@
  */
 
 import { canonicalJson, sha256Hex, type AuditStoreWriter } from "../audit/link-store.ts";
-import { log } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log } from "../lib/log.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import type { HindsightClient } from "./client.ts";
 

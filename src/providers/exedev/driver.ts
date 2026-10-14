@@ -26,7 +26,7 @@
  */
 
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, readSync } from "node:fs";
-import { log, newRequestId } from "../../swarmclaw/log.ts";
+import { log, newRequestId } from "../../lib/log.ts";
 import { assertExistingRunId, assertValidRunId } from "../run-record.ts";
 import { redactSecrets } from "../step-log.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "../driver.ts";

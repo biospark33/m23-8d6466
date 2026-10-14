@@ -19,7 +19,7 @@ import { statusAll, statusRun, type StatusDeps } from "../../src/fleet/status.ts
 import { boxMarkerPath, DEFAULT_PER_CALL_DEADLINE_MS } from "../../src/fleet/fanout-primitive.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS } from "../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import type { ExecResult, ProviderVm } from "../../src/providers/driver.ts";
 
 const RUN_ID = "sbx-20260903-a1b2c3";

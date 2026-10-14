@@ -24,7 +24,7 @@ import {
   harvestedEngineLogPath,
   ingestHarvestedTokens,
 } from "../../src/providers/cost-ledger-bridge.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 
 const IS_ROOT = (process.getuid?.() ?? -1) === 0;
 

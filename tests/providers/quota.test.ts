@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { createRun, SBX_OWNERSHIP_TAG, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import {
   checkHeadroom,
   loadQuotaLimits,

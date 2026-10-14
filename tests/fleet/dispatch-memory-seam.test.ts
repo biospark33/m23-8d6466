@@ -47,7 +47,7 @@ import { dirname, join } from "node:path";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import { FleetError, fakeGate, dispatch, type DispatchDeps } from "../../src/fleet/dispatch.ts";
 import { goodLedger } from "./helpers.ts";
 import { MemgateLedger } from "../../src/memgate/ledger.ts";

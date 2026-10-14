@@ -1,5 +1,6 @@
 # Z5: Chassis fate — utilities to `src/lib/`, dormant server surface per DD-18
 
+**Status:** DONE (2026-10-14) — branch `feature/z5-chassis-fate`, PR → dev
 **Story Points:** 2
 **Sprint:** v6a-Foundation (Wave 2 — Zeropoint macro-host epic, zero E21 gates, live tier: none, deps: none)
 
@@ -110,4 +111,64 @@ The move is mechanical and enumerated at dev time; the listable OWNED set is the
 
 ## Dev Agent Record
 
+## Dev Agent Record
+
+**Landed 2026-10-14** — branch `feature/z5-chassis-fate` (single commit, amended
+through review rounds), PR → dev.
+
+- **Unlazy pipeline:** 8 leaves + node-1.1 (13/13 gates) + root, all VERIFIED
+  with machine evidence (`.unlazy/z5/`); ledgers r1→r9 as contract amendments
+  landed (owned set 122→128).
+- **Round-1 fixes:** see Review Findings (round 1) — all 11 patch groups applied.
+- **Round-2 fixes:** 10 applied — tests/ walk under rules 1/2/4 (rule 3
+  production-only), star/namespace tightening for rules 2/4, logMuted in
+  LOG_CLAUSE, rule-4 resolved-arm pin, formatted-message negative control,
+  js-family walk breadth, self-contained header, __proto__ pin; visualizer/
+  server/index.ts:399 scrub (C10 amended for that line, r9); tool-bridge header
+  completed ("routes AND hindsight").
+- **Disclosed deviations (truth):**
+  - AC5's "no re-pin owed" premise was EMPIRICALLY WRONG: the move edited 21
+    walked COPY inputs and changed the walk's composition (origin out; lib
+    log/mask-env in). The buildId literal was re-pinned per the test's own
+    same-commit ritual — final value 2328187…, provenance chain in
+    `tests/scripts/build-exedev-image.test.ts` (e2dc33cd → 91eabeb3 → 3fcd0fca
+    → 25e068ee → 23281874). AC5's letter (frozen Dockerfile/script/driver pins)
+    holds; verified by node-1.1:N8.
+  - Spec census undercounts (visualizer/ missing; 13 scripts vs 8; ~40 src vs
+    27; nine re-export test consumers vs six) — implementation strictly more
+    complete than enumerated.
+  - Scope amendments: C10's exclusion of visualizer/server/index.ts:399 lifted
+    for that one line (r9); fence.test.ts gained an ALLOWED_REPO_TARGETS entry
+    (r3); comment allowances 1.1.1/1.1.3 (r8).
+  - Deferred: maskEnv `__proto__` key-loss (inherited from origin verbatim;
+    pinned in tests, fix → successor story), README old-home section (C10),
+    bash-walk automation gap, two-lexer consolidation.
+- **Verification at close:** node-1.1 ALL MET 13/13; BG1 pass-set OK
+  8030 pass / 12 skip / 15 fail summary, 14 (fail) markers — strict subset of
+  the 17-name baseline, ZERO new failures, +25 pass; DoD demos green
+  (tests/swarmclaw/ 231 pass incl. the guard; skill-contract 45 pass);
+  story-consistency checker OK.
+
 *Written at implementation time, not at spec time.*
+
+### Review Findings (round 1, 2026-10-13 — bmad-code-review, 4 layers, 26 findings)
+
+Triage: 13 grouped patch entries, 4 defer, 9 rejected. All patch + low fixed in round 1 per the standing review contract.
+
+- [x] [Review][Patch] Barrel exemption over-broad: exempts clause (b) too [tests/swarmclaw/dormancy.test.ts:203] — exempt src/index.ts for clause (a) only; a log-origin import under the barrel path must flag
+- [x] [Review][Patch] visualizer/ absent from the dormancy walk [tests/swarmclaw/dormancy.test.ts] — this diff proves visualizer is a production consumer; add to walk (stays green: imports lib/log only)
+- [x] [Review][Patch] log-via-transport regression unguarded [tests/swarmclaw/dormancy.test.ts] — restored stdio-transport log re-export passes the guard; add rule: stdio-transport specifier + log-symbol clause = violation
+- [x] [Review][Patch] origin resurrection via swarmclaw/log.d.ts or log/index.ts unguarded [tests/swarmclaw/dormancy.test.ts] — extend tail alternation + resolved-dir rule
+- [x] [Review][Patch] multiline dynamic destructure escapes maskEnv/server-surface rules [tests/swarmclaw/dormancy.test.ts] — enclosingStatement clips to the import( line; extend to the enclosing declaration; pin the multiline shape
+- [x] [Review][Patch] template-literal specifier behavior undocumented [tests/swarmclaw/dormancy.test.ts] — declare the lexer ceiling in the docblock and pin the current behavior (house regex-ceiling precedent)
+- [x] [Review][Patch] dormancy docblock drift: raw-pass union + rule-3 tail matching undocumented [tests/swarmclaw/dormancy.test.ts] — docblock truth fixes
+- [x] [Review][Patch] mask-env.ts ships with zero direct unit tests [src/lib/mask-env.ts] — add tests/swarmclaw/mask-env.test.ts (undefined→{}, every value masked, keys preserved) — new owned path r8
+- [x] [Review][Patch] stale docblocks: src/hindsight/client.ts:15-17 (log/maskEnv old homes) and src/swarmclaw/mcp/tool-bridge.ts:2 (claims INV-SC5 masking it no longer holds) — comment scrubs under r8 ledger comment-allowance amendments (1.1.3 G2, 1.1.1 G5)
+- [x] [Review][Patch] provenance-note defects (build-exedev-image.test.ts): "deleted deleted" scrub typo; "ALL import-path-line-only" universal false for tool-bridge (block deletion); "98 files = all test files/scripts/visualizer" mischaracterization; "no further tree edits" self-contradiction
+- [x] [Review][Patch] portability comment rationale inverted (here-string adds the trailing newline; command substitution strips it); per-instance correction
+- [x] [Review][Defer] bash-3.2 read-loop sets verified by no automation [scripts/dev/*] — deferred: verification-gap layer's filed evidence; durable gate-mode check needs a synthetic git fixture disproportionate to the 4-line patch
+- [x] [Review][Defer] two divergent hand-rolled import lexers (dormancy guard + fence.test.ts) [tests/] — deferred: consolidation is a separate refactor; fence lexer predates this change
+- [x] [Review][Defer] AC5 outcome premise falsified (digest moved; re-pin landed in-branch) — deferred to story-header truth at closure (BG3): spec premise empirically wrong, disclosed r4/r7
+- [x] [Review][Defer] spec-text inaccuracies for closure truth: census counts off (visualizer/ missing; 13 scripts vs 8; ~40 src vs 27); INV-SC5 "routes tests now importing from lib/mask-env" describes a pin that doesn't exist (transitive); dev-script portability patch outside owned set (r6, disclosed) — deferred: BG3 story-header truth items, spec-edit rejected per triage rules
+
+Rejected (9): log.ts docblock rewrite ≠ verbatim violation — sanctioned by recorded contract amendment PLAN I1 (r1, the one sanctioned truthfulness sentence; old text would have been false post-move); unpaired-quote mispairing escaping the guard — false: the raw pass runs all four edge regexes quote-pairing-independently, so the union closes the mispair scenario by construction; cli-anything/src unscanned — scope-excluded by story contract (the cli-anything/src/env.ts:15 mention is pre-existing and out of scope; a guard extension there would sit permanently red on an excluded file); AC3-grep-red-on-guard-fixture — adjudicated at r5/N7: the guard is the sanctioned namer, fragment-encoding its plants degrades the test for zero safety gain; spec-census edit requests — rejected per no-spec-edit rule (routed to BG3 truth instead); dev-scripts-as-smuggled-work — disclosed r6, required for N10/N11 to fire on this platform, PR-body disclosure; re-pin-in-branch as "not this story's to fix" — the ritual is the test's own demand, disclosed; DoD process evidence absent from diff — by nature (ledger + story record carry it, BG3); maskEnv-walk-composition claim — verified correct by the acceptance auditor itself.

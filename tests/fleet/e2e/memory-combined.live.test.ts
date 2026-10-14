@@ -852,7 +852,7 @@ describe("memory combined live (M2.3)", () => {
         // QDS_LOG_VERBOSE: the memgate-revoke / memgate-verify-revoked lines
         // this leg asserts are the ONLY memory-key revoke-verify evidence
         // (INV-M3-4 puts them in NO audit row), and the log sink MUTES both
-        // streams under NODE_ENV=test (swarmclaw/log.ts:30) — which bun test
+        // streams under NODE_ENV=test (lib/log.ts:30) — which bun test
         // sets and runFleet merges into this child. Unmute for THIS verb only.
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], {
           cwd: hostRepo,

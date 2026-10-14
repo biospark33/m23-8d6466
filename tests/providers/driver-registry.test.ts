@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveCleanupDriver, resolveDriver } from "../../src/providers/index.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 
 const PINNED = "ghcr.io/example/qds-exedev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

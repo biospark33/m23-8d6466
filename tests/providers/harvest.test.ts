@@ -56,7 +56,7 @@ import {
   type HarvestResult,
 } from "../../src/providers/harvest.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import {
   cloneIntoBox,
   hostGit,

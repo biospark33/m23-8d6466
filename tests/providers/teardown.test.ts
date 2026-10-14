@@ -24,7 +24,7 @@ import type { ExecResult, ProviderAuditLink, ProviderDriver } from "../../src/pr
 import { HarvestError } from "../../src/providers/harvest.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
 import { bunGitRunner, type GitRunner } from "../../src/providers/harvest.ts";
 import { teardownSandbox, TeardownError, type CostLedgerHook, type TeardownDeps } from "../../src/providers/teardown.ts";

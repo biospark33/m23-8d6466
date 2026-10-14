@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { run as cliRun } from "../../scripts/run-record.ts";
 import { liveForeignPid } from "../helpers.ts";
-import { setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink } from "../../src/lib/log.ts";
 import { isRecordLockTimeout, teardownRun } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import {

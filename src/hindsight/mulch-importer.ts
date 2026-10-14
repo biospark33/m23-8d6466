@@ -24,7 +24,7 @@ import { extname, relative, sep as PATH_SEP, resolve as pathResolve } from "node
 import { parse } from "yaml";
 import { MulchExpertiseSchema, ERR_MULCH_FILE_COUNT, type MulchExpertise } from "./schemas.ts";
 import type { HindsightClient } from "./client.ts";
-import { log, newRequestId, type LogEntry } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log, newRequestId, type LogEntry } from "../lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // Constants (spec contract)

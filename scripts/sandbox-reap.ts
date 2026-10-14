@@ -52,7 +52,7 @@ import { teardownMemoryKey } from "../src/fleet/run-completion.ts";
 // discipline F044 set for the ledger).
 import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
-import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import { newRequestId, setLogSink } from "../src/lib/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
 // Structured logs go to stderr so stdout carries only the command's output.

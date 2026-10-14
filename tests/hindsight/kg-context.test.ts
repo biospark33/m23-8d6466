@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { HindsightHttpError } from "../../src/hindsight/client.ts";
 import type { RecallResponse } from "../../src/hindsight/schemas.ts";
 import {

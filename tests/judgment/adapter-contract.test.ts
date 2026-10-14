@@ -30,7 +30,7 @@ import {
   type JudgmentProvider,
 } from "../../src/judgment/provider.ts";
 import { makeJudgmentResponseSchema, type JudgmentRequest, type Question } from "../../src/judgment/schemas.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import contract from "./typesafe-api-contract.json";
 
 const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");

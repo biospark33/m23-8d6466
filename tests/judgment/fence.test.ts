@@ -1,7 +1,7 @@
 /**
  * Two-import fence test (JEV-2 INV-J4, handoff §11 resolution 2).
  *
- * `src/judgment/` imports ONLY `src/lib/http.ts` + `src/swarmclaw/log.ts`
+ * `src/judgment/` imports ONLY `src/lib/http.ts` + `src/lib/log.ts`
  * (repo-internal) plus `zod` (external) and its own siblings. This is the
  * grep-level assertion of the fence — it keeps the providers/audit/gate
  * surfaces structurally unreachable from the judgment core, and keeps the
@@ -15,7 +15,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 const JUDGMENT_SRC = join(import.meta.dir, "..", "..", "src", "judgment");
-const ALLOWED_REPO_IMPORTS = new Set(["../lib/http.ts", "../swarmclaw/log.ts"]);
+const ALLOWED_REPO_IMPORTS = new Set(["../lib/http.ts", "../lib/log.ts"]);
 
 function importSpecifiers(source: string): string[] {
   // Both module edges: import-from AND export-from — a re-export is an import
@@ -37,7 +37,7 @@ describe("src/judgment import fence", () => {
     expect(importSpecifiers('import "./side-effect.ts";')).toContain("./side-effect.ts");
   });
 
-  test("every module imports only http.ts, swarmclaw/log.ts, zod, or its own siblings", () => {
+  test("every module imports only http.ts, lib/log.ts, zod, or its own siblings", () => {
     const violations: string[] = [];
     for (const file of readdirSync(JUDGMENT_SRC)) {
       if (!file.endsWith(".ts")) continue;
@@ -76,7 +76,7 @@ describe("src/judgment import fence", () => {
  * and a sibling edge is any path that stays inside src/judgment/.
  */
 const SRC = join(JUDGMENT_SRC, "..");
-const ALLOWED_REPO_TARGETS = new Set([join(SRC, "lib", "http.ts"), join(SRC, "swarmclaw", "log.ts")]);
+const ALLOWED_REPO_TARGETS = new Set([join(SRC, "lib", "http.ts"), join(SRC, "lib", "log.ts")]);
 
 function judgmentFiles(): string[] {
   return readdirSync(JUDGMENT_SRC, { recursive: true, encoding: "utf8" })
@@ -127,7 +127,7 @@ describe("src/judgment import fence — recursive (J1)", () => {
     expect(fenceViolations(adapter, 'const a = require("../../audit/link-store.ts");').length).toBe(1);
   });
 
-  test("every module at every depth imports only http.ts, swarmclaw/log.ts, zod, node:, or src/judgment/ itself", () => {
+  test("every module at every depth imports only http.ts, lib/log.ts, zod, node:, or src/judgment/ itself", () => {
     const violations = judgmentFiles().flatMap((f) => fenceViolations(f, readFileSync(f, "utf8")));
     expect(violations).toEqual([]);
   });

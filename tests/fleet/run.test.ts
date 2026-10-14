@@ -62,7 +62,7 @@ import {
   InvalidRunIdError,
   RunRecordStore,
 } from "../../src/providers/run-record.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { useTempAuditStore } from "./helpers.ts";
 

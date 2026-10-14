@@ -1,6 +1,8 @@
 /**
- * Tool bridge: enumerate MCP tools (with TTL cache), invoke tools, mask
- * secrets (INV-SC5), and emit observability logs (CC-9).
+ * Tool bridge: enumerate MCP tools (with TTL cache), invoke tools, and emit
+ * observability logs (CC-9). Env masking (INV-SC5) lives in lib/mask-env.ts;
+ * this module no longer masks — routes and hindsight import the masking
+ * primitive directly.
  *
  * bank_id argument validation lives in MCPInvokeArgumentsSchema (checking
  * both `bank_id` and `bankId` spellings against the P0.9 BankIdSchema regex)
@@ -8,10 +10,9 @@
  */
 
 import { z } from "zod";
+import { log, newRequestId } from "../../lib/log.ts";
 import {
   JsonRpcError,
-  log,
-  newRequestId,
   type StdioTransport,
 } from "./stdio-transport.ts";
 
@@ -145,24 +146,6 @@ export const MCPInvokeErrorResponseSchema = z.object({
   }),
   id: z.string().or(z.number()).nullable(),
 });
-
-// ---------------------------------------------------------------------------
-// Secret masking (INV-SC5).
-// ---------------------------------------------------------------------------
-
-/**
- * Mask every env value to `***` for diagnostics/responses (INV-SC5). Key names
- * stay visible; heuristic key-matching both under-covers (PASS, DSN) and
- * over-covers (MONKEY), so all values are masked regardless of key name.
- */
-export function maskEnv(env: Record<string, string> | undefined): Record<string, string> {
-  if (!env) return {};
-  const out: Record<string, string> = {};
-  for (const k of Object.keys(env)) {
-    out[k] = "***";
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // Tool enumeration cache with TTL clamp (Technical Notes).

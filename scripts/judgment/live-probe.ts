@@ -56,7 +56,7 @@ import {
   type JudgmentEnvelope,
   type JudgmentProviderId,
 } from "../../src/judgment/index.ts";
-import { newRequestId } from "../../src/swarmclaw/log.ts";
+import { newRequestId } from "../../src/lib/log.ts";
 import contract from "../../tests/judgment/typesafe-api-contract.json";
 
 const CONFIRM_ENV = "QDS_LIVE_PROBE_CONFIRMED";

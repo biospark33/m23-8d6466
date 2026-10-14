@@ -40,7 +40,7 @@ import { shellQuote } from "../../src/providers/exedev/transport.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger, useTempAuditStore, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 // B2-1: `runMarkerPath()` is no longer imported — every interception in this
 // file keys on the `BOX_MARKER_PATH` literal the poller actually probes, so an
 // ambient `QDS_RUN_ROOT` cannot silently unhook the fixtures.

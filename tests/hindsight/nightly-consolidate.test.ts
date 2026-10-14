@@ -53,7 +53,7 @@ import {
   type MemgateDeps,
   type MemgateLedger,
 } from "../../src/memgate/index.ts";
-import type { LogEntry } from "../../src/swarmclaw/log.ts";
+import type { LogEntry } from "../../src/lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures — env discipline (C-5), tmpdir ledger, tracked closes (gateway

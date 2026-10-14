@@ -262,7 +262,13 @@ fi
 MB="$(git merge-base "${BASE}" HEAD)"
 CHANGED="$(git diff --name-only --diff-filter=ACMR "${MB}" -- '*.ts' | sort -u)"
 if [[ -n "$CHANGED" ]]; then
-  mapfile -t FILES <<< "$CHANGED"
+  # bash-3.2 portable mapfile -t (macOS ships 3.2). The here-string appends
+  # the trailing newline that command substitution strips, so every element
+  # is read normally; the `|| [[ -n $line ]]` arm is dead here but kept
+  # uniform with the blank_code instance below, where command output may
+  # lack a final newline and the arm is what captures the last element.
+  FILES=()
+  while IFS= read -r line || [[ -n $line ]]; do FILES+=("$line"); done <<< "$CHANGED"
 else
   FILES=()
 fi
@@ -276,7 +282,8 @@ for f in "${FILES[@]}"; do
   # comment or string literal is not a cast. Real casts keep their keywords;
   # ${...} interpolation code stays visible. Regex literals remain a lexer
   # ceiling — dp:ok is the hatch.
-  mapfile -t BLANKED < <(blank_code "$f")
+  BLANKED=()
+  while IFS= read -r line || [[ -n $line ]]; do BLANKED+=("$line"); done < <(blank_code "$f")
 
   # Walk added hunks with their line numbers.
   while IFS=$'\t' read -r lineno text; do

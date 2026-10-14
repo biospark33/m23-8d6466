@@ -396,7 +396,7 @@ interface GateContext {
  * brings it back. Production never sets NODE_ENV to "test", so it is
  * unaffected. Read at call time, not module load, so a test can toggle it
  * (test/auth.test.ts's redaction probe does exactly that). Same name and
- * predicate as src/swarmclaw/log.ts's and cli-anything/src/env.ts's copies,
+ * predicate as src/lib/log.ts's and cli-anything/src/env.ts's copies,
  * duplicated rather than imported because those are three separate tsconfig
  * projects with no shared module between them.
  */

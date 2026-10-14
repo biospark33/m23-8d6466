@@ -6,7 +6,7 @@
  * No SDK: `httpRequest`/`HttpPolicy` from src/lib/http.ts + strict zod
  * schemas, mirroring src/hindsight/client.ts (schemas + mock mode + tests
  * + HindsightHttpError body-carrying). `src/judgment/` imports ONLY
- * src/lib/http.ts + src/swarmclaw/log.ts repo-internally — the two-import
+ * src/lib/http.ts + src/lib/log.ts repo-internally — the two-import
  * fence asserted by tests/judgment/fence.test.ts (recursively, adapters/
  * included).
  *
@@ -27,7 +27,7 @@
  * house log.
  */
 
-import { log, newRequestId, type LogEntry } from "../swarmclaw/log.ts";
+import { log, newRequestId, type LogEntry } from "../lib/log.ts";
 import { DEFAULT_MAX_ATTEMPTS } from "./adapters/jev.ts";
 import { CeilingExceededError, type JudgmentCeiling } from "./ceiling.ts";
 import { DEFAULT_PROVENANCE_DIR, detailFromEnvelope, emitProvenance } from "./emit.ts";

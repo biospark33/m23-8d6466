@@ -41,7 +41,7 @@ import {
 } from "../../../src/providers/exedev/driver.ts";
 import { ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
 import { ASSERTION_CODE, type AssertionItem } from "../../../src/providers/exedev/setup-gate.ts";
-import { setLogSink } from "../../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../../src/lib/log.ts";
 import {
   DEFAULT_IMAGE_MARKER,
   fakeExeDev,

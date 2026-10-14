@@ -30,7 +30,7 @@ import {
   type SweepReport,
   type SweepRow,
 } from "../../src/providers/reaper.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import type { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { SBX_OWNERSHIP_TAG, type ExecResult, type ProviderAuditLink } from "../../src/providers/driver.ts";
 import type { FakeKeyApi } from "./fixtures/fake-key-api.ts";

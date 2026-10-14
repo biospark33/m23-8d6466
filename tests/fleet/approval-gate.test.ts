@@ -27,7 +27,7 @@ import {
   RunLockReentrantError,
   withRunLock,
 } from "../../scripts/lib/run-lock.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import {
   awaitDecision,
   DEFAULT_TIMEOUT_MS,

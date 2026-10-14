@@ -84,7 +84,7 @@ import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../providers/exedev/fill.t
 import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 // M2.2 (DD-16): the per-run recall-only memory key — the M2.1 gateway mint and
 // the DD-28.23 env pair it is delivered with. Direct module imports, beside the

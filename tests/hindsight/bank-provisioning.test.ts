@@ -21,7 +21,7 @@ import {
   type ProvisionClient,
   type ProvisionResult,
 } from "../../src/hindsight/bank-provisioner.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // Mock client factory

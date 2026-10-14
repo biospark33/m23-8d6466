@@ -67,7 +67,7 @@ import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
 import { CredentialLifecycleError, defaultKeyCapMicroUsd, SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
 import { type AdmissionInput, CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 import { statusRun } from "../../src/fleet/status.ts";
 import { isSubstrateFailure } from "../../src/providers/fake-gate.ts";
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../src/providers/exedev/fill.ts";

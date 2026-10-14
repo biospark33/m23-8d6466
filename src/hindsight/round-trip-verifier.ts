@@ -37,7 +37,7 @@
 
 import type { HindsightClient } from "./client.ts";
 import { HindsightHttpError } from "./client.ts";
-import { log, newRequestId } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log, newRequestId } from "../lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults — deterministic test memory (AC-1 example content).

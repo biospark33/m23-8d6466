@@ -47,7 +47,7 @@ import {
 } from "./schemas.ts";
 import { forwardScoped, verifyRequest, type MemgateDeps, type MemgatePrincipal } from "../memgate/gateway.ts";
 import { MemgateError, type MemgateRefusalReason } from "../memgate/schemas.ts";
-import { log, newRequestId, type LogEntry } from "../swarmclaw/log.ts";
+import { log, newRequestId, type LogEntry } from "../lib/log.ts";
 
 export interface NightlyDeps {
   /** Built by the caller via memgateDeps(...) — its `.client` is the

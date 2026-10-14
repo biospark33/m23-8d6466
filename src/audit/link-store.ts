@@ -41,7 +41,7 @@ import { dirname } from "node:path";
 import { Database, type Statement } from "bun:sqlite";
 
 import { sanitizeLabel } from "../fleet/brief-schema.ts";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 
 /**
  * The ten hops of the audit chain (story hop table, DD-8). `AuditLinkInput`

@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { redactSecrets, timedLoggedStep, type StepCtx, type StepLogLabels } from "../../src/providers/step-log.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { findKeyManagementUrl, leakScan } from "./fixtures/leak-scan.ts";
 import { SECRET_PREFIXES } from "../../src/providers/run-record.ts";
 

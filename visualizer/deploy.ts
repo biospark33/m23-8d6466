@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
-import { log, newRequestId } from "../src/swarmclaw/log.ts";
+import { log, newRequestId } from "../src/lib/log.ts";
 import { ExeDevDriverError } from "../src/providers/exedev/transport.ts";
 import { assertPlainBoxPath } from "../src/providers/path-guard.ts";
 import {

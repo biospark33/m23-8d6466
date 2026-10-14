@@ -8,7 +8,7 @@
  * fleet fixtures broke the provider suite. It also cost more than layering.
  * `tests/fleet/helpers.ts` VALUE-imports `defaultKeyCapMicroUsd` from
  * `src/providers/credentials.ts`, which drags `credentials.ts` →
- * `swarmclaw/log.ts` → `step-log.ts` into module load for every suite that
+ * `lib/log.ts` → `step-log.ts` into module load for every suite that
  * touches the file — a provider test paying for three modules to get one
  * promise combinator. This file imports nothing from `src/`, which is the part
  * that mattered; `node:`/`Bun` builtins are free.

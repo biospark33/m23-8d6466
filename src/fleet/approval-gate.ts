@@ -87,7 +87,7 @@ import { boundedEcho } from "../providers/step-log.ts";
 //    caller that forgets to wire it gets silence indistinguishable from a
 //    working one. The bug being fixed here IS a declared event with no
 //    producer; a seam whose default is inert would rebuild it.
-import { log } from "../swarmclaw/log.ts";
+import { log } from "../lib/log.ts";
 // TYPE-ONLY, so there is no runtime cycle: `approval.ts` imports this
 // module's `requestApproval` as a value, and this direction is erased.
 import type { ApprovalOutcome, ApprovalRequest } from "../reverify/approval.ts";

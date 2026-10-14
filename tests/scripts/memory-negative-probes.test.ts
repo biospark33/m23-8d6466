@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { HindsightClient } from "../../src/hindsight/client.ts";
-import type { LogEntry } from "../../src/swarmclaw/log.ts";
+import type { LogEntry } from "../../src/lib/log.ts";
 import {
   MEMGATE_ADMIN_KEY,
   QDS_MEMGATE_LEDGER,

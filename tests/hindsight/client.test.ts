@@ -22,7 +22,7 @@ import {
   REFLECT_TIMEOUT_MS,
   RETAIN_TIMEOUT_MS,
 } from "../../src/hindsight/client.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // global fetch mock harness — save/restore per test (story mandate).

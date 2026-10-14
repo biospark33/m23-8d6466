@@ -440,7 +440,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
   test("stopVisualizer propagates a transport failure after logging its own viz-stop-failed line", async () => {
     const vm = "df42-viz-stop-throw";
     await makeVm(vm);
-    const { setLogSink } = await import("../../src/swarmclaw/log.ts");
+    const { setLogSink } = await import("../../src/lib/log.ts");
     const logs: Record<string, unknown>[] = [];
     const restore = setLogSink((entry) => logs.push(entry as unknown as Record<string, unknown>));
     const failing = Object.create(recording) as RecordingDriver;
@@ -466,7 +466,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     // never written and the original null rejection is silently replaced.
     const vm = "df42-viz-stop-null-reject";
     await makeVm(vm);
-    const { setLogSink } = await import("../../src/swarmclaw/log.ts");
+    const { setLogSink } = await import("../../src/lib/log.ts");
     const logs: Record<string, unknown>[] = [];
     const restore = setLogSink((entry) => logs.push(entry as unknown as Record<string, unknown>));
     const failing = Object.create(recording) as RecordingDriver;

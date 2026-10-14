@@ -19,7 +19,7 @@ import { z } from "zod";
 import { MIN_REDACTABLE_VALUE_LEN, SECRET_KEY_RE, redactSecrets } from "../../cli-anything/src/redact.ts";
 import type { GateCheck } from "../phase-engine/gates/report.ts";
 import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 
 /** Per-check evidence cap, suffix INCLUDED (story: Guards/limits). */
 export const NOTE_MAX_CHARS = 1_000;

@@ -8,14 +8,13 @@
 
 import { resolve } from "node:path";
 
-// Observability (CC-9) lives in the transport-neutral ../log.ts — this module
-// re-exports it so existing consumers keep their import paths. New low-level
-// consumers (providers, run-record) import ../log.ts directly: the dependency
-// direction must stay providers → log, never providers → MCP transport.
-// logMuted is deliberately absent: it has always been module-private (never
-// exported from here or ../log.ts) and has no consumers.
-import { log, newRequestId } from "../log.ts";
-export { log, logSink, newRequestId, setLogSink, type LogEntry } from "../log.ts";
+// Observability (CC-9) lives in the transport-neutral ../../lib/log.ts,
+// imported directly — this module no longer re-exports it, so no consumer
+// reaches log symbols through here. The dependency direction must stay
+// providers → log, never providers → MCP transport. logMuted is deliberately
+// absent: it has always been module-private (never exported, here or in
+// lib/log) and has no consumers.
+import { log, newRequestId } from "../../lib/log.ts";
 
 // ---------------------------------------------------------------------------
 // INV-SC2: command allowlist + code-injection arg rules.

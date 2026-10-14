@@ -31,7 +31,7 @@ import type { ExecResult } from "../../src/providers/driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import type { TeardownDeps } from "../../src/providers/teardown.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { isRunLockDestructive } from "../../scripts/lib/run-lock.ts";
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import {

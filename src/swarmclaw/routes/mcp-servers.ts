@@ -6,17 +6,17 @@
  *   DELETE /api/mcp-servers/{id}    — reclaim: shut the subprocess down, free the slot
  */
 
+import { newRequestId } from "../../lib/log.ts";
+import { maskEnv } from "../../lib/mask-env.ts";
 import {
   buildSubprocessEnv,
   CommandValidationError,
   JsonRpcError,
-  newRequestId,
   StdioTransport,
   validateCommand,
 } from "../mcp/stdio-transport.ts";
 import {
   assertInvokeResultWithinCap,
-  maskEnv,
   MCPInvokeErrorResponseSchema,
   MCPInvokeSchema,
   MCPResultTooLargeError,

@@ -9,7 +9,7 @@
  * FleetError unified: ONE class, in dispatch.ts (C2). Imported here, never
  * re-exported — see the import below.
  */
-import { log, newRequestId } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../lib/log.ts";
 import { SBX_OWNERSHIP_TAG, type ExecResult, type ProviderVm } from "../providers/driver.ts";
 import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
 // Imported, not restated as "120 s": it is the number a status read must never

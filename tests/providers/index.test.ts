@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { registerDriver, resolveDriver } from "../../src/providers/index.ts";
 import type { ProviderDriver } from "../../src/providers/driver.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 
 const SECRET = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJ";
 

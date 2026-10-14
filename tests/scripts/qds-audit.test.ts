@@ -29,7 +29,7 @@ import { CostLedger } from "../../src/providers/cost-ledger.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { brokenDetail, describeHop, run } from "../../scripts/qds-audit.ts";
 import { chainVerdict } from "../../src/audit/index.ts";
-import { log, setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import { log, setLogSink, type LogEntry } from "../../src/lib/log.ts";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/qds-audit.ts");
 

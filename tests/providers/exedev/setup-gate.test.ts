@@ -20,7 +20,7 @@ import { setupGate } from "../../../src/providers/exedev/setup-gate.ts";
 import { RosterError } from "../../../src/phase-engine/roster/schema.ts";
 import { provisionAdmittedRun, ProvisionRefusedError, type ProviderAuditLink } from "../../../src/providers/driver.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { setLogSink } from "../../../src/swarmclaw/log.ts";
+import { setLogSink } from "../../../src/lib/log.ts";
 import {
   fakeExeDev,
   writePostureAttestation,

@@ -40,7 +40,7 @@ import {
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { teardownMemoryKey } from "../src/fleet/run-completion.ts";
 import { AuditStoreError, openAuditStore, type AuditStoreWriter } from "../src/audit/link-store.ts";
-import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import { newRequestId, setLogSink } from "../src/lib/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import {

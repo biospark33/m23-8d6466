@@ -21,7 +21,7 @@ import {
   safeJson,
   type SwarmClawServer,
 } from "../../src/swarmclaw/index.ts";
-import { type LogEntry, setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { type LogEntry, setLogSink } from "../../src/lib/log.ts";
 
 const FAKE = join(import.meta.dir, "fixtures", "fake-mcp-server.ts");
 /** Server-generated request ids come from crypto.randomUUID() (v4). */
