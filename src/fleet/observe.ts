@@ -194,11 +194,14 @@ export interface SweepChainCtx {
  */
 export const ON_TICK_DEADLINE_MS = 60_000;
 
+/** R2-14: total `onTick` time per pass is capped at this fraction of the pass wall-clock budget. */
+export const ON_TICK_PASS_BUDGET_FRACTION = 0.25;
+
 /** What `onTick` receives for one still-running resident (interface I3). */
 export interface ObserveTickInfo {
   readonly runId: string;
   readonly vm: string;
-  /** The in-lock re-read record (`nowRec`). */
+  /** The in-lock re-read record (`nowRec`), captured under the lock; the hook itself runs after release. */
   readonly record: RunRecord;
   readonly driver: ProviderDriver;
   /** `deps.requestId` — the sweep invocation's id, the tick's idempotence key. */
@@ -232,14 +235,17 @@ export interface ObserveSweepDeps {
   wallClockBudgetMs?: number;
   /**
    * Optional host-side tick hook: called at most once per pass for each
-   * resident whose box is still alive and whose run has not settled, inside
-   * its lock, awaited but bounded by `onTickDeadlineMs`. Any throw, rejection
+   * resident whose box is still alive and whose run has not settled, after
+   * its run lock is released (never inside it), awaited but bounded by
+   * `onTickDeadlineMs`, and by a per-pass total (`onTickPassBudgetMs`). Any throw, rejection
    * or timeout is swallowed (logged) and never touches counters, dispositions
    * or the lock. Absent = today's behavior.
    */
   onTick?: (info: ObserveTickInfo) => void | Promise<void>;
   /** Override of ON_TICK_DEADLINE_MS (tests). */
   onTickDeadlineMs?: number;
+  /** Override of wallClockBudgetMs * ON_TICK_PASS_BUDGET_FRACTION (tests). */
+  onTickPassBudgetMs?: number;
 }
 
 // ─── observability (the observeLine idiom, run-completion.ts:115-129) ────────
@@ -451,6 +457,42 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
   let processed = 0;
 
   /**
+   * J4 onTick, run AFTER the run lock is released (R2-02) so `fleet teardown`/
+   * `harvest` on the run are never refused while the hook waits on a box read
+   * plus a model call. A box torn down concurrently is the hook's recorded
+   * miss, not the sweep's. Awaited, bounded by the per-call deadline,
+   * fault-isolated, logged on failure; never touches counters or dispositions.
+   * Skipped (logged) when the remaining pass budget cannot cover this hook plus
+   * one more deadline (R1-05), or when hooks already spent their share of the
+   * pass (R2-14, ON_TICK_PASS_BUDGET_FRACTION).
+   */
+  let hookSpentMs = 0;
+  const runTickHook = async (onTick: NonNullable<ObserveSweepDeps["onTick"]>, info: ObserveTickInfo): Promise<void> => {
+    const deadline = deps.onTickDeadlineMs ?? ON_TICK_DEADLINE_MS;
+    const remainingMs = budgetMs - el();
+    const hookBudgetMs = deps.onTickPassBudgetMs ?? budgetMs * ON_TICK_PASS_BUDGET_FRACTION;
+    const reason = remainingMs < deadline * 2 ? "wall-clock-budget" : hookSpentMs >= hookBudgetMs ? "pass-hook-budget" : undefined;
+    if (reason !== undefined) {
+      sweepLine(deps.requestId, {
+        runId: info.runId,
+        event: "sweep-ontick-skipped",
+        reason,
+        remaining_ms: Math.max(0, remainingMs),
+        sweep_ms: el(),
+      });
+      return;
+    }
+    const t0 = Date.now();
+    try {
+      await withTimeout((async () => onTick(info))(), deadline, `onTick(${info.runId})`);
+    } catch (e) {
+      sweepLine(deps.requestId, { runId: info.runId, event: "sweep-ontick-failed", error: errText(e), sweep_ms: el() });
+    } finally {
+      hookSpentMs += Date.now() - t0;
+    }
+  };
+
+  /**
    * Drive ONE candidate under its own acquire/release of the per-run lock.
    * Sets exactly one disposition counter — the identity
    * `dispositions + candidates_skipped === candidates_enumerated` holds by
@@ -502,6 +544,7 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
     }
 
     let chainCtx: SweepChainCtx | undefined;
+    let pendingTick: ObserveTickInfo | undefined;
     try {
       // In-lock re-read — UNCONDITIONAL (AC3): a record open at enumeration
       // and closedAt here was collected between the two (the reaper, a
@@ -713,31 +756,9 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
             // The one arm where the box is alive AND the run unsettled: engine-dead
             // retires the run, skip means the box could not be read (no trustworthy
             // state to tick on), and every other kind tore the box down or closed it.
+            // R2-02: only RECORD the decision here; the hook runs after the lock is released.
             if (deps.onTick !== undefined) {
-              const onTick = deps.onTick;
-              const deadline = deps.onTickDeadlineMs ?? ON_TICK_DEADLINE_MS;
-              // J4 (R1-05): budget-aware. A hook may burn a full deadline per resident,
-              // which would starve later candidates (settled runs awaiting teardown)
-              // pass after pass. Run it only if the remaining pass budget still covers
-              // this hook PLUS one more deadline of margin for the rest of the pass.
-              const remainingMs = budgetMs - el();
-              if (remainingMs < deadline * 2) {
-                sweepLine(deps.requestId, {
-                  runId,
-                  event: "sweep-ontick-skipped",
-                  reason: "wall-clock-budget",
-                  remaining_ms: Math.max(0, remainingMs),
-                  sweep_ms: el(),
-                });
-              } else try {
-                await withTimeout(
-                  (async () => onTick({ runId, vm, record: nowRec, driver: deps.driver, sweepRequestId: deps.requestId }))(),
-                  deadline,
-                  `onTick(${runId})`,
-                );
-              } catch (e) {
-                sweepLine(deps.requestId, { runId, event: "sweep-ontick-failed", error: errText(e), sweep_ms: el() });
-              }
+              pendingTick = { runId, vm, record: nowRec, driver: deps.driver, sweepRequestId: deps.requestId };
             }
           }
         } else if (outcome.kind === "refused") {
@@ -801,6 +822,7 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
         // operator, withRunLock's own leave-for-operator posture.
       }
     }
+    if (pendingTick !== undefined && deps.onTick !== undefined) await runTickHook(deps.onTick, pendingTick);
   };
 
   for (const rec of candidates) {

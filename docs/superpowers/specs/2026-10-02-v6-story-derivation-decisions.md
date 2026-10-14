@@ -370,16 +370,20 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     detail `unrecognized action: compact (host-only: …)`). The allowlist entries, read via
     `directiveAllowedAt`, govern only the future host-originated path.
     (a) **buildId:** BOTH `src/phase-engine/steering.ts` and `src/fleet/observe.ts` (the `onTick`
-    seam) are COPY-set and move `deriveBuildId`; re-pinned `285156f` (J3's pin)→`348e5d4` on the branch
-    (DD-28.2 ritual; publish/adopt stays operator-gated).
+    seam) are COPY-set and move `deriveBuildId`; origin/dev's literal `285156f` was already stale: J3's CodeRabbit round-3 commit `dac6e6c2`
+    edited the walked input `src/fleet/dispatch.ts` without a re-pin, so dev's real digest is
+    `b34dc6b` and dev's own pin test is red. J4 moves `b34dc6b`→`4095eff` via `steering.ts` +
+    `observe.ts` only (and incidentally restores dev's pin test) (DD-28.2 ritual; publish/adopt
+    stays operator-gated).
     (b) **Arming PR owes:** a host-to-engine directive path (DF1.11's inbox is context-only, and
     production builds the L7 hook with no steering writer, so arming today only logs
     `no-steering-writer`) plus the box-side `compact` applier (its own re-pin). Both are unowned
     follow-up work that rides the arming PR.
-    (c) **Honestly unproven:** the box journal's resident block is written only pre-walk and
-    post-`run_end`, so L7 sees real spend/iterations only near run end, and RSS/context
-    utilization are not host-observable (null). A mid-run resident refresh is box-side follow-up
-    work. It is unowned and rides the arming PR.
+    (c) **Honestly unproven:** the box journal's resident block is refreshed only after
+    `run.finish` writes `journal/final.json`, the very marker that makes observe treat the run as
+    settled, so in production L7 makes ZERO asks today. RSS/context utilization are not
+    host-observable (null). A mid-run resident refresh (box-side engine work) is the
+    prerequisite; it is unowned and rides the arming PR.
     (d) **Pre-dispatch sanity leg:** asks a provisional noul `manifest_consistent` question purely
     to emit provenance. It names no disposition values and stays provenance-only until a register
     amendment names its answer pair.

@@ -10,7 +10,8 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { run as fleetRun } from "../../scripts/fleet.ts";
+import { run as fleetRun, observeTickHookFor } from "../../scripts/fleet.ts";
+import type { ObserveTickInfo } from "../../src/fleet/observe.ts";
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import { setLogSink } from "../../src/lib/log.ts";
 import { createRun, type ExecResult } from "../../src/providers/driver.ts";
@@ -120,4 +121,42 @@ test("fleet observe --all with injected deps and NO judgmentPack runs hook-free"
   expect(houseLog.some((l) => l.event === "l7-ask")).toBe(false);
   // the sweep did reach the running resident (so the absence of a read is the hook's absence)
   expect(houseLog.some((l) => l.runId === "run-cli")).toBe(true);
+});
+
+test("observeTickHookFor: production (no deps) gets the L7 hook; deps without judgmentPack get none; injected pack is used (R2-19)", async () => {
+  // no deps ⇒ the hook on its defaults. Invoked against a box whose journal is cleanly absent, so it reads
+  // the default journal path and writes nothing anywhere.
+  const prod = observeTickHookFor(undefined).onTick;
+  expect(typeof prod).toBe("function");
+  const seen: string[] = [];
+  const absentBox = new (class extends FakeDriver {
+    override async execTimed(_vm: string, argv: string[]): Promise<ExecResult> {
+      seen.push(argv.join(" "));
+      return { stdout: "", stderr: "", exitCode: 1 }; // `test -f` says: not there
+    }
+    override async exec(vm: string, argv: string[]): Promise<ExecResult> {
+      return this.execTimed(vm, argv);
+    }
+  })(tmp("qds-j4-sel-box-"));
+  const info = { runId: "run-sel", vm: "vm-sel", record: {}, driver: absentBox, sweepRequestId: "sweep-sel" } as unknown as ObserveTickInfo; // dp:ok the hook reads only runId/vm/driver/sweepRequestId
+  await prod?.(info);
+  expect(seen.some((c) => c.includes("/home/exedev/run-sel.journal.jsonl"))).toBe(true);
+
+  // injected deps, no judgmentPack ⇒ hook-free
+  expect(observeTickHookFor({})).toEqual({});
+
+  // injected pack ⇒ the hook built on THOSE deps (its injected reader is the one called)
+  const reads: string[] = [];
+  const injected = observeTickHookFor({
+    judgmentPack: {
+      provenanceDir: path.join(tmp("qds-j4-sel-out-"), "prov"),
+      readBoxFile: async (_d, _vm, p) => {
+        reads.push(p);
+        return { kind: "absent", probeExit: 1 };
+      },
+    },
+  }).onTick;
+  expect(typeof injected).toBe("function");
+  await injected?.(info);
+  expect(reads).toEqual(["/home/exedev/run-sel.journal.jsonl"]);
 });

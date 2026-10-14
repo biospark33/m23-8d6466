@@ -10,7 +10,7 @@
  * stand-in where a specific answer/failure is needed) against tmp dirs only.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -289,7 +289,18 @@ describe("AC5 — recording-only", () => {
     expect(PACK_SIGNALS_ARMED).toBe(false);
     const src = readFileSync(join(ROOT, "src", "autonomy", "host-pack.ts"), "utf8");
     expect(src).toMatch(/export const PACK_SIGNALS_ARMED = false as const;/);
-    expect(/process\.env|Bun\.env|readFileSync\([^)]*\.(json|ya?ml|env)/.test(src)).toBe(false);
+    // No ambient read of any kind (R2-11): env in every spelling, and no config-file read.
+    const ambient = [
+      /process\.env/,
+      /Bun\.env/,
+      /import\.meta\.env/,
+      /node:process/,
+      /Bun\.file\(/,
+      /readFileSync|readFile\(|createReadStream/,
+      /\.(json|jsonc|ya?ml|toml|env|ini)["'`]/,
+      /\brc["'`]/,
+    ];
+    expect(ambient.filter((re) => re.test(src)).map(String)).toEqual([]);
   });
 
   test("a past-threshold ask writes ZERO steering directives", async () => {
@@ -300,13 +311,28 @@ describe("AC5 — recording-only", () => {
     expect(r.writes).toEqual([]);
   });
 
-  test("env arming does not exist: QDS_JUDGMENT_PACK_ARMED=1 changes nothing", async () => {
-    const prev = process.env.QDS_JUDGMENT_PACK_ARMED;
-    process.env.QDS_JUDGMENT_PACK_ARMED = "1";
-    cleanups.push(() => {
-      if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_JUDGMENT_PACK_ARMED");
-      else process.env.QDS_JUDGMENT_PACK_ARMED = prev;
-    });
+  test("env arming does not exist: every plausible arming var set to 1 changes nothing", async () => {
+    const names = [
+      "QDS_JUDGMENT_PACK_ARMED",
+      "PACK_SIGNALS_ARMED",
+      "QDS_PACK_SIGNALS_ARMED",
+      "QDS_PACK_ARMED",
+      "JUDGMENT_PACK_ARMED",
+      "JUDGMENT_ARMED",
+      "QDS_JUDGMENT_ARMED",
+      "HOST_PACK_ARMED",
+      "QDS_HOST_PACK_ARMED",
+      "PACK_ARMED",
+      "ARMED",
+    ];
+    for (const n of names) {
+      const prev = process.env[n];
+      process.env[n] = "1";
+      cleanups.push(() => {
+        if (prev === undefined) Reflect.deleteProperty(process.env, n);
+        else process.env[n] = prev;
+      });
+    }
     const r = rig();
     const ctx = packContext(r.deps);
     await l7Ask(ctx, state());
@@ -745,6 +771,64 @@ describe("L7 per-tick key, state digest, per-run shards (R1-08)", () => {
     expect((await l7Ask(ctx, state({ tickKey: "tick-2" }))).kind).toBe("asked");
     expect(jsonl(join(shard, "x-rx.jsonl")).length).toBe(1);
   });
+
+  test("an I/O error on a healthy shard is a `corpus-io` miss; the shard is NOT set aside (R2-12)", async () => {
+    const judge = scriptedJudge(compactAnswer);
+    const r = rig({ client: judge });
+    const ctx = packContext(r.deps);
+    expect((await l7Ask(ctx, state({ tickKey: "t1" }))).kind).toBe("asked");
+    const shard = l7ShardDir(r.msDir, "run-a");
+    const file = join(shard, "x-rx.jsonl");
+    chmodSync(file, 0o000);
+    cleanups.unshift(() => chmodSync(file, 0o644)); // before the tmp dir is removed
+    expect(await l7Ask(ctx, state({ tickKey: "t2" }))).toEqual({ kind: "miss", reason: "corpus-io" });
+    expect(files(shard)).toContain("x-rx.jsonl");
+    expect(files(shard).some((f) => f.includes(".unreadable-"))).toBe(false);
+    chmodSync(file, 0o644);
+    // history survived: the same state is still recognised as unchanged, no second paid ask
+    expect(await l7Ask(ctx, state({ tickKey: "t3" }))).toEqual({ kind: "state-unchanged" });
+    expect(judge.calls).toBe(1);
+  });
+
+  test("a triage (foreign) line in a shard is `corpus-unreadable` BEFORE the ask, and set aside (R2-13)", async () => {
+    const judge = scriptedJudge(compactAnswer);
+    const r = rig({ client: judge });
+    const shard = l7ShardDir(r.msDir, "run-a");
+    mkdirSync(shard, { recursive: true });
+    const triage = TriageRecordSchema.parse({
+      finding_id: "f1",
+      finding_text: "a finding",
+      diff_context_ref: "ref",
+      label: "lens",
+      disposition: "PATCH",
+      labeler: "someone",
+      pr: null,
+      round: null,
+      created_at: null,
+    });
+    appendFileSync(join(shard, "x-rx.jsonl"), `${JSON.stringify(triage)}\n`);
+    const ctx = packContext(r.deps);
+    expect(await l7Ask(ctx, state())).toEqual({ kind: "miss", reason: "corpus-unreadable" });
+    expect(judge.calls).toBe(0);
+    expect(files(shard).some((f) => f.startsWith("x-rx.jsonl.unreadable-"))).toBe(true);
+    expect((await l7Ask(ctx, state({ tickKey: "tick-2" }))).kind).toBe("asked");
+    expect(judge.calls).toBe(1);
+  });
+
+  test("state-unchanged only skips within the same answer_mode: a mock record never suppresses a live ask (R2-16)", async () => {
+    const mock = scriptedJudge(compactAnswer);
+    const r = rig({ client: mock });
+    expect((await l7Ask(packContext(r.deps), state({ tickKey: "t1" }))).kind).toBe("asked");
+    const live = scriptedJudge(compactAnswer);
+    const liveJudge: Judge = { mode: "live", judge: live.judge };
+    const liveCtx = packContext({ ...r.deps, client: liveJudge });
+    const out = await l7Ask(liveCtx, state({ tickKey: "t2" }));
+    if (out.kind !== "asked") throw new Error(`expected asked, got ${out.kind}`);
+    expect(out.record.answer_mode).toBe("live");
+    expect(live.calls).toBe(1);
+    // and the live record now suppresses the next live ask of the same state
+    expect(await l7Ask(liveCtx, state({ tickKey: "t3" }))).toEqual({ kind: "state-unchanged" });
+  });
 });
 
 describe("armed L8 kept-set (R1-07)", () => {
@@ -783,13 +867,53 @@ describe("armed L8 kept-set (R1-07)", () => {
     expect(r.lines.find((l) => "would_keep" in l)?.would_keep).toEqual(["run-a/f1", "run-a/f2"]);
   });
 
-  test("misses and already-recorded findings are never filtered", async () => {
-    const r = rig({ client: selectiveJudge(["run-a/f1"]) });
+  test("misses are never filtered; an already-recorded finding keeps its recorded disposition (R2-01)", async () => {
+    const judge = selectiveJudge(["run-a/f1"]);
+    let calls = 0;
+    const r = rig({
+      client: {
+        mode: "mock",
+        judge: (...a) => {
+          calls++;
+          return judge.judge(...a);
+        },
+      },
+    });
     const ctx = packContext(r.deps);
-    await l8Prefilter(ctx, [finding("f1")]); // recorded as would-filter
+    await l8Prefilter(ctx, [finding("f1"), finding("f2")]); // f1 recorded would-filter, f2 recorded keep
+    expect(r.lines.find((l) => "would_keep" in l)?.would_keep).toEqual(["run-a/f2"]);
     r.lines.length = 0;
-    await l8Prefilter(ctx, [finding("f1"), finding("x", { author: "coderabbitai[bot]" })]);
-    expect(r.lines.find((l) => "would_keep" in l)?.would_keep).toEqual(["run-a/f1", "run-a/x"]);
+    await l8Prefilter(ctx, [finding("f1"), finding("f2"), finding("x", { author: "coderabbitai[bot]" })]);
+    expect(calls).toBe(2); // the repeat pass asks nothing
+    // the filter is idempotent: a previously filtered finding stays filtered, the kept one stays kept
+    expect(r.lines.find((l) => "would_keep" in l)?.would_keep).toEqual(["run-a/f2", "run-a/x"]);
+    const skips = r.lines.filter((l) => l.skip === "already-recorded");
+    expect(skips.map((l) => [l.findingId, l.would_signal])).toEqual([
+      ["f1", true],
+      ["f2", false],
+    ]);
+  });
+
+  test("each L8 ask has a deadline: a hung ask is an `ask-deadline` miss and the lock is released (R2-09)", async () => {
+    let calls = 0;
+    const answered = selectiveJudge([]);
+    const judge: Judge = {
+      mode: "mock",
+      judge: (...a) => {
+        calls++;
+        if (calls === 1) return new Promise<never>(() => {}); // never settles
+        return answered.judge(...a);
+      },
+    };
+    const r = rig({ client: judge, l7AskDeadlineMs: 20 });
+    const ctx = packContext(r.deps);
+    const input = [finding("f1"), finding("f2")];
+    expect(await l8Prefilter(ctx, input)).toEqual(input);
+    expect(r.lines.find((l) => l.findingId === "f1")).toMatchObject({ event: "l8-filter", miss: "ask-deadline" });
+    expect(r.lines.find((l) => l.findingId === "f2")?.answer).toBeDefined();
+    // the lock was released in finally: another writer can take it at once
+    const held = acquireRunLock(r.corpus, CORPUS_LOCK_ID, "next writer");
+    releaseRunLock(held);
   });
 });
 

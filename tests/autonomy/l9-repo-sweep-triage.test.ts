@@ -10,6 +10,7 @@ import {
   BRIEF_MAX_CHARS,
   L9_MOCK_CORPUS_DIR,
   resolveTriageCorpusDir,
+  resolveProvenanceDir,
   MAX_WALK_ENTRIES,
   PATH_MAX_CHARS,
   L9_EGRESS_CLASS,
@@ -83,7 +84,7 @@ describe("makeSweepTriageRanker", () => {
   test("envelope egress class is ac-prose", async () => {
     const seen: string[] = [];
     const client = mockClient();
-    const spy = { judge: async (...a: Parameters<JudgmentClient["judge"]>) => { const e = await client.judge(...a); seen.push(e.egress_class); return e; } };
+    const spy = { mode: "mock" as const, judge: async (...a: Parameters<JudgmentClient["judge"]>) => { const e = await client.judge(...a); seen.push(e.egress_class); return e; } };
     await makeSweepTriageRanker({ client: spy, corpusDir: corpus(), log: sink }).rank(hs);
     expect(seen).toEqual(["ac-prose", "ac-prose", "ac-prose"]);
   });
@@ -97,13 +98,13 @@ describe("makeSweepTriageRanker", () => {
   test("brief is length-capped before egress", async () => {
     const sent: unknown[] = [];
     const client = mockClient();
-    const spy = { judge: async (s: Parameters<JudgmentClient["judge"]>[0], ...rest: [Parameters<JudgmentClient["judge"]>[1], Parameters<JudgmentClient["judge"]>[2]]) => { sent.push(s); return client.judge(s, ...rest); } };
+    const spy = { mode: "mock" as const, judge: async (s: Parameters<JudgmentClient["judge"]>[0], ...rest: [Parameters<JudgmentClient["judge"]>[1], Parameters<JudgmentClient["judge"]>[2]]) => { sent.push(s); return client.judge(s, ...rest); } };
     await makeSweepTriageRanker({ client: spy, corpusDir: corpus(), log: sink }).rank([{ path: "p", brief: "x".repeat(BRIEF_MAX_CHARS * 3), score: 1 }]);
     expect((sent[0] as { brief: string }).brief).toHaveLength(BRIEF_MAX_CHARS);
   });
 
   test("egress refusal is a recorded miss: no throw, no record, order intact", async () => {
-    const client = { judge: async () => { throw new EgressRefusedError("diff-hunk refused", "diff-hunk"); } };
+    const client = { mode: "mock" as const, judge: async () => { throw new EgressRefusedError("diff-hunk refused", "diff-hunk"); } };
     const out = await makeSweepTriageRanker({ client, corpusDir: corpus(), log: sink }).rank(hs);
     expect(out).toHaveLength(3);
     const misses = triageLines().filter((l) => l.miss);
@@ -114,7 +115,7 @@ describe("makeSweepTriageRanker", () => {
 
   test("ceiling exhaustion is a recorded miss and stops further asks", async () => {
     let calls = 0;
-    const client = { judge: async () => { calls++; throw new CeilingExceededError(10, 5); } };
+    const client = { mode: "mock" as const, judge: async () => { calls++; throw new CeilingExceededError(10, 5); } };
     await makeSweepTriageRanker({ client, corpusDir: corpus(), log: sink }).rank(hs);
     expect(calls).toBe(1);
     expect(triageLines().map((l) => l.miss)).toEqual(["ceiling-exceeded", "ceiling-exhausted", "ceiling-exhausted"]);
@@ -128,7 +129,7 @@ describe("makeSweepTriageRanker", () => {
   });
 
   test("generic judge failure is a miss, not a throw", async () => {
-    const client = { judge: async () => { throw new Error("boom"); } };
+    const client = { mode: "mock" as const, judge: async () => { throw new Error("boom"); } };
     const out = await makeSweepTriageRanker({ client, corpusDir: corpus(), log: sink }).rank(hs);
     expect(out).toHaveLength(3);
     expect(triageLines().every((l) => l.miss === "judge-failed")).toBe(true);
@@ -167,7 +168,7 @@ describe("L9 review fixes (round 1)", () => {
   test("R1-13: second rank() over the same hotspots asks nothing; changed brief is re-asked", async () => {
     let asks = 0;
     const c = mockClient();
-    const spy = { judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
+    const spy = { mode: "mock" as const, judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
     const r = makeSweepTriageRanker({ client: spy, corpusDir: corpus(), log: sink });
     await r.rank(hs);
     expect(asks).toBe(3);
@@ -194,7 +195,7 @@ describe("L9 review fixes (round 1)", () => {
   test("R1-20: non-finite scores are recorded misses; order is total and deterministic", async () => {
     let asks = 0;
     const c = mockClient();
-    const spy = { judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
+    const spy = { mode: "mock" as const, judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
     const mixed: SweepHotspot[] = [
       { path: "n", brief: "n", score: Number.NaN },
       { path: "ok", brief: "ok", score: 1 },
@@ -310,5 +311,54 @@ describe("opensrcSpans", () => {
     const ranked = await makeSweepTriageRanker({ client: mockClient(), corpusDir: corpus(), log: sink }).rank(r.spans);
     expect(ranked.map((h) => h.path)).toEqual(r.spans.map((h) => h.path));
     expect(records()).toHaveLength(2);
+  });
+});
+
+describe("L9 review fixes (round 2, FX-E)", () => {
+  test("R2-03: only explicit live selects the measured corpus; spy without mode routes to mock", async () => {
+    const live = resolveTriageCorpusDir({ mode: "live" });
+    expect(resolveTriageCorpusDir({})).toBe(resolveTriageCorpusDir({ mode: "mock" }));
+    expect(resolveTriageCorpusDir({ mode: "typo" })).not.toBe(live);
+    expect(resolveTriageCorpusDir({}).endsWith(join("corpus", "mock"))).toBe(true);
+    const c = mockClient();
+    const proxy = { judge: (...a: Parameters<JudgmentClient["judge"]>) => c.judge(...a) };
+    expect(resolveTriageCorpusDir(proxy as { mode?: string })).toBe(resolveTriageCorpusDir({ mode: "mock" }));
+    // @ts-expect-error Judge.mode is required: a wrapper that omits it does not typecheck
+    makeSweepTriageRanker({ client: proxy, corpusDir: corpus(), log: sink });
+  });
+
+  test("R2-07: cap counts only asked hotspots; recorded ones stay in the would-be order", async () => {
+    const many = Array.from({ length: MAX_HOTSPOTS_PER_CALL + 15 }, (_, i) => ({ path: `f${String(i).padStart(3, "0")}`, brief: "b", score: 1 }));
+    const pre = many.slice(0, 10);
+    await makeSweepTriageRanker({ client: mockClient(), corpusDir: corpus(), log: sink }).rank(pre);
+    logs = [];
+    let asks = 0;
+    const c = mockClient();
+    const spy = { mode: "mock" as const, judge: async (...a: Parameters<JudgmentClient["judge"]>) => { asks++; return c.judge(...a); } };
+    await makeSweepTriageRanker({ client: spy, corpusDir: corpus(), log: sink }).rank(many);
+    expect(asks).toBe(MAX_HOTSPOTS_PER_CALL);
+    expect(triageLines().filter((l) => l.miss === "already-recorded")).toHaveLength(10);
+    expect(triageLines().filter((l) => l.miss === "capped")).toHaveLength(5);
+    const order = logs.find((l) => l.event === "l9-triage-order");
+    expect((order?.would_order as string[]).length).toBe(many.length);
+  });
+
+  test("R2-08: default provenance dir anchors to the factory root, not cwd (pure)", () => {
+    const d = resolveProvenanceDir();
+    expect(d.startsWith("/")).toBe(true);
+    expect(d.endsWith(join("_bmad-output", "judgment", "provenance"))).toBe(true);
+    expect(d).toBe(join(dirname(dirname(import.meta.dir)), "_bmad-output", "judgment", "provenance"));
+    expect(resolveProvenanceDir("/x/p")).toBe("/x/p");
+  });
+
+  test("R2-18: every l9-triage log line carries answer_mode", async () => {
+    await makeSweepTriageRanker({ client: mockClient(), corpusDir: corpus(), log: sink }).rank(hs);
+    const all = logs.filter((l) => l.operation === "l9-triage");
+    expect(all.length).toBeGreaterThan(3);
+    expect(all.every((l) => l.answer_mode === "mock")).toBe(true);
+    logs = [];
+    const live = { mode: "live" as const, judge: async () => { throw new Error("x"); } };
+    await makeSweepTriageRanker({ client: live, corpusDir: corpus(), log: sink }).rank(hs);
+    expect(logs.every((l) => l.answer_mode === "live")).toBe(true);
   });
 });

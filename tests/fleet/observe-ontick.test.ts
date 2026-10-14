@@ -134,16 +134,40 @@ describe("observeSweep onTick seam", () => {
     expect(a.sweepRequestId).toBe("req-j4-sweep");
   });
 
-  test("runs inside the run's lock", async () => {
+  test("R2-02: hook runs with the run lock RELEASED (a teardown-style acquire succeeds)", async () => {
     const f = fixture();
     await f.seed("run-a");
-    let lockPresent = false;
+    let lockPresent = true;
+    let acquired = false;
     await observeSweep(f.deps({ onTick: (i) => {
           lockPresent = fs.existsSync(path.join(f.dir, `${i.runId}.lock`));
+          const h = acquireRunLock(f.dir, i.runId, "teardown");
+          acquired = true;
+          releaseRunLock(h);
         },
       }));
-    expect(lockPresent).toBe(true);
+    expect(lockPresent).toBe(false);
+    expect(acquired).toBe(true);
     expect(fs.existsSync(path.join(f.dir, "run-a.lock"))).toBe(false);
+  });
+
+  test("R2-14: slow hooks exhaust the pass hook budget; later residents are skipped with pass-hook-budget", async () => {
+    const f = fixture();
+    for (const id of ["run-a", "run-b", "run-c"]) await f.seed(id);
+    const lines = captureLogs();
+    let calls = 0;
+    const out = await observeSweep(f.deps({
+      onTickPassBudgetMs: 50,
+      onTick: async () => {
+        calls += 1;
+        await new Promise((r) => setTimeout(r, 80));
+      },
+    }));
+    expect(calls).toBe(1);
+    expect(sweep(out).runs_unsettled).toBe(3);
+    const skips = lines.filter((l) => l.event === "sweep-ontick-skipped");
+    expect(skips).toHaveLength(2);
+    expect(skips.every((l) => l.reason === "pass-hook-budget")).toBe(true);
   });
 
   test("not called for engine-dead, unreachable, settled, locked-out or skipped residents", async () => {

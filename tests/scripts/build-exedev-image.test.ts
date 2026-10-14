@@ -2105,15 +2105,19 @@ describe("buildIdFileInputs", () => {
       // IMAGE RE-PUBLISH stays ops-gated (wave-0 ritual: J3 + J4 + A2 + the
       // M2.2 surface, DD-28.26(4)); only the pin adopts here.
       //
-      // 348e5d4: moved from 285156f by J4 (host-side judgment pack) — TWO
-      // walked inputs, both adds-only and priced by the story (AC4):
-      // `src/phase-engine/steering.ts` (the fifth `compact` union member, two
-      // POINT_ALLOWLIST entries, the resident-origin refusal and the
-      // `directiveAllowedAt` predicate) and `src/fleet/observe.ts` (the optional
-      // budget-aware `onTick` seam). Everything else J4 touched is absent from
-      // the walk: src/autonomy/, scripts/fleet.ts, scripts/corpus/, docs, tests.
-      // The image re-publish rides the same ops-gated wave-0 ritual as J3's.
-      "348e5d4237cda6b88623433e3e79d415400cc1724eaefd916e7f21ea92977a62",
+      // 4095eff: moved by J4 (host-side judgment pack). NOTE: the literal above
+      // (285156f) was already stale on origin/dev 5b03a7b7 — J3's CodeRabbit
+      // round-3 commit dac6e6c2 edited the walked input src/fleet/dispatch.ts
+      // without a re-pin (dev's real digest b34dc6b; dev's own pin test red).
+      // J4's true move is b34dc6b -> 4095eff, over TWO walked inputs, both
+      // adds-only and priced by the story (AC4): `src/phase-engine/steering.ts`
+      // (fifth `compact` member, two POINT_ALLOWLIST entries, the resident-
+      // origin refusal, `directiveAllowedAt`, resident-facing rejection text)
+      // and `src/fleet/observe.ts` (the budget-aware `onTick` seam, invoked
+      // after the run lock is released). Everything else J4 touched is absent
+      // from the walk: src/autonomy/, scripts/fleet.ts, scripts/corpus/, docs,
+      // tests. Image re-publish rides the ops-gated wave-0 ritual with J3.
+      "4095eff3c2aab69e2f0952e3a03ae4dba43d1aeb78bfea59bce3ea2b46f75c81",
     );
   });
 });

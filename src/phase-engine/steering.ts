@@ -149,6 +149,9 @@ export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
 /** Derived from the schema itself (A8) so the literals cannot drift apart. */
 const KNOWN_ACTIONS = SteeringDirectiveSchema.options.map((m) => m.shape.action.value) as readonly string[];
 
+/** Actions a resident may never originate; excluded from resident-facing text. */
+const HOST_ONLY_ACTIONS = ["compact"] as const;
+
 /** Per-point directive allowlist: a schema-valid reply whose action has
  *  nothing to steer at this point is a REJECTION, not an acceptance —
  *  `telemetry.directives` counts only directives the runner can actually
@@ -471,7 +474,9 @@ function rejectionDetail(parsed: unknown, error: ZodError): string {
   }
   const issue = error.issues[0];
   if (issue === undefined) return "schema rejected the reply";
-  const detail = formatZodIssue(issue);
+  // R2-15: zod enumerates the union in its discriminator message; compact is
+  // host-only, so the resident-facing list is the pre-J4 one (compact removed).
+  const detail = formatZodIssue(issue).replaceAll(HOST_ONLY_ACTIONS.map((a) => ` | '${a}'`).join(""), "");
   return typeof action === "string" ? `action ${sanitizeForMessage(action)} rejected: ${detail}` : detail;
 }
 

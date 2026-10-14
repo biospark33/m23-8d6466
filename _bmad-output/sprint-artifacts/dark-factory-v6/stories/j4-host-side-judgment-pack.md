@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b-Autonomy (J-epic — one of the E21-independent v6b stories (cf. A5/M2.2/M2.3/J2/J3); entirely host-side off J1)
-**Status:** ready-for-dev — **no E21 gate.** Deps: **J1** (v6a). Live tier: none (spec-seam + mock; see E2E Slice for the honestly-unproven limb).
+**Status:** in-review (branch `feature/j4-host-side-judgment-pack`) — **no E21 gate.** Deps: **J1** (v6a). Live tier: none (spec-seam + mock; see E2E Slice for the honestly-unproven limb).
 
 ## Spec Reference
 
@@ -124,3 +124,19 @@ L9 is a **separable leg**: one module (`src/autonomy/l9-repo-sweep-triage.ts`) +
 - `steering.ts:101` ("there is no fourth") — verified, no change.
 - `src/judgment/schemas.ts:21` (`TYPESAFE_MODEL`) — verified, no change.
 - L9 leg amended: opensrc dep-source spans named as the second consumer of the per-file score machinery (Overview + one Trigger Surface row); locks unchanged per the content contract — recording-only until J2 arming, host-side only, flex-cut #1 unchanged, no new dep edges, binary baking deferred to the ops register.
+
+## Dev Agent Record (2026-10-14)
+
+**Build:** five-leaf team under unlazy scope `j4` (steering compact member · corpus machine-state arm · observe `onTick` seam · pack core `src/autonomy/host-pack.ts` + `scripts/fleet.ts` wiring · separable L9 leg), then three-layer adversarial review rounds (blind hunter / edge-case hunter / acceptance auditor) with triage + per-fixer reports under `_bmad-output/reviews/j4-round{1,2,3}/`. Rebased onto origin/dev `5b03a7b7` (J3 #427 merged) before round 2.
+
+**Deviations from the story text (each reviewed and recorded):**
+
+1. **Resident-originated `compact` is refused by origin** (`solicit()`, pre-J4 rejection + `gate_bypass_attempt` tripwire). AC2's schema member and `POINT_ALLOWLIST` entries land as specified and are tested through the exported `directiveAllowedAt` predicate; they govern the future host-originated path. Without the origin guard a resident reply `{action:"compact"}` was accepted in-box while the pack is recording-only (R1-02). Consequence for the DoD e2e bullet: the steering-suite round proves `compact` schema-validates and that DF1.11's drain/ack machinery carries it as inbox context, and that a resident-originated directive is refused — there is no host-to-engine directive path yet (arming PR, register DD-28.26 item 16).
+2. **`scripts/corpus/merge.ts` + `index.ts` touched** (story lists only `schema.ts`): `appendRecord` hard-codes the triage schema, so the machine-state arm gets its own `appendMachineStateRecord` sharing the internals; `appendRecord` stays triage-only (behavior and messages identical to dev, R1-17).
+3. **Honestly-unproven limb, widened:** the box journal's `resident` block is refreshed only after `run.finish` writes `journal/final.json` — the marker that makes observe treat the run as settled — so **in production L7 makes zero asks today**; RSS and context utilization are not host-observable mid-run (carried as `null`, never fabricated). A mid-run resident refresh is box-side engine work, unowned, riding the arming PR (R1-03 / R2-05 DEFER; register DD-28.26 item 16(c)). The mock e2e round seeds the journal to prove the ask→envelope→record chain.
+4. **Pre-dispatch sanity leg** asks one provisional noul `manifest_consistent` purely to emit provenance; no disposition values are named and nothing consumes it (provenance-only, register item 16(d)). It is a callable, tested chain; no dispatch call site (Files to Modify lists none).
+5. **Mock records stay out of measured denominators by directory:** L8/L9 mock-mode records go to `_bmad-output/judgment/corpus/mock/` (ab-report reads only top-level `*.jsonl`); L7 machine-state records live in per-run shards under `corpus/machine-state/<runId>/`. Pack defaults anchor to the factory repo root, never cwd.
+6. **Observe seam additions beyond I3:** `ON_TICK_DEADLINE_MS` per-call bound, budget-aware skip (`sweep-ontick-skipped`), and the hook runs after the run lock is released (R1-05, R2-02, R2-14). `FleetDeps.judgmentPack` injects the pack's deps for tests.
+7. **buildId pin:** origin/dev's literal `285156f` was already stale (J3 `dac6e6c2` moved walked input `src/fleet/dispatch.ts` without a re-pin; dev's real digest `b34dc6b`, dev's own pin test red). J4 re-pins from the real dev digest (`b34dc6b` → `4095eff`) over its two walked inputs (`steering.ts`, `observe.ts`); the image publish + adopt stays operator-gated (DD-28.2 wave-0 ritual, batched with J3).
+
+**Review rounds:** R1 — 40 raw → 25 unified (3 HIGH / 13 MED / 9 LOW): 20 patched, 4 dismissed with rationale, 1 deferred. R2 — 20 unified (7 MED / 13 LOW): 17 patched, 2 dismissed, 1 deferred (doc corrected). R3 — see `_bmad-output/reviews/j4-round3/`.

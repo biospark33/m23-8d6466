@@ -34,6 +34,7 @@ import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { CORPUS_LOCK_ID, DEFAULT_CORPUS_DIR, corpusFilePath, readCorpusRecords } from "../../scripts/corpus/merge.ts";
 import {
   CeilingExceededError,
+  DEFAULT_PROVENANCE_DIR,
   DEFAULT_STAGE_CEILING_INPUT_TOKENS,
   EgressRefusedError,
   JudgmentCeiling,
@@ -73,10 +74,14 @@ export const L9_MOCK_CORPUS_DIR = join(DEFAULT_CORPUS_DIR, "mock");
 /** Defaults anchor to the factory repo (this module's location), never cwd — same rule as the pack core. */
 const FACTORY_ROOT = resolve(import.meta.dir, "..", "..");
 
-/** Where a ranker writes: the injected dir, else mock → `mock/` subdir, live → the measured corpus. */
+/** Where a ranker writes: the injected dir, else ONLY an explicit mode "live" → the measured corpus; anything else → `mock/`. */
 export function resolveTriageCorpusDir(client: { mode?: string }, injected?: string): string {
   if (injected !== undefined) return injected;
-  return resolve(FACTORY_ROOT, client.mode === "mock" ? L9_MOCK_CORPUS_DIR : DEFAULT_CORPUS_DIR);
+  return resolve(FACTORY_ROOT, client.mode === "live" ? DEFAULT_CORPUS_DIR : L9_MOCK_CORPUS_DIR);
+}
+/** Default provenance dir anchors to the factory root, never cwd. Pure. */
+export function resolveProvenanceDir(injected?: string): string {
+  return injected ?? resolve(FACTORY_ROOT, DEFAULT_PROVENANCE_DIR);
 }
 /** Bounds of the default opensrc walk. */
 export const MAX_WALK_ENTRIES = 5_000;
@@ -108,6 +113,8 @@ const DISPOSITION_BY_CHOICE: Record<string, Disposition> = { patch: "PATCH", def
 
 /** Judge seam: the real JudgmentClient, or any structural stand-in (tests). */
 export interface Judge {
+  /** Required: wrappers must declare it, or they are routed to the mock corpus. */
+  readonly mode: "live" | "mock";
   judge: JudgmentClient["judge"];
 }
 
@@ -178,11 +185,12 @@ function recordFrom(h: SweepHotspot, ref: string, id: string, brief: string, env
 
 export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
   const emit = deps.log ?? log;
-  const client: Judge = deps.client ?? new JudgmentClient({ provenanceDir: deps.provenanceDir });
+  const client: Judge = deps.client ?? new JudgmentClient({ provenanceDir: resolveProvenanceDir(deps.provenanceDir) });
   // Mock records must never reach the measured corpus ab-report reads (top-level *.jsonl).
   const corpusDir = resolveTriageCorpusDir(client as { mode?: string }, deps.corpusDir);
   const ceiling = deps.ceiling ?? new JudgmentCeiling(DEFAULT_STAGE_CEILING_INPUT_TOKENS);
 
+  const answerMode = client.mode === "live" ? "live" : "mock";
   const line = (requestId: string, started: number, extra: Record<string, unknown>, status: "ok" | "error"): void => {
     const now = Date.now();
     try {
@@ -197,6 +205,7 @@ export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
         leg: "l9",
         egress_class: L9_EGRESS_CLASS,
         armed: false,
+        answer_mode: answerMode,
         latency_ms: now - started,
         ...extra,
       });
@@ -215,17 +224,14 @@ export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
         lock = acquireRunLock(corpusDir, CORPUS_LOCK_ID, "l9 triage");
         const worthByPath = new Map<string, number>();
         let ceilingHit = false;
+        let asked = 0;
         const corpusFile = corpusFilePath(corpusDir, null, null);
-        for (const [i, h] of order.entries()) {
+        for (const h of order) {
           const started = Date.now();
           const path = clip(h.path, PATH_MAX_CHARS);
           const miss = (reason: string, requestId = newRequestId()) => line(requestId, started, { miss: reason, path }, "error");
           if (!Number.isFinite(h.score)) {
             miss("non-finite-score");
-            continue;
-          }
-          if (i >= MAX_HOTSPOTS_PER_CALL) {
-            miss("capped");
             continue;
           }
           if (ceilingHit) {
@@ -240,6 +246,12 @@ export function makeSweepTriageRanker(deps: TriageDeps = {}): SweepRanker {
             miss("already-recorded");
             continue;
           }
+          // The cap counts only hotspots that will actually be asked.
+          if (asked >= MAX_HOTSPOTS_PER_CALL) {
+            miss("capped");
+            continue;
+          }
+          asked++;
           let env: JudgmentEnvelope | undefined;
           try {
             env = await client.judge({ kind: "sweep-hotspot", path, brief }, L9_QUESTIONS, {

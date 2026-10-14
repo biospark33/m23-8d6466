@@ -46,6 +46,11 @@
  * (`<machineStateCorpusDir>/<runId>/x-rx.jsonl`); an unchanged state digest
  * (`state_ref`, tick-independent) skips the ask with a `state-unchanged` line.
  * Default dirs anchor to the factory repo root (`FACTORY_ROOT`), never cwd.
+ * Review round 2: the shard is read under the append's own schema; only a
+ * torn/foreign line sets it aside (an I/O error is a `corpus-io` miss, shard
+ * untouched); `state-unchanged` holds only within one `answer_mode`. L8 bounds
+ * each ask by the same deadline, and an already-recorded finding re-applies
+ * its recorded answer to the would-filter set (one `already-recorded` line).
  *
  * Known ceilings, documented not fixed (round-1 DISMISS):
  *  - R1-10: thresholds compare against the catalog defaults (8,000 µ$, 3
@@ -247,7 +252,7 @@ export interface PackDeps {
   boxJournalPath?: (runId: string) => string;
   /** Per-leg ceiling (input tokens). Default 1M. */
   ceilingTokens?: number;
-  /** Override of L7_ASK_DEADLINE_MS (tests). */
+  /** Override of L7_ASK_DEADLINE_MS (tests). The same per-ask deadline bounds each L8 ask. */
   l7AskDeadlineMs?: number;
 }
 
@@ -401,16 +406,23 @@ function missReason(e: unknown): string {
   if (e instanceof JudgmentSchemaError) return "schema-error";
   if (e instanceof DigestDivergenceError) return "digest-divergence";
   if (e instanceof RunLockedError || e instanceof RunLockReentrantError) return "corpus-locked";
-  if (e instanceof CorpusUnreadableError) return "corpus-unreadable";
+  if (e instanceof CorpusReadError) return e.torn ? "corpus-unreadable" : "corpus-io";
   if (e instanceof TimeoutError) return "ask-deadline";
   return "judge-failed";
 }
 
-/** A corpus file with a torn or schema-invalid line: an operator fact, its own miss reason. */
-class CorpusUnreadableError extends Error {
-  constructor(file: string, cause: unknown) {
-    super(`corpus file ${file} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`);
-    this.name = "CorpusUnreadableError";
+/**
+ * A corpus read failure, split by cause (review round 2): `torn` = a line that
+ * does not parse or fails its schema (an operator fact; L7 sets the shard
+ * aside); otherwise an I/O error (EACCES, EMFILE, …) — a plain miss, the file
+ * is left untouched. Only a positively identified parse/schema failure is torn.
+ */
+class CorpusReadError extends Error {
+  readonly torn: boolean;
+  constructor(file: string, cause: unknown, torn: boolean) {
+    super(`corpus file ${file} ${torn ? "is unreadable" : "could not be read"}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "CorpusReadError";
+    this.torn = torn;
   }
 }
 
@@ -418,8 +430,18 @@ function readCorpusOrThrow(file: string): CorpusRecord[] {
   try {
     return readCorpusRecords(file);
   } catch (e) {
-    throw new CorpusUnreadableError(file, e);
+    const torn = e instanceof SyntaxError || (e instanceof Error && e.message.includes("failed schema validation"));
+    throw new CorpusReadError(file, e, torn);
   }
+}
+
+/** An L7 shard read under the SAME schema the append enforces: a triage (foreign) line is torn here, pre-ask, not a paid ask every tick. */
+function readMachineStateShard(file: string): MachineStateRecord[] {
+  return readCorpusOrThrow(file).map((r, i) => {
+    const parsed = MachineStateRecordSchema.safeParse(r);
+    if (!parsed.success) throw new CorpusReadError(file, new Error(`line ${i + 1} is not a machine-state record`), true);
+    return parsed.data;
+  });
 }
 
 type Leg = "l7" | "l8" | "sanity";
@@ -468,9 +490,15 @@ function choiceOf(env: JudgmentEnvelope, id: string, allowed: readonly string[])
   return a.choice;
 }
 
-/** Was this key already recorded by this labeler? (Avoids a second PAID ask; appendRecord's dedupe is the at-most-once backstop.) */
-function alreadyRecorded(dir: string, findingId: string, labeler: string): boolean {
-  return readCorpusOrThrow(corpusFilePath(dir, null, null)).some((r) => r.finding_id === findingId && r.labeler === labeler);
+/** This key's record by this labeler, if any. (Avoids a second PAID ask; appendRecord's dedupe is the at-most-once backstop.) */
+function recordedFor(dir: string, findingId: string, labeler: string): CorpusRecord | undefined {
+  return readCorpusOrThrow(corpusFilePath(dir, null, null)).find((r) => r.finding_id === findingId && r.labeler === labeler);
+}
+
+/** The would-filter rule re-applied to a recorded L8 answer (disposition + the noul in its rationale); unreadable ⇒ not filtered. */
+function recordedWouldFilter(r: CorpusRecord): boolean {
+  const real = /is_real_defect=([0-9.eE+-]+);/.exec(r.rationale ?? "");
+  return r.disposition === "DISMISS" && real !== null && Number(real[1]) < L8_REAL_DEFECT_MIN;
 }
 
 /** The lock is released in `finally` on every path, including a rejected or deadline-abandoned ask. */
@@ -526,22 +554,26 @@ export async function l7Ask(ctx: PackContext, state: ResidentMachineState): Prom
     const stateRef = l7StateRef(state);
     return await withCorpusLock(shard, "l7 host-pack", async (): Promise<L7Result> => {
       const file = corpusFilePath(shard, null, null);
-      let prior: CorpusRecord[];
+      let prior: MachineStateRecord[];
       try {
-        prior = readCorpusOrThrow(file);
+        prior = readMachineStateShard(file);
       } catch (e) {
-        // ponytail: set the torn shard aside so one bad line costs one miss, not the run's leg; the file is kept for the operator.
-        try {
-          renameSync(file, `${file}.unreadable-${ctx.now()}`);
-        } catch {
-          // a failed rename leaves the next tick to miss again — still a recorded miss, never a throw
+        // ponytail: set a TORN shard aside so one bad line costs one miss, not the run's leg; the file is kept for the operator.
+        // An I/O error (EACCES/EMFILE) leaves a healthy shard where it is: a plain miss.
+        if (e instanceof CorpusReadError && e.torn) {
+          try {
+            renameSync(file, `${file}.unreadable-${ctx.now()}`);
+          } catch {
+            // a failed rename leaves the next tick to miss again — still a recorded miss, never a throw
+          }
         }
         throw e;
       }
       const mine = prior.filter((r) => r.labeler === L7_LABELER && r.finding_id.startsWith(`${state.runId}@`));
       if (mine.some((r) => r.finding_id === findingId)) return { kind: "duplicate" };
       const last = mine.at(-1);
-      if (last !== undefined && "state_ref" in last && last.state_ref === stateRef) {
+      // A record from the other answer mode (mock vs live) never suppresses this client's ask.
+      if (last !== undefined && last.state_ref === stateRef && last.answer_mode === ctx.client.mode) {
         packLine(ctx, "l7", requestId, started, { skip: "state-unchanged", state_ref: stateRef, runId: state.runId });
         return { kind: "state-unchanged" };
       }
@@ -671,8 +703,9 @@ export function makeL7ObserveHook(deps: PackDeps = {}): (info: ObserveTickInfo) 
  */
 export async function l8Prefilter(ctx: PackContext, findings: readonly PackFinding[]): Promise<readonly PackFinding[]> {
   const unchanged = [...findings];
-  // Only an ANSWERED would-filter enters this set: a miss, a refusal, a lock failure or an
-  // already-recorded finding is never filtered (fail-open to deep adjudication).
+  // Only an ANSWERED would-filter enters this set — freshly answered, or already recorded (its
+  // recorded answer carries over, so a repeat pass filters the same set). A miss, a refusal or a
+  // lock failure is never filtered (fail-open to deep adjudication).
   const filtered = new Set<string>();
   const key = (f: PackFinding): string => `${f.runId}/${f.findingId}`;
   const started = ctx.now();
@@ -689,11 +722,21 @@ export async function l8Prefilter(ctx: PackContext, findings: readonly PackFindi
           if (f.text.length === 0 || f.text.length > L8_FINDING_MAX_CHARS) {
             throw new EgressRefusedError(`finding-text refused: ${f.text.length} chars outside 1..${L8_FINDING_MAX_CHARS}`, "finding-text");
           }
-          if (alreadyRecorded(ctx.corpusDir, findingId, L8_LABELER)) continue;
-          const envelope = await ctx.client.judge(
-            { finding_id: findingId, lens: f.lens, finding_text: f.text },
-            L8_QUESTIONS,
-            { egressClass: L8_EGRESS_CLASS, ceiling: ctx.ceilings.l8 },
+          const recorded = recordedFor(ctx.corpusDir, findingId, L8_LABELER);
+          if (recorded !== undefined) {
+            const wouldFilter = recordedWouldFilter(recorded);
+            if (wouldFilter) filtered.add(findingId);
+            packLine(ctx, "l8", requestId, t0, { skip: "already-recorded", would_signal: wouldFilter, findingId: f.findingId });
+            continue;
+          }
+          // Per-ask deadline (as L7): the corpus lock is held across the loop, so no single ask may hold it unbounded.
+          const envelope = await withTimeout(
+            ctx.client.judge({ finding_id: findingId, lens: f.lens, finding_text: f.text }, L8_QUESTIONS, {
+              egressClass: L8_EGRESS_CLASS,
+              ceiling: ctx.ceilings.l8,
+            }),
+            ctx.l7AskDeadlineMs,
+            `l8 ask (${findingId})`,
           );
           requestId = envelope.requestId;
           const real = noulOf(envelope, "is_real_defect");

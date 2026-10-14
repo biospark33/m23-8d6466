@@ -2064,6 +2064,19 @@ describe("J4 AC2 — compact: the fifth strict member, host-only, allowlisted at
     expect(compact.telemetry.tripwires[0]!.detail.startsWith("unrecognized action: compact")).toBe(true);
   });
 
+  test("action-less / non-string-action rejections list the pre-J4 actions (no compact)", async () => {
+    for (const raw of ["{}", '{"action":5}']) {
+      const s = scriptedCaller([{ raw }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+      const detail = c.telemetry.tripwires[0]!.detail;
+      expect(detail).toBe(
+        "action: Invalid discriminator value. Expected 'proceed' | 'retry' | 'select_roster' | 'abort'",
+      );
+      expect(detail).not.toContain("compact");
+    }
+  });
+
   test("the resident-facing prompt (and its correction) never advertises compact — host-only", async () => {
     const s = scriptedCaller([{ raw: "not json" }, { raw: '{"action":"proceed"}' }]);
     const c = createSteering({ caller: s.caller, rate: RATE });

@@ -132,6 +132,7 @@ import { observeSweep } from "../src/fleet/observe.ts";
 // J4: the host-side L7 leg, injected into the sweep as its onTick hook — a
 // seam on observe.ts, never an import from it (AC1). Adds-only statement.
 import { makeL7ObserveHook, type PackDeps } from "../src/autonomy/host-pack.ts";
+import type { ObserveTickInfo } from "../src/fleet/observe.ts";
 // DF5.3: the composition roots in this script open the host-side audit-link
 // store and bind its `record` into the provider emit seam (never the reverse —
 // src/providers takes the seam, not this import).
@@ -420,6 +421,16 @@ export interface FleetDeps
    * production (no deps) gets the hook with its default dirs.
    */
   judgmentPack?: PackDeps;
+}
+
+/**
+ * J4: which onTick the observe sweep gets. Production (no deps) ⇒ the L7 hook
+ * on its default dirs; injected deps without `judgmentPack` ⇒ none; otherwise
+ * the hook on the injected pack deps. Pure (building a hook writes nothing).
+ */
+export function observeTickHookFor(deps: Pick<Partial<FleetDeps>, "judgmentPack"> | undefined): { onTick?: (info: ObserveTickInfo) => Promise<void> } {
+  if (deps === undefined) return { onTick: makeL7ObserveHook() };
+  return deps.judgmentPack === undefined ? {} : { onTick: makeL7ObserveHook(deps.judgmentPack) };
 }
 
 /** Every refusal is a FleetError so ONE renderer owns the envelope + exit code. */
@@ -2264,11 +2275,7 @@ async function runObserveSweep(ctx: VerbCtx, requestId: string, usage: string): 
       // J4 L7 (recording-only, PACK_SIGNALS_ARMED=false): one machine-state ask
       // per still-running resident per pass; the hook never throws and observe
       // fault-isolates it anyway. See FleetDeps.judgmentPack for the test gate.
-      ...(deps === undefined
-        ? { onTick: makeL7ObserveHook() }
-        : deps.judgmentPack === undefined
-          ? {}
-          : { onTick: makeL7ObserveHook(deps.judgmentPack) }),
+      ...observeTickHookFor(deps),
     });
 
     if (outcome.kind === "refused") {
