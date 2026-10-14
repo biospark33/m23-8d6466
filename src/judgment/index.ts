@@ -50,3 +50,32 @@ export {
   type Question,
   type Usage,
 } from "./schemas.ts";
+// J3 router public surface (adds-only): the deterministic tier pick, the
+// strict log-line contract + its reader (M3.2/A5 read, never write), and
+// runRouting — the one entry the host-side dispatch hook calls. SHAPE_BANDS
+// is public because AC3's re-derivation is an external contract (M3.2
+// re-derives tiers from logged lines).
+export {
+  appliedTier,
+  FEATURE_CAPS,
+  pairForRole,
+  readRoutingLog,
+  riskTier,
+  ROUTING_LOG_PATH,
+  RoutingLogLineSchema,
+  runRouting,
+  scoreFeatures,
+  SHAPE_BANDS,
+  SHAPES,
+  TIER_TABLE,
+  WEIGHTS,
+  type AppliedTier,
+  type ModelPair,
+  type RiskTier,
+  type RoutingFeatures,
+  type RoutingInput,
+  type RoutingLogLine,
+  type RoutingResult,
+  type Shape,
+  type SkipReason,
+} from "./router.ts";

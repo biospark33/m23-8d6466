@@ -2100,7 +2100,11 @@ describe("buildIdFileInputs", () => {
             // touched is absent from the walk: the dormancy/mask-env test
             // files, the dev scripts, visualizer/server (not COPY'd). Adopted
             // LAST on the final tree, per the discipline above.
-            "2328187438731c9962f9f28a7e7d3ce49e72e2c211eb17c1a4b3b919c5fcfb96",
+            // J3 adopted 2026-10-14: the routing layer's adds-only dispatch/schema/
+      // judgment-surface changes moved the walked inputs (deriveBuildId). The
+      // IMAGE RE-PUBLISH stays ops-gated (wave-0 ritual: J3 + J4 + A2 + the
+      // M2.2 surface, DD-28.26(4)); only the pin adopts here.
+      "285156feb2948a0d821919abd67099793e3e7cb77f76759df28b51195b5ff039",
     );
   });
 });

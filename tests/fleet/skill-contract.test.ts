@@ -1040,6 +1040,27 @@ function parseAckRunId(outOnly: string[], cmd: FleetCommand): string {
 function writeBriefFixture(dir: string): string {
   const manifestDir = join(dir, "manifests");
   mkdirSync(manifestDir, { recursive: true });
+  // J3: the armed routing hook parses the roster beside the manifest for its
+  // features — a roster here is production shape, and without one the
+  // derivation's routing-features-unavailable note lands on stderr and fails
+  // this sequence's err-must-be-empty assertion below. (The paragraph in the
+  // manifest comment about keeping roster shape out of this fixture predates
+  // the routing hook; a minimal roster costs nothing and matches what the
+  // documented command runs against in production.)
+  writeFileSync(
+    join(manifestDir, "roster.yaml"),
+    [
+      "defaults:",
+      "  provider: anthropic",
+      "  tools: null",
+      "  writes: []",
+      "  harness_engineering: []",
+      "roles:",
+      "  - name: lead",
+      "    model: claude-haiku-4-5",
+      "",
+    ].join("\n"),
+  );
   writeFileSync(
     join(manifestDir, "pipeline.json"),
     JSON.stringify({
@@ -1124,7 +1145,19 @@ describe("DoD e2e (MANDATORY): the documented dispatch → observe sequence agai
       //    (modulo the fixture substitutions sanitizeArgvForFakeRun documents).
       const dispatchCmd = requireDocumentedCommand("factory-dispatch", "dispatch");
       const dispatchArgv = sanitizeArgvForFakeRun(cutShell(words(substituteRunId(dispatchCmd.argsText, undefined, dispatchCmd))));
-      const dispatchCode = await run(dispatchArgv, out, shared, errOut);
+      // J3: the armed routing hook writes the provenance side channel relative
+      // to cwd — root this full-provisioning run at a throwaway dir (the
+      // cli.test.ts withRoutingCwd pattern, scoped save/restore). The routing
+      // LOG itself is store-rooted (the shared store lives under this test's
+      // own dir), so only the provenance default needs the chdir.
+      const j3SavedCwd = process.cwd();
+      process.chdir(mkdtempSync(join(tmpRoot, "e2e-cwd-")));
+      let dispatchCode: number;
+      try {
+        dispatchCode = await run(dispatchArgv, out, shared, errOut);
+      } finally {
+        process.chdir(j3SavedCwd);
+      }
       expect({ argv: dispatchArgv, code: dispatchCode, err: errCaptured.join("") }).toEqual({ argv: dispatchArgv, code: 0, err: "" });
       const runId = parseAckRunId(outOnly, dispatchCmd);
 

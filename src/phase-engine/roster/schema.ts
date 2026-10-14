@@ -32,6 +32,9 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
+/** J3 AC4 emitter — separate import keeps the adds-only gate at zero deletions. */
+import { stringify } from "yaml";
+
 /**
  * Thinking levels pi 0.55.0 actually accepts. `max` appears in SSSF's own type
  * (R4 §1.5) but is absent from pi 0.55.0's `--help` (R4 §4.3), so the schema
@@ -469,4 +472,84 @@ export function loadRoster(rosterPath: string, opts: LoadRosterOptions = {}): Re
     );
   }
   return parseRoster(text, abs);
+}
+
+// ---------------------------------------------------------------------------
+// J3 AC4 — tier override + deterministic rendering
+// ---------------------------------------------------------------------------
+
+/** A tier the router applies to one role, VERBATIM. */
+export type TierOverridePair = { provider: string; model: string };
+
+/**
+ * J3 AC4 — apply a router-decided tier as a `(provider, model)` swap, keyed by
+ * role NAME: the only key `parseRoster` guarantees unique (`slug` is derived,
+ * and two roles can share one, so it cannot address a single role).
+ *
+ * This is the PRE-VALIDATION override: the returned roster is what reaches
+ * `validate.ts`, so the overridden pairs face the same dual slug gates as
+ * hand-written ones — an override naming a slug the catalog lacks is refused
+ * exactly like a typo in roster.yaml. The source roster.yaml is never
+ * modified; the override exists only in the returned value (dispatch
+ * materializes it as its own copy).
+ *
+ * Pure: no filesystem access, no mutation of the input. Replacement is
+ * provider-authoritative with the model VERBATIM — exactly `resolveSlug`'s
+ * explicit-`provider` semantics — so an embedded `/` in `model` is not a split
+ * point. Roles with no entry in `pairs` pass through unchanged; an unknown key
+ * is the caller's targeting decision, not an error here. Copied like `pick`:
+ * fresh role objects, fresh arrays — the result never aliases the input.
+ */
+export function applyTierOverride(
+  roster: ResolvedRoster,
+  pairs: Record<string, TierOverridePair>,
+): ResolvedRoster {
+  const roles = roster.roles.map((role) => {
+    const pair = pairs[role.name];
+    return {
+      ...role,
+      ...(pair !== undefined ? { provider: pair.provider, model: pair.model, slug: `${pair.provider}/${pair.model}` } : {}),
+      tools: role.tools === null ? null : [...role.tools],
+      writes: role.writes === null ? null : [...role.writes],
+      harness_engineering: [...role.harness_engineering],
+      warnings: [...role.warnings],
+    };
+  });
+  return { path: roster.path, roles, warnings: roles.flatMap((r) => r.warnings) };
+}
+
+/**
+ * Deterministic YAML form of a merged roster — text `parseRoster` accepts.
+ *
+ * Round-trip contract: `parseRoster(renderRoster(r))` deep-equals `r.roles`.
+ * Every closed-schema field is emitted explicitly, per role and never via a
+ * `defaults` block — a parsed `ResolvedRoster` holds merged roles only, and a
+ * defaults block would fabricate data the struct does not carry. The two
+ * DERIVED fields are omitted because the schema's key set is closed: `slug`
+ * is recomputed from `(provider, model)` and `warnings` from the
+ * harness/tools pair, both identically, on re-parse.
+ *
+ * Emitted through the same `yaml` package `parseRoster` reads, keys in a
+ * fixed insertion order, `lineWidth: 0` so no value ever folds across lines —
+ * byte-stable for identical input. `harness_engineering: []` and an absent
+ * `compaction` are omitted (both parse back to their defaults); `thinking`,
+ * `tools` and `writes` are always emitted because `writes` must be DECLARED —
+ * omitting it is a parse error, and its `null` ("unrestricted") must survive
+ * as an explicit null, not silence.
+ */
+export function renderRoster(roster: ResolvedRoster): string {
+  const roles: Record<string, unknown>[] = roster.roles.map((role) => {
+    const out: Record<string, unknown> = {
+      name: role.name,
+      provider: role.provider,
+      model: role.model,
+      thinking: role.thinking,
+      tools: role.tools,
+      writes: role.writes,
+    };
+    if (role.harness_engineering.length > 0) out.harness_engineering = role.harness_engineering;
+    if (role.compaction !== undefined) out.compaction = role.compaction;
+    return out;
+  });
+  return stringify({ roles }, { lineWidth: 0 });
 }
