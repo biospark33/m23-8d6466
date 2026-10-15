@@ -39,6 +39,13 @@
  *      decision mints.
  *   10. verdict-rejected drives the real chain: an eligible-shaped context
  *      whose verdict status is "rejected" consults verdict-rejected and parks.
+ *   11. human-wins-at-mint (round-4 guard): a decision landing between the
+ *      gate's registration and the mint is seen by the store's record-lock
+ *      recheck — the mint refuses, the human approverId stands, one
+ *      auto-merge-approval-skip line.
+ *   12. mint-fault isolation (round-4): a throwing setApprovalIfAwaiting is
+ *      failure-isolated — one auto-merge-approval-error line, the outcome
+ *      stays driven, the gate's parked awaiting-approval stands.
  *
  * Same-completion-call supersession (the gate's transient awaiting-approval
  * write, then the policy decision across the reverify await — documented in
@@ -121,11 +128,11 @@ afterEach(() => {
 
 type MarkerPlan = { body: Record<string, unknown> | null };
 
-function store(): { store: RunRecordStore; dir: string; cleanup(): void } {
+function store(Ctor: typeof RunRecordStore = RunRecordStore): { store: RunRecordStore; dir: string; cleanup(): void } {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-g1chain-"));
   return {
     dir,
-    store: new RunRecordStore({ dir }),
+    store: new Ctor({ dir }),
     cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
   };
 }
@@ -837,6 +844,117 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         // parked; policyDecision false ⇒ no mint
         expect(s.store.get("run-g1j").extensions?.approval?.state).toBe("awaiting-approval");
         expect(JSON.stringify(s.store.get("run-g1j"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC human-wins-at-mint guard (round-4): a decision landing between the gate's registration and the mint refuses the write under the record-lock recheck",
+    async () => {
+      const lines = captureLogs();
+      /**
+       * Injects the human decision at the MINT instant — after the gate's
+       * registration and its already-decided arm never see it, only the
+       * store's recheck does. The honest stand-in for an operator deciding
+       * while the chain crosses from reverify to the mint.
+       */
+      class HumanAtMintStore extends RunRecordStore {
+        armed = true;
+        override setApprovalIfAwaiting(
+          runId: string,
+          patch: Parameters<RunRecordStore["setApprovalIfAwaiting"]>[1],
+        ): ReturnType<RunRecordStore["setApprovalIfAwaiting"]> {
+          if (this.armed) {
+            this.armed = false;
+            s.store.set("run-g1k", {
+              extensions: {
+                approval: {
+                  state: "approved",
+                  approverId: "human:steve",
+                  decidedAt: new Date().toISOString(),
+                  reason: "manual",
+                },
+              },
+            });
+          }
+          return super.setApprovalIfAwaiting(runId, patch);
+        }
+      }
+      const s = store(HumanAtMintStore);
+      const host = gitHost("on");
+      try {
+        quarantine(host, "run-g1k");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1k", { ok: true });
+        const out = await observeAndDriveChain(
+          "run-g1k",
+          baseDeps("run-g1k", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            consultContext: () => injectedConsult("run-g1k", ["src/feature/x.ts"], ["src/feature/**"]),
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        expect(out).toMatchObject({ kind: "driven", markerOk: true });
+        expect(consultEvents(lines)).toHaveLength(1);
+        // the refusal is a line, never silent
+        expect(lines.filter((l) => l.event === "auto-merge-approval-skip")).toHaveLength(1);
+        // the HUMAN decision stands — the mint lost the race by construction
+        expect(s.store.get("run-g1k").extensions?.approval).toMatchObject({
+          state: "approved",
+          approverId: "human:steve",
+          reason: "manual",
+        });
+        expect(JSON.stringify(s.store.get("run-g1k"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC mint-fault isolation (round-4): a throwing setApprovalIfAwaiting surfaces one auto-merge-approval-error line, the outcome stays driven, the gate park intact",
+    async () => {
+      const lines = captureLogs();
+      class MintFaultStore extends RunRecordStore {
+        override setApprovalIfAwaiting(): ReturnType<RunRecordStore["setApprovalIfAwaiting"]> {
+          throw new Error("mint store fault");
+        }
+      }
+      const s = store(MintFaultStore);
+      const host = gitHost("on");
+      try {
+        quarantine(host, "run-g1l");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1l", { ok: true });
+        const out = await observeAndDriveChain(
+          "run-g1l",
+          baseDeps("run-g1l", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            consultContext: () => injectedConsult("run-g1l", ["src/feature/x.ts"], ["src/feature/**"]),
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        // NO raw escape past the typed outcome — the chain genuinely landed
+        expect(out).toMatchObject({ kind: "driven", markerOk: true });
+        expect(lines.filter((l) => l.event === "auto-merge-approval-error")).toHaveLength(1);
+        expect(lines.filter((l) => l.event === "auto-merge-approval-error")[0]).toMatchObject({
+          error: expect.stringContaining("mint store fault"),
+        });
+        // the gate's parked state stands and stays decidable by hand
+        expect(s.store.get("run-g1l").extensions?.approval?.state).toBe("awaiting-approval");
+        expect(JSON.stringify(s.store.get("run-g1l"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
       } finally {
         host.cleanup();
         s.cleanup();

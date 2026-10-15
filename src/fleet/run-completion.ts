@@ -514,18 +514,29 @@ function buildConsultContext(rec: RunRecord): {
  * decision mints here; when the veto-window queue lands (the veto-window
  * story, first post-A2 concern), the reject-until-execution window wraps
  * THIS write.
+ *
+ * The write is GUARDED (round-4 review): the store's `setApprovalIfAwaiting`
+ * rechecks the record under its own record lock — the one lock every
+ * `extensions.approval` writer serializes through — and mints only over a
+ * still-unclaimed `awaiting-approval`, so a human decision that landed across
+ * the reverify await wins the race by construction (ADR-2 clause 5, "the human
+ * override is unconditional", held at the WRITE, not only at the gate's
+ * already-decided arm). Returns whether the decision minted; a false return is
+ * a lost race, surfaced by the caller as a skip line, never an error.
  */
-function recordPolicyApproval(store: RunRecordStore, runId: string, decidedAt: Date): void {
-  store.set(runId, {
-    extensions: {
-      approval: {
-        state: "approved",
-        approverId: POLICY_AUTO_MERGE_APPROVER_ID,
-        decidedAt: decidedAt.toISOString(),
-        reason: POLICY_DECISION_REASON,
+function recordPolicyApproval(store: RunRecordStore, runId: string, decidedAt: Date): boolean {
+  return (
+    store.setApprovalIfAwaiting(runId, {
+      extensions: {
+        approval: {
+          state: "approved",
+          approverId: POLICY_AUTO_MERGE_APPROVER_ID,
+          decidedAt: decidedAt.toISOString(),
+          reason: POLICY_DECISION_REASON,
+        },
       },
-    },
-  });
+    }) !== undefined
+  );
 }
 
 /**
@@ -641,7 +652,9 @@ async function reverifyAndMap(
     // runs; only a still-ON policy mints the decision. Technical Notes'
     // one-read guard names the consult evaluation; the mint-time re-read is
     // the sanctioned revocation guard (round-2 review), two reads total on
-    // the eligible path.
+    // the eligible path. The mint WRITE itself is guarded against displacing
+    // a decision that landed across the reverify await (round-4 review —
+    // recordPolicyApproval's doc).
     if (
       policyDecision &&
       readAutoMergePolicy({
@@ -649,7 +662,22 @@ async function reverifyAndMap(
         ...(deps.consultCarrierRoot === undefined ? {} : { carrierRoot: deps.consultCarrierRoot }),
       }).state === "on"
     ) {
-      recordPolicyApproval(deps.store, runId, new Date());
+      // The mint is failure-isolated, the consult fold's precedent: a store
+      // fault past the green reverify must not escape reverifyAndMap untyped —
+      // the chain genuinely landed (teardown, verdict, gate registration), the
+      // record stays parked `awaiting-approval` and decidable by hand, and the
+      // fault is a line, never a raw throw.
+      try {
+        if (!recordPolicyApproval(deps.store, runId, new Date())) {
+          // The guard refused: a decision landed across the reverify await and
+          // the mint lost the race — surfaced, never silent (absent is ABSENT).
+          observeLine(requestId, { runId, event: "auto-merge-approval-skip" });
+        }
+      } catch (e) {
+        // The error text is store/IO material (lock timeout, EACCES), redacted
+        // and capped by errText — the same class the chain-failed arms carry.
+        observeLine(requestId, { runId, event: "auto-merge-approval-error", error: errText(e) });
+      }
     }
     outcome =
       line.markerOk === undefined

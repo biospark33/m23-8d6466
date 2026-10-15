@@ -1715,6 +1715,29 @@ export class RunRecordStore {
     return next;
   }
 
+  /**
+   * The policy-mint guard (G1/ADR-2): merge `patch` into the record ONLY while
+   * its approval extension still reads `awaiting-approval` with no
+   * `approverId`. The recheck and the write share ONE `withLock` acquisition —
+   * the same record lock every other `extensions.approval` writer (the gate's
+   * registration, decide, timeout paths) serializes through — so a human
+   * decision that lands between the gate's registration and the caller's mint
+   * wins the race by construction, never the reverse. `set()` itself cannot be
+   * called here (its `withLock` is not re-entrant), so this routes through the
+   * internal `setLocked` under the lock already held. Returns the updated
+   * record, or `undefined` when the guard refused — the caller, not the store,
+   * decides what a refusal means.
+   */
+  setApprovalIfAwaiting(runId: string, patch: RunRecordPatch): RunRecord | undefined {
+    return this.withLock(runId, () => {
+      const current = this.get(runId);
+      const ext = current.extensions?.approval;
+      const state = typeof ext?.state === "string" ? ext.state : undefined;
+      if (state !== "awaiting-approval" || ext?.approverId !== undefined) return undefined;
+      return this.traced(runId, "set-approval-if-awaiting", () => this.setLocked(runId, patch));
+    });
+  }
+
   /** First-close-wins: a second close succeeds and keeps the original `closedAt`. */
   close(runId: string, now: Date = new Date()): RunRecord {
     return this.traced(runId, "close", () =>
