@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b — Autonomy (judgment tier; E21-independent, runs on v6a artifacts only)
-**Status:** done — merged behavior landed on feature/j3-model-router-decision-layer (PR to dev at closure); 2 bmad-code-review rounds; branch gates green
+**Status:** done — PR #427 merged to dev 2026-10-14 (merge 5b03a7b7, head dac6e6c2; CodeRabbit round 3 folded in); 2 bmad-code-review rounds; branch gates green
 
 > **Decision of record (NET-NEW — flag for the DD-14+ register, Jev-register note):** the tier **applied** at dispatch is picked
 > by the deterministic composite score — weights in code. The cheap Jev L5 ask's tier answer is **recorded as a recommendation**,

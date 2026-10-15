@@ -163,6 +163,27 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # 31061f54…/a095d2629d5bcc09, walk digest 72d8d83b -> 0c5509f3, adoption commit d63f603 is the
 # healing run (mirror re-push + verify-image-pin follow it).
 
+# 2026-09-18 (post-merge reconciliation — git history as authority; three slate rows were stale):
+# (drained 2026-10-15. Text verbatim.)
+# DF3.7 DONE — PR #257 merged 2026-09-16 (c30b7072); issue #245 closed with it (DF2.11's D6
+# production wiring — recordApprovalPort closure carries the chain-held RunLockHandle, gated
+# production-closure test; already recorded in DF2.11's deferred-section update 2026-09-15).
+# DF5.3 DONE — PR #258 merged 2026-09-17 (4603d1a3) after 3 adversarial review rounds; the
+# operator-deferred live e2e demo RAN pre-merge 2026-09-17 (operator-confirmed; evidence
+# _bmad-output/evidence/df5-3/, committed in the same change as this reconciliation).
+# DF3.6a DONE — PR #263 merged 2026-09-18 (b85b15db) after review r1 (40 findings: 23 source +
+# 17 test patched, 5 deferred, 10 dismissed) + r2 (3 CodeRabbit findings: createBoundsGuard
+# refusals — incl. zero bundled rates — now settle not-ok with a terminal marker, the stale
+# onBoundBreach known-limitation retired, releaseAdmission's headroom claim corrected). The two
+# DF3.6a-routed DF2.8 follow-ups (releaseAdmission + gate_admission_releases) shipped in-round;
+# DF2.8's owned list now holds only the residentSpendCeilingMicros config key. DF3.6b is IN DEV
+# (second operator). STALENESS FIXED IN THIS COMMIT, corrected against git history rather than
+# story prose: DF3.7 read ready-for-dev (merged 2026-09-16), DF5.3 read in-progress (merged
+# 2026-09-17), DF3.6a read in-review (merged 2026-09-18); the three story md files carried no
+# merge-record Status lines — added. The 2026-09-13 and 2026-09-03 notes this replaces were
+# drained to sprint-status-history.md (the 2026-09-03 note had sat undrained past two newer
+# history entries; inserted at its chronological position, marked).
+
 # 2026-10-15 (G1 DONE — ADR-2 verdict recorded, decided shape merged to dev):
 # Operator verdict ACCEPTED recorded in the ADR (clauses 1-4 as written; clause 5 verbatim, the
 # veto-window queue named the blocking build item; DD-18 re-opened, DD-19 unchanged). Decided shape

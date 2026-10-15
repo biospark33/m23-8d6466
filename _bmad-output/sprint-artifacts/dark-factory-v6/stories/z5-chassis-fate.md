@@ -1,6 +1,6 @@
 # Z5: Chassis fate — utilities to `src/lib/`, dormant server surface per DD-18
 
-**Status:** DONE (2026-10-14) — branch `feature/z5-chassis-fate`, PR → dev
+**Status:** DONE (2026-10-14) — PR #426 merged to dev 2026-10-14 (merge 77b9339f, head 3f66ab58); branch `feature/z5-chassis-fate`
 **Story Points:** 2
 **Sprint:** v6a-Foundation (Wave 2 — Zeropoint macro-host epic, zero E21 gates, live tier: none, deps: none)
 
