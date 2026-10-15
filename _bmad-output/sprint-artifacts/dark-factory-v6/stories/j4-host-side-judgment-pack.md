@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b-Autonomy (J-epic — one of the E21-independent v6b stories (cf. A5/M2.2/M2.3/J2/J3); entirely host-side off J1)
-**Status:** in-review (branch `feature/j4-host-side-judgment-pack`) — **no E21 gate.** Deps: **J1** (v6a). Live tier: none (spec-seam + mock; see E2E Slice for the honestly-unproven limb).
+**Status:** DONE — MERGED to dev (PR #428, merge commit 140d477f, head 78d31955: recording-only host-side pack — L7/L8/sanity in `src/autonomy/host-pack.ts`, separable L9 leg, `compact` steering member with resident-origin refusal, budget-aware observe `onTick` seam; 3 three-layer review rounds, all reviewers approve in R3; full suite 8202 pass / 53 fail vs dev 8079 / 54, zero new failures; CI `tests` green, `check` red only on pre-existing src/fixloop coverage). Open, not this story's: box image publish/adopt (ops-gated, with J3) and the engine-side mid-run resident refresh (production L7 makes zero asks until it lands) — **no E21 gate.** Deps: **J1** (v6a). Live tier: none (spec-seam + mock; see E2E Slice for the honestly-unproven limb).
 
 ## Spec Reference
 
