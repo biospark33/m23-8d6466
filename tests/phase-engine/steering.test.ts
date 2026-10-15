@@ -27,12 +27,14 @@ import {
   ATTACH_MESSAGE_CHAR_CEILING,
   DIRECTIVE_ID_CHAR_CEILING,
   DIRECTIVE_TEXT_CHAR_CEILING,
+  HOST_ONLY_COMPACT_DETAIL,
   INBOX_CALL_TIMEOUT_MS,
   MAX_MALFORMED_ATTEMPTS,
   MAX_OUTPUT_TOKENS,
   PROMPT_CHAR_CEILING,
   SteeringDirectiveSchema,
   createSteering,
+  directiveAllowedAt,
   type ResidentCaller,
   type ResidentTripwire,
   type SolicitCtx,
@@ -101,14 +103,16 @@ describe("SteeringDirectiveSchema — closed union (AC2 contract)", () => {
   });
 
   test("the derived action list and the schema literals cannot drift (A8)", () => {
-    // Mirror the instruction text's four members; any schema change that
-    // drops or renames one must update this list (and DIRECTIVE_INSTRUCTION)
-    // in the same commit.
+    // Mirror the instruction text's four members plus J4's host-only
+    // `compact` (deliberately NOT in DIRECTIVE_INSTRUCTION); any schema change
+    // that drops or renames one must update this list (and
+    // DIRECTIVE_INSTRUCTION) in the same commit.
     expect(SteeringDirectiveSchema.options.map((m) => m.shape.action.value)).toEqual([
       "proceed",
       "retry",
       "select_roster",
       "abort",
+      "compact",
     ]);
   });
 
@@ -1981,5 +1985,173 @@ describe("DF3.6b AC1/AC5 — a kernel OOM-kill stops the resident and says so", 
     // observable that does is the degradation reason, which the wrong order
     // sets and the right one never touches.
     expect(c.lastDegradationReason).toBeNull();
+  });
+});
+
+describe("J4 AC2 — compact: the fifth strict member, host-only, allowlisted at run_start + post_gate_failure", () => {
+  test("accepts compact with an optional note", () => {
+    expect(SteeringDirectiveSchema.safeParse({ action: "compact" }).success).toBe(true);
+    expect(SteeringDirectiveSchema.safeParse({ action: "compact", note: "ctx at 0.82" }).success).toBe(true);
+  });
+
+  test("compact is member-level .strict(): extra keys, a wrong-typed or over-ceiling note are REJECTED", () => {
+    for (const extra of [{ evil: true }, { guidance: "g" }, { reason: "r" }, { fraction: 0.9 }]) {
+      expect(SteeringDirectiveSchema.safeParse({ action: "compact", ...extra }).success).toBe(false);
+    }
+    expect(SteeringDirectiveSchema.safeParse({ action: "compact", note: 42 }).success).toBe(false);
+    expect(
+      SteeringDirectiveSchema.safeParse({ action: "compact", note: "x".repeat(DIRECTIVE_TEXT_CHAR_CEILING + 1) })
+        .success,
+    ).toBe(false);
+  });
+
+  test("POINT_ALLOWLIST (via directiveAllowedAt): compact is valid at run_start + post_gate_failure only", () => {
+    // These entries govern the FUTURE host-originated path (AC2); a resident
+    // reply never reaches them (refused by origin below).
+    expect(directiveAllowedAt("run_start", "compact")).toBe(true);
+    expect(directiveAllowedAt("post_gate_failure", "compact")).toBe(true);
+    expect(directiveAllowedAt("run_end", "compact")).toBe(false);
+    // The pre-J4 entries are unchanged.
+    expect(directiveAllowedAt("run_start", "retry")).toBe(false);
+    expect(directiveAllowedAt("post_gate_failure", "retry")).toBe(true);
+    expect(directiveAllowedAt("run_end", "proceed")).toBe(true);
+  });
+
+  for (const point of ["run_start", "post_gate_failure", "run_end"] as const) {
+    test(`a RESIDENT-originated compact at ${point} is refused by origin — tripwire, never counted`, async () => {
+      for (const raw of ['{"action":"compact","note":"soft_at crossed"}', '{"action":"compact","threshold":0.5}']) {
+        const s = scriptedCaller([{ raw }]);
+        const tripwires: ResidentTripwire[] = [];
+        const c = createSteering({ caller: s.caller, rate: RATE, onTripwire: (t) => tripwires.push(t) });
+        const d = await c.solicit(point, ctx({ phase: "build", rosterIds: ["r1"], phaseIds: ["build"] }));
+        expect(d).toEqual(PROCEED);
+        expect(s.calls()).toBe(1);
+        expect(c.telemetry.status).toBe("active");
+        expect(c.telemetry.directives).toBe(0);
+        expect(c.telemetry.directivesRejected).toBe(1);
+        expect(c.telemetry.steeringIterations).toEqual({});
+        expect(c.telemetry.tripwires).toHaveLength(1);
+        expect(c.telemetry.tripwires[0]!.cause).toBe("gate_bypass_attempt");
+        expect(c.telemetry.tripwires[0]!.detail).toBe(HOST_ONLY_COMPACT_DETAIL);
+        expect(c.telemetry.tripwires[0]!.detail).toContain("host-only");
+        expect(tripwires).toEqual(c.telemetry.tripwires);
+      }
+    });
+  }
+
+  test("before/after parity: a resident compact rejects exactly as origin/dev rejected an unknown action", async () => {
+    // origin/dev (pre-J4) had no compact member, so {"action":"compact"} took
+    // the unknown-action schema rejection, detail `unrecognized action: <x>`.
+    // That path is unchanged post-J4 for any other unknown action, so it is the
+    // live baseline. The ONLY legitimate delta is the detail's host-only suffix;
+    // the prefix is byte-identical to the pre-J4 compact detail.
+    const run = async (raw: string) => {
+      const s = scriptedCaller([{ raw }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      const d = await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+      return { d, calls: s.calls(), telemetry: c.telemetry };
+    };
+    const unknown = await run('{"action":"frobnicate"}');
+    const compact = await run('{"action":"compact"}');
+    expect(unknown.telemetry.tripwires[0]!.detail).toBe("unrecognized action: frobnicate");
+    expect(compact.d).toEqual(unknown.d);
+    expect(compact.calls).toBe(unknown.calls);
+    const strip = (t: typeof unknown.telemetry) => ({
+      ...t,
+      tripwires: t.tripwires.map(({ detail: _d, ...rest }) => rest),
+    });
+    expect(strip(compact.telemetry)).toEqual(strip(unknown.telemetry));
+    expect(compact.telemetry.tripwires[0]!.detail.startsWith("unrecognized action: compact")).toBe(true);
+  });
+
+  test("action-less / non-string-action rejections list the pre-J4 actions (no compact)", async () => {
+    for (const raw of ["{}", '{"action":5}']) {
+      const s = scriptedCaller([{ raw }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+      const detail = c.telemetry.tripwires[0]!.detail;
+      expect(detail).toBe(
+        "action: Invalid discriminator value. Expected 'proceed' | 'retry' | 'select_roster' | 'abort'",
+      );
+      expect(detail).not.toContain("compact");
+    }
+  });
+
+  test("the resident-facing prompt (and its correction) never advertises compact — host-only", async () => {
+    const s = scriptedCaller([{ raw: "not json" }, { raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("post_gate_failure", ctx({ phase: "build", promptContext: [] }));
+    expect(s.prompts).toHaveLength(2);
+    for (const prompt of s.prompts) expect(prompt).not.toContain("compact");
+  });
+
+  test("negative controls: raw NDJSON and note-overloaded proceed/retry never carry a compact directive", async () => {
+    const cases: { raw: string; point: "run_start" | "post_gate_failure"; want: unknown }[] = [
+      // A trailing NDJSON compact line: the first balanced object wins.
+      { raw: '{"action":"proceed"}\n{"action":"compact"}', point: "run_start", want: PROCEED },
+      // pi --mode json envelope carrying compact as an escaped string: no action → rejected.
+      {
+        raw: '{"type":"message_end","message":{"content":"{\\"action\\":\\"compact\\"}"}}',
+        point: "post_gate_failure",
+        want: PROCEED,
+      },
+      // A compact signal smuggled through a note / extra key / guidance text.
+      { raw: '{"action":"proceed","note":"compact"}', point: "run_start", want: { action: "proceed", note: "compact" } },
+      { raw: '{"action":"proceed","compact":true}', point: "run_start", want: PROCEED },
+      {
+        raw: '{"action":"retry","guidance":"{\\"action\\":\\"compact\\"}"}',
+        point: "post_gate_failure",
+        want: { action: "retry", guidance: '{"action":"compact"}' },
+      },
+      // Discriminator spelled wrong: not a member.
+      { raw: '{"type":"compact"}', point: "run_start", want: PROCEED },
+      { raw: '{"action":"COMPACT"}', point: "run_start", want: PROCEED },
+    ];
+    for (const { raw, point, want } of cases) {
+      const c = createSteering({ caller: scriptedCaller([{ raw }]).caller, rate: RATE });
+      const d = await c.solicit(point, ctx({ phase: "build" }));
+      expect(d).toEqual(want as typeof d);
+      expect(d.action).not.toBe("compact");
+    }
+  });
+
+  test("end-to-end through the drain/ack inbox: an inbox line is context only, a compact reply is refused", async () => {
+    // DF3.4's inbox folds operator text into prompt CONTEXT and acks it at fold
+    // time; it never parses a directive (INV-APPROVE-5). So a compact JSON line
+    // queued in the inbox is input the resident sees, and a resident compact
+    // reply is refused by origin — no compact reaches the runner today.
+    const acks: { id: string; point: string }[] = [];
+    const inbox = {
+      drain: async () => [{ messageId: "m-compact", message: '{"action":"compact"}' }],
+      ack: async (id: string, point: string) => {
+        acks.push({ id, point });
+      },
+    };
+    // Reply proceed: the queued compact line does NOT become a directive.
+    const quiet = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
+    const c1 = createSteering({ caller: quiet.caller, rate: RATE, inbox });
+    const shared1 = ctx({ phase: "build", promptContext: [] });
+    expect(await c1.solicit("post_gate_failure", shared1)).toEqual(PROCEED);
+    expect(shared1.promptContext.some((l) => l.startsWith("operator attach m-compact: "))).toBe(true);
+    expect(quiet.prompts[0]).toContain("operator attach m-compact");
+    expect(acks).toEqual([{ id: "m-compact", point: "post_gate_failure" }]);
+
+    // Reply compact: refused by origin even at an allowlisted point; the
+    // fold-time ack still lands through the same drain/ack pass.
+    acks.length = 0;
+    const steer = scriptedCaller([{ raw: '{"action":"compact"}' }]);
+    const c2 = createSteering({ caller: steer.caller, rate: RATE, inbox });
+    expect(await c2.solicit("post_gate_failure", ctx({ phase: "build", promptContext: [] }))).toEqual(PROCEED);
+    expect(c2.telemetry.directives).toBe(0);
+    expect(c2.telemetry.directivesRejected).toBe(1);
+    expect(c2.telemetry.tripwires[0]!.detail).toBe(HOST_ONLY_COMPACT_DETAIL);
+    expect(acks).toEqual([{ id: "m-compact", point: "post_gate_failure" }]);
+
+    // At run_end the fold-time ack still lands, and compact is still rejected.
+    acks.length = 0;
+    const late = createSteering({ caller: scriptedCaller([{ raw: '{"action":"compact"}' }]).caller, rate: RATE, inbox });
+    expect(await late.solicit("run_end", ctx({ promptContext: [] }))).toEqual(PROCEED);
+    expect(late.telemetry.directivesRejected).toBe(1);
+    expect(acks).toEqual([{ id: "m-compact", point: "run_end" }]);
   });
 });

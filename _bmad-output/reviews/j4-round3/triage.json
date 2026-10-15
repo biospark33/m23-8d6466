@@ -1,0 +1,160 @@
+{
+  "pr": 0,
+  "round": 3,
+  "findings": [
+    {
+      "finding_id": "R3-01",
+      "finding_text": "orderSweepHotspots sort is inconsistent for NaN/Infinity scores (L9 fixed its copy; core did not)",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "non-finite scores sort last, deterministic",
+      "sources": "BH3-001",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-02",
+      "finding_text": "L8 holds the shared corpus lock across all findings (unbounded count x 40s); L9 rank() same shape",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "cap findings per call (named constant) so lock hold is bounded; same cap discipline as L9",
+      "sources": "BH3-002",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-03",
+      "finding_text": "L8 does not validate lens before the paid ask: record fails after payment, mislabelled judge-failed, re-paid every call",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "validate the would-be record fields (lens id) before asking; refuse = recorded miss",
+      "sources": "BH3-003",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-04",
+      "finding_text": "Timed-out ask can still complete and be paid without a record",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "same as R1-22/R2-10: mock-only CLI, bounded by the 40s ask deadline, documented in the module header",
+      "sources": "BH3-004",
+      "owner": "-",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-05",
+      "finding_text": "fleet-observe-pack test leaves corpus dirs on real defaults (safe only because the stub reports no journal)",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "inject tmp dirs explicitly",
+      "sources": "BH3-005",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-06",
+      "finding_text": "Pass hook budget can overrun by one per-call deadline (360s vs 300s cap)",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "clamp each hook's deadline to the remaining pass hook budget",
+      "sources": "ECH3-001",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-07",
+      "finding_text": "L8 routes anything not 'mock' to the measured corpus (R2-03 applied to L9 only)",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "only explicit mode==='live' selects the measured corpus in L8 too",
+      "sources": "ECH3-002",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-08",
+      "finding_text": "L9 already-recorded hotspots sort to the bottom of the logged would-be order on repeat calls",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "logged order keeps recorded items at their judged/deterministic position",
+      "sources": "ECH3-003",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-09",
+      "finding_text": "L8 reuses a recorded answer by finding id only; an edited finding inherits its old verdict",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "key recorded answers by finding id + text digest",
+      "sources": "ECH3-004",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-10",
+      "finding_text": "Hook ticks on a possibly stale record snapshot after lock release",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "costs nothing while unarmed; the arming PR must re-check run state under the lock before any write \u2014 recorded in the register/DAR via the observe docblock",
+      "sources": "ECH3-005",
+      "owner": "-",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-11",
+      "finding_text": "Arming source scan bypassable (process['env'], destructuring, rc files)",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "the scan is a tripwire, not the guarantee; the guarantee is the `false as const` literal + no arming code path, both tested; noted in the test",
+      "sources": "ECH3-006",
+      "owner": "FX-F(comment)",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-12",
+      "finding_text": "Pin test comment references the replaced literal 285156f as 'the literal above'",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "reword",
+      "sources": "AA3-001",
+      "owner": "driver",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-13",
+      "finding_text": "opensrc lockfile default is process.cwd(), contradicting DAR #5",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "default to FACTORY_ROOT/bun.lock",
+      "sources": "AA3-002",
+      "owner": "FX-F",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    },
+    {
+      "finding_id": "R3-14",
+      "finding_text": "L9 corpus records do not name answer_mode inside the record",
+      "diff_context_ref": "origin/dev...4aa58295",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "TriageRecordSchema is LOCKED (no new field); mode is carried by directory routing (mock/ vs measured) and on every l9-triage log line (R2-18)",
+      "sources": "AA3-003",
+      "owner": "-",
+      "created_at": "2026-10-14T21:36:28+00:00"
+    }
+  ]
+}

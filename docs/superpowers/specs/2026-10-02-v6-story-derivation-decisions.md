@@ -360,6 +360,33 @@ converged 13-agent pipeline) surfaced findings requiring register-level decision
     standing-index gate probe pins the symbol — `src/gate/assertions/p0-10-gitnexus.ts:27`
     probes `createServer` in `src/swarmclaw/index.ts` (NET-NEW vs R3, flagged by Z5), so the
     retained surface is load-bearing twice (ADR-2 restoration path + this probe).
+16. **J4 `compact` amendment (DD-28.14 executed, 2026-10-14):** J4 amends DF1.11's closed
+    `SteeringDirectiveSchema` union adds-only with a fifth `.strict()` member
+    `{action:"compact", note?}`; `POINT_ALLOWLIST` gains it at `run_start` +
+    `post_gate_failure` only (`run_end` stays proceed-only; no fourth steering point). The
+    resident-facing directive prompt does not advertise it, and origin IS code-enforced:
+    `solicit()` refuses a resident reply naming `compact` at every point with the exact pre-J4
+    unknown-action rejection (PROCEED, `directivesRejected` +1, `gate_bypass_attempt` row,
+    detail `unrecognized action: compact (host-only: …)`). The allowlist entries, read via
+    `directiveAllowedAt`, govern only the future host-originated path.
+    (a) **buildId:** BOTH `src/phase-engine/steering.ts` and `src/fleet/observe.ts` (the `onTick`
+    seam) are COPY-set and move `deriveBuildId`; origin/dev's literal `285156f` was already stale: J3's CodeRabbit round-3 commit `dac6e6c2`
+    edited the walked input `src/fleet/dispatch.ts` without a re-pin, so dev's real digest is
+    `b34dc6b` and dev's own pin test is red. J4 moves `b34dc6b`→`37e749e` via `steering.ts` +
+    `observe.ts` only (and incidentally restores dev's pin test) (DD-28.2 ritual; publish/adopt
+    stays operator-gated).
+    (b) **Arming PR owes:** a host-to-engine directive path (DF1.11's inbox is context-only, and
+    production builds the L7 hook with no steering writer, so arming today only logs
+    `no-steering-writer`) plus the box-side `compact` applier (its own re-pin). Both are unowned
+    follow-up work that rides the arming PR.
+    (c) **Honestly unproven:** the box journal's resident block is refreshed only after
+    `run.finish` writes `journal/final.json`, the very marker that makes observe treat the run as
+    settled, so in production L7 makes ZERO asks today. RSS/context utilization are not
+    host-observable (null). A mid-run resident refresh (box-side engine work) is the
+    prerequisite; it is unowned and rides the arming PR.
+    (d) **Pre-dispatch sanity leg:** asks a provisional noul `manifest_consistent` question purely
+    to emit provenance. It names no disposition values and stays provenance-only until a register
+    amendment names its answer pair.
 
 ## 8b. DD-29 — SWARMCLAW_FORK_REV adoption ritual (Z1, 2026-10-02)
 

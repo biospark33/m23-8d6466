@@ -134,11 +134,23 @@ export const SteeringDirectiveSchema = z.discriminatedUnion("action", [
       note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional(),
     })
     .strict(),
+  // J4 (AC2): the L7 compact signal — appended LAST, adds-only, a register-
+  // ratified amendment of this closed union (DD register, J4 line). Host-only:
+  // DIRECTIVE_INSTRUCTION deliberately does not advertise it, and solicit()
+  // refuses a RESIDENT-originated compact by origin (HOST_ONLY_COMPACT_DETAIL)
+  // before this schema is consulted. No in-box applier or host-to-engine
+  // directive path exists yet (the arming PR owns both).
+  z
+    .object({ action: z.literal("compact"), note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional() })
+    .strict(),
 ]);
 export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
 
 /** Derived from the schema itself (A8) so the literals cannot drift apart. */
 const KNOWN_ACTIONS = SteeringDirectiveSchema.options.map((m) => m.shape.action.value) as readonly string[];
+
+/** Actions a resident may never originate; excluded from resident-facing text. */
+const HOST_ONLY_ACTIONS = ["compact"] as const;
 
 /** Per-point directive allowlist: a schema-valid reply whose action has
  *  nothing to steer at this point is a REJECTION, not an acceptance —
@@ -147,12 +159,27 @@ const KNOWN_ACTIONS = SteeringDirectiveSchema.options.map((m) => m.shape.action.
  *  fail transition) and select_roster (the dispatch_task pick);
  *  post_gate_failure applies retry (guidance into promptContext) and abort
  *  (declining the authorized retry); at run_end the run is already settled —
- *  proceed only. */
+ *  proceed only. J4: compact at run_start (carried-context compaction at the
+ *  run boundary) and post_gate_failure; compacting a settled run is
+ *  meaningless, so run_end stays proceed-only. */
 const POINT_ALLOWLIST: Record<SteeringPoint, readonly SteeringDirective["action"][]> = {
-  run_start: ["proceed", "abort", "select_roster"],
-  post_gate_failure: ["proceed", "retry", "abort"],
+  run_start: ["proceed", "abort", "select_roster", "compact"],
+  post_gate_failure: ["proceed", "retry", "abort", "compact"],
   run_end: ["proceed"],
 };
+
+/** J4: the pure view of POINT_ALLOWLIST — where a directive is valid. For
+ *  `compact` this governs only the future host-originated path; a resident
+ *  reply naming compact is refused by origin in solicit() at every point. */
+export function directiveAllowedAt(point: SteeringPoint, action: SteeringDirective["action"]): boolean {
+  return POINT_ALLOWLIST[point].includes(action);
+}
+
+/** J4 (R1-02): tripwire detail for a resident-originated compact. Prefixed with
+ *  the pre-J4 schema-rejection detail ("unrecognized action: compact") so the
+ *  journal row stays the row an unknown action produced before J4. */
+export const HOST_ONLY_COMPACT_DETAIL =
+  "unrecognized action: compact (host-only: a resident reply never originates compact)";
 
 /** Fleet-supplied agent caller. Engine never imports fleet (INV-RES-1). */
 export interface ResidentCaller {
@@ -328,6 +355,11 @@ export interface SteeringController {
 /** The deterministic default every degradation path lands on (INV-RES-5). */
 const PROCEED: SteeringDirective = { action: "proceed" };
 
+// The resident-facing union: `compact` is intentionally ABSENT. It is a
+// host-originated L7 signal (J4), never a resident decision — advertising it
+// would invite the resident to originate a control action the story reserves
+// for the host, and recording-only (PACK_SIGNALS_ARMED=false) means nothing
+// writes one today.
 const DIRECTIVE_INSTRUCTION = [
   "You are the resident orchestrator for this run. Reply with ONE JSON object and nothing else.",
   `Keep the reply at or under ${MAX_OUTPUT_TOKENS} output tokens.`,
@@ -442,7 +474,9 @@ function rejectionDetail(parsed: unknown, error: ZodError): string {
   }
   const issue = error.issues[0];
   if (issue === undefined) return "schema rejected the reply";
-  const detail = formatZodIssue(issue);
+  // R2-15: zod enumerates the union in its discriminator message; compact is
+  // host-only, so the resident-facing list is the pre-J4 one (compact removed).
+  const detail = formatZodIssue(issue).replaceAll(HOST_ONLY_ACTIONS.map((a) => ` | '${a}'`).join(""), "");
   return typeof action === "string" ? `action ${sanitizeForMessage(action)} rejected: ${detail}` : detail;
 }
 
@@ -1360,6 +1394,14 @@ export function createSteering(deps: {
         }
         prompt = malformedCorrectionPrompt(parsed.reason, point, ctx);
         continue;
+      }
+      // J4 (R1-02): compact is host-originated only. A resident reply naming
+      // it — well-formed or not, at ANY point — is refused by origin here,
+      // before the schema (which now has the member) could accept it: the
+      // exact pre-J4 unknown-action rejection (PROCEED, directivesRejected +1,
+      // gate_bypass_attempt row, directives untouched).
+      if ((parsed.parsed as { action?: unknown } | null)?.action === "compact") {
+        return reject(ctx, HOST_ONLY_COMPACT_DETAIL);
       }
       const result = SteeringDirectiveSchema.safeParse(parsed.parsed);
       if (!result.success) {

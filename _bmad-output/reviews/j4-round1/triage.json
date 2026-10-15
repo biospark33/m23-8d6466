@@ -1,0 +1,281 @@
+{
+  "pr": 0,
+  "round": 1,
+  "findings": [
+    {
+      "finding_id": "R1-01",
+      "finding_text": "L9 default (mock) writes arm:jev records into the top-level triage corpus that ab-report counts as measured jev data",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "route mock-mode L9 records to corpus/mock like L8",
+      "sources": "BH1-001,AA1-002,ECH1-002",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-02",
+      "finding_text": "Resident reply {action:compact} is now accepted+counted (pre-J4: rejected with gate_bypass_attempt) \u2014 recording-only claim false in-box",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "HIGH",
+      "disposition": "PATCH",
+      "rationale": "solicit() refuses compact by ORIGIN (resident replies) with the existing tripwire; schema member + POINT_ALLOWLIST stay (AC2) and govern the future host path; export a pure allowedAt predicate for the allowlist tests",
+      "sources": "BH1-002,AA1-003,ECH1-007",
+      "owner": "FX-A",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-03",
+      "finding_text": "L7 almost never fires mid-run: journal resident block written only pre-walk + post-run_end; RSS/context null",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "HIGH",
+      "disposition": "DEFER",
+      "rationale": "engine-side mid-run resident refresh is box-side work outside J4 Files-to-Modify; honest-unproven limb recorded in story + DD register; L7 additionally gated to live resident status (R1-09)",
+      "sources": "AA1-001",
+      "owner": "FX-A(doc)+driver(story)",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-04",
+      "finding_text": "onTick timeout orphans the L7 ask which keeps the corpus lock; later residents fail misattributed as judge-failed",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "L7 ask bounded below ON_TICK_DEADLINE (client timeout / own deadline), lock released in finally, RunLockedError mapped to corpus-locked",
+      "sources": "ECH1-001,BH1-006,AA1-015",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-05",
+      "finding_text": "Hook time can exhaust the sweep wall-clock budget and starve later (settled) candidates",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "observe: skip onTick when remaining pass budget < hook deadline (logged), so hooks never push the sweep past its budget",
+      "sources": "BH1-004",
+      "owner": "FX-D",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-06",
+      "finding_text": "Production hook writes cwd-relative _bmad-output/judgment into whatever repo fleet runs from",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "anchor default pack dirs to the factory repo root (module-relative), not cwd",
+      "sources": "BH1-005,AA1-010,ECH1-009",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-07",
+      "finding_text": "Armed L8 drops every finding when the corpus lock fails; kept-set keyed by findingId alone collides across runs",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "misses are never filtered; key runId+findingId",
+      "sources": "BH1-003",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-08",
+      "finding_text": "L7 idempotence key uses the sweep UUID: unchanged state re-asked every sweep; single ever-growing file read twice per ask",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "per-tick key kept (story: runId+tick) but skip the ask when the run's last recorded state digest is unchanged; shard machine-state corpus per runId; torn line = corpus-unreadable miss",
+      "sources": "ECH1-004,BH1-007,ECH1-011",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-09",
+      "finding_text": "L7 asks about stopped/degraded residents",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "ask only while resident status is live/running",
+      "sources": "ECH1-006",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-10",
+      "finding_text": "L7 thresholds use default ceilings not per-run manifest values",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "DISMISS",
+      "rationale": "story pins spend vs 8_000 \u00b5$ and iterations vs 3 (thresholds-in-code, LOCKED); the host has no per-run manifest bound in the RunRecord; recorded as a known ceiling in the module header",
+      "sources": "ECH1-005",
+      "owner": "-",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-11",
+      "finding_text": "No production steering-writer path; arming would only log a miss",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "DISMISS",
+      "rationale": "story: the in-box applier + host path are unowned follow-up of the arming PR (DD-28.26); recorded in the register line",
+      "sources": "AA1-004",
+      "owner": "FX-A(doc)",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-12",
+      "finding_text": "Sanity leg never invoked; manifest_consistent question invented without register entry",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "register line names the provisional question (no disposition values); story wiring = callable chain (Files to Modify lists no dispatch edit); recorded in Dev Agent Record",
+      "sources": "AA1-005",
+      "owner": "FX-A(doc)",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-13",
+      "finding_text": "L9 re-asks (paid) hotspots whose records then dedupe away",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "check existing record (key incl. brief digest) before asking",
+      "sources": "BH1-008,AA1-006,ECH1-003",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-14",
+      "finding_text": "Machine-state validator ignores object keys (prose smuggled in keys)",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "validate keys against the id regex too",
+      "sources": "AA1-007",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-15",
+      "finding_text": "L9-less tree check (DoD) not exercised in tests/CI",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "cut-boundary test materialises an L9-less copy and runs the pack suite there",
+      "sources": "AA1-008",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-16",
+      "finding_text": "fleet observe --all wiring untested; FleetDeps.judgmentPack unexercised",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "test runs the CLI sweep path with an injected judgmentPack and asserts the hook fired",
+      "sources": "AA1-009",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-17",
+      "finding_text": "appendRecord accepts machine-state records into any dir (one misrouted line breaks ab-report)",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "appendRecord back to triage-only (byte-identical behavior to dev); new appendMachineStateRecord sharing the internals",
+      "sources": "BH1-010,AA1-012,ECH1-010",
+      "owner": "FX-B",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-18",
+      "finding_text": "Unarmed hook adds two box reads per unsettled run per sweep",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "bounded by DEFAULT_PER_CALL_DEADLINE_MS and needed to record (LOCKED #5 records while unarmed); documented",
+      "sources": "ECH1-008",
+      "owner": "-",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-19",
+      "finding_text": "Some unreadable journal states return silently instead of a miss",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "log a miss for probe failure / invalid resident block",
+      "sources": "ECH1-012",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-20",
+      "finding_text": "L9 ids collide past 300 chars; NaN/Infinity scores accepted",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "digest-suffixed ids; reject non-finite scores",
+      "sources": "ECH1-013",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-21",
+      "finding_text": "opensrc walk 'bounded' comment false; walks node_modules; one broken symlink fails the package",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "bounded entry count, skip node_modules, lstat/skip symlinks",
+      "sources": "BH1-009,ECH1-014",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-22",
+      "finding_text": "Live ask in flight at CLI exit is paid but unrecorded",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "CLI path is mock-only (no live flag); provenance is emitted inside judge before return; documented",
+      "sources": "ECH1-015",
+      "owner": "-",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-23",
+      "finding_text": "Register entry omits that observe.ts also moves deriveBuildId",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "amend the DD line",
+      "sources": "AA1-011",
+      "owner": "FX-A",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-24",
+      "finding_text": "Missing named negative controls: noul-vs-choice arithmetic; hard cap",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "add tests",
+      "sources": "AA1-013",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    },
+    {
+      "finding_id": "R1-25",
+      "finding_text": "AC1 fence follows relative imports only",
+      "diff_context_ref": "origin/dev...c73d379c",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "also flag non-relative specifiers reaching judgment/autonomy (path aliases, src/...)",
+      "sources": "AA1-014",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T19:40:23+00:00"
+    }
+  ]
+}

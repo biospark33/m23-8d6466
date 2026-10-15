@@ -1,0 +1,226 @@
+{
+  "pr": 0,
+  "round": 2,
+  "findings": [
+    {
+      "finding_id": "R2-01",
+      "finding_text": "Armed L8 re-admits an already-recorded filtered finding (skip runs before the filter; no log line)",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "already-recorded findings carry their recorded disposition into the armed filter and log a line",
+      "sources": "ECH2-001",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-02",
+      "finding_text": "onTick runs inside the per-run lock: teardown/harvest refused for up to ~60s per resident per pass",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "invoke the hook after the run lock is released (still per pass, fault-isolated, budget-aware); box gone mid-hook = recorded miss",
+      "sources": "BH2-002",
+      "owner": "FX-D",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-03",
+      "finding_text": "L9 treats any client whose mode is not 'mock' as live \u2014 a wrapped/spied mock writes into the measured corpus",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "only an explicit mode==='live' selects the measured corpus; Judge.mode required",
+      "sources": "BH2-003,ECH2-006",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-04",
+      "finding_text": "Pin provenance wrong: 285156f is not origin/dev's digest (J3 dac6e6c2 moved dispatch.ts without re-pin; dev's own pin test is red at b34dc6b)",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "provenance + register say dev literal 285156f was stale (real b34dc6b after J3 dac6e6c2); J4 moves b34dc6b->348e5d4 via steering.ts + observe.ts; J4's re-pin incidentally turns dev's red pin test green",
+      "sources": "AA2-001",
+      "owner": "driver+FX-A",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-05",
+      "finding_text": "L7 deferred gap understated: production L7 makes ZERO asks today (resident block refreshed only after final.json, which ends observe ticking)",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "DEFER",
+      "rationale": "engine-side mid-run refresh stays out of J4 scope; register 16(c) + story corrected to 'zero production asks today'; unarmed per-pass cost (two bounded box reads, no lock after R2-02) accepted",
+      "sources": "AA2-002,BH2-006",
+      "owner": "FX-A(doc)+driver",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-06",
+      "finding_text": "Story file never updated (status, Dev Agent Record, R1-03/R1-12 records; e2e bullet now schema-validation + refusal)",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "driver updates story status, Dev Agent Record with deviations, DoD evidence",
+      "sources": "AA2-003",
+      "owner": "driver",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-07",
+      "finding_text": "L9 cap counts already-recorded hotspots: items past 50 never judged; they also drop from the would-be order",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "MED",
+      "disposition": "PATCH",
+      "rationale": "cap counts real asks only; recorded items stay in the logged order",
+      "sources": "BH2-001,ECH2-007",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-08",
+      "finding_text": "L9 default provenance dir is cwd-relative",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "anchor to FACTORY_ROOT like the corpus dir",
+      "sources": "BH2-004,ECH2-006,AA2-006",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-09",
+      "finding_text": "L8 holds the corpus lock across unbounded asks",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "per-ask deadline in L8",
+      "sources": "BH2-005",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-10",
+      "finding_text": "A timed-out L7 ask can still be paid + provenance written; next tick re-asks",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "bounded by the 40s ask deadline inside the 60s hook deadline; only on timeout; the CLI path is mock-only (R1-22); recorded in the module header",
+      "sources": "BH2-007",
+      "owner": "-",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-11",
+      "finding_text": "Env-arming test uses an invented var; source scan misses import.meta.env / Bun.file",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "scan widened; test sets every plausible arming var",
+      "sources": "BH2-008",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-12",
+      "finding_text": "L7 sets a healthy shard aside on any read error (EACCES/EMFILE), not only a torn line",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "rename-aside only on parse/schema failure; I/O errors = miss, shard untouched",
+      "sources": "ECH2-002",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-13",
+      "finding_text": "Lenient shard read vs strict append: one triage line in a run shard = paid ask every tick, misreported",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "same schema for read and append; foreign line = corpus-unreadable",
+      "sources": "ECH2-003",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-14",
+      "finding_text": "Budget skip still lets slow hooks consume most of the pass (budget-120s)",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "pass-level hook budget (a fixed fraction of the sweep budget) in addition to the per-call skip",
+      "sources": "ECH2-004",
+      "owner": "FX-D",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-15",
+      "finding_text": "Rejection text for action-less replies now lists 'compact' among valid actions",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "resident-facing/known-action message excludes compact (pre-J4 text)",
+      "sources": "ECH2-005",
+      "owner": "FX-A",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-16",
+      "finding_text": "L7 skip ignores answer_mode: a mock answer suppresses a later live ask for the same state",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "skip only when the recorded answer_mode matches the client's mode",
+      "sources": "ECH2-008",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-17",
+      "finding_text": "Cut-boundary test: no tests/ import scan, no typecheck, symlinks writable dirs into tmp tree",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "scan tests/ too; tsc in the L9-less tree; copy/omit writable dirs instead of symlinking",
+      "sources": "ECH2-009",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-18",
+      "finding_text": "L9 log lines/records carry no mock marker",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "answer_mode on every l9-triage log line (TriageRecordSchema is LOCKED; records are routed by dir)",
+      "sources": "AA2-004",
+      "owner": "FX-E",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-19",
+      "finding_text": "Production fleet wiring (no-deps arm attaching the hook) untested",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "PATCH",
+      "rationale": "extract a tiny exported selector in fleet.ts and test both arms",
+      "sources": "AA2-005",
+      "owner": "FX-C",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    },
+    {
+      "finding_id": "R2-20",
+      "finding_text": "steering.ts edit exceeds member+allowlist (origin guard)",
+      "diff_context_ref": "origin/dev...3f1d7e23",
+      "label": "LOW",
+      "disposition": "DISMISS",
+      "rationale": "ratified in register 16(b) (R1-02); noted only",
+      "sources": "AA2-007",
+      "owner": "-",
+      "created_at": "2026-10-14T20:59:17+00:00"
+    }
+  ]
+}
