@@ -161,6 +161,16 @@ export interface RunCompletionDeps {
    * era replaces the default with the real record carrier.
    */
   consultContext?: (rec: RunRecord) => { input: Parameters<typeof consultAutoMerge>[0]; verdict: QaVerdict | undefined };
+  /**
+   * G1 (ADR-2): the clause-5 carrier-probe seam — TEST/PRODUCER ONLY, the
+   * same trusted-configuration class as consultContext. Threaded verbatim to
+   * readAutoMergePolicy's `carrierRoot` opt (production callers never pass
+   * it; the probe defaults to the factory build tree beside this module). The
+   * chain demo injects a fabricated carrier tree — without it, ON is
+   * unreachable while the real veto-window carrier is missing, and the
+   * eligible path could not be driven end-to-end at all.
+   */
+  consultCarrierRoot?: string;
 }
 
 // ─── observability (the emitLine/log idiom, fanout-primitive.ts:1538-1550) ────
@@ -542,14 +552,39 @@ async function reverifyAndMap(
   // no state write. Present file ⇒ one synchronous evaluation, one consult
   // event, and — only on the green+requested arm below — the labeled policy
   // decision. reasons[] is present here; the absent-file case emits nothing.
-  const policy = readAutoMergePolicy({ cwd: deps.hostRoot });
+  // The audit trail is TWO events by design: this consult event records the
+  // evaluation, the terminal event below records the outcome — an
+  // eligible-then-vetoed sequence is legitimate (reverify is the chain's own
+  // veto arm), not a double-write bug.
+  const policy = readAutoMergePolicy({
+    cwd: deps.hostRoot,
+    ...(deps.consultCarrierRoot === undefined ? {} : { carrierRoot: deps.consultCarrierRoot }),
+  });
   let policyDecision = false;
   if (policy.state !== "absent") {
-    const rec = deps.store.get(runId);
-    const ctx = (deps.consultContext ?? buildConsultContext)(rec);
-    const consult = consultAutoMerge(ctx.input, ctx.verdict, policy);
-    observeLine(requestId, { runId, event: "auto-merge-consult", eligible: consult.eligible, ...(consult.reasons === undefined ? {} : { reasons: consult.reasons }) });
-    policyDecision = consult.eligible;
+    // Belt-and-braces fold (dispatch's precedent): a record the store cannot
+    // return, or a throwing injected consultContext, must never escape
+    // reverifyAndMap untyped (the module doc promises no-throw past typed
+    // outcomes). Catch ⇒ the decision stays false — fail-closed, silent; the
+    // failing-open alternative is worse.
+    try {
+      const rec = deps.store.get(runId);
+      const ctx = (deps.consultContext ?? buildConsultContext)(rec);
+      const consult = consultAutoMerge(ctx.input, ctx.verdict, policy);
+      // policy_off mirrors the consult result's optional policyOff (its
+      // stateReason when the policy is off) — snake_case, the chain-event
+      // convention beside chain_ms.
+      observeLine(requestId, {
+        runId,
+        event: "auto-merge-consult",
+        eligible: consult.eligible,
+        ...(consult.reasons === undefined ? {} : { reasons: consult.reasons }),
+        ...(consult.policyOff === undefined ? {} : { policy_off: consult.policyOff }),
+      });
+      policyDecision = consult.eligible;
+    } catch {
+      // fail-closed by design — see the fold comment above the try.
+    }
   }
   let result: ReverifyOutcome;
   try {
@@ -592,7 +627,18 @@ async function reverifyAndMap(
     // precedent). The gate's transient awaiting-approval write is same-tick
     // superseded by the policy decision; the gate module itself is untouched
     // (CHANNEL ≠ POLICY: approval-gate.ts stays byte-identical).
-    if (policyDecision) recordPolicyApproval(deps.store, runId, new Date());
+    // Fail-closed re-read: the operator may revoke the policy while reverify
+    // runs; only a still-ON policy mints the decision. One extra read, on the
+    // eligible path only.
+    if (
+      policyDecision &&
+      readAutoMergePolicy({
+        cwd: deps.hostRoot,
+        ...(deps.consultCarrierRoot === undefined ? {} : { carrierRoot: deps.consultCarrierRoot }),
+      }).state === "on"
+    ) {
+      recordPolicyApproval(deps.store, runId, new Date());
+    }
     outcome =
       line.markerOk === undefined
         ? { kind: "driven", chainMs }

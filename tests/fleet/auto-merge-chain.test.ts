@@ -16,9 +16,11 @@
  *      approval-gate.ts stays byte-untouched (CHANNEL ≠ POLICY).
  *   3. never-path park: `src/fleet/approval-gate.ts` in the diff parks even
  *      with the policy ON.
- *   4. v6a production-reality inertness: with no consult producer in the
- *      production graph (no `deps.consultContext`), the consult reports
- *      `verdict-absent` and the chain always parks.
+ *   4. v6a production-reality inertness: with no consult producer AND no
+ *      carrier injection in the production graph (no `deps.consultContext`,
+ *      no `deps.consultCarrierRoot` — the real factory tree has no
+ *      veto-window carrier yet), the consult reports `verdict-absent` +
+ *      `policy-off` and the chain always parks.
  *   5. AC2 observability: a present-but-OFF policy consults with `policy-off`
  *      and parks.
  *
@@ -37,6 +39,8 @@ import { type RunCompletionDeps, observeAndDriveChain } from "../../src/fleet/ru
 import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { createRun, type ExecResult } from "../../src/providers/driver.ts";
+import type { CostLedger } from "../../src/providers/cost-ledger.ts";
+import type { CostLedgerHook } from "../../src/providers/teardown.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { setLogSink } from "../../src/lib/log.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
@@ -94,7 +98,9 @@ afterEach(() => {
   for (const restore of logRestores.splice(0)) restore();
 });
 
-// ─── fixtures (the run-completion.test.ts chain arrangement, rebuilt local) ───
+// ─── fixtures — the tests/fleet/run-completion.test.ts:1386+ chain arrangement, rebuilt local ──
+// SYNC DUTY: this is a deliberate copy of that arrangement, not a shared helper;
+// a change on either side must review the other for divergence.
 
 type MarkerPlan = { body: Record<string, unknown> | null };
 
@@ -153,9 +159,10 @@ class ProbeDriver extends FakeDriver {
   }
 }
 
-function quietLedger(): { hook: { ingestBoxHours(ctx: Record<string, unknown>): void }; ingested: Array<Record<string, unknown>> } {
-  const ingested: Array<Record<string, unknown>> = [];
-  return { hook: { ingestBoxHours: (ctx) => ingested.push(ctx) }, ingested };
+function quietLedger(): CostLedgerHook {
+  return {
+    ingestBoxHours: () => ({ eventId: "quiet", inserted: false, unpriced: false }),
+  };
 }
 
 function baseDeps(
@@ -170,9 +177,14 @@ function baseDeps(
     runLock: path.join(over.runsDir, `${runId}.lock`) as RunCompletionDeps["runLock"],
     keyApi: new FakeKeyApi() as RunCompletionDeps["keyApi"],
     requestId: "req-g1",
-    costLedger: quietLedger().hook as never,
+    // ONE structural cast, typed to the real deps interface (not `never`): the
+    // chain's teardown consumes the ledger only through CostLedgerHook's
+    // `ingestBoxHours` (teardown's DF2.8 structural handle, which quietLedger
+    // satisfies exactly); the full CostLedger class surface is fixture-unwritable.
+    costLedger: quietLedger() as CostLedger,
     recordAuditLink: () => {},
     consultContext: over.consultContext,
+    consultCarrierRoot: over.consultCarrierRoot,
   };
 }
 
@@ -225,21 +237,37 @@ function gitRun(argv: string[], cwd: string): string {
   return res.stdout;
 }
 
-/** The clause-5 carrier module: declares `enqueueVetoWindow`, text-probed, never imported. */
-const CARRIER_MODULE_SRC = "export function enqueueVetoWindow(q: unknown): void {}\n";
-const CARRIER_TEST_SRC = [
-  'import { expect, test } from "bun:test";',
-  'import { enqueueVetoWindow } from "../../src/fleet/veto-window.ts";',
-  'test("queues", () => { expect(enqueueVetoWindow(undefined)).toBeUndefined(); });',
-  "",
-].join("\n");
+/**
+ * The clause-5 carrier, fabricated in a tmp tree SHAPED like the factory tree
+ * (module at <root>/src/fleet/veto-window.ts, suite at <root>/tests/fleet/
+ * veto-window.test.ts) so the probe — anchored to the carrierRoot handed to
+ * it via deps.consultCarrierRoot, never the host tree — finds a live queue.
+ * Returns the carrierRoot to pass. Injection ONLY: the real factory tree
+ * gains its carrier with the veto-window story, never from a fixture.
+ */
+function fabricateCarrier(root: string): string {
+  fs.mkdirSync(path.join(root, "src", "fleet"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "fleet", "veto-window.ts"), "export function enqueueVetoWindow(q: unknown): void {}\n");
+  fs.mkdirSync(path.join(root, "tests", "fleet"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "tests", "fleet", "veto-window.test.ts"),
+    'test("queues", () => { enqueueVetoWindow(undefined); });\n',
+  );
+  return path.join(root, "src", "fleet");
+}
 
 /**
  * A git host shaped like run-completion.test.ts's, whose `.factory/policy.json`
- * posture is chosen per arm — the policy and the clause-5 carriers are written
- * BEFORE the base commit so the host tree stays clean for reverify's
- * tree-clean phase. The policy file is 0600 (the `.factory/` posture the
- * guarded read demands; a looser file is `policy-unreadable`, i.e. OFF).
+ * posture is chosen per arm — the policy is written BEFORE the base commit so
+ * the host tree stays clean for reverify's tree-clean phase. The policy file
+ * is 0600 (the `.factory/` posture the guarded read demands; a looser file is
+ * `policy-unreadable`, i.e. OFF).
+ *
+ * The committed policy file is FIXTURE-ONLY scaffolding: reverify's tree-clean
+ * needs a clean tracked tree and the loader needs the file present at the
+ * default path, so the fixture commits it with the base. A real operator
+ * NEVER commits it — `.factory/` is gitignored in the shipped posture and
+ * policy lives out-of-tree.
  */
 function gitHost(policy: "absent" | "on" | "off"): GitHost {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-g1chain-repo-"));
@@ -254,12 +282,6 @@ function gitHost(policy: "absent" | "on" | "off"): GitHost {
     path.join(dir, ".factory", "pipeline.json"),
     JSON.stringify({ version: 1, repos: { "acme/widget": { manifest: ".factory/manifests/acme-widget.json" } } }),
   );
-  if (policy === "on") {
-    fs.mkdirSync(path.join(dir, "src", "fleet"), { recursive: true });
-    fs.mkdirSync(path.join(dir, "tests", "fleet"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "src", "fleet", "veto-window.ts"), CARRIER_MODULE_SRC);
-    fs.writeFileSync(path.join(dir, "tests", "fleet", "veto-window.test.ts"), CARRIER_TEST_SRC);
-  }
   if (policy !== "absent") {
     const body =
       policy === "on"
@@ -390,6 +412,7 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         quarantine(host, "run-g1b");
         const driver = new ProbeDriver(path.join(s.dir, "boxes"));
         const vm = await seedGreenRun(s.store, driver, host, "run-g1b", { ok: true });
+        // the fabricated carrier rides the store tmpdir — s.cleanup() removes it
         const out = await observeAndDriveChain(
           "run-g1b",
           baseDeps("run-g1b", {
@@ -398,12 +421,18 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
             runsDir: s.dir,
             hostRoot: host.dir,
             consultContext: () => injectedConsult("run-g1b", ["src/feature/x.ts"], ["src/feature/**"]),
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
           }),
         );
         expect(out).toMatchObject({ kind: "driven", markerOk: true });
-        // ONE consult event, eligible with an empty reasons list
+        // ONE consult event, eligible with the contract's satisfied-requirements
+        // reasons list — every clause named as passed, not an empty array.
         expect(consultEvents(lines)).toHaveLength(1);
-        expect(consultEvents(lines)[0]).toMatchObject({ runId: "run-g1b", eligible: true, reasons: [] });
+        expect(consultEvents(lines)[0]).toMatchObject({
+          runId: "run-g1b",
+          eligible: true,
+          reasons: ["never-path-clear", "scope-ok", "verdict-fresh", "policy-on"],
+        });
         // DD-28.26(2) home: the merge decision is recorded where every approved
         // run's decision is recorded — FINAL persisted state only (the gate's
         // transient awaiting-approval write is same-tick superseded).
@@ -417,6 +446,15 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         });
         expect(typeof approval?.decidedAt === "string" && !Number.isNaN(new Date(approval.decidedAt).getTime())).toBe(true);
         expect(new Date(approval!.decidedAt as string).getTime()).not.toBeNaN();
+        // The per-field-merge chimera is the SANCTIONED shape: the decision's
+        // four fields land ON the gate's registration entry, so a registration
+        // field persists beside them — and DD-28.26(2) and approval-gate's
+        // decisionOf read state/approverId off this same entry.
+        expect(typeof approval?.requestedAt).toBe("string");
+        expect(typeof approval?.expiresAt).toBe("string");
+        // a non-approval extension namespace seeded before the chain survives
+        // the superseding write untouched
+        expect(s.store.get("run-g1b").extensions?.budget).toMatchObject({ repoSlug: "acme/widget", issueId: "7" });
         // the chain drove all the way: box torn down with the bundle harvested
         expect(driver.destroyed).toEqual([vm]);
         // CHANNEL ≠ POLICY: the gate module carries none of the policy's
@@ -450,6 +488,7 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
             runsDir: s.dir,
             hostRoot: host.dir,
             consultContext: () => injectedConsult("run-g1c", ["src/fleet/approval-gate.ts"], ["src/fleet/**"]),
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
           }),
         );
         expect(out).toMatchObject({ kind: "driven", markerOk: true });
@@ -476,16 +515,27 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         quarantine(host, "run-g1d");
         const driver = new ProbeDriver(path.join(s.dir, "boxes"));
         await seedGreenRun(s.store, driver, host, "run-g1d", { ok: true });
-        // production default: deps.consultContext is ABSENT — RunRecord carries
-        // no diff/scope carrier and no factory_result verdict, so the default
-        // extraction returns empty carriers (the buildConsultContext arm).
+        // production default: NO injection at all — deps.consultContext is
+        // ABSENT (RunRecord carries no diff/scope carrier and no factory_result
+        // verdict ⇒ buildConsultContext's empty carriers) and
+        // deps.consultCarrierRoot is ABSENT, so the clause-5 probe reads the
+        // REAL factory build tree, which has no veto-window carrier yet: the
+        // ON-tree policy file consults OFF (clause5-carrier-absent). v6a
+        // production reality: the chain parks twice over.
         const out = await observeAndDriveChain(
           "run-g1d",
           baseDeps("run-g1d", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
         );
         expect(out).toMatchObject({ kind: "driven", markerOk: true });
         expect(consultEvents(lines)).toHaveLength(1);
-        expect(consultEvents(lines)[0]).toMatchObject({ runId: "run-g1d", eligible: false, reasons: ["verdict-absent"] });
+        expect(consultEvents(lines)[0]).toMatchObject({
+          runId: "run-g1d",
+          eligible: false,
+          // the default extraction's EMPTY diffEntries is its own failing
+          // clause (scope), listed before the verdict and policy failures
+          reasons: ["scope", "verdict-absent", "policy-off"],
+          policy_off: "clause5-carrier-absent",
+        });
         expect(s.store.get("run-g1d").extensions?.approval?.state).toBe("awaiting-approval");
         expect(JSON.stringify(s.store.get("run-g1d"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
       } finally {
@@ -515,7 +565,12 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         expect(consultEvents(lines)[0]).toMatchObject({
           runId: "run-g1e",
           eligible: false,
-          reasons: ["verdict-absent", "policy-off"],
+          // no producer ⇒ the default extraction's empty carriers fail scope
+          // and verdict; the OFF policy adds its own clause
+          reasons: ["scope", "verdict-absent", "policy-off"],
+          // the consult result's policyOff (stateReason when off), on the
+          // event as snake_case beside the chain-event convention
+          policy_off: "declared-off",
         });
         expect(s.store.get("run-g1e").extensions?.approval?.state).toBe("awaiting-approval");
       } finally {
