@@ -2,7 +2,7 @@
 
 **Story Points:** 2
 **Sprint:** v6a — Foundation (Governance epic; wave-1, zero E21 gates — the implementation half is verdict-gated, and that gate is operator GO, not an E21/ops gate)
-**Status:** done — ACCEPTED verdict recorded 2026-10-15, decided-shape implemented, e2e demo green, 3 bmad-code-review rounds (88 findings triaged, 68 patched, all incl. lows), branch gate green. PR to `dev` at story close.
+**Status:** done — ACCEPTED verdict recorded 2026-10-15, decided-shape implemented, e2e demo green, 3 bmad-code-review rounds (88 findings triaged, 68 patched, all incl. lows), branch gate green. Merged: PR #430 to dev 2026-10-15 (merge 20e3a452), CodeRabbit round 4 green — 2 findings patched (2e333746).
 
 > **The input artifact already exists.** The derivation session wrote the draft:
 > `docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md` (PROPOSED; it defines the Tier A/B/C

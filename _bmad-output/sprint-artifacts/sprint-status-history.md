@@ -162,3 +162,15 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # Tenth image-pin adoption rode the merge: gate B run 34762465643 printed
 # 31061f54…/a095d2629d5bcc09, walk digest 72d8d83b -> 0c5509f3, adoption commit d63f603 is the
 # healing run (mirror re-push + verify-image-pin follow it).
+
+# 2026-10-15 (G1 DONE — ADR-2 verdict recorded, decided shape merged to dev):
+# Operator verdict ACCEPTED recorded in the ADR (clauses 1-4 as written; clause 5 verbatim, the
+# veto-window queue named the blocking build item; DD-18 re-opened, DD-19 unchanged). Decided shape
+# shipped: fail-closed src/fleet/auto-merge-policy.ts + adds-only run-completion consult (labeled
+# policy:adr-2 mint), approval-gate.ts byte-identical; suites 79 policy / 12 chain arms / 71
+# covering. 3 bmad-code-review rounds (88 findings triaged, 68 patched incl. every LOW in rounds
+# 1-2), then CodeRabbit round 4 on PR #430: 2 findings verified and fixed (2e333746) — the atomic
+# policy-mint guard (RunRecordStore.setApprovalIfAwaiting rechecks under the store's record lock,
+# so a human decision landing across the reverify await wins the race by construction) and mint
+# fault isolation (a store fault emits one auto-merge-approval-error line; the driven outcome and
+# the gate's parked awaiting-approval stand). PR #430 merged to dev (merge 20e3a452).
