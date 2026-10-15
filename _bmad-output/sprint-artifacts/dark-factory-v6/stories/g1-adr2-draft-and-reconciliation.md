@@ -2,7 +2,7 @@
 
 **Story Points:** 2
 **Sprint:** v6a — Foundation (Governance epic; wave-1, zero E21 gates — the implementation half is verdict-gated, and that gate is operator GO, not an E21/ops gate)
-**Status:** ready-for-dev — pre-dev campaign (qds-story-review) runs before any dev lane starts
+**Status:** done — ACCEPTED verdict recorded 2026-10-15, decided-shape implemented, e2e demo green, 3 bmad-code-review rounds (88 findings triaged, 68 patched, all incl. lows), branch gate green. PR to `dev` at story close.
 
 > **The input artifact already exists.** The derivation session wrote the draft:
 > `docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md` (PROPOSED; it defines the Tier A/B/C
@@ -109,16 +109,90 @@ Three parts. **(1) Decision workflow:** the operator reads the draft, rules in c
 
 ## Definition of Done
 
-- [ ] **Workflow:** operator verdict recorded in the ADR (status + signature + dated block, per-clause dispositions, DD-18/DD-19 effects named) — whichever outcome (AC1, AC6).
-- [ ] **Impl (accept/amend paths):** `auto-merge-policy.ts` + the run-completion consult; on REJECTED: zero `src/` lines and the DD-18 closure note instead (AC2–AC4, AC6).
-- [ ] **Test (fail-closed):** absent-file OFF, present-OFF, ON-requires-setting arms; **an ON setting against a PROPOSED ADR makes the consistency test red** (AC1, AC2).
-- [ ] **Test (never-list):** named paths, out-of-scope, verdict absent/stale/escalated each park regardless of setting; `classifyDiffScope` import-zero (AC3).
-- [ ] **Test (inertness):** with no QA-verdict producer in the production module graph, no v6a run is eligible — the chain always parks; the proceed arm is fixture-fed, and the inertness test asserts no real producer in the graph (AC4).
-- [ ] **Test (gate unchanged):** `approval-gate.ts` zero-diff; an eligible proceed carries `approverId: "policy:adr-2"` in the run record's persisted approval state (DD-28.26(2)); the `run-approval` hop gains no emitter, no new hop (AC5).
-- [ ] **Contract:** run-completion diff adds-only; ineligible path byte-identical; audit walker byte-identical after.
-- [ ] **Security:** INV-G1-1..5 verified; ADR-1 untouched; verdict block append-only.
-- [ ] **Test (e2e demo — MANDATORY):** fake-driver three-arm chain demo — default park (v5-identical), accepted-eligible labeled proceed, never-list park. **Explicitly non-live:** no box, no spend, no E21 — every behavior under test is host-side and offline.
+- [x] **Workflow:** operator verdict recorded in the ADR (status + signature + dated block, per-clause dispositions, DD-18/DD-19 effects named) — whichever outcome (AC1, AC6).
+- [x] **Impl (accept/amend paths):** `auto-merge-policy.ts` + the run-completion consult; on REJECTED: zero `src/` lines and the DD-18 closure note instead (AC2–AC4, AC6).
+- [x] **Test (fail-closed):** absent-file OFF, present-OFF, ON-requires-setting arms; **an ON setting against a PROPOSED ADR makes the consistency test red** (AC1, AC2).
+- [x] **Test (never-list):** named paths, out-of-scope, verdict absent/stale/escalated each park regardless of setting; `classifyDiffScope` import-zero (AC3).
+- [x] **Test (inertness):** with no QA-verdict producer in the production module graph, no v6a run is eligible — the chain always parks; the proceed arm is fixture-fed, and the inertness test asserts no real producer in the graph (AC4).
+- [x] **Test (gate unchanged):** `approval-gate.ts` zero-diff; an eligible proceed carries `approverId: "policy:adr-2"` in the run record's persisted approval state (DD-28.26(2)); the `run-approval` hop gains no emitter, no new hop (AC5).
+- [x] **Contract:** run-completion diff adds-only; ineligible path byte-identical; audit walker byte-identical after.
+- [x] **Security:** INV-G1-1..5 verified; ADR-1 untouched; verdict block append-only.
+- [x] **Test (e2e demo — MANDATORY):** fake-driver three-arm chain demo — default park (v5-identical), accepted-eligible labeled proceed, never-list park. **Explicitly non-live:** no box, no spend, no E21 — every behavior under test is host-side and offline.
 
 ## Dev Agent Record
 
-*(written at implementation time, not at spec time.)*
+*(written at implementation time — 2026-10-15, story close.)*
+
+### Outcome
+
+ACCEPTED verdict recorded (2026-10-15, operator ruling in the G1 session; recorded in the
+ADR: status flip + signature + dated operator-verdict block, clauses 1–4 as written, clause 5
+verbatim with the veto-window queue named the blocking build item, DD-18 re-opened, DD-19
+unchanged, arming state noted, consent-at-dispatch follow-up recorded). Implemented the
+decided shape: fail-closed `src/fleet/auto-merge-policy.ts` (loader / never-auto-merge
+predicate / QA-verdict consumption pin / consistency oracle / producer tripwire), the
+adds-only consult in `run-completion.ts` (labeled `policy:adr-2` mint on the green+requested
+arm, revocation-guarded), and the two suites. REJECTED-path AC6 unexercised (verdict was
+ACCEPTED); its machinery is the consistency oracle's no-impl-while-unruled arm, tested.
+
+### Verification evidence
+
+- Policy suite 79 pass / 0 fail (loader arms, predicate arms, consistency matrix, import-zero,
+  inertness + write-shape tripwire, disposition-parse negatives, calendar/`<=now` date bound).
+- Chain e2e 10 arms / 0 fail, real chain (teardown → reverify → gate): default park (zero
+  consult events), labeled proceed (`policy:adr-2` + `adr-2-auto-merge` persisted,
+  gate-free source asserted), never-path park, v6a inertness, policy-off (+`policy_off`
+  stateReason), revocation-to-OFF, revocation-to-DELETED, throwing-consult fold,
+  human-decision protection (already-decided ⇒ no mint), verdict-rejected park.
+- Covering run-completion suite 71/0; approval-gate + audit suites 262/0; `approval-gate.ts`
+  byte-identical; run-completion adds-only (0 deleted lines); `classifyDiffScope`/
+  `feedback-run` import-zero; no `run-approval` emitter; ADR body append-only (oracle-proven).
+- Branch gate (full suite): 0 new fail names vs baseline (j3 baselines + G1's
+  evidence-backed `.unlazy/g1/dev-load-flakes.txt`); tsc + repo lint clean.
+- buildId digest adopted twice with provenance comments (37e749e → 9c3d5ba → current;
+  standing per-story ritual, image re-publish ops-gated).
+
+### Review rounds (bmad-code-review, 4-layer waves each round)
+
+- Round 1: 44 findings → 32 entries → 26 patched (2 waves), 2 DAR, 3 false, 1 folded.
+- Round 2: 36 findings → 24 entries → 24 patched (2 waves + driver), 3 DAR/GA9, 1 false
+  (re-refuted ADR-in-place claim — verdict-block oracle).
+- Round 3: 29 findings → 18 entries → 17 patched (2 waves + driver), 1 false; accept layer's
+  verdict: all six ACs mechanically satisfied, drift-level findings only.
+- Totals: 88 wait-free findings triaged, 68 patched incl. every LOW in rounds 1–2, 5 false
+  (refuted with evidence), the rest recorded here.
+
+### Sanctioned interpretations / recorded deviations
+
+1. **Vocabulary extensions** (Observability Contract names six parked clauses): the event
+   also emits `verdict-rejected`, `verdict-future` (both strictly fail-closed refinements of
+   "present/fresh/escalated") and the satisfied-requirements list on eligible arms; the fold
+   path emits a distinct `auto-merge-consult-error` event. Additive only; the six contract
+   names remain the floor.
+2. **Never-list self-protection**: the policy module, its future veto-window carrier, and the
+   0600 guarded-read seam are never-auto-merge members beyond clause 4's enumeration —
+   the policy brain is a gate surface. `run-completion.ts` deliberately NOT wholesale-added
+   (20-line consult region in a 1000+-line file would over-park unrelated runs); the operator
+   may tighten later.
+3. **Carrier probe is a tripwire, not a verifier**: a determined stub naming
+   `enqueueVetoWindow` + a referencing test passes the probe; semantic proof is the
+   operator's `vetoWindowQueueLive` assertion (documented at the probe). The mint-time
+   comment names the clause-5 attach point for the veto-window story.
+4. **Two policy reads on the eligible path** (consult + mint-time revocation guard) — the
+   second read is the sanctioned revocation guard; Technical Notes' one-read guard names
+   the consult evaluation.
+5. **`escalated` schema-tolerance**: non-boolean escalated values schema-reject to
+   `verdict-absent` (fail-closed) rather than `verdict-escalated`; A2 loosening
+   `QaVerdictSchema.escalated` must be deliberate.
+6. **DI seams** (`consultContext`, `consultCarrierRoot`): trusted-configuration class (j3
+   RoutingHook precedent), never brief-reachable, production callers omit both — the v6a
+   production default is structurally ineligible (asserted by chain arm + graph tripwire).
+7. **Chimera record**: the policy mint per-field-merges onto the gate's registration entry
+   (store idiom); downstream consumers read state/approverId (decisionOf) — asserted.
+
+### Operator-directed follow-ups (surfaced for backlog at close)
+
+- **Veto-window queue** — clause-5's blocking build item; first post-A2 concern; attach
+  point named at `recordPolicyApproval`.
+- **Per-run "ask before it gets going" consent surface** — operator-directed in the verdict
+  block; enters via normal review as its own decided work item.
