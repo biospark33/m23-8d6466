@@ -2110,7 +2110,9 @@ describe("buildIdFileInputs", () => {
       // `src/fleet/auto-merge-policy.ts` (new — the fail-closed loader,
       // never-auto-merge predicate, QA-verdict consumption pin) and
       // `src/fleet/run-completion.ts` (adds-only ADR-2 consult before gate
-      // registration, 92 insertions / 0 deletions). Everything else G1 touched
+      // registration, adds-only — zero deleted lines; the consult region grows
+      // with review-round hardening, so read the actual diff, not this prose).
+      // Everything else G1 touched
       // is absent from the walk: docs, tests. Image re-publish rides the
       // ops-gated wave-0 ritual with J3/J4.
       //

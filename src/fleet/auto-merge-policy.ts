@@ -15,7 +15,12 @@
  * The scope vocabulary below (SCOPE_REQUIRES_PRIVILEGE, OUT_OF_SCOPE_DIFF) is
  * RESTATED per ADR-2 clause 4 / story AC3, NEVER imported from src/fixloop:
  * a policy module that imports the loop it polices could be flipped by the
- * thing it gates (see the import-zero test in the suite).
+ * thing it gates (see the import-zero test in the suite). This module's scope
+ * compare is deliberately STRICTER than fixloop's matcher: both the diff path
+ * and the glob are case-folded before matching — fail-closed for
+ * case-insensitive hosts, where fixloop's own (case-sensitive) matcher could
+ * be bypassed by spelling. fixloop's matcher is a never-edit file; the
+ * divergence is recorded here as an intentional, house-level decision.
  *
  * Two anchors, kept deliberately apart. The POLICY FILE is operator-local:
  * read under the host cwd/root, guarded, 0600 — per-host config. The CLAUSE-5
@@ -57,6 +62,12 @@ export type AutoMergePolicyState =
   | { state: "off"; stateReason: "policy-garbled" | "policy-unreadable" | "declared-off" | "clause5-carrier-absent" }
   | { state: "on" };
 
+/**
+ * ADR-2 clause 2's minimal consumption pin (presence, freshness, escalation,
+ * status). A2's producer names the audit-row mechanism — AC4's audit-rowed
+ * deferral surfaced here as the hook it will fill; this type is G1's minimal
+ * consumption pin. The producer may extend it adds-only.
+ */
 export type QaVerdict = { status: string; producedAt: string; escalated?: boolean };
 
 /** Failing-clause names, in the ADR-2 contract's vocabulary. */
@@ -65,6 +76,7 @@ export type NeverPathReason =
   | "scope"
   | "verdict-absent"
   | "verdict-stale"
+  | "verdict-future"
   | "verdict-escalated"
   | "verdict-rejected"
   | "policy-off";
@@ -81,6 +93,8 @@ export const OUT_OF_SCOPE_DIFF = "out-of-scope-diff";
 
 export const NEVER_AUTO_MERGE_PREFIXES: readonly string[] = ["src/audit/"];
 export const NEVER_AUTO_MERGE_PATHS: readonly string[] = [
+  // The audit node itself — not only its children.
+  "src/audit",
   "src/fleet/approval-gate.ts",
   "src/providers/credentials.ts",
   "src/audit/link-store.ts",
@@ -118,24 +132,27 @@ const POLICY_SPEC = {
 } as const;
 
 /**
- * Segment-wise lexical normalization: backslashes become separators, `//`
- * collapses, `.` segments drop, `..` pops against the stack (a leading `..`
- * stays — there is nothing above the caller's root to pop into). Lexical only:
- * the never-list is compared against the path a producer CLAIMS, then
- * case-folded at the compare site.
+ * Segment-wise lexical normalization, CLASSIFYING: Windows drive prefixes
+ * (`X:`, `X:/`) and an absolute leading `/` strip to the repo-relative form;
+ * a path that STILL pops above the root (a leading `..` with nothing to pop
+ * into) is flagged `outside` — it has left the repo-relative namespace and is
+ * parked, never silently re-rooted. Lexical only: the never-list is compared
+ * against the path a producer CLAIMS, then case-folded at the compare site.
  */
-function normalizeRel(p: string): string {
+function normalizeRel(p: string): { rel: string; outside: boolean } {
+  const stripped = p.replace(/\\/g, "/").replace(/^[A-Za-z]:(?:\/|$)/, "").replace(/^\//, "");
   const stack: string[] = [];
-  for (const seg of p.replace(/\\/g, "/").split("/")) {
+  let outside = false;
+  for (const seg of stripped.split("/")) {
     if (seg === "" || seg === ".") continue;
     if (seg === "..") {
       if (stack.length > 0 && stack[stack.length - 1] !== "..") stack.pop();
-      else stack.push("..");
+      else outside = true;
       continue;
     }
     stack.push(seg);
   }
-  return stack.join("/");
+  return { rel: stack.join("/"), outside };
 }
 
 /** Comment text must never arm the carrier probe; strip before matching. */
@@ -212,7 +229,10 @@ export function readAutoMergePolicy(opts?: {
   // queue actually exists in the factory tree. Any miss is the same state —
   // the point of clause 5 is that ON is unreachable while the carrier is
   // missing.
-  if (parsed.adr2AcceptedOn === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.adr2AcceptedOn)) {
+  // Plausible-calendar shape only (no 13th month, no day 00) — the loader
+  // NEVER cross-checks this against the ADR (docs are not runtime config, the
+  // spec's own rejected alternative); the consistency readers are the ADR truth.
+  if (parsed.adr2AcceptedOn === undefined || !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[0-1])$/.test(parsed.adr2AcceptedOn)) {
     return { state: "off", stateReason: "clause5-carrier-absent" };
   }
   if (parsed.vetoWindowQueueLive !== true) return { state: "off", stateReason: "clause5-carrier-absent" };
@@ -220,16 +240,20 @@ export function readAutoMergePolicy(opts?: {
   return { state: "on" };
 }
 
-/** DENY-first never-list: normalized, then compared case-insensitively —
- * the list is ours (lowercase, controlled), the diff paths are the host's,
- * and a case-insensitive filesystem must not bypass the gate by spelling. */
+/** DENY-first never-list: normalized (drive/absolute spellings stripped,
+ * leading-`..` escapes flagged), then compared case-insensitively — the list
+ * is ours (lowercase, controlled), the diff paths are the host's, and a
+ * case-insensitive filesystem must not bypass the gate by spelling. An
+ * outside-root path parks on its own: it claims to be somewhere else. */
 export function evaluateNeverAutoMerge(diffPaths: readonly string[]): { park: boolean; reason?: "never-path" } {
   for (const raw of diffPaths) {
-    const p = normalizeRel(raw).toLowerCase();
-    if (NEVER_AUTO_MERGE_PREFIXES.some((prefix) => p.startsWith(prefix.toLowerCase()))) {
-      return { park: true, reason: "never-path" };
-    }
-    if ((NEVER_AUTO_MERGE_PATHS as readonly string[]).some((n) => n.toLowerCase() === p)) {
+    const { rel, outside } = normalizeRel(raw);
+    const p = rel.toLowerCase();
+    if (
+      outside ||
+      NEVER_AUTO_MERGE_PREFIXES.some((prefix) => p.startsWith(prefix.toLowerCase())) ||
+      (NEVER_AUTO_MERGE_PATHS as readonly string[]).some((n) => n.toLowerCase() === p)
+    ) {
       return { park: true, reason: "never-path" };
     }
   }
@@ -275,20 +299,22 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${out}$`);
 }
 
-/** DENY WINS: a deny hit is `scope-requires-privilege` — retrying can never help. */
+/** DENY WINS: a deny hit is `scope-requires-privilege` — retrying can never help.
+ * BOTH sides are case-folded (deliberately stricter than fixloop — see the
+ * module doc), so a case-insensitive host cannot bypass the gate by spelling. */
 export function evaluateDiffScope(
   diffEntries: readonly DiffEntry[],
   scope: DiffScope,
 ): { park: boolean; reason?: typeof SCOPE_REQUIRES_PRIVILEGE | typeof OUT_OF_SCOPE_DIFF } {
   for (const entry of diffEntries) {
-    const p = normalizeRel(entry.path);
-    if (scope.deniedPathGlobs.some((d) => globToRegExp(normalizeRel(d.glob)).test(p))) {
+    const p = normalizeRel(entry.path).rel.toLowerCase();
+    if (scope.deniedPathGlobs.some((d) => globToRegExp(normalizeRel(d.glob).rel.toLowerCase()).test(p))) {
       return { park: true, reason: SCOPE_REQUIRES_PRIVILEGE };
     }
   }
   for (const entry of diffEntries) {
-    const p = normalizeRel(entry.path);
-    const allowed = scope.allowedPathGlobs.some((g) => globToRegExp(normalizeRel(g)).test(p));
+    const p = normalizeRel(entry.path).rel.toLowerCase();
+    const allowed = scope.allowedPathGlobs.some((g) => globToRegExp(normalizeRel(g).rel.toLowerCase()).test(p));
     if (!allowed || !scope.permittedActions.includes(entry.action)) {
       return { park: true, reason: OUT_OF_SCOPE_DIFF };
     }
@@ -301,25 +327,46 @@ export const PASSING_QA_STATUSES: ReadonlySet<string> = new Set(["approved"]);
 
 /**
  * ADR-2 clause 2's minimal consumption pin: presence, freshness, escalation,
- * passing status. The producer (A2) may extend QaVerdict adds-only; the order
- * is load-bearing — stale is judged before escalated, and both before the
- * passing-status arm, so a verdict failing several clauses reports the
- * earliest one. Fresh means strictly AFTER the rebase (same-ms is not fresh —
- * the verdict must postdate what it blesses) and not future-dated.
+ * passing status. The order is load-bearing — absent → unparseable → FUTURE
+ * (a producedAt after `now` is clock skew or a forged producer; its own
+ * verdict-future reason, never folded into stale) → stale (<= rebasedAt) →
+ * escalated → passing status, so a verdict failing several clauses reports
+ * the earliest one. Fresh means strictly AFTER the rebase (same-ms is not
+ * fresh — the verdict must postdate what it blesses).
  */
 export function evaluateVerdict(
   verdict: QaVerdict | undefined,
   rebasedAt?: Date,
   now: Date = new Date(),
-): { ok: boolean; reason?: "verdict-absent" | "verdict-stale" | "verdict-escalated" | "verdict-rejected" } {
+): {
+  ok: boolean;
+  reason?: "verdict-absent" | "verdict-stale" | "verdict-future" | "verdict-escalated" | "verdict-rejected";
+} {
   if (verdict === undefined) return { ok: false, reason: "verdict-absent" };
   const produced = new Date(verdict.producedAt).getTime();
-  if (Number.isNaN(produced) || produced <= (rebasedAt?.getTime() ?? 0) || produced > now.getTime()) {
-    return { ok: false, reason: "verdict-stale" };
+  if (Number.isNaN(produced)) return { ok: false, reason: "verdict-stale" };
+  if (produced > now.getTime()) return { ok: false, reason: "verdict-future" };
+  if (produced <= (rebasedAt?.getTime() ?? 0)) return { ok: false, reason: "verdict-stale" };
+  // Truthy non-boolean escalations (1, "yes") count as escalated — fail closed.
+  if (verdict.escalated != null && verdict.escalated !== false) {
+    return { ok: false, reason: "verdict-escalated" };
   }
-  if (verdict.escalated === true) return { ok: false, reason: "verdict-escalated" };
   if (!PASSING_QA_STATUSES.has(verdict.status)) return { ok: false, reason: "verdict-rejected" };
   return { ok: true };
+}
+
+/** The consult result. On ELIGIBLE `reasons` names the satisfied
+ * requirements; on any failing clause the failures; ABSENT (`undefined`)
+ * when no evaluation occurred (policy absent). */
+export interface ConsultResult {
+  runId: string;
+  eligible: boolean;
+  reasons?: ConsultReason[];
+  policyState?: {
+    state: "off";
+    stateReason?: "policy-garbled" | "policy-unreadable" | "declared-off" | "clause5-carrier-absent";
+  };
+  policyOff?: string;
 }
 
 /**
@@ -330,9 +377,11 @@ export function evaluateVerdict(
  * (`diffPaths` and `diffEntries`) feed the never-check — an entry present in
  * only one must not skip the gate — and an EMPTY diffEntries parks
  * out-of-scope BEFORE the allow-glob pass: zero reviewed changes is not
- * mergeable, and no allow glob can bless a vacuous diff. When the policy is
- * present but OFF, the result carries the loader's state passthrough
- * (`policyState`/`policyOff`) for the caller's consult event.
+ * mergeable, and no allow glob can bless a vacuous diff. A verdict WITHOUT a
+ * `rebasedAt` anchor is stale, fail-closed: freshness is judged against the
+ * rebase, so an era that produces verdicts must thread the rebase timestamp.
+ * When the policy is present but OFF, the result carries the loader's state
+ * passthrough (`policyState`/`policyOff`) for the caller's consult event.
  */
 export function consultAutoMerge(
   input: {
@@ -344,16 +393,7 @@ export function consultAutoMerge(
   },
   verdict: QaVerdict | undefined,
   policy: AutoMergePolicyState,
-): {
-  runId: string;
-  eligible: boolean;
-  reasons?: ConsultReason[];
-  policyState?: {
-    state: "off";
-    stateReason?: "policy-garbled" | "policy-unreadable" | "declared-off" | "clause5-carrier-absent";
-  };
-  policyOff?: string;
-} {
+): ConsultResult {
   if (policy.state === "absent") {
     // No policy ⇒ no evaluation occurred; `reasons` is ABSENT so the caller
     // knows to emit no consult event at all.
@@ -367,8 +407,13 @@ export function consultAutoMerge(
   if (input.diffEntries.length === 0) reasons.push("scope");
   const scope = evaluateDiffScope(input.diffEntries, input.scope);
   if (scope.reason) reasons.push("scope");
-  const v = evaluateVerdict(verdict, input.rebasedAt);
-  if (v.reason) reasons.push(v.reason);
+  // No rebase anchor ⇒ freshness unverifiable ⇒ stale (the verdict is present,
+  // so this is not verdict-absent — the era forgot to thread rebasedAt).
+  if (verdict !== undefined && input.rebasedAt === undefined) reasons.push("verdict-stale");
+  else {
+    const v = evaluateVerdict(verdict, input.rebasedAt);
+    if (v.reason) reasons.push(v.reason);
+  }
   if (policy.state === "off") reasons.push("policy-off");
   if (reasons.length === 0 && policy.state === "on") {
     return {
@@ -377,16 +422,7 @@ export function consultAutoMerge(
       reasons: ["never-path-clear", "scope-ok", "verdict-fresh", "policy-on"],
     };
   }
-  const result: {
-    runId: string;
-    eligible: boolean;
-    reasons?: ConsultReason[];
-    policyState?: {
-      state: "off";
-      stateReason?: "policy-garbled" | "policy-unreadable" | "declared-off" | "clause5-carrier-absent";
-    };
-    policyOff?: string;
-  } = { runId: input.runId, eligible: false, reasons };
+  const result: ConsultResult = { runId: input.runId, eligible: false, reasons };
   if (policy.state === "off") {
     result.policyState = { state: "off", stateReason: policy.stateReason };
     result.policyOff = policy.stateReason;
@@ -407,6 +443,7 @@ export function consultAutoMerge(
  * word arrives as-is and fails closed under the `...-while-unknown` names.
  *
  * Violation names, stable for suite + operator output:
+ *   accepted-without-verdict-block · accepted-while-clause1-rejected ·
  *   verdict-block-while-proposed · impl-present-while-proposed ·
  *   setting-on-while-proposed · amended-without-accepted-verdict ·
  *   impl-present-while-amended-unaccepted ·
@@ -434,6 +471,14 @@ export function evaluateTreeConsistency(input: {
     if (input.verdictBlockPresent === true) violations.push("verdict-block-while-proposed");
     if (input.implPresent) violations.push("impl-present-while-proposed");
     if (input.settingOn) violations.push("setting-on-while-proposed");
+  } else if (input.adrStatus === "ACCEPTED") {
+    // ACCEPTED, too, stands on the verdict block: without a clause-1 ACCEPTED
+    // disposition the header is a bare claim. Block absent (clause1Accepted
+    // undefined) is its own violation; block present with any other
+    // disposition is rejected-while-claimed-accepted.
+    if (input.clause1Accepted !== true) {
+      violations.push(input.clause1Accepted === undefined ? "accepted-without-verdict-block" : "accepted-while-clause1-rejected");
+    }
   } else if (input.adrStatus === "AMENDED") {
     // Under AMENDED the clause-1 ACCEPTED disposition is what licenses the
     // surface; anything else — block absent, disposition AMENDED/REJECTED,
@@ -469,9 +514,12 @@ export function readAdrStatus(opts?: { adrPath?: string; cwd?: string }): "PROPO
  * Consistency-side verdict-block reader: does the ADR carry an
  * `## Operator verdict` block, and what did it dispose of clause 1?
  * No block (or unreadable file) ⇒ `{present: false, clause1Accepted: undefined}`.
- * With a block: the clause-1 table row's disposition — ACCEPTED ⇒ true,
- * ANYTHING else (AMENDED, REJECTED, row missing) ⇒ false. Same docs-not-config
- * caveat as readAdrStatus: consistency test only.
+ * With a block: the clause-1 table row's LEADING bolded token — the
+ * disposition cell's first `**word**` — is ACCEPTED ⇒ true; ANYTHING else
+ * (AMENDED, `REJECTED (was ACCEPTED)`, `NOT **ACCEPTED**`, row missing)
+ * ⇒ false. Fenced code blocks are stripped first, as in readAdrStatus — a
+ * clause-1 row quoted in an example is prose, not a disposition. Same
+ * docs-not-config caveat as readAdrStatus: consistency test only.
  */
 export function readVerdictBlock(opts?: { adrPath?: string; cwd?: string }): {
   present: boolean;
@@ -479,11 +527,13 @@ export function readVerdictBlock(opts?: { adrPath?: string; cwd?: string }): {
 } {
   const text = readAdrText(opts);
   if (text === undefined) return { present: false, clause1Accepted: undefined };
-  const heading = text.match(/^##\s+Operator verdict\b.*$/m);
+  const stripped = text.replace(/```[\s\S]*?```/g, " ");
+  const heading = stripped.match(/^##\s+Operator verdict\b.*$/m);
   if (!heading) return { present: false, clause1Accepted: undefined };
   const row =
-    text.slice((heading.index ?? 0) + heading[0].length).match(/^\s*\|\s*1\b.*$/m)?.[0] ?? "";
-  return { present: true, clause1Accepted: row.includes("ACCEPTED") };
+    stripped.slice((heading.index ?? 0) + heading[0].length).match(/^\s*\|\s*1\b.*$/m)?.[0] ?? "";
+  const token = row.match(/\*\*([A-Za-z]+)\*\*/)?.[1];
+  return { present: true, clause1Accepted: token === "ACCEPTED" };
 }
 
 function readAdrText(opts?: { adrPath?: string; cwd?: string }): string | undefined {
@@ -514,14 +564,28 @@ export const PRODUCER_WRITE_SHAPE = `kind: "${NO_PRODUCER_MARKER}"`;
  * not match, so the consult chain itself stays clean while a real producer
  * (A2-era) trips the wire. This is a tripwire, not a parser — v6a must return
  * clean, and any future hit is a human-review event, not an automated verdict.
+ * Default scan roots (module-URL anchored, like the carrier probe): the
+ * factory's src/ plus its sibling scripts/; an explicit root scans just it.
  */
-export function assertNoQaProducerInGraph(
-  root: string = resolve(process.cwd(), "src"),
-): { clean: boolean; offenders: string[] } {
+export function assertNoQaProducerInGraph(root?: string): { clean: boolean; offenders: string[] } {
   const offenders: string[] = [];
-  const srcRoot = root;
+  // Default anchors like the carrier probe: module-URL, never the dispatched
+  // cwd — the factory's own src/ AND its scripts/ are scanned.
+  const moduleDir = fileURLToPath(new URL(".", import.meta.url));
+  const srcRoot = resolve(moduleDir, "..");
+  const roots = root !== undefined ? [root] : [srcRoot, resolve(srcRoot, "..", "scripts")];
   const selfRel = "fleet/auto-merge-policy.ts";
-  const walk = (dir: string): void => {
+  const visited = new Set<string>();
+  const walk = (srcRoot: string, dir: string): void => {
+    // dev:ino visited set: a symlink cycle (dir → ancestor) terminates here.
+    try {
+      const st = statSync(dir);
+      const key = `${st.dev}:${st.ino}`;
+      if (visited.has(key)) return;
+      visited.add(key);
+    } catch {
+      return; // unstatable root flags nothing; the tripwire is best-effort read-only
+    }
     let ents: Dirent[];
     try {
       ents = readdirSync(dir, { withFileTypes: true });
@@ -544,7 +608,7 @@ export function assertNoQaProducerInGraph(
         }
       }
       if (isDir) {
-        walk(abs);
+        walk(srcRoot, abs);
         continue;
       }
       if (!ent.isFile() || !/\.(?:ts|tsx)$/.test(name)) continue;
@@ -559,6 +623,6 @@ export function assertNoQaProducerInGraph(
       if (text.includes(PRODUCER_WRITE_SHAPE)) offenders.push(rel);
     }
   };
-  walk(srcRoot);
+  for (const r of roots) walk(r, r);
   return { clean: offenders.length === 0, offenders };
 }

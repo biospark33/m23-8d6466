@@ -23,6 +23,11 @@
  *      `policy-off` and the chain always parks.
  *   5. AC2 observability: a present-but-OFF policy consults with `policy-off`
  *      and parks.
+ *   6. revocation-between-reads: the operator revokes mid-chain (the injected
+ *      consultContext rewrites policy.json to autoMergeDefault:false) — the
+ *      consult saw ON, the mint-time re-read sees OFF, no decision mints.
+ *   7. consult-throws: an injected consultContext that throws — surfaced as
+ *      exactly one auto-merge-consult-error event, no consult event, park.
  *
  * Same-tick supersession (the gate's transient awaiting-approval write, then
  * the policy decision — documented in run-completion.ts) is asserted on FINAL
@@ -263,19 +268,24 @@ function fabricateCarrier(root: string): string {
  * is 0600 (the `.factory/` posture the guarded read demands; a looser file is
  * `policy-unreadable`, i.e. OFF).
  *
+ * `ignorePolicy` (revocation arm only) leaves the policy file UNTRACKED
+ * (gitignored, shipped posture): that arm rewrites the file mid-chain, and a
+ * tracked rewrite would dirty the tree so reverify's tree-clean phase vetoes
+ * before the mint-time re-read can see the revocation.
+ *
  * The committed policy file is FIXTURE-ONLY scaffolding: reverify's tree-clean
  * needs a clean tracked tree and the loader needs the file present at the
  * default path, so the fixture commits it with the base. A real operator
  * NEVER commits it — `.factory/` is gitignored in the shipped posture and
  * policy lives out-of-tree.
  */
-function gitHost(policy: "absent" | "on" | "off"): GitHost {
+function gitHost(policy: "absent" | "on" | "off", ignorePolicy = false): GitHost {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-g1chain-repo-"));
   const run = (argv: string[], cwd = dir): string => gitRun(argv, cwd);
   run(["git", "init", "-q", "-b", "main"]);
   run(["git", "config", "commit.gpgsign", "false"]);
   fs.writeFileSync(path.join(dir, "README.md"), "# base\n");
-  fs.writeFileSync(path.join(dir, ".gitignore"), ".sandbox/\n");
+  fs.writeFileSync(path.join(dir, ".gitignore"), ignorePolicy ? ".sandbox/\n.factory/policy.json\n" : ".sandbox/\n");
   fs.mkdirSync(path.join(dir, ".factory", "manifests"), { recursive: true });
   fs.writeFileSync(path.join(dir, ".factory", "manifests", "acme-widget.json"), JSON.stringify(HOST_MANIFEST));
   fs.writeFileSync(
@@ -354,7 +364,12 @@ async function seedGreenRun(
   return rec.vmName!;
 }
 
-/** `deps.consultContext`'s return, parameterized by the arm's diff — the trusted DI seam, j3 precedent. */
+/**
+ * `deps.consultContext`'s return, parameterized by the arm's diff — the
+ * trusted DI seam, j3 precedent. `rebasedAt` is threaded (a Date BEFORE the
+ * verdict's producedAt) because a verdict present without a rebase stamp is
+ * `verdict-stale` by contract — an eligible arm cannot omit it.
+ */
 function injectedConsult(runId: string, diffPaths: string[], scopeGlobs: string[]) {
   return {
     input: {
@@ -362,6 +377,7 @@ function injectedConsult(runId: string, diffPaths: string[], scopeGlobs: string[
       diffPaths,
       diffEntries: diffPaths.map((p) => ({ path: p, action: "modify" as const })),
       scope: { allowedPathGlobs: scopeGlobs, deniedPathGlobs: [], permittedActions: ["modify" as const] },
+      rebasedAt: new Date(Date.now() - 120_000),
     },
     verdict: { status: "approved", producedAt: new Date(Date.now() - 60_000).toISOString(), escalated: false } satisfies QaVerdict,
   };
@@ -445,7 +461,6 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
           reason: "adr-2-auto-merge",
         });
         expect(typeof approval?.decidedAt === "string" && !Number.isNaN(new Date(approval.decidedAt).getTime())).toBe(true);
-        expect(new Date(approval!.decidedAt as string).getTime()).not.toBeNaN();
         // The per-field-merge chimera is the SANCTIONED shape: the decision's
         // four fields land ON the gate's registration entry, so a registration
         // field persists beside them — and DD-28.26(2) and approval-gate's
@@ -573,6 +588,90 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
           policy_off: "declared-off",
         });
         expect(s.store.get("run-g1e").extensions?.approval?.state).toBe("awaiting-approval");
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC revocation-between-reads: the consult saw ON but the operator revokes mid-chain — the mint-time re-read sees OFF and NO decision mints",
+    async () => {
+      const lines = captureLogs();
+      const s = store();
+      // ignorePolicy: the arm rewrites the policy file mid-chain; untracked is
+      // the shipped posture and keeps reverify's tree-clean phase green.
+      const host = gitHost("on", true);
+      try {
+        quarantine(host, "run-g1f");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1f", { ok: true });
+        const policyPath = path.join(host.dir, ".factory", "policy.json");
+        const out = await observeAndDriveChain(
+          "run-g1f",
+          baseDeps("run-g1f", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            // SIDE EFFECT before returning: the operator's revocation lands
+            // while reverify runs — the consult (already past the pre-read)
+            // still saw ON; only the mint-time re-read sees OFF.
+            consultContext: () => {
+              fs.writeFileSync(policyPath, JSON.stringify({ autoMergeDefault: false }));
+              return injectedConsult("run-g1f", ["src/feature/x.ts"], ["src/feature/**"]);
+            },
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        expect(out).toMatchObject({ kind: "driven", markerOk: true });
+        // exactly one consult event, eligible — the consult evaluated against
+        // the still-ON pre-read
+        expect(consultEvents(lines)).toHaveLength(1);
+        expect(consultEvents(lines)[0]).toMatchObject({ runId: "run-g1f", eligible: true });
+        expect(lines.filter((l) => l.event === "auto-merge-consult-error")).toHaveLength(0);
+        // the re-read saw OFF ⇒ no mint; the gate's park stands as final state
+        expect(s.store.get("run-g1f").extensions?.approval?.state).toBe("awaiting-approval");
+        expect(JSON.stringify(s.store.get("run-g1f"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC consult-throws: policy present-ON with an injected consultContext that throws — NO consult event, exactly one consult-error event, fail-closed park",
+    async () => {
+      const lines = captureLogs();
+      const s = store();
+      const host = gitHost("on");
+      try {
+        quarantine(host, "run-g1g");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1g", { ok: true });
+        const out = await observeAndDriveChain(
+          "run-g1g",
+          baseDeps("run-g1g", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            consultContext: () => {
+              throw new Error("injected consult failure");
+            },
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        expect(out).toMatchObject({ kind: "driven", markerOk: true });
+        // the consult never ran ⇒ no consult event; the fold surfaced exactly once
+        expect(consultEvents(lines)).toHaveLength(0);
+        expect(lines.filter((l) => l.event === "auto-merge-consult-error")).toHaveLength(1);
+        expect(s.store.get("run-g1g").extensions?.approval?.state).toBe("awaiting-approval");
+        expect(JSON.stringify(s.store.get("run-g1g"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
       } finally {
         host.cleanup();
         s.cleanup();

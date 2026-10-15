@@ -510,7 +510,10 @@ function buildConsultContext(rec: RunRecord): {
  * :2479-2494) with a labeled non-human approver — the `system:timeout`
  * precedent, now `policy:adr-2`. Clock: run-completion has no now-seam in
  * RunCompletionDeps; the wall clock is this file's own idiom (F17, `Date.now()`
- * throughout).
+ * throughout). VETO-WINDOW ATTACH POINT (single-tick consult in v6a): the
+ * decision mints here; when the veto-window queue lands (the veto-window
+ * story, first post-A2 concern), the reject-until-execution window wraps
+ * THIS write.
  */
 function recordPolicyApproval(store: RunRecordStore, runId: string, decidedAt: Date): void {
   store.set(runId, {
@@ -565,8 +568,8 @@ async function reverifyAndMap(
     // Belt-and-braces fold (dispatch's precedent): a record the store cannot
     // return, or a throwing injected consultContext, must never escape
     // reverifyAndMap untyped (the module doc promises no-throw past typed
-    // outcomes). Catch ⇒ the decision stays false — fail-closed, silent; the
-    // failing-open alternative is worse.
+    // outcomes). Catch ⇒ the decision stays false — fail-closed AND surfaced
+    // (the consult-error event below); the failing-open alternative is worse.
     try {
       const rec = deps.store.get(runId);
       const ctx = (deps.consultContext ?? buildConsultContext)(rec);
@@ -583,7 +586,12 @@ async function reverifyAndMap(
       });
       policyDecision = consult.eligible;
     } catch {
-      // fail-closed by design — see the fold comment above the try.
+      // Fail-closed AND surfaced: the fold above stands, but a policy-present
+      // consult that cannot complete is a silent audit hole — the error event
+      // fires BEFORE the fold lands. A distinct event name keeps the consult
+      // event's clause vocabulary clean, and the line carries no error detail
+      // (no token/payload material ever leaves).
+      observeLine(requestId, { runId, event: "auto-merge-consult-error" });
     }
   }
   let result: ReverifyOutcome;
@@ -628,8 +636,10 @@ async function reverifyAndMap(
     // superseded by the policy decision; the gate module itself is untouched
     // (CHANNEL ≠ POLICY: approval-gate.ts stays byte-identical).
     // Fail-closed re-read: the operator may revoke the policy while reverify
-    // runs; only a still-ON policy mints the decision. One extra read, on the
-    // eligible path only.
+    // runs; only a still-ON policy mints the decision. Technical Notes'
+    // one-read guard names the consult evaluation; the mint-time re-read is
+    // the sanctioned revocation guard (round-2 review), two reads total on
+    // the eligible path.
     if (
       policyDecision &&
       readAutoMergePolicy({
