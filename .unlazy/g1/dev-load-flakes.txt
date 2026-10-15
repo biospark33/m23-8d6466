@@ -1,0 +1,10 @@
+# G1 load-flake exclusions — each name isolated green under load-fail evidence:
+# - "timeout SIGKILL → exitStatus 'transient'" (tests/fleet/resident.test.ts): full-suite fail @8.1s (13:39Z run, /tmp/qds-g1-full-suite.log:1024); isolated 39 pass/0 fail.
+# - "a TRANSIENT errno while reading --brief is exit 1" (tests/fleet/cli.test.ts): full-suite fail @5.0s (same run, :1047); isolated 188 pass/0 fail.
+# Same class as j3's dev-load-flakes (approval-lock @load). Classified per j3 procedure: isolation re-run green = load flake, never auto-added without this evidence.
+(fail) process-end mapping (exitStatus, CC-1 values) > timeout SIGKILL → call throws, exitStatus 'transient'
+(fail) scripts/fleet.ts (DF3.1 CLI) > a TRANSIENT errno while reading --brief is exit 1, never permanent exit 2 (round 10)
+# GA7 final-run classification (run 3, ee7f70ee):
+# - "check-story-consistency exits 0" + "checker is self-proving" (tests/scripts/story-consistency.test.ts): REAL, root-caused — sprint-status.yaml g1 row lagged the story header flip; yaml row updated, checker exits 0, suite 8/8.
+# - "box-unreachable on `unknown` liveness evidence" (tests/phase-engine/resident-bounds.test.ts): isolated 66 pass/0 fail.
+# - "probe-budget-exhausted (no cat issued) → unusable (AC2a)" (tests/fleet/run-completion.test.ts): 924s under concurrent isolation load; clean-environment re-run in flight.
