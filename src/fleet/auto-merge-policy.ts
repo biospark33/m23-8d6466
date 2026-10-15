@@ -63,12 +63,33 @@ export type AutoMergePolicyState =
   | { state: "on" };
 
 /**
+ * The verdict statuses a passing QA verdict may carry. `"approved"` is the
+ * sole passing member today; A2's producer extends this union adds-only.
+ */
+export type QaVerdictStatus = "approved";
+
+/**
  * ADR-2 clause 2's minimal consumption pin (presence, freshness, escalation,
  * status). A2's producer names the audit-row mechanism — AC4's audit-rowed
  * deferral surfaced here as the hook it will fill; this type is G1's minimal
  * consumption pin. The producer may extend it adds-only.
  */
-export type QaVerdict = { status: string; producedAt: string; escalated?: boolean };
+export type QaVerdict = {
+  status: string;
+  producedAt: string;
+  /** Any non-false value, including 0 and empty string, counts as escalated. */
+  escalated?: boolean;
+};
+
+/** The CONSUMED verdict shape (tolerant: `status` stays a string —
+ * PASSING_QA_STATUSES owns the passing check — and unknown keys pass
+ * through, so A2's adds-only extension never unparseable-fails). A verdict
+ * that fails this schema is treated as absent, fail-closed. */
+export const QaVerdictSchema = z.object({
+  status: z.string(),
+  producedAt: z.string(),
+  escalated: z.boolean().optional(),
+});
 
 /** Failing-clause names, in the ADR-2 contract's vocabulary. */
 export type NeverPathReason =
@@ -97,7 +118,16 @@ export const NEVER_AUTO_MERGE_PATHS: readonly string[] = [
   "src/audit",
   "src/fleet/approval-gate.ts",
   "src/providers/credentials.ts",
-  "src/audit/link-store.ts",
+  // The policy brain protects itself (clause-4 gate surface): the consult
+  // chain and its guard are never auto-merged. run-completion.ts is
+  // deliberately NOT listed — its consult region is 20 of 1000+ lines and
+  // wholesale parking would over-park unrelated runs; the operator may
+  // tighten this later.
+  "src/fleet/auto-merge-policy.ts",
+  // The future clause-5 carrier — protect the queue before it exists.
+  "src/fleet/veto-window.ts",
+  // The guarded-read seam behind every policy file read.
+  "src/providers/allowlist-path.ts",
 ];
 
 export interface DiffEntry {
@@ -140,7 +170,11 @@ const POLICY_SPEC = {
  * against the path a producer CLAIMS, then case-folded at the compare site.
  */
 function normalizeRel(p: string): { rel: string; outside: boolean } {
-  const stripped = p.replace(/\\/g, "/").replace(/^[A-Za-z]:(?:\/|$)/, "").replace(/^\//, "");
+  const folded = p.replace(/\\/g, "/");
+  // A leading `//` (the Windows UNC spelling `\\server\share` after the
+  // backslash fold) names a HOST, not a repo-relative path — outside, always.
+  const unc = folded.startsWith("//");
+  const stripped = folded.replace(/^[A-Za-z]:(?:\/|$)/, "").replace(/^\//, "");
   const stack: string[] = [];
   let outside = false;
   for (const seg of stripped.split("/")) {
@@ -152,7 +186,7 @@ function normalizeRel(p: string): { rel: string; outside: boolean } {
     }
     stack.push(seg);
   }
-  return { rel: stack.join("/"), outside };
+  return { rel: stack.join("/"), outside: outside || unc };
 }
 
 /** Comment text must never arm the carrier probe; strip before matching. */
@@ -196,7 +230,11 @@ export function readAutoMergePolicy(opts?: {
    * untouched — operator-local per-host config stays anchored to cwd/hostRoot.
    */
   carrierRoot?: string;
+  /** Wall-clock seam (tests inject): the acceptance date must also not lie in
+   * the future — a date decades ahead fails the clause-5 conjunct. */
+  now?: Date;
 }): AutoMergePolicyState {
+  const now = opts?.now ?? new Date();
   const root = resolve(opts?.cwd ?? process.cwd());
   const policyPath = resolve(root, opts?.policyPath ?? DEFAULT_POLICY_FILE);
   const carrierRoot = opts?.carrierRoot ?? fileURLToPath(new URL(".", import.meta.url));
@@ -233,6 +271,11 @@ export function readAutoMergePolicy(opts?: {
   // NEVER cross-checks this against the ADR (docs are not runtime config, the
   // spec's own rejected alternative); the consistency readers are the ADR truth.
   if (parsed.adr2AcceptedOn === undefined || !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[0-1])$/.test(parsed.adr2AcceptedOn)) {
+    return { state: "off", stateReason: "clause5-carrier-absent" };
+  }
+  // The acceptance must already have HAPPENED: a date after `now` (decades
+  // ahead = a forged or placeholder policy) fails the clause-5 conjunct too.
+  if (new Date(parsed.adr2AcceptedOn).getTime() > now.getTime()) {
     return { state: "off", stateReason: "clause5-carrier-absent" };
   }
   if (parsed.vetoWindowQueueLive !== true) return { state: "off", stateReason: "clause5-carrier-absent" };
@@ -313,16 +356,22 @@ export function evaluateDiffScope(
     }
   }
   for (const entry of diffEntries) {
-    const p = normalizeRel(entry.path).rel.toLowerCase();
+    // The outside flag is load-bearing: `../src/run.ts` normalizes to an
+    // in-scope-looking rel, but the path CLAIMS to live outside the root —
+    // parking is the fail-closed read.
+    const { rel, outside } = normalizeRel(entry.path);
+    const p = rel.toLowerCase();
     const allowed = scope.allowedPathGlobs.some((g) => globToRegExp(normalizeRel(g).rel.toLowerCase()).test(p));
-    if (!allowed || !scope.permittedActions.includes(entry.action)) {
+    if (outside || !allowed || !scope.permittedActions.includes(entry.action)) {
       return { park: true, reason: OUT_OF_SCOPE_DIFF };
     }
   }
   return { park: false };
 }
 
-/** The fleet-result vocabulary value a passing QA verdict carries (sc2-7 precedent). */
+/** The fleet-result vocabulary value a passing QA verdict carries (sc2-7
+ * precedent). Typed over strings — the set consumes the schema's tolerant
+ * `status: string`, while QaVerdictStatus pins the union adds-only. */
 export const PASSING_QA_STATUSES: ReadonlySet<string> = new Set(["approved"]);
 
 /**
@@ -335,23 +384,30 @@ export const PASSING_QA_STATUSES: ReadonlySet<string> = new Set(["approved"]);
  * fresh — the verdict must postdate what it blesses).
  */
 export function evaluateVerdict(
-  verdict: QaVerdict | undefined,
+  verdict: QaVerdict | null | undefined,
   rebasedAt?: Date,
   now: Date = new Date(),
 ): {
   ok: boolean;
   reason?: "verdict-absent" | "verdict-stale" | "verdict-future" | "verdict-escalated" | "verdict-rejected";
 } {
-  if (verdict === undefined) return { ok: false, reason: "verdict-absent" };
-  const produced = new Date(verdict.producedAt).getTime();
+  if (verdict == null) return { ok: false, reason: "verdict-absent" };
+  // Schema first: a verdict that does not parse as the CONSUMED shape (wrong
+  // field types, missing producedAt, non-boolean escalated) is treated as
+  // absent — fail-closed, never a TypeError downstream.
+  const parsed = QaVerdictSchema.safeParse(verdict);
+  if (!parsed.success) return { ok: false, reason: "verdict-absent" };
+  const produced = new Date(parsed.data.producedAt).getTime();
   if (Number.isNaN(produced)) return { ok: false, reason: "verdict-stale" };
   if (produced > now.getTime()) return { ok: false, reason: "verdict-future" };
   if (produced <= (rebasedAt?.getTime() ?? 0)) return { ok: false, reason: "verdict-stale" };
-  // Truthy non-boolean escalations (1, "yes") count as escalated — fail closed.
-  if (verdict.escalated != null && verdict.escalated !== false) {
+  // Truthy non-boolean escalations (0, "") count as escalated — fail closed.
+  // (The schema rejects them before this line when it guards the call; the
+  // check stands for direct callers that bypass it.)
+  if (parsed.data.escalated != null && parsed.data.escalated !== false) {
     return { ok: false, reason: "verdict-escalated" };
   }
-  if (!PASSING_QA_STATUSES.has(verdict.status)) return { ok: false, reason: "verdict-rejected" };
+  if (!PASSING_QA_STATUSES.has(parsed.data.status)) return { ok: false, reason: "verdict-rejected" };
   return { ok: true };
 }
 
@@ -366,7 +422,6 @@ export interface ConsultResult {
     state: "off";
     stateReason?: "policy-garbled" | "policy-unreadable" | "declared-off" | "clause5-carrier-absent";
   };
-  policyOff?: string;
 }
 
 /**
@@ -381,7 +436,7 @@ export interface ConsultResult {
  * `rebasedAt` anchor is stale, fail-closed: freshness is judged against the
  * rebase, so an era that produces verdicts must thread the rebase timestamp.
  * When the policy is present but OFF, the result carries the loader's state
- * passthrough (`policyState`/`policyOff`) for the caller's consult event.
+ * passthrough (`policyState`) for the caller's consult event.
  */
 export function consultAutoMerge(
   input: {
@@ -399,13 +454,22 @@ export function consultAutoMerge(
     // knows to emit no consult event at all.
     return { runId: input.runId, eligible: false };
   }
+  // Both diff projections feed EVERY path clause: the entry list is the UNION
+  // (diffEntries first, then any diffPaths-only path as a "modify" entry), so
+  // a path surfaced only in one projection cannot skip a gate the other runs.
+  const entries: DiffEntry[] = [
+    ...input.diffEntries,
+    ...input.diffPaths
+      .filter((p) => !input.diffEntries.some((e) => e.path === p))
+      .map((p) => ({ path: p, action: "modify" as const })),
+  ];
   // Canonical clause order; every failing clause is listed, never just the first.
   const reasons: NeverPathReason[] = [];
-  if (evaluateNeverAutoMerge([...input.diffPaths, ...input.diffEntries.map((e) => e.path)]).park) {
+  if (evaluateNeverAutoMerge(entries.map((e) => e.path)).park) {
     reasons.push("never-path");
   }
   if (input.diffEntries.length === 0) reasons.push("scope");
-  const scope = evaluateDiffScope(input.diffEntries, input.scope);
+  const scope = evaluateDiffScope(entries, input.scope);
   if (scope.reason) reasons.push("scope");
   // No rebase anchor ⇒ freshness unverifiable ⇒ stale (the verdict is present,
   // so this is not verdict-absent — the era forgot to thread rebasedAt).
@@ -425,7 +489,6 @@ export function consultAutoMerge(
   const result: ConsultResult = { runId: input.runId, eligible: false, reasons };
   if (policy.state === "off") {
     result.policyState = { state: "off", stateReason: policy.stateReason };
-    result.policyOff = policy.stateReason;
   }
   return result;
 }
@@ -444,6 +507,8 @@ export function consultAutoMerge(
  *
  * Violation names, stable for suite + operator output:
  *   accepted-without-verdict-block · accepted-while-clause1-rejected ·
+ *   accepted-while-clause1-rejected-impl-present ·
+ *   accepted-while-clause1-rejected-setting-on ·
  *   verdict-block-while-proposed · impl-present-while-proposed ·
  *   setting-on-while-proposed · amended-without-accepted-verdict ·
  *   impl-present-while-amended-unaccepted ·
@@ -475,9 +540,16 @@ export function evaluateTreeConsistency(input: {
     // ACCEPTED, too, stands on the verdict block: without a clause-1 ACCEPTED
     // disposition the header is a bare claim. Block absent (clause1Accepted
     // undefined) is its own violation; block present with any other
-    // disposition is rejected-while-claimed-accepted.
+    // disposition is rejected-while-claimed-accepted, named per surface
+    // (impl / setting) like the AMENDED arm below.
     if (input.clause1Accepted !== true) {
-      violations.push(input.clause1Accepted === undefined ? "accepted-without-verdict-block" : "accepted-while-clause1-rejected");
+      if (input.clause1Accepted === undefined) {
+        violations.push("accepted-without-verdict-block");
+      } else {
+        violations.push("accepted-while-clause1-rejected");
+        if (input.implPresent) violations.push("accepted-while-clause1-rejected-impl-present");
+        if (input.settingOn) violations.push("accepted-while-clause1-rejected-setting-on");
+      }
     }
   } else if (input.adrStatus === "AMENDED") {
     // Under AMENDED the clause-1 ACCEPTED disposition is what licenses the
@@ -504,7 +576,7 @@ export function evaluateTreeConsistency(input: {
 export function readAdrStatus(opts?: { adrPath?: string; cwd?: string }): "PROPOSED" | "ACCEPTED" | "AMENDED" | "UNKNOWN" {
   const text = readAdrText(opts);
   if (text === undefined) return "PROPOSED";
-  const stripped = text.replace(/```[\s\S]*?```/g, " ");
+  const stripped = text.replace(/```[\s\S]*?```/g, " ").replace(/```[\s\S]*$/, " ");
   const word = stripped.match(/^\s*-\s*\*\*Status:\*\*\s*(\S+)/m)?.[1];
   if (word === "ACCEPTED" || word === "AMENDED" || word === "PROPOSED") return word;
   return word === undefined ? "PROPOSED" : "UNKNOWN";
@@ -514,12 +586,13 @@ export function readAdrStatus(opts?: { adrPath?: string; cwd?: string }): "PROPO
  * Consistency-side verdict-block reader: does the ADR carry an
  * `## Operator verdict` block, and what did it dispose of clause 1?
  * No block (or unreadable file) ⇒ `{present: false, clause1Accepted: undefined}`.
- * With a block: the clause-1 table row's LEADING bolded token — the
- * disposition cell's first `**word**` — is ACCEPTED ⇒ true; ANYTHING else
- * (AMENDED, `REJECTED (was ACCEPTED)`, `NOT **ACCEPTED**`, row missing)
- * ⇒ false. Fenced code blocks are stripped first, as in readAdrStatus — a
- * clause-1 row quoted in an example is prose, not a disposition. Same
- * docs-not-config caveat as readAdrStatus: consistency test only.
+ * With a block: the clause-1 table row's LAST non-empty cell is the
+ * disposition column; its LEADING bolded token is ACCEPTED ⇒ true; ANYTHING
+ * else (AMENDED, `REJECTED (was ACCEPTED)`, `NOT **ACCEPTED**`, an unbolded
+ * cell, a bolded token in an earlier column, row missing) ⇒ false. Fenced
+ * code blocks are stripped first, as in readAdrStatus — a clause-1 row
+ * quoted in an example is prose, not a disposition. Same docs-not-config
+ * caveat as readAdrStatus: consistency test only.
  */
 export function readVerdictBlock(opts?: { adrPath?: string; cwd?: string }): {
   present: boolean;
@@ -527,12 +600,15 @@ export function readVerdictBlock(opts?: { adrPath?: string; cwd?: string }): {
 } {
   const text = readAdrText(opts);
   if (text === undefined) return { present: false, clause1Accepted: undefined };
-  const stripped = text.replace(/```[\s\S]*?```/g, " ");
+  const stripped = text.replace(/```[\s\S]*?```/g, " ").replace(/```[\s\S]*$/, " ");
   const heading = stripped.match(/^##\s+Operator verdict\b.*$/m);
   if (!heading) return { present: false, clause1Accepted: undefined };
   const row =
     stripped.slice((heading.index ?? 0) + heading[0].length).match(/^\s*\|\s*1\b.*$/m)?.[0] ?? "";
-  const token = row.match(/\*\*([A-Za-z]+)\*\*/)?.[1];
+  // The disposition is the row's LAST cell — a bolded word in an earlier
+  // (description) column is prose about the clause, not the disposition.
+  const cells = row.split("|").map((c) => c.trim()).filter((c) => c !== "");
+  const token = (cells[cells.length - 1] ?? "").match(/^\*\*([A-Za-z]+)\*\*/)?.[1];
   return { present: true, clause1Accepted: token === "ACCEPTED" };
 }
 
@@ -598,20 +674,25 @@ export function assertNoQaProducerInGraph(root?: string): { clean: boolean; offe
       if (name.startsWith(".")) continue;
       const abs = resolve(dir, name);
       // readdir's dirent types do not resolve symlinks: stat the target so a
-      // symlinked directory is walked instead of skipped (broken link ⇒ skip).
+      // symlinked directory is walked and a symlinked FILE is scanned instead
+      // of skipped (broken link ⇒ skip).
       let isDir = ent.isDirectory();
-      if (!isDir && ent.isSymbolicLink()) {
+      let isFile = ent.isFile();
+      if (!isDir && !isFile && ent.isSymbolicLink()) {
         try {
-          isDir = statSync(abs).isDirectory();
+          const st = statSync(abs);
+          isDir = st.isDirectory();
+          isFile = st.isFile();
         } catch {
           isDir = false;
+          isFile = false;
         }
       }
       if (isDir) {
         walk(srcRoot, abs);
         continue;
       }
-      if (!ent.isFile() || !/\.(?:ts|tsx)$/.test(name)) continue;
+      if (!isFile || !/\.(?:ts|tsx)$/.test(name)) continue;
       const rel = relative(srcRoot, abs).split(sep).join("/");
       if (rel === selfRel) continue;
       let text: string;

@@ -28,11 +28,15 @@ import {
   OUT_OF_SCOPE_DIFF,
   PASSING_QA_STATUSES,
   POLICY_AUTO_MERGE_APPROVER_ID,
+  type QaVerdict,
   readAdrStatus,
   readAutoMergePolicy,
   readVerdictBlock,
   SCOPE_REQUIRES_PRIVILEGE,
 } from "../../src/fleet/auto-merge-policy.ts";
+
+/** Windows needs elevated privileges to create symlinks; POSIX does not. */
+const SYMLINK_OK = process.platform !== "win32";
 
 let dirs: string[] = [];
 /** rmSync that rescues a deliberately hostile mode first (a 0666 dir has no
@@ -65,6 +69,10 @@ const tmp = (): string => {
 
 /** The everything-set clause-5 policy body. */
 const POLICY_ON = { autoMergeDefault: true, adr2AcceptedOn: "2026-10-15", vetoWindowQueueLive: true };
+/** Injected wall clock for the acceptance-date conjunct: strictly after the
+ * POLICY_ON date, so every clause-5 arm behaves identically regardless of the
+ * real clock. */
+const POLICY_NOW = new Date("2026-10-16T00:00:00.000Z");
 
 const writePolicy = (root: string, body: unknown, mode = 0o600): string => {
   fs.mkdirSync(path.join(root, ".factory"), { recursive: true });
@@ -213,7 +221,24 @@ describe("readAutoMergePolicy", () => {
     const root = tmp();
     const carrierRoot = fabricateCarrier(root);
     writePolicy(root, POLICY_ON);
-    expect(readAutoMergePolicy({ cwd: root, carrierRoot })).toEqual({ state: "on" });
+    expect(readAutoMergePolicy({ cwd: root, carrierRoot, now: POLICY_NOW })).toEqual({ state: "on" });
+  });
+
+  test("clause 5: a FUTURE adr2AcceptedOn ⇒ clause5-carrier-absent (acceptance must already have happened)", () => {
+    // Blind#13: an acceptance date decades ahead is a forged/placeholder
+    // policy; it must fail the clause-5 conjunct, not arm ON.
+    const root = tmp();
+    const carrierRoot = fabricateCarrier(root);
+    writePolicy(root, { ...POLICY_ON, adr2AcceptedOn: "2076-01-01" });
+    expect(readAutoMergePolicy({ cwd: root, carrierRoot, now: POLICY_NOW })).toEqual({
+      state: "off",
+      stateReason: "clause5-carrier-absent",
+    });
+    // Boundary: the acceptance INSTANT itself (00:00Z of the date) satisfies
+    // `acceptedOn <= now` — the conjunct is inclusive.
+    expect(readAutoMergePolicy({ cwd: root, carrierRoot, now: new Date("2076-01-01T00:00:00.000Z") })).toEqual({
+      state: "on",
+    });
   });
 
   test("clause 5: a comment-only carrier does NOT arm — comments stripped before matching", () => {
@@ -239,7 +264,7 @@ describe("readAutoMergePolicy", () => {
     const carrierRoot = fabricateCarrier(root);
     writeModule(carrierRoot, 'export { enqueueVetoWindow } from "./veto-window-impl.ts";\n');
     writePolicy(root, POLICY_ON);
-    expect(readAutoMergePolicy({ cwd: root, carrierRoot })).toEqual({ state: "on" });
+    expect(readAutoMergePolicy({ cwd: root, carrierRoot, now: POLICY_NOW })).toEqual({ state: "on" });
   });
 
   test("clause 5: a carrier suite that never names the symbol does NOT arm", () => {
@@ -322,6 +347,34 @@ describe("evaluateNeverAutoMerge", () => {
     expect(evaluateNeverAutoMerge(["SRC/audit/LINK-STORE.ts"])).toEqual({ park: true, reason: "never-path" });
     expect(evaluateNeverAutoMerge(["SRC/RUN.TS"])).toEqual({ park: false });
   });
+
+  test("clause: the policy brain protects itself — policy module, veto-window carrier, guarded-read seam park (r3 E1)", () => {
+    // link-store is subsumed by the src/audit/ prefix and is no longer a
+    // named member (r3 E11): the named set is exactly these six.
+    expect(NEVER_AUTO_MERGE_PATHS).toEqual([
+      "src/audit",
+      "src/fleet/approval-gate.ts",
+      "src/providers/credentials.ts",
+      "src/fleet/auto-merge-policy.ts",
+      "src/fleet/veto-window.ts",
+      "src/providers/allowlist-path.ts",
+    ]);
+    for (const p of ["src/fleet/auto-merge-policy.ts", "src/fleet/veto-window.ts", "src/providers/allowlist-path.ts"]) {
+      expect(evaluateNeverAutoMerge([p])).toEqual({ park: true, reason: "never-path" });
+    }
+    // Spelling cannot dodge the self-protection either.
+    expect(evaluateNeverAutoMerge(["./src/fleet/auto-merge-policy.ts"])).toEqual({ park: true, reason: "never-path" });
+    expect(evaluateNeverAutoMerge(["SRC/PROVIDERS/ALLOWLIST-PATH.TS"])).toEqual({ park: true, reason: "never-path" });
+  });
+
+  test("clause: a // UNC spelling is OUTSIDE the repo-relative namespace — parks either way (r3 E4)", () => {
+    // `\\server\share` after the backslash fold: a host name, never a
+    // repo-relative path, so it must not normalize into a matching rel.
+    expect(evaluateNeverAutoMerge(["//src/audit/link-store.ts"])).toEqual({ park: true, reason: "never-path" });
+    expect(evaluateNeverAutoMerge(["\\\\server\\share\\src\\run.ts"])).toEqual({ park: true, reason: "never-path" });
+    // Even a clean path spelled UNC parks — outside is parked, not re-rooted.
+    expect(evaluateNeverAutoMerge(["//src/run.ts"])).toEqual({ park: true, reason: "never-path" });
+  });
 });
 
 describe("evaluateDiffScope", () => {
@@ -391,6 +444,27 @@ describe("evaluateDiffScope", () => {
     expect(evaluateDiffScope([{ path: "src//run.ts", action: "modify" }], scope())).toEqual({ park: false });
   });
 
+  test("clause: an outside-root entry parks out-of-scope even when its rel LOOKS in-scope (r3 E2/edge#1)", () => {
+    // `../src/run.ts` normalizes to the in-scope rel `src/run.ts` — the
+    // dropped outside flag used to wave it through. It claims to live
+    // outside the root; parking is the fail-closed read.
+    expect(evaluateDiffScope([{ path: "../src/run.ts", action: "modify" }], scope())).toEqual({
+      park: true,
+      reason: OUT_OF_SCOPE_DIFF,
+    });
+    // Same for the UNC spelling — a host name is not a repo-relative path.
+    expect(evaluateDiffScope([{ path: "//src/run.ts", action: "modify" }], scope())).toEqual({
+      park: true,
+      reason: OUT_OF_SCOPE_DIFF,
+    });
+    // Deny still wins over outside: a deny-matching rel on an outside path.
+    const denied = scope({ deniedPathGlobs: [{ glob: "src/audit/**", reason: "audit hops" }] });
+    expect(evaluateDiffScope([{ path: "../src/audit/x.ts", action: "modify" }], denied)).toEqual({
+      park: true,
+      reason: SCOPE_REQUIRES_PRIVILEGE,
+    });
+  });
+
   test("clause: BOTH sides casefold — an uppercase deny glob or uppercase diff path still matches", () => {
     // Deny spelled uppercase still catches the lowercase path (deliberately
     // stricter than fixloop's case-sensitive matcher — see the module doc).
@@ -416,6 +490,34 @@ describe("evaluateDiffScope", () => {
 describe("evaluateVerdict", () => {
   test("clause: undefined ⇒ verdict-absent", () => {
     expect(evaluateVerdict(undefined)).toEqual({ ok: false, reason: "verdict-absent" });
+  });
+
+  test("clause: null ⇒ verdict-absent — a null verdict never TypeErrors (r3 E3)", () => {
+    expect(evaluateVerdict(null)).toEqual({ ok: false, reason: "verdict-absent" });
+  });
+
+  test("clause: a verdict that fails QaVerdictSchema ⇒ verdict-absent, fail-closed (r3 E8)", () => {
+    // Wrong field type, missing producedAt, non-boolean escalated — each is
+    // "no verdict" for consumption purposes, never a downstream TypeError.
+    expect(
+      evaluateVerdict({ status: 5, producedAt: "2026-10-15T12:00:00.000Z" } as unknown as QaVerdict, undefined, FRESH_NOW),
+    ).toEqual({ ok: false, reason: "verdict-absent" });
+    expect(evaluateVerdict({ status: "approved" } as unknown as QaVerdict, undefined, FRESH_NOW)).toEqual({
+      ok: false,
+      reason: "verdict-absent",
+    });
+    expect(
+      evaluateVerdict({ status: "approved", producedAt: "2026-10-15T12:00:00.000Z", escalated: "yes" } as unknown as QaVerdict, undefined, FRESH_NOW),
+    ).toEqual({ ok: false, reason: "verdict-absent" });
+    // Unknown EXTRA keys pass (A2's adds-only extension must not unparseable-
+    // fail) — only the consumed fields are validated.
+    expect(
+      evaluateVerdict(
+        { status: "approved", producedAt: "2026-10-15T12:30:00.000Z", auditRowId: "ar-9" } as unknown as QaVerdict,
+        new Date("2026-10-15T11:00:00.000Z"),
+        FRESH_NOW,
+      ),
+    ).toEqual({ ok: true });
   });
 
   test("clause: producedAt before rebasedAt (or unparseable) ⇒ verdict-stale", () => {
@@ -445,18 +547,12 @@ describe("evaluateVerdict", () => {
     });
   });
 
-  test("clause: escalated ⇒ verdict-escalated — truthy non-boolean counts; stale beats escalated, future beats both", () => {
+  test("clause: escalated ⇒ verdict-escalated — stale beats escalated, future beats both", () => {
     expect(
       evaluateVerdict({ status: "approved", producedAt: "2026-10-15T12:30:00.000Z", escalated: true }, undefined, FRESH_NOW),
     ).toEqual({ ok: false, reason: "verdict-escalated" });
-    // Truthy non-boolean escalation values fail closed (C5).
-    expect(
-      evaluateVerdict(
-        { status: "approved", producedAt: "2026-10-15T12:30:00.000Z", escalated: "yes" as unknown as boolean },
-        undefined,
-        FRESH_NOW,
-      ),
-    ).toEqual({ ok: false, reason: "verdict-escalated" });
+    // Truthy non-boolean escalation values are the SCHEMA's arm now (r3 E8):
+    // escalated:"yes" fails the consumed shape ⇒ verdict-absent (above).
     expect(
       evaluateVerdict(
         { status: "approved", producedAt: "2026-10-15T11:00:00.000Z", escalated: true },
@@ -516,14 +612,16 @@ describe("consultAutoMerge", () => {
     expect("reasons" in r).toBe(false);
   });
 
-  test("clause: present-OFF, otherwise clean ⇒ [policy-off] + policyState/policyOff passthrough", () => {
-    expect(consultAutoMerge(input(), PAST_VERDICT, OFF)).toEqual({
+  test("clause: present-OFF, otherwise clean ⇒ [policy-off] + policyState passthrough (flat policyOff is gone, r3 E12)", () => {
+    const r = consultAutoMerge(input(), PAST_VERDICT, OFF);
+    expect(r).toEqual({
       runId: "run-1",
       eligible: false,
       reasons: ["policy-off"],
       policyState: { state: "off", stateReason: "declared-off" },
-      policyOff: "declared-off",
     });
+    // Single source: consumers read policyState.stateReason (wave F contract).
+    expect("policyOff" in r).toBe(false);
   });
 
   test("clause: verdict present WITHOUT a rebasedAt anchor ⇒ verdict-stale (freshness needs the rebase)", () => {
@@ -580,6 +678,38 @@ describe("consultAutoMerge", () => {
     const r = consultAutoMerge(input({ diffPaths: ["src/providers/credentials.ts"] }), PAST_VERDICT, { state: "on" });
     expect(r.reasons).toEqual(["never-path"]);
   });
+
+  test("clause: the SCOPE check sees the UNION — a diffPaths-only out-of-scope path parks (r3 E2/blind#2)", () => {
+    // docs/ is outside the open allow glob; the entry list is the union, so
+    // surfacing it only in diffPaths no longer skips the scope gate.
+    const r = consultAutoMerge(input({ diffPaths: ["docs/x.md"] }), PAST_VERDICT, { state: "on" });
+    expect(r.reasons).toEqual(["scope"]);
+    // Same through the deny arm: a diffPaths-only hostile path hits the deny
+    // glob and names the stronger reason.
+    const denied = consultAutoMerge(
+      input({
+        diffPaths: ["src/secret/key.ts"],
+        scope: { ...openScope, deniedPathGlobs: [{ glob: "src/secret/**", reason: "operator-only" }] },
+      }),
+      PAST_VERDICT,
+      { state: "on" },
+    );
+    expect(denied.reasons).toEqual(["scope"]);
+  });
+
+  test("clause: the scope check consumes the union's OUTSIDE flag — a diffPaths-only ../ path cannot re-root (r3 E2)", () => {
+    // ../src/run.ts normalizes to the in-scope rel src/run.ts; parking on the
+    // outside flag is the fail-closed read (the flag used to be dropped).
+    // Canonical order: outside parks never-path FIRST, then the scope gate.
+    const r = consultAutoMerge(input({ diffPaths: ["../src/run.ts"] }), PAST_VERDICT, { state: "on" });
+    expect(r.reasons).toEqual(["never-path", "scope"]);
+    // A clean union still passes — the union itself did not break eligibility.
+    expect(consultAutoMerge(input({ diffPaths: ["src/other.ts"] }), PAST_VERDICT, { state: "on" })).toEqual({
+      runId: "run-1",
+      eligible: true,
+      reasons: ["never-path-clear", "scope-ok", "verdict-fresh", "policy-on"],
+    });
+  });
 });
 
 describe("evaluateTreeConsistency", () => {
@@ -624,7 +754,8 @@ describe("evaluateTreeConsistency", () => {
     ).toEqual({ consistent: false, violations: ["accepted-without-verdict-block"] });
   });
 
-  test("clause: ACCEPTED with a clause-1 REJECTED disposition ⇒ accepted-while-clause1-rejected", () => {
+  test("clause: ACCEPTED with a clause-1 REJECTED disposition ⇒ per-surface names like the AMENDED arm (r3 E13)", () => {
+    // Both surfaces present: the base name plus one name per surface.
     expect(
       evaluateTreeConsistency({
         adrStatus: "ACCEPTED",
@@ -633,7 +764,39 @@ describe("evaluateTreeConsistency", () => {
         settingOn: true,
         implPresent: true,
       }),
-    ).toEqual({ consistent: false, violations: ["accepted-while-clause1-rejected"] });
+    ).toEqual({
+      consistent: false,
+      violations: [
+        "accepted-while-clause1-rejected",
+        "accepted-while-clause1-rejected-impl-present",
+        "accepted-while-clause1-rejected-setting-on",
+      ],
+    });
+    // Impl alone, then setting alone — each surface names itself.
+    expect(
+      evaluateTreeConsistency({
+        adrStatus: "ACCEPTED",
+        verdictBlockPresent: true,
+        clause1Accepted: false,
+        settingOn: false,
+        implPresent: true,
+      }),
+    ).toEqual({
+      consistent: false,
+      violations: ["accepted-while-clause1-rejected", "accepted-while-clause1-rejected-impl-present"],
+    });
+    expect(
+      evaluateTreeConsistency({
+        adrStatus: "ACCEPTED",
+        verdictBlockPresent: true,
+        clause1Accepted: false,
+        settingOn: true,
+        implPresent: false,
+      }),
+    ).toEqual({
+      consistent: false,
+      violations: ["accepted-while-clause1-rejected", "accepted-while-clause1-rejected-setting-on"],
+    });
   });
 
   test("clause: AMENDED ⇒ consistent only with clause1Accepted === true (the tree-read disposition)", () => {
@@ -729,6 +892,63 @@ describe("readVerdictBlock", () => {
     expect(readVerdictBlock({ cwd: root })).toEqual({ present: true, clause1Accepted: false });
   });
 
+  test("clause: disposition read from the row's LAST cell — a bolded word in the description column does not decide (r3 E5)", () => {
+    // The fail-open this fixes: "see **ACCEPTED** below | **REJECTED**." has
+    // ACCEPTED as the first bolded token ANYWHERE; the disposition cell (the
+    // row's last cell) says REJECTED ⇒ false.
+    const root = tmp();
+    writeAdr(
+      root,
+      ADR_WITH_BLOCK.replace(
+        "| 1 — auto-merge default | **ACCEPTED** as written. |",
+        "| 1 — auto-merge default | see **ACCEPTED** discussion below | **REJECTED**. |",
+      ),
+    );
+    expect(readVerdictBlock({ cwd: root })).toEqual({ present: true, clause1Accepted: false });
+    // The mirror: a bolded description column with a bolded ACCEPTED
+    // disposition cell still reads true — the last cell decides.
+    const root2 = tmp();
+    writeAdr(
+      root2,
+      ADR_WITH_BLOCK.replace(
+        "| 1 — auto-merge default | **ACCEPTED** as written. |",
+        "| 1 — auto-merge default | rationale **below** | **ACCEPTED** as written. |",
+      ),
+    );
+    expect(readVerdictBlock({ cwd: root2 })).toEqual({ present: true, clause1Accepted: true });
+    // An UNBOLDED last cell is not a disposition, even when an earlier column
+    // carries **ACCEPTED** (the old first-bolded-anywhere read waved it).
+    const root3 = tmp();
+    writeAdr(
+      root3,
+      ADR_WITH_BLOCK.replace(
+        "| 1 — auto-merge default | **ACCEPTED** as written. |",
+        "| 1 — auto-merge default | **ACCEPTED** mentioned | accepted, reluctantly. |",
+      ),
+    );
+    expect(readVerdictBlock({ cwd: root3 })).toEqual({ present: true, clause1Accepted: false });
+  });
+
+  test("clause: an UNPAIRED fence tail is stripped too — a lone ``` opener cannot smuggle a disposition (r3 E6)", () => {
+    // The fenced (unpaired) clause-1 row precedes the real row; without the
+    // tail strip the first |1 row match lands INSIDE the fence.
+    const root = tmp();
+    writeAdr(
+      root,
+      [
+        "# ADR-2",
+        "",
+        "## Operator verdict",
+        "",
+        "```md",
+        "| 1 — example | **ACCEPTED** |",
+        "",
+        "| 1 — auto-merge default | **AMENDED**. |",
+      ].join("\n"),
+    );
+    expect(readVerdictBlock({ cwd: root })).toEqual({ present: true, clause1Accepted: false });
+  });
+
   test("clause: disposition parsed from the LEADING bolded token only — substring ACCEPTED does not pass (C1)", () => {
     // "REJECTED (was ACCEPTED)" and "NOT ACCEPTED" contain the substring but
     // their leading bolded token is not exactly ACCEPTED ⇒ false (the r1
@@ -808,6 +1028,14 @@ describe("readAdrStatus", () => {
         "",
       ].join("\n"),
     );
+    expect(readAdrStatus({ cwd: root })).toBe("PROPOSED");
+  });
+
+  test("clause: an UNPAIRED fence tail is stripped too — a lone ``` opener cannot smuggle a status (r3 E6)", () => {
+    // The fenced (unpaired) Status bullet precedes the real one; without the
+    // tail strip the first-match read lands INSIDE the fence.
+    const root = tmp();
+    writeAdr(root, "```md\n- **Status:** ACCEPTED\n\n- **Status:** PROPOSED\n");
     expect(readAdrStatus({ cwd: root })).toBe("PROPOSED");
   });
 
@@ -896,10 +1124,26 @@ describe("inertness", () => {
       fs.rmSync(real, { recursive: true, force: true });
     }
   });
-});
 
-/** Windows needs elevated privileges to create symlinks; POSIX does not. */
-const SYMLINK_OK = process.platform !== "win32";
+  test.skipIf(!SYMLINK_OK)(
+    "clause: the tripwire follows a symlinked FILE (r3 E7 — the dirent isFile() skip no longer hides it)",
+    () => {
+      const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-g1symf-"));
+      const real = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-g1symfreal-"));
+      try {
+        fs.writeFileSync(
+          path.join(real, "producer.ts"),
+          `export const artifact = { kind: "factory_result", verdict: {} };\n`,
+        );
+        fs.symlinkSync(path.join(real, "producer.ts"), path.join(root, "linked.ts"));
+        expect(assertNoQaProducerInGraph(root)).toEqual({ clean: false, offenders: ["linked.ts"] });
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(real, { recursive: true, force: true });
+      }
+    },
+  );
+});
 
 describe("inertness — cycle safety (C8)", () => {
   test.skipIf(!SYMLINK_OK)(

@@ -574,15 +574,16 @@ async function reverifyAndMap(
       const rec = deps.store.get(runId);
       const ctx = (deps.consultContext ?? buildConsultContext)(rec);
       const consult = consultAutoMerge(ctx.input, ctx.verdict, policy);
-      // policy_off mirrors the consult result's optional policyOff (its
-      // stateReason when the policy is off) — snake_case, the chain-event
-      // convention beside chain_ms.
+      // policy_off mirrors the consult result's policyState.stateReason (the
+      // off-reason, present only when the policy is OFF) — snake_case, the
+      // chain-event convention beside chain_ms.
+      const policyOffReason = consult.policyState?.stateReason;
       observeLine(requestId, {
         runId,
         event: "auto-merge-consult",
         eligible: consult.eligible,
         ...(consult.reasons === undefined ? {} : { reasons: consult.reasons }),
-        ...(consult.policyOff === undefined ? {} : { policy_off: consult.policyOff }),
+        ...(policyOffReason === undefined ? {} : { policy_off: policyOffReason }),
       });
       policyDecision = consult.eligible;
     } catch {
@@ -632,8 +633,9 @@ async function reverifyAndMap(
     // G1 (ADR-2): the merge decision is recorded where every approved run's
     // decision is recorded — the run record's persisted approval state
     // (DD-28.26(2)) — as a labeled non-human approver (the system:timeout
-    // precedent). The gate's transient awaiting-approval write is same-tick
-    // superseded by the policy decision; the gate module itself is untouched
+    // precedent). The gate's transient awaiting-approval write is superseded
+    // within the same completion call, across the reverify await, by the
+    // policy decision; the gate module itself is untouched
     // (CHANNEL ≠ POLICY: approval-gate.ts stays byte-identical).
     // Fail-closed re-read: the operator may revoke the policy while reverify
     // runs; only a still-ON policy mints the decision. Technical Notes'

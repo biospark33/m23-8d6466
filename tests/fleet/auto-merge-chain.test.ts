@@ -28,10 +28,22 @@
  *      consult saw ON, the mint-time re-read sees OFF, no decision mints.
  *   7. consult-throws: an injected consultContext that throws — surfaced as
  *      exactly one auto-merge-consult-error event, no consult event, park.
+ *   8. human-decision protection (ADR-2 clause 5, "the human override is
+ *      unconditional"): a human approval decided while the chain runs —
+ *      written through the consultContext seam, which sits after the chain's
+ *      #382 pre-registration and before the gate reads the record — drives the
+ *      gate's already-decided arm; the policy mint never fires and the human
+ *      approverId/reason stand untouched.
+ *   9. deleted-to-absent revocation: like arm 6 but the consultContext side
+ *      effect DELETES the policy file — the mint-time re-read sees ABSENT, no
+ *      decision mints.
+ *   10. verdict-rejected drives the real chain: an eligible-shaped context
+ *      whose verdict status is "rejected" consults verdict-rejected and parks.
  *
- * Same-tick supersession (the gate's transient awaiting-approval write, then
- * the policy decision — documented in run-completion.ts) is asserted on FINAL
- * persisted state only, never on write order.
+ * Same-completion-call supersession (the gate's transient awaiting-approval
+ * write, then the policy decision across the reverify await — documented in
+ * run-completion.ts) is asserted on FINAL persisted state only, never on write
+ * order.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -370,7 +382,7 @@ async function seedGreenRun(
  * verdict's producedAt) because a verdict present without a rebase stamp is
  * `verdict-stale` by contract — an eligible arm cannot omit it.
  */
-function injectedConsult(runId: string, diffPaths: string[], scopeGlobs: string[]) {
+function injectedConsult(runId: string, diffPaths: string[], scopeGlobs: string[], verdictStatus: QaVerdict["status"] = "approved") {
   return {
     input: {
       runId,
@@ -379,7 +391,7 @@ function injectedConsult(runId: string, diffPaths: string[], scopeGlobs: string[
       scope: { allowedPathGlobs: scopeGlobs, deniedPathGlobs: [], permittedActions: ["modify" as const] },
       rebasedAt: new Date(Date.now() - 120_000),
     },
-    verdict: { status: "approved", producedAt: new Date(Date.now() - 60_000).toISOString(), escalated: false } satisfies QaVerdict,
+    verdict: { status: verdictStatus, producedAt: new Date(Date.now() - 60_000).toISOString(), escalated: false } satisfies QaVerdict,
   };
 }
 
@@ -451,7 +463,8 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         });
         // DD-28.26(2) home: the merge decision is recorded where every approved
         // run's decision is recorded — FINAL persisted state only (the gate's
-        // transient awaiting-approval write is same-tick superseded).
+        // transient awaiting-approval write is superseded within the same
+        // completion call, across the reverify await).
         const approval = s.store.get("run-g1b").extensions?.approval;
         // store.set merges per-field, so the decision's four fields land ON the
         // gate's registration entry — toMatchObject pins the decision fields.
@@ -672,6 +685,158 @@ describe("G1 chain demo: ADR-2 fail-closed auto-merge, driven end-to-end (non-li
         expect(lines.filter((l) => l.event === "auto-merge-consult-error")).toHaveLength(1);
         expect(s.store.get("run-g1g").extensions?.approval?.state).toBe("awaiting-approval");
         expect(JSON.stringify(s.store.get("run-g1g"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC human-decision protection (ADR-2 clause 5: \"the human override is unconditional\"): a human approval decided while the chain runs is never displaced by the policy decision",
+    async () => {
+      const lines = captureLogs();
+      const s = store();
+      const host = gitHost("on");
+      try {
+        quarantine(host, "run-g1h");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1h", { ok: true });
+        const out = await observeAndDriveChain(
+          "run-g1h",
+          baseDeps("run-g1h", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            consultContext: () => {
+              // The human decision lands through the consultContext seam —
+              // AFTER the chain's #382 pausing pre-registration and BEFORE the
+              // gate reads the record — so the gate's already-decided arm (a
+              // TERMINAL state) answers WITHOUT writing, and the policy mint
+              // never fires (it rides the `requested` outcome only). ADR-2
+              // clause 5: "the human override is unconditional" — a policy
+              // decision may never displace one.
+              s.store.set("run-g1h", {
+                extensions: {
+                  approval: {
+                    state: "approved",
+                    approverId: "human:steve",
+                    decidedAt: new Date().toISOString(),
+                    reason: "manual",
+                  },
+                },
+              });
+              return injectedConsult("run-g1h", ["src/feature/x.ts"], ["src/feature/**"]);
+            },
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        // the non-requested mapping: the gate's already-decided answer lands
+        // as handed-off, not driven
+        expect(out).toMatchObject({ kind: "handed-off", outcome: "already-decided" });
+        // the consult itself still ran — eligible against the still-ON policy
+        expect(consultEvents(lines)).toHaveLength(1);
+        expect(consultEvents(lines)[0]).toMatchObject({ runId: "run-g1h", eligible: true });
+        expect(lines.filter((l) => l.event === "auto-merge-consult-error")).toHaveLength(0);
+        // the HUMAN approverId/reason survive verbatim on the persisted
+        // approval — the gate wrote nothing, and no labeled approver exists
+        // anywhere on the record
+        expect(s.store.get("run-g1h").extensions?.approval).toMatchObject({
+          state: "approved",
+          approverId: "human:steve",
+          reason: "manual",
+        });
+        expect(JSON.stringify(s.store.get("run-g1h"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC deleted-to-absent revocation: the consult saw ON but the operator DELETES the policy file mid-chain — the mint-time re-read sees ABSENT and no decision mints",
+    async () => {
+      const lines = captureLogs();
+      const s = store();
+      // ignorePolicy: the arm removes the (untracked) policy file mid-chain,
+      // so reverify's tree-clean phase stays green.
+      const host = gitHost("on", true);
+      try {
+        quarantine(host, "run-g1i");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1i", { ok: true });
+        const policyPath = path.join(host.dir, ".factory", "policy.json");
+        const out = await observeAndDriveChain(
+          "run-g1i",
+          baseDeps("run-g1i", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            // SIDE EFFECT before returning: the file is GONE while reverify
+            // runs — the consult (past the pre-read) saw ON; the mint-time
+            // re-read sees ABSENT.
+            consultContext: () => {
+              fs.rmSync(policyPath);
+              return injectedConsult("run-g1i", ["src/feature/x.ts"], ["src/feature/**"]);
+            },
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        expect(out).toMatchObject({ kind: "driven", markerOk: true });
+        // exactly one consult event, eligible — evaluated against the
+        // still-present pre-read; no error fold fired
+        expect(consultEvents(lines)).toHaveLength(1);
+        expect(consultEvents(lines)[0]).toMatchObject({ runId: "run-g1i", eligible: true });
+        expect(lines.filter((l) => l.event === "auto-merge-consult-error")).toHaveLength(0);
+        // the re-read saw ABSENT ⇒ no mint; the gate's park stands as final
+        expect(s.store.get("run-g1i").extensions?.approval?.state).toBe("awaiting-approval");
+        expect(JSON.stringify(s.store.get("run-g1i"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
+      } finally {
+        host.cleanup();
+        s.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "AC verdict-rejected drives the real chain: an eligible-shaped context whose QA verdict status is rejected consults verdict-rejected and parks awaiting-approval",
+    async () => {
+      const lines = captureLogs();
+      const s = store();
+      const host = gitHost("on");
+      try {
+        quarantine(host, "run-g1j");
+        const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+        await seedGreenRun(s.store, driver, host, "run-g1j", { ok: true });
+        const out = await observeAndDriveChain(
+          "run-g1j",
+          baseDeps("run-g1j", {
+            driver,
+            store: s.store,
+            runsDir: s.dir,
+            hostRoot: host.dir,
+            // eligible-shaped diff/scope with rebasedAt threaded — the ONLY
+            // failing clause is the verdict's rejected status
+            consultContext: () => injectedConsult("run-g1j", ["src/feature/x.ts"], ["src/feature/**"], "rejected"),
+            consultCarrierRoot: fabricateCarrier(path.join(s.dir, "carrier-tree")),
+          }),
+        );
+        expect(out).toMatchObject({ kind: "driven", markerOk: true });
+        expect(consultEvents(lines)).toHaveLength(1);
+        expect(consultEvents(lines)[0]).toMatchObject({
+          runId: "run-g1j",
+          eligible: false,
+          reasons: ["verdict-rejected"],
+        });
+        // parked; policyDecision false ⇒ no mint
+        expect(s.store.get("run-g1j").extensions?.approval?.state).toBe("awaiting-approval");
+        expect(JSON.stringify(s.store.get("run-g1j"))).not.toContain(POLICY_AUTO_MERGE_APPROVER_ID);
       } finally {
         host.cleanup();
         s.cleanup();

@@ -2105,6 +2105,11 @@ describe("buildIdFileInputs", () => {
       // IMAGE RE-PUBLISH stays ops-gated (wave-0 ritual: J3 + J4 + A2 + the
       // M2.2 surface, DD-28.26(4)); only the pin adopts here.
       //
+      // 8af25a0: moved by G1's review rounds (the consult region grew across
+      // three bmad-code-review rounds; standing per-story ritual — re-derive
+      // at the branch gate, adopt with provenance, image re-publish stays
+      // ops-gated with J3/J4). Prior: 9c3d5ba (G1 implementation), 37e749e (J4).
+      //
       // 9c3d5ba: moved by G1 (ADR-2 verdict + policy). G1's true move is
       // 37e749e -> 9c3d5ba over TWO walked inputs, both priced by the story:
       // `src/fleet/auto-merge-policy.ts` (new — the fail-closed loader,
@@ -2128,7 +2133,7 @@ describe("buildIdFileInputs", () => {
       // after the run lock is released, deadline clamped to the pass budget). Everything else J4 touched is absent
       // from the walk: src/autonomy/, scripts/fleet.ts, scripts/corpus/, docs,
       // tests. Image re-publish rides the ops-gated wave-0 ritual with J3.
-      "9c3d5ba7aa6f72e32657fce285826d834164886b820bcf0f1af2d1b201d306d9",
+      "8af25a0c9a34c9aaeba5021a7095778d59b6e4f3efb5887b501124dd225de7e4",
     );
   });
 });
