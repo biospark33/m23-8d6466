@@ -32,6 +32,8 @@
  * handle is passed to `teardownSandbox` unchanged, and the #245 production
  * closure wired into the approval port passes the SAME handle — never a
  * `withRunLock` wrap, which would throw on re-entry.
+ *
+ * (G1, ADR-2): the auto-merge consult's input is structurally inert in v6a — RunRecord carries no diff/scope carrier and no factory_result verdict artifact, so consultAutoMerge always sees empty diffs and a verdict-absent run until those carriers land.
  */
 import { existsSync } from "node:fs";
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
@@ -42,6 +44,12 @@ import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { retainRunOutcomeBestEffort } from "./retain-best-effort.ts";
+import {
+  consultAutoMerge,
+  POLICY_AUTO_MERGE_APPROVER_ID,
+  readAutoMergePolicy,
+  type QaVerdict,
+} from "./auto-merge-policy.ts";
 import { recordApprovalPort } from "../reverify/approval.ts";
 import { runRedactionMap } from "../reverify/redaction.ts";
 import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
@@ -144,6 +152,25 @@ export interface RunCompletionDeps {
    * the operator's exported environment, tests inject a scoped copy.
    */
   env?: Record<string, string | undefined>;
+  /**
+   * G1 (ADR-2): the consult context seam — test/producer injection for the
+   * QA verdict and diff/scope carriers the consult consumes. Trusted
+   * configuration, never brief-reachable (the j3 RoutingHook precedent);
+   * defaulted at the consumption site to buildConsultContext, whose v6a
+   * default sees empty carriers ⇒ structurally ineligible. A2's producer
+   * era replaces the default with the real record carrier.
+   */
+  consultContext?: (rec: RunRecord) => { input: Parameters<typeof consultAutoMerge>[0]; verdict: QaVerdict | undefined };
+  /**
+   * G1 (ADR-2): the clause-5 carrier-probe seam — TEST/PRODUCER ONLY, the
+   * same trusted-configuration class as consultContext. Threaded verbatim to
+   * readAutoMergePolicy's `carrierRoot` opt (production callers never pass
+   * it; the probe defaults to the factory build tree beside this module). The
+   * chain demo injects a fabricated carrier tree — without it, ON is
+   * unreachable while the real veto-window carrier is missing, and the
+   * eligible path could not be driven end-to-end at all.
+   */
+  consultCarrierRoot?: string;
 }
 
 // ─── observability (the emitLine/log idiom, fanout-primitive.ts:1538-1550) ────
@@ -444,6 +471,74 @@ function emitTerminal(
   observeLine(requestId, { runId, ...fields });
 }
 
+// ─── ADR-2 auto-merge consult (G1, 2026-10-15; ./auto-merge-policy.ts) ────────
+
+/**
+ * The `extensions.approval.reason` the policy decision carries — named beside
+ * approval-gate.ts's `TIMEOUT_REASON` in convention, never imported from that
+ * module (FORBIDDEN_DIRECT).
+ */
+const POLICY_DECISION_REASON = "adr-2-auto-merge";
+
+/**
+ * The DEFAULT consult-input extraction, lifted off a RunRecord. CARRIER
+ * FINDINGS (v6a): RunRecord (src/providers/run-record.ts:124-147) carries NO
+ * diff/scope carrier — no fixScope/changedFiles/diffPaths field; dispatch and
+ * harvest persist neither — and NO factory_result verdict artifact, so this
+ * default returns empty carriers ⇒ the consult is structurally ineligible
+ * (verdict-absent) by construction. Surfaced, not absorbed. `deps.consultContext`
+ * (RunCompletionDeps) is where tests and A2-era producers inject the real
+ * carriers; in v6a nothing does.
+ */
+function buildConsultContext(rec: RunRecord): {
+  input: Parameters<typeof consultAutoMerge>[0];
+  verdict: QaVerdict | undefined;
+} {
+  return {
+    input: {
+      runId: rec.runId,
+      diffPaths: [],
+      diffEntries: [],
+      scope: { allowedPathGlobs: [], deniedPathGlobs: [], permittedActions: [] },
+    },
+    verdict: undefined,
+  };
+}
+
+/**
+ * One write, the gate's own decision shape (approval-gate.ts:2455-2464,
+ * :2479-2494) with a labeled non-human approver — the `system:timeout`
+ * precedent, now `policy:adr-2`. Clock: run-completion has no now-seam in
+ * RunCompletionDeps; the wall clock is this file's own idiom (F17, `Date.now()`
+ * throughout). VETO-WINDOW ATTACH POINT (single-tick consult in v6a): the
+ * decision mints here; when the veto-window queue lands (the veto-window
+ * story, first post-A2 concern), the reject-until-execution window wraps
+ * THIS write.
+ *
+ * The write is GUARDED (round-4 review): the store's `setApprovalIfAwaiting`
+ * rechecks the record under its own record lock — the one lock every
+ * `extensions.approval` writer serializes through — and mints only over a
+ * still-unclaimed `awaiting-approval`, so a human decision that landed across
+ * the reverify await wins the race by construction (ADR-2 clause 5, "the human
+ * override is unconditional", held at the WRITE, not only at the gate's
+ * already-decided arm). Returns whether the decision minted; a false return is
+ * a lost race, surfaced by the caller as a skip line, never an error.
+ */
+function recordPolicyApproval(store: RunRecordStore, runId: string, decidedAt: Date): boolean {
+  return (
+    store.setApprovalIfAwaiting(runId, {
+      extensions: {
+        approval: {
+          state: "approved",
+          approverId: POLICY_AUTO_MERGE_APPROVER_ID,
+          decidedAt: decidedAt.toISOString(),
+          reason: POLICY_DECISION_REASON,
+        },
+      },
+    }) !== undefined
+  );
+}
+
 /**
  * reverify() plus the outcome mapping shared by both entries. Any throw past
  * reverify's typed outcome (its report leg sits outside its own try blocks)
@@ -466,6 +561,51 @@ async function reverifyAndMap(
     bundleDir: deps.runsDir,
     teardown: (id, opts) => guardedTeardown(deps, teardownDeps, id, opts),
   });
+  // G1 (ADR-2, ACCEPTED 2026-10-15): fail-closed auto-merge consult. Absent
+  // policy file ⇒ exactly the pre-G1 path: no evaluation, no consult event,
+  // no state write. Present file ⇒ one synchronous evaluation, one consult
+  // event, and — only on the green+requested arm below — the labeled policy
+  // decision. reasons[] is present here; the absent-file case emits nothing.
+  // The audit trail is TWO events by design: this consult event records the
+  // evaluation, the terminal event below records the outcome — an
+  // eligible-then-vetoed sequence is legitimate (reverify is the chain's own
+  // veto arm), not a double-write bug.
+  const policy = readAutoMergePolicy({
+    cwd: deps.hostRoot,
+    ...(deps.consultCarrierRoot === undefined ? {} : { carrierRoot: deps.consultCarrierRoot }),
+  });
+  let policyDecision = false;
+  if (policy.state !== "absent") {
+    // Belt-and-braces fold (dispatch's precedent): a record the store cannot
+    // return, or a throwing injected consultContext, must never escape
+    // reverifyAndMap untyped (the module doc promises no-throw past typed
+    // outcomes). Catch ⇒ the decision stays false — fail-closed AND surfaced
+    // (the consult-error event below); the failing-open alternative is worse.
+    try {
+      const rec = deps.store.get(runId);
+      const ctx = (deps.consultContext ?? buildConsultContext)(rec);
+      const consult = consultAutoMerge(ctx.input, ctx.verdict, policy);
+      // policy_off mirrors the consult result's policyState.stateReason (the
+      // off-reason, present only when the policy is OFF) — snake_case, the
+      // chain-event convention beside chain_ms.
+      const policyOffReason = consult.policyState?.stateReason;
+      observeLine(requestId, {
+        runId,
+        event: "auto-merge-consult",
+        eligible: consult.eligible,
+        ...(consult.reasons === undefined ? {} : { reasons: consult.reasons }),
+        ...(policyOffReason === undefined ? {} : { policy_off: policyOffReason }),
+      });
+      policyDecision = consult.eligible;
+    } catch {
+      // Fail-closed AND surfaced: the fold above stands, but a policy-present
+      // consult that cannot complete is a silent audit hole — the error event
+      // fires BEFORE the fold lands. A distinct event name keeps the consult
+      // event's clause vocabulary clean, and the line carries no error detail
+      // (no token/payload material ever leaves).
+      observeLine(requestId, { runId, event: "auto-merge-consult-error" });
+    }
+  }
   let result: ReverifyOutcome;
   try {
     result = await reverify(runId, {
@@ -501,6 +641,44 @@ async function reverifyAndMap(
         : "approval null without flag",
     };
   } else if (result.approval.outcome === "requested") {
+    // G1 (ADR-2): the merge decision is recorded where every approved run's
+    // decision is recorded — the run record's persisted approval state
+    // (DD-28.26(2)) — as a labeled non-human approver (the system:timeout
+    // precedent). The gate's transient awaiting-approval write is superseded
+    // within the same completion call, across the reverify await, by the
+    // policy decision; the gate module itself is untouched
+    // (CHANNEL ≠ POLICY: approval-gate.ts stays byte-identical).
+    // Fail-closed re-read: the operator may revoke the policy while reverify
+    // runs; only a still-ON policy mints the decision. Technical Notes'
+    // one-read guard names the consult evaluation; the mint-time re-read is
+    // the sanctioned revocation guard (round-2 review), two reads total on
+    // the eligible path. The mint WRITE itself is guarded against displacing
+    // a decision that landed across the reverify await (round-4 review —
+    // recordPolicyApproval's doc).
+    if (
+      policyDecision &&
+      readAutoMergePolicy({
+        cwd: deps.hostRoot,
+        ...(deps.consultCarrierRoot === undefined ? {} : { carrierRoot: deps.consultCarrierRoot }),
+      }).state === "on"
+    ) {
+      // The mint is failure-isolated, the consult fold's precedent: a store
+      // fault past the green reverify must not escape reverifyAndMap untyped —
+      // the chain genuinely landed (teardown, verdict, gate registration), the
+      // record stays parked `awaiting-approval` and decidable by hand, and the
+      // fault is a line, never a raw throw.
+      try {
+        if (!recordPolicyApproval(deps.store, runId, new Date())) {
+          // The guard refused: a decision landed across the reverify await and
+          // the mint lost the race — surfaced, never silent (absent is ABSENT).
+          observeLine(requestId, { runId, event: "auto-merge-approval-skip" });
+        }
+      } catch (e) {
+        // The error text is store/IO material (lock timeout, EACCES), redacted
+        // and capped by errText — the same class the chain-failed arms carry.
+        observeLine(requestId, { runId, event: "auto-merge-approval-error", error: errText(e) });
+      }
+    }
     outcome =
       line.markerOk === undefined
         ? { kind: "driven", chainMs }

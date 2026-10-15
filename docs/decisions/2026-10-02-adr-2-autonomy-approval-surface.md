@@ -1,7 +1,10 @@
 # ADR-2: Autonomy approval surface — auto-merge default with QA-owned verdicts, the E21-S05b inbox as the human override surface
 
-- **Status:** PROPOSED — operator decides. Nothing in this document changes behavior until the
-  operator accepts it (decision workflow: story **G1**, `_bmad-output/sprint-artifacts/dark-factory-v6/stories/g1-adr2-draft-and-reconciliation.md`).
+- **Status:** ACCEPTED — operator verdict recorded 2026-10-15 via story **G1**
+  (`_bmad-output/sprint-artifacts/dark-factory-v6/stories/g1-adr2-draft-and-reconciliation.md`);
+  see the operator-verdict block appended at the end of this file. The body below is the
+  input artifact as proposed; amendments are recorded in the verdict block, never folded
+  into the draft text.
 - **Date:** 2026-10-02
 - **Extends:** [ADR-1](2026-09-30-adr-1-swarmclaw-macro-host.md) (ACCEPTED 2026-09-30) — and only
   within the exact clause ADR-1 §4 reserved: *"Auto-approve is out of scope here … its own future
@@ -108,5 +111,45 @@ the reconciliation note (DD-19) and this draft share one vocabulary:
 
 | | |
 |---|---|
-| **Operator (Steve)** | ⬜ PENDING — decide via G1 |
-| **Date** | — |
+| **Operator (Steve)** | ✅ ACCEPTED — 2026-10-15, via story G1 (ruled in the G1 session; recorded in the operator-verdict block below) |
+| **Date** | 2026-10-15 |
+
+## Operator verdict — ACCEPTED (2026-10-15, via story G1)
+
+Recorded by the operator (Steve) in the G1 decision session. This block is the
+append-only amendment of the PROPOSED draft above, which stands as written as the
+input artifact. Only the accepted clauses are implemented (story G1, AC1).
+
+| Clause | Disposition |
+|---|---|
+| 1 — auto-merge default for full-chain runs | **ACCEPTED** as written. |
+| 2 — QA owns the merge-verdict input (`factory_result.verdict`) | **ACCEPTED** as written; the A2 hunter-pack (v6b) owns the producer and may extend the schema adds-only. |
+| 3 — S05b approvals inbox as the human override surface | **ACCEPTED** as written; channel ≠ policy holds verbatim; the inbox relay is v6b work gated on E21-S05b. |
+| 4 — what never auto-merges | **ACCEPTED** as written (gate/credentials/audit surfaces, out-of-declared-scope, absent/stale/escalated QA verdicts). |
+| 5 — the human override is unconditional | **ACCEPTED verbatim.** The veto-window queue is named the **blocking build item** for any arming of `autoMergeDefault`: while the queue is absent, clause 5's reject-until-execution guarantee has no carrier, so the policy stays fail-closed OFF (the setting's `vetoWindowQueueLive` carrier cannot be truthfully set). The queue is the first post-A2 concern. No clause-5 amendment is made — the single-tick consult is the v6a implementation shape, never an arming license. |
+
+**Operator notes.**
+
+- The pre-authorization surface of record is the named setting (`.factory/policy.json`,
+  `autoMergeDefault`) — the operator's "check the box ahead of time" act: operator-local,
+  gitignored, reversible by flipping one value.
+- **Operator-directed follow-up (recorded here, not part of this verdict's accepted
+  clauses):** a per-run "ask before it gets going" consent surface — the agent asks the
+  operator, before a run starts, whether it may proceed under auto-merge — is to be
+  specified as its own decided work item and built soon. It enters the record through
+  normal review (no quiet scope growth in a story AC).
+- The operator affirms the DAG verification chain (deterministic checks → agent
+  verification rounds → QA-owned verdict) as the required pre-merge path, consistent
+  with clause 1 as written.
+
+**Effects.**
+
+- **DD-18: RE-OPENED.** The swarmclaw server-surface (query-surface) question re-opens
+  per this ADR's "does NOT decide" list; the surface stays dormant-retained until that
+  follow-on decision is recorded.
+- **DD-19: unchanged.** Tier B remains PARTIAL; the auto-merge default is a policy
+  change decided by this verdict, never Tier B drift, exactly as the draft's tier table
+  states.
+- **Arming state at verdict time:** `autoMergeDefault` cannot arm — A2's QA-verdict
+  producer does not exist and the clause-5 veto-window queue is not built. v6a ships
+  the fail-closed machinery only.

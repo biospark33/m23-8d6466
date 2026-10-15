@@ -934,6 +934,89 @@ describe("set (AC2)", () => {
   }, 30_000);
 });
 
+describe("setApprovalIfAwaiting (G1 policy-mint guard)", () => {
+  const REGISTRATION = {
+    state: "awaiting-approval",
+    reportId: "rv-1",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    expiresAt: "2026-10-15T23:59:59.000Z",
+  };
+
+  test("mints over an unclaimed awaiting-approval, preserving the registration fields", () => {
+    store.create("run-g1mint");
+    store.set("run-g1mint", { extensions: { approval: { ...REGISTRATION } } });
+    const minted = store.setApprovalIfAwaiting("run-g1mint", {
+      extensions: {
+        approval: {
+          state: "approved",
+          approverId: "policy:adr-2",
+          decidedAt: "2026-10-15T12:00:00.000Z",
+          reason: "adr-2-auto-merge",
+        },
+      },
+    });
+    expect(minted?.extensions?.approval).toMatchObject({
+      state: "approved",
+      approverId: "policy:adr-2",
+      decidedAt: "2026-10-15T12:00:00.000Z",
+      reason: "adr-2-auto-merge",
+      // the registration fields survive the per-field merge
+      reportId: "rv-1",
+      expiresAt: "2026-10-15T23:59:59.000Z",
+    });
+    // a claimed state refuses a second mint — a lost race, not idempotence
+    expect(
+      store.setApprovalIfAwaiting("run-g1mint", {
+        extensions: { approval: { state: "approved", approverId: "x", decidedAt: "2026-10-15T12:00:01.000Z", reason: "again" } },
+      }),
+    ).toBeUndefined();
+    expect(store.get("run-g1mint").extensions?.approval?.approverId).toBe("policy:adr-2");
+  });
+
+  test("refuses a terminal human decision — the record is byte-identical", () => {
+    store.create("run-g1human");
+    store.set("run-g1human", {
+      extensions: {
+        approval: { state: "approved", approverId: "human:steve", decidedAt: "2026-10-15T11:00:00.000Z", reason: "manual" },
+      },
+    });
+    const before = readFileSync(join(dir, "run-g1human.json"), "utf8");
+    expect(
+      store.setApprovalIfAwaiting("run-g1human", {
+        extensions: { approval: { state: "approved", approverId: "policy:adr-2", decidedAt: "2026-10-15T12:00:00.000Z", reason: "adr-2-auto-merge" } },
+      }),
+    ).toBeUndefined();
+    expect(readFileSync(join(dir, "run-g1human.json"), "utf8")).toBe(before);
+  });
+
+  test("refuses an awaiting-approval that already carries an approverId (hand-edit shape)", () => {
+    store.create("run-g1claimed");
+    store.set("run-g1claimed", {
+      extensions: { approval: { state: "awaiting-approval", reportId: "rv-2", approverId: "human:steve" } },
+    });
+    expect(
+      store.setApprovalIfAwaiting("run-g1claimed", {
+        extensions: { approval: { state: "approved", approverId: "policy:adr-2", decidedAt: "2026-10-15T12:00:00.000Z", reason: "adr-2-auto-merge" } },
+      }),
+    ).toBeUndefined();
+    expect(store.get("run-g1claimed").extensions?.approval?.approverId).toBe("human:steve");
+    expect(store.get("run-g1claimed").extensions?.approval?.state).toBe("awaiting-approval");
+  });
+
+  test("refuses the chain's pausing pre-registration state", () => {
+    store.create("run-g1pause");
+    store.set("run-g1pause", {
+      extensions: { approval: { state: "pausing", origin: "observe-chain" } },
+    });
+    expect(
+      store.setApprovalIfAwaiting("run-g1pause", {
+        extensions: { approval: { state: "approved", approverId: "policy:adr-2", decidedAt: "2026-10-15T12:00:00.000Z", reason: "adr-2-auto-merge" } },
+      }),
+    ).toBeUndefined();
+    expect(store.get("run-g1pause").extensions?.approval?.state).toBe("pausing");
+  });
+});
+
 describe("close", () => {
   test("first close wins; the second succeeds and keeps closedAt", () => {
     store.create("run-d");
