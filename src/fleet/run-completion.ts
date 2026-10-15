@@ -32,6 +32,8 @@
  * handle is passed to `teardownSandbox` unchanged, and the #245 production
  * closure wired into the approval port passes the SAME handle — never a
  * `withRunLock` wrap, which would throw on re-entry.
+ *
+ * (G1, ADR-2): the auto-merge consult's input is structurally inert in v6a — RunRecord carries no diff/scope carrier and no factory_result verdict artifact, so consultAutoMerge always sees empty diffs and a verdict-absent run until those carriers land.
  */
 import { existsSync } from "node:fs";
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
@@ -42,6 +44,12 @@ import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { retainRunOutcomeBestEffort } from "./retain-best-effort.ts";
+import {
+  consultAutoMerge,
+  POLICY_AUTO_MERGE_APPROVER_ID,
+  readAutoMergePolicy,
+  type QaVerdict,
+} from "./auto-merge-policy.ts";
 import { recordApprovalPort } from "../reverify/approval.ts";
 import { runRedactionMap } from "../reverify/redaction.ts";
 import { reverify, type ReverifyOutcome } from "../reverify/runner.ts";
@@ -144,6 +152,15 @@ export interface RunCompletionDeps {
    * the operator's exported environment, tests inject a scoped copy.
    */
   env?: Record<string, string | undefined>;
+  /**
+   * G1 (ADR-2): the consult context seam — test/producer injection for the
+   * QA verdict and diff/scope carriers the consult consumes. Trusted
+   * configuration, never brief-reachable (the j3 RoutingHook precedent);
+   * defaulted at the consumption site to buildConsultContext, whose v6a
+   * default sees empty carriers ⇒ structurally ineligible. A2's producer
+   * era replaces the default with the real record carrier.
+   */
+  consultContext?: (rec: RunRecord) => { input: Parameters<typeof consultAutoMerge>[0]; verdict: QaVerdict | undefined };
 }
 
 // ─── observability (the emitLine/log idiom, fanout-primitive.ts:1538-1550) ────
@@ -444,6 +461,60 @@ function emitTerminal(
   observeLine(requestId, { runId, ...fields });
 }
 
+// ─── ADR-2 auto-merge consult (G1, 2026-10-15; ./auto-merge-policy.ts) ────────
+
+/**
+ * The `extensions.approval.reason` the policy decision carries — named beside
+ * approval-gate.ts's `TIMEOUT_REASON` in convention, never imported from that
+ * module (FORBIDDEN_DIRECT).
+ */
+const POLICY_DECISION_REASON = "adr-2-auto-merge";
+
+/**
+ * The DEFAULT consult-input extraction, lifted off a RunRecord. CARRIER
+ * FINDINGS (v6a): RunRecord (src/providers/run-record.ts:124-147) carries NO
+ * diff/scope carrier — no fixScope/changedFiles/diffPaths field; dispatch and
+ * harvest persist neither — and NO factory_result verdict artifact, so this
+ * default returns empty carriers ⇒ the consult is structurally ineligible
+ * (verdict-absent) by construction. Surfaced, not absorbed. `deps.consultContext`
+ * (RunCompletionDeps) is where tests and A2-era producers inject the real
+ * carriers; in v6a nothing does.
+ */
+function buildConsultContext(rec: RunRecord): {
+  input: Parameters<typeof consultAutoMerge>[0];
+  verdict: QaVerdict | undefined;
+} {
+  return {
+    input: {
+      runId: rec.runId,
+      diffPaths: [],
+      diffEntries: [],
+      scope: { allowedPathGlobs: [], deniedPathGlobs: [], permittedActions: [] },
+    },
+    verdict: undefined,
+  };
+}
+
+/**
+ * One write, the gate's own decision shape (approval-gate.ts:2455-2464,
+ * :2479-2494) with a labeled non-human approver — the `system:timeout`
+ * precedent, now `policy:adr-2`. Clock: run-completion has no now-seam in
+ * RunCompletionDeps; the wall clock is this file's own idiom (F17, `Date.now()`
+ * throughout).
+ */
+function recordPolicyApproval(store: RunRecordStore, runId: string, decidedAt: Date): void {
+  store.set(runId, {
+    extensions: {
+      approval: {
+        state: "approved",
+        approverId: POLICY_AUTO_MERGE_APPROVER_ID,
+        decidedAt: decidedAt.toISOString(),
+        reason: POLICY_DECISION_REASON,
+      },
+    },
+  });
+}
+
 /**
  * reverify() plus the outcome mapping shared by both entries. Any throw past
  * reverify's typed outcome (its report leg sits outside its own try blocks)
@@ -466,6 +537,20 @@ async function reverifyAndMap(
     bundleDir: deps.runsDir,
     teardown: (id, opts) => guardedTeardown(deps, teardownDeps, id, opts),
   });
+  // G1 (ADR-2, ACCEPTED 2026-10-15): fail-closed auto-merge consult. Absent
+  // policy file ⇒ exactly the pre-G1 path: no evaluation, no consult event,
+  // no state write. Present file ⇒ one synchronous evaluation, one consult
+  // event, and — only on the green+requested arm below — the labeled policy
+  // decision. reasons[] is present here; the absent-file case emits nothing.
+  const policy = readAutoMergePolicy({ cwd: deps.hostRoot });
+  let policyDecision = false;
+  if (policy.state !== "absent") {
+    const rec = deps.store.get(runId);
+    const ctx = (deps.consultContext ?? buildConsultContext)(rec);
+    const consult = consultAutoMerge(ctx.input, ctx.verdict, policy);
+    observeLine(requestId, { runId, event: "auto-merge-consult", eligible: consult.eligible, ...(consult.reasons === undefined ? {} : { reasons: consult.reasons }) });
+    policyDecision = consult.eligible;
+  }
   let result: ReverifyOutcome;
   try {
     result = await reverify(runId, {
@@ -501,6 +586,13 @@ async function reverifyAndMap(
         : "approval null without flag",
     };
   } else if (result.approval.outcome === "requested") {
+    // G1 (ADR-2): the merge decision is recorded where every approved run's
+    // decision is recorded — the run record's persisted approval state
+    // (DD-28.26(2)) — as a labeled non-human approver (the system:timeout
+    // precedent). The gate's transient awaiting-approval write is same-tick
+    // superseded by the policy decision; the gate module itself is untouched
+    // (CHANNEL ≠ POLICY: approval-gate.ts stays byte-identical).
+    if (policyDecision) recordPolicyApproval(deps.store, runId, new Date());
     outcome =
       line.markerOk === undefined
         ? { kind: "driven", chainMs }
