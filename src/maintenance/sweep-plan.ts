@@ -549,8 +549,13 @@ export function briefTask(b: PlannedBrief): string {
   return `Maintenance sweep brief (${b.kind}; deterministic ${b.source} signal). ${signal} ${NEVER_EDIT} ${COMMIT_DISCIPLINE}`;
 }
 
-/** An ERE over the fenced prefixes, for the closing phase's diff check (prefixes are fixed literals — no input reaches it). */
-const FENCED_PATH_ERE = `^(${FENCED_TARGET_PREFIXES.map((p) => p.replaceAll(".", "\\.")).join("|")})`;
+/**
+ * The fenced prefixes as bash `case` patterns, for the closing phase's diff
+ * check. Prefixes are fixed literals (charset [A-Za-z0-9._/-]) — no input
+ * reaches them. A prefix ending in `/` matches everything beneath it; a file
+ * prefix matches itself exactly.
+ */
+const FENCED_CASE_PATTERNS = FENCED_TARGET_PREFIXES.map((p) => (p.endsWith("/") ? `${p}*` : p)).join("|");
 
 /**
  * The generated manifest — fix-run.pipeline.json's two-phase shape and
@@ -583,11 +588,14 @@ export function briefManifest(b: PlannedBrief, commitSha: string): Record<string
         command: [
           "bash",
           "-c",
-          // bash -c (not -lc: no box profile runs first). The diff is captured
-          // BEFORE grep so a failing `git diff` fails CLOSED (an unresolvable
-          // base is a refusal, never an empty pass), and --no-renames lists a
-          // moved file's OLD path too, so a rename out of a fenced dir is seen.
-          `test -z "$(git status --porcelain)" || { echo 'uncommitted work remains in the checkout — the maintain phase must commit everything on the sandbox branch' >&2; exit 1; }; changed=$(git -c core.quotePath=false diff --no-renames --name-only ${commitSha}..HEAD) || { echo 'the fence could not diff against the brief commit — refusing' >&2; exit 1; }; if printf '%s\n' "$changed" | grep -E '${FENCED_PATH_ERE}'; then echo 'the diff touches a never-edit path (listed above) — the A3 tripwire refuses this run' >&2; exit 1; fi; git log --oneline -1`,
+          // bash -c (not -lc: no box profile runs first). The diff is read
+          // NUL-separated (-z) and matched path-by-path with `case`: git
+          // C-quotes a path holding a quote, backslash, tab or newline in its
+          // line-oriented output, which a line-anchored grep would never match
+          // (a parser differential). The diff goes to a temp file first so a
+          // failing `git diff` fails CLOSED, and --no-renames lists a moved
+          // file's OLD path too, so a rename out of a fenced dir is seen.
+          `set -u; test -z "$(git status --porcelain)" || { echo 'uncommitted work remains in the checkout — the maintain phase must commit everything on the sandbox branch' >&2; exit 1; }; t=$(mktemp) || exit 1; git diff -z --no-renames --name-only ${commitSha}..HEAD > "$t" || { echo 'the fence could not diff against the brief commit — refusing' >&2; rm -f "$t"; exit 1; }; hit=0; while IFS= read -r -d '' f; do case "$f" in ${FENCED_CASE_PATTERNS}) printf 'fenced: %q\n' "$f" >&2; hit=1;; esac; done < "$t"; rm -f "$t"; if [ "$hit" -ne 0 ]; then echo 'the diff touches a never-edit path (listed above) — the A3 tripwire refuses this run' >&2; exit 1; fi; git log --oneline -1`,
         ],
         maxDurationMs: 15_000,
         retries: 0,

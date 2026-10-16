@@ -607,6 +607,12 @@ describe("planning — deterministic order, fence, cap", () => {
     git("mv", "src/audit/chain.ts", "src/lib/chain.ts");
     git("commit", "-qm", "rename out of the fence");
     expect(spawnSync(seededVerify[0] as string, seededVerify.slice(1), { cwd: repo, encoding: "utf8" }).status).toBe(1);
+    // A fenced path git would C-QUOTE (a tab in the name) is still seen: -z + case, no line parsing.
+    git("reset", "-q", "--hard", seeded);
+    writeFileSync(join(repo, "src", "audit", "we\tird.ts"), "export {};\n");
+    git("add", ".");
+    git("commit", "-qm", "quoted-path edit in the fence");
+    expect(spawnSync(seededVerify[0] as string, seededVerify.slice(1), { cwd: repo, encoding: "utf8" }).status).toBe(1);
     // An unresolvable base fails CLOSED, never an empty pass.
     const ghost = (briefManifest(b, "f".repeat(40)) as { phases: { command?: string[] }[] }).phases[1]?.command ?? [];
     expect(spawnSync(ghost[0] as string, ghost.slice(1), { cwd: repo, encoding: "utf8" }).status).toBe(1);

@@ -175,6 +175,14 @@
    "label": "LOW",
    "disposition": "DISMISS",
    "rationale": "A released-on-exit lock, A1's identical posture \u2014 not a daemon PID file."
+  },
+  {
+   "finding_id": "R3-22",
+   "finding_text": "Background security review: parser differential \u2014 git C-quotes paths with quote/backslash/tab/newline, so the line-anchored grep tripwire never matched them",
+   "source": "security-review",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "git diff -z + per-path bash case match; diff to a temp file so a failing diff fails closed; test commits a tab-named fenced file. Still a tripwire, not a control (R3 record)."
   }
  ]
 }
