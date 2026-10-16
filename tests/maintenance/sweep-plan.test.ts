@@ -129,11 +129,11 @@ function emptyAudit(over: Partial<AuditDeps> = {}): AuditDeps {
   };
 }
 
-function ack(runId: string, replayed = false): SubmitAnswer {
+function ack(runId: string, replayed = false, requestId = "x"): SubmitAnswer {
   // A real submit stdout carries the CLI's own JSONL log lines beside the ack.
   return {
     exitCode: 0,
-    stdout: `${JSON.stringify({ requestId: "log", operation: "fleet.submit", status: "ok" })}\n${JSON.stringify({ schemaVersion: 1, runId, requestId: "x", state: "running", vmName: "vm", replayed })}\n${JSON.stringify({ operation: "fleet.verb", exit: 0 })}\n`,
+    stdout: `${JSON.stringify({ requestId: "log", operation: "fleet.submit", status: "ok" })}\n${JSON.stringify({ schemaVersion: 1, runId, requestId, state: "running", vmName: "vm", replayed })}\n${JSON.stringify({ operation: "fleet.verb", exit: 0 })}\n`,
     stderr: "",
   };
 }
@@ -154,7 +154,7 @@ function deps(over: Partial<SweepDeps> & { stateDir?: string } = {}): SweepDeps 
     writeBrief: () => {},
     submit: async (_p, rid) => {
       submits.push(rid);
-      return ack(`qds-20261019-${(++n).toString(16).padStart(6, "0")}`);
+      return ack(`qds-20261019-${(++n).toString(16).padStart(6, "0")}`, false, rid);
     },
     ...over,
     submits,
@@ -186,14 +186,18 @@ function report(sweepId: string, createdAt: string, briefs: SweepReport["report"
 // ─── identity derivations ───────────────────────────────────────────────────
 
 describe("identity — sweepId, workKey, requestId", () => {
-  test("sweepId is the UTC Monday on/before now+14h — a Monday 03:17 fire on any host timezone keys the same week; a late-week manual run never pre-empts the next Monday", () => {
+  test("sweepId is the UTC Monday on/before now+14h — a Monday 03:17 fire on any host timezone keys the same week; manual runs Mon–Sat key their own week", () => {
     expect(sweepIdFor(new Date("2026-10-19T03:17:00Z"))).toBe(SWEEP); // UTC host
     expect(sweepIdFor(new Date("2026-10-18T13:17:00Z"))).toBe(SWEEP); // UTC+14 host: Sunday 13:17 UTC
     expect(sweepIdFor(new Date("2026-10-18T22:17:00Z"))).toBe(SWEEP); // UTC+5 host
     expect(sweepIdFor(new Date("2026-10-19T15:17:00Z"))).toBe(SWEEP); // UTC−12 host
     expect(sweepIdFor(new Date("2026-10-23T12:00:00Z"))).toBe(SWEEP); // a Friday manual run keys THIS week
-    expect(sweepIdFor(new Date("2026-10-25T09:00:00Z"))).toBe(SWEEP); // Sunday morning UTC
+    expect(sweepIdFor(new Date("2026-10-25T09:59:59Z"))).toBe(SWEEP); // the last Sunday instant that keys this week
+    // The documented price of the timezone lead: from Sunday 10:00 UTC a manual run keys the COMING week.
+    expect(sweepIdFor(new Date("2026-10-25T10:00:00Z"))).toBe("sweep-2026-10-26");
     expect(sweepIdFor(new Date("2026-10-26T03:17:00Z"))).toBe("sweep-2026-10-26"); // the next Monday's fire
+    expect(sweepIdFor(new Date("2026-12-31T12:00:00Z"))).toBe("sweep-2026-12-28"); // year boundary
+    expect(sweepIdFor(new Date("2027-01-03T09:00:00Z"))).toBe("sweep-2026-12-28");
   });
 
   test("briefRequestId is a strict UUID v4, deterministic per (sweep, workId), distinct across either", () => {
@@ -426,6 +430,24 @@ describe("AC3(c) — audit-chain hotspots over the trailing window, read-only", 
     expect(leg).toMatchObject({ runsInWindow: 5, runsWithoutPr: 1, runsWalked: 4, ledgersIncomplete: 1, recordsSkipped: 1 });
   });
 
+  test("malformed ledgers and off-charset signals are counted, never silent; one bad ledger never discards the leg", async () => {
+    const leg = await collectAuditHotspots(
+      emptyAudit({
+        listRecords: () => ({
+          records: [
+            rec("qds-20261018-aaaaaa", "2026-10-18T00:00:00Z", { extensions: { fixLoop: { schemaVersion: 1, fixAttemptRunIds: [42] } } }),
+            rec("qds-20261018-bbbbbb", "2026-10-18T01:00:00Z"),
+          ],
+          skipped: 0,
+        }),
+        brokenHops: async (id) => (id === "qds-20261018-bbbbbb" ? ["run-cost", "Bad_Hop9"] : ["run-box"]),
+      }),
+      NOW,
+    );
+    expect(leg).toMatchObject({ ledgersIncomplete: 1, signalsRejected: 1 });
+    expect(leg.hotspots.map((h) => h.target).sort()).toEqual(["hop:run-box", "hop:run-cost"]);
+  });
+
   test("bounded: past MAX_WALKED_RUNS the NEWEST are walked and the rest counted; a failed walk is counted, never fatal", async () => {
     const id = (i: number) => `qds-20261018-${i.toString(16).padStart(6, "0")}`;
     const records = Array.from({ length: MAX_WALKED_RUNS + 3 }, (_, i) => rec(id(i), new Date(NOW.getTime() - (i + 2) * 3_600_000).toISOString()));
@@ -478,6 +500,12 @@ describe("AC3(c) — audit-chain hotspots over the trailing window, read-only", 
     expect(snapshotAuditDb(join(dir, "missing.db"), dir)).toBeUndefined();
   });
 
+  test("only the walked run's OWN chain counts — contributing fix runs (no PR of their own) never mint hops", () => {
+    const cli = readFileSync(join(REPO_ROOT, "scripts", "maintenance-sweep.ts"), "utf8");
+    expect(cli).toContain("const own = report.runs[runId];");
+    expect(cli).toContain("chainVerdict({ ...report, runs: { [runId]: own } })");
+  });
+
   test("the restated audit-store default is the link store's own literal (drift tripwire)", () => {
     expect(readFileSync(join(REPO_ROOT, "src", "audit", "link-store.ts"), "utf8")).toContain(`export const DEFAULT_AUDIT_DB_FILE = "${AUDIT_DB_DEFAULT}";`);
   });
@@ -521,6 +549,8 @@ describe("planning — deterministic order, fence, cap", () => {
       ".github/",
       "deploy/",
       "oci/",
+      "config/",
+      "package.json",
       "src/providers/",
       "src/audit/",
       "src/reverify/",
@@ -628,6 +658,21 @@ describe("cooldown — graph targets only, sweep-week arithmetic, possibly-live 
     expect(set.has(briefIdentity(SWEEP, h3, REPO.commitSha).briefId)).toBe(false);
   });
 
+  test("a POSSIBLY-LIVE audit brief is cooled down too (a second box never follows blind); a dispatched one is not", async () => {
+    const stateDir = tmp();
+    const a = hs("audit", "hop:run-cost", 2, ["qds-20261018-aaaaaa"]);
+    const first = deps({ stateDir, graphLeg: async () => fresh(), audit: emptyAudit({ listRecords: () => ({ records: [rec("qds-20261018-aaaaaa", "2026-10-18T00:00:00Z")], skipped: 0 }), brokenHops: async () => ["run-cost"] }) });
+    first.submit = async () => ({ exitCode: 3, stdout: "", stderr: "gate" });
+    await runSweep(first);
+    lines = [];
+    const nextWeek = new Date(NOW.getTime() + 7 * DAY);
+    const second = deps({ stateDir, now: () => nextWeek, graphLeg: async () => fresh(), audit: emptyAudit({ listRecords: () => ({ records: [rec("qds-20261025-aaaaaa", "2026-10-25T00:00:00Z")], skipped: 0 }), brokenHops: async () => ["run-cost"] }) });
+    await runSweep(second);
+    expect(second.submits).toEqual([]);
+    expect(ev("sweep-plan")[0]?.hotspots_already_briefed).toBe(1);
+    expect(a.target).toBe("hop:run-cost");
+  });
+
   test("audit signals are never cooled down — a recurring breakage is new evidence every week", () => {
     const a = hs("audit", "hop:run-cost", 2, ["qds-20261018-aaaaaa"]);
     const p = planBriefs(SWEEP, REPO.commitSha, [a], new Set([briefIdentity(SWEEP, a, REPO.commitSha).briefId]));
@@ -653,6 +698,11 @@ describe("AC4 — bounded, exiting, per-brief refusals never fail the pass", () 
     expect(classifySubmit(e(5, '{"error":{"code":"submit-intent-corrupt"}}'))).toMatchObject({ kind: "skipped", code: "submit-in-flight" });
     const provisioned = { exitCode: 0, stdout: `${JSON.stringify({ schemaVersion: 1, runId: "qds-20261019-000001", requestId: "x", state: "provisioned", vmName: "vm", replayed: true })}\n`, stderr: "" };
     expect(classifySubmit(provisioned)).toEqual({ kind: "replay", after: "submit-transient" }); // a box with no engine is never "dispatched"
+    // A replayed run that already moved on (a crashed earlier pass) IS this brief's run.
+    const movedOn = { exitCode: 0, stdout: `${JSON.stringify({ schemaVersion: 1, runId: "qds-20261019-000001", requestId: "rid-1", state: "awaiting-approval", vmName: "vm", replayed: true })}\n`, stderr: "" };
+    expect(classifySubmit(movedOn, "rid-1")).toMatchObject({ kind: "dispatched", runId: "qds-20261019-000001", replayed: true });
+    // An ack echoed for ANOTHER request id is no ack for this one.
+    expect(classifySubmit(movedOn, "rid-other")).toMatchObject({ kind: "skipped", code: "ack-unrecovered" });
     expect(classifySubmit(e(3))).toMatchObject({ kind: "skipped", code: "setup-gate" });
     expect(classifySubmit(e(2))).toMatchObject({ kind: "skipped", code: "brief-rejected" });
     expect(classifySubmit(e(1))).toEqual({ kind: "replay", after: "submit-transient" });
@@ -697,7 +747,9 @@ describe("AC4 — bounded, exiting, per-brief refusals never fail the pass", () 
     const d = deps({ graphLeg: async () => fresh(hot) });
     d.submit = async (_p, rid) => {
       d.submits.push(rid);
-      return answers.shift() as SubmitAnswer;
+      const a = answers.shift() as SubmitAnswer;
+      // The canned acks answer whichever brief asks: stamp the submitted id in.
+      return "stdout" in a ? { ...a, stdout: a.stdout.replaceAll('"requestId":"x"', `"requestId":"${rid}"`) } : a;
     };
     const r = await runSweep(d);
     expect(r).toMatchObject({ counters: { briefs_dispatched: 1, briefs_skipped: 3, chain_refused: 1 } });
@@ -754,6 +806,11 @@ describe("AC4 — bounded, exiting, per-brief refusals never fail the pass", () 
     await runSweep(deps({ stateDir, graphLeg: async () => fresh([hs("graph", "src/a.ts", 3)]) }));
     const meta = sweepRunMeta(stateDir);
     expect(meta.get("qds-20261019-000001")).toEqual({ botId: "bot-maint", workKey: briefIdentity(SWEEP, hs("graph", "src/a.ts", 3), REPO.commitSha).workKey });
+    // Two reports naming one runId with different workKeys: ambiguous, never attributed.
+    persistSweepReport(stateDir, report("sweep-2026-10-12", NOW.toISOString(), [
+      { event: "brief-dispatched", briefId: "refactor-ffffffff", workKey: "w:maint/2026-10-12/refactor-ffffffff", botId: "bot-maint", source: "graph", target: "src/z.ts", kind: "refactor", runId: "qds-20261019-000001" },
+    ]));
+    expect(sweepRunMeta(stateDir).has("qds-20261019-000001")).toBe(false);
   });
 
   test("NEGATIVE CONTROL: an empty sweep (zero hotspots) completes with briefs_planned 0 — a quiet tick is not a failure", async () => {
@@ -818,7 +875,40 @@ describe("the report handoff — durable, correlated, delivered once", () => {
     lines = [];
     expect(await runSweep(d)).toEqual({ outcome: "already-swept", sweepId: SWEEP });
     expect(d.submits).toHaveLength(1);
-    expect(ev("sweep-complete")[0]).toMatchObject({ already_swept: true });
+    expect(ev("sweep-complete")[0]).toMatchObject({ already_swept: true, briefs_dispatched: 1, briefs_planned: 1 }); // the prior counters ride the line
+  });
+
+  test("this week's record present but corrupt: refused (named), never re-planned over", async () => {
+    const stateDir = tmp();
+    mkdirSync(join(stateDir, "sweep-reports"), { recursive: true });
+    writeFileSync(join(stateDir, "sweep-reports", `${SWEEP}.json`), "{ not json");
+    const d = deps({ stateDir, graphLeg: async () => fresh([hs("graph", "src/a.ts", 3)]) });
+    expect(await runSweep(d)).toEqual({ outcome: "already-swept", sweepId: SWEEP });
+    expect(d.submits).toEqual([]);
+    expect(ev("sweep-report-corrupt")[0]?.error).toMatchObject({ code: "report-corrupt" });
+  });
+
+  test("a re-sweep keeps the first pass's createdAt (the residue clock) and never clobbers a delivery flip", async () => {
+    const stateDir = tmp();
+    await runSweep(deps({ stateDir })); // zero-dispatch week
+    const firstCreated = readSweepReport(stateDir, SWEEP)?.createdAt;
+    markReportDelivered(stateDir, SWEEP, NOW);
+    // A delivered week is already-swept; force the re-sweep path by restoring pending, then deliver mid-pass.
+    const r = readSweepReport(stateDir, SWEEP) as SweepReport;
+    persistSweepReport(stateDir, { ...r, deliveryState: "pending" });
+    const later = new Date(NOW.getTime() + 3_600_000);
+    const d = deps({
+      stateDir,
+      now: () => later,
+      graphLeg: async () => {
+        markReportDelivered(stateDir, SWEEP, later); // the wake fires while the re-sweep runs
+        return fresh();
+      },
+    });
+    await runSweep(d);
+    const after = readSweepReport(stateDir, SWEEP);
+    expect(after?.createdAt).toBe(firstCreated);
+    expect(after?.deliveryState).toBe("delivered");
   });
 
   test("the wake flips only the matching PENDING record, exactly once; a delivered week is never re-swept", async () => {

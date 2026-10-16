@@ -423,7 +423,13 @@ async function main(): Promise<void> {
               },
               brokenHops: async (runId) => {
                 if (auditDb === undefined) throw new Error(`audit store snapshot unavailable${snapshotError ? `: ${snapshotError}` : " (no store)"}`);
-                return chainVerdict(await walkAuditChain(runId, { requestId, auditDb })).brokenHops.map((h) => h.hop);
+                // THIS run's own chain only: the walker also sub-walks a parent's
+              // contributing fix runs, which never open a PR of their own — their
+              // hops would read as broken and mint false briefs every week.
+              const report = await walkAuditChain(runId, { requestId, auditDb });
+              const own = report.runs[runId];
+              if (own === undefined) throw new Error(`the walk resolved no chain keyed by ${runId}`);
+              return chainVerdict({ ...report, runs: { [runId]: own } }).brokenHops.map((h) => h.hop);
               },
             },
             materialize: (b, manifest) => {

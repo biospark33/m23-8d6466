@@ -1,0 +1,180 @@
+{
+ "story": "A3",
+ "round": 3,
+ "layers": [
+  "blind",
+  "edge",
+  "auditor"
+ ],
+ "verdict": "no AC violations (AC1-3 PASS-CONDITIONAL on disclosed sign-offs/live round/fork leg; AC4, AC5, INV-A3-* PASS)",
+ "findings": [
+  {
+   "finding_id": "R3-01",
+   "finding_text": "walkAuditChain sub-walks contributing fix runs (no PR of their own) \u2192 false hop briefs",
+   "source": "edge",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "brokenHops scoped to report.runs[runId] (the walked run's own chain); source-pinned test."
+  },
+  {
+   "finding_id": "R3-02",
+   "finding_text": "Replayed ack for a run already past running is mislabelled transient after a crashed pass",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Only `provisioned` replays; any other ack state is the brief's run (dispatched); tested."
+  },
+  {
+   "finding_id": "R3-03",
+   "finding_text": "Sunday-afternoon manual run keys the coming week; docstring/test claimed otherwise",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Docstring + test now state the documented trade-off (Sun \u226510:00 UTC keys the coming week); year-boundary cases tested."
+  },
+  {
+   "finding_id": "R3-04",
+   "finding_text": "D2 sides with DF3.8 over A3's 'wiring closed' without a \u2691",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "D2 flagged \u2691 for operator sign-off."
+  },
+  {
+   "finding_id": "R3-05",
+   "finding_text": "Possibly-live AUDIT briefs not cooled down \u2192 second box next week",
+   "source": "edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "possiblyLiveBriefs applied to every source; tested."
+  },
+  {
+   "finding_id": "R3-06",
+   "finding_text": "Corrupt current-week report \u2192 re-plan under a new commit's ids",
+   "source": "edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Refused as already-swept with a named report-corrupt line; tested."
+  },
+  {
+   "finding_id": "R3-07",
+   "finding_text": "Re-sweep resets createdAt (residue clock) and can clobber a wake's delivery flip",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "createdAt preserved; delivery state re-read before persist; tested."
+  },
+  {
+   "finding_id": "R3-08",
+   "finding_text": "ackOf accepts an echoed ack for another request id",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "ackOf matches the submitted requestId; tested."
+  },
+  {
+   "finding_id": "R3-09",
+   "finding_text": "Charset-rejected signals and malformed ledgers dropped silently; one bad ledger wipes the leg",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "signals_rejected / ledgers_incomplete counters; ladder throw contained; tested."
+  },
+  {
+   "finding_id": "R3-10",
+   "finding_text": "quotePath hides non-ASCII fenced paths from the tripwire",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "git -c core.quotePath=false."
+  },
+  {
+   "finding_id": "R3-11",
+   "finding_text": "Tripwire omits config/ and package.json",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Added to fence + task text; explicit-list test updated."
+  },
+  {
+   "finding_id": "R3-12",
+   "finding_text": "sweepRunMeta last-writer-wins on a duplicated runId",
+   "source": "edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Conflicting entries dropped (never attributed); tested."
+  },
+  {
+   "finding_id": "R3-13",
+   "finding_text": "briefs_carried not reflected in counters",
+   "source": "edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "briefs_carried counter on re-sweep."
+  },
+  {
+   "finding_id": "R3-14",
+   "finding_text": "Live test absolute state dir fails realpath containment behind a symlink",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Relative state dir."
+  },
+  {
+   "finding_id": "R3-15",
+   "finding_text": "Live test git-log merge check near-tautological",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Removed; extensions.pr absence is the proof."
+  },
+  {
+   "finding_id": "R3-16",
+   "finding_text": "D12 8-day threshold not flagged",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "\u2691 D12."
+  },
+  {
+   "finding_id": "R3-17",
+   "finding_text": "R2-23 half-asserted (already-swept counters)",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Test asserts carried counters."
+  },
+  {
+   "finding_id": "R3-18",
+   "finding_text": "Possibly-live lines carry no runId \u2192 digest join gap",
+   "source": "edge",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "rationale": "A possibly-live brief has no proven runId; attributing one would fabricate a join. Recorded."
+  },
+  {
+   "finding_id": "R3-19",
+   "finding_text": "R2-11/14/15/16/22 untested branches (digest stderr, busy_timeout, roster from commit, fetch, symlinked state dir)",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "rationale": "Host-substrate branches; source-reviewed. Follow-up if CI flake surfaces."
+  },
+  {
+   "finding_id": "R3-20",
+   "finding_text": "AC2 tests are test-local",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "Already dispositioned R1-03 (no wake code in this repo; DoD box unticked)."
+  },
+  {
+   "finding_id": "R3-21",
+   "finding_text": "withRunLock lock body holds a pid (vs 'no PID file')",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "A released-on-exit lock, A1's identical posture \u2014 not a daemon PID file."
+  }
+ ]
+}
