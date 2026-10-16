@@ -6,9 +6,12 @@
  * Reads the reindex stamp `<graph-home>/cli-version.json` and writes exactly
  * ONE line of JSON to stdout (key order is part of the contract):
  *   {"verdict":"fresh"|"stale"|"absent"|"invalid","ageHours":<number>|null,"ceilingHours":8,"stampPath":"<abs path>"}
- * Sole consumer: scripts/gitnexus-refresh.sh captures the line for the cycle's
+ * Consumers: scripts/gitnexus-refresh.sh captures the line for the cycle's
  * NFR-OBS-5 log record — a staleness verdict NEVER aborts a cycle (the same
- * cycle that alarms performs the reindex: record-then-cure).
+ * cycle that alarms performs the reindex: record-then-cure); and A3's
+ * scripts/maintenance-sweep.ts reads it under the shared refresh lock, where a
+ * non-fresh verdict REFUSES the graph leg (a graph consumer must not read a
+ * stale graph — NFR-OBS-5) — the line contract is unchanged for both.
  *
  * Env-var table (NAMES only — values are never logged, never echoed):
  *   QDS_GITNEXUS_HOME  absolute directory holding the stamp; fixture/testing

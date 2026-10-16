@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  ESCALATION_KINDS,
   composeDigest,
   fleetCliInvoker,
   FleetVerbTimeoutError,
@@ -1178,5 +1179,32 @@ describe("channel discipline", () => {
     const snap = event(lines, "digest-snapshot")[0]!;
     expect(snap.duration).toBe(snap.snapshot_ms);
     expect(snap.snapshot_ms).toBe(0); // deps.now is a fixed clock: clamped, not negative
+  });
+});
+
+describe("A3 — sweep-report residue marks (adds-only)", () => {
+  test("an undelivered sweep report becomes a sweep-scoped escalation mark carrying its sweepId", async () => {
+    const lines = captureInto();
+    const { cli } = fakeCli({ statusRows: [] });
+    const outcome = await composeDigest(
+      { ...deps({ cli }), undeliveredSweepReports: () => ["sweep-2026-10-12", "not-a-sweep-id"] },
+      {},
+    );
+    expect(event(lines, "digest-escalation")).toEqual([
+      expect.objectContaining({ kind: "sweep-report-undelivered", sweepId: "sweep-2026-10-12" }),
+    ]);
+    expect(outcome.escalationMarks).toBe(1); // the malformed id is dropped, never rendered
+    expect(ESCALATION_KINDS).toContain("sweep-report-undelivered");
+  });
+
+  test("absent dep = A1's digest unchanged; a throwing read is no marks, never a failed digest", async () => {
+    for (const extra of [{}, { undeliveredSweepReports: (): string[] => { throw new Error("EACCES"); } }]) {
+      const lines = captureInto();
+      const { cli } = fakeCli({ statusRows: [] });
+      const outcome = await composeDigest({ ...deps({ cli }), ...extra }, {});
+      expect(outcome.outcome).toBe("composed");
+      expect(event(lines, "digest-escalation")).toEqual([]);
+      restoreCaptures();
+    }
   });
 });

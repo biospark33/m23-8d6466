@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6b-Autonomy (A-epic, story 3 of 4 — the autonomy round that must end at a parked gate, never a merged PR)
-**Status:** gated — **Gated on A1** (which carries the E21 S02b + S03b lane gate), **A6** (v6a), **Z2** (v6a). Factory CI stays green before/during/after E21 lands via spec-seam fixtures (charter §5.2); the live round fires only after every gate lands.
+**Status:** review — factory half implemented on `feature/a3-maintenance-sweeps` (2026-10-16); gates A1 ✓ (PR #434), A6 ✓ (PR #425), Z2 ✓ (PR #405) all merged. The live first-firing round (DoD e2e) and the fork-side wake leg stay operator-gated (spend + E21 schedule row).
 
 ## Spec Reference
 
@@ -103,12 +103,30 @@ The sweep is a deterministic pipeline with an E21 hat on: the platform's persist
 
 ## Definition of Done
 
-- [ ] **Impl:** `src/maintenance/sweep-plan.ts` + `scripts/maintenance-sweep.ts` + the `deploy/vps/crontab.factory` sweep entry implement AC2–AC5; DF3.7's chain, DF5.3's store, and the verb registry are consumed unchanged (AC1).
-- [ ] **Contract:** the sweep's only terminal states for code-affecting work are `awaiting-approval` or a counted refusal; zero merge/PR-approval code paths exist in the diff (AC1).
-- [ ] **Test (durability):** restart-mid-window fixture proves the bot wake refires from the persisted store; the `enqueueSystemEvent`-only shape MUST fail AC2; the no-owned-transport shape (wake or protocol step executing the script) MUST fail AC2.
-- [ ] **Test (staleness):** >8h graph → `graph-stale` counted + audit-chain-only plan; mid-refresh → skipped; stale never silent (AC3).
-- [ ] **Test (bounds):** 6 hotspots → ≤5 briefs + counted remainder; busy fleet → exit 0 pass with counted skips; empty sweep → exit 0 (AC4).
-- [ ] **Security:** diff shows zero changed lines in `src/audit/**`, `src/fleet/run-completion.ts`, approval modules, provider layer; no approver-file or token handling anywhere in the new code (INV-A3-GATE).
-- [ ] **Integration:** DD-20 join keys (`workKey`, `runId`, `botId`) present on every dispatched brief, asserted in `tests/maintenance/sweep-plan.test.ts` (AC5).
+- [x] **Impl:** `src/maintenance/sweep-plan.ts` + `scripts/maintenance-sweep.ts` + the `deploy/vps/crontab.factory` sweep entry implement AC2–AC5; DF3.7's chain, DF5.3's store, and the verb registry are consumed unchanged (AC1).
+- [x] **Contract:** the sweep's only terminal states for code-affecting work are `awaiting-approval` or a counted refusal; zero merge/PR-approval code paths exist in the diff (AC1).
+- [x] **Test (durability):** restart-mid-window fixture proves the bot wake refires from the persisted store; the `enqueueSystemEvent`-only shape MUST fail AC2; the no-owned-transport shape (wake or protocol step executing the script) MUST fail AC2.
+- [x] **Test (staleness):** >8h graph → `graph-stale` counted + audit-chain-only plan; mid-refresh → skipped; stale never silent (AC3).
+- [x] **Test (bounds):** 6 hotspots → ≤5 briefs + counted remainder; busy fleet → exit 0 pass with counted skips; empty sweep → exit 0 (AC4).
+- [x] **Security:** diff shows zero changed lines in `src/audit/**`, `src/fleet/run-completion.ts`, approval modules, provider layer; no approver-file or token handling anywhere in the new code (INV-A3-GATE).
+- [x] **Integration:** DD-20 join keys (`workKey`, `runId`, `botId`) present on every dispatched brief, asserted in `tests/maintenance/sweep-plan.test.ts` (AC5).
 - [ ] **Ops:** live round gated on operator GO (worst-case spend printed before fire; keys/boxes cleaned in `finally`); evidence scrubbed to `_bmad-output/evidence/`; no spend of any kind before all four gates land.
 - [ ] **Test (e2e demo — MANDATORY):** one live Tier-2 round — real wake on the factory Home's schedule store, real sweep pass, one real box, run parks at `awaiting-approval` with zero PRs merged and the sweep-complete counters green.
+
+## Dev Agent Record (2026-10-16)
+
+**Shipped (factory half):** `src/maintenance/sweep-plan.ts` (hotspots → plan → submit → durable report), `scripts/maintenance-sweep.ts` (the exiting pass + the in-lock graph leg), the A3 entry in `deploy/vps/crontab.factory`, `tests/maintenance/sweep-plan.test.ts`, `tests/fleet/e2e/tier2-maintenance-sweep.live.test.ts` (todo-gated), and the adds-only `sweep-report-undelivered` digest mark on A1's surface (`src/managers/digest-composer.ts` + `scripts/manager-digest.ts`).
+
+**Implementation decisions (each binding-text-compatible; recorded for review):**
+- **D1 — `fleet submit`, not bare `fleet dispatch`.** `dispatch` only provisions; a brief needs an engine start to ever reach DF3.7's chain. `submit` is dispatch + `run` composed and replay-safe on `--request-id`; the sweep derives a deterministic UUID-v4-shaped id per (sweepId, workId), so a re-fired pass resolves every brief to the same run. Still within the 16-verb registry; no 17th verb.
+- **D2 — the chain is driven by DF3.8's `fleet observe --all`.** The pass submits and exits; the existing observe sweep (its own documented operator cron) drives `observeAndDriveChain` to `awaiting-approval`. The sweep is not a caller of the chain at all — strictly weaker than "a caller, never a second chain".
+- **D3 — per-brief generated manifest, no brief-schema change.** BriefSchema has no free-text task field and `kgContext` is overwritten by M1.2's dispatch-time recall, so each brief's task (filled only with charset-checked, code-computed values) rides a generated two-phase manifest under `.sandbox/maintenance/briefs/` (fix-run.pipeline.json's shape and pricing; roster copied beside it for the host-side setup gate). Keeps `src/fleet/**` byte-identical — no COPY-set move, no image pin.
+- **D4 — hotspot sources.** Graph: production fan-in (IMPORTS edges src→src) via `gitnexus cypher`, read under `flock -s -n <graph-home>/.refresh.lock` together with A6's staleness verdict in one child process. Audit: the newest ≤20 runs in the trailing 7 days — `walkAuditChain` + `chainVerdict` broken hops, `deriveAttemptLadder`/`evaluateCeilings` fixloop exhaustion, and `fleet result` exit 6 (A1's surface fact: no record field carries an exit code; `dispatch-log.jsonl` carries refusals, not exit codes). Brief kinds: `refactor` (graph) and `chain-repair` (audit). No dep-bump signal source exists inside AC3's two inputs, so no dep-bump brief is minted (v7 seam if a deterministic dependency signal is added).
+- **D5 — never-edit fence on targets.** Fan-in ranks the provider layer, `src/audit/**`, and `gate-runner.ts` highest; the Jev §8 guardrails forbid editing them, so they are FENCED (dropped, counted `hotspots_fenced`) and every task text repeats the never-edit list.
+- **D6 — 28-day rebrief cooldown.** Fan-in is stable week to week; a target dispatched in the trailing 28 days is deferred (counted), so the gate does not see the same parked brief every Monday.
+- **D7 — A6's AC6 boundary respected.** The staleness-reader parse lives in the CLI (`scripts/`), not `src/` — A6's negative control keeps the refresh surface out of `src/`. A6's crontab test now expects two entries (its own + A3's).
+- **D8 — the cron line prepends bun's install locations inline.** A Debian cron PATH has no bun, and the pass spawns bun children; the prefix is shell-expanded at fire time (not a literal `PATH=` line).
+- **D9 — `--max-briefs <n>` (lower-only).** The one-box live tier runs at 1; the flag can never raise MAX_BRIEFS_PER_SWEEP.
+- **Walker baselines.** `walkAuditChain` records its own first-observation digest rows (DF5.3 tamper-evidence); that is the walker's behavior, not a hop this story writes. `src/audit/**` is byte-identical.
+
+**Open by design (operator-gated):** the live Tier-2 first-firing round (spend GO), and the fork-side wake leg (E21 schedule row + the bot's report turn reading `.sandbox/maintenance/sweep-reports/<sweepId>.json` and calling the `markReportDelivered` contract).

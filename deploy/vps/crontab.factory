@@ -20,3 +20,27 @@
 #   scripts/gitnexus-refresh.sh
 SHELL=/bin/bash
 7 */5 * * * /opt/qds-factory/scripts/gitnexus-refresh.sh >> /var/log/qds/refresh-cron.log 2>&1
+
+# A3 — maintenance sweep pass (story:
+# _bmad-output/sprint-artifacts/dark-factory-v6/stories/a3-maintenance-sweeps-f4.md).
+# A6 owns this file; A3 owns the entry below (A1's documented-crontab-line
+# precedent). Weekly, Monday 03:17 box-local (UTC on the VPS) — off the top of
+# the hour, and off A6's minute 7. The pass is bounded and EXITING: it reads
+# the graph under a SHARED flock on A6's .refresh.lock (a mid-refresh tick is a
+# counted skip), submits at most 5 briefs through `fleet submit`, persists its
+# report record under .sandbox/maintenance/sweep-reports/, and exits 0 on every
+# per-brief refusal (exit table: scripts/maintenance-sweep.ts header).
+# Prerequisites (one-time, operator):
+#   install -o deploy -m 0644 /dev/null /var/log/qds/maintenance-sweep.log
+#   config/manager.json — A1's config of record (the Maintenance bot id)
+#   gitnexus on the PATH above or at ~/.local/node-arm64/bin (else the graph
+#     leg is a counted, named graph-unavailable and the sweep runs audit-only)
+#   DF3.8's observe sweep — submitted runs reach the approve gate only when
+#     `fleet observe --all` drives DF3.7's chain; its cron line is DF3.8's own
+#     (`bun scripts/fleet.ts observe --help` prints it). The sweep never
+#     approves, merges, or drives the chain itself.
+# PATH: a Debian cron PATH is /usr/bin:/bin — no bun. The pass and every child
+# it spawns (fleet CLI, staleness reader) need bun, so the entry prepends the
+# same three locations gitnexus-refresh.sh probes, INLINE: shell-expanded at
+# fire time, unlike a literal PATH= cron line (the rot warned about above).
+17 3 * * 1 cd /opt/qds-factory && PATH="$HOME/.bun/bin:/usr/local/bin:$HOME/.local/bin:$PATH" bun scripts/maintenance-sweep.ts >> /var/log/qds/maintenance-sweep.log 2>&1

@@ -79,6 +79,7 @@
  */
 
 import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { resolveRunsDir, RunRecordStore } from "../src/providers/run-record.ts";
 import {
@@ -88,6 +89,7 @@ import {
   type DigestDeps,
   type DigestOutcome,
 } from "../src/managers/digest-composer.ts";
+import { DEFAULT_SWEEP_STATE_DIR, undeliveredReports } from "../src/maintenance/sweep-plan.ts";
 import {
   ManagerConfigError,
   validateManagerConfig,
@@ -284,6 +286,11 @@ try {
           // A1 has no manager-originated run (A2 introduces the first one): the
           // default wiring keeps botId absent-not-null on every line.
           runMeta: () => undefined,
+          // A3: a sweep report the bot wake never delivered surfaces here, on
+          // A1's surface — a second channel, so a broken wake cannot hide
+          // its own residue.
+          undeliveredSweepReports: () =>
+            undeliveredReports(resolve(process.env.QDS_SWEEP_STATE_DIR ?? DEFAULT_SWEEP_STATE_DIR), new Date()),
           now: () => new Date(),
           requestId: newRequestId,
         },
