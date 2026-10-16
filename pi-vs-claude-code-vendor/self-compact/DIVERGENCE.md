@@ -40,4 +40,4 @@ Vendored from upstream `disler/self-compact-pi-agent` at commit
 | `tests/unit/summary-splice.test.ts` | NEW: astral case pinning the UTF-16-bounded, pair-safe trim | same |
 | `tests/harness/fake-provider.ts` (3rd) | transcriptSystem replays the full system-message chain via pi-ai's `getCurrentTools`/`getCurrentSystemPrompt` — later system messages carry `toolsAdded`/`toolsRemoved` deltas, so the leading-message read goes stale once tool state changes mid-transcript | same |
 | `repo-typecheck-shims.d.ts` | export the two new pi-ai names (`getCurrentSystemPrompt`, `getCurrentTools`) as `any` | same |
-| `scripts/typecheck.sh` | PI_DIR falls back to the pi-managed release layout (`~/.pi/agent/install/releases/<v>/…`, newest first) when the global-npm default is absent — pi ≥1.x left the global npm tree | same |
+| `scripts/typecheck.sh` | PI_DIR falls back to the pi-managed release layout (`~/.pi/agent/install/releases/<v>/…`) when the global-npm default is absent — pi ≥1.x left the global npm tree; only releases carrying `dist/` are candidates, and `NM_DIR` resolves flat vs nested layouts | same |

@@ -12,8 +12,10 @@ cd "$(dirname "$0")/.."
 
 PI_DIR="${PI_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
 # pi >=1.x left the global npm tree — fall back to the pi-managed release
-# layout (newest first), the same source tests/parity resolves.
-release_dir="$(ls -d "$HOME"/.pi/agent/install/releases/*/node_modules/@earendil-works/pi-coding-agent 2>/dev/null | sort -V | tail -1 || true)"
+# layout, the same source tests/parity resolves. Only releases that actually
+# carry dist/ are candidates, so an incomplete newest release cannot block an
+# older usable one.
+release_dir="$(ls -d "$HOME"/.pi/agent/install/releases/*/node_modules/@earendil-works/pi-coding-agent/dist 2>/dev/null | sed 's:/dist$::' | sort -V | tail -1 || true)"
 if [ ! -d "$PI_DIR/dist" ] && [ -n "$release_dir" ] && [ -d "$release_dir/dist" ]; then
 	PI_DIR="$release_dir"
 fi
