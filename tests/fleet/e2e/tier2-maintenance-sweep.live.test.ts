@@ -6,10 +6,10 @@
  *   1. the REAL sweep pass (`bun scripts/maintenance-sweep.ts --max-briefs 1`)
  *      — real graph leg under A6's shared lock, real audit walk, real
  *      `fleet submit` (dispatch + engine start) of exactly one brief;
- *   2. `fleet observe --all` — DF3.8's sweep, the EXACT invocation its
- *      crontab line (deploy/vps/crontab.factory) fires in production, driving
- *      DF3.7's chain — harvest → teardown → reverify → the gate's own
- *      requestApproval;
+ *   2. `fleet observe <runId>` — DF3.7's chain, the same entry point the
+ *      operator's DF3.8 `observe --all` cron drives in production, scoped to
+ *      THIS run so the round never drives anyone else's open records —
+ *      harvest → teardown → reverify → the gate's own requestApproval;
  *   3. the record rests at `extensions.approval.state = "awaiting-approval"`,
  *      `closedAt` set, bundle present; no PR merged; the sweep's report record
  *      persisted `pending` for the wake to deliver.
@@ -83,10 +83,13 @@ test.todoIf(liveTodoOff())(
         .filter((l) => l.includes('"operation":"maintenance.sweep"'))
         .map((l) => JSON.parse(l) as Record<string, unknown>);
       evidence.push({ leg: "sweep", exitCode: code, events, stderrTail: stderr.slice(-2000) });
-      expect(code).toBe(0);
+      // runId FIRST: if the pass dispatched and then failed, `finally` must
+      // still know the box to tear down.
       const plan = events.find((e) => e.event === "sweep-plan");
       sweepId = typeof plan?.sweepId === "string" ? plan.sweepId : undefined;
       const dispatched = events.find((e) => e.event === "brief-dispatched");
+      if (dispatched !== undefined) runId = String(dispatched.runId);
+      expect(code).toBe(0);
       if (dispatched === undefined) {
         throw new Error(
           `the sweep dispatched no brief (plan: ${JSON.stringify(plan)}) — run the round on a fresh graph (A6 refresh inside 8h) or with windowed audit signal`,
@@ -97,16 +100,7 @@ test.todoIf(liveTodoOff())(
       expect(String(dispatched.workKey)).toMatch(/^w:maint\//);
 
       // ── 2. DF3.7's chain — the entry point DF3.8's observe --all drives ──
-      // The production path: the crontab's observe --all, re-fired until this
-      // run settles (each pass is bounded and exits; a still-walking engine is
-      // a counted skip, not a failure).
-      let obs = await runFleet(["observe", "--all", "--driver", "exedev"], { timeoutMs: OBSERVE_CEILING_MS });
-      const deadline = Date.now() + OBSERVE_CEILING_MS;
-      const parkedNow = () => (new RunRecordStore({ create: false }).get(runId as string).extensions?.approval as { state?: unknown } | undefined)?.state === "awaiting-approval";
-      while (!parkedNow() && Date.now() < deadline) {
-        await Bun.sleep(60_000);
-        obs = await runFleet(["observe", "--all", "--driver", "exedev"], { timeoutMs: OBSERVE_CEILING_MS });
-      }
+      const obs = await runFleet(["observe", runId, "--driver", "exedev"], { timeoutMs: OBSERVE_CEILING_MS });
       evidence.push({ leg: "observe", exitCode: obs.exitCode, stdoutTail: obs.stdout.slice(-2000) });
       expect(obs.exitCode).toBe(0);
 
@@ -121,6 +115,10 @@ test.todoIf(liveTodoOff())(
       // approves (D8), and the push leg records it as extensions.pr. A parked
       // run's record carries none.
       expect(rec.extensions?.pr).toBeUndefined();
+      // AC1's letter: zero merge commits from the sweep on the target branch.
+      const merges = Bun.spawnSync(["git", "log", "--merges", "--oneline", "--grep", runId, "origin/dev"], { cwd: REPO_ROOT });
+      expect(merges.exitCode).toBe(0);
+      expect(merges.stdout.toString().trim()).toBe("");
 
       // ── 4. the durable handoff awaits the wake ──
       const report = JSON.parse(readFileSync(join(stateDir, "sweep-reports", `${sweepId}.json`), "utf8")) as Record<string, unknown>;

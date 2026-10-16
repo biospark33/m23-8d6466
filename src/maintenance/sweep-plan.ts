@@ -70,11 +70,18 @@ export const REBRIEF_COOLDOWN_SWEEPS = 4;
 /**
  * A report still `pending` this long after its sweep is residue: the next
  * weekly wake has come and gone (plus a day of grace for a wake that fires
- * later on the Monday than the pass).
+ * later on the Monday than the pass). The A1 digest (which runs far more
+ * often than weekly) names it from day 8; the sweep pass itself names it on
+ * the following Monday. Residue never ages out — "never silence" (story
+ * Technical Notes).
  */
 export const REPORT_RESIDUE_AFTER_MS = 8 * DAY_MS;
-/** Residue older than this is history, not news: the digest names at most ~5 weeks of it. */
-export const REPORT_RESIDUE_HORIZON_MS = 36 * DAY_MS;
+/**
+ * A graph stamp dated further in the future than this is not "fresh": a small
+ * negative age is clock skew (A6's reader treats it as fresh), a large one is
+ * a bad stamp that would otherwise read fresh indefinitely.
+ */
+export const STAMP_SKEW_TOLERANCE_MS = 60 * 60 * 1000;
 /**
  * The submit verb's `--timeout-ms`: dispatch refuses a manifest whose
  * runBudgetMs exceeds it, so it must cover the generated manifest's budget —
@@ -124,9 +131,9 @@ export type SkipCode =
 
 const SKIP_REMEDIATION: Record<SkipCode, string> = {
   "fleet-busy": "admission refused (no headroom or cap) — the brief is re-planned on a later sweep",
-  "submit-in-flight": "a prior submit for this request id is stuck in-flight — inspect .sandbox/runs/submits/ (Q1.1's ceiling) before the next sweep",
-  "setup-gate": "the setup gate refused the box — inspect the roster and image; the run never reached the chain",
-  "submit-transient": "the box did not answer — re-run the sweep this week (the same request id replays the submit, no second box)",
+  "submit-in-flight": "this request id's submit intent is stuck (in-flight or failed) — inspect .sandbox/runs/submits/<requestId>.json and `fleet status`; the id stays spoken-for until an operator clears it",
+  "setup-gate": "the setup gate refused a LIVE box (INV-5 leaves it up) — inspect the roster and image, then `fleet status` / `fleet cancel` the run; the target is cooled down",
+  "submit-transient": "the submit did not settle (no answer, or the engine did not start) — check `fleet status` and .sandbox/runs/submits/<requestId>.json before re-running; the target is cooled down so it is not re-briefed blind",
   "brief-rejected": "the brief or manifest failed validation — a sweep defect; file it with the brief under .sandbox/maintenance/briefs/",
   "ack-unrecovered": "the run may be live without an ack — check `fleet status`; the target is cooled down so it is not re-briefed blind",
   "submit-failed": "the fleet CLI could not run — check bun and the checkout on the host",
@@ -138,7 +145,7 @@ const SKIP_REMEDIATION: Record<SkipCode, string> = {
  * the target is cooled down exactly like a dispatched one, so the next week
  * never provisions a second box for it blind.
  */
-const POSSIBLY_LIVE: ReadonlySet<string> = new Set<SkipCode>(["submit-transient", "ack-unrecovered", "submit-failed", "submit-in-flight"]);
+const POSSIBLY_LIVE: ReadonlySet<string> = new Set<SkipCode>(["submit-transient", "ack-unrecovered", "submit-failed", "submit-in-flight", "setup-gate"]);
 
 /** The graph leg's answer, as the in-lock child reports it. */
 export type GraphLeg =
@@ -153,21 +160,23 @@ export const A6_ALARM =
 
 // ─── identity derivations ────────────────────────────────────────────────────
 
+/** The furthest-ahead host timezone (UTC+14): a local Monday 03:17 there is Sunday 13:17 UTC. */
+const MAX_TZ_LEAD_MS = 14 * 60 * 60 * 1000;
+
 /**
- * The correlation key: the scheduled fire's week — the UTC Monday 00:00
- * NEAREST to `now`, as `sweep-YYYY-MM-DD`. Nearest, not "on or before": a
- * Monday 03:17 fire on any host clock from UTC−12 to UTC+14 lands within 14 h
- * of that Monday's UTC midnight, so the key does not depend on the host's
- * timezone. The wake leg derives the same key from its own fire time.
+ * The correlation key: the scheduled fire's window start — the UTC Monday on
+ * or before `now + 14 h`, as `sweep-YYYY-MM-DD`. The 14 h lead absorbs host
+ * timezones ahead of UTC (a Monday 03:17 fire on a UTC+14 box is still Sunday
+ * in UTC), so the key does not depend on the host's timezone; a manual run
+ * later in the week keys THAT week, never the next one (it cannot pre-empt
+ * the coming Monday's scheduled pass). The wake leg derives the same key
+ * from its own fire time.
  */
 export function sweepIdFor(now: Date): string {
-  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const back = (new Date(midnight).getUTCDay() + 6) % 7; // days since the previous Monday
-  const prevMonday = midnight - back * DAY_MS;
-  const nextMonday = prevMonday + 7 * DAY_MS;
-  const t = now.getTime();
-  const nearest = t - prevMonday <= nextMonday - t ? prevMonday : nextMonday;
-  return `sweep-${new Date(nearest).toISOString().slice(0, 10)}`;
+  const t = new Date(now.getTime() + MAX_TZ_LEAD_MS);
+  const midnight = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate());
+  const back = (new Date(midnight).getUTCDay() + 6) % 7; // days since Monday
+  return `sweep-${new Date(midnight - back * DAY_MS).toISOString().slice(0, 10)}`;
 }
 
 /** Whole sweep weeks from `older` to `newer` (both sweepIds). */
@@ -181,12 +190,14 @@ function sha256(s: string): string {
 }
 
 /**
- * A deterministic UUID-v4-SHAPED id from (sweepId, workId): the submit verb's
- * replay key. A re-fired pass for the same sweep resolves every brief to the
- * same run instead of a second box (Q1.1's replay safety, consumed).
+ * A deterministic UUID-v4-SHAPED id from (sweepId, workId, commitSha): the
+ * submit verb's replay key. A re-fired pass for the same sweep at the same
+ * commit resolves every brief to the same run instead of a second box (Q1.1's
+ * replay safety, consumed); a redeploy mid-week is a different brief (new
+ * commit, new manifest) and never replays a run pinned to the old commit.
  */
-export function briefRequestId(sweepId: string, workId: string): string {
-  const h = sha256(`${sweepId}|${workId}`);
+export function briefRequestId(sweepId: string, workId: string, commitSha: string): string {
+  const h = sha256(`${sweepId}|${workId}|${commitSha}`);
   const variant = ((Number.parseInt(h[16] ?? "0", 16) & 0x3) | 0x8).toString(16);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
@@ -221,6 +232,11 @@ export const FENCED_TARGET_PREFIXES: readonly string[] = [
   "src/fleet/approvers.ts",
   "src/fleet/push.ts",
   "src/maintenance/",
+  // The task text forbids CI configuration and deployment surfaces too; the
+  // tripwire carries them so the prompt is not the only place they are named.
+  ".github/",
+  "deploy/",
+  "oci/",
 ];
 
 export function isFencedTarget(h: Pick<Hotspot, "source" | "target">): boolean {
@@ -229,19 +245,19 @@ export function isFencedTarget(h: Pick<Hotspot, "source" | "target">): boolean {
 
 /** Repeated in every task: the fence the in-box agent is told, beside the planner's and the closing phase's. */
 const NEVER_EDIT =
-  "Never edit: src/providers/** (the provider layer, including classifyRunExit), src/audit/** (including AUDIT_HOPS), src/reverify/**, the verdict logic in src/gate/gate-runner.ts, classifyDiffScope in src/fixloop/feedback-run.ts, or the approval gate, approver, and push modules under src/fleet/ — the closing phase fails the run if the diff touches any of them.";
+  "Never edit: src/providers/** (the provider layer, including classifyRunExit), src/audit/** (including AUDIT_HOPS), src/reverify/**, the verdict logic in src/gate/gate-runner.ts, classifyDiffScope in src/fixloop/feedback-run.ts, the approval gate, approver, and push modules under src/fleet/, .github/, deploy/, or oci/ — the closing phase fails the run if the diff touches any of them.";
 
 export function isSafeTarget(h: Pick<Hotspot, "source" | "target">): boolean {
   return h.source === "graph" ? SAFE_PATH_RE.test(h.target) : AUDIT_TARGET_RE.test(h.target);
 }
 
 /** Brief identity: the target hashes into a stable id, so the cooldown and the replay key both see "the same work". */
-export function briefIdentity(sweepId: string, h: Pick<Hotspot, "kind" | "target">) {
+export function briefIdentity(sweepId: string, h: Pick<Hotspot, "kind" | "target">, commitSha: string) {
   const hash8 = sha256(h.target).slice(0, 8);
   const briefId = `${h.kind}-${hash8}`;
   const workId = `maint/${sweepId.slice("sweep-".length)}/${briefId}`;
   const workKey = WorkKeySchema.parse(`w:${workId}`);
-  return { briefId, workId, workKey, requestId: briefRequestId(sweepId, workId) };
+  return { briefId, workId, workKey, requestId: briefRequestId(sweepId, workId, commitSha) };
 }
 
 // ─── graph leg: cypher markdown → hotspots ───────────────────────────────────
@@ -291,7 +307,7 @@ export function decideGraphLeg(
 ): GraphLeg {
   if (staleness === undefined) return { status: "graph-unavailable", message: "staleness verdict unparseable" };
   const ageMs = staleness.ageHours === null ? null : Math.round(staleness.ageHours * 3_600_000);
-  if (staleness.verdict !== "fresh" || ageMs === null || ageMs > GRAPH_STALENESS_BUDGET_MS) {
+  if (staleness.verdict !== "fresh" || ageMs === null || ageMs > GRAPH_STALENESS_BUDGET_MS || ageMs < -STAMP_SKEW_TOLERANCE_MS) {
     return { status: "graph-stale", graphAgeMs: ageMs, verdict: staleness.verdict, stampPath: staleness.stampPath };
   }
   const read = readGraph();
@@ -334,21 +350,29 @@ export type AuditLeg = {
   hotspots: Hotspot[];
   windowFrom: string;
   windowTo: string;
+  /** Runs CLOSED inside the window. */
   runsInWindow: number;
-  runsOpen: number;
+  /** Closed in the window but never reached a PR (parked, rejected, failed, or a sweep's own brief) — not walked. */
+  runsWithoutPr: number;
   runsWalked: number;
   runsNotWalked: number;
   walksFailed: number;
+  /** Fix-loop ledgers with an unreadable attempt record — not judged (a pruned record is not an exhausted loop). */
+  ledgersIncomplete: number;
   recordsSkipped: number;
 };
 
 const MAX_EVIDENCE_RUN_IDS = 10;
 
 /**
- * Windowed CLOSED runs only: an open run (still walking, or parked awaiting
- * a human) has an incomplete chain by construction — walking it would mint a
- * false chain-repair brief, and the sweep's own parked briefs would feed the
- * next sweep. Open runs are counted, never walked.
+ * The walk population: runs CLOSED inside the window that reached a PR
+ * (`extensions.pr`). A run's audit chain is only complete-able once a PR
+ * exists — hop 1 (pr-run) is `broken` on every PR-less run by the walker's
+ * own rules, so a parked, rejected or failed run (including a sweep's own
+ * parked brief) would mint a false `hop:pr-run` brief every week and the
+ * sweep would feed itself. PR-less closed runs are counted, never walked. The
+ * window keys on `closedAt`, so a run created before the window and closed
+ * inside it is not lost between two sweeps.
  *
  * No exit-6 signal: no run record field carries an exit code, and the only
  * per-run surface that reports 6 (`fleet result`) means "the payload could not
@@ -359,14 +383,15 @@ export async function collectAuditHotspots(deps: AuditDeps, now: Date): Promise<
   const to = now.getTime();
   const from = to - SWEEP_WINDOW_MS;
   const { records, skipped } = deps.listRecords();
+  const closedAt = (r: RunRecord) => (typeof r.closedAt === "string" ? Date.parse(r.closedAt) : Number.NaN);
   const windowed = records.filter((r) => {
-    const t = Date.parse(r.createdAt);
+    const t = closedAt(r);
     return Number.isFinite(t) && t >= from && t <= to;
   });
-  const closed = windowed
-    .filter((r) => typeof r.closedAt === "string")
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || a.runId.localeCompare(b.runId));
-  const walked = closed.slice(0, MAX_WALKED_RUNS);
+  const withPr = windowed
+    .filter((r) => r.extensions?.pr !== undefined)
+    .sort((a, b) => closedAt(b) - closedAt(a) || a.runId.localeCompare(b.runId));
+  const walked = withPr.slice(0, MAX_WALKED_RUNS);
 
   const signal = new Map<string, Set<string>>();
   const add = (target: string, runId: string) => {
@@ -376,6 +401,7 @@ export async function collectAuditHotspots(deps: AuditDeps, now: Date): Promise<
     signal.set(target, s);
   };
   let walksFailed = 0;
+  let ledgersIncomplete = 0;
 
   for (const rec of walked) {
     try {
@@ -385,11 +411,22 @@ export async function collectAuditHotspots(deps: AuditDeps, now: Date): Promise<
     }
     const ledger = rec.extensions?.fixLoop?.fixAttemptRunIds;
     if (Array.isArray(ledger) && ledger.length > 0 && ledger.every((id) => typeof id === "string")) {
-      try {
+      // Every attempt record must be readable: the ladder counts a dangling id
+      // as an orphaned attempt, so record PRUNING alone would read as an
+      // exhausted loop. An incomplete ledger is counted, never judged.
+      const readable = (ledger as string[]).every((id) => {
+        try {
+          deps.readRecord(id);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (!readable) {
+        ledgersIncomplete++;
+      } else {
         const { counts } = deriveAttemptLadder((id) => deps.readRecord(id), ledger as string[]);
         if (evaluateCeilings(counts).length > 0) add("fixloop-exhausted", rec.runId);
-      } catch {
-        walksFailed++;
       }
     }
   }
@@ -406,10 +443,11 @@ export async function collectAuditHotspots(deps: AuditDeps, now: Date): Promise<
     windowFrom: new Date(from).toISOString(),
     windowTo: new Date(to).toISOString(),
     runsInWindow: windowed.length,
-    runsOpen: windowed.length - closed.length,
+    runsWithoutPr: windowed.length - withPr.length,
     runsWalked: walked.length,
-    runsNotWalked: closed.length - walked.length,
+    runsNotWalked: withPr.length - walked.length,
     walksFailed,
+    ledgersIncomplete,
     recordsSkipped: skipped,
   };
 }
@@ -426,11 +464,14 @@ export type PlannedBrief = Hotspot & ReturnType<typeof briefIdentity>;
  */
 export function planBriefs(
   sweepId: string,
+  commitSha: string,
   hotspots: Hotspot[],
   recentlyBriefed: ReadonlySet<string>,
   cap: number = MAX_BRIEFS_PER_SWEEP,
+  /** briefIds this week already holds as possibly live (a re-sweep): never re-submitted, any source. */
+  heldThisWeek: ReadonlySet<string> = new Set(),
 ): { briefs: PlannedBrief[]; unsafe: number; fenced: number; alreadyBriefed: number; overCap: number } {
-  const limit = Math.min(cap, MAX_BRIEFS_PER_SWEEP);
+  const limit = Math.max(0, Math.min(cap, MAX_BRIEFS_PER_SWEEP) - heldThisWeek.size);
   const rank = (h: Hotspot) => (h.source === "audit" ? 0 : 1);
   const ordered = [...hotspots].sort(
     (a, b) => rank(a) - rank(b) || b.score - a.score || a.target.localeCompare(b.target),
@@ -449,10 +490,10 @@ export function planBriefs(
       fenced++;
       continue;
     }
-    const id = briefIdentity(sweepId, h);
+    const id = briefIdentity(sweepId, h, commitSha);
     if (seen.has(id.briefId)) continue; // the same target from two legs is one brief
     seen.add(id.briefId);
-    if (h.source === "graph" && recentlyBriefed.has(id.briefId)) {
+    if (heldThisWeek.has(id.briefId) || (h.source === "graph" && recentlyBriefed.has(id.briefId))) {
       alreadyBriefed++;
       continue;
     }
@@ -521,8 +562,12 @@ export function briefManifest(b: PlannedBrief, commitSha: string): Record<string
           "Fails the run when work was left uncommitted (harvest counts commits on the sandbox branch) or when the committed diff touches a never-edit path (the A3 fence's in-box tripwire; the human approver remains the control of record).",
         command: [
           "bash",
-          "-lc",
-          `test -z "$(git status --porcelain)" || { echo 'uncommitted work remains in the checkout — the maintain phase must commit everything on the sandbox branch' >&2; exit 1; }; if git diff --name-only ${commitSha}..HEAD | grep -E '${FENCED_PATH_ERE}'; then echo 'the diff touches a never-edit path (listed above) — the A3 fence refuses this run' >&2; exit 1; fi; git log --oneline -1`,
+          "-c",
+          // bash -c (not -lc: no box profile runs first). The diff is captured
+          // BEFORE grep so a failing `git diff` fails CLOSED (an unresolvable
+          // base is a refusal, never an empty pass), and --no-renames lists a
+          // moved file's OLD path too, so a rename out of a fenced dir is seen.
+          `test -z "$(git status --porcelain)" || { echo 'uncommitted work remains in the checkout — the maintain phase must commit everything on the sandbox branch' >&2; exit 1; }; changed=$(git diff --no-renames --name-only ${commitSha}..HEAD) || { echo 'the fence could not diff against the brief commit — refusing' >&2; exit 1; }; if printf '%s\n' "$changed" | grep -E '${FENCED_PATH_ERE}'; then echo 'the diff touches a never-edit path (listed above) — the A3 tripwire refuses this run' >&2; exit 1; fi; git log --oneline -1`,
         ],
         maxDurationMs: 15_000,
         retries: 0,
@@ -586,12 +631,14 @@ export function classifySubmit(a: SubmitAnswer): BriefOutcome | { kind: "replay"
     const ack = ackOf(a.stdout);
     return ack === undefined
       ? { kind: "skipped", code: "ack-unrecovered", message: "submit exited 0 with no parseable ack" }
-      : { kind: "dispatched", ...ack };
+      : ack.state === "running"
+        ? { kind: "dispatched", ...ack }
+        : { kind: "replay", after: "submit-transient" }; // a box without a started engine: replay once, never "dispatched"
   }
   if (a.exitCode === 6) return { kind: "replay", after: "ack-unrecovered" };
   if (a.exitCode === 1) return { kind: "replay", after: "submit-transient" };
   if (a.exitCode === 5) {
-    return /submit-in-flight/.test(a.stderr)
+    return /submit-in-flight|submit-intent-corrupt/.test(a.stderr)
       ? { kind: "skipped", code: "submit-in-flight", message: tail(a.stderr) }
       : { kind: "skipped", code: "fleet-busy", message: tail(a.stderr) };
   }
@@ -702,16 +749,41 @@ export function listSweepReports(stateDir: string): { reports: SweepReport[]; un
 
 /**
  * Residue: reports still pending past REPORT_RESIDUE_AFTER_MS (the next wake
- * plus a day's grace) and inside REPORT_RESIDUE_HORIZON_MS — older residue is
- * history the operator has already been told about for five weeks running.
+ * plus a day's grace). Never ages out. A reports dir that cannot be read, or
+ * records that fail validation, are returned as `problem` so a caller can
+ * surface them — an unreadable dir must never read as "no residue".
  */
-export function undeliveredReports(stateDir: string, now: Date): string[] {
-  return listSweepReports(stateDir)
-    .reports.filter((r) => {
-      const age = now.getTime() - Date.parse(r.createdAt);
-      return r.deliveryState === "pending" && age >= REPORT_RESIDUE_AFTER_MS && age <= REPORT_RESIDUE_HORIZON_MS;
-    })
+export function undeliveredReportsWithProblems(stateDir: string, now: Date): { sweepIds: string[]; problem?: string } {
+  const l = listSweepReports(stateDir);
+  const sweepIds = l.reports
+    .filter((r) => r.deliveryState === "pending" && now.getTime() - Date.parse(r.createdAt) >= REPORT_RESIDUE_AFTER_MS)
     .map((r) => r.sweepId);
+  const problem =
+    l.dirError !== undefined
+      ? `sweep reports dir unreadable: ${l.dirError}`
+      : l.unreadable > 0
+        ? `${l.unreadable} sweep report record(s) failed validation`
+        : undefined;
+  return problem === undefined ? { sweepIds } : { sweepIds, problem };
+}
+
+export function undeliveredReports(stateDir: string, now: Date): string[] {
+  return undeliveredReportsWithProblems(stateDir, now).sweepIds;
+}
+
+/**
+ * runId → { botId, workKey } for every brief a sweep report says it
+ * dispatched: the A1 digest's `runMeta` source, so a sweep-originated run's
+ * digest line carries DD-20's botId + workKey (AC5).
+ */
+export function sweepRunMeta(stateDir: string): Map<string, { botId: string; workKey: string }> {
+  const out = new Map<string, { botId: string; workKey: string }>();
+  for (const r of listSweepReports(stateDir).reports) {
+    for (const b of r.report.briefs) {
+      if (b.event === "brief-dispatched" && typeof b.runId === "string") out.set(b.runId, { botId: b.botId, workKey: b.workKey });
+    }
+  }
+  return out;
 }
 
 /**
@@ -779,10 +851,11 @@ const emptyAuditLeg = (now: Date): AuditLeg => ({
   windowFrom: new Date(now.getTime() - SWEEP_WINDOW_MS).toISOString(),
   windowTo: now.toISOString(),
   runsInWindow: 0,
-  runsOpen: 0,
+  runsWithoutPr: 0,
   runsWalked: 0,
   runsNotWalked: 0,
   walksFailed: 0,
+  ledgersIncomplete: 0,
   recordsSkipped: 0,
 });
 
@@ -803,10 +876,15 @@ export async function runSweep(deps: SweepDeps): Promise<SweepResult> {
   const prior = readSweepReport(deps.stateDir, sweepId);
   if (prior !== undefined && (prior.deliveryState === "delivered" || prior.report.complete.briefs_dispatched > 0)) {
     line(rid, startedAt, { event: "sweep-already-swept", sweepId, deliveryState: prior.deliveryState });
-    line(rid, startedAt, { event: "sweep-complete", sweepId, already_swept: true });
+    line(rid, startedAt, { event: "sweep-complete", sweepId, already_swept: true, ...prior.report.complete });
     return { outcome: "already-swept", sweepId };
   }
-  if (prior !== undefined) line(rid, startedAt, { event: "sweep-resweep", sweepId, prior: prior.report.complete });
+  // A re-sweep of a zero-dispatch week: the prior pass's POSSIBLY-LIVE briefs
+  // are carried into this week's record (so the cooldown never forgets them)
+  // and held out of this plan, and they count against this week's cap.
+  const carried = (prior?.report.briefs ?? []).filter((b) => b.code !== undefined && POSSIBLY_LIVE.has(b.code));
+  const held = new Set(carried.map((b) => b.briefId));
+  if (prior !== undefined) line(rid, startedAt, { event: "sweep-resweep", sweepId, prior: prior.report.complete, briefs_held: held.size });
 
   const listing = listSweepReports(deps.stateDir);
   if (listing.dirError !== undefined || listing.unreadable > 0) {
@@ -867,7 +945,7 @@ export async function runSweep(deps: SweepDeps): Promise<SweepResult> {
 
   // ── plan ──
   const hotspots = [...audit.hotspots, ...(graph.status === "fresh" ? graph.hotspots : [])];
-  const plan = planBriefs(sweepId, hotspots, recentlyBriefed(deps.stateDir, sweepId), deps.maxBriefs);
+  const plan = planBriefs(sweepId, deps.repo.commitSha, hotspots, recentlyBriefed(deps.stateDir, sweepId), deps.maxBriefs, held);
   const graphStale = graph.status === "graph-stale";
   line(rid, startedAt, {
     event: "sweep-plan",
@@ -880,7 +958,8 @@ export async function runSweep(deps: SweepDeps): Promise<SweepResult> {
     chain_window: { from: audit.windowFrom, to: audit.windowTo },
     runs_in_window: audit.runsInWindow,
     runs_walked: audit.runsWalked,
-    ...(audit.runsOpen === 0 ? {} : { runs_open: audit.runsOpen }),
+    ...(audit.runsWithoutPr === 0 ? {} : { runs_without_pr: audit.runsWithoutPr }),
+    ...(audit.ledgersIncomplete === 0 ? {} : { ledgers_incomplete: audit.ledgersIncomplete }),
     ...(audit.runsNotWalked === 0 ? {} : { runs_not_walked: audit.runsNotWalked }),
     ...(audit.walksFailed === 0 ? {} : { walks_failed: audit.walksFailed }),
     ...(audit.recordsSkipped === 0 ? {} : { records_skipped: audit.recordsSkipped }),
@@ -952,7 +1031,7 @@ export async function runSweep(deps: SweepDeps): Promise<SweepResult> {
       sweepId,
       window: { from: audit.windowFrom, to: audit.windowTo },
       botTarget: deps.botTarget,
-      report: { complete: counters, briefs: briefLines },
+      report: { complete: counters, briefs: [...briefLines, ...carried] },
       deliveryState: "pending",
       createdAt: now.toISOString(),
     });

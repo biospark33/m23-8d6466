@@ -529,13 +529,11 @@ describe("AC1/INV-A6-1 — no-bare-analyze scan (real wrapper + real crontab)", 
     const text = readFileSync(CRONTAB, "utf8");
     expect(scanBareAnalyze(text, "deploy/vps/crontab.factory")).toEqual([]);
     const entries = entryLines(text);
-    // A6's refresh entry first, then A3's two (its sweep entry and DF3.8's
-    // observe sweep it depends on — shapes pinned in
-    // tests/maintenance/sweep-plan.test.ts).
-    expect(entries).toHaveLength(3);
+    // A6's refresh entry first, then A3's sweep entry (A3 owns that one line
+    // in A6's file; its shape is pinned in tests/maintenance/sweep-plan.test.ts).
+    expect(entries).toHaveLength(2);
     expect(entries[0]).toMatch(ENTRY_RE);
     expect(entries[1]).toContain("bun scripts/maintenance-sweep.ts");
-    expect(entries[2]).toContain("observe --all --driver exedev");
     expect(text).toContain("SHELL=/bin/bash");
   });
 
@@ -570,7 +568,7 @@ describe("AC1/INV-A6-1 — no-bare-analyze scan (real wrapper + real crontab)", 
     const violations = scanBareAnalyze(mutant, "mutated-crontab");
     expect(violations.length).toBeGreaterThan(0);
     expect(violations.join("\n")).toContain("gitnexus analyze");
-    expect(entryLines(mutant)).toHaveLength(4); // the entry-count rule detects the extra line too
+    expect(entryLines(mutant)).toHaveLength(3); // the entry-count rule detects the extra line too
   });
 });
 

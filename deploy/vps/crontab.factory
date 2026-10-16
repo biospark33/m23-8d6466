@@ -35,20 +35,20 @@ SHELL=/bin/bash
 #   config/manager.json — A1's config of record (the Maintenance bot id)
 #   gitnexus on the PATH above or at ~/.local/node-arm64/bin (else the graph
 #     leg is a counted, named graph-unavailable and the sweep runs audit-only)
-#   /var/log/qds/observe-sweep.log — for DF3.8's observe line below (same install)
+#   DF3.8's completion sweep — submitted briefs reach the approve gate ONLY
+#     when `fleet observe --all` drives DF3.7's chain. That schedule is the
+#     OPERATOR's own cron (DF3.8 INV-IBOX-19: documented, never installed);
+#     `bun scripts/fleet.ts observe --help` prints the line. Without it,
+#     sweep runs stay `running` and never park.
+#   .factory/ on the host — the reverify host plan and the approvers
+#     allowlist the chain's gate step reads (operator-local, gitignored);
+#     without them a finished run stops at `pausing`, never `awaiting-approval`.
+# Install note: `crontab <file>` REPLACES the deploy user's whole crontab.
+#   Operator-owned lines (A1's manager digest, DF3.8's observe sweep) must be
+#   merged, e.g.  (crontab -l; cat deploy/vps/crontab.factory) | crontab -
+#   after removing any stale copies of this file's entries.
 # PATH: a Debian cron PATH is /usr/bin:/bin — no bun. The pass and every child
 # it spawns (fleet CLI, staleness reader) need bun, so the entry prepends the
 # same three locations gitnexus-refresh.sh probes, INLINE: shell-expanded at
 # fire time, unlike a literal PATH= cron line (the rot warned about above).
 17 3 * * 1 cd /opt/qds-factory && PATH="$HOME/.bun/bin:/usr/local/bin:$HOME/.local/bin:$PATH" bun scripts/maintenance-sweep.ts >> /var/log/qds/maintenance-sweep.log 2>&1
-
-# DF3.8 — the completion sweep (`fleet observe --all`), installed here by A3:
-# a submitted maintenance brief reaches the approve gate ONLY when this pass
-# drives DF3.7's chain for it (harvest → teardown → reverify → the gate's own
-# requestApproval). Bounded, re-entrant, exiting; every per-run refusal is a
-# counted skip inside a pass that exits 0. Interval = SWEEP_INTERVAL_MINUTES
-# (src/fleet/observe.ts — the reaper's 4h staleAfterMs over 8); the shape is
-# the one `fleet observe --help` prints, with the same inline PATH as above.
-# It never approves: `fleet approve` stays scrypt-gated, token-on-stdin,
-# human-only (INV-A3-GATE).
-*/30 * * * * cd /opt/qds-factory && PATH="$HOME/.bun/bin:/usr/local/bin:$HOME/.local/bin:$PATH" bun scripts/fleet.ts observe --all --driver exedev >> /var/log/qds/observe-sweep.log 2>&1

@@ -45,17 +45,17 @@ import {
   readSweepReport,
   recentlyBriefed,
   REPORT_RESIDUE_AFTER_MS,
-  REPORT_RESIDUE_HORIZON_MS,
   runSweep,
   type SubmitAnswer,
   type SweepDeps,
   type SweepReport,
   sweepIdFor,
+  sweepRunMeta,
   undeliveredReports,
+  undeliveredReportsWithProblems,
 } from "../../src/maintenance/sweep-plan.ts";
-import { AUDIT_DB_DEFAULT, cypherJson, snapshotAuditDb } from "../../scripts/maintenance-sweep.ts";
+import { AUDIT_DB_DEFAULT, cypherJson, parseGithubRemote, snapshotAuditDb } from "../../scripts/maintenance-sweep.ts";
 import { BriefSchema } from "../../src/fleet/brief-schema.ts";
-import { SWEEP_INTERVAL_MINUTES } from "../../src/fleet/observe.ts";
 import { WorkKeySchema } from "../../src/managers/manager-config.ts";
 import { isValidWorkId, UUID_V4_PATTERN } from "../../src/phase-engine/issue-correlation.ts";
 import type { RunRecord } from "../../src/providers/run-record.ts";
@@ -97,13 +97,16 @@ afterAll(() => {
   for (const d of tmps) rmSync(d, { recursive: true, force: true });
 });
 
-function rec(runId: string, createdAt: string, opts: { closed?: boolean; extensions?: RunRecord["extensions"] } = {}): RunRecord {
+/** A closed run that reached a PR, unless told otherwise (`closedAt` = createdAt + 1 h by default). */
+function rec(runId: string, createdAt: string, opts: { closed?: boolean; closedAt?: string; pr?: boolean; extensions?: Record<string, unknown> } = {}): RunRecord {
+  const closedAt = opts.closedAt ?? new Date(Date.parse(createdAt) + 3_600_000).toISOString();
+  const ext: Record<string, unknown> = { ...(opts.pr === false ? {} : { pr: { schemaVersion: 1, prUrl: "https://github.com/o/r/pull/1" } }), ...(opts.extensions ?? {}) };
   return {
     runId,
     createdAt,
-    ...(opts.closed === false ? {} : { closedAt: createdAt }),
-    ...(opts.extensions ? { extensions: opts.extensions } : {}),
-  };
+    ...(opts.closed === false ? {} : { closedAt }),
+    ...(Object.keys(ext).length === 0 ? {} : { extensions: ext as RunRecord["extensions"] }),
+  } as RunRecord;
 }
 
 const hs = (source: "graph" | "audit", target: string, score: number, runIds: string[] = []): Hotspot => ({
@@ -183,32 +186,45 @@ function report(sweepId: string, createdAt: string, briefs: SweepReport["report"
 // ─── identity derivations ───────────────────────────────────────────────────
 
 describe("identity — sweepId, workKey, requestId", () => {
-  test("sweepId is the NEAREST UTC Monday — a Monday 03:17 fire on any host timezone keys the same week", () => {
+  test("sweepId is the UTC Monday on/before now+14h — a Monday 03:17 fire on any host timezone keys the same week; a late-week manual run never pre-empts the next Monday", () => {
     expect(sweepIdFor(new Date("2026-10-19T03:17:00Z"))).toBe(SWEEP); // UTC host
-    expect(sweepIdFor(new Date("2026-10-18T22:17:00Z"))).toBe(SWEEP); // UTC+5 host: still Sunday in UTC
-    expect(sweepIdFor(new Date("2026-10-19T13:17:00Z"))).toBe(SWEEP); // UTC−10 host
-    expect(sweepIdFor(new Date("2026-10-21T12:00:00Z"))).toBe(SWEEP); // Wednesday
-    expect(sweepIdFor(new Date("2026-10-23T12:00:00Z"))).toBe("sweep-2026-10-26"); // Friday → next week
+    expect(sweepIdFor(new Date("2026-10-18T13:17:00Z"))).toBe(SWEEP); // UTC+14 host: Sunday 13:17 UTC
+    expect(sweepIdFor(new Date("2026-10-18T22:17:00Z"))).toBe(SWEEP); // UTC+5 host
+    expect(sweepIdFor(new Date("2026-10-19T15:17:00Z"))).toBe(SWEEP); // UTC−12 host
+    expect(sweepIdFor(new Date("2026-10-23T12:00:00Z"))).toBe(SWEEP); // a Friday manual run keys THIS week
+    expect(sweepIdFor(new Date("2026-10-25T09:00:00Z"))).toBe(SWEEP); // Sunday morning UTC
+    expect(sweepIdFor(new Date("2026-10-26T03:17:00Z"))).toBe("sweep-2026-10-26"); // the next Monday's fire
   });
 
   test("briefRequestId is a strict UUID v4, deterministic per (sweep, workId), distinct across either", () => {
-    const a = briefRequestId(SWEEP, "maint/2026-10-19/refactor-00000000");
+    const a = briefRequestId(SWEEP, "maint/2026-10-19/refactor-00000000", REPO.commitSha);
     expect(a).toMatch(UUID_V4_PATTERN);
-    expect(briefRequestId(SWEEP, "maint/2026-10-19/refactor-00000000")).toBe(a);
-    expect(briefRequestId("sweep-2026-10-26", "maint/2026-10-19/refactor-00000000")).not.toBe(a);
-    for (let i = 0; i < 200; i++) expect(briefRequestId(SWEEP, `w${i}`)).toMatch(UUID_V4_PATTERN);
+    expect(briefRequestId(SWEEP, "maint/2026-10-19/refactor-00000000", REPO.commitSha)).toBe(a);
+    expect(briefRequestId("sweep-2026-10-26", "maint/2026-10-19/refactor-00000000", REPO.commitSha)).not.toBe(a);
+    for (let i = 0; i < 200; i++) expect(briefRequestId(SWEEP, `w${i}`, REPO.commitSha)).toMatch(UUID_V4_PATTERN);
+    // A redeploy mid-week is a different brief: the replay key covers the commit.
+    expect(briefRequestId(SWEEP, "maint/2026-10-19/refactor-00000000", "b".repeat(40))).not.toBe(a);
   });
 
   test("AC5: the workKey is w:-namespaced and the workId fits BriefSchema's headless leg", () => {
-    const id = briefIdentity(SWEEP, hs("graph", "src/fleet/dispatch.ts", 9));
+    const id = briefIdentity(SWEEP, hs("graph", "src/fleet/dispatch.ts", 9), REPO.commitSha);
     expect(WorkKeySchema.safeParse(id.workKey).success).toBe(true);
     expect(id.workKey).toBe(`w:${id.workId}`);
     expect(isValidWorkId(id.workId)).toBe(true);
     expect(id.workId).toMatch(/^maint\/2026-10-19\/refactor-[0-9a-f]{8}$/);
   });
 
+  test("origin parsing: github https/ssh/scp forms with optional .git and trailing slash; credentials and other hosts refused", () => {
+    for (const r of ["https://github.com/o/r", "https://github.com/o/r.git", "https://github.com/o/r/", "git@github.com:o/r.git", "ssh://git@github.com/o/r.git"]) {
+      expect(parseGithubRemote(r)).toBe("o/r");
+    }
+    for (const r of ["https://tok@github.com/o/r", "https://user:pw@github.com/o/r.git", "https://gitlab.com/o/r", "git@github.com:o/r/extra", "file:///o/r"]) {
+      expect(parseGithubRemote(r)).toBeUndefined();
+    }
+  });
+
   test("the generated brief passes the real BriefSchema (workId leg, no issueId)", () => {
-    const b = { ...hs("graph", "src/fleet/dispatch.ts", 9), ...briefIdentity(SWEEP, hs("graph", "src/fleet/dispatch.ts", 9)) };
+    const b = { ...hs("graph", "src/fleet/dispatch.ts", 9), ...briefIdentity(SWEEP, hs("graph", "src/fleet/dispatch.ts", 9), REPO.commitSha) };
     expect(BriefSchema.safeParse(briefJson(b, REPO, ".sandbox/maintenance/briefs/x/pipeline.json")).success).toBe(true);
     expect(briefJson(b, REPO, "m")).not.toHaveProperty("issueId");
   });
@@ -250,6 +266,9 @@ describe("AC3(a) — the graph leg is staleness-gated and never silently degrade
       expect(read).toBe(0);
     }
     expect(decideGraphLeg(undefined, () => ({ markdown: md })).status).toBe("graph-unavailable");
+    // Small negative ages are clock skew (fresh); a stamp hours in the future is a bad stamp.
+    expect(decideGraphLeg(v(-0.5), () => ({ markdown: md })).status).toBe("fresh");
+    expect(decideGraphLeg(v(-2), () => ({ markdown: md })).status).toBe("graph-stale");
   });
 
   test("NEGATIVE CONTROL: graph-stale is never folded into a benign zero-hotspot outcome — named, alarmed, in the counters, plan proceeds audit-only", async () => {
@@ -338,7 +357,7 @@ describe("AC3(b) — one flock, two modes: the refresh's exclusive lock skips th
       writeFileSync(fakeGn, `#!/bin/sh\ntouch ${marker}\necho '{"markdown":"| file | fanIn |\\n| --- | --- |\\n| src/x.ts | 2 |","row_count":1}'\n`, { mode: 0o755 });
       writeFileSync(join(home, "cli-version.json"), JSON.stringify({ indexedAt: new Date().toISOString().replace(/\.\d+Z$/, "Z") }));
       const holder = await holdExclusive(lock);
-      const env = { ...process.env, QDS_GITNEXUS_HOME: home, QDS_GITNEXUS_BIN: fakeGn };
+      const env = { ...process.env, QDS_GITNEXUS_HOME: home, QDS_GITNEXUS_BIN: fakeGn, QDS_SWEEP_GRAPH_LEG_CHILD: "1" };
       const argv = ["-s", "-n", lock, process.execPath, join(REPO_ROOT, "scripts", "maintenance-sweep.ts"), "--graph-leg"];
       const r = spawnSync("flock", argv, { cwd: REPO_ROOT, env, encoding: "utf8" });
       holder.kill();
@@ -353,6 +372,12 @@ describe("AC3(b) — one flock, two modes: the refresh's exclusive lock skips th
     30_000,
   );
 
+  test("--graph-leg without the parent's marker is refused (never an unlocked graph read)", () => {
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "maintenance-sweep.ts"), "--graph-leg"], { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, QDS_SWEEP_GRAPH_LEG_CHILD: "" } });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--graph-leg is internal");
+  });
+
   test("the lock target is A6's own: <graph-home>/.refresh.lock, shared non-blocking — one vocabulary", () => {
     const src = readFileSync(join(REPO_ROOT, "scripts", "maintenance-sweep.ts"), "utf8");
     expect(src).toContain('[flock, "-s", "-n", join(home, ".refresh.lock")');
@@ -363,20 +388,27 @@ describe("AC3(b) — one flock, two modes: the refresh's exclusive lock skips th
 // ─── AC3c: audit chain ───────────────────────────────────────────────────────
 
 describe("AC3(c) — audit-chain hotspots over the trailing window, read-only", () => {
-  test("windowed CLOSED runs only; broken hops and fixloop exhaustion aggregate by target with run evidence", async () => {
+  test("walks runs CLOSED in the window that reached a PR; PR-less runs (parked, rejected, a sweep's own brief) are counted, never walked", async () => {
+    const timedOut = (id: string) => rec(id, "2026-10-10T00:00:00Z", { pr: false, extensions: { approval: { schemaVersion: 1, state: "timed-out" } } });
+    const attempts = new Map([["att-1", timedOut("att-1")], ["att-2", timedOut("att-2")], ["att-3", timedOut("att-3")]]);
     const records = [
       rec("qds-20261018-aaaaaa", "2026-10-18T00:00:00Z"),
-      rec("qds-20261017-bbbbbb", "2026-10-17T00:00:00Z", {
-        extensions: { fixLoop: { schemaVersion: 1, fixAttemptRunIds: ["gone-1", "gone-2", "gone-3"] } } as RunRecord["extensions"],
-      }),
-      rec("qds-20261018-cccccc", "2026-10-18T06:00:00Z", { closed: false }), // open: never walked
-      rec("qds-20261001-dddddd", "2026-10-01T00:00:00Z"), // before the window
-      rec("qds-20261020-eeeeee", "2026-10-20T00:00:00Z"), // after now
+      rec("qds-20261017-bbbbbb", "2026-10-17T00:00:00Z", { extensions: { fixLoop: { schemaVersion: 1, fixAttemptRunIds: ["att-1", "att-2", "att-3"] } } }),
+      rec("qds-20261016-ffffff", "2026-10-16T00:00:00Z", { extensions: { fixLoop: { schemaVersion: 1, fixAttemptRunIds: ["att-1", "pruned-x", "att-3"] } } }),
+      rec("qds-20261018-cccccc", "2026-10-18T06:00:00Z", { closed: false }), // open: not in the window at all
+      rec("qds-20261018-dddddd", "2026-10-18T07:00:00Z", { pr: false }), // parked/rejected: no PR
+      rec("qds-20261009-eeeeee", "2026-10-09T00:00:00Z", { closedAt: "2026-10-15T00:00:00Z" }), // created before, CLOSED inside
+      rec("qds-20261001-gggggg", "2026-10-01T00:00:00Z"), // closed before the window
     ];
     const walked: string[] = [];
     const leg = await collectAuditHotspots(
       emptyAudit({
         listRecords: () => ({ records, skipped: 1 }),
+        readRecord: (id) => {
+          const r = attempts.get(id);
+          if (r === undefined) throw new Error(`no record ${id}`);
+          return r;
+        },
         brokenHops: async (id) => {
           walked.push(id);
           return id === "qds-20261018-aaaaaa" ? ["run-cost", "run-cost", "run-box"] : ["run-cost"];
@@ -384,19 +416,19 @@ describe("AC3(c) — audit-chain hotspots over the trailing window, read-only", 
       }),
       NOW,
     );
-    expect(walked.sort()).toEqual(["qds-20261017-bbbbbb", "qds-20261018-aaaaaa"]);
+    expect(walked.sort()).toEqual(["qds-20261009-eeeeee", "qds-20261016-ffffff", "qds-20261017-bbbbbb", "qds-20261018-aaaaaa"]);
     const by = Object.fromEntries(leg.hotspots.map((h) => [h.target, h]));
-    expect(by["hop:run-cost"]).toMatchObject({ score: 2, runIds: ["qds-20261017-bbbbbb", "qds-20261018-aaaaaa"] });
+    expect(by["hop:run-cost"]?.score).toBe(4);
     expect(by["hop:run-box"]?.score).toBe(1);
-    // Three dangling ledger ids = three orphaned (uncharged) attempts = the ceiling.
+    // Three READABLE timed-out attempts = the uncharged ceiling; a ledger with a pruned record is not judged.
     expect(by["fixloop-exhausted"]?.runIds).toEqual(["qds-20261017-bbbbbb"]);
     expect(by["exit-6"]).toBeUndefined(); // no producer carries a run's exit 6
-    expect(leg).toMatchObject({ runsInWindow: 3, runsOpen: 1, runsWalked: 2, recordsSkipped: 1 });
+    expect(leg).toMatchObject({ runsInWindow: 5, runsWithoutPr: 1, runsWalked: 4, ledgersIncomplete: 1, recordsSkipped: 1 });
   });
 
   test("bounded: past MAX_WALKED_RUNS the NEWEST are walked and the rest counted; a failed walk is counted, never fatal", async () => {
     const id = (i: number) => `qds-20261018-${i.toString(16).padStart(6, "0")}`;
-    const records = Array.from({ length: MAX_WALKED_RUNS + 3 }, (_, i) => rec(id(i), new Date(NOW.getTime() - (i + 1) * 60_000).toISOString()));
+    const records = Array.from({ length: MAX_WALKED_RUNS + 3 }, (_, i) => rec(id(i), new Date(NOW.getTime() - (i + 2) * 3_600_000).toISOString()));
     const walked: string[] = [];
     const leg = await collectAuditHotspots(
       emptyAudit({
@@ -468,6 +500,7 @@ describe("planning — deterministic order, fence, cap", () => {
   test("audit before graph; score desc; target asc on ties", () => {
     const p = planBriefs(
       SWEEP,
+      REPO.commitSha,
       [hs("graph", "src/z.ts", 50), hs("audit", "hop:run-box", 1, ["qds-20261018-aaaaaa"]), hs("graph", "src/b.ts", 7), hs("graph", "src/a.ts", 7)],
       new Set(),
     );
@@ -476,15 +509,18 @@ describe("planning — deterministic order, fence, cap", () => {
 
   test("DoD bounds: 6 eligible hotspots → 5 briefs + a counted remainder of 1; --max-briefs only lowers the cap", () => {
     const six = Array.from({ length: 6 }, (_, i) => hs("graph", `src/f${i}.ts`, 10 - i));
-    const p = planBriefs(SWEEP, six, new Set());
+    const p = planBriefs(SWEEP, REPO.commitSha, six, new Set());
     expect(p.briefs).toHaveLength(MAX_BRIEFS_PER_SWEEP);
     expect(p.overCap).toBe(1);
-    expect(planBriefs(SWEEP, six, new Set(), 1)).toMatchObject({ overCap: 5 });
-    expect(planBriefs(SWEEP, six, new Set(), 99).briefs).toHaveLength(MAX_BRIEFS_PER_SWEEP);
+    expect(planBriefs(SWEEP, REPO.commitSha, six, new Set(), 1)).toMatchObject({ overCap: 5 });
+    expect(planBriefs(SWEEP, REPO.commitSha, six, new Set(), 99).briefs).toHaveLength(MAX_BRIEFS_PER_SWEEP);
   });
 
   test("the never-edit fence covers exactly the guardrail + approval/verification surfaces (explicit list, not self-referential)", () => {
     const expected = [
+      ".github/",
+      "deploy/",
+      "oci/",
       "src/providers/",
       "src/audit/",
       "src/reverify/",
@@ -497,7 +533,7 @@ describe("planning — deterministic order, fence, cap", () => {
     ];
     expect([...FENCED_TARGET_PREFIXES].sort()).toEqual([...expected].sort());
     const targets = ["src/providers/run-record.ts", "src/audit/chain.ts", "src/reverify/approval.ts", "src/gate/gate-runner.ts", "src/fixloop/feedback-run.ts", "src/fleet/approval-gate.ts", "src/fleet/approvers.ts", "src/fleet/push.ts", "src/maintenance/sweep-plan.ts"];
-    const p = planBriefs(SWEEP, [...targets.map((t) => hs("graph", t, 50)), hs("graph", "src/lib/x.ts", 3)], new Set());
+    const p = planBriefs(SWEEP, REPO.commitSha, [...targets.map((t) => hs("graph", t, 50)), hs("graph", "src/lib/x.ts", 3)], new Set());
     expect(p.fenced).toBe(targets.length);
     expect(p.briefs.map((b) => b.target)).toEqual(["src/lib/x.ts"]);
     expect(isFencedTarget({ source: "audit", target: "hop:run-cost" })).toBe(false);
@@ -516,8 +552,9 @@ describe("planning — deterministic order, fence, cap", () => {
     git("add", ".");
     git("commit", "-qm", "base");
     const base = git("rev-parse", "HEAD").stdout.trim();
-    const b = { ...hs("graph", "src/lib/x.ts", 3), ...briefIdentity(SWEEP, hs("graph", "src/lib/x.ts", 3)) };
+    const b = { ...hs("graph", "src/lib/x.ts", 3), ...briefIdentity(SWEEP, hs("graph", "src/lib/x.ts", 3), REPO.commitSha) };
     const verify = (briefManifest(b, base) as { phases: { command?: string[] }[] }).phases[1]?.command ?? [];
+    expect(verify.slice(0, 2)).toEqual(["bash", "-c"]); // no login profile runs first
     const run = () => spawnSync(verify[0] as string, verify.slice(1), { cwd: repo, encoding: "utf8" }).status;
     mkdirSync(join(repo, "src", "lib"), { recursive: true });
     writeFileSync(join(repo, "src", "lib", "x.ts"), "export {};\n");
@@ -529,11 +566,25 @@ describe("planning — deterministic order, fence, cap", () => {
     git("add", ".");
     git("commit", "-qm", "fenced");
     expect(run()).toBe(1);
+    // A RENAME out of a fenced dir is seen (--no-renames lists the old path too).
+    git("reset", "-q", "--hard", "HEAD~1");
+    mkdirSync(join(repo, "src", "audit"), { recursive: true });
+    writeFileSync(join(repo, "src", "audit", "chain.ts"), "export const a = 1;\n");
+    git("add", ".");
+    git("commit", "-qm", "seed fenced file");
+    const seeded = git("rev-parse", "HEAD").stdout.trim();
+    const seededVerify = (briefManifest(b, seeded) as { phases: { command?: string[] }[] }).phases[1]?.command ?? [];
+    git("mv", "src/audit/chain.ts", "src/lib/chain.ts");
+    git("commit", "-qm", "rename out of the fence");
+    expect(spawnSync(seededVerify[0] as string, seededVerify.slice(1), { cwd: repo, encoding: "utf8" }).status).toBe(1);
+    // An unresolvable base fails CLOSED, never an empty pass.
+    const ghost = (briefManifest(b, "f".repeat(40)) as { phases: { command?: string[] }[] }).phases[1]?.command ?? [];
+    expect(spawnSync(ghost[0] as string, ghost.slice(1), { cwd: repo, encoding: "utf8" }).status).toBe(1);
     expect(() => briefManifest(b, "not-a-sha")).toThrow();
   });
 
   test("the generated manifest mirrors fix-run's two-phase shape and stays within the dispatch ceiling", () => {
-    const b = { ...hs("audit", "hop:run-cost", 2, ["qds-20261018-aaaaaa"]), ...briefIdentity(SWEEP, hs("audit", "hop:run-cost", 2)) };
+    const b = { ...hs("audit", "hop:run-cost", 2, ["qds-20261018-aaaaaa"]), ...briefIdentity(SWEEP, hs("audit", "hop:run-cost", 2), REPO.commitSha) };
     const m = briefManifest(b, REPO.commitSha) as { phases: { kind: string; roster?: string; task?: string }[]; runBudgetMs: number };
     expect(m.phases.map((p) => p.kind)).toEqual(["dispatch_task", "code"]);
     expect(m.phases[0]?.roster).toBe("config/rosters/roster.yaml");
@@ -543,7 +594,7 @@ describe("planning — deterministic order, fence, cap", () => {
   });
 
   test("unsafe targets never reach a brief", () => {
-    const p = planBriefs(SWEEP, [hs("graph", "src/b.ts", 4), hs("audit", "hop:Run Cost; rm -rf", 3), hs("graph", "../x.ts", 9)], new Set());
+    const p = planBriefs(SWEEP, REPO.commitSha, [hs("graph", "src/b.ts", 4), hs("audit", "hop:Run Cost; rm -rf", 3), hs("graph", "../x.ts", 9)], new Set());
     expect(p.unsafe).toBe(2);
     expect(p.briefs.map((b) => b.target)).toEqual(["src/b.ts"]);
   });
@@ -551,7 +602,7 @@ describe("planning — deterministic order, fence, cap", () => {
 
 describe("cooldown — graph targets only, sweep-week arithmetic, possibly-live outcomes count", () => {
   const briefLine = (b: Hotspot, event: "brief-dispatched" | "brief-skipped", code?: string) => {
-    const id = briefIdentity(SWEEP, b);
+    const id = briefIdentity(SWEEP, b, REPO.commitSha);
     return { event, briefId: id.briefId, workKey: id.workKey, botId: "bot-maint", source: b.source, target: b.target, kind: b.kind, ...(code ? { code } : {}) } as SweepReport["report"]["briefs"][number];
   };
   const g = hs("graph", "src/a.ts", 5);
@@ -559,7 +610,7 @@ describe("cooldown — graph targets only, sweep-week arithmetic, possibly-live 
   test("a dispatched graph target is deferred for the next 3 sweeps and eligible on the 4th", () => {
     const stateDir = tmp();
     persistSweepReport(stateDir, report(SWEEP, NOW.toISOString(), [briefLine(g, "brief-dispatched")]));
-    const id = briefIdentity(SWEEP, g).briefId;
+    const id = briefIdentity(SWEEP, g, REPO.commitSha).briefId;
     expect(recentlyBriefed(stateDir, SWEEP).has(id)).toBe(false); // the same week is not "previous"
     expect(recentlyBriefed(stateDir, "sweep-2026-10-26").has(id)).toBe(true);
     expect(recentlyBriefed(stateDir, "sweep-2026-11-09").has(id)).toBe(true);
@@ -572,14 +623,14 @@ describe("cooldown — graph targets only, sweep-week arithmetic, possibly-live 
     const h3 = hs("graph", "src/c.ts", 3);
     persistSweepReport(stateDir, report(SWEEP, NOW.toISOString(), [briefLine(g, "brief-skipped", "submit-transient"), briefLine(h2, "brief-skipped", "ack-unrecovered"), briefLine(h3, "brief-skipped", "fleet-busy")]));
     const set = recentlyBriefed(stateDir, "sweep-2026-10-26");
-    expect(set.has(briefIdentity(SWEEP, g).briefId)).toBe(true);
-    expect(set.has(briefIdentity(SWEEP, h2).briefId)).toBe(true);
-    expect(set.has(briefIdentity(SWEEP, h3).briefId)).toBe(false);
+    expect(set.has(briefIdentity(SWEEP, g, REPO.commitSha).briefId)).toBe(true);
+    expect(set.has(briefIdentity(SWEEP, h2, REPO.commitSha).briefId)).toBe(true);
+    expect(set.has(briefIdentity(SWEEP, h3, REPO.commitSha).briefId)).toBe(false);
   });
 
   test("audit signals are never cooled down — a recurring breakage is new evidence every week", () => {
     const a = hs("audit", "hop:run-cost", 2, ["qds-20261018-aaaaaa"]);
-    const p = planBriefs(SWEEP, [a], new Set([briefIdentity(SWEEP, a).briefId]));
+    const p = planBriefs(SWEEP, REPO.commitSha, [a], new Set([briefIdentity(SWEEP, a, REPO.commitSha).briefId]));
     expect(p.briefs).toHaveLength(1);
     expect(p.alreadyBriefed).toBe(0);
   });
@@ -599,6 +650,9 @@ describe("AC4 — bounded, exiting, per-brief refusals never fail the pass", () 
     const e = (exitCode: number, stderr = "x") => ({ exitCode, stdout: "", stderr });
     expect(classifySubmit(e(5))).toMatchObject({ kind: "skipped", code: "fleet-busy" });
     expect(classifySubmit(e(5, "error: submit-in-flight: intent stuck"))).toMatchObject({ kind: "skipped", code: "submit-in-flight" });
+    expect(classifySubmit(e(5, '{"error":{"code":"submit-intent-corrupt"}}'))).toMatchObject({ kind: "skipped", code: "submit-in-flight" });
+    const provisioned = { exitCode: 0, stdout: `${JSON.stringify({ schemaVersion: 1, runId: "qds-20261019-000001", requestId: "x", state: "provisioned", vmName: "vm", replayed: true })}\n`, stderr: "" };
+    expect(classifySubmit(provisioned)).toEqual({ kind: "replay", after: "submit-transient" }); // a box with no engine is never "dispatched"
     expect(classifySubmit(e(3))).toMatchObject({ kind: "skipped", code: "setup-gate" });
     expect(classifySubmit(e(2))).toMatchObject({ kind: "skipped", code: "brief-rejected" });
     expect(classifySubmit(e(1))).toEqual({ kind: "replay", after: "submit-transient" });
@@ -654,8 +708,8 @@ describe("AC4 — bounded, exiting, per-brief refusals never fail the pass", () 
   test("replay safety across re-fires: every submit carries briefRequestId(sweepId, workId), and a re-run of a zero-dispatch week reuses them", async () => {
     const stateDir = tmp();
     const hot = [hs("graph", "src/a.ts", 3)];
-    const id = briefIdentity(SWEEP, hot[0] as Hotspot);
-    expect(id.requestId).toBe(briefRequestId(SWEEP, id.workId));
+    const id = briefIdentity(SWEEP, hot[0] as Hotspot, REPO.commitSha);
+    expect(id.requestId).toBe(briefRequestId(SWEEP, id.workId, REPO.commitSha));
     const first = deps({ stateDir, graphLeg: async () => fresh(hot) });
     first.submit = async (_p, rid) => {
       first.submits.push(rid);
@@ -669,6 +723,37 @@ describe("AC4 — bounded, exiting, per-brief refusals never fail the pass", () 
     expect(r.outcome).toBe("complete"); // a zero-dispatch week may be re-run
     expect(ev("sweep-resweep")).toHaveLength(1);
     expect(second.submits).toEqual([id.requestId]);
+  });
+
+  test("a re-sweep carries the prior pass's possibly-live briefs into the record, never re-submits them, and counts them against the cap", async () => {
+    const stateDir = tmp();
+    const a = hs("graph", "src/a.ts", 9);
+    const b = hs("graph", "src/b.ts", 8);
+    const first = deps({ stateDir, maxBriefs: 1, graphLeg: async () => fresh([a, b]) });
+    first.submit = async (_p, rid) => {
+      first.submits.push(rid);
+      return { exitCode: 3, stdout: "", stderr: "setup gate refused" }; // a live box under INV-5
+    };
+    await runSweep(first);
+    lines = [];
+    const second = deps({ stateDir, maxBriefs: 2, graphLeg: async () => fresh([a, b]) });
+    await runSweep(second);
+    const idA = briefIdentity(SWEEP, a, REPO.commitSha);
+    const idB = briefIdentity(SWEEP, b, REPO.commitSha);
+    expect(second.submits).toEqual([idB.requestId]); // A is held; the cap (2) minus the held one leaves 1
+    const briefs = readSweepReport(stateDir, SWEEP)?.report.briefs ?? [];
+    expect(briefs.map((x) => [x.briefId, x.event, x.code])).toEqual([
+      [idB.briefId, "brief-dispatched", undefined],
+      [idA.briefId, "brief-skipped", "setup-gate"],
+    ]);
+    expect(recentlyBriefed(stateDir, "sweep-2026-10-26").has(idA.briefId)).toBe(true); // the cooldown still knows A may be live
+  });
+
+  test("dispatched briefs join the A1 digest: sweepRunMeta maps runId → botId + w: workKey", async () => {
+    const stateDir = tmp();
+    await runSweep(deps({ stateDir, graphLeg: async () => fresh([hs("graph", "src/a.ts", 3)]) }));
+    const meta = sweepRunMeta(stateDir);
+    expect(meta.get("qds-20261019-000001")).toEqual({ botId: "bot-maint", workKey: briefIdentity(SWEEP, hs("graph", "src/a.ts", 3), REPO.commitSha).workKey });
   });
 
   test("NEGATIVE CONTROL: an empty sweep (zero hotspots) completes with briefs_planned 0 — a quiet tick is not a failure", async () => {
@@ -747,13 +832,13 @@ describe("the report handoff — durable, correlated, delivered once", () => {
     expect((await runSweep(d)).outcome).toBe("already-swept");
   });
 
-  test("residue: pending past the next wake + grace is named; a delivered report never is; ancient residue ages out", () => {
+  test("residue: pending past the next wake + grace is named; a delivered report never is; residue never ages out", () => {
     const stateDir = tmp();
     persistSweepReport(stateDir, report(SWEEP, NOW.toISOString(), []));
     persistSweepReport(stateDir, report("sweep-2026-10-12", new Date(NOW.getTime() - 7 * DAY).toISOString(), [], "delivered"));
     expect(undeliveredReports(stateDir, new Date(NOW.getTime() + 7 * DAY))).toEqual([]); // the next wake may not have fired yet
     expect(undeliveredReports(stateDir, new Date(NOW.getTime() + REPORT_RESIDUE_AFTER_MS))).toEqual([SWEEP]);
-    expect(undeliveredReports(stateDir, new Date(NOW.getTime() + REPORT_RESIDUE_HORIZON_MS + 1))).toEqual([]);
+    expect(undeliveredReports(stateDir, new Date(NOW.getTime() + 365 * DAY))).toEqual([SWEEP]); // never ages out — never silence
   });
 
   test("residue surfaces on the next pass as a coded error line", async () => {
@@ -771,6 +856,7 @@ describe("the report handoff — durable, correlated, delivered once", () => {
     const r = await runSweep(deps({ stateDir }));
     expect(r.outcome).toBe("complete");
     expect(ev("sweep-reports-unreadable")[0]?.error).toMatchObject({ code: "reports-unreadable" });
+    expect(undeliveredReportsWithProblems(stateDir, NOW).problem).toContain("failed validation");
   });
 
   test("a report-persist failure is recorded and non-silent, and never unwinds the dispatched briefs", async () => {
@@ -848,7 +934,7 @@ describe("AC2 — durable wake (spec-seam), owned pass transport, legitimate ini
     expect(fakes.turns).toHaveLength(1);
   });
 
-  test("the pass owns its transport: the A3 crontab entry fires the script; DF3.8's observe line closes the chain", () => {
+  test("the pass owns its transport: the A3 crontab entry fires the script; DF3.8's observe sweep stays an operator prerequisite", () => {
     const crontab = readFileSync(join(REPO_ROOT, "deploy", "vps", "crontab.factory"), "utf8");
     const entries = crontab.split("\n").filter((l) => l.trim() !== "" && !l.trim().startsWith("#") && !l.startsWith("SHELL="));
     const sweep = entries.filter((l) => l.includes("scripts/maintenance-sweep.ts"));
@@ -856,10 +942,11 @@ describe("AC2 — durable wake (spec-seam), owned pass transport, legitimate ini
     expect(sweep[0]).toMatch(/^17 3 \* \* 1 cd \/opt\/qds-factory && PATH="\$HOME\/\.bun\/bin:[^"]*" bun scripts\/maintenance-sweep\.ts >> \/var\/log\/qds\/maintenance-sweep\.log 2>&1$/);
     const header = readFileSync(join(REPO_ROOT, "scripts", "maintenance-sweep.ts"), "utf8").split("\n").map((l) => l.replace(/^\/\/\s+/, ""));
     expect(header).toContain(sweep[0] ?? "<no sweep entry>");
-    // DF3.8's observe sweep at its own derived interval — what parks every submitted run.
-    const observe = entries.filter((l) => l.includes("observe --all"));
-    expect(observe).toHaveLength(1);
-    expect(observe[0]).toMatch(new RegExp(`^\\*/${SWEEP_INTERVAL_MINUTES} \\* \\* \\* \\* cd /opt/qds-factory && PATH="[^"]*" bun scripts/fleet\\.ts observe --all --driver exedev >> /var/log/qds/observe-sweep\\.log 2>&1$`));
+    // DF3.8's observe sweep is the OPERATOR's cron (INV-IBOX-19: documented,
+    // never installed) — named as a prerequisite, never shipped as an entry.
+    expect(entries.filter((l) => l.includes("observe"))).toEqual([]);
+    expect(crontab).toContain("fleet observe --all");
+    expect(crontab).toContain(".factory/");
   });
 });
 
@@ -958,6 +1045,19 @@ process.exit(2);
     60_000,
   );
 
+  test(
+    "split-brain guard: a graph-home override that is not this checkout's index is graph-unavailable unless the binary is pinned too",
+    async () => {
+      const { home } = freshGraphHome(["| src/lib/x.ts | 2 |"]);
+      const { code, events } = await run(["--config", configPath], { QDS_GITNEXUS_HOME: home });
+      expect(code).toBe(0);
+      const skip = events.find((e) => e.event === "sweep-leg-skipped") as { code?: string; error?: { message?: string } } | undefined;
+      expect(skip?.code).toBe("graph-unavailable");
+      expect(skip?.error?.message).toContain("not this checkout's index");
+    },
+    60_000,
+  );
+
   test.skipIf(!HAS_FLOCK)(
     "a fresh graph briefs and submits through the real binary; --max-briefs 1 is honored (one submit of two candidates)",
     async () => {
@@ -1030,6 +1130,11 @@ process.exit(2);
       expect(outside.code).toBe(2);
       expect(outside.stderr).toContain("state-dir-outside-repo");
       expect(existsSync(join(work, "outside-state"))).toBe(false); // refused BEFORE any write
+      for (const bad of [".", ".git", ".git/maint"]) {
+        const r = await run(["--config", configPath], { QDS_SWEEP_STATE_DIR: bad });
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("state-dir-outside-repo");
+      }
       const elsewhere = await run(["--config", configPath], {}, work);
       expect(elsewhere.code).toBe(3);
       expect(elsewhere.stderr).toContain("not-repo-root");
@@ -1040,7 +1145,7 @@ process.exit(2);
 
 describe("A1 digest — the second channel reads A3's residue (real binary)", () => {
   test(
-    "manager-digest emits a sweep-report-undelivered escalation for an aged pending report",
+    "manager-digest emits a sweep-report-undelivered escalation for an aged pending report, and a sweep run's line carries the Maintenance botId (DD-20)",
     async () => {
       const work = tmp("a3-digest-");
       const stateDir = join(work, "state");
@@ -1057,8 +1162,16 @@ describe("A1 digest — the second channel reads A3's residue (real binary)", ()
           ],
         }),
       );
+      // A dispatched brief in an older report: its run's digest line must carry the bot.
+      const dispatchedReport = report("sweep-2026-10-12", new Date(Date.now() - 2 * DAY).toISOString(), [
+        { event: "brief-dispatched", briefId: "refactor-0000abcd", workKey: "w:maint/2026-10-12/refactor-0000abcd", botId: "bot-maint", source: "graph", target: "src/lib/x.ts", kind: "refactor", runId: "qds-20261012-0000aa" },
+      ]);
+      persistSweepReport(stateDir, dispatchedReport);
       const entry = join(work, "fake-fleet.mjs");
-      writeFileSync(entry, "process.exit(0);\n");
+      writeFileSync(
+        entry,
+        `if (process.argv[2] === "status") console.log(JSON.stringify({ runId: "qds-20261012-0000aa", state: "closed", createdAt: ${JSON.stringify(new Date().toISOString())} }));\nprocess.exit(0);\n`,
+      );
       const proc = Bun.spawn(["bun", join(REPO_ROOT, "scripts", "manager-digest.ts"), "--config", configPath], {
         cwd: REPO_ROOT,
         env: { ...process.env, QDS_LOG_VERBOSE: "1", QDS_RUNS_DIR: join(work, "runs"), QDS_MANAGER_FLEET_ENTRY: entry, QDS_SWEEP_STATE_DIR: stateDir, QDS_COST_LEDGER_FILE: join(work, "none.db") },
@@ -1069,6 +1182,11 @@ describe("A1 digest — the second channel reads A3's residue (real binary)", ()
       expect(code).toBe(0);
       expect(stdout).toContain('"kind":"sweep-report-undelivered"');
       expect(stdout).toContain('"sweepId":"sweep-2026-10-05"');
+      const run = stdout
+        .split("\n")
+        .filter((l) => l.includes('"event":"digest-run"'))
+        .map((l) => JSON.parse(l) as Record<string, unknown>)[0];
+      expect(run).toMatchObject({ runId: "qds-20261012-0000aa", botId: "bot-maint", workKey: "w:maint/2026-10-12/refactor-0000abcd" });
     },
     60_000,
   );

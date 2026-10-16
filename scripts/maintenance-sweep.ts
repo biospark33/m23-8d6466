@@ -15,8 +15,9 @@
 //   17 3 * * 1 cd /opt/qds-factory && PATH="$HOME/.bun/bin:/usr/local/bin:$HOME/.local/bin:$PATH" bun scripts/maintenance-sweep.ts >> /var/log/qds/maintenance-sweep.log 2>&1
 /**
  * Runs reach the approve gate through DF3.7's chain, driven by DF3.8's
- * `fleet observe --all` sweep — its cron line sits beside this one in
- * deploy/vps/crontab.factory. This pass submits and leaves; it is never a
+ * `fleet observe --all` sweep — the OPERATOR's own cron (DF3.8 INV-IBOX-19:
+ * documented, never installed; listed as a prerequisite in
+ * deploy/vps/crontab.factory). This pass submits and leaves; it is never a
  * second chain and never an approver.
  *
  * Exit contract:
@@ -61,7 +62,7 @@
 import { Database } from "bun:sqlite";
 import type { ChildProcess } from "node:child_process";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { chainVerdict, walkAuditChain } from "../src/audit/chain.ts";
@@ -119,6 +120,20 @@ function resolveGitnexusBin(): string | undefined {
 const graphHome = (): string =>
   process.env.QDS_GITNEXUS_HOME ? resolve(process.env.QDS_GITNEXUS_HOME) : join(REPO_ROOT, ".gitnexus");
 
+/** Set by the parent on the flock-wrapped child only: `--graph-leg` without it is refused (never an unlocked read). */
+const GRAPH_LEG_MARKER = "QDS_SWEEP_GRAPH_LEG_CHILD";
+
+/**
+ * origin → repo slug, or undefined. Accepted: git@github.com:o/r,
+ * ssh://git@github.com/o/r, https://github.com/o/r — optional `.git` and
+ * trailing slash. A remote carrying credentials is NOT accepted (the brief's
+ * repoUrl must never carry one).
+ */
+export function parseGithubRemote(remote: string): string | undefined {
+  const m = remote.match(/^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?\/?$/);
+  return m?.[1];
+}
+
 /**
  * Parse the staleness reader's one-line verdict (scripts/gitnexus-staleness.ts
  * contract). Lives HERE, not in src/maintenance: A6's AC6 boundary keeps the
@@ -154,6 +169,9 @@ export function cypherJson(stdout: string): { markdown: string } | { error: stri
 
 function graphLegChild(): never {
   let leg: GraphLeg;
+  if (process.env[GRAPH_LEG_MARKER] !== "1") {
+    die(EXIT.configRefused, "usage", "--graph-leg is internal", "the sweep runs it under `flock -s -n`; never invoke it by hand (that would read the graph without the refresh lock)");
+  }
   try {
     const stale = spawnSync(process.execPath, [join(import.meta.dir, "gitnexus-staleness.ts")], {
       encoding: "utf8",
@@ -188,6 +206,9 @@ export function snapshotAuditDb(source: string, into: string): string | undefine
   const target = join(into, "audit-snapshot.db");
   const db = new Database(source, { readonly: true });
   try {
+    // An emitter may hold the write lock (DELETE journal) for a moment: wait,
+    // do not fail every walk on an instant SQLITE_BUSY.
+    db.run("PRAGMA busy_timeout = 5000");
     db.run(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
   } finally {
     db.close();
@@ -255,13 +276,21 @@ async function main(): Promise<void> {
   // ─── the state dir must sit under the repo root (checked BEFORE any write) ─
 
   const stateDir = resolve(rootReal, process.env.QDS_SWEEP_STATE_DIR ?? DEFAULT_SWEEP_STATE_DIR);
-  const inside = (p: string) => p === rootReal || p.startsWith(`${rootReal}${sep}`);
-  if (!inside(stateDir)) {
-    die(EXIT.configRefused, "state-dir-outside-repo", `state dir ${stateDir} is outside the repo root ${rootReal}`, "dispatch resolves each brief's manifestPath against the repo root — point QDS_SWEEP_STATE_DIR beneath it");
+  const gitDir = join(rootReal, ".git");
+  const strictlyInside = (p: string) => p.startsWith(`${rootReal}${sep}`) && p !== gitDir && !p.startsWith(`${gitDir}${sep}`);
+  if (!strictlyInside(stateDir)) {
+    die(EXIT.configRefused, "state-dir-outside-repo", `state dir ${stateDir} is not a directory strictly beneath the repo root ${rootReal} (and outside .git)`, "dispatch resolves each brief's manifestPath against the repo root — point QDS_SWEEP_STATE_DIR beneath it");
   }
   try {
+    // The nearest EXISTING ancestor is realpath-checked BEFORE mkdir, so a
+    // symlinked path component cannot make mkdir create directories outside
+    // the repo.
+    let probe = stateDir;
+    while (!existsSync(probe)) probe = resolve(probe, "..");
+    const real = realpathSync(probe);
+    if (real !== rootReal && !strictlyInside(real)) throw new Error(`state dir ${stateDir} resolves outside the repo root through a symlink (${real})`);
     mkdirSync(stateDir, { recursive: true });
-    if (!inside(realpathSync(stateDir))) throw new Error(`state dir ${stateDir} resolves outside the repo root through a symlink`);
+    if (!strictlyInside(realpathSync(stateDir))) throw new Error(`state dir ${stateDir} resolves outside the repo root through a symlink`);
   } catch (e) {
     die(EXIT.configRefused, "state-dir-unusable", String((e as Error)?.message ?? e), "point QDS_SWEEP_STATE_DIR at a writable directory beneath the repo root");
   }
@@ -278,15 +307,15 @@ async function main(): Promise<void> {
   try {
     const commitSha = git(["rev-parse", "HEAD"]);
     const remote = git(["remote", "get-url", "origin"]);
-    // git@github.com:o/r, ssh://git@github.com/o/r, https://github.com/o/r — each
-    // with an optional .git and trailing slash. A remote carrying credentials is
-    // refused rather than normalized (the brief's repoUrl must never carry one).
-    const m = remote.match(/^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?\/?$/);
-    if (m === null || m[1] === undefined) throw new Error(`origin ${remote.replace(/\/\/[^@/]+@/, "//***@")} is not a credential-free github.com remote`);
-    if (process.env.QDS_SWEEP_ALLOW_UNPUSHED !== "1" && git(["branch", "-r", "--contains", commitSha]) === "") {
-      throw new Error(`HEAD ${commitSha} is on no remote branch — a box could not clone it`);
+    const slug = parseGithubRemote(remote);
+    if (slug === undefined) throw new Error(`origin ${remote.replace(/\/\/[^@/]+@/, "//***@")} is not a credential-free github.com remote`);
+    if (process.env.QDS_SWEEP_ALLOW_UNPUSHED !== "1") {
+      // Fresh remote-tracking refs first: a stale ref would pass a commit the
+      // remote no longer has, and every brief would burn a provision.
+      git(["fetch", "--quiet", "--prune", "origin"]);
+      if (git(["branch", "-r", "--contains", commitSha]) === "") throw new Error(`HEAD ${commitSha} is on no remote branch — a box could not clone it`);
     }
-    repo = { repoSlug: m[1], repoUrl: `https://github.com/${m[1]}`, commitSha };
+    repo = { repoSlug: slug, repoUrl: `https://github.com/${slug}`, commitSha };
   } catch (e) {
     die(EXIT.preflight, "repo-identity", String((e as Error)?.message ?? e), "deploy a pushed commit of a github.com checkout (git fetch; git status)");
   }
@@ -302,6 +331,13 @@ async function main(): Promise<void> {
     // No graph home = no stamp: the reader's own `absent` verdict, without
     // creating the consumer-side directory a refresh owns.
     if (!existsSync(home)) return { status: "graph-stale", graphAgeMs: null, verdict: "absent", stampPath: join(home, "cli-version.json") };
+    // Split-brain guard (A6's own rule): the cypher read always queries THIS
+    // checkout's index, so a graph-home override that is not that index would
+    // gate and lock one graph and read another. Only a test that also pins
+    // the gitnexus binary (QDS_GITNEXUS_BIN) may point the home elsewhere.
+    if (home !== join(rootReal, ".gitnexus") && home !== join(REPO_ROOT, ".gitnexus") && process.env.QDS_GITNEXUS_BIN === undefined) {
+      return { status: "graph-unavailable", message: `QDS_GITNEXUS_HOME ${home} is not this checkout's index — the staleness gate and the query would read different graphs` };
+    }
     const flock = Bun.which("flock");
     if (flock === null) return { status: "graph-unavailable", message: "flock not found on PATH — the shared refresh lock cannot be taken (AC3b)" };
     // DETACHED: its own process group, so the timeout's killTree reaches the
@@ -311,7 +347,7 @@ async function main(): Promise<void> {
       cwd: rootReal,
       stdout: "pipe",
       stderr: "pipe",
-      env: process.env,
+      env: { ...process.env, [GRAPH_LEG_MARKER]: "1" },
       detached: true,
     });
     const timer = setTimeout(() => killTree(proc as unknown as ChildProcess), GRAPH_LEG_TIMEOUT_MS);
@@ -394,8 +430,10 @@ async function main(): Promise<void> {
               const dir = join(stateDir, "briefs", b.workId.split("/")[1] ?? "unknown", b.briefId);
               mkdirSync(dir, { recursive: true });
               writeFileSync(join(dir, "pipeline.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-              // The setup gate reads the ACTIVE roster beside the manifest (dispatch.ts).
-              copyFileSync(join(rootReal, SOURCE_ROSTER), join(dir, "roster.yaml"));
+              // The setup gate reads the ACTIVE roster beside the manifest (dispatch.ts),
+              // written from the PINNED commit — the bytes the box will run, never a
+              // working-tree edit.
+              writeFileSync(join(dir, "roster.yaml"), `${git(["show", `${repo.commitSha}:${SOURCE_ROSTER}`])}\n`);
               const rel = relative(rootReal, join(dir, "pipeline.json"));
               if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`brief dir ${dir} is outside the repo root`);
               return { briefPath: join(dir, "brief.json"), manifestPath: rel.split(sep).join("/") };
