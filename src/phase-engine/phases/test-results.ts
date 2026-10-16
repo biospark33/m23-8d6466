@@ -85,9 +85,14 @@ export async function runTestCommand(
     // command string comes from the manifest, not from untrusted input — but
     // INV-1 discipline says secrets propagate only to their consumer.
     //
-    // ponytail: Bun.spawn has no detached/process-group option, so the abort
-    // path below signals the LEAD pid only; a descendant that outlives its
-    // leader is bounded by its own runtime. node:child_process (which does
+    // ponytail: this spawn is NOT detached, so the abort path below signals
+    // the LEAD pid only; a descendant that outlives its leader is bounded by
+    // its own runtime. (bun-types 1.4.3 declares a `detached` process-group
+    // option and src/managers/digest-composer.ts pairs it with killTree, so
+    // this note's original "Bun.spawn has no such option" is stale; this
+    // module stays lead-only because that is all it ever promised, and the
+    // node:child_process freeze observed on bun 1.2.22 was never re-tested
+    // against the group shape.) node:child_process (which does
     // support groups) is not usable under Bun here: with a prior live child,
     // the next spawn freezes and kill(2) does not land — observed on bun
     // 1.2.22. Revisit when the runtime grows group support.
@@ -146,8 +151,8 @@ export async function runTestCommand(
         // SIGTERM (or sits in uninterruptible sleep) must not hang the abort
         // path — the exact case aborts exist to recover from.
         //
-        // NOTE: Bun.spawn has no process-group API; we signal only the lead pid.
-        // A backgrounded grandchild may outlive SIGTERM and hold the pipe open,
+        // NOTE: the spawn above is not detached, so we signal only the lead
+        // pid. A backgrounded grandchild may outlive SIGTERM and hold the pipe open,
         // but the drain timeout (in readBounded) bounds the drain wait so we never
         // hang forever.
         try {

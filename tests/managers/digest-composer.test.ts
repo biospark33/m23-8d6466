@@ -1089,6 +1089,49 @@ describe("boundedness", () => {
     }
   });
 
+  test("the production invoker sweeps a GRANDCHILD holding stdout open — no tree leak past the timeout", async () => {
+    // `sleep`'s duration doubles as the run-unique marker (kill-tree.test.ts's
+    // shape), so a leaked sleeper from an earlier run can never be mistaken
+    // for this run's survivor.
+    const marker = `3000.${process.pid}${Math.floor(Math.random() * 1e6)}`;
+    const script = join(tmpdir(), `qds-digest-grandchild-${process.pid}.ts`);
+    await Bun.write(
+      script,
+      [
+        'import { spawn } from "node:child_process";',
+        // The grandchild shares the leader's PIPED stdout: past the timeout it
+        // is exactly what a lead-only kill would leave holding the pipe open.
+        `spawn("sh", ["-c", "sleep ${marker}"], { stdio: ["ignore", "inherit", "inherit"] });`,
+        "await new Promise(() => {});", // the wedged leader never exits on its own
+      ].join("\n"),
+    );
+    const alive = (): number =>
+      Bun.spawnSync(["pgrep", "-f", marker]).stdout.toString().trim().split("\n").filter(Boolean).length;
+    try {
+      const invoker = fleetCliInvoker({ entry: script, timeoutMs: 60 });
+      const pending = invoker(["status"]);
+      // Non-vacuous: the grandchild really started (and holds the pipe) while
+      // the leader is still wedged.
+      const deadline = Date.now() + 5_000;
+      while (alive() === 0) {
+        if (Date.now() > deadline) throw new Error("grandchild never started");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await expect(pending).rejects.toBeInstanceOf(FleetVerbTimeoutError);
+      // The group sweep is synchronous from the killer's side; give the
+      // signal a beat to land (kill-tree.test.ts's settle discipline).
+      await new Promise((r) => setTimeout(r, 300));
+      expect(alive()).toBe(0);
+    } finally {
+      Bun.spawnSync(["pkill", "-f", marker]);
+      try {
+        unlinkSync(script);
+      } catch {
+        // best-effort cleanup of a tmp fixture
+      }
+    }
+  });
+
   test("the production invoker propagates a happy child's exit code, stdout, and stderr faithfully", async () => {
     const script = join(tmpdir(), `qds-digest-happy-${process.pid}.ts`);
     await Bun.write(script, 'console.log("out-line");\nconsole.error("err-line");\n');

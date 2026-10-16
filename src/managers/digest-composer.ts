@@ -73,20 +73,73 @@ export class FleetVerbTimeoutError extends Error {
 }
 
 /**
+ * The detached children currently in flight across every invoker this
+ * process has built: one process-global set so the signal handlers below
+ * sweep them all. A child leaves the set the moment its invocation settles
+ * (resolved, rejected, or timed out) — only a mid-flight child is ever in it.
+ */
+const inFlightChildren = new Set<ChildProcess>();
+
+/**
+ * Detached children sit outside the terminal's foreground group, so Ctrl-C
+ * no longer reaches them — without compensation, an interrupted poll would
+ * orphan the in-flight `bun` and whatever it spawned (F023 round-1 lesson,
+ * `scripts/lib/mcp-stdio-client.ts`'s handlers, module-level here because
+ * signals are process-global and this module has no close() seam). Wired
+ * once per process; each handler drops the wiring FIRST and re-raises under
+ * the default disposition — bun re-invokes an installed handler on a
+ * self-raised signal (verified against 1.4.3), so the re-raise must land on
+ * no handler to actually end the process.
+ */
+const wiredSignals: Array<[NodeJS.Signals, () => void]> = [];
+
+function wireChildSignals(): void {
+  if (wiredSignals.length > 0) return;
+  const onSignal = (sig: NodeJS.Signals): void => {
+    for (const [s, fn] of wiredSignals) process.removeListener(s, fn);
+    wiredSignals.length = 0;
+    for (const child of inFlightChildren) killTree(child, "SIGKILL");
+    inFlightChildren.clear();
+    try {
+      process.kill(process.pid, sig); // re-raise: SIGINT stays SIGINT
+    } catch {
+      process.exit(1);
+    }
+  };
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    const fn = () => onSignal(sig);
+    wiredSignals.push([sig, fn]);
+    process.on(sig, fn);
+  }
+}
+
+/**
  * The production invoker: one `bun` child per verb, the token-free Bun.spawn
  * idiom (`src/fixloop/ci-status.ts`'s ghRunner shape) — secrets ride the
  * child environment, never argv, and this poll holds none at all. The child
- * races a kill timer: past the budget the child is killed and the in-flight
- * promise REJECTS with `FleetVerbTimeoutError`, so a wedged CLI leaks neither
- * a process nor a hanging invoker.
+ * is spawned DETACHED — its own process group — so the kill below is
+ * killTree's `-pid` group sweep, which takes a wedged child's DESCENDANTS
+ * with it instead of orphaning a grandchild that still holds the stdout
+ * pipe (the same F024/F023 shape `scripts/lib/mcp-stdio-client.ts` ships).
+ * Detaching costs terminal SIGINT delivery, which `wireChildSignals` gives
+ * back. The child races a kill timer: past the budget the child is killed
+ * and the in-flight promise REJECTS with `FleetVerbTimeoutError`, so a
+ * wedged CLI leaks neither a process tree nor a hanging invoker.
  */
 export function fleetCliInvoker(opts?: { entry?: string; timeoutMs?: number }): CliInvoker {
   const budgetMs = opts?.timeoutMs ?? VERB_TIMEOUT_MS;
+  wireChildSignals();
   return async (argv) => {
     const proc = Bun.spawn(["bun", opts?.entry ?? "scripts/fleet.ts", ...argv], {
       stdout: "pipe",
       stderr: "pipe",
+      // Own process group, so killTree's `-pid` sweep reaches the child's
+      // descendants. Detaching costs terminal SIGINT delivery, which is what
+      // the handlers above give back (F023 round-1 lesson).
+      detached: true,
     });
+    const child = proc as unknown as ChildProcess;
+    inFlightChildren.add(child);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await new Promise<CliResult>((resolve, reject) => {
@@ -94,7 +147,7 @@ export function fleetCliInvoker(opts?: { entry?: string; timeoutMs?: number }): 
           // The house tree-kill primitive (F024) — best-effort, never throws.
           // The process is already being rejected below, so the kill's outcome
           // cannot hold the promise hostage.
-          killTree(proc as unknown as ChildProcess);
+          killTree(child);
           reject(new FleetVerbTimeoutError(`fleet ${argv[0]}`, budgetMs));
         }, budgetMs);
         void Promise.all([
@@ -108,6 +161,7 @@ export function fleetCliInvoker(opts?: { entry?: string; timeoutMs?: number }): 
       });
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      inFlightChildren.delete(child);
     }
   };
 }
