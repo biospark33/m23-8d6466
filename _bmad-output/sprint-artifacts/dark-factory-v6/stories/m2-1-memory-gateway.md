@@ -2,6 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6a (M-arc, story 4 of 4 — the authz layer that makes the dedicated KG safe to approach; wave-1 dev, acceptance pinned on M1.1)
+**Status:** done — PR #414 merged to dev 2026-10-08 (merge da2195d9, head 98e056ec).
 
 > **Dependency edge, pinned explicitly (R5-F1, register-ratified):** the charter's dep "M1.1" holds for **integration acceptance only** — this story is unit/mock tier and its dev starts in Wave 1 against fixtures, before the VPS lands. Nothing here waits on the box; the live-instance conformance leg is M2.3's combined round.
 

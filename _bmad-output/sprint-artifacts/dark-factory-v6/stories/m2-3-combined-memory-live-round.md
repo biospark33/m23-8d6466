@@ -2,6 +2,7 @@
 
 **Story Points:** 2
 **Sprint:** v6b (Autonomy — memory lane, lane story 3 of 3: M2.1 → M2.2 → M2.3, M2.1 itself shipping in v6a; the lane's exit round — the second lane completes here without E21)
+**Status:** done — PR #418 merged to dev 2026-10-09 (merge 3c1509a3, head 32ca3faf). Live-fire ACs stay open until the operator-gated T2 round fires (`_bmad-output/reviews/m2-3-t2-handoff.md`).
 
 ## Spec Reference
 

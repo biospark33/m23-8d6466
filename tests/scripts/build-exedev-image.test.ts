@@ -2105,6 +2105,15 @@ describe("buildIdFileInputs", () => {
       // IMAGE RE-PUBLISH stays ops-gated (wave-0 ritual: J3 + J4 + A2 + the
       // M2.2 surface, DD-28.26(4)); only the pin adopts here.
       //
+      // 137ba91: moved from 8af25a0 by G1's review round 4 (2e333746), which
+      // landed after the round-3 adoption without re-pinning — origin/dev
+      // 20e3a452 shipped red on this test. TWO walked inputs:
+      // `src/fleet/run-completion.ts` (atomic policy-mint guard + fault
+      // isolation around the ADR-2 consult) and `src/providers/run-record.ts`
+      // (the guard's record helper). Bisected: the pin holds on 429991a5 and
+      // fails only after 2e333746. Image re-publish rides the ops-gated wave-0
+      // ritual with J3/J4/G1.
+      //
       // 8af25a0: moved by G1's review rounds (the consult region grew across
       // three bmad-code-review rounds; standing per-story ritual — re-derive
       // at the branch gate, adopt with provenance, image re-publish stays

@@ -6,25 +6,19 @@
 # plus the most recent note only. Append new notes here; drain them there.
 #
 # --- Most recent note ---
-# 2026-09-18 (post-merge reconciliation — git history as authority; three slate rows were stale):
-# DF3.7 DONE — PR #257 merged 2026-09-16 (c30b7072); issue #245 closed with it (DF2.11's D6
-# production wiring — recordApprovalPort closure carries the chain-held RunLockHandle, gated
-# production-closure test; already recorded in DF2.11's deferred-section update 2026-09-15).
-# DF5.3 DONE — PR #258 merged 2026-09-17 (4603d1a3) after 3 adversarial review rounds; the
-# operator-deferred live e2e demo RAN pre-merge 2026-09-17 (operator-confirmed; evidence
-# _bmad-output/evidence/df5-3/, committed in the same change as this reconciliation).
-# DF3.6a DONE — PR #263 merged 2026-09-18 (b85b15db) after review r1 (40 findings: 23 source +
-# 17 test patched, 5 deferred, 10 dismissed) + r2 (3 CodeRabbit findings: createBoundsGuard
-# refusals — incl. zero bundled rates — now settle not-ok with a terminal marker, the stale
-# onBoundBreach known-limitation retired, releaseAdmission's headroom claim corrected). The two
-# DF3.6a-routed DF2.8 follow-ups (releaseAdmission + gate_admission_releases) shipped in-round;
-# DF2.8's owned list now holds only the residentSpendCeilingMicros config key. DF3.6b is IN DEV
-# (second operator). STALENESS FIXED IN THIS COMMIT, corrected against git history rather than
-# story prose: DF3.7 read ready-for-dev (merged 2026-09-16), DF5.3 read in-progress (merged
-# 2026-09-17), DF3.6a read in-review (merged 2026-09-18); the three story md files carried no
-# merge-record Status lines — added. The 2026-09-13 and 2026-09-03 notes this replaces were
-# drained to sprint-status-history.md (the 2026-09-03 note had sat undrained past two newer
-# history entries; inserted at its chronological position, marked).
+# 2026-10-15 (post-merge reconciliation — git history + `gh pr view` as authority):
+# v6 state: 18 of 24 rows done (Z1 Z2 Z4 Z5 · M1.1 M1.2 M1.3 M2.1 M2.2 M2.3 M3.1 M3.2 · A5 A6 ·
+# J1 J3 J4 · G1 — PR #430, 20e3a452, ADR-2 ACCEPTED; its note is in sprint-status-history.md).
+# Not done: M1.4 draft (atomicity audit owed); Z3, A1, A2, A3, J2 gated (E21 S02b/S03b external;
+# J2 on corpus milestones + operator sign-off). No v6 row is open to an unattended dev lane today.
+# STALENESS FIXED IN THIS COMMIT: the J3 row read "PR to dev at closure" (PR #427 merged
+# 2026-10-14, 5b03a7b7); the Z5 row read "PR to dev" (PR #426 merged 2026-10-14, 77b9339f). Story
+# md headers: M1.2/M1.3/M2.1/M2.2/M2.3 carried no Status line (added with PR + merge commit, each
+# verified via gh); M3.1 still read GATED-WITH-FALLBACK (merged PR #422 2026-10-10, 7c777bc9);
+# Z5/J3 headers repointed to their merge PRs. Operator-gated legs still open: image re-pin
+# ritual (blocks all T2 — J3+J4 pin moves now on the tree), M1.2 AC7 / M2.3 live-fire T2 rounds,
+# A6 AC7 + Z4 AC8 fired halves, issue #408 (M1.1 VPS-day remainder). The 2026-09-18 note this
+# replaces was drained to sprint-status-history.md.
 #
 
 meta:
@@ -339,7 +333,7 @@ epics:
       Z2: { title: "BUILD-IN-FORK: factory_observe step kind + triggers + notify leg", points: 5, status: done, deps: [Z1] }  # v6a — fake-CLI journal; fork worktree work + 1 factory test file; normalizeStep carry + round-trip per new field; durable triggers = schedule/watch-job repositories (NOT enqueueSystemEvent — in-memory, DD-25). DONE 2026-10-03: counterpart swarmclaw PR #703 merged (fork dev); factory PR #405 merged to dev 2026-10-03 (34d24a29) — fork-observe-consumer harness + tests, and the branch-gate script hardened (bun exit-status fail-closed guard, vendor exemption narrowed to the self-compact cluster, retry-loop trailing-colon bug fixed — the loop never rescued a flake before it); http TEST-NET budget tests de-flaked onto a local hang server so their exemption was removable; 2 CodeRabbit rounds (3 findings + 1 nitpick: 3 fixed, 1 pushback w/ measured evidence then root-cause fixed) — story closed.
       Z3: { title: "Cross-repo live exit round (the v6 SC2.7 analog)", points: 3, status: gated, deps: [A2, Z2, M2.1] }  # v6b — GATED on A2 (→E21) + Z2 + M2.1; live T2 cross-repo; exactly-one-box; approval park + human decide; memory legs via M2.1 agent tokens
       Z4: { title: "Factory VPS deploy profile (dedicated Hindsight 0.10.0 + M2 gateway + fleet CLI wrapper)", points: 3, status: done, deps: [] }  # v6a — authored ACs dep-free; FIRED ACs gate on operator VPS-day (runbook G1–G7; zero agent spend); compose adds factory services (template has none); wrapper owns --driver exedev. DONE 2026-10-04 (authored half): 8 files +2448/−0 — compose (fork index-digest pin verbatim, sole publish 127.0.0.1:18890:8888, m2-gateway slot awaiting-image-honest + least-privilege), Caddy allowlist fragment (default-404 tail, sequencing warning), fleet-wrapper (sole --driver exedev holder, 10/6 table drift-alarmed vs listVerbs, builtins-only $0 resolution, stdin passthrough), 2 secret-free env templates (DD-28.22 origin split), 89 contract tests (every AC negative fixture-refused by name incl. run()-real-CLI acceptance legs), runbook adds-only annotation (dedicated-origin rule, §6.4/§7 traps, G5 disambiguation, 2 UNOWNED ops-register rows). 3 bmad-code-review rounds (147 raw → 74 patches, all fixed incl. LOWs; triage + reports in _bmad-output/reviews/z4-round{1,2,3}/). unlazy scope z4 ALL MET 20/20. PR #406 merged to dev 2026-10-04 (14705e6a). Fired leg (AC8) remains operator-owned on VPS day.
-      Z5: { title: "Chassis fate (utilities → src/lib; server surface dormant-retained)", points: 2, status: done, deps: [] }  # v6a — DONE 2026-10-14: PR to dev after 2 bmad-code-review rounds (26+15 findings, all fixed or deferred); the "no re-pin owed" premise was EMPIRICALLY WRONG — 21 walked COPY inputs moved + walk composition changed, buildId re-pinned 4× per the same-commit ritual (provenance in tests/scripts/build-exedev-image.test.ts); guard ships 4 rules incl. AC4 clause (a); DD-18
+      Z5: { title: "Chassis fate (utilities → src/lib; server surface dormant-retained)", points: 2, status: done, deps: [] }  # v6a — DONE 2026-10-14: PR #426 merged to dev (merge 77b9339f, head 3f66ab58) after 2 bmad-code-review rounds (26+15 findings, all fixed or deferred); the "no re-pin owed" premise was EMPIRICALLY WRONG — 21 walked COPY inputs moved + walk composition changed, buildId re-pinned 4× per the same-commit ritual (provenance in tests/scripts/build-exedev-image.test.ts); guard ships 4 rules incl. AC4 clause (a); DD-18
   v6-m:
     name: Memory ladder
     status: ready-for-dev
@@ -374,7 +368,7 @@ epics:
     stories:
       J1: { title: "JudgmentProvider seam (jev/mock registered adapters + neutral-layer policy + contract tests)", points: 3, status: done, deps: [] }  # v6a — done 2026-10-13: PR #421 merged to dev (merge adf66aed, head b3579205) — 3 three-layer review rounds pre-PR (approved on all layers round 3) + CodeRabbit round (story pre-existing-failure count 34→39 reconciled to the PR verification round; never-throw bodySnippet at the seam's schema-refusal path + errors.test.ts; tests/judgment 165/0 at merge); DoD e2e Jev-live round fired clean 2026-10-09 (evidence _bmad-output/evidence/v6a/j1/); mock + Jev-live probe; closed registry; TYPESAFE_MODEL literal stays THE alarm; LOCKED#3 superseded-refined (DD-21)
       J2: { title: "Measured arm-thresholds / confidence gating (S1 routing ARMED)", points: 3, status: gated, deps: [J1] }  # v6b — GATED on corpus milestones (200 outcome-confirmed records, Wilson 95% LB ≥0.90 on OUTCOME agreement) + explicit operator sign-off; writer-proposed values — operator may amend at review (DD-28)
-      J3: { title: "Model-router decision layer (L3 weights-in-code picks tier; Jev recommendation recorded-only)", points: 5, status: done, deps: [J1, M1.2] }  # v6b — DONE 2026-10-14: implemented on feature/j3-model-router-decision-layer (PR to dev at closure) — 2 bmad-code-review rounds (23+28 findings, all patched except 1 recorded defer + DAR notes in _bmad-output/workflow-state/code-review/j3/rounds.md); branch gates: grand sweep 784/0 across touched suites, full-suite vs 15-fail dev baseline (zero NEW), tsc 0, lint 0, zero-diff adds-only + INV-JR-4 frozen surfaces byte-identical, detect_changes = PLAN ownership set exactly; e2e demo MANDATORY green (real hook, 2 dispatches straddling the shape bands, provenance, idempotent routing-<runId>-dev-meta retain); moves deriveBuildId (dispatch hook) — wave-0 re-pin tree = J3+J4+A2+M2.2 surface, ops-gated NOT fired
+      J3: { title: "Model-router decision layer (L3 weights-in-code picks tier; Jev recommendation recorded-only)", points: 5, status: done, deps: [J1, M1.2] }  # v6b — DONE 2026-10-14: PR #427 merged to dev (merge 5b03a7b7, head dac6e6c2; CodeRabbit round 3 folded in) — 2 bmad-code-review rounds (23+28 findings, all patched except 1 recorded defer + DAR notes in _bmad-output/workflow-state/code-review/j3/rounds.md); branch gates: grand sweep 784/0 across touched suites, full-suite vs 15-fail dev baseline (zero NEW), tsc 0, lint 0, zero-diff adds-only + INV-JR-4 frozen surfaces byte-identical, detect_changes = PLAN ownership set exactly; e2e demo MANDATORY green (real hook, 2 dispatches straddling the shape bands, provenance, idempotent routing-<runId>-dev-meta retain); moves deriveBuildId (dispatch hook) — wave-0 re-pin tree = J3+J4+A2+M2.2 surface, ops-gated NOT fired
       J4: { title: "Host-side judgment pack (L7 compact-signal + L8 pre-filter + sanity + L9 sweep triage)", points: 5, status: done, deps: [J1] }  # v6b — DONE 2026-10-15: PR #428 merged to dev (merge 140d477f, head 78d31955; rebased on J3 5b03a7b7); full suite 8202/53 vs dev 8079/54 (zero new), CI tests green, check red only on pre-existing src/fixloop coverage (same as J3 #427); 3 three-layer bmad-code-review rounds (25+20+14 unified findings: 47 patched, 10 dismissed w/ rationale, 2 deferred = the engine-side mid-run resident refresh — production L7 makes zero asks today, recorded in DAR + DD-28.26 item 16(c)); recording-only (PACK_SIGNALS_ARMED=false); resident-originated compact refused by origin; buildId re-pinned b34dc6b->37e749e (dev literal 285156f was stale after J3 dac6e6c2) — image publish/adopt ops-gated with J3; reviews _bmad-output/reviews/j4-round{1,2,3}/ — PACK_SIGNALS_ARMED=false (recording-only holds); steering-union adds-only `compact` member amends DF1.11 (moves deriveBuildId — re-pin owed); L9 = flex-cut #1 (v6b); L6 PARKED (DD-21)
   v6-g:
     name: Governance
