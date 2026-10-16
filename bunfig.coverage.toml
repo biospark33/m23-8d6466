@@ -12,7 +12,9 @@
 #
 #   bun run check:coverage
 #   = bun --config=bunfig.coverage.toml test tests/scripts tests/scripts/corpus \
-#       tests/providers tests/lib tests/judgment tests/reverify/report.test.ts
+#       tests/providers tests/lib tests/judgment tests/reverify tests/p0-9 \
+#       tests/hindsight tests/memgate tests/pr tests/kpi tests/fixloop \
+#       tests/swarmclaw/mask-env.test.ts
 #
 # FLAG POSITION IS LOAD-BEARING. `--config` is a bun GLOBAL flag and must come
 # BEFORE the `test` subcommand. Written the natural-looking way round —
@@ -130,6 +132,21 @@
 # CAN score it — that block lifted it to 77.78% funcs / 87.50% lines (measured
 # 2026-10-11); the spawned e2e arms alone could not (coverage cannot score
 # children — the shape scripts/qds-cost.ts keeps).
+# THE SAME ARTIFACT, VIA tests/kpi (2026-10-16, issue #433). The gate sat red
+# on dev across PRs #427, #428, #430, #431 and #432 on three files no suite in
+# the run was written for: `src/fixloop/escalation.ts` (9.09 / 24.34) and
+# `feedback-run.ts` (13.79 / 19.43), dragged in by `src/kpi/join.ts` /
+# `kpis.ts` once A5 put tests/kpi in the run, and `src/lib/mask-env.ts`
+# (100.00 / 28.57 lines), which Z5 moved to src/lib and `src/hindsight/client.ts`
+# drags in via tests/hindsight. Their suites, `tests/fixloop/` and
+# `tests/swarmclaw/mask-env.test.ts`, sat outside the run. Widened the RUN:
+# `tests/fixloop` wholesale and the mask-env suite as a path positional, not
+# the `tests/swarmclaw` dir, whose live/e2e suites would drag in a tree this
+# gate ignores anyway. Re-measured on the widened run: escalation 100.00 /
+# 99.40, feedback-run 100.00 / 98.55, ci-status 78.95 / 92.31, mask-env
+# 100.00 / 100.00; no file in scope under 0.60. The red stayed unseen because
+# a permanently red `check` hid #430's real buildIdFileInputs failure (fixed
+# in #432).
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 
