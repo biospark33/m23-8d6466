@@ -54,7 +54,7 @@
    "source": "vgap+auditor",
    "label": "HIGH",
    "disposition": "PATCH",
-   "rationale": "Explicit literal list in test; src/reverify/ added; fence enforced on the box's diff by the closing phase (executed in a real git repo in test)."
+   "rationale": "Explicit literal list in test; src/reverify/ added; an in-box closing-phase tripwire on the diff (executed in a real git repo in test) — a tripwire, not a control; the human approver stays the control of record."
   },
   {
    "finding_id": "R1-07",

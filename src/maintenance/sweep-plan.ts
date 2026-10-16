@@ -202,9 +202,12 @@ const RUN_ID_SAFE_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
  * provider layer incl. classifyRunExit, AUDIT_HOPS, gate-runner verdicts,
  * classifyDiffScope — plus the approval/verification modules INV-A3-GATE
  * fences): a graph hotspot inside one is FENCED — dropped and counted, never
- * briefed — and the generated manifest's closing phase FAILS a run whose diff
- * touches one, so the fence is enforced on the box's output, not just asked
- * for in the prompt. Fan-in ranks these files highest precisely because
+ * briefed — and the generated manifest's closing phase fails a run whose diff
+ * touches one. That closing check is a TRIPWIRE, not a security control: it
+ * runs inside the box the agent controls, so a hostile agent can defeat it
+ * (rewrite history, the manifest copy, the git environment). It catches the
+ * honest-mistake case early and cheaply; the controls of record stay outside
+ * the box — host-side reverify and the human approve gate (INV-A3-GATE). Fan-in ranks these files highest precisely because
  * everything depends on them; that is the reason not to hand them to an
  * unattended refactor.
  */
@@ -492,7 +495,8 @@ const FENCED_PATH_ERE = `^(${FENCED_TARGET_PREFIXES.map((p) => p.replaceAll(".",
  * The generated manifest — fix-run.pipeline.json's two-phase shape and
  * pricing. The closing phase fails the run when work was left uncommitted OR
  * when the committed diff (from the brief's pinned commit) touches a fenced
- * path — the never-edit fence enforced on the box's output.
+ * path — the never-edit TRIPWIRE (an in-box check the agent could defeat;
+ * reverify + the human approver are the controls of record).
  */
 export function briefManifest(b: PlannedBrief, commitSha: string): Record<string, unknown> {
   if (!/^[0-9a-f]{40}$/.test(commitSha)) throw new Error("commitSha must be 40-hex");
@@ -514,7 +518,7 @@ export function briefManifest(b: PlannedBrief, commitSha: string): Record<string
         name: "verify-committed",
         kind: "code",
         description:
-          "Fails the run when work was left uncommitted (harvest counts commits on the sandbox branch) or when the committed diff touches a never-edit path (the A3 fence, enforced on output).",
+          "Fails the run when work was left uncommitted (harvest counts commits on the sandbox branch) or when the committed diff touches a never-edit path (the A3 fence's in-box tripwire; the human approver remains the control of record).",
         command: [
           "bash",
           "-lc",

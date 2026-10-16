@@ -3,8 +3,8 @@
  *
  * Owns (story Files to Modify): staleness + contention (AC3), bounds and the
  * exit-0 pass (AC4), DD-20 join keys (AC5), the one-gate contract (AC1's
- * import/token fence + parked terminal shape + the never-edit fence enforced
- * on the box's diff), the durable report handoff, the audit store's
+ * import/token fence + parked terminal shape + the never-edit tripwire on the
+ * box's diff), the durable report handoff, the audit store's
  * read-only snapshot, and AC2's factory-side spec-seam fixtures (persisted
  * wake vs the enqueueSystemEvent-only shape; the pass's owned transport).
  * Every negative control named in the story is a test that MUST fail the bad
@@ -506,7 +506,7 @@ describe("planning — deterministic order, fence, cap", () => {
     expect(task).toContain("AUDIT_HOPS");
   });
 
-  test("the fence is ENFORCED on the box's output: the closing phase fails a diff touching a fenced path, passes a clean one", () => {
+  test("the in-box TRIPWIRE: the closing phase fails a diff touching a fenced path, passes a clean one (a tripwire, not a control — the agent owns the box)", () => {
     const repo = tmp("a3-fence-");
     const git = (...a: string[]) => spawnSync("git", a, { cwd: repo, encoding: "utf8" });
     git("init", "-q");
