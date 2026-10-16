@@ -21,8 +21,8 @@
  */
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, JsonObject, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 const env = (key: string, fallback: string) => process.env[key] ?? fallback;
 const WINDOW = Number(env("SC_FAKE_WINDOW", "100000"));
@@ -80,9 +80,9 @@ function trace(record: Record<string, unknown>) {
 
 interface Plan {
 	text?: string;
-	toolCall?: { name: string; arguments: Record<string, unknown> };
+	toolCall?: { name: string; arguments: JsonObject };
 	/** Extra calls emitted in the same batch (sibling tests). */
-	siblings?: Array<{ name: string; arguments: Record<string, unknown>; position: "before" | "after" }>;
+	siblings?: Array<{ name: string; arguments: JsonObject; position: "before" | "after" }>;
 	usageTotal: number;
 	stopReason: "stop" | "toolUse";
 }
@@ -201,22 +201,21 @@ function decide(context: Context): Plan {
 
 /**
  * pi-ai 1.1.0: providers receive a TranscriptContext — `systemPrompt` and `tools`
- * no longer exist as fields; `normalizeContext` folds both into the leading system
- * message (`toolsAdded` carries the tool set). Read them off the transcript.
+ * no longer exist as fields; `normalizeContext` folds both into system messages
+ * (the leading one carries the base, later ones carry `toolsAdded`/`toolsRemoved`
+ * deltas). Replay the full chain with pi-ai's own helpers: reading only the
+ * leading message goes stale once tool state changes mid-transcript.
  */
 function transcriptSystem(context: Context): { systemPrompt: string; tools: unknown[] } {
-	const system = (context.messages ?? []).find((m: any) => m?.role === "system") as
-		| { content?: unknown; toolsAdded?: unknown[] }
-		| undefined;
-	if (!system) {
+	const messages = context.messages ?? [];
+	const hasSystem = messages.some((m: any) => m?.role === "system");
+	if (!hasSystem) {
 		// pi-ai 1.1.0 folds prompt+tools into a system message before a provider
 		// ever sees the transcript. Its absence means the layout changed under
 		// us — fail loudly instead of misclassifying every call as a summary.
 		throw new Error("fake provider: transcript has no system message (pi-ai layout changed?)");
 	}
-	const content = system?.content;
-	const systemPrompt = typeof content === "string" ? content : Array.isArray(content) ? content.map((b) => (b as { text?: string }).text ?? "").join("") : "";
-	return { systemPrompt, tools: system?.toolsAdded ?? [] };
+	return { systemPrompt: getCurrentSystemPrompt(messages), tools: getCurrentTools(messages) };
 }
 
 function streamScripted(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
@@ -265,7 +264,7 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
 					stream.push({ type: "text_end", contentIndex: index, content: plan.text, partial: output });
 					index += 1;
 				}
-				const emitCall = (name: string, args: Record<string, unknown>) => {
+				const emitCall = (name: string, args: JsonObject) => {
 					const id = `call_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 					const toolCall = { type: "toolCall" as const, id, name, arguments: args };
 					output.content.push(toolCall);

@@ -25,8 +25,14 @@ export function replaceInstructions(context: { messages: any[] }, inputs: string
 	// instructions must ride the request exactly once, so a quoted or prior
 	// "# Conversation" block inside the history is left untouched.
 	const lastUserIdx = context.messages.reduce((last: number, m: any, i: number) => (m?.role === "user" ? i : last), -1);
-	const trimTail = (text: string, budgetChars: number): string =>
-		[...text].slice(-budgetChars).join(""); // codepoint-bounded: never split a surrogate pair
+	const trimTail = (text: string, budgetChars: number): string => {
+		// Bounded in UTF-16 code units, matching the budget itself (derived from
+		// .length in summary.ts) — a codepoint slice can double-count astral
+		// text. Adjust the cut so a surrogate pair is never split: an orphaned
+		// low surrogate at the cut is dropped.
+		const tail = text.slice(-budgetChars);
+		return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
+	};
 	const messages = context.messages.map((message: any, mi: number) => {
 		if (message.role !== "user") return message;
 		const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
@@ -47,7 +53,7 @@ export function replaceInstructions(context: { messages: any[] }, inputs: string
 				}
 				if (isLastUser && !sawCoreRendered && block.text.startsWith("# Conversation")) {
 					sawCoreRendered = true;
-					const over = [...block.text].length > budgetChars;
+					const over = block.text.length > budgetChars;
 					const body = over ? `${TRIM_MARKER}\n${trimTail(block.text, budgetChars)}` : block.text;
 					if (over) truncated = true;
 					return { ...block, text: `${body}\n\n${instructions}` };

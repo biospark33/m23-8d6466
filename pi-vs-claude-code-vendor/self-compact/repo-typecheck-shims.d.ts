@@ -31,7 +31,10 @@ declare module "@earendil-works/pi-ai" {
 	export type Context = any;
 	export type Model<T = any> = any;
 	export type SimpleStreamOptions = any;
+	export type JsonObject = any;
 	export const createAssistantMessageEventStream: any;
+	export const getCurrentSystemPrompt: any;
+	export const getCurrentTools: any;
 }
 declare module "@earendil-works/pi-tui" {
 	export const Text: any;

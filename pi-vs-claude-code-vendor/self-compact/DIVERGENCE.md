@@ -36,3 +36,8 @@ Vendored from upstream `disler/self-compact-pi-agent` at commit
 | `tests/harness/fake-provider.ts` (2nd) | transcriptSystem throws loudly when the transcript lacks the folded leading system message (layout drift must fail, not silently misclassify every call as a summary) | same |
 | `tests/parity/extension.test.mjs` (2nd) | entry anchored with fileURLToPath (raw pathname breaks on encoded/space paths) | same |
 | `tests/parity/extension.test.mjs` (3rd) | host() loadExtensions serialized through an in-process promise lock + the load-error assert prints the error text (sporadic jiti-compile race only visible under bun's 300+-file scheduler) | pi 1.1.0 compat follow-through |
+| `extensions/self-compact/summary-splice.ts` | trimTail bounded in UTF-16 code units (matching the .length-derived budget) with a surrogate-pair cut adjustment; the core-rendered over-check switched from codepoint count to .length | CodeRabbit review #436 |
+| `tests/unit/summary-splice.test.ts` | NEW: astral case pinning the UTF-16-bounded, pair-safe trim | same |
+| `tests/harness/fake-provider.ts` (3rd) | transcriptSystem replays the full system-message chain via pi-ai's `getCurrentTools`/`getCurrentSystemPrompt` — later system messages carry `toolsAdded`/`toolsRemoved` deltas, so the leading-message read goes stale once tool state changes mid-transcript | same |
+| `repo-typecheck-shims.d.ts` | export the two new pi-ai names (`getCurrentSystemPrompt`, `getCurrentTools`) as `any` | same |
+| `scripts/typecheck.sh` | PI_DIR falls back to the pi-managed release layout (`~/.pi/agent/install/releases/<v>/…`, newest first) when the global-npm default is absent — pi ≥1.x left the global npm tree | same |

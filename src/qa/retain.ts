@@ -12,7 +12,7 @@
  * carries the host env token (INV-HM1), and that is the only retain
  * credential there is. INV-A2-6: the bank id is the caller-resolved
  * `qds-<repo>` repo bank (`resolveRepoBankId` semantics, never re-derived
- * here) and is guard-checked for the explicit `qds-` prefix — the
+ * here) and is guard-checked for the full BankIdSchema identity — the
  * `solstice-*` families have no guard to pass.
  *
  * The audit receipt (INV-KG-4) lands AFTER retain success only, best-effort,
@@ -26,6 +26,7 @@
 import { canonicalJson, sha256Hex, type AuditStoreWriter } from "../audit/link-store.ts";
 import type { HindsightClient } from "../hindsight/client.ts";
 import { RETAIN_PAYLOAD_MAX_BYTES } from "../hindsight/run-retain.ts";
+import { BankIdSchema } from "../hindsight/schemas.ts";
 import { log } from "../lib/log.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { QA_LENS, QA_LOG, FindingSchema, MAX_FINDINGS_PER_HARVEST, type Finding } from "./findings.ts";
@@ -169,10 +170,14 @@ function validateIdentity(input: RetainFindingsInput): void {
   if (typeof input.commitSha !== "string" || !COMMIT_SHA_RE.test(input.commitSha)) {
     throw new QaRetainError("retain-payload-invalid", "commitSha must be 40-hex lowercase");
   }
-  // INV-A2-6: the explicit qds- guard — a bank outside the qds- family (the
-  // solstice-* families, or a bare repo slug) has no guard to pass.
-  if (typeof input.repoBankId !== "string" || !input.repoBankId.startsWith("qds-")) {
-    throw new QaRetainError("retain-bank-not-repo", `repoBankId must be the explicit qds-<repo> repo bank id, got ${JSON.stringify(String(input.repoBankId).slice(0, 64))} — never the solstice-* families`);
+  // INV-A2-6: the full qds-<repo> identity guard — beyond the qds- prefix,
+  // the whole id must be BankIdSchema-shaped (what resolveRepoBankId emits:
+  // lowercase alnum + hyphen, 1-64 chars, no hyphen-padded ends), which
+  // bounds the suffix, rejects a bare "qds-", path/control characters, and
+  // over-long ids. A bank outside the qds- family (the solstice-* families,
+  // or a bare repo slug) has no guard to pass.
+  if (typeof input.repoBankId !== "string" || !input.repoBankId.startsWith("qds-") || !BankIdSchema.safeParse(input.repoBankId).success) {
+    throw new QaRetainError("retain-bank-not-repo", `repoBankId must be the explicit qds-<repo> repo bank id (BankIdSchema), got ${JSON.stringify(String(input.repoBankId).slice(0, 64))} — never the solstice-* families`);
   }
   if (typeof input.repoSlug !== "string" || input.repoSlug.length === 0 || input.repoSlug.length > REPO_SLUG_MAX_LEN || CONTROL_CHAR_RE.test(input.repoSlug)) {
     throw new QaRetainError("retain-payload-invalid", `repoSlug must be a string of at most ${REPO_SLUG_MAX_LEN} characters with no control characters`);

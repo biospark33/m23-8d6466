@@ -493,7 +493,7 @@ describe("AC3: replay leaves one document set + one receipt row set", () => {
 
   test("AC3 negative control: wrong-bank retain — a non-qds / solstice-* bank id is refused (retain-bank-not-repo)", async () => {
     const { calls, client } = fakeClient();
-    for (const badBank of ["solstice-collective", "solstice-acmewidgets", "acmewidgets"]) {
+    for (const badBank of ["solstice-collective", "solstice-acmewidgets", "acmewidgets", "qds-", "qds-../../etc", `qds-${"a".repeat(61)}`]) {
       await expect(retainFindings({ client }, retainInput({ repoBankId: badBank }))).rejects.toMatchObject({
         code: "retain-bank-not-repo",
       });
