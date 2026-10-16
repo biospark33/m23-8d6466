@@ -4,11 +4,47 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
-const globalModules = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
-const { loadExtensions } = await import(pathToFileURL(join(globalModules, '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js')));
-const entry = resolve('extensions/self-compact/self-compact.ts');
+// Resolve pi's extension loader: PI_INSTALL_ROOT override, then the pi-managed
+// release layout (~/.pi/agent/install/releases/<version>), then the legacy
+// global npm root. pi >= 1.x moved off the global npm tree, so the npm-root
+// probe alone broke when the install method changed (not a version issue).
+const candidateRoots = [];
+if (process.env.PI_INSTALL_ROOT) candidateRoots.push(process.env.PI_INSTALL_ROOT);
+try {
+  const home = process.env.HOME ?? '';
+  const version = (await import('node:fs')).readFileSync(join(home, '.pi/agent/install/current-version'), 'utf8').trim();
+  candidateRoots.push(join(home, '.pi/agent/install/releases', version, 'node_modules'));
+} catch {}
+try {
+  candidateRoots.push(execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim());
+} catch {}
+const loaderRel = '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js';
+let loaderPath;
+for (const root of candidateRoots) {
+  const candidate = join(root, loaderRel);
+  if ((await import('node:fs')).existsSync(candidate)) { loaderPath = candidate; break; }
+}
+if (!loaderPath) throw new Error(`pi extension loader not found; tried: ${candidateRoots.join(', ')}`);
+// An existing loader can still fail to import (stale PI_INSTALL_ROOT, dist
+// skew) — fall through to the next candidate instead of crashing the suite.
+let loadExtensions;
+let lastImportError;
+for (const root of candidateRoots) {
+  const candidate = join(root, loaderRel);
+  if (!(await import('node:fs')).existsSync(candidate)) continue;
+  try {
+    ({ loadExtensions } = await import(pathToFileURL(candidate)));
+    break;
+  } catch (err) {
+    lastImportError = err;
+  }
+}
+if (!loadExtensions) {
+  throw new Error(`pi extension loader failed to import from every candidate: ${candidateRoots.join(', ')}${lastImportError ? ` — last error: ${lastImportError}` : ''}`);
+}
+const entry = resolve(fileURLToPath(new URL('.', import.meta.url)), '../../extensions/self-compact/self-compact.ts');
 
 function seedEntries(chars = 2000) {
   // A minimal real-shaped branch: one finished turn plus the current user prompt, so Pi's cut-point
@@ -21,12 +57,21 @@ function seedEntries(chars = 2000) {
   ];
 }
 
+// bun's full-suite scheduler interleaves async tests within a file; concurrent
+// loadExtensions calls raced on the jiti compile of the same entry (sporadic
+// load errors only under the 300+-file run). One in-process lock serializes them.
+let loadChain = Promise.resolve();
+function loadSerialized(cwd) {
+  const run = loadChain.then(() => loadExtensions([entry], cwd));
+  loadChain = run.catch(() => {});
+  return run;
+}
 async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 100 } }) {
   const cwd = mkdtempSync(join(tmpdir(), 'self-compact-parity-'));
   mkdirSync(join(cwd, '.pi'), { recursive: true });
   writeFileSync(join(cwd, '.pi', 'settings.json'), JSON.stringify(settings));
-  const loaded = await loadExtensions([entry], cwd);
-  assert.deepEqual(loaded.errors, []);
+  const loaded = await loadSerialized(cwd);
+  assert.deepEqual(loaded.errors, [], `extension load errors: ${loaded.errors.map((e) => String(e.error ?? e)).join(' | ')}`);
   const extension = loaded.extensions[0];
   const entries = seedEntries(), messages = [], notices = [], compactions = [], requests = [];
   let tokens = 0;
@@ -186,15 +231,22 @@ test('P2: native engine preserves split turns, previous summaries, budgets and f
   assert.ok(result.compaction);
   assert.equal(h.requests.length, 2);
   assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), [800, 500]);
+  // pi >= 1.1.0: the summary request's leading message is the folded system
+  // message; the conversation rides a later user message. Anchor on that.
+  const userText = (request) => {
+    const m = request.messages.find((x) => x.role === 'user');
+    const c = m?.content;
+    return typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => b.text ?? '').join('\n') : '';
+  };
   for (const { request, options } of h.requests) {
     assert.equal(request.systemPrompt, 'EXACT SYSTEM OVERRIDE');
     assert.equal(options.reasoningEffort, 'low');
-    assert.match(request.messages[0].content[0].text, /USER INSTRUCTIONS.*preserve evidence/);
-    assert.match(request.messages[0].content[0].text, /Keep the failing test name/);
-    assert.doesNotMatch(request.messages[0].content[0].text, /Use this EXACT format/);
+    assert.match(userText(request), /USER INSTRUCTIONS.*preserve evidence/);
+    assert.match(userText(request), /Keep the failing test name/);
+    assert.doesNotMatch(userText(request), /Use this EXACT format/);
   }
-  assert.match(h.requests[0].request.messages[0].content[0].text, /<previous-summary>\nPrevious checkpoint/);
-  assert.match(h.requests[1].request.messages[0].content[0].text, /Continue parser tests/);
+  assert.match(userText(h.requests[0].request), /<previous-summary>\nPrevious checkpoint/);
+  assert.match(userText(h.requests[1].request), /Continue parser tests/);
   assert.match(result.compaction.summary, /Turn Context \(split turn\)/);
   assert.deepEqual(result.compaction.details.readFiles, ['README.md']);
   assert.deepEqual(result.compaction.details.modifiedFiles, ['parser.ts']);

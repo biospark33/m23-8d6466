@@ -91,7 +91,16 @@ const STATUS_VOCABULARY: readonly string[] = [
 const OBSERVE_VERBS: readonly string[] = ["status", "result"];
 
 const RESULT_REQUIRED = ["schemaVersion", "runId", "requestId", "status", "terminal", "artifacts"];
-const RESULT_OPTIONAL = ["vmName", "spendMicroUsd"];
+const RESULT_OPTIONAL = ["vmName", "spendMicroUsd", "verdict"];
+/** When a payload carries the A2 verdict, the block's shape is pinned here too: a drift inside the block must not sail past the observe gate. */
+export function assertVerdictBlockShape(verdict: unknown): void {
+	if (verdict === undefined || verdict === null) return;
+	const v = verdict as Record<string, unknown>;
+	if (typeof v.status !== "string" || v.status.length === 0) throw new Error("verdict.status must be a non-empty string");
+	if (!(typeof v.escalated === "boolean" || v.escalated === undefined)) throw new Error("verdict.escalated must be a boolean or absent");
+	if (typeof v.producedAt !== "string" || Number.isNaN(Date.parse(v.producedAt))) throw new Error("verdict.producedAt must be an ISO string");
+	if (typeof v.qaRunId !== "string" || v.qaRunId.length === 0) throw new Error("verdict.qaRunId must be a non-empty string");
+}
 const STATUS_REQUIRED = ["runId", "state"];
 const STATUS_OPTIONAL = [
   "requestId",
@@ -204,6 +213,7 @@ export async function assertObserveSurface(
     expect(poll.lines).toHaveLength(1);
     const payload = JSON.parse(poll.lines[0] as string) as ResultPayload;
     expectExactFields(payload, RESULT_REQUIRED, RESULT_OPTIONAL);
+    assertVerdictBlockShape((payload as { verdict?: unknown }).verdict);
     expect(payload.schemaVersion).toBe(1);
     expect(RESULT_STATUS_VALUES.has(payload.status)).toBe(true);
     expect(payload.terminal).toBe(false);

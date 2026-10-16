@@ -2164,10 +2164,15 @@ describe("buildIdFileInputs", () => {
       // carries no managers module — the walk still sees them, so the pin
       // adopts). scripts/manager-digest.ts + tests/managers/** are absent
       // from the walk. Image re-publish stays ops-gated with the J3/J4/G1
-      // wave-0 ritual. Received from this test's own failing run on the
-      // final post-review tree (all walked-input edits landed before this
-      // re-pin, per the edit-first/re-pin-last discipline).
-      "584d400253915a2b1046f5cbc25f241ec8abd9da46023d95b10c4caf671dedce",
+      // wave-0 ritual. Moved by the A2 seam additions (run-record.ts
+      // qaWorkKey/qaVerdict namespaces + SHAPE_EXEMPT_PATHS entry,
+      // result.ts verdict fold) and the A2 round-1/2 review fixes; re-computed
+      // on the merged tree once #435's coverage suites joined the walk
+      // (package.json `check:coverage` gained tests/fixloop +
+      // tests/swarmclaw/mask-env.test.ts). Adopted from this test's own
+      // failing run on the final post-review tree (all walked-input edits
+      // landed before this re-pin, per the edit-first/re-pin-last discipline).
+      "1c77bc01b936f82d73ecbfd836c883cd59e10887a5e2da17019a67dc3092bafd",
     );
   });
 });
