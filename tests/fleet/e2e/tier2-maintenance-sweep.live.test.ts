@@ -6,9 +6,10 @@
  *   1. the REAL sweep pass (`bun scripts/maintenance-sweep.ts --max-briefs 1`)
  *      — real graph leg under A6's shared lock, real audit walk, real
  *      `fleet submit` (dispatch + engine start) of exactly one brief;
- *   2. `fleet observe <runId>` — DF3.7's chain, the same entry point DF3.8's
- *      `observe --all` cron drives in production — harvest → teardown →
- *      reverify → the gate's own requestApproval;
+ *   2. `fleet observe --all` — DF3.8's sweep, the EXACT invocation its
+ *      crontab line (deploy/vps/crontab.factory) fires in production, driving
+ *      DF3.7's chain — harvest → teardown → reverify → the gate's own
+ *      requestApproval;
  *   3. the record rests at `extensions.approval.state = "awaiting-approval"`,
  *      `closedAt` set, bundle present; no PR merged; the sweep's report record
  *      persisted `pending` for the wake to deliver.
@@ -37,12 +38,15 @@
  */
 
 import { expect, test } from "bun:test";
+import type { ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+import { killTree } from "../../../scripts/lib/kill-tree.ts";
 import { liveGate, liveTodoOff, preflight, REPO_ROOT, runFleet, teardownQuietly, writeEvidenceQuietly } from "./live-harness.ts";
 
-const SWEEP_CEILING_MS = 45 * 60_000;
+/** One brief, worst case: a 40-min submit child + one same-id replay, plus the legs. */
+const SWEEP_CEILING_MS = 100 * 60_000;
 const OBSERVE_CEILING_MS = 60 * 60_000;
 
 test.todoIf(liveTodoOff())(
@@ -65,11 +69,13 @@ test.todoIf(liveTodoOff())(
       // ── 1. the real sweep pass, capped at one brief ──
       const proc = Bun.spawn(["bun", join(REPO_ROOT, "scripts", "maintenance-sweep.ts"), "--config", config, "--max-briefs", "1"], {
         cwd: REPO_ROOT,
+        detached: true,
         env: { ...(process.env as Record<string, string>), QDS_LOG_VERBOSE: "1", QDS_SWEEP_STATE_DIR: stateDir },
         stdout: "pipe",
         stderr: "pipe",
       });
-      const timer = setTimeout(() => proc.kill("SIGKILL"), SWEEP_CEILING_MS);
+      // Detached + killTree: a ceiling kill reaches the submit child too.
+      const timer = setTimeout(() => killTree(proc as unknown as ChildProcess), SWEEP_CEILING_MS);
       const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       clearTimeout(timer);
       const events = stdout
@@ -91,7 +97,16 @@ test.todoIf(liveTodoOff())(
       expect(String(dispatched.workKey)).toMatch(/^w:maint\//);
 
       // ── 2. DF3.7's chain — the entry point DF3.8's observe --all drives ──
-      const obs = await runFleet(["observe", runId, "--driver", "exedev"], { timeoutMs: OBSERVE_CEILING_MS });
+      // The production path: the crontab's observe --all, re-fired until this
+      // run settles (each pass is bounded and exits; a still-walking engine is
+      // a counted skip, not a failure).
+      let obs = await runFleet(["observe", "--all", "--driver", "exedev"], { timeoutMs: OBSERVE_CEILING_MS });
+      const deadline = Date.now() + OBSERVE_CEILING_MS;
+      const parkedNow = () => (new RunRecordStore({ create: false }).get(runId as string).extensions?.approval as { state?: unknown } | undefined)?.state === "awaiting-approval";
+      while (!parkedNow() && Date.now() < deadline) {
+        await Bun.sleep(60_000);
+        obs = await runFleet(["observe", "--all", "--driver", "exedev"], { timeoutMs: OBSERVE_CEILING_MS });
+      }
       evidence.push({ leg: "observe", exitCode: obs.exitCode, stdoutTail: obs.stdout.slice(-2000) });
       expect(obs.exitCode).toBe(0);
 
@@ -102,8 +117,10 @@ test.todoIf(liveTodoOff())(
       expect(typeof rec.closedAt).toBe("string");
       expect(existsSync(join(new RunRecordStore({ create: false }).dir, `${runId}.bundle`))).toBe(true);
       parked = true;
-      const merged = await Bun.spawn(["gh", "pr", "list", "--state", "merged", "--head", `qds/${runId}`, "--json", "number"], { stdout: "pipe" });
-      expect((await new Response(merged.stdout).text()).trim()).toBe("[]");
+      // No PR exists to merge: a PR is opened host-side only AFTER a human
+      // approves (D8), and the push leg records it as extensions.pr. A parked
+      // run's record carries none.
+      expect(rec.extensions?.pr).toBeUndefined();
 
       // ── 4. the durable handoff awaits the wake ──
       const report = JSON.parse(readFileSync(join(stateDir, "sweep-reports", `${sweepId}.json`), "utf8")) as Record<string, unknown>;

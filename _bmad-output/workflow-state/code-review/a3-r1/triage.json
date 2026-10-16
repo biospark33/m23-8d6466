@@ -1,0 +1,292 @@
+{
+ "story": "A3",
+ "round": 1,
+ "layers": [
+  "blind",
+  "edge",
+  "auditor",
+  "verification-gap"
+ ],
+ "findings": [
+  {
+   "finding_id": "R1-01",
+   "finding_text": "Walker writes first-observation baselines into the production audit store; weekly unattended walk of in-flight runs fixes singular-hop baselines",
+   "source": "auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "D10: walk a VACUUM INTO snapshot per pass via a read-only connection; walk CLOSED runs only; snapshot test proves source bytes unchanged."
+  },
+  {
+   "finding_id": "R1-02",
+   "finding_text": "Runs never park: DF3.8 observe --all cron neither installed nor listed",
+   "source": "auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "D2: DF3.8's observe line installed in crontab.factory at SWEEP_INTERVAL_MINUTES; pinned by test; live test drives observe --all, not a hand observe."
+  },
+  {
+   "finding_id": "R1-03",
+   "finding_text": "AC2 negative controls exercise only test-local fakes; durability DoD box unearned",
+   "source": "auditor+blind",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "DoD box unticked with note; no wake code exists factory-side (E21 config). Added production fence: no enqueueSystemEvent in A3 code. Fork + live round own the production proof."
+  },
+  {
+   "finding_id": "R1-04",
+   "finding_text": "Timed-out / unacked submits re-briefed next week under a new request id \u2192 possible second box; 'replays next sweep' claim false",
+   "source": "blind+edge+auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Cooldown now includes possibly-live codes; zero-dispatch weeks may be re-run with the SAME ids; exit 1 and 6 replay once; message corrected."
+  },
+  {
+   "finding_id": "R1-05",
+   "finding_text": "Replay-safety across re-fires untested (randomUUID mutation survived)",
+   "source": "vgap",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Test asserts every submit carries briefRequestId(sweepId, workId) and a re-run reuses it."
+  },
+  {
+   "finding_id": "R1-06",
+   "finding_text": "Fence list tested against itself (deleting approval modules survived); src/reverify/approval.ts omitted",
+   "source": "vgap+auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Explicit literal list in test; src/reverify/ added; fence enforced on the box's diff by the closing phase (executed in a real git repo in test)."
+  },
+  {
+   "finding_id": "R1-07",
+   "finding_text": "Undelivered reports accumulate forever; digest marks unbounded",
+   "source": "blind+edge",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Residue window 8d..36d (D12); fork leg remains the deliverer (operator-gated) \u2014 visible by design until then."
+  },
+  {
+   "finding_id": "R1-08",
+   "finding_text": "sweepId uses UTC date; non-UTC cron host keys last week \u2192 already-swept forever",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "D11: nearest UTC Monday; tested across UTC\u221210..UTC+5."
+  },
+  {
+   "finding_id": "R1-09",
+   "finding_text": "Graph-leg timeout kills only flock; grandchild keeps lock + pipes",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Detached spawn + killTree group sweep; inner spawnSync killSignal SIGKILL."
+  },
+  {
+   "finding_id": "R1-10",
+   "finding_text": "Unavailable run store silently reads as an empty window; listRecords throw aborts pass",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Store built after runs dir; listRecords throws \u2192 counted audit-unavailable leg; pass completes."
+  },
+  {
+   "finding_id": "R1-11",
+   "finding_text": "Open runs walked \u2192 false chain-repair briefs that feed themselves",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Closed runs only; runs_open counted."
+  },
+  {
+   "finding_id": "R1-12",
+   "finding_text": "Ack parsed from last stdout line; fleet CLI log lines share stdout",
+   "source": "edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "ackOf scans by shape (schemaVersion+requestId+runId charset); tested with surrounding log lines."
+  },
+  {
+   "finding_id": "R1-13",
+   "finding_text": "exit-6 signal uses fleet result exit 6 = payload unprintable, not run outcome",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Leg dropped (no producer); documented D4 as v7 seam."
+  },
+  {
+   "finding_id": "R1-14",
+   "finding_text": "graph_stale:false hides never-read graph legs in persisted counters",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "graph_leg added to counters + report."
+  },
+  {
+   "finding_id": "R1-15",
+   "finding_text": "Cooldown suppresses audit signals; wall-clock boundary jitter",
+   "source": "auditor+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Cooldown graph-only, sweep-week arithmetic; expiry tested."
+  },
+  {
+   "finding_id": "R1-16",
+   "finding_text": "exit 5 submit-in-flight folded into fleet-busy",
+   "source": "auditor+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Own skip code with remediation."
+  },
+  {
+   "finding_id": "R1-17",
+   "finding_text": "Transient leg failure blocks reruns for the week",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Only delivered or dispatching weeks are already-swept; resweep line emitted."
+  },
+  {
+   "finding_id": "R1-18",
+   "finding_text": "Digest reads state dir relative to its own cwd",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Resolved against the script's repo root; wiring proven by a real-binary digest test."
+  },
+  {
+   "finding_id": "R1-19",
+   "finding_text": "Never-edit fence prompt-only",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Closing-phase diff check (D5)."
+  },
+  {
+   "finding_id": "R1-20",
+   "finding_text": "Live test gh pr list check vacuous; ceilings too short; SIGKILL leaves submit child",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Asserts extensions.pr absent; 100-min ceiling; detached + killTree."
+  },
+  {
+   "finding_id": "R1-21",
+   "finding_text": "Rejected cypher rows / unreadable reports counted then discarded",
+   "source": "blind+edge+vgap",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "hotspots_rejected on plan line; sweep-reports-unreadable error line; dirError distinguishes EACCES from ENOENT."
+  },
+  {
+   "finding_id": "R1-22",
+   "finding_text": "Report validation: NaN createdAt / missing briefs crash or hide records",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "readSweepReport validates structure; malformed \u2192 counted unreadable."
+  },
+  {
+   "finding_id": "R1-23",
+   "finding_text": "State-dir containment checked after writes; symlink escape",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Lexical + realpath containment pre-flight before any write (exit 2); tested."
+  },
+  {
+   "finding_id": "R1-24",
+   "finding_text": "Lock/graph home resolved from cwd, staleness reader from repo root",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "REPO_ROOT from script location; cwd must equal repo root (exit 3)."
+  },
+  {
+   "finding_id": "R1-25",
+   "finding_text": "HEAD unpushed / remote regex variants",
+   "source": "edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Pushed-HEAD pre-flight (test seam QDS_SWEEP_ALLOW_UNPUSHED for CI merge commits); ssh:// and trailing slash accepted; credentials refused."
+  },
+  {
+   "finding_id": "R1-26",
+   "finding_text": "Coalesced and already-swept passes emit no channel/complete line",
+   "source": "auditor+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "sweep-coalesced line; already-swept emits sweep-complete{already_swept:true}."
+  },
+  {
+   "finding_id": "R1-27",
+   "finding_text": "Error lines lack {code,message,remediation}",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "All error lines and CLI refusals carry the triple."
+  },
+  {
+   "finding_id": "R1-28",
+   "finding_text": "cypher banner '{' parse; process.exit after pipe write; count(a) not DISTINCT; residue boundary jitter",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "^{ multiline parse; writeSync; count(DISTINCT a); 8-day residue threshold."
+  },
+  {
+   "finding_id": "R1-29",
+   "finding_text": "CLI exit 1/3, --max-briefs pass-through, flock-missing path, newest-first, window upper bound, exit-6-twice, contention-with-stdout untested",
+   "source": "vgap",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Each now has a test (flock-gated ones run in Linux CI)."
+  },
+  {
+   "finding_id": "R1-30",
+   "finding_text": "D1 replaces the named verb; D4 drops dep-bump and adds chain-repair",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "DECISION",
+   "rationale": "Kept and flagged \u2691 in the Dev Agent Record for operator sign-off (DD-28.21-style); dispatch-only cannot reach the chain, and no deterministic dep signal exists inside AC3."
+  },
+  {
+   "finding_id": "R1-31",
+   "finding_text": "Files touched outside Files to Modify (A1 digest, A6 test + header)",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "Required by the story's own residue clause (A1 surface) and A6's pinned crontab test; adds-only, recorded in the Dev Agent Record."
+  },
+  {
+   "finding_id": "R1-32",
+   "finding_text": "MAX_WALKED_RUNS bound not a spec guard",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "Named pass budget with counted remainder (runs_not_walked) \u2014 never silent."
+  },
+  {
+   "finding_id": "R1-33",
+   "finding_text": "Persist failure loses cooldown",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "DEFER",
+   "rationale": "Exit 1 + error line; operator re-runs the week (same ids replay). A second persistence channel is beyond scope."
+  },
+  {
+   "finding_id": "R1-34",
+   "finding_text": "Graph home override vs cypher -r read different graphs",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "rationale": "Production never sets QDS_GITNEXUS_HOME (A6 refuses split-brain the same way); test-only seam."
+  },
+  {
+   "finding_id": "R1-35",
+   "finding_text": "Live e2e cannot drive the E21 wake",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "DEFER",
+   "rationale": "Wake leg is fork-side; operator step recorded in the live test header and evidence."
+  }
+ ]
+}

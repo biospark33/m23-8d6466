@@ -290,7 +290,9 @@ try {
           // A1's surface — a second channel, so a broken wake cannot hide
           // its own residue.
           undeliveredSweepReports: () =>
-            undeliveredReports(resolve(process.env.QDS_SWEEP_STATE_DIR ?? DEFAULT_SWEEP_STATE_DIR), new Date()),
+            // Resolved against THIS checkout's root, not the cwd: a digest
+            // fired from elsewhere must still read the sweep's records.
+            undeliveredReports(resolve(import.meta.dir, "..", process.env.QDS_SWEEP_STATE_DIR ?? DEFAULT_SWEEP_STATE_DIR), new Date()),
           now: () => new Date(),
           requestId: newRequestId,
         },
