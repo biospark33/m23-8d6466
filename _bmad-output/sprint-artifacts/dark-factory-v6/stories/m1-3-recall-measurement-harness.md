@@ -2,6 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6a (Foundation — memory ladder, story 7 of 11; the measurement leg whose decision checkpoint is deliberately DATED past the sprint)
+**Status:** done — PR #413 merged to dev 2026-10-07 (merge 939aed0f, head 6bf51483). First real-instance baseline committed (hit-rate@5 0.565 over 23 probes); the DD-22 re-measure is operator-ruled (M1.4 rides it).
 
 > **Provenance:** charter row M1.3 (`2026-10-01-v6-derivation-session-INPUT.md:79`) + DD agenda item 9 (DD-22: "define hit-rate@k target + labeled probe set NOW; decision checkpoint after ~30 M1 cycles"). Risk §7.3 (recall quality post-re-pin) demands the probe set exist BEFORE the deep dependency matures. v6a's FIRST named flex-cut lives here (R5 F4, register decision): the report leg slips to v6b if v6a strains — the probe set, harness, and instrumentation do not.
 

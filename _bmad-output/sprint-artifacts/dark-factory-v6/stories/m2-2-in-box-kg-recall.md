@@ -2,6 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b (Autonomy — memory lane, the un-gated second lane, lane story 2 of 3: M2.1 → M2.2 → M2.3 — note M2.1 itself ships in v6a; E21-independent by the physical cut line)
+**Status:** done — PR #416 merged to dev 2026-10-08 (merge 6dff0ba1, head 993136d0). The image re-pin ritual is operator GO and NOT fired (blocks all T2).
 
 ## Spec Reference
 
