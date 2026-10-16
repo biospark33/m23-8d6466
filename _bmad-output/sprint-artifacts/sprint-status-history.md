@@ -195,3 +195,18 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # so a human decision landing across the reverify await wins the race by construction) and mint
 # fault isolation (a store fault emits one auto-merge-approval-error line; the driven outcome and
 # the gate's parked awaiting-approval stand). PR #430 merged to dev (merge 20e3a452).
+
+# 2026-10-16 (A1 DONE — department managers factory half merged to dev):
+# Factory half shipped: src/managers manager config + digest composer + the manager-digest CLI
+# leaf, coded against seam fakes only (charter §5.2/§5.4 — live behavior rides A2/Z3). Gates E21
+# S02b (#701) + S03b (#704) + Z2 (#405) merged before start; org-owner refused per ADR-RUN-2 D1;
+# fixloop+verbs byte-identical; 109 manager tests + real-binary e2e; 3 bmad-code-review rounds (R3
+# audit: no AC violations). CodeRabbit on PR #434: 1 finding verified and fixed (4d2054e8) —
+# fleetCliInvoker spawns detached so killTree's -pid group sweep reaches a wedged child's
+# descendants (a grandchild holding the piped stdout survived the lead-only fallback kill);
+# F023 round-1 signal-handler compensation included; grandchild test falsification-proven (red
+# without detached, green with). The merge also took dev's 137ba91 image pin (both branches had
+# landed it independently; both provenance notes kept) and corrected the stale "Bun.spawn has no
+# detached/process-group option" notes in test-results.ts (bun 1.4.3 declares the option; that
+# module stays lead-only). PR #434 merged to dev (merge 8e78354c). Digest crontab line stays
+# operator-owned (documented in the CLI header, not installed).

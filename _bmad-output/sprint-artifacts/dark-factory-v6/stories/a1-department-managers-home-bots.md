@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b (autonomy arc — the story that makes charter D-3's "bots-as-profiles in one factory Home" real)
-**Status:** GATED — starts only after **E21 S02b** (bots as profiles + turn principal), **E21 S03b** (home provider wiring + `writeProfileTokens`), and **Z2** (fork-side trigger wiring) are merged. Factory CI stays green before/during/after E21 lands: this story codes against seam fakes only (charter §5.2/§5.4); live behavior is proven in A2/Z3's rounds, not here.
+**Status:** done — gates **E21 S02b** (#701), **E21 S03b** (#704), and **Z2** (#405) merged before start; factory half coded against seam fakes only (charter §5.2/§5.4 — live behavior rides A2/Z3's rounds); org-owner refused per ADR-RUN-2 D1; fixloop+verbs byte-identical; 109 manager tests + real-binary e2e; 3 bmad-code-review rounds (R3 audit: no AC violations). Merged: PR #434 to dev 2026-10-16 (merge 8e78354c) after CodeRabbit review — 1 finding verified and fixed (4d2054e8): detached process-group kill for the digest CLI invoker (killTree's `-pid` sweep reaches grandchildren; grandchild-leak test falsification-proven). Digest crontab line stays operator-owned (documented in the CLI header, not installed).
 
 > **Register-backed design note — the owner adjudication (ratified: DD-28.15):**
 > ADR-RUN-2 D1's `Owner = {kind:'user'|'org', id}` seam admits an `org` kind, but it is **refused
