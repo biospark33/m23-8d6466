@@ -32,14 +32,19 @@ import {
   MAX_STATUS_ROWS,
   PARK_THRESHOLD_MS,
   type CliInvoker,
-  type CliResult,
   type DigestDeps,
-  type DigestLine,
 } from "../../src/managers/digest-composer.ts";
-import type { CostView } from "../../src/providers/cost-ledger.ts";
 import type { RunRecord } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { WorkKeySchema } from "../../src/managers/manager-config.ts";
+import {
+  captureInto,
+  costView,
+  event,
+  fakeCli,
+  NOW,
+  record,
+  restoreCaptures,
+} from "./fixture-helpers.ts";
 
 const MANAGERS_DIR = join(import.meta.dir, "../../src/managers");
 const DIGEST_CLI = join(import.meta.dir, "../../scripts/manager-digest.ts");
@@ -58,84 +63,7 @@ function walkTs(dir: string): string[] {
   return out;
 }
 
-// ─── fakes ───────────────────────────────────────────────────────────────────
-
-type JournalEntry = { verb: string; argv: readonly string[]; rc: number };
-
-type FakeCliOpts = {
-  /** The `fleet status` answer. Default: rc 0 with the rows given at build time. */
-  statusRc?: number;
-  statusRows?: Record<string, unknown>[];
-  /** Raw status stdout override — rows are ignored when present. */
-  statusStdout?: string;
-  /** Raw status stderr (rides a non-zero statusRc). */
-  statusStderr?: string;
-  /** The status invocation's invoker THROWS (a spawn failure, not a timeout). */
-  statusThrows?: boolean;
-  /** Every `fleet result` invocation's invoker THROWS (a spawn failure). */
-  resultThrows?: boolean;
-  /** Every `fleet result` invocation never resolves (a hung child). */
-  resultHangs?: boolean;
-  /** Per-runId `fleet result` answer. Default: rc 0. */
-  resultRc?: (runId: string) => number;
-  /** Never-resolving invocations (tests the verb deadline). */
-  hang?: boolean;
-  /** Wall-clock delay before every invocation answers (tests the total budget). */
-  slowMs?: number;
-};
-
-function fakeCli(opts: FakeCliOpts): { cli: CliInvoker; journal: JournalEntry[] } {
-  const journal: JournalEntry[] = [];
-  const cli: CliInvoker = async (argv) => {
-    const verb = argv[0] as string;
-    if (opts.hang) return new Promise<CliResult>(() => {});
-    if (opts.resultHangs && verb === "result") {
-      journal.push({ verb, argv, rc: 0 }); // the verb WAS issued before it hung
-      return new Promise<CliResult>(() => {});
-    }
-    if (opts.statusThrows && verb === "status") throw new Error("spawn failed: bun not found");
-    if (opts.resultThrows && verb === "result") throw new Error("spawn failed: result leg down");
-    if (opts.slowMs !== undefined) await new Promise((r) => setTimeout(r, opts.slowMs));
-    journal.push({ verb, argv, rc: 0 });
-    if (verb === "status") {
-      const rc = opts.statusRc ?? 0;
-      journal[journal.length - 1]!.rc = rc;
-      const stdout =
-        opts.statusStdout !== undefined
-          ? opts.statusStdout
-          : rc === 0
-            ? `${opts.statusRows?.map((r) => JSON.stringify(r)).join("\n")}\n`
-            : "";
-      return { exitCode: rc, stdout, stderr: opts.statusStderr ?? "" };
-    }
-    if (verb === "result") {
-      const runId = argv[1] as string;
-      const rc = opts.resultRc?.(runId) ?? 0;
-      journal[journal.length - 1]!.rc = rc;
-      const payload = { runId, status: "completed", terminal: true };
-      return { exitCode: rc, stdout: rc === 0 ? `${JSON.stringify(payload)}\n` : "", stderr: "" };
-    }
-    journal[journal.length - 1]!.rc = 2;
-    return { exitCode: 2, stdout: "", stderr: "unknown verb" };
-  };
-  return { cli, journal };
-}
-
-/** An explicit `hasEvents` (default true) so a 0-with-events view stays representable. */
-function costView(totalMicroUsd: number, hasEvents = true): CostView {
-  return {
-    totalMicroUsd,
-    perRole: hasEvents ? { "box-hours": totalMicroUsd } : {},
-    tokenTotals: { inputTokens: 0, outputTokens: 0 },
-    cacheTotals: { cacheReadTokens: 0, cacheWriteTokens: 0 },
-    unpricedRows: 0,
-    eventCount: hasEvents ? 1 : 0,
-    hasEvents,
-    hasTokenRows: false,
-  };
-}
-
-const NOW = new Date("2026-10-15T12:00:00.000Z");
+// ─── fakes (shared: tests/managers/fixture-helpers.ts) ───────────────────────
 
 type DepsOpts = {
   cli: CliInvoker;
@@ -178,49 +106,7 @@ function row(runId: string, opts?: { state?: string; createdAt?: string }): Reco
   };
 }
 
-function record(runId: string, extensions?: Record<string, Record<string, unknown>>): RunRecord {
-  // Every extension namespace carries its schemaVersion on a real record;
-  // the fixtures stamp 1 so the shapes read as written records.
-  const stamped = Object.fromEntries(
-    Object.entries(extensions ?? {}).map(([ns, entry]) => [ns, { schemaVersion: 1, ...entry }]),
-  );
-  return {
-    runId,
-    createdAt: NOW.toISOString(),
-    ...(extensions === undefined ? {} : { extensions: stamped as RunRecord["extensions"] }),
-  };
-}
-
-/**
- * Capture the composer's channel lines. Restores are CHAINED: a capture
- * installed while another is live must unwind through it (the
- * threshold-boundary loop installs three in one test), so the latest
- * restore runs its own restore first and then its predecessor's — a sink is
- * never left installed after afterEach, which would override log.ts's
- * bun-test mute for the WHOLE process.
- */
-let restoreSink: (() => void) | undefined;
-function captureInto(): DigestLine[] {
-  const seen: DigestLine[] = [];
-  const previous = restoreSink;
-  const restore = setLogSink((entry: LogEntry) => {
-    seen.push(entry as unknown as DigestLine);
-  });
-  restoreSink = () => {
-    restore();
-    previous?.();
-  };
-  return seen;
-}
-
-function event(lines: DigestLine[], name: string): DigestLine[] {
-  return lines.filter((l) => l.event === name);
-}
-
-afterEach(() => {
-  restoreSink?.();
-  restoreSink = undefined;
-});
+afterEach(restoreCaptures);
 
 // ─── AC2: the import fence asserts the ALLOWLIST ─────────────────────────────
 

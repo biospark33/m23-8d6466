@@ -41,19 +41,23 @@ import {
   DIGEST_EXIT,
   PARK_THRESHOLD_MS,
   type CliInvoker,
-  type CliResult,
   type DigestDeps,
-  type DigestLine,
 } from "../../src/managers/digest-composer.ts";
-import type { CostView } from "../../src/providers/cost-ledger.ts";
 import type { RunRecord } from "../../src/providers/run-record.ts";
 import { acquireRunLock, isAlive, releaseRunLock } from "../../scripts/lib/run-lock.ts";
-import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { createSeamFakes, PROFILE_TOKEN_NAMES } from "./home-seam-fakes.ts";
+import {
+  captureInto,
+  costView,
+  event,
+  fakeCli,
+  NOW,
+  record,
+  restoreCaptures,
+} from "./fixture-helpers.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const GATEWAY = "https://gateway.a1-e2e.example";
-const NOW = new Date("2026-10-15T12:00:00.000Z");
 
 /** The manager config of record fixture — one Home, operator-as-user, three `bot-`-prefixed ceilings. */
 const MANAGER_CONFIG = {
@@ -108,91 +112,11 @@ describe("A1 e2e — provisioning", () => {
 });
 
 // ─── B. the digest, through the REAL composer ────────────────────────────────
+// fakeCli / costView / record / event / captureInto live in the shared
+// tests/managers/fixture-helpers.ts (review finding D15 — one copy, both
+// suites); afterEach unwinds through restoreCaptures().
 
-type JournalEntry = { verb: string; argv: readonly string[]; rc: number };
-
-function fakeCli(opts: {
-  statusRows: Record<string, unknown>[];
-  resultRc?: (runId: string) => number;
-}): { cli: CliInvoker; journal: JournalEntry[] } {
-  const journal: JournalEntry[] = [];
-  const cli: CliInvoker = async (argv): Promise<CliResult> => {
-    const verb = argv[0] as string;
-    const entry: JournalEntry = { verb, argv, rc: 0 };
-    journal.push(entry);
-    if (verb === "status") {
-      const stdout = `${opts.statusRows.map((r) => JSON.stringify(r)).join("\n")}\n`;
-      return { exitCode: 0, stdout, stderr: "" };
-    }
-    if (verb === "result") {
-      const rc = opts.resultRc?.(argv[1] as string) ?? 0;
-      entry.rc = rc;
-      return {
-        exitCode: rc,
-        stdout: rc === 0 ? `{"runId":"${argv[1] as string}","status":"completed"}\n` : "",
-        stderr: "",
-      };
-    }
-    return { exitCode: 2, stdout: "", stderr: "unknown verb" };
-  };
-  return { cli, journal };
-}
-
-/** An explicit `hasEvents` (default true) so a 0-with-events view stays representable. */
-function costView(totalMicroUsd: number, hasEvents = true): CostView {
-  return {
-    totalMicroUsd,
-    perRole: hasEvents ? { "box-hours": totalMicroUsd } : {},
-    tokenTotals: { inputTokens: 0, outputTokens: 0 },
-    cacheTotals: { cacheReadTokens: 0, cacheWriteTokens: 0 },
-    unpricedRows: 0,
-    eventCount: hasEvents ? 1 : 0,
-    hasEvents,
-    hasTokenRows: false,
-  };
-}
-
-function record(runId: string, extensions?: Record<string, Record<string, unknown>>): RunRecord {
-  const stamped = Object.fromEntries(
-    Object.entries(extensions ?? {}).map(([ns, entry]) => [ns, { schemaVersion: 1, ...entry }]),
-  );
-  return {
-    runId,
-    createdAt: NOW.toISOString(),
-    ...(extensions === undefined ? {} : { extensions: stamped as RunRecord["extensions"] }),
-  };
-}
-
-function event(lines: DigestLine[], name: string): DigestLine[] {
-  return lines.filter((l) => l.event === name);
-}
-
-/**
- * Capture the composer's channel lines. Restores are CHAINED (the same
- * discipline the composer suite applies): a capture installed while another
- * is live must unwind through it, so the latest restore runs its own restore
- * first and then its predecessor's — a sink is never left installed after
- * afterEach, which would override log.ts's bun-test mute for the WHOLE
- * process.
- */
-let restoreSink: (() => void) | undefined;
-function captureInto(): DigestLine[] {
-  const seen: DigestLine[] = [];
-  const previous = restoreSink;
-  const restore = setLogSink((entry: LogEntry) => {
-    seen.push(entry as unknown as DigestLine);
-  });
-  restoreSink = () => {
-    restore();
-    previous?.();
-  };
-  return seen;
-}
-
-afterEach(() => {
-  restoreSink?.();
-  restoreSink = undefined;
-});
+afterEach(restoreCaptures);
 
 describe("A1 e2e — the digest invocation", () => {
   const parkRequestedAt = new Date(NOW.getTime() - PARK_THRESHOLD_MS - 1).toISOString();
