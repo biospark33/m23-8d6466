@@ -395,7 +395,186 @@ export const EXTENSION_NAMESPACES: Readonly<
     schemaVersion: 1,
     fields: { seats: "strings", keyHashes: "strings", limitMicroUsd: "numbers" },
   },
+  /**
+   * A2 (DD-20): the leg's `w:`-namespace workKey, stamped on the fleet run
+   * record so the host-side join `workKey + runId + botId` needs no schema
+   * change later (Deviation 1: per-workKey macro-side spend aggregation is
+   * DD-20/A5's surface and #380 stays open here — leg spend is booked by the
+   * normal per-runId ledger + `run-cost` hop, unchanged).
+   *
+   * The `w:` prefix is NOT this schema's check — it is the WRITER helper's
+   * contract (`qaWorkKeyPatch` below). Write-exact/read-tolerant: write mode
+   * validates the value against this field table exactly like every other
+   * extension field (`string` kind, so no prefix rule fires there), and read
+   * mode tolerates whatever a registered namespace already holds.
+   */
+  qaWorkKey: { schemaVersion: 1, fields: { workKey: "string" } },
+  /**
+   * A2 / G1 AC4: the QA verdict this run PRODUCED. The producing QA run's own
+   * record IS the audited trail — no new audit hop, `AUDIT_HOPS`
+   * (src/audit/link-store.ts) untouched; a consumer joins via `qaRunId` and
+   * the block folds into `ResultPayload.verdict` (src/fleet/result.ts),
+   * whose consumer pin (`QaVerdictSchema`, src/fleet/auto-merge-policy.ts)
+   * tolerates extras adds-only.
+   *
+   * `escalated` is an int 0/1, not a boolean — the `FieldKind` vocabulary is
+   * closed (`string`/`int`/`ports`/`strings`/`numbers`) and widening it would
+   * touch an existing export; the fold converts it to the boolean the
+   * consumer schema pins. `findingCount` is `int` for the same reason.
+   * `findingRefs` rides the existing `strings` kind — the producer schema
+   * (`QaVerdictProducerSchema`) carries it, so the writer seam can persist it
+   * through the store rather than losing it to write-exact refusal.
+   */
+  qaVerdict: {
+    schemaVersion: 1,
+    fields: {
+      status: "string",
+      producedAt: "string",
+      escalated: "int",
+      qaRunId: "string",
+      commitSha: "string",
+      findingCount: "int",
+      findingRefs: "strings",
+    },
+  },
 };
+
+// ---------------------------------------------------------------------------
+// qaWorkKey / qaVerdict helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * The typed verdict the qaWorkKey writer throws for a non-`w:qa-` workKey — the
+ * same dedicated-subclass reasoning as `InvalidRunIdError` above: a caller
+ * separating "the caller's join key failed the namespace check" from an
+ * internal bug matches `name`, never message text.
+ */
+export class QaWorkKeyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QaWorkKeyError";
+  }
+}
+
+/** The DD-20 contract grammar: `w:qa-<compact-UTC-stamp>-<lens>`. */
+const QA_WORK_KEY_RE = /^w:qa-\d{8}T\d{6}Z-\S+$/;
+
+/**
+ * The ONE writer seam for the `qaWorkKey` stamp: validates the DD-20
+ * contract grammar (`w:qa-<utcstamp>-<lens>` — compact UTC stamp + lens tail)
+ * and returns the RUN RECORD PATCH to pass to `store.set(runId, …)`. The
+ * store's own validation is the backstop for the dynamic callers (the CLI
+ * builds its patch from argv), exactly the split `RunRecordPatch`'s docblock
+ * describes; the grammar rule lives HERE because the field table is
+ * shape-only, and replaying the same workKey through this helper lands the
+ * same deep-merged entry — idempotent by the store's merge.
+ */
+export function qaWorkKeyPatch(workKey: string): RunRecordPatch {
+  if (typeof workKey !== "string" || !QA_WORK_KEY_RE.test(workKey)) {
+    throw new QaWorkKeyError(
+      `qaWorkKey.workKey must match the contract grammar w:qa-<utcstamp>-<lens> (w:qa-20261016T120000Z-correctness), got ${JSON.stringify(workKey)}`,
+    );
+  }
+  return { extensions: { qaWorkKey: { workKey } } };
+}
+
+/** The record-side read of the `qaWorkKey` stamp, in `approvalState`'s tolerant style. */
+export function readQaWorkKey(rec: RunRecord): string | undefined {
+  const workKey = rec.extensions?.qaWorkKey?.workKey;
+  return typeof workKey === "string" && workKey.length > 0 ? workKey : undefined;
+}
+
+/**
+ * The record-side read of the `qaVerdict` block: the whole entry, or
+ * `undefined` when it is absent or carries no readable `status` (a
+ * status-less block is treated as absent — the consumer's fail-closed
+ * posture, mirrored at the read seam). Read-tolerant records may carry a
+ * null entry, so the object check guards before `.status`.
+ */
+export function readQaVerdict(rec: RunRecord): ExtensionEntry | undefined {
+  const entry = rec.extensions?.qaVerdict;
+  return entry != null && typeof entry.status === "string" && entry.status.length > 0 ? entry : undefined;
+}
+
+/**
+ * The typed verdict the qaVerdict writer throws for a malformed block — the
+ * same dedicated-subclass reasoning as `QaWorkKeyError` above.
+ */
+export class QaVerdictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QaVerdictError";
+  }
+}
+
+/** The block `qaVerdictPatch` accepts — booleans in, the stored int 0/1 out. */
+export interface QaVerdictInput {
+  status: string;
+  producedAt: string;
+  escalated?: boolean;
+  qaRunId: string;
+  commitSha: string;
+  findingCount: number;
+  findingRefs?: string[];
+}
+
+/**
+ * Mirror of findings.ts's ISO_8601_RE (not exported there) — the same
+ * machine-emitted-ISO pin the producer schema refines producedAt with.
+ */
+const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * The ONE writer seam for the `qaVerdict` block, mirroring `qaWorkKeyPatch`:
+ * validates the block against the producer contract (`QaVerdictProducerSchema`,
+ * src/qa/findings.ts) and returns the RUN RECORD PATCH to pass to
+ * `store.set(runId, …)`. `escalated` is converted to the int 0/1 the field
+ * table pins HERE, so a boolean never reaches the store; the store's own
+ * validation stays the backstop for dynamic callers. Replaying the same
+ * verdict lands the same deep-merged entry — idempotent by the store's merge.
+ */
+export function qaVerdictPatch(v: QaVerdictInput): RunRecordPatch {
+  const refuse = (field: string, why: string): void => {
+    throw new QaVerdictError(`qaVerdict.${field} ${why}`);
+  };
+  // Vocabulary parity with the producer schema: "approved" is the only passing
+  // value in the fleet-results vocabulary — anything else is the consumer's
+  // fail-closed path, not ours to invent.
+  if (v.status !== "approved") {
+    refuse("status", `must be "approved" (the only passing vocabulary value), got ${JSON.stringify(v.status)}`);
+  }
+  if (typeof v.producedAt !== "string" || Number.isNaN(Date.parse(v.producedAt)) || !ISO_8601_RE.test(v.producedAt)) {
+    refuse("producedAt", "must be an ISO-8601 timestamp (e.g. 2026-10-16T00:00:00.000Z)");
+  }
+  // Mirror of findings.ts RUN_ID_RE — a verdict joins to its QA run by a
+  // minted id, not free text.
+  if (!/^qds-\d{8}-[a-f0-9]{6}$/.test(v.qaRunId)) {
+    refuse("qaRunId", `must be a minted run id (qds-YYYYMMDD-hex6), got ${JSON.stringify(v.qaRunId)}`);
+  }
+  if (typeof v.commitSha !== "string" || !/^[0-9a-f]{40}$/.test(v.commitSha)) {
+    refuse("commitSha", "must be a 40-hex lowercase commit sha");
+  }
+  if (typeof v.findingCount !== "number" || !Number.isInteger(v.findingCount) || v.findingCount < 0) {
+    refuse("findingCount", "must be a non-negative integer");
+  }
+  if (
+    v.findingRefs !== undefined &&
+    (!Array.isArray(v.findingRefs) || v.findingRefs.some((r) => typeof r !== "string" || r.length === 0))
+  ) {
+    refuse("findingRefs", "must be an array of non-empty strings");
+  }
+  const block: Record<string, ExtensionValue> = {
+    status: v.status,
+    producedAt: v.producedAt,
+    // The field table pins int 0/1 — the boolean never reaches the store.
+    escalated: v.escalated === true ? 1 : 0,
+    qaRunId: v.qaRunId,
+    commitSha: v.commitSha,
+    findingCount: v.findingCount,
+  };
+  if (v.findingRefs !== undefined) block.findingRefs = v.findingRefs;
+  return { extensions: { qaVerdict: block } };
+}
 
 // ---------------------------------------------------------------------------
 // Run ids
@@ -695,6 +874,12 @@ const SHAPE_EXEMPT_PATHS: ReadonlySet<string> = new Set([
   // ever reach the record, and both are written AFTER the box exists.
   extPath("budget", "repoSlug"),
   extPath("budget", "issueId"),
+  // Grammar pinned by the A2 contract (story + fork protocol builder):
+  // `w:qa-<utcstamp>-<lens>`, lens ∈ QA_LENS — a full-ISO stamp plus a long
+  // lens crosses the ≥40 mixed-class line, so the shape test costs a legal
+  // value. The writer still enforces the w:qa- form, and the ≤201 grammar
+  // bound + prefix scan stay in force on this path.
+  extPath("qaWorkKey", "workKey"),
   // No `extensions.approval` path is exempt. `supersededReportIds` in
   // particular stays subject to the heuristic: a reverify id is short and
   // lowercase by construction (src/reverify/runner.ts builds it that way for

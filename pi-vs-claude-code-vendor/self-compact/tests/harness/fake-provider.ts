@@ -199,7 +199,28 @@ function decide(context: Context): Plan {
 	};
 }
 
+/**
+ * pi-ai 1.1.0: providers receive a TranscriptContext — `systemPrompt` and `tools`
+ * no longer exist as fields; `normalizeContext` folds both into the leading system
+ * message (`toolsAdded` carries the tool set). Read them off the transcript.
+ */
+function transcriptSystem(context: Context): { systemPrompt: string; tools: unknown[] } {
+	const system = (context.messages ?? []).find((m: any) => m?.role === "system") as
+		| { content?: unknown; toolsAdded?: unknown[] }
+		| undefined;
+	if (!system) {
+		// pi-ai 1.1.0 folds prompt+tools into a system message before a provider
+		// ever sees the transcript. Its absence means the layout changed under
+		// us — fail loudly instead of misclassifying every call as a summary.
+		throw new Error("fake provider: transcript has no system message (pi-ai layout changed?)");
+	}
+	const content = system?.content;
+	const systemPrompt = typeof content === "string" ? content : Array.isArray(content) ? content.map((b) => (b as { text?: string }).text ?? "").join("") : "";
+	return { systemPrompt, tools: system?.toolsAdded ?? [] };
+}
+
 function streamScripted(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
+	const { systemPrompt, tools } = transcriptSystem(context);
 	const stream = createAssistantMessageEventStream();
 	const output: AssistantMessage = {
 		role: "assistant",
@@ -211,17 +232,17 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
 		stopReason: "pending",
 		timestamp: Date.now(),
 	};
-	const isSummary = !context.tools || context.tools.length === 0;
+	const isSummary = tools.length === 0;
 	setTimeout(() => {
 		try {
 			stream.push({ type: "start", partial: output });
 			if (isSummary) {
 				summaryCalls += 1;
-				trace({ kind: "summary", call: summaryCalls, systemPrompt: context.systemPrompt?.slice(0, 200) });
+				trace({ kind: "summary", call: summaryCalls, systemPrompt: systemPrompt.slice(0, 200) });
 				if (summaryCalls <= SUMMARY_FAIL) {
 					throw new Error(`fake summary failure #${summaryCalls}`);
 				}
-				const text = `FAKE-SUMMARY[${(context.systemPrompt ?? "").slice(0, 60)}]\n## Goal\nScripted goal.\n## Next Steps\n1. Follow the note.`;
+				const text = `FAKE-SUMMARY[${systemPrompt.slice(0, 60)}]\n## Goal\nScripted goal.\n## Next Steps\n1. Follow the note.`;
 				output.content.push({ type: "text", text: "" });
 				stream.push({ type: "text_start", contentIndex: 0, partial: output });
 				(output.content[0] as { text: string }).text = text;
