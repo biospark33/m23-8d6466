@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b-Autonomy (E21-gated; the QA *department manager* as a Home bot — a manager, not a proactive/cron agent)
-**Status:** **gated** — spec complete; dev BLOCKED until every gate clears. Gates: **E21 S02b** (bots as profiles + turn principal) and **E21 S03b** (Home provider wiring) merged to fork `origin/dev`; predecessor stories **A1** (manager bot substrate), **M1.2** (host-side retain/recall cycle), **Z2** (fork-side post-merge trigger wiring) done. **No documented crontab fallback exists for this story.** M3.1's fallback works because the M3 gateway is driver-agnostic; A2's actor is a bot turn — a cron substituting for it would be a different, un-chartered surface. If E21 slips, A2 waits.
+**Status:** **ready** — all gates cleared: **E21 S02b** (bots as profiles + turn principal) and **E21 S03b** (Home provider wiring) merged to fork `origin/dev`; predecessors **A1** (manager bot substrate, PR #434), **M1.2** (host-side retain/recall cycle), **Z2** (fork-side post-merge trigger wiring) all done. **No documented crontab fallback exists for this story — by design, keep it that way.** M3.1's fallback works because the M3 gateway is driver-agnostic; A2's actor is a bot turn — a cron substituting for it would be a second, un-chartered write path into the turn system. F3 is event-shaped: Z2's post-merge trigger is THE trigger; a missed-wake sweeper (driver-agnostic, commitSha-deduped reconciliation scan) is a SEPARATE story to charter, never something a dev session improvises here. If E21 slips, A2 waits — fail-closed is correct.
 
 ## Spec Reference
 
