@@ -2105,6 +2105,12 @@ describe("buildIdFileInputs", () => {
       // IMAGE RE-PUBLISH stays ops-gated (wave-0 ritual: J3 + J4 + A2 + the
       // M2.2 surface, DD-28.26(4)); only the pin adopts here.
       //
+      // 584d400: moved from 4569b87 by the issue #433 coverage fix — ONE walked
+      // input: `package.json` (the `check:coverage` script gained
+      // `tests/fixloop` + `tests/swarmclaw/mask-env.test.ts`). Script text
+      // only; no dependency moved. Image re-publish rides the ops-gated
+      // wave-0 ritual.
+      //
       // 4569b87: moved from 137ba91 by A1's review round (4d2054e8) — ONE
       // walked input, comment-only: `src/phase-engine/phases/test-results.ts`
       // (the stale "Bun.spawn has no process-group option" ponytail note
@@ -2161,7 +2167,7 @@ describe("buildIdFileInputs", () => {
       // wave-0 ritual. Received from this test's own failing run on the
       // final post-review tree (all walked-input edits landed before this
       // re-pin, per the edit-first/re-pin-last discipline).
-      "4569b87d012c2611c7546d6c7e9ecff293d391b62c96579df4c5a3ef783798f2",
+      "584d400253915a2b1046f5cbc25f241ec8abd9da46023d95b10c4caf671dedce",
     );
   });
 });
