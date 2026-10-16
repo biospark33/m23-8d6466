@@ -2142,6 +2142,17 @@ describe("buildIdFileInputs", () => {
       // after the run lock is released, deadline clamped to the pass budget). Everything else J4 touched is absent
       // from the walk: src/autonomy/, scripts/fleet.ts, scripts/corpus/, docs,
       // tests. Image re-publish rides the ops-gated wave-0 ritual with J3.
+      // A1 adopted 2026-10-16: moved from 8af25a0c by A1's build — TWO new
+      // walked inputs, both new files under the `src/**` walk:
+      // `src/managers/manager-config.ts` and `src/managers/digest-composer.ts`
+      // (the factory-side half; every file the story adds is host-side and
+      // the story's Files-to-Modify note says the engine-stage enumeration
+      // carries no managers module — the walk still sees them, so the pin
+      // adopts). scripts/manager-digest.ts + tests/managers/** are absent
+      // from the walk. Image re-publish stays ops-gated with the J3/J4/G1
+      // wave-0 ritual. Received from this test's own failing run on the
+      // final post-review tree (all walked-input edits landed before this
+      // re-pin, per the edit-first/re-pin-last discipline).
       "137ba91ef06f693ee1a4d897df8659b9dd52e55012593268dda04f9310cd08e5",
     );
   });

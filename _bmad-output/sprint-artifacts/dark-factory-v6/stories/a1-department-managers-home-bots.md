@@ -118,13 +118,27 @@ Three manager bots (Dev/QA/Maintenance) are declared as profiles of ONE factory 
 
 ## Definition of Done
 
-- [ ] **Impl:** `manager-config.ts` validates one Home / owner `{kind:'user'}` / three `bot-`-prefixed profiles / per-bot ceilings, refusing `kind:'org'` and ceiling-less bots by name (AC1, AC4).
-- [ ] **Impl:** `digest-composer.ts` shells only `fleet status --driver exedev` and `fleet result`, assembles the snapshot, emits join-key lines and escalation marks; bounded exiting invocation, no daemon artifact (AC2, AC3).
-- [ ] **Contract:** `src/fixloop/` and `src/fleet/verbs.ts` byte-identical after — a diff in either is a failed AC2/AC3, not a patch to argue.
-- [ ] **Test (config):** org-kind refusal, missing-ceiling refusal, duplicate-Home refusal, and `w:`-form `workKey` validation all green with their named errors (AC1, AC4, AC5).
-- [ ] **Test (digest):** snapshot lines carry all three DD-20 join keys; spend joins both ledgers; escalation marks fire for parked-past-threshold approvals, exhausted fix loops, and exit-6 runs; `botId` absent-not-null on fleet-only lines (AC5).
-- [ ] **Test (fence):** the import fence asserts the AC2 allowlist — any manager-module import from `src/fleet/` outside `status.ts`, `result.ts`, or type-only `brief-schema.ts` fails; the fake journal shows no bot turn reaching an approve/dispatch path (AC2).
-- [ ] **Test (seam):** fakes encode `TURN_REFUSALS` (3 values), the four `SOLSTICE_*_TOKEN` names, and the `home_gateway_url_mismatch` refusal; zero fork imports in the factory graph (AC6).
-- [ ] **Test (budget):** one gateway budget reservation per bot before first turn; an unreserved turn refuses (AC4).
-- [ ] **Security:** no token value, provider key, or approval authority appears in any new module, log line, or fixture (INV-MGR-2/3/4).
-- [ ] **Test (e2e demo — MANDATORY):** the full fake-journal loop — config → provisioning validation → budget reservations → digest invocation → snapshot with join keys, escalation marks, and both ledger reads — green in CI with zero fork code present, proving the CI-green invariant holds.
+- [x] **Impl:** `manager-config.ts` validates one Home / owner `{kind:'user'}` / three `bot-`-prefixed profiles / per-bot ceilings, refusing `kind:'org'` and ceiling-less bots by name (AC1, AC4).
+- [x] **Impl:** `digest-composer.ts` shells only `fleet status --driver exedev` and `fleet result`, assembles the snapshot, emits join-key lines and escalation marks; bounded exiting invocation, no daemon artifact (AC2, AC3).
+- [x] **Contract:** `src/fixloop/` and `src/fleet/verbs.ts` byte-identical after — a diff in either is a failed AC2/AC3, not a patch to argue.
+- [x] **Test (config):** org-kind refusal, missing-ceiling refusal, duplicate-Home refusal, and `w:`-form `workKey` validation all green with their named errors (AC1, AC4, AC5).
+- [x] **Test (digest):** snapshot lines carry all three DD-20 join keys; spend joins both ledgers; escalation marks fire for parked-past-threshold approvals, exhausted fix loops, and exit-6 runs; `botId` absent-not-null on fleet-only lines (AC5).
+- [x] **Test (fence):** the import fence asserts the AC2 allowlist — any manager-module import from `src/fleet/` outside `status.ts`, `result.ts`, or type-only `brief-schema.ts` fails; the fake journal shows no bot turn reaching an approve/dispatch path (AC2).
+- [x] **Test (seam):** fakes encode `TURN_REFUSALS` (3 values), the four `SOLSTICE_*_TOKEN` names, and the `home_gateway_url_mismatch` refusal; zero fork imports in the factory graph (AC6).
+- [x] **Test (budget):** one gateway budget reservation per bot before first turn; an unreserved turn refuses (AC4).
+- [x] **Security:** no token value, provider key, or approval authority appears in any new module, log line, or fixture (INV-MGR-2/3/4).
+- [x] **Test (e2e demo — MANDATORY):** the full fake-journal loop — config → provisioning validation → budget reservations → digest invocation → snapshot with join keys, escalation marks, and both ledger reads — green in CI with zero fork code present, proving the CI-green invariant holds.
+
+## Dev Agent Record
+
+**Shipped (2026-10-15/16, branch `feature/a1-home-bots`):** the factory-side half — `src/managers/manager-config.ts` (config of record: one Home, operator-as-user owner, three `bot-` profiles, ceilings; org refused by name citing ADR-RUN-2 D1 + company-bot door; `w:` WorkKeySchema with control-char rejection; credential-free gateway pin), `src/managers/digest-composer.ts` (bounded read-only poll; shells ONLY `fleet status --driver exedev` + `fleet result` via injected CLI invoker with tree-kill on timeout; AC2 allowlist — zero direct `src/fleet/` imports; escalation marks approval-park/fixloop-exhausted/exit-6; MAX_SNAPSHOT_RUNS + MAX_STATUS_ROWS + TOTAL_BUDGET_MS bounds; absent-not-null `botId` / absent-not-0 `bot_turn_spend_usd`, denominations never converted), `scripts/manager-digest.ts` (bounded CLI: crontab line documented, exit table 0/1/2/3, run-lock coalescing, stale-lock → exit 3, `--daemon` refused by name), `tests/managers/` (5 files, 109 tests), `tests/managers/scan-helpers.ts` (shared fork-scan).
+
+**Build protocol:** unlazy orchestrated tree (driver + 4 work leaves in 3 rolling waves, per-leaf ledgers under `.unlazy/a1/gates/`), parent re-verification per leaf, node integration gates (byte-identical fixloop/verbs + fixloop & skill-contract suites green at every gate).
+
+**Review rounds (bmad-code-review, 3 rounds in waves of 4 independent reviewers — blind-hunter / edge-case-hunter / verification-gap / acceptance-auditor):**
+- R1: 41 findings → 14 patch groups fixed + 5 rulings (D1–D5). R2: 37 findings → 20 patch groups fixed + 5 rulings (D6–D10). R3 (confirmation): audit verdict **no AC violations** (all six ACs + DOD PASS); 22 findings → 20-item final patch batch + rulings D12–D15. Triage records: `_bmad-output/workflow-state/code-review/a1/r{1,2,3}-triage.md`.
+- Settled rulings (selection): spend figures render ABSENT (never 0, never converted) when a ledger read has no figure or fails — absent-not-0 discipline governs over the schema's "required" letter (D1/D2); exit-6 mark rides the `fleet result` child rc — no record-side carrier exists today, a record-side producer supersedes (D3); the DOD "fake journal shows no bot turn reaching approve/dispatch" test is vacuous by construction — the fakes have no such surface (D7); the story's `fixOutcome` citation is stale — the real surface is `evaluateCeilings` (D8); AC2's letter is a static DIRECT-import fence (D12); digest-escalation's field set is the story's own `{kind, runId|approvalId}` (D13).
+
+**Verification at close:** `bunx tsc --noEmit` 0 errors; `bun run lint` (biome, repo-wide) exit 0; `src/fixloop/**` + `src/fleet/verbs.ts` byte-identical to dev (git diff clean); 109/109 manager-suite tests green (config 17, seam 23, composer 53, e2e 16) incl. the MANDATORY DOD e2e demo through the real binary; full `bun test` at the branch gate per operator directive (driver-only).
+
+**Handoffs:** the crontab line (`*/N * * * * cd /path/to/QDS-Factory && bun scripts/manager-digest.ts --driver exedev`) is operator-owned deploy config — documented in the CLI header, NOT installed by this story (DF3.8/A5 precedent); `deploy/vps/crontab.factory` does not yet carry it. A2's adds-only `workKey` run-record stamp plugs into the composer's `runMeta` seam (default `() => undefined` = all-fleet-only, A1's truth).
