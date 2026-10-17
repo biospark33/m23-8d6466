@@ -2181,7 +2181,9 @@ describe("buildIdFileInputs", () => {
       // Moved once more by f30f1339 (workId `:` charset — issue-correlation.ts
       // is a walked input); re-adopted in-branch the same way, D9's
       // same-commit ritual, ahead of the refire publish.
-            "d8d3009953a423bf3c174af2b0dbcbb3b23997545d9db98c40d41ee454875a69",
+      // Moved by the 2026-10-17 dependency sweep (vite 8 + @types/node 26:
+      // package.json and bun.lock are walked inputs); re-adopted in-branch.
+            "980ae80de6d8a5573a9cd1f4d81db7b2147915dc1fc8cd58642022d3929f75f6",
     );
   });
 });
