@@ -82,10 +82,20 @@ export async function submitLeg(lens: string): Promise<{ workId: string; runId: 
 	for (;;) {
 		refreshProtocolState();
 		const state = readProtocolState();
-		// The dump sorts runs by updatedAt DESC — the FIRST entry is the
-		// trigger-fired run the round is watching (an older qa_hunter_pack run
-		// would sit behind it; the round never picks an older one).
-		const run = state.runs[0];
+		// The watch job patches result.protocolRunId on a successful fire — the
+		// authoritative current-run link. A stale dump may still carry a PREVIOUS
+		// fire's run (or its failure); never read a run the jobs list does not
+		// name as fired.
+		const firedRunId = state.jobs
+			.map((j) => String((j.result as { protocolRunId?: string } | undefined)?.protocolRunId ?? ""))
+			.filter(Boolean)
+			.at(-1);
+		const run = firedRunId ? state.runs.find((r) => r.id === firedRunId) : state.runs[0];
+		if (!run) {
+			if (Date.now() > deadline) throw new Error("the trigger never fired a protocol run within the deadline");
+			await sleep(STATE_POLL_MS);
+			continue;
+		}
 		const step = run?.steps?.find((s) => s.id === stepId);
 		const fsEntry = run?.factoryState?.[stepId];
 		const workId = step?.externalJobConfig?.workId;

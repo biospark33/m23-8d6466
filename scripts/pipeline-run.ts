@@ -168,6 +168,7 @@ import { redactSecrets } from "../src/providers/step-log.ts";
 import {
   appendDispatchFailure,
   CorrelationError,
+  isValidWorkId,
   MAX_ISSUE_ID,
   RequestIdRepoMismatchError,
   resolveRunCorrelation,
@@ -1363,8 +1364,18 @@ function witnessCorrelationBeside(
     new Error(
       `the dispatch witness ${witnessPath} carries a malformed issueId: issueId must be a positive integer written in decimal digits alone, the same test \`--issue\` applies (got ${witnessEcho(JSON.stringify(w.issueId), 80)})`,
     );
-  let issueId: number;
-  if (typeof w.issueId === "string") {
+  // Q1.7 headless work rides the SAME field: dispatch writes `issueKey` — the
+  // digits-spelled issue id OR the `w:<workId>` headless identity — and the
+  // reader routes by shape (digits → the issue branch, `w:` → the workId
+  // branch of the same `resolveRunCorrelation`). A2's live round (leg
+  // qds-20261017-a5b1e1) caught the reader refusing the headless spelling the
+  // writer had always emitted; the two carriers now accept both shapes.
+  let issueId: number | undefined;
+  let workId: string | undefined;
+  if (typeof w.issueId === "string" && /^w:/.test(w.issueId)) {
+    workId = w.issueId.slice(2);
+    if (!isValidWorkId(workId)) throw malformedIssueId();
+  } else if (typeof w.issueId === "string") {
     if (!/^\d+$/.test(w.issueId)) throw malformedIssueId();
     issueId = Number(w.issueId);
   } else if (typeof w.issueId === "number") {
@@ -1378,11 +1389,13 @@ function witnessCorrelationBeside(
   try {
     const correlation = resolveRunCorrelation({
       repoSlug: w.repoSlug,
-      // No cast: the gate above is what makes this a number, so the compiler
-      // enforces the check rather than documenting it. Integerness and the
-      // 1..MAX_ISSUE_ID bounds stay `resolveRunCorrelation`'s, not a second
-      // opinion that can drift from the flag path's.
-      issueId,
+      // No cast: the gate above is what makes this a number (or a validated
+      // `w:`-workId), so the compiler enforces the check rather than
+      // documenting it. Integerness and the 1..MAX_ISSUE_ID bounds stay
+      // `resolveRunCorrelation`'s, not a second opinion that can drift from
+      // the flag path's.
+      ...(issueId !== undefined ? { issueId } : {}),
+      ...(workId !== undefined ? { workId } : {}),
       // A zero-length `issueUrl` is ABSENT, not a link. `parseValueFlags`
       // refuses an empty value for `--issue-url`, so the flag carrier cannot
       // express it; forwarding it wrote `sessions.issue_url = ""`, which is
