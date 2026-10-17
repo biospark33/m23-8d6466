@@ -15,11 +15,11 @@
     {
       "name": "verify-clean-tree",
       "kind": "code",
-      "description": "Proves the findings-only invariant on the box: the hunt phase must leave the checkout byte-identical to the fill. Companion phase required by the shipped manifest loader (MIN_PHASES = 2, src/phase-engine/types.ts:57) — the review work itself is entirely phase 1's.",
+      "description": "Proves the findings-only invariant on the box as far as the box can see it: the hunt phase must leave the worktree clean — a committed edit would hide behind an empty `git status --porcelain`, so the HOST driver additionally asserts the phase's echoed HEAD (`head=<sha>` line) equals the merged commitSha. Companion phase required by the shipped manifest loader (MIN_PHASES = 2, src/phase-engine/types.ts:57) — the review work itself is entirely phase 1's.",
       "command": [
         "bash",
         "-lc",
-        "test -z \"$(git status --porcelain)\" || { echo 'findings-only violated: the hunt phase edited the checkout' >&2; exit 1; }; git log --oneline -1"
+        "test -z \"$(git status --porcelain)\" || { echo 'findings-only violated: the hunt phase edited the checkout' >&2; exit 1; }; echo \"head=$(git rev-parse HEAD)\""
       ],
       "maxDurationMs": 15000,
       "retries": 0

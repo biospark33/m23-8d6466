@@ -22,8 +22,9 @@
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 
-const REPO_ROOT = "/Users/steve/QDS-Factory";
+const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const STATE_FILE = `${REPO_ROOT}/.unlazy/a2/protocol-state.json`;
 const STATE_POLL_MS = 10_000;
 
@@ -45,7 +46,19 @@ type ProtocolState = {
 };
 
 export function readProtocolState(): ProtocolState {
-	return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as ProtocolState;
+	const deadline = Date.now() + 30_000;
+	for (;;) {
+		try {
+			return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as ProtocolState;
+		} catch (err) {
+			if (Date.now() > deadline) {
+				throw new Error(`protocol state dump unreadable after 30s (${STATE_FILE}): ${String(err)}`);
+			}
+			refreshProtocolState();
+			const until = Date.now() + 1_000;
+			while (Date.now() < until) {} // 1s backoff before the next read
+		}
+	}
 }
 
 /** Refreshes the fork-side state dump (best-effort; a stale dump still parses). */
@@ -69,7 +82,10 @@ export async function submitLeg(lens: string): Promise<{ workId: string; runId: 
 	for (;;) {
 		refreshProtocolState();
 		const state = readProtocolState();
-		const run = state.runs.find((r) => r.status !== "failed");
+		// The dump sorts runs by updatedAt DESC — the FIRST entry is the
+		// trigger-fired run the round is watching (an older qa_hunter_pack run
+		// would sit behind it; the round never picks an older one).
+		const run = state.runs[0];
 		const step = run?.steps?.find((s) => s.id === stepId);
 		const fsEntry = run?.factoryState?.[stepId];
 		const workId = step?.externalJobConfig?.workId;
