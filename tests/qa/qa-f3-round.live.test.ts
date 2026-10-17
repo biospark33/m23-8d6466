@@ -22,6 +22,7 @@
 import { describe, expect, test } from "bun:test";
 import { liveGate, liveTodoOff } from "../fleet/e2e/live-harness.ts";
 import { printWorstCaseSpend, runLeg, SWARMCLAW_FORK_REV, type LegDriverDeps } from "../../scripts/qa/leg-drivers.ts";
+import { awaitTerminal, submitLeg } from "../../scripts/qa/live-round-wiring.ts";
 import { QA_LENS } from "../../src/qa/findings.ts";
 
 const EVIDENCE_DIR = "_bmad-output/evidence/v6-a2";
@@ -40,17 +41,17 @@ describe("A2 live Tier-2 round (post-merge trigger; operator GO-gated)", () => {
 			throw new Error(`operator GO not recorded at ${goFile} — record it (who/when/spend-approved) before firing`);
 		}
 
-		// The leg drivers are injected on the day: submitLeg goes through the
-		// fork-side protocol's external_job submission for the merged commitSha;
-		// awaitTerminal polls `fleet result` (driver-agnostic verbs only). The
-		// retain/issues/priming legs run through the merged src/qa modules.
+		// The leg drivers are wired on the day (scripts/qa/live-round-wiring.ts):
+		// submitLeg observes the trigger-fired protocol's external_job legs (the
+		// round driver never submits spend itself); awaitTerminal polls the
+		// driver-agnostic `fleet result` seam against the shared run-record
+		// store. Lens labels are minted host-side by the wiring module from the
+		// protocol step ids (the fork→fleet submit seam carries no step
+		// instructions — see that file's header). The retain/issues/priming
+		// legs run through the merged src/qa modules after the legs settle.
 		const deps: LegDriverDeps = {
-			submitLeg: async () => {
-				throw new Error("wired on the day from the merged fork protocol (see scripts/qa/leg-drivers.ts header)");
-			},
-			awaitTerminal: async () => {
-				throw new Error("wired on the day from the fleet result seam");
-			},
+			submitLeg,
+			awaitTerminal,
 			forkRev: () => SWARMCLAW_FORK_REV,
 			outDir: EVIDENCE_DIR,
 		};
