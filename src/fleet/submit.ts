@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { dispatch, FleetError, type DispatchDeps, type DispatchResult } from "./dispatch.ts";
 import { log } from "../lib/log.ts";
 import { isValidUuidV4, resolveRunCorrelation, type IssueRef } from "../phase-engine/issue-correlation.ts";
-import type { RunRecordStore } from "../providers/run-record.ts";
+import { qaWorkKeyPatch, type RunRecordStore } from "../providers/run-record.ts";
 import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import type { StartRunResult } from "./run.ts";
@@ -109,14 +109,30 @@ export interface SubmitDeps extends Pick<
  * forwards. Verbatim shape of scripts/fleet.ts's `observingMint` (that copy
  * lives in the CLI layer; this module is src-layer and cannot import it).
  */
-function observingMint(store: RunRecordStore, onMinted: (runId: string) => void): RunRecordStore {
+function observingMint(
+  store: RunRecordStore,
+  onMinted: (runId: string) => void,
+  /** A2 (AC6): when the brief carries a `w:qa-*` workId, stamp it on the record at birth. */
+  qaWorkKey?: string,
+): RunRecordStore {
   return new Proxy(store, {
     get(target, prop) {
       if (prop !== "create") return Reflect.get(target, prop);
       const create = target.create.bind(target);
       return (runId: string, now?: Date) => {
         onMinted(runId);
-        return create(runId, now);
+        const record = create(runId, now);
+        // AC6's stamp, best-effort at the birth hook: a stamp failure must not
+        // fail the submit (the box may already be provisioning) — the DD-20
+        // join tolerates an absent stamp, never a wrong one.
+        if (qaWorkKey) {
+          try {
+            target.set(runId, qaWorkKeyPatch(qaWorkKey));
+          } catch {
+            /* the record keeps no stamp; the ledger identity still carries it */
+          }
+        }
+        return record;
       };
     },
   });
@@ -351,7 +367,9 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
   }
 
   let mintedRunId: string | undefined;
-  const store = observingMint(deps.store, (minted) => {
+  const store = observingMint(
+    deps.store,
+    (minted) => {
     if (mintedRunId !== undefined) return;
     mintedRunId = minted;
     // The run is visible — the intent resolves to it from this instant, crash
@@ -365,7 +383,12 @@ export async function submitWork(deps: SubmitDeps): Promise<SubmitAck> {
       engine: "not-requested",
       ...group,
     });
-  });
+    },
+    typeof (deps.brief as { workId?: string }).workId === "string" &&
+      (deps.brief as { workId?: string }).workId?.startsWith("w:qa-")
+      ? (deps.brief as { workId?: string }).workId
+      : undefined,
+  );
 
   let result: DispatchResult;
   try {
