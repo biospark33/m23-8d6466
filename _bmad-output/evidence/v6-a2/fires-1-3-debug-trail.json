@@ -1,0 +1,48 @@
+{
+	"leg": "fires-1-3-debug-trail",
+	"mode": "live",
+	"ok": true,
+	"outcome": "debug-trail",
+	"origin": "session record 2026-10-17; written by the round driver (Claude)",
+	"writtenAt": "2026-10-17T12:45:00Z",
+	"swarmclawForkRev": "9603c0f0",
+	"summary": "Fires 1-3 of the A2 live Tier-2 round (story a2-qa-department-f3): the first REAL end-to-end fire of the whole F3 chain (Z2 post-merge trigger -> QA bot wake -> hunter-pack protocol -> external_job legs -> fleet submit -> box -> engine). Four shipped-seam defects, each caught by a live-only failure and fixed in its own PR:",
+	"catches": [
+		{
+			"n": 1,
+			"what": "the contract workId w:qa-<stamp>-<lens> refused at submit: the brief-side charset [A-Za-z0-9._/-] barred the colon",
+			"evidence": "fork run 567b5c4a leg qa-leg-correctness: CorrelationError INVALID_WORK_ID (watch job 542b9d73b9df5f20e2f6)",
+			"fix": "factory PR #439 (charset + ledger mirror, CodeRabbit-caught second layer)"
+		},
+		{
+			"n": 2,
+			"journal": "heartbeat-wake: Wake skipped for session b470af0c: heartbeat disabled (heartbeat-wake.ts:465); createAgentTaskSession hard-sets heartbeatEnabled:false (task-session.ts:66)",
+			"what": "watch-job wakes die on task sessions — the trigger's wake rode the heartbeat gate",
+			"fix": "day-of: flip the trigger session's heartbeat on (30-day interval, watch_job wakes only); fork-side follow-up filed swarmclaw#808"
+		},
+		{
+			"n": 3,
+			"what": "the AC6 workKey stamp never wired into submit — records born unstamped (run qds-20261017-b22765 born 2026-10-17T11:17:52Z with extensions.budget only)",
+			"fix": "factory PR #440 (observingMint birth-hook stamp); leg-1's record retro-stamped via the writer's patch shape"
+		},
+		{
+			"n": 4,
+			"journal": "qds-run@qds-20261017-a5b1e1: pipeline-run: the dispatch witness carries a malformed issueId ... (got w:w:qa-20261017t122025z-correctness)",
+			"what": "the in-box witness reader refused the headless identity the writer had always emitted",
+			"fix": "factory PR #441 (deriveInBoxArgv routes by shape; front-door regression test)"
+		}
+	],
+	"infraGaps": [
+		"day-of substrate: no live fork instance ran the merged counterpart code (image rebuilt locally as qa-f3-a2 at 9603c0f0); the trigger config (createQaPostMergeTrigger) had never been invoked — no production caller exists",
+		"the fork container's fleet child could not fetch the PRIVATE factory repo over https (no credentials) — the fill died and the engine never started (fire 2, run qds-20261017-b22765, intent c054dab6 state:failed engine:not-requested); fixed day-of with a mounted git credential store (0600, mounted ro; the container-side copy lives in /tmp)",
+		"the publish chain was broken at the R3-a TOFU gate (openrig tree drift) — healed: c224c02f + 9ae282c9 + publish 38990891847 success (digest dc5795bd, attested, mirrored)"
+	],
+	"cleanup": {
+		"boxes": "qds-20261017-b22765 + qds-20261017-a5b1e1 destroyed (fleet teardown + exe.dev rm); 0 boxes live at trail close",
+		"keys": "both minted keys revoked and verified against listedKeyHashes() (a179aa78 revoked via teardown; 68ec45be revoked via revokeRunKey after the interrupted teardown); 0 live e2e keys",
+		"spend": "2 boxes (~2.2h box-hours), 2 keys at the 50,000 u$ cap, 81 u$ spend booked on the a5b1e1 attempt; realistic spend under $0.25",
+		"locks": "the interrupted teardown's stale lock removed (holder pid 71799 dead, box destroyed, key absent)"
+	},
+	"watchJobs": ["542b9d73b9df5f20e2f6 (fire 1, deleted after the refusal)", "429548b5b7c193d1797c (fire 2, deleted)", "62c8d720f233f00c47a7 (fire 3, deleted)"],
+	"protocolRuns": ["567b5c4a (fire 1, deleted post-refusal)", "34fa7db9 (fire 2, kept as evidence, waiting->failed)", "d53bb5f9 (fire 3, kept as evidence)"]
+}

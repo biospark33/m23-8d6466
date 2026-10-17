@@ -1,0 +1,23 @@
+{
+	"who": "operator (biospark33)",
+	"when": "2026-10-16T21:00:00-04:00",
+	"recordedFrom": "verbatim operator instruction in session: \"just do the fucking live round now\" \u2014 GO for the A2 live Tier-2 round",
+	"spendApproved": {
+		"legs": "3 hunter-pack legs x $6/leg cap = $18 max (groupCapUsd default 25, per-leg admission cap $6 set by QA_WORST_CASE_USD default in scripts/qa/leg-drivers.ts)",
+		"botTurn": "1 qa-manager bot turn (anthropic/claude-haiku-4.5 via the fork's OpenRouter credential)",
+		"hindsightExtraction": "hindsight-qds extraction LLM on the retained findings (openrouter, small)",
+		"primingProof": "primeDispatchBrief seam call against the real bank (real recall, no box) + optionally one small real Dev dispatch if within envelope",
+		"worstCaseUsd": 20,
+		"realisticUsd": "under $2",
+		"watchPollPAT": "fork credential cred_82ed11859e02 (read-only PAT; stored encrypted)"
+	},
+	"preconditionsAtGo": {
+		"imagePin": "c224c02f TOFU re-pin + 9ae282c9 adoption; publish 38990891847 green (dc5795bd... attested); private mirror re-pushed",
+		"fork": "solstice-swarmclaw:qa-f3-a2 at 9603c0f0 (has #801) with day-of compose override",
+		"bot": "qa-manager bc74f607",
+		"hindsight": "hindsight-qds healthy on 127.0.0.1:18890 (dedicated, Z4 compose)",
+		"trigger": "watch job 542b9d73b9df5f20e2f6 armed on PR #436; FIRED 2026-10-17T02:13:48Z (wake f2a9996bd53ebdae, session b470af0c); protocol run 567b5c4a"
+	},
+	"firedAt": "2026-10-17T02:13:48Z",
+	"swarmclawForkRev": "9603c0f0"
+}

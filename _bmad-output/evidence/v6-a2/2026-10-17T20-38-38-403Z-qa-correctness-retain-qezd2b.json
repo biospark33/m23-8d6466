@@ -1,0 +1,18 @@
+{
+  "leg": "qa-correctness-retain",
+  "mode": "live",
+  "ok": false,
+  "outcome": "retained",
+  "steps": [],
+  "origin": ".unlazy/a2/post-legs.ts",
+  "stdoutTail": "documents=0",
+  "stderrTail": "",
+  "writtenAt": "2026-10-17T20:38:38.403Z",
+  "swarmclawForkRev": "9603c0f0",
+  "extra": {
+    "runId": "qds-20261017-96bc7a",
+    "documentIds": [],
+    "bank": "qds-factory",
+    "commitSha": "d061869ae68d103a773832748712b8d587d3f4d6"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "leg": "qa-correctness",
+  "mode": "live",
+  "ok": false,
+  "outcome": "cancelled",
+  "steps": [],
+  "origin": "scripts/qa/leg-drivers.ts runLeg(correctness)",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "writtenAt": "2026-10-17T15:52:16.796Z",
+  "swarmclawForkRev": "9603c0f0"
+}

@@ -1,0 +1,21 @@
+{
+	"leg": "qa-priming-round-trip",
+	"mode": "live",
+	"ok": true,
+	"outcome": "primed",
+	"steps": [],
+	"origin": ".unlazy/a2/priming-proof.ts via src/hindsight/kg-context.ts primeDispatchBrief (the production dispatch seam)",
+	"exitCode": 0,
+	"stdoutTail": "kgContextChars=7929 containsRetainedFinding=true",
+	"stderrTail": "",
+	"writtenAt": "2026-10-17T20:50:00Z",
+	"swarmclawForkRev": "9603c0f0",
+	"extra": {
+		"bank": "quantum-digital-solutions-qds-factory (+ -dev-meta family marker; qds-factory also carries the guard-legal copy)",
+		"hindsight": "hindsight-qds 0.10.0 dedicated instance, 127.0.0.1:18890 (Z4 compose)",
+		"kgContextChars": 7929,
+		"containsRetainedFinding": true,
+		"firstKgContextEntry": "documentId=qds-20261017-e88f24 (leg qds-20261017-297263, lens secret-hygiene)",
+		"seamGap11": "retain's qds- prefix guard vs recall's resolveBankId(slug) family disagree for org slugs \u2014 the loop needed both banks; filed in the round evidence + swarmclaw#808 thread"
+	}
+}
