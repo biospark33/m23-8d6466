@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6b-Autonomy (A-epic, story 3 of 4 — the autonomy round that must end at a parked gate, never a merged PR)
-**Status:** review — factory half implemented on `feature/a3-maintenance-sweeps` (2026-10-16); gates A1 ✓ (PR #434), A6 ✓ (PR #425), Z2 ✓ (PR #405) all merged. The live first-firing round (DoD e2e) and the fork-side wake leg stay operator-gated (spend + E21 schedule row).
+**Status:** done — factory PR #437 merged to dev 2026-10-17 (merge 556f5bbc, head 6e025908) after 3 pre-PR bmad review rounds and CodeRabbit review (2 minor findings fixed in 6e025908: `src/maintenance/**` added to the told fence list with a drift test; header names DF3.8 `observe --all` as the operator's cron). Linux-only flock fixtures fixed in f43bf3a3. Gates A1 ✓ (PR #434), A6 ✓ (PR #425), Z2 ✓ (PR #405). Still operator-gated (not implied by the merge): sign-off on the ⚑ decisions D1, D2, D4, D11, D12 and the DD-28.21 reading; crontab merge-install plus DF3.8 `observe --all` and `.factory/`; the fork-side wake leg; the live first-firing round (DoD e2e, spend GO).
 
 ## Spec Reference
 
