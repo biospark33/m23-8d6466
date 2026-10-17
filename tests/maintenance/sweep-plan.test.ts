@@ -570,6 +570,8 @@ describe("planning — deterministic order, fence, cap", () => {
     const task = briefTask(p.briefs[0] as (typeof p.briefs)[number]);
     expect(task).toContain("Never edit: src/providers/**");
     expect(task).toContain("AUDIT_HOPS");
+    // The list the agent is TOLD must cover every fenced directory the tripwire enforces.
+    for (const dir of FENCED_TARGET_PREFIXES.filter((p) => p.endsWith("/"))) expect(task).toContain(dir);
   });
 
   test("the in-box TRIPWIRE: the closing phase fails a diff touching a fenced path, passes a clean one (a tripwire, not a control — the agent owns the box)", () => {

@@ -16,8 +16,9 @@
  * The gate is the one gate (AC1, INV-A3-GATE): a brief becomes a run through
  * the fleet CLI's `submit` verb (dispatch + engine start, replay-safe on its
  * `--request-id`), and the run reaches `awaiting-approval` through DF3.7's
- * `observeAndDriveChain`, driven by DF3.8's `fleet observe --all` sweep (its
- * cron line sits beside A3's in deploy/vps/crontab.factory). This module never
+ * `observeAndDriveChain`, driven by DF3.8's `fleet observe --all` sweep: the
+ * operator's own cron (DF3.8 INV-IBOX-19: documented, never installed; named
+ * only as a prerequisite in deploy/vps/crontab.factory). This module never
  * imports the chain, the approval gate, the approver allowlist, or `push.ts`,
  * and holds no token — the fence test greps for each.
  *
@@ -250,7 +251,7 @@ export function isFencedTarget(h: Pick<Hotspot, "source" | "target">): boolean {
 
 /** Repeated in every task: the fence the in-box agent is told, beside the planner's and the closing phase's. */
 const NEVER_EDIT =
-  "Never edit: src/providers/** (the provider layer, including classifyRunExit), src/audit/** (including AUDIT_HOPS), src/reverify/**, the verdict logic in src/gate/gate-runner.ts, classifyDiffScope in src/fixloop/feedback-run.ts, the approval gate, approver, and push modules under src/fleet/, .github/, deploy/, oci/, config/, or package.json — the closing phase fails the run if the diff touches any of them.";
+  "Never edit: src/providers/** (the provider layer, including classifyRunExit), src/audit/** (including AUDIT_HOPS), src/reverify/**, src/maintenance/** (this sweep), the verdict logic in src/gate/gate-runner.ts, classifyDiffScope in src/fixloop/feedback-run.ts, the approval gate, approver, and push modules under src/fleet/, .github/, deploy/, oci/, config/, or package.json — the closing phase fails the run if the diff touches any of them.";
 
 export function isSafeTarget(h: Pick<Hotspot, "source" | "target">): boolean {
   return h.source === "graph" ? SAFE_PATH_RE.test(h.target) : AUDIT_TARGET_RE.test(h.target);
