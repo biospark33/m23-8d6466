@@ -90,7 +90,10 @@ export async function submitLeg(lens: string): Promise<{ workId: string; runId: 
 			.map((j) => String((j.result as { protocolRunId?: string } | undefined)?.protocolRunId ?? ""))
 			.filter(Boolean)
 			.at(-1);
-		const run = firedRunId ? state.runs.find((r) => r.id === firedRunId) : state.runs[0];
+		// No fallback: a dump from before this round's fire carries a PREVIOUS
+		// fire's runs — polling until THIS round's job names its run is the only
+		// safe read.
+		const run = firedRunId ? state.runs.find((r) => r.id === firedRunId) : undefined;
 		if (!run) {
 			if (Date.now() > deadline) throw new Error("the trigger never fired a protocol run within the deadline");
 			await sleep(STATE_POLL_MS);
