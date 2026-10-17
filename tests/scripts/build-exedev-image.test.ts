@@ -2178,7 +2178,10 @@ describe("buildIdFileInputs", () => {
       // tests/swarmclaw/mask-env.test.ts). Adopted from this test's own
       // failing run on the final post-review tree (all walked-input edits
       // landed before this re-pin, per the edit-first/re-pin-last discipline).
-            "7e49ed7a3adb6e2f2a25295ff917adc2592ed507141779b1ba165cddcf5098e2",
+      // Moved once more by f30f1339 (workId `:` charset — issue-correlation.ts
+      // is a walked input); re-adopted in-branch the same way, D9's
+      // same-commit ritual, ahead of the refire publish.
+            "102e23146f928aa0ea85607bb1504b8bb5b00cbaf734816d5a56c82e4494345a",
     );
   });
 });

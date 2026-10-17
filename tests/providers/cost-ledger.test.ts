@@ -4006,3 +4006,26 @@ describe("#380 — headless work keys (the `w:` namespace)", () => {
     expect(() => loadCostConfig(file)).toThrow(CostConfigError);
   });
 });
+
+// f30f1339 follow-up (CodeRabbit #439): the ledger grammars mirror correlation's
+// charset — `:` joined the brief-side grammar, so the mirror takes it the same
+// commit. The A2 hunter-pack's contract workId `w:qa-<stamp>-<lens>` must be
+// admittable end to end (identity → budget admission), not refused after the
+// brief already validated.
+describe("the `:` tail-charset join (CodeRabbit #439 mirror)", () => {
+	test("a colon-bearing w: identity admits and prices (the A2 contract shape)", () => {
+		const id = "w:qa-20261017t021348z-correctness"; // folded case, as correlation mints it
+		seedRecord("run-colon");
+		expect(() =>
+			ledger.admitIssue({ repoSlug: "qds/demo", issueId: id, runId: "run-colon", requestId: "req-colon" }, 5_000_000, 50_000_000),
+		).not.toThrow();
+		expect(ledger.issueBudgetSnapshot("qds/demo", id)).toBeDefined();
+	});
+
+	test("a colon-bearing override KEY loads (config side of the mirror)", () => {
+		const file = join(dir, "cost-config-colon.json");
+		writeFileSync(file, JSON.stringify({ defaultCapMicroUsd: 5_000_000, perIssueOverrides: { "qds/demo#w:qa-20261017t021348z-correctness": 9_000_000 } }));
+		const { config } = loadCostConfig(file);
+		expect(capForIssue(config, "qds/demo", "w:qa-20261017t021348z-correctness")).toBe(9_000_000);
+	});
+});

@@ -987,6 +987,15 @@ describe("resolveRunCorrelation workId (Q1.7)", () => {
     }
   });
 
+  test("the `:` charset join (A2 live round 542b9d73…): the QA hunter-pack contract workId crosses the brief grammar", () => {
+    const r = resolveRunCorrelation({
+      repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
+      workId: "w:qa-20261017T021348Z-correctness",
+      requestId: REQ_ID_A,
+    });
+    expect(r.workId).toBe("w:qa-20261017T021348Z-correctness");
+  });
+
   test("purity holds for the workId path too (no fs/db I/O)", () => {
     const cwd = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, "pure-workid-")));
     const prevCwd = process.cwd();
