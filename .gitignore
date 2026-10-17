@@ -95,3 +95,6 @@ _bmad-output/evidence/**/audit-links.db
 
 # operator-local factory config (repos/approvers allowlists, 0600) + local demo byproducts
 .factory/
+
+# Z4 operator-placed env files (runbook G3: 0600, never committed)
+deploy/vps/*.env
