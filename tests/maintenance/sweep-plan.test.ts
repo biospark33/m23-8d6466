@@ -340,7 +340,7 @@ describe("AC3(b) — one flock, two modes: the refresh's exclusive lock skips th
   });
 
   async function holdExclusive(lock: string): Promise<ReturnType<typeof Bun.spawn>> {
-    const holder = Bun.spawn(["flock", "-x", lock, "sleep", "10"]);
+    const holder = Bun.spawn(["flock", "-x", "-o", lock, "sleep", "10"]);
     // Poll until the lock is provably held (a probe that cannot take it), so a
     // slow CI box never races the assertion.
     for (let i = 0; i < 100; i++) {
@@ -358,7 +358,7 @@ describe("AC3(b) — one flock, two modes: the refresh's exclusive lock skips th
       const lock = join(home, ".refresh.lock");
       const marker = join(home, "graph-read");
       const fakeGn = join(home, "gitnexus");
-      writeFileSync(fakeGn, `#!/bin/sh\ntouch ${marker}\necho '{"markdown":"| file | fanIn |\\n| --- | --- |\\n| src/x.ts | 2 |","row_count":1}'\n`, { mode: 0o755 });
+      writeFileSync(fakeGn, `#!/bin/sh\ntouch ${marker}\nprintf '%s\\n' '{"markdown":"| file | fanIn |\\n| --- | --- |\\n| src/x.ts | 2 |","row_count":1}'\n`, { mode: 0o755 });
       writeFileSync(join(home, "cli-version.json"), JSON.stringify({ indexedAt: new Date().toISOString().replace(/\.\d+Z$/, "Z") }));
       const holder = await holdExclusive(lock);
       const env = { ...process.env, QDS_GITNEXUS_HOME: home, QDS_GITNEXUS_BIN: fakeGn, QDS_SWEEP_GRAPH_LEG_CHILD: "1" };
@@ -1109,7 +1109,7 @@ process.exit(2);
     writeFileSync(join(home, "cli-version.json"), JSON.stringify({ indexedAt: new Date().toISOString().replace(/\.\d+Z$/, "Z") }));
     const bin = join(home, "gitnexus");
     const md = ["| file | fanIn |", "| --- | --- |", ...rows].join("\\n");
-    writeFileSync(bin, `#!/bin/sh\necho 'GitNexus Cypher'\necho '{"markdown":"${md}","row_count":${rows.length}}'\n`, { mode: 0o755 });
+    writeFileSync(bin, `#!/bin/sh\necho 'GitNexus Cypher'\nprintf '%s\\n' '{"markdown":"${md}","row_count":${rows.length}}'\n`, { mode: 0o755 });
     return { home, bin };
   }
 
