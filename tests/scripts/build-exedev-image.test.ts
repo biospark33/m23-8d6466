@@ -2181,7 +2181,7 @@ describe("buildIdFileInputs", () => {
       // Moved once more by f30f1339 (workId `:` charset — issue-correlation.ts
       // is a walked input); re-adopted in-branch the same way, D9's
       // same-commit ritual, ahead of the refire publish.
-            "102e23146f928aa0ea85607bb1504b8bb5b00cbaf734816d5a56c82e4494345a",
+            "d8d3009953a423bf3c174af2b0dbcbb3b23997545d9db98c40d41ee454875a69",
     );
   });
 });
