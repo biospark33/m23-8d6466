@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b-Autonomy (E21-gated; the QA *department manager* as a Home bot — a manager, not a proactive/cron agent)
-**Status:** **in-progress** (fixture tier code-complete 2026-10-16, R1 review fixes landed; live Tier-2 round + PR pending) — all gates cleared: **E21 S02b** (bots as profiles + turn principal) and **E21 S03b** (Home provider wiring) merged to fork `origin/dev`; predecessors **A1** (manager bot substrate, PR #434), **M1.2** (host-side retain/recall cycle), **Z2** (fork-side post-merge trigger wiring) all done. **No documented crontab fallback exists for this story — by design, keep it that way.** M3.1's fallback works because the M3 gateway is driver-agnostic; A2's actor is a bot turn — a cron substituting for it would be a second, un-chartered write path into the turn system. F3 is event-shaped: Z2's post-merge trigger is THE trigger; a missed-wake sweeper (driver-agnostic, commitSha-deduped reconciliation scan) is a SEPARATE story to charter, never something a dev session improvises here. If E21 slips, A2 waits — fail-closed is correct.
+**Status:** done — factory PR #436 merged to dev 2026-10-17 (merge d061869a) after CodeRabbit review — 3 inline findings verified and fixed (100684e2: full `qds-<repo>` BankIdSchema identity guard on `retainFindings`; UTF-16-bounded surrogate-safe summary trim + full system-message tool-state replay in the vendored pi-1.1.0 harness; 8d43f018: typecheck.sh release pick filters for `dist/` so an incomplete newest release cannot block an older usable one) — and the counterpart swarmclaw PR #801 merged 2026-10-17 (merge 9603c0f0, CodeRabbit full review). 2 pre-PR bmad review rounds (R1 ~35 / R2 ~24 findings; 35 fixed, 5 declined with rulings, stop rule met). Live Tier-2 round = Z2's post-merge trigger on the merged commit, evidence pinned to `_bmad-output/evidence/v6-a2/` (D7). All gates cleared: **E21 S02b** (bots as profiles + turn principal) and **E21 S03b** (Home provider wiring) merged to fork `origin/dev`; predecessors **A1** (manager bot substrate, PR #434), **M1.2** (host-side retain/recall cycle), **Z2** (fork-side post-merge trigger wiring) all done. **No documented crontab fallback exists for this story — by design, keep it that way.** M3.1's fallback works because the M3 gateway is driver-agnostic; A2's actor is a bot turn — a cron substituting for it would be a second, un-chartered write path into the turn system. F3 is event-shaped: Z2's post-merge trigger is THE trigger; a missed-wake sweeper (driver-agnostic, commitSha-deduped reconciliation scan) is a SEPARATE story to charter, never something a dev session improvises here. If E21 slips, A2 waits — fail-closed is correct.
 
 ## Spec Reference
 
@@ -100,14 +100,14 @@ Factory scope: the host-side legs (findings normalization, idempotent retain, is
 
 ## Definition of Done
 
-- [ ] **Impl:** `src/qa/` legs + run-record `workKey` stamp; tsc/biome clean.
-- [ ] **Test (fixture):** fake Home-bot/gateway journal suite green with zero E21 code present; factory CI green.
-- [ ] **Contract:** `workKey` adds-only; `detect_changes()` shows 0 unexpected affected symbols.
-- [ ] **Security:** AC3/AC4/AC7 negative controls demonstrated failing at fixture tier.
-- [ ] **Integration:** live Tier-2 round — worst-case spend printed, operator GO recorded, keys/boxes cleaned in `finally`, evidence scrubbed to `_bmad-output/evidence/v6-a2/` (`QDS_E2E_EVIDENCE_DIR` pinned there — live-harness defaults to `df3-e2e`); every evidence JSON stamps `swarmclawForkRev` (Z1's drift alarm covers `v6-a2/`) — the stamp is written by this story's own leg-evidence writer (mirroring Z3's leg drivers; `live-harness.ts` stays un-stamping per Z1 AC7, so the pinning requirement lives in the file this story adds to Files to Modify, not in live-harness); priming round-trip proven (next Dev dispatch `<kg_context>` contains a retained finding).
-- [ ] **Test (e2e demo — MANDATORY):** the live round is the demo; the fixture tier additionally demos the full trigger→retain→issue path headlessly.
-- [ ] **Integration:** counterpart fork-side story filed in the solstice repo from the same contract text.
-- [ ] **Contract:** sprint-status v6 row + epics index updated; `bun test tests/scripts/story-consistency.test.ts` green.
+- [x] **Impl:** `src/qa/` legs + run-record `workKey` stamp; tsc/biome clean.
+- [x] **Test (fixture):** fake Home-bot/gateway journal suite green with zero E21 code present; factory CI green.
+- [x] **Contract:** `workKey` adds-only; `detect_changes()` shows 0 unexpected affected symbols.
+- [x] **Security:** AC3/AC4/AC7 negative controls demonstrated failing at fixture tier.
+- [x] **Integration:** live Tier-2 round — worst-case spend printed, operator GO recorded, keys/boxes cleaned in `finally`, evidence scrubbed to `_bmad-output/evidence/v6-a2/` (`QDS_E2E_EVIDENCE_DIR` pinned there — live-harness defaults to `df3-e2e`); every evidence JSON stamps `swarmclawForkRev` (Z1's drift alarm covers `v6-a2/`) — the stamp is written by this story's own leg-evidence writer (mirroring Z3's leg drivers; `live-harness.ts` stays un-stamping per Z1 AC7, so the pinning requirement lives in the file this story adds to Files to Modify, not in live-harness); priming round-trip proven (next Dev dispatch `<kg_context>` contains a retained finding).
+- [x] **Test (e2e demo — MANDATORY):** the live round is the demo; the fixture tier additionally demos the full trigger→retain→issue path headlessly.
+- [x] **Integration:** counterpart fork-side story filed in the solstice repo from the same contract text.
+- [x] **Contract:** sprint-status v6 row + epics index updated; `bun test tests/scripts/story-consistency.test.ts` green.
 
 ## Dev Agent Record
 
