@@ -1,0 +1,22 @@
+# A2 leaf-2.0.1 — the QA hunter-pack leg roster (read-only reviewers).
+#
+# Read-only by construction: the hunter-pack legs review findings-only — the
+# leg never edits or merges (ADR-1 §2, story a2-qa-department-f3 INV-A2-1) —
+# so no role carries `writes`. Tools mirror the memory-live roster's
+# least-privilege idiom (explicit list, never null on the credential-carrying
+# role). Two roles is the minimum the gate-beside contract exercises
+# (setup gate C pings every roster model). Same proven-live T2 model pair as
+# config/rosters/roster.yaml (lead haiku-4.5, second deepseek-v3.2).
+defaults:
+  provider: openrouter
+  thinking: medium
+  tools: ["read", "grep", "bash"]
+  writes: []
+
+roles:
+  - name: lead
+    model: anthropic/claude-haiku-4.5
+    thinking: high
+
+  - name: verifier
+    model: deepseek/deepseek-v3.2

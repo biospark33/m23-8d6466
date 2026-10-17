@@ -407,7 +407,7 @@ export const BriefSchema = z.strictObject({
     .string()
     .refine(isValidWorkId, {
       message:
-        "workId must match ^[A-Za-z0-9._/-]{1,64}$ and may not be all digits (all digits collide with a numeric issue's spend identity)",
+        "workId must match ^[A-Za-z0-9._:/-]{1,64}$ and may not be all digits (all digits collide with a numeric issue's spend identity)",
     })
     .optional(),
   // DF3.1 D2: optional string URL. Same scheme allow-list as repoUrl below:

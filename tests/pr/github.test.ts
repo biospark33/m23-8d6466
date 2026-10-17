@@ -297,6 +297,59 @@ describe("getPullRequest", () => {
   });
 });
 
+describe("createIssue", () => {
+  test("POSTs {title, body} to /repos/{owner}/{repo}/issues and maps number/html_url", async () => {
+    let method = "";
+    let path = "";
+    let sent: unknown;
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        method = req.method;
+        path = url.pathname;
+        sent = await req.json();
+        return Response.json({ number: 42, html_url: "https://github.invalid/o/r/issues/42" });
+      },
+    });
+    try {
+      const ref = await httpGitHubApi(`http://localhost:${server.port}`).createIssue({
+        owner: "o",
+        repo: "r",
+        title: "t",
+        body: "b",
+        token: TOKEN,
+      });
+      expect(ref).toEqual({ issueNumber: 42, htmlUrl: "https://github.invalid/o/r/issues/42" });
+      expect(method).toBe("POST");
+      expect(path).toBe("/repos/o/r/issues");
+      expect(sent).toEqual({ title: "t", body: "b" });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a 200 missing html_url refuses as GitHubApiError", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ number: 42 }) });
+    try {
+      const call = httpGitHubApi(`http://localhost:${server.port}`).createIssue({
+        owner: "o",
+        repo: "r",
+        title: "t",
+        body: "b",
+        token: TOKEN,
+      });
+      const err: Error = await call.then(
+        () => new Error("expected a refusal, got a resolved issue"),
+        (e: unknown) => e as Error,
+      );
+      expect(err.name).toBe("GitHubApiError");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 describe("readHostToken", () => {
   test("a host without `security` falls through to the piped stdin instead of throwing", async () => {
     // `Bun.spawn` THROWS ENOENT rather than exiting non-zero, so an unguarded

@@ -245,6 +245,10 @@ export function fakeGitHub(over: Partial<Pick<FakeGitHub, "loginValue" | "failCr
     async commentIssue({ issueNumber, body }) {
       api.comments.push({ issueNumber, body });
     },
+    async createIssue() {
+      // Not wired into this fake: A2 QA filing drives its own `api` seam.
+      throw new Error("createIssue is not wired into FakeGitHub");
+    },
     async listPrReviewComments({ prNumber }) {
       return api.reviewComments[prNumber] ?? [];
     },

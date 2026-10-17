@@ -1318,7 +1318,13 @@ describe("buildIdFileInputs", () => {
       // OPEN PAIRING, now with a named next input: whoever adopts fa2284d1 into the
       // ARG moves these bytes again, and section 3b re-adopts this entry from that
       // failing run — the driver REF/BUILD_ID adoption stays owed behind it.
-      "oci/exedev/Dockerfile": "def062876a50493e01d6bab1fabb9aa79c73884ddd5ff7ed57f2b87ea874aa37",
+      //
+      // c224c02f (2026-10-16): A2-day re-pinned OPENRIG_TREE_SHA256 9f148862 →
+      // 4340266a (publish run 38989801031's healed TOFU pass — the ARG move
+      // succeeded where 37917090552 deadlocked). Dockerfile bytes only, measured
+      // from this test's own failing run; the walk digest below was adopted by
+      // scripts/adopt-image-pin.ts from the same run.
+      "oci/exedev/Dockerfile": "886e5c428b04c30147f61b6328e265b520a76470be9fd974e2e0572aae1adc1f",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -2164,10 +2170,18 @@ describe("buildIdFileInputs", () => {
       // carries no managers module — the walk still sees them, so the pin
       // adopts). scripts/manager-digest.ts + tests/managers/** are absent
       // from the walk. Image re-publish stays ops-gated with the J3/J4/G1
-      // wave-0 ritual. Received from this test's own failing run on the
-      // final post-review tree (all walked-input edits landed before this
-      // re-pin, per the edit-first/re-pin-last discipline).
-      "584d400253915a2b1046f5cbc25f241ec8abd9da46023d95b10c4caf671dedce",
+      // wave-0 ritual. Moved by the A2 seam additions (run-record.ts
+      // qaWorkKey/qaVerdict namespaces + SHAPE_EXEMPT_PATHS entry,
+      // result.ts verdict fold) and the A2 round-1/2 review fixes; re-computed
+      // on the merged tree once #435's coverage suites joined the walk
+      // (package.json `check:coverage` gained tests/fixloop +
+      // tests/swarmclaw/mask-env.test.ts). Adopted from this test's own
+      // failing run on the final post-review tree (all walked-input edits
+      // landed before this re-pin, per the edit-first/re-pin-last discipline).
+      // Moved once more by f30f1339 (workId `:` charset — issue-correlation.ts
+      // is a walked input); re-adopted in-branch the same way, D9's
+      // same-commit ritual, ahead of the refire publish.
+            "d8d3009953a423bf3c174af2b0dbcbb3b23997545d9db98c40d41ee454875a69",
     );
   });
 });
@@ -3891,7 +3905,10 @@ describe("checksumArgProblems", () => {
         case "NODE_SHA256":
           return "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29";
         case "OPENRIG_TREE_SHA256":
-          return "9f1488626ed4a655312cc0151e2cdfda2c135fcdbf4c3e0963a4dadd9a47e031";
+          // 2026-10-16: re-pinned with the Dockerfile ARG (publish run
+          // 38989801031's healed build — same caret-float class, the fixture
+          // is the test-side mirror of the ARG).
+          return "4340266aaa77f0db4a35736e89ec5aa22d926bb96af397d0eea5bbace2863441";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {

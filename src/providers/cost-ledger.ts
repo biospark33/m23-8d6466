@@ -582,7 +582,8 @@ const ISSUE_KEY_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
 
 /**
  * The WORK-KEY override spelling (#380): `owner/repo#w:<id>`, where `<id>` is
- * lower-case `w:` + the WORK_ID_PATTERN charset (`[a-z0-9._/-]`, 1..64) —
+ * lower-case `w:` + the WORK_ID_PATTERN charset (`[a-z0-9._:/-]`, 1..64 — `:`
+ * joined with f30f1339, mirrored here the same commit) —
  * `resolveRunCorrelation` mints exactly this shape (`w:` + folded workId), so
  * the override grammar is its mirror, character class for character class.
  *
@@ -592,10 +593,10 @@ const ISSUE_KEY_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
  * (#380's whole point), and a loud config refusal beats a silently ignored
  * line. Briefs may carry any case (correlation folds); config may not.
  */
-const WORK_KEY_OVERRIDE_RE = /^[\w.-]+\/[\w.-]+#w:[a-z0-9._/-]{1,64}$/;
+const WORK_KEY_OVERRIDE_RE = /^[\w.-]+\/[\w.-]+#w:[a-z0-9._:/-]{1,64}$/;
 
-/** The canonical identity spellings `assertCanonicalIdentity` admits. Digits, or the sanctioned work namespace. */
-const WORK_IDENTITY_RE = /^w:[a-z0-9._/-]{1,64}$/;
+/** The canonical identity spellings `assertCanonicalIdentity` admits. Digits, or the sanctioned work namespace. `:` joined the tail charset with the brief-side grammar (f30f1339 — the A2 hunter-pack's `w:qa-…` contract ids); correlation folds case before this grammar sees the id. */
+const WORK_IDENTITY_RE = /^w:[a-z0-9._:/-]{1,64}$/;
 
 /** The `<canonical slug>#<canonical issue>` identity both sides of an override lookup are reduced to. */
 function canonicalIssueKey(repoSlug: string, issueId: string): string {

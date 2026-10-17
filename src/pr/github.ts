@@ -37,6 +37,12 @@ export interface PrReviewComment {
   authorType: string;
 }
 
+/** One filed GitHub issue (A2 QA findings, host-side, F3). */
+export interface IssueRef {
+  issueNumber: number;
+  htmlUrl: string;
+}
+
 export interface PullRequestInfo {
   number: number;
   state: string;
@@ -69,6 +75,8 @@ export interface GitHubApi {
   createPr(o: CreatePrInput): Promise<PrRef>;
   /** Best-effort refusal notification (AC3). Its failure never rescues a refusal. */
   commentIssue(o: { owner: string; repo: string; issueNumber: number; body: string; token: string }): Promise<void>;
+  /** A2 QA findings filing — host-side, F3. */
+  createIssue(o: { owner: string; repo: string; title: string; body: string; token: string }): Promise<IssueRef>;
 }
 
 export const API_TIMEOUT_MS = 30_000;
@@ -184,6 +192,18 @@ export function httpGitHubApi(apiBase = API_BASE): GitHubApi {
 
     async commentIssue({ owner, repo, issueNumber, body, token }) {
       await request(`/repos/${owner}/${repo}/issues/${issueNumber}/comments`, { method: "POST", token, body: { body } }, apiBase);
+    },
+
+    async createIssue({ owner, repo, title, body, token }) {
+      const created = (await request(
+        `/repos/${owner}/${repo}/issues`,
+        { method: "POST", token, body: { title, body } },
+        apiBase,
+      )) as { html_url?: unknown; number?: unknown };
+      if (typeof created?.html_url !== "string" || typeof created?.number !== "number") {
+        throw new GitHubApiError(200, "POST /repos/{owner}/{repo}/issues returned no html_url/number");
+      }
+      return { issueNumber: created.number, htmlUrl: created.html_url };
     },
 
     async listPrReviewComments({ owner, repo, prNumber, token }) {

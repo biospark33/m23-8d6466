@@ -11,8 +11,9 @@ import {
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { createAssistantMessageEventStream, type Context } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { LoadedPrompt } from "./prompts.ts";
+import { replaceInstructions } from "./summary-splice.ts";
 
 /**
  * Mirrors Pi's prepareCompaction(): true when a compaction of this branch would have at least one message to
@@ -66,28 +67,6 @@ function summaryInstructions(event: SessionBeforeCompactEvent, prompt: LoadedPro
 	].filter(Boolean).join("\n\n");
 }
 
-/** Match complete known inputs, so tag-like text inside history cannot cut the conversation short. */
-function replaceInstructions(context: Context, inputs: string[], instructions: string, budgetChars: number) {
-	let truncated = false;
-	const messages = context.messages.map((message: any) => {
-		if (message.role !== "user") return message;
-		const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
-		return {
-			...message,
-			content: content.map((block: any) => {
-				if (block.type !== "text") return block;
-				let input = inputs.find(candidate => block.text.startsWith(candidate));
-				if (input === undefined) throw new Error("Unrecognized Pi summary input; cannot replace instructions safely.");
-				if (input.length > budgetChars) {
-					input = `[earlier conversation truncated to fit summary budget]\n${input.slice(-budgetChars)}`;
-					truncated = true;
-				}
-				return { ...block, text: `${input}${instructions}` };
-			}),
-		};
-	});
-	return { messages, truncated };
-}
 
 /** Pi owns split turns, summary updates, file tracking and configured transport retries. */
 export async function generateSummary(event: SessionBeforeCompactEvent, ctx: ExtensionContext, system: LoadedPrompt, instructions: LoadedPrompt) {

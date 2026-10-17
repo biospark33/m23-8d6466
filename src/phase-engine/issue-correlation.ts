@@ -91,9 +91,16 @@ export const MAX_ISSUE_ID = 2 ** 31 - 1;
  * id is half of the `${slug}#${workId}` spend key, so anything a SQL predicate
  * or a grep would trip on (whitespace, `#`, control characters) never gets in.
  * `/`, `.`, `_`, `-` are inside so DAG node ids like `dag/build-docs` are
- * expressible without a second encoding.
+ * expressible without a second encoding. `:` joined 2026-10-17 (A2 live
+ * round's first fire, watch 542b9d73…): the QA hunter-pack's contract workId
+ * `w:qa-<utcstamp>-<lens>` crossed this class and was refused at submit —
+ * while the SPEND KEY this identity feeds ALREADY carries `w:` tails for
+ * headless work (`issueKey = "w:<workId>"`, the test pin above), so the
+ * character was always legal in the key; only the brief-side charset lagged.
+ * Like `/`, it is neither whitespace, `#`, nor a control character — nothing
+ * a SQL predicate or a grep would trip on.
  */
-export const WORK_ID_PATTERN = /^[A-Za-z0-9._/-]{1,64}$/;
+export const WORK_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,64}$/;
 
 /**
  * Refuse a headless workId. One shape rule and one COLLISION rule:

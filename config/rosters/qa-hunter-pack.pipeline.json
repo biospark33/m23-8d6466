@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "qa-hunter-pack",
+  "runBudgetMs": 1900000,
+  "phases": [
+    {
+      "name": "hunt",
+      "kind": "dispatch_task",
+      "description": "A2 leaf-2.0.1 hunter-pack leg: one QA lens review of the merged commit's diff, findings-only — the leg never edits or merges (ADR-1 §2). The box reviews the checkout at the merged SHA (the dispatch fill clone IS the merged tree), hunts defects under its assigned lens discipline, and finishes with a structured findings JSON. The 600000 phase cap bounds a read-only review loop against the merged diff; runBudgetMs 1900000 prices the declared ceilings by the loader's rule (Σ (retries+1) × (PARSE_FIX_ATTEMPTS+1) × maxDurationMs + n × ROUTING_MARGIN_MS = 3×600000 + 3×15000 + 2×5000 = 1855000, ~2.4% headroom — the same pricing the fix-run manifest documents).",
+      "roster": "config/rosters/qa-hunter-pack.roster.yaml",
+      "task": "You are one QA hunter-pack leg reviewing the checkout at its current HEAD (the merged commit under review). Work findings-only: do NOT edit any file, do NOT commit, do NOT touch git remotes — leave the tree exactly as the dispatch filled it (a later phase asserts the tree is clean). Hunt for defects in the current HEAD's changes versus its parent commit (git diff HEAD~1..HEAD — if the history is shallower than 2, review the full tree instead and say so in your output). Review the whole diff for: correctness bugs (logic errors, broken invariants, error-handling gaps, race/edge conditions), secret hygiene (any key, token, credential, or secret-shaped literal introduced or left exposed, including in tests and fixtures), and diff scope (changes outside the commit's stated purpose, unexplained included files, scope creep). Be thorough but bounded: report only findings you are confident are real. When you finish, have the team finish with EXACTLY one JSON object of shape {\"findings\": [{\"finding_text\": \"<one-sentence finding>\", \"diff_context_ref\": \"<path[:line] or symbol the finding concerns>\"}]} as the final output — an empty findings array is a valid result when the diff is clean. No other trailing text after the JSON.",
+      "maxDurationMs": 600000,
+      "retries": 0
+    },
+    {
+      "name": "verify-clean-tree",
+      "kind": "code",
+      "description": "Proves the findings-only invariant on the box as far as the box can see it: the hunt phase must leave the worktree clean — a committed edit would hide behind an empty `git status --porcelain`, so the HOST driver additionally asserts the phase's echoed HEAD (`head=<sha>` line) equals the merged commitSha. Companion phase required by the shipped manifest loader (MIN_PHASES = 2, src/phase-engine/types.ts:57) — the review work itself is entirely phase 1's.",
+      "command": [
+        "bash",
+        "-lc",
+        "test -z \"$(git status --porcelain)\" || { echo 'findings-only violated: the hunt phase edited the checkout' >&2; exit 1; }; echo \"head=$(git rev-parse HEAD)\""
+      ],
+      "maxDurationMs": 15000,
+      "retries": 0
+    }
+  ]
+}

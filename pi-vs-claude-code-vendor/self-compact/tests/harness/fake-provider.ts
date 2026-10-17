@@ -21,8 +21,8 @@
  */
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, JsonObject, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 const env = (key: string, fallback: string) => process.env[key] ?? fallback;
 const WINDOW = Number(env("SC_FAKE_WINDOW", "100000"));
@@ -80,9 +80,9 @@ function trace(record: Record<string, unknown>) {
 
 interface Plan {
 	text?: string;
-	toolCall?: { name: string; arguments: Record<string, unknown> };
+	toolCall?: { name: string; arguments: JsonObject };
 	/** Extra calls emitted in the same batch (sibling tests). */
-	siblings?: Array<{ name: string; arguments: Record<string, unknown>; position: "before" | "after" }>;
+	siblings?: Array<{ name: string; arguments: JsonObject; position: "before" | "after" }>;
 	usageTotal: number;
 	stopReason: "stop" | "toolUse";
 }
@@ -199,7 +199,27 @@ function decide(context: Context): Plan {
 	};
 }
 
+/**
+ * pi-ai 1.1.0: providers receive a TranscriptContext — `systemPrompt` and `tools`
+ * no longer exist as fields; `normalizeContext` folds both into system messages
+ * (the leading one carries the base, later ones carry `toolsAdded`/`toolsRemoved`
+ * deltas). Replay the full chain with pi-ai's own helpers: reading only the
+ * leading message goes stale once tool state changes mid-transcript.
+ */
+function transcriptSystem(context: Context): { systemPrompt: string; tools: unknown[] } {
+	const messages = context.messages ?? [];
+	const hasSystem = messages.some((m: any) => m?.role === "system");
+	if (!hasSystem) {
+		// pi-ai 1.1.0 folds prompt+tools into a system message before a provider
+		// ever sees the transcript. Its absence means the layout changed under
+		// us — fail loudly instead of misclassifying every call as a summary.
+		throw new Error("fake provider: transcript has no system message (pi-ai layout changed?)");
+	}
+	return { systemPrompt: getCurrentSystemPrompt(messages), tools: getCurrentTools(messages) };
+}
+
 function streamScripted(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
+	const { systemPrompt, tools } = transcriptSystem(context);
 	const stream = createAssistantMessageEventStream();
 	const output: AssistantMessage = {
 		role: "assistant",
@@ -211,17 +231,17 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
 		stopReason: "pending",
 		timestamp: Date.now(),
 	};
-	const isSummary = !context.tools || context.tools.length === 0;
+	const isSummary = tools.length === 0;
 	setTimeout(() => {
 		try {
 			stream.push({ type: "start", partial: output });
 			if (isSummary) {
 				summaryCalls += 1;
-				trace({ kind: "summary", call: summaryCalls, systemPrompt: context.systemPrompt?.slice(0, 200) });
+				trace({ kind: "summary", call: summaryCalls, systemPrompt: systemPrompt.slice(0, 200) });
 				if (summaryCalls <= SUMMARY_FAIL) {
 					throw new Error(`fake summary failure #${summaryCalls}`);
 				}
-				const text = `FAKE-SUMMARY[${(context.systemPrompt ?? "").slice(0, 60)}]\n## Goal\nScripted goal.\n## Next Steps\n1. Follow the note.`;
+				const text = `FAKE-SUMMARY[${systemPrompt.slice(0, 60)}]\n## Goal\nScripted goal.\n## Next Steps\n1. Follow the note.`;
 				output.content.push({ type: "text", text: "" });
 				stream.push({ type: "text_start", contentIndex: 0, partial: output });
 				(output.content[0] as { text: string }).text = text;
@@ -244,7 +264,7 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
 					stream.push({ type: "text_end", contentIndex: index, content: plan.text, partial: output });
 					index += 1;
 				}
-				const emitCall = (name: string, args: Record<string, unknown>) => {
+				const emitCall = (name: string, args: JsonObject) => {
 					const id = `call_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 					const toolCall = { type: "toolCall" as const, id, name, arguments: args };
 					output.content.push(toolCall);

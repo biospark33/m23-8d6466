@@ -221,10 +221,11 @@ describe("Q1.8 contract: fleet result's payload", () => {
       const code = await runCli(["result", runId, "--json"]);
       expect(code).toBe(0);
       const payload = JSON.parse(outLines.at(-1) as string) as ResultPayload;
-      expectExactFields(payload, ["schemaVersion", "runId", "requestId", "status", "terminal", "artifacts"], [
-        "vmName",
-        "spendMicroUsd",
-      ]);
+      expectExactFields(
+        payload,
+        ["schemaVersion", "runId", "requestId", "status", "terminal", "artifacts"],
+        ["vmName", "spendMicroUsd", "verdict"],
+      );
       expect(payload.schemaVersion).toBe(1);
       expect(payload.runId).toBe(runId);
       // requestId is `string | null` — present-but-null, never absent: the
@@ -240,6 +241,41 @@ describe("Q1.8 contract: fleet result's payload", () => {
     const code = await runCli(["result", "qds-20260928-none99"]);
     expect(code).toBe(4);
     expect(errLines.join("")).toContain("run-not-found");
+  });
+
+  test("verdict is OPTIONAL on the wire: present only when the record carries a qaVerdict block (A2 leaf-1.3.1, adds-only), absent otherwise — schemaVersion stays the literal 1 either way", async () => {
+    // Absent-otherwise: a record with no block carries no verdict key.
+    store.create("qds-20260928-con001");
+    const code = await runCli(["result", "qds-20260928-con001", "--json"]);
+    expect(code).toBe(0);
+    const bare = JSON.parse(outLines.at(-1) as string) as ResultPayload; // dp:ok parses the CLI JSON line this test just captured in-process; malformed output SHOULD throw and fail the test
+    expect(Object.hasOwn(bare, "verdict")).toBe(false);
+    // Present-when-block-exists: stamp a qaVerdict block on the record and
+    // the payload folds it, extras included, without moving schemaVersion.
+    store.set("qds-20260928-con001", {
+      extensions: {
+        qaVerdict: {
+          status: "approved",
+          producedAt: "2026-10-16T00:00:00.000Z",
+          escalated: 1,
+          qaRunId: "qds-20260928-con001",
+          commitSha: "b".repeat(40),
+          findingCount: 0,
+        },
+      },
+    });
+    const code2 = await runCli(["result", "qds-20260928-con001", "--json"]);
+    expect(code2).toBe(0);
+    const payload = JSON.parse(outLines.at(-1) as string) as ResultPayload; // dp:ok parses the CLI JSON line this test just captured in-process; malformed output SHOULD throw and fail the test
+    expect(payload.schemaVersion).toBe(1);
+    expect(payload.verdict).toEqual({
+      status: "approved",
+      producedAt: "2026-10-16T00:00:00.000Z",
+      escalated: true,
+      qaRunId: "qds-20260928-con001",
+      commitSha: "b".repeat(40),
+      findingCount: 0,
+    });
   });
 });
 
