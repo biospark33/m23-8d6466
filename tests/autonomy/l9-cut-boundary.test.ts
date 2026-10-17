@@ -59,13 +59,22 @@ function l9Edges(file: string, src: string): string[] {
 }
 
 describe("L9 cut boundary (survives the cut)", () => {
-  test("no src/, scripts/ or tests/ module except L9's own files imports the L9 module", () => {
-    const own = new Set([...L9_OWN].map(norm));
-    const files = [...codeUnder("src"), ...codeUnder("scripts"), ...codeUnder("tests")].filter((f) => !own.has(norm(f)));
-    expect(files.length).toBeGreaterThan(100); // not vacuous
-    expect(files.some((f) => f.includes(`${join("tests", "autonomy")}`))).toBe(true); // tests/ is walked
-    expect(files.flatMap((f) => l9Edges(f, readFileSync(f, "utf8")))).toEqual([]);
-  });
+  // 60s, not bun's 5s default: the edge walk reads EVERY src/scripts/tests
+  // file, and on a shared CI runner the read cost crossed the default three
+  // times in one day (PRs #440/#441, 6.1–6.2s vs 2.8s locally) — the same
+  // suite-under-load class the live-e2e skill documents. The walk itself is
+  // unchanged.
+  test(
+    "no src/, scripts/ or tests/ module except L9's own files imports the L9 module",
+    () => {
+      const own = new Set([...L9_OWN].map(norm));
+      const files = [...codeUnder("src"), ...codeUnder("scripts"), ...codeUnder("tests")].filter((f) => !own.has(norm(f)));
+      expect(files.length).toBeGreaterThan(100); // not vacuous
+      expect(files.some((f) => f.includes(`${join("tests", "autonomy")}`))).toBe(true); // tests/ is walked
+      expect(files.flatMap((f) => l9Edges(f, readFileSync(f, "utf8")))).toEqual([]);
+    },
+    { timeout: 60_000 },
+  );
 
   test("controls: the edge walk flags static, re-export, dynamic, computed and require edges", () => {
     const f = join(ROOT, "src", "autonomy", "host-pack.ts");
