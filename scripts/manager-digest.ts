@@ -79,6 +79,7 @@
  */
 
 import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { resolveRunsDir, RunRecordStore } from "../src/providers/run-record.ts";
 import {
@@ -88,6 +89,7 @@ import {
   type DigestDeps,
   type DigestOutcome,
 } from "../src/managers/digest-composer.ts";
+import { DEFAULT_SWEEP_STATE_DIR, sweepRunMeta, undeliveredReportsWithProblems } from "../src/maintenance/sweep-plan.ts";
 import {
   ManagerConfigError,
   validateManagerConfig,
@@ -240,6 +242,17 @@ const recordStore = (() => {
   }
 })();
 
+// A3's sweep state, resolved against THIS checkout's root (not the cwd): a
+// digest fired from elsewhere must still read the sweep's records.
+const sweepStateDir = resolve(import.meta.dir, "..", process.env.QDS_SWEEP_STATE_DIR ?? DEFAULT_SWEEP_STATE_DIR);
+const sweepMeta = (() => {
+  try {
+    return sweepRunMeta(sweepStateDir);
+  } catch {
+    return new Map<string, { botId: string; workKey: string }>(); // unreadable reports: fleet-only lines, never a crash
+  }
+})();
+
 const entry = process.env.QDS_MANAGER_FLEET_ENTRY;
 const newRequestId = (): string => crypto.randomUUID();
 
@@ -281,9 +294,20 @@ try {
           // figure is invented here, so every line renders bot_turn_spend_usd as
           // absent through the composer's own rules.
           botTurnSpendUsd: () => undefined,
-          // A1 has no manager-originated run (A2 introduces the first one): the
-          // default wiring keeps botId absent-not-null on every line.
-          runMeta: () => undefined,
+          // Manager-originated runs: A3's sweep reports name, per dispatched
+          // brief, the runId with its Maintenance botId + w: workKey (DD-20),
+          // so those runs' digest lines join the bot. Every other run stays
+          // fleet-only (absent-not-null, A1's rule). Read once per digest.
+          runMeta: (runId) => sweepMeta.get(runId),
+          // A3: a sweep report the bot wake never delivered surfaces here, on
+          // A1's surface — a second channel, so a broken wake cannot hide its
+          // own residue. An unreadable reports dir is NOT "no residue": it
+          // goes to stderr (the cron log) by name.
+          undeliveredSweepReports: () => {
+            const r = undeliveredReportsWithProblems(sweepStateDir, new Date());
+            if (r.problem !== undefined) process.stderr.write(`manager-digest: ${r.problem}\n`);
+            return r.sweepIds;
+          },
           now: () => new Date(),
           requestId: newRequestId,
         },

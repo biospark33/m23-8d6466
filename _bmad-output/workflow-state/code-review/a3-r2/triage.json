@@ -1,0 +1,259 @@
+{
+ "story": "A3",
+ "round": 2,
+ "layers": [
+  "blind",
+  "edge",
+  "auditor"
+ ],
+ "findings": [
+  {
+   "finding_id": "R2-01",
+   "finding_text": "Audit leg mints hop:pr-run on every PR-less closed run, incl. the sweep's own parked runs (self-feeding weekly brief)",
+   "source": "blind+edge+auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Walk only runs closed in the window that reached a PR; PR-less runs counted runs_without_pr."
+  },
+  {
+   "finding_id": "R2-02",
+   "finding_text": "D2 installed DF3.8's observe --all cron against DF3.8 INV-IBOX-19 (documented, never installed); not flagged",
+   "source": "auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Reverted: observe line removed; named as an operator prerequisite with the .factory/ host config; test asserts it is absent."
+  },
+  {
+   "finding_id": "R2-03",
+   "finding_text": ".factory/ host plan + approvers not listed \u2014 runs stall at pausing",
+   "source": "auditor",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "Listed as a crontab prerequisite."
+  },
+  {
+   "finding_id": "R2-04",
+   "finding_text": "Fence tripwire: rename escapes --name-only; git diff failure passes open; bash -l loads profile",
+   "source": "blind+edge",
+   "label": "HIGH",
+   "disposition": "PATCH",
+   "rationale": "--no-renames; diff captured before grep, fail-closed; bash -c; rename + ghost-base cases executed in a real repo test."
+  },
+  {
+   "finding_id": "R2-05",
+   "finding_text": "D5 overclaims: DF3.7 drives the chain even on ok:false",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "D5 reworded: tripwire for honest mistakes; controls of record = reverify + human gate."
+  },
+  {
+   "finding_id": "R2-06",
+   "finding_text": "Fence covers less than the prompt promises (.github/, deploy/)",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": ".github/, deploy/, oci/ added to fence + task text."
+  },
+  {
+   "finding_id": "R2-07",
+   "finding_text": "Re-sweep overwrites report: possibly-live briefs forgotten; can exceed cap",
+   "source": "blind+edge+auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Carried into the record, held out of the plan, counted against the cap; tested."
+  },
+  {
+   "finding_id": "R2-08",
+   "finding_text": "Replay key ignores commit/manifest",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "requestId hashes (sweepId, workId, commitSha)."
+  },
+  {
+   "finding_id": "R2-09",
+   "finding_text": "Late-week manual run takes next Monday's sweepId (nearest-Monday rule)",
+   "source": "blind+edge+auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Monday on/before now+14h; flagged \u2691 D11."
+  },
+  {
+   "finding_id": "R2-10",
+   "finding_text": "Residue: 36-day horizon silences; first pass sees residue only on day 14",
+   "source": "blind+auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Horizon removed (never silence); cadence documented (digest from day 8)."
+  },
+  {
+   "finding_id": "R2-11",
+   "finding_text": "Digest swallows unreadable reports dir / corrupt records",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "undeliveredReportsWithProblems; digest writes a named stderr diagnostic."
+  },
+  {
+   "finding_id": "R2-12",
+   "finding_text": "A3 produces manager-originated runs but digest still drops botId",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Digest runMeta reads sweep reports (sweepRunMeta); proven by a real-binary digest test."
+  },
+  {
+   "finding_id": "R2-13",
+   "finding_text": "submit-intent-corrupt (exit 5) mislabelled fleet-busy; setup-gate leaves a live box; provisioned-not-running counted dispatched",
+   "source": "edge+auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Folded into submit-in-flight; setup-gate + submit-in-flight possibly-live; non-running ack replays once then skips transient; remediations corrected."
+  },
+  {
+   "finding_id": "R2-14",
+   "finding_text": "Snapshot VACUUM INTO fails instantly on a held write lock",
+   "source": "edge",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "busy_timeout 5000."
+  },
+  {
+   "finding_id": "R2-15",
+   "finding_text": "Roster copied from the working tree, not the pinned commit",
+   "source": "edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "git show <commitSha>:config/rosters/roster.yaml."
+  },
+  {
+   "finding_id": "R2-16",
+   "finding_text": "Pushed-HEAD check trusts stale remote-tracking refs",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "git fetch --prune origin before the --contains check."
+  },
+  {
+   "finding_id": "R2-17",
+   "finding_text": "Graph-home override vs cypher -r split-brain",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Override that is not this checkout's index \u2192 graph-unavailable unless QDS_GITNEXUS_BIN pins the binary (test seam); tested."
+  },
+  {
+   "finding_id": "R2-18",
+   "finding_text": "Future-dated stamp reads fresh indefinitely",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Negative age beyond 1h tolerance \u2192 graph-stale; small skew stays fresh (A6's posture)."
+  },
+  {
+   "finding_id": "R2-19",
+   "finding_text": "--graph-leg runnable without the lock",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Refused unless the parent's marker env is set; tested."
+  },
+  {
+   "finding_id": "R2-20",
+   "finding_text": "Pruned fix-attempt records read as an exhausted loop; walk/ledger double count",
+   "source": "blind+auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Unreadable ledgers counted ledgers_incomplete, never judged."
+  },
+  {
+   "finding_id": "R2-21",
+   "finding_text": "Window keyed on createdAt loses runs closed inside it",
+   "source": "blind+edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Window keys on closedAt; tested."
+  },
+  {
+   "finding_id": "R2-22",
+   "finding_text": "State dir mkdir before symlink check; repo root / .git accepted",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Nearest existing ancestor realpath-checked before mkdir; root and .git refused; tested."
+  },
+  {
+   "finding_id": "R2-23",
+   "finding_text": "already-swept sweep-complete carries no counters",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Prior counters included."
+  },
+  {
+   "finding_id": "R2-24",
+   "finding_text": "Live test: exit asserted before runId captured (leaks a box); no git-log merge check; observe --all touches other runs",
+   "source": "blind+auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "runId captured first; git log --merges check; single-run observe <runId>."
+  },
+  {
+   "finding_id": "R2-25",
+   "finding_text": "Impl DoD box ticked while \u2691 decisions pending",
+   "source": "auditor",
+   "label": "MED",
+   "disposition": "PATCH",
+   "rationale": "Unticked with conditional note."
+  },
+  {
+   "finding_id": "R2-26",
+   "finding_text": "Pushed-HEAD / remote forms untested",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "parseGithubRemote exported + tested (https/ssh/scp, credentials refused)."
+  },
+  {
+   "finding_id": "R2-27",
+   "finding_text": "crontab install wipes operator lines (A1 digest)",
+   "source": "edge",
+   "label": "LOW",
+   "disposition": "PATCH",
+   "rationale": "Install note: merge, never replace."
+  },
+  {
+   "finding_id": "R2-28",
+   "finding_text": "markReportDelivered has no production caller \u2192 constant residue",
+   "source": "blind+edge",
+   "label": "MED",
+   "disposition": "DEFER",
+   "rationale": "The caller is the fork's wake leg (out of this repo); residue is the designed, visible signal until it lands."
+  },
+  {
+   "finding_id": "R2-29",
+   "finding_text": "Stale run lock blocks every later sweep silently",
+   "source": "blind",
+   "label": "MED",
+   "disposition": "DEFER",
+   "rationale": "Exit 3 with the rm remediation (A1's posture); a no-recent-report digest mark is a follow-up."
+  },
+  {
+   "finding_id": "R2-30",
+   "finding_text": "Snapshot baselines discarded \u2014 tamper detection only for operator-walked runs",
+   "source": "auditor",
+   "label": "LOW",
+   "disposition": "DISMISS",
+   "rationale": "Intended: AC3(c) read-only outranks baseline creation; the operator's qds-audit walks own baselines."
+  },
+  {
+   "finding_id": "R2-31",
+   "finding_text": "Snapshot test does not cover WAL with live writer; SIGKILL leaves tmp snapshot",
+   "source": "blind",
+   "label": "LOW",
+   "disposition": "DEFER",
+   "rationale": "busy_timeout added; tmp residue is bounded and in tmpdir."
+  }
+ ]
+}

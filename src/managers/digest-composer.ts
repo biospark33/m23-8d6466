@@ -196,8 +196,13 @@ export const MAX_LINE_BYTES = 8192;
  */
 export const PARK_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
-/** The three escalation kinds, exactly. */
-export const ESCALATION_KINDS = ["approval-park", "fixloop-exhausted", "exit-6"] as const;
+/**
+ * The escalation kinds, exactly: A1's three run-scoped kinds, plus A3's
+ * adds-only `sweep-report-undelivered` — a maintenance sweep report record
+ * still `pending` after the next scheduled wake came and went (the bot never
+ * carried it). Sweep-scoped, not run-scoped: its mark carries `sweepId`.
+ */
+export const ESCALATION_KINDS = ["approval-park", "fixloop-exhausted", "exit-6", "sweep-report-undelivered"] as const;
 export type EscalationKind = (typeof ESCALATION_KINDS)[number];
 
 /**
@@ -259,6 +264,13 @@ export type DigestDeps = {
    * and the absent-not-null rules make the absence visible, not fabricated.
    */
   runMeta(runId: string): { botId: string; workKey?: string } | undefined;
+  /**
+   * A3: sweepIds of maintenance sweep reports still undelivered past the next
+   * wake (src/maintenance/sweep-plan.ts `undeliveredReports`). Optional and
+   * adds-only: absent ⇒ no sweep marks, the A1 digest byte-identical. A
+   * throwing read degrades to no marks, never a failed digest.
+   */
+  undeliveredSweepReports?(): string[];
   now(): Date;
   requestId(): string;
   /** Test override of VERB_TIMEOUT_MS. */
@@ -480,7 +492,7 @@ export async function composeDigest(deps: DigestDeps, _input: DigestInput): Prom
   const truncated = Math.max(0, runs.length - MAX_SNAPSHOT_RUNS);
   const kept = runs.slice(runs.length - MAX_SNAPSHOT_RUNS);
 
-  const marks: { kind: EscalationKind; runId?: string; approvalId?: string }[] = [];
+  const marks: { kind: EscalationKind; runId?: string; approvalId?: string; sweepId?: string }[] = [];
   let approvalsParked = 0;
   let fixloopsActive = 0;
   let runLinesSkipped = 0;
@@ -677,6 +689,19 @@ export async function composeDigest(deps: DigestDeps, _input: DigestInput): Prom
     });
   }
 
+  // ── A3 sweep-report residue: sweep-scoped marks, after every run mark ──
+  let sweepIds: string[] = [];
+  try {
+    sweepIds = deps.undeliveredSweepReports?.() ?? [];
+  } catch {
+    sweepIds = []; // an unreadable report dir is no marks, never a failed digest
+  }
+  for (const sweepId of sweepIds) {
+    if (typeof sweepId === "string" && /^sweep-\d{4}-\d{2}-\d{2}$/.test(sweepId)) {
+      marks.push({ kind: "sweep-report-undelivered", sweepId });
+    }
+  }
+
   // ── emit: snapshot → runs → escalations → complete ──
   // duration carries the snapshot's own elapsed (clamped at 0 — a clock that
   // ticks backwards must not render a negative duration), on every line the
@@ -709,6 +734,7 @@ export async function composeDigest(deps: DigestDeps, _input: DigestInput): Prom
       kind: mark.kind,
       ...(mark.approvalId === undefined ? {} : { approvalId: mark.approvalId }),
       ...(mark.runId === undefined ? {} : { runId: mark.runId }),
+      ...(mark.sweepId === undefined ? {} : { sweepId: mark.sweepId }),
     });
   }
   digestLine(requestId, { event: "digest-complete", duration: snapshotMs });
