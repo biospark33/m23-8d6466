@@ -872,7 +872,7 @@ const probeNack = (
 			sock.write(payload);
 		});
 		sock.on("data", (c) => {
-			chunks.push(c);
+			chunks.push(Buffer.from(c)); // @types/node 26 types socket data as string | Buffer
 			const buf = Buffer.concat(chunks);
 			const nl = buf.indexOf(0x0a);
 			if (nl < 0) return;
