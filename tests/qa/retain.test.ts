@@ -405,9 +405,9 @@ describe("qa retain refusals and surfaces", () => {
     }
   });
 
-  test("AC3 negative control: a retain targeting a NON-repo bank (solstice-* family or missing qds- prefix) is refused by the qds- guard (INV-A2-6)", async () => {
+  test("AC3 negative control: a retain targeting a NON-repo bank (solstice-* family, foreign qds- bank, or non-schema id) is refused by the repo-bank guard (INV-A2-6)", async () => {
     const { calls, client } = fakeClient();
-    for (const badBank of ["solstice-collective", "solstice-acme-widgets", "acme-widgets", "qds", ""]) {
+    for (const badBank of ["solstice-collective", "solstice-acme-widgets", "other-widgets", "qds", ""]) {
       let thrown: unknown;
       try {
         await retainFindings({ client }, input({ repoBankId: badBank }));
