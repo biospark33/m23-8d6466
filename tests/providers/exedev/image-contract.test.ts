@@ -1394,8 +1394,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // buildId inputs are the ones the current pin was derived from" — which
     // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
     // SAME COMMIT; that pairing is the whole ritual.
-    expect(marker.buildId).toBe("00bc761fcd09bfdc"); // adopted from publish run 39078813795 (CI-measured; the post-#460 package.json/bun.lock re-pin). Earlier history: adopted by the THIRTY-FIRST-pin ritual (gate run 36876842343, CI-measured): OPENRIG_TREE_SHA256 sixth pin (8074bfe6..., hono 4.13.12 floating under @openrig/cli's ^4.7.0 — tarballs verified byte-stable, the closure moved), plus the image's first post-billing-outage rebuild. Prior pairing: the thirtieth (quota-intents.ts in the engine COPY enumeration + OPENRIG_TREE_SHA256's fifth re-pin + the Q1 submit/result/cancel surface — run 36614519605)
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("00bc761fcd09bfdc");
+    expect(marker.buildId).toBe("a7ce0b1bc7194631"); // adopted from publish run 39131294967 (CI-measured; the exeuntu base re-pin ea6c3f5c → bb7e0268, #462). Prior pairing: publish run 39078813795 (the post-#460 package.json/bun.lock re-pin). Earlier history: adopted by the THIRTY-FIRST-pin ritual (gate run 36876842343, CI-measured): OPENRIG_TREE_SHA256 sixth pin (8074bfe6..., hono 4.13.12 floating under @openrig/cli's ^4.7.0 — tarballs verified byte-stable, the closure moved), plus the image's first post-billing-outage rebuild. Prior pairing: the thirtieth (quota-intents.ts in the engine COPY enumeration + OPENRIG_TREE_SHA256's fifth re-pin + the Q1 submit/result/cancel surface — run 36614519605)
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("a7ce0b1bc7194631");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 
