@@ -97,7 +97,7 @@
 # ── STAGE 1 of 2: the engine builder. Discarded; only /out/qds-factory (the
 # engine's shipped source tree and its node_modules), /out/qds-engine (the exec
 # wrapper) and the pi catalog are copied out of it. ───────────────────────────
-FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:ea6c3f5c65d4122408c504d6e6ea6e2afd4ac629557428e2bff1d3dcfe67beb2 AS engine
+FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:bb7e0268970e18a1e377a9e0b00896acdf7210fd1f66b57b65ba2a00d952adc9 AS engine
 
 # THE SAME BUN THE IMAGE SHIPS, and the reason this install is duplicated below
 # rather than shared. This stage does not compile anything into the artifact any
@@ -471,7 +471,7 @@ RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/bun /opt/qds-factory/scripts/
  && chmod 0755 /out/qds-engine
 
 # ── STAGE 2 of 2: the image that ships. ──────────────────────────────────────
-FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:ea6c3f5c65d4122408c504d6e6ea6e2afd4ac629557428e2bff1d3dcfe67beb2
+FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:bb7e0268970e18a1e377a9e0b00896acdf7210fd1f66b57b65ba2a00d952adc9
 
 # Overrides the base's org.opencontainers.image.* provenance, which points at
 # boldsoftware/exe. This is our artifact now and must say so. The exe.dev/*
