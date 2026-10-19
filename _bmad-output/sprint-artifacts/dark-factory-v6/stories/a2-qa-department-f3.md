@@ -156,3 +156,44 @@ The live Tier-2 round FIRED the same day, on Z2's post-merge trigger, after the 
 ### Review rounds (continued)
 
 - **Round 2 (2026-10-16, pre-PR):** 4 layers over the post-R1 diff (3972 lines, 22 files, incl. the vendored pi-1.1.0 compat). ~24 findings; triaged: **19 fixed** (writer grammar + schema parity with lowercase pin; secret-hygiene redaction on retain payloads, issue bodies/titles and failure errors; filing attribution honesty — per-finding lens titles + runId provenance; same-batch dedup with an explicit cross-restart scope note; failedCount on the log line; minted-shape runId pins; slug-gate ordering; null-entry guard; real-client `createIssue` tests; the vendor compat hardening — splice restricted to the last user block, codepoint-safe trim, loud layout-drift failure, loader fallbacks, refusal-arm + extraction unit tests, fixture workId collision refusal); **5 declined with rulings**: (i) strict (runId,lens) consistency gate on `fileIssues` — multi-lens/multi-runId batches are the hunter-pack's design, per-finding labeling is the attribution fix; (ii) `retainFindings` deriving ran-ness internally — single-caller pattern (normalizeHarvest→retain), fixture covers both arms; interface churn late in the round buys nothing; (iii) registry-derived vendor expectations — vendored frozen-upstream suite stays upstream-shaped; (iv) `workKey` folded into the wire payload — DD-20's join is factory-internal via records; the cross-system contract is the verdict only; (v) vendor suites moved into a gate — the exemption is the repo's documented env-dependent posture (PR #404); proof of record = manual verify runs on this machine (unit 35/0 + parity 13/0 + e2e 10/0). **Round 2 verdict: only Lows/Infos remained after fixes → stopping after round 2 per the operator's stop rule.**
+
+### A2 follow-through record (2026-10-19, branch feature/a2-followup-seam11-wprefix → PR #464, merged to dev 8a3de673)
+
+The day-of workarounds replaced with reviewed, tested fixes; the live acceptance fire ran the fixed chain
+against the merged sha. Evidence: `_bmad-output/evidence/v6-a2-followup/`.
+
+**Merged fixes** (factory PR #464; fork PR #822 left for review):
+- **P1-A seam #11**: the retain guard accepts exactly `provisionedRepoBankCandidates(resolveBankId(repoSlug))` —
+  one enumeration shared with `resolveProvisionedRepoBankId`, so the guard and the recall cannot drift. Proven
+  LIVE: retainFindings → primeDispatchBrief on one bank (containsRetainedFinding=true), and the fire's own
+  leg-1 findings retained through the production seam (docIds qds-20261019-638493/-015b4c).
+- **P1-B #1 wake gate**: the trigger session runs heartbeatEnabled=false; the wake landed (attempt 1 fired the
+  run). The day-of 30-day heartbeat standing config is retired.
+- **P1-B #2 group-reserve release**: the close path releases by the RECORD's requestId
+  (`releaseBudgetGroupByRequest`, compensating insert, append-only ledger intact). Proven LIVE through the
+  observe chain's teardown (budget_group_releases 7c216307/afda41f1 at 13:50:06Z). The verb arms
+  (teardown/cancel/harvest) wire the ledger hook now (they silently skipped the release before — measured).
+- **P1-B #3 lens**: BriefSchema.instructions + the witness spread + the roster reading its lens from
+  .qds/run-context.json. Proven LIVE: the box's run-context.json carried `Hunter-pack lens "correctness" …`
+  and the leg's trace shows the agent reading the witness (2 hits) — the lens is real, not bookkeeping.
+- **P3 w:w:**: single-`w:` identities in every new record and ledger row; append-only rows never rewritten;
+  cost-config carried no w:w: override keys.
+
+**The fire also caught four NEW seams** (the acceptance fire doing its job):
+1. `~/.ssh` mounted ro → leg 1 died at steering-provision (ssh could not write known_hosts). Fixed in the
+   compose substrate + recomposed.
+2. `/root/.gitconfig` (credential.helper=store) was day-of hand-written state lost on every recompose —
+   attempt 2 died at the fill's git fetch. Now mounted from `.unlazy/a2/gitconfig`.
+3. The fleet CLI's teardown/cancel/harvest verb arms never wired the ledger hook (the release was
+   structurally skipped on the operator path), and the release read the invocation's requestId instead of
+   the record's (W2-C5). Both fixed, both measured live (the release skip → the release row).
+4. **QDS-Factory#465**: findings-only runs strand in `pausing` — the observe chain's reverify vetoes
+   nothing-to-verify and no verb exits that pause, so the sequential leg advance (leg 2/3 inside one run)
+   is blocked until #465's design decision. Day-of masked it with teardown-closure. G16's leg-advance
+   clause is ABANDONED-with-handoff on #465; everything else it named is proven (G16a).
+
+**Spend**: $3.25 total on 2026-10-19 (factory ledger): the acceptance leg ≈ $0.09 box-hours + the fork-side
+bot calls; attempts 1-2 (substrate failures) ≈ $1.58 box-hours, repairs committed.
+
+**Substrate state**: 0 boxes, no fleet lock, trigger armed (provisioning is the only writer; apply-twice
+idempotent), heartbeat OFF on the trigger session.
