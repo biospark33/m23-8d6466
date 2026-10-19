@@ -6,7 +6,7 @@
 // knows the answer. Seam gap #11 rides along as a negative control: the legacy
 // hand-named bank is refused, so the old dual-bank workaround cannot close
 // the loop either.
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,8 +77,13 @@ describe("priming round trip at the primeDispatchBrief seam", () => {
   let prevKey = "";
   let hadBase = false;
   let hadKey = false;
+  let armed = false;
 
-  const setup = () => {
+  // HOOK-held env, not per-test-body setup/restore: a mid-test throw used to
+  // skip the manual restore and LEAK HINDSIGHT_BASE_URL/API_KEY into every
+  // later suite in the same process (the 12 downstream fails the first clean
+  // full-suite run exposed).
+  beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-priming-rt-"));
     hadBase = "HINDSIGHT_BASE_URL" in process.env;
     hadKey = "HINDSIGHT_API_KEY" in process.env;
@@ -86,8 +91,11 @@ describe("priming round trip at the primeDispatchBrief seam", () => {
     prevKey = process.env.HINDSIGHT_API_KEY ?? "";
     process.env.HINDSIGHT_BASE_URL = "http://127.0.0.1:1";
     process.env.HINDSIGHT_API_KEY = "gate-only";
-  };
-  const restore = () => {
+    armed = true;
+  });
+
+  afterEach(() => {
+    if (!armed) return;
     const observed: Array<[string, boolean, string]> = [
       ["HINDSIGHT_BASE_URL", hadBase, prevBase],
       ["HINDSIGHT_API_KEY", hadKey, prevKey],
@@ -97,10 +105,10 @@ describe("priming round trip at the primeDispatchBrief seam", () => {
       else Reflect.deleteProperty(process.env, key);
     }
     rmSync(dir, { recursive: true, force: true });
-  };
+    armed = false;
+  });
 
   test("a retain into the slug-resolved family is exactly what primeDispatchBrief recalls", async () => {
-    setup();
     const { docs, client } = makeSubstrate();
     await retainFindings({ client }, retainInput());
     const primed = await primeDispatchBrief(BRIEF, { client, recallDir: dir });
@@ -111,11 +119,9 @@ describe("priming round trip at the primeDispatchBrief seam", () => {
     expect(row.banks).toEqual([FAMILY, "qds-collective"]);
     expect(row.recalledDocumentIds.length).toBe(1);
     expect(docs.get(FAMILY)!.size).toBe(1);
-    restore();
   });
 
   test("seam gap #11 negative: the legacy hand-named bank is refused, so the loop cannot close through it", async () => {
-    setup();
     const { docs, client } = makeSubstrate();
     let thrown: unknown;
     try {
@@ -126,6 +132,5 @@ describe("priming round trip at the primeDispatchBrief seam", () => {
     expect(thrown).toBeInstanceOf(QaRetainError);
     expect((thrown as QaRetainError).code).toBe("retain-bank-not-repo");
     expect(docs.get(FAMILY)?.size ?? 0).toBe(0);
-    restore();
   });
 });
