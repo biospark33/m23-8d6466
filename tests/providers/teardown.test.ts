@@ -1636,6 +1636,22 @@ describe("DF2.5 teardownSandbox", () => {
       readonly tokenCalls: { event: Record<string, unknown>; ctx: Record<string, unknown> }[] = [];
       /** When set, throws on the next ingest call — box hours AND tokens — with code/remediation */
       error?: { code: string; message: string; remediation: string };
+      /** A2 follow-up: group-release calls, in order, by the requestId teardown owns. */
+      readonly releaseCalls: string[] = [];
+      /** When set, releaseBudgetGroupByRequest throws with code/remediation. */
+      releaseError?: { code: string; message: string; remediation: string };
+
+      releaseBudgetGroupByRequest(requestId: string): { released: boolean } {
+        this.releaseCalls.push(requestId);
+        if (this.releaseError) {
+          const { code, message, remediation } = this.releaseError;
+          const err = new Error(message) as Error & { code: string; remediation: string };
+          err.code = code;
+          err.remediation = remediation;
+          throw err;
+        }
+        return { released: true };
+      }
 
       ingestCostEvent(
         event: Parameters<NonNullable<CostLedgerHook["ingestCostEvent"]>>[0],
@@ -1714,6 +1730,56 @@ describe("DF2.5 teardownSandbox", () => {
       expect(call.requestId).toBe(requestId);
 
       // Record was closed
+      expect(store.get(runId).closedAt).toBeString();
+    }, 30_000);
+
+    // A2 follow-up (swarmclaw#808 seam 2): the close path retires the run's
+    // budget-group reservation by the requestId teardown owns.
+    test("close step releases the run's group reservation by requestId, after the spend ingests", async () => {
+      const runId = "a2f-group-release";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      const hook = new MockCostLedgerHook();
+      const requestId = "req-a2f-group-release";
+
+      const deps_ = deps({
+        gitCwd: host,
+        costLedger: hook,
+        requestId,
+      });
+
+      await teardownSandbox(deps_, runId, lockFor(runId));
+
+      // Exactly one release, keyed by the run record's own requestId — the
+      // admission row is the identity map, no group id reaches teardown.
+      expect(hook.releaseCalls).toEqual([requestId]);
+      expect(store.get(runId).closedAt).toBeString();
+    }, 30_000);
+
+    // A2 follow-up: best-effort — a release refusal is reported and NEVER
+    // fails teardown (an unreleased reservation only overstates group usage).
+    test("a release refusal never fails teardown — the record still closes", async () => {
+      const runId = "a2f-group-release-refused";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      const hook = new MockCostLedgerHook();
+      hook.releaseError = {
+        code: "ledger-busy",
+        message: "database is locked",
+        remediation: "retry the release; the admission row stays visible for reconciliation",
+      };
+
+      const deps_ = deps({
+        gitCwd: host,
+        costLedger: hook,
+        requestId: "req-a2f-group-release-refused",
+      });
+
+      await teardownSandbox(deps_, runId, lockFor(runId));
+
+      expect(hook.releaseCalls).toEqual(["req-a2f-group-release-refused"]);
       expect(store.get(runId).closedAt).toBeString();
     }, 30_000);
 

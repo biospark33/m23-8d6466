@@ -102,6 +102,18 @@ export interface CostLedgerHook {
    */
   ingestCostEvent?(event: CostWireEvent, ctx: IngestCtx): IngestResult;
   /**
+   * A2 follow-up (swarmclaw#808 seam 2): the group-reservation release. Fired
+   * by the close step (and its crash-recovery twin) right after the spend
+   * ingests, so leg N+1's `budget-group-exceeded` wedge — the day-of
+   * `release-all.ts` sweep's root cause — cannot recur: the reservation is
+   * retired the moment the run's spend is final. Optional like every hook
+   * member — a hook that cannot answer is simply not asked; production wires
+   * the full CostLedger, which has the method. Best-effort: a release refusal
+   * is reported and NEVER fails teardown (the reservation only overstates
+   * group usage; the admission row stays visible for reconciliation).
+   */
+  releaseBudgetGroupByRequest?(requestId: string): { released: boolean };
+  /**
    * F032: the DERIVED per-run view, for the divergence check at the close step.
    * `perRole` comes with it because the comparison has to be like-for-like: the
    * record's `spendMicroUsd` is TOKEN spend, so the box-hours bucket this very
@@ -688,6 +700,50 @@ function tokenIngestRefusalLog(ctx: StepCtx, phase: string): (e: unknown) => voi
 }
 
 /**
+ * A2 follow-up (swarmclaw#808 seam 2): retire this run's budget-group
+ * reservation, best-effort, at BOTH close paths — the fresh close step and the
+ * crash-recovery healing pass — so a settled leg stops counting against its
+ * group the moment its spend is final. This is the release wiring submit.ts
+ * documents as deliberately deferred ("cancel / teardown / completion never
+ * call releaseBudgetGroup; the only release is the no-record refusal refund
+ * below") — the day-of `release-all.ts` sweep was the workaround for exactly
+ * this gap, and leg N+1's `budget-group-exceeded` wedge cannot recur once the
+ * close path owns the release. Fired AFTER the spend ingests so the reservation
+ * cannot retire before the spend it vouched for is recorded. A hook without
+ * the method (structural, like every CostLedgerHook member) is skipped; a
+ * release REFUSAL is reported and never fails teardown — an unreleased
+ * reservation only overstates group usage, and the admission row stays visible
+ * for reconciliation (the same posture the token-ingest reporter takes).
+ */
+function releaseBudgetGroupIfWired(costLedger: CostLedgerHook, ctx: StepCtx, phase: string): void {
+  if (costLedger.releaseBudgetGroupByRequest === undefined) return;
+  try {
+    const { released } = costLedger.releaseBudgetGroupByRequest(ctx.requestId);
+    log({
+      ...stepBase(ctx, "teardown", phase),
+      operation: "teardown.budget_group_release",
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      ...(released ? { outcome: "released" } : { outcome: "skipped", reason: "no group admission for this requestId" }),
+    });
+  } catch (e) {
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    log({
+      ...stepBase(ctx, "teardown", phase),
+      operation: "teardown.budget_group_release",
+      duration: 0,
+      durationMs: 0,
+      status: "error",
+      outcome: "refused",
+      code: err.code ?? "budget-group-release-refused",
+      reason: `budget-group release refused (${err.code ?? "ledger-error"}): ${err.message ?? String(e)} — teardown continues; the admission row stays visible for reconciliation`,
+      ...(err.remediation === undefined ? {} : { remediation: err.remediation }),
+    });
+  }
+}
+
+/**
  * F032: how far the record's spend and the ledger's derived total may sit apart
  * before the close step says so, in micro-USD. A tenth of a cent — above the
  * rounding noise of per-token and per-box-hour pricing (both round to whole
@@ -928,6 +984,11 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
         // every re-run, wedging the row forever.
         ingestHarvestedTokensIfWired(deps.costLedger, rec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx, "close-recovery"));
         ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
+        // The crash-recovery twin of the close step's release: a run whose
+        // record closed before the process died still retired its reservation
+        // only if THIS healing pass runs it — idempotent by (group_id,
+        // request_id), so a fresh close that already released is a no-op.
+        releaseBudgetGroupIfWired(deps.costLedger, ctx, "close-recovery");
       } catch (e) {
         // Preserve the original error as cause so CostLedgerError classification survives the wrap.
         const wrapped = asTeardownError(e);
@@ -1262,6 +1323,9 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
           reason: "no issue attribution — box hours not priced for this run",
         });
       }
+      // A2 follow-up (swarmclaw#808 seam 2): the run's spend is final — retire
+      // its group reservation now, not never. See releaseBudgetGroupIfWired.
+      releaseBudgetGroupIfWired(deps.costLedger, ctx, "close");
       // F032 — AFTER the ingest, so the read sees the ledger's final state for
       // this run. The box-hours row it just wrote is subtracted back out there:
       // the record's figure is token spend, so the comparison must be too.

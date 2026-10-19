@@ -212,3 +212,51 @@ describe("reserveBudgetGroup (Q1.2)", () => {
     expect((err as CostLedgerError).code).toBe("budget-group-input-invalid");
   });
 });
+
+describe("releaseBudgetGroupByRequest (A2 follow-up, swarmclaw#808 seam 2)", () => {
+  test("sequential submits release through teardown: a settled-but-unreleased first leg no longer wedges leg N+1", () => {
+    // The live round's wedge, replayed: leg 1 reserves 700k of a 1M group cap;
+    // leg 2's submit MUST refuse while leg 1's reservation is outstanding —
+    // this is the pre-fix wedge, exactly what release-all.ts swept.
+    ledger.reserveBudgetGroup({ ...IDENTITY, requestId: req(1), amountMicroUsd: 700_000 }, 1_000_000);
+    let wedge: unknown;
+    try {
+      ledger.reserveBudgetGroup({ ...IDENTITY, requestId: req(2), amountMicroUsd: 700_000 }, 1_000_000);
+    } catch (e) {
+      wedge = e;
+    }
+    expect(wedge).toBeInstanceOf(CostLedgerError);
+    expect((wedge as CostLedgerError).code).toBe("budget-group-exceeded");
+
+    // Leg 1 settles: the close path releases by the requestId it owns (the
+    // admission row is the identity map — no group id reaches teardown).
+    const released = ledger.releaseBudgetGroupByRequest(req(1));
+    expect(released).toEqual({ released: true });
+
+    // Leg N+1 now fits under the same cap — no operator sweep required.
+    const second = ledger.reserveBudgetGroup({ ...IDENTITY, requestId: req(2), amountMicroUsd: 700_000 }, 1_000_000);
+    expect(second.admitted).toBe(true);
+
+    // Idempotent: releasing the settled leg again is the documented no-op.
+    expect(ledger.releaseBudgetGroupByRequest(req(1))).toEqual({ released: false });
+    // A requestId with no admission (every non-budget-group run) is a no-op
+    // too, so the close path can fire it unconditionally.
+    expect(ledger.releaseBudgetGroupByRequest(req(99))).toEqual({ released: false });
+    // The ledger stays append-only: exactly two admissions + one release row.
+    const db = rawDb();
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM budget_group_admissions").get()!.n).toBe(2);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM budget_group_releases").get()!.n).toBe(1);
+    db.close();
+  });
+
+  test("release-by-request refuses a NULL-bind requestId pre-write", () => {
+    let err: unknown;
+    try {
+      ledger.releaseBudgetGroupByRequest("");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CostLedgerError);
+    expect((err as CostLedgerError).code).toBe("budget-group-input-invalid");
+  });
+});

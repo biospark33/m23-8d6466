@@ -3031,6 +3031,34 @@ export class CostLedger {
     return { released: changes === 1 };
   }
 
+  /**
+   * The teardown-chain release (A2 follow-up, swarmclaw#808 seam 2): retires
+   * the group reservation minted at submit for THIS requestId, whatever its
+   * group — the admission row IS the identity map (admission rows carry the
+   * same requestId the run record carries, so the close path releases by the
+   * only id teardown owns). Idempotent exactly like `releaseBudgetGroup`; a
+   * request with no admission (every non-budget-group run) is a no-op, not an
+   * error, so the close path can fire it unconditionally.
+   */
+  releaseBudgetGroupByRequest(requestId: string): { released: boolean } {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
+    if (typeof requestId !== "string" || requestId.length === 0) {
+      throw new CostLedgerError(
+        "budget-group-input-invalid",
+        "budget-group release by request needs a non-empty requestId — refusing to look up against a NULL bind",
+        "supply the requestId the reserveBudgetGroup call minted (the run record's requestId)",
+      );
+    }
+    this.assertQueryable();
+    const row = this.db
+      .prepare(
+        "SELECT group_id AS groupId FROM budget_group_admissions WHERE request_id = ? ORDER BY decided_at DESC LIMIT 1",
+      )
+      .get(requestId) as { groupId: string } | null | undefined;
+    if (row == null) return { released: false };
+    return this.releaseBudgetGroup({ groupId: row.groupId, requestId });
+  }
+
   releaseAdmission(input: AdmissionInput): { released: boolean } {
     if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
     const started = Date.now();
