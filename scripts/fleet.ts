@@ -6003,10 +6003,22 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // a cancelled-then-closed record reads `cancelled` in the result
       // payload; the close the teardown performs is the idempotency anchor.
       if (rec.closedAt !== undefined) {
-        const printed = reportCompletion([
-          `nothing to do: ${runIdArg} already settled — no box, no keys, no teardown`,
-        ]);
-        code = printed ? 0 : 6;
+        // The closed-record pass of teardownSandbox is the crash-recovery
+        // twin of the close step (spend ingest + group-reservation release,
+        // all idempotent by request id): a cancel that lands after a close
+        // whose process died before the release must still heal it, exactly
+        // as `fleet teardown` of the same record does. The cancel mark is NOT
+        // written — a settled run is not relabelled cancelled.
+        const armed = await runTeardown(ctx, { tdeps, store, rec, lock, runIdArg, requestId, state });
+        if (armed.early === true) return armed.code;
+        if (armed.code === 0) {
+          const printed = reportCompletion([
+            `nothing to do: ${runIdArg} already settled — no box, no keys, no teardown`,
+          ]);
+          code = printed ? 0 : 6;
+        } else {
+          code = armed.code;
+        }
       } else {
         store.set(runIdArg, {
           extensions: { cancel: { state: "cancelled", at: new Date().toISOString() } },
@@ -6901,7 +6913,11 @@ async function runTeardown(
   // cost-config.json or an unopenable ledger db throws a bare Error, which
   // fell through `report`'s generic branch as exit 1 `transient` — so every
   // `fleet teardown` on the host retried forever while the boxes billed.
-  state.ledger = asUsage(
+  // The verb arm already opened (and parked in `state.ledger`) the release
+  // ledger and wired it into tdeps: reuse that handle (`??=`). Constructing a second
+  // one here would overwrite `state.ledger` and leak the first, which the
+  // finally's single close would never reach.
+  state.ledger ??= asUsage(
     () =>
       new CostLedger({
         ...costLedgerOpts(store.dir),
