@@ -5922,7 +5922,39 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       );
     }
     state.audit = audit;
+    // A2 follow-up (swarmclaw#808 seam 2): the teardown/cancel/harvest VERB
+    // arms wire the ledger hook so the close path's group-reservation release
+    // fires HERE too — the verb path is the one an operator-driven teardown
+    // (or a hand teardown of a dead leg) takes, and a hook without the method
+    // is skipped structurally, so leaving costLedger unwired here silently
+    // skipped the release the close step owns. Same construction the ingest
+    // arms use (costLedgerOpts + the record projection so box-hours pricing
+    // reads the closed record, not a phantom open one). The close lives in
+    // the arm scope below: the throw path is a process exit, whose next open
+    // recovers the WAL — nothing durable hangs on an explicit close there.
+    let verbLedger: CostLedger | undefined;
+    try {
+      verbLedger = new CostLedger({
+        ...costLedgerOpts(store.dir),
+        runsDir: store.dir,
+        readRunRecord: (id: string) => {
+          try {
+            return costRecordProjection(store.get(id));
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+            throw e;
+          }
+        },
+      });
+    } catch (e) {
+      // Best-effort, the release's own posture: a ledger that cannot open
+      // skips the release (the admission row stays visible for
+      // reconciliation) but must not block the destroy.
+      verbLedger = undefined;
+      printError(note, "teardown-ledger-unavailable", `the ledger could not be opened for ${runIdArg}'s group-reservation release: ${redactSecrets(e instanceof Error ? e.message : String(e))} — the teardown continues; the admission row stays visible for reconciliation`, "inspect the ledger path if the release matters");
+    }
     const tdeps: TeardownDeps = {
+      ...(verbLedger !== undefined ? { costLedger: verbLedger } : {}),
       driver,
       store,
       requestId,
@@ -5987,9 +6019,16 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // Re-raised HERE, inside the try, so the CC-9 line still precedes the
       // `finally`'s cleanup diagnostics exactly as the inline arm's own
       // `return finish(…)` did.
-      if (armed.early === true) return armed.code;
+      if (armed.early === true) {
+        verbLedger?.close();
+        return armed.code;
+      }
       code = armed.code;
     }
+    // The verb's ledger closes HERE, in the arm scope: the release it served
+    // has landed either way, and the throw path is a process exit (the next
+    // open recovers the WAL — nothing durable hangs on an explicit close).
+    verbLedger?.close();
   } catch (e) {
     code = reportCode(note, e);
   } finally {
