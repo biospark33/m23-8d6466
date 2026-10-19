@@ -2181,7 +2181,10 @@ describe("buildIdFileInputs", () => {
       // Moved once more by f30f1339 (workId `:` charset — issue-correlation.ts
       // is a walked input); re-adopted in-branch the same way, D9's
       // same-commit ritual, ahead of the refire publish.
-            "d8d3009953a423bf3c174af2b0dbcbb3b23997545d9db98c40d41ee454875a69",
+      // Moved once more by the A2 follow-through branch: src/fleet/dispatch.ts
+      // (the instructions witness spread) is a walked input; re-adopted
+      // in-branch, edit-first/re-pin-last, ahead of the merge.
+            "e9d6105d4d045db0d1a24f49c104e9c34c1691a95337a56224f5d119a31f0d20",
     );
   });
 });
