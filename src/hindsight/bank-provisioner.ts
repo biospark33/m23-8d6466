@@ -205,6 +205,25 @@ export function safeRepoBaseCandidates(baseId: string): [string, ...string[]] {
 }
 
 /**
+ * EVERY bank id a provisioned family for `baseId` could carry, in the exact
+ * order `resolveRepoBankId` / `resolveProvisionedRepoBankId` walk them: each
+ * safe base form, then that form's `-2..-11` suffix siblings. ONE enumeration
+ * because three consumers must never drift apart: the write-side resolver, the
+ * read-side family signature probe, and the QA retain guard (INV-A2-6) — the
+ * guard accepts exactly the ids this emits and nothing else, so a hand-named
+ * bank outside the family (`qds-<short-name>` for an org-scoped slug, seam
+ * gap #11) is refused by construction.
+ */
+export function provisionedRepoBankCandidates(baseId: string): string[] {
+  const out: string[] = [];
+  for (const base of safeRepoBaseCandidates(baseId)) {
+    out.push(base);
+    for (let n = 2; n <= MAX_SUFFIX; n++) out.push(`${base}-${n}`);
+  }
+  return out;
+}
+
+/**
  * Resolve the repo bank id (`{resolveBankId}`) against existing banks + the
  * fixed `qds-collective` id. Returns the chosen id, or null if every suffix
  * collides (`-2..-11` all taken, OR every suffix candidate fails BankIdSchema
@@ -256,15 +275,9 @@ export function resolveProvisionedRepoBankId(
   baseId: string,
   existing: Set<string>,
 ): string | null {
-  for (const base of safeRepoBaseCandidates(baseId)) {
-    if (existing.has(base) && existing.has(`${base}-dev-meta`)) {
-      return base;
-    }
-    for (let n = 2; n <= MAX_SUFFIX; n++) {
-      const candidate = `${base}-${n}`;
-      if (existing.has(candidate) && existing.has(`${candidate}-dev-meta`)) {
-        return candidate;
-      }
+  for (const candidate of provisionedRepoBankCandidates(baseId)) {
+    if (existing.has(candidate) && existing.has(`${candidate}-dev-meta`)) {
+      return candidate;
     }
   }
   return null;
