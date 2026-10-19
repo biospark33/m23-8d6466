@@ -1,0 +1,376 @@
+{
+  "story": "Z3",
+  "round": 2,
+  "created_at": "2026-10-19T19:22:23.433Z",
+  "layers": [
+    "blind-hunter",
+    "edge-case-hunter",
+    "acceptance-auditor"
+  ],
+  "counts": {
+    "PATCH": 44,
+    "DISMISS": 1
+  },
+  "findings": [
+    {
+      "finding_id": "A-1",
+      "label": "HIGH",
+      "diff_context_ref": "AC1 / F-011 scripts/z3/live-round-wiring.ts:120 (+ fork scripts/solstice/z3-exit-round.ts:83-104)",
+      "disposition": "PATCH",
+      "rationale": "Each event now carries `summary` (always present on the event store row). The test pins it.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "A-10",
+      "label": "LOW",
+      "diff_context_ref": "AC4 scripts/z3/fleet-gate.sh:31",
+      "disposition": "PATCH",
+      "rationale": "`HOLD_LIMIT_S` defaults to 240, below the fork's 300 s execFile timeout, so the wrapper's own `expired` (exit 99, not a replay exit) is the path a dead driver takes. Fixture-tested.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-11",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:67, scripts/z3/leg-drivers.ts:11",
+      "disposition": "PATCH",
+      "rationale": "Both stale `scripts/z3-exit-round.ts` comments now name `scripts/solstice/z3-exit-round.ts`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-12",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:42",
+      "disposition": "PATCH",
+      "rationale": "The submit brief is buffered byte-exact to a temp file (`cat > \"$tmp\"`) and handed to the real CLI on fd 3, so trailing newlines are kept. The test's fake CLI records stdin with `cat > file`, and a brief ending in `\\n` is compared exactly.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-13",
+      "label": "LOW",
+      "diff_context_ref": "AC4 scripts/z3/live-round-wiring.ts:409-416",
+      "disposition": "PATCH",
+      "rationale": "Recorded in the Z3 round record (\"AC4 double-booking surface\"): the readonly ledger read by request id is a stronger witness than `fleet status`/`result`, whose payload carries only `spendMicroUsd`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-2",
+      "label": "HIGH",
+      "diff_context_ref": "AC6 (and so AC1) scripts/z3/leg-drivers.ts:316-328 (+ live-round-wiring.ts:349-352)",
+      "disposition": "PATCH",
+      "rationale": "Observe attribution also goes through the requestId of every factoryState entry, including `submitting` ones (`protocolRunIds()` → `recordsForRequestId`). While anything is unattributed and a sibling step is `submitting`, the leg re-samples after each `BOX_STABILITY_MS` (≤ `SUBMIT_SETTLE_POLLS`) before charging. New fixture switch `recordLag`: the next leg's box and key exist before its record or runId. Covered by a positive control and an AC6 negative control.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-3",
+      "label": "HIGH",
+      "diff_context_ref": "E-2 / B-16 deferral, AC1 / AC7 tests/fleet/e2e/z3-exit-round.live.test.ts:40-48, :141-145 (+ leg-drivers.ts:729)",
+      "disposition": "PATCH",
+      "rationale": "`Z3_UPSTREAM_BLOCKERS` (round-plan.ts) lists #467 (filed) and #465. The live test refuses FIRST, by name, before `liveGate`, the GO gate, arming, or any spend. `readHarvest` is the second line of defence and now names #467 and #465. `awaitResult(…, \"terminal\")` fails fast and by name (#465) when a run reads `pausing` past `PAUSING_BOUND_MS` (20 min). The 2-blocker list and its refusal are unit-tested.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-4",
+      "label": "HIGH",
+      "diff_context_ref": "\"using only code merged\" / AC4 scripts/z3/fleet-gate.sh (git mode)",
+      "disposition": "PATCH",
+      "rationale": "The wrapper tests exec `scripts/z3/fleet-gate.sh` directly (no `/bin/bash` prefix), and the first test is \"executable as a file\". The index is still `100644` (`core.fileMode=false`), so the driver commits it with `git update-index --chmod=+x scripts/z3/fleet-gate.sh` as ruled.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-5",
+      "label": "MED",
+      "diff_context_ref": "AC1 (priming round-trip) / DoD scripts/z3/leg-drivers.ts:556 (+ :721, :725-735)",
+      "disposition": "PATCH",
+      "rationale": "The watcher kills only after the round's LAST host retain (`retainDone`). The hold keeps the window open, and the fork stays up for the QA tail's own state reads. The crash leg records `releasedAfterRetain: true` and AC4 requires it. The fixture's dispatch recall now sees only the docs retained before the release, and the priming leg records `citedLenses`. The positive control shows all three lenses cited.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-6",
+      "label": "MED",
+      "diff_context_ref": "AC7 / INV-Z3-5 tests/fleet/e2e/z3-exit-round.live.test.ts:94-113",
+      "disposition": "PATCH",
+      "rationale": "New verb `disarm <scheduleId>`, printing `{disarmed, firedRunId}`.<br />Behaviour:<br />- An `active` or `paused` row is archived (`archivedFromStatus` recorded, history `reason: z3_disarmed`). The tick fires only `active` rows. `paused` is archived as well, because a paused row can be resumed.<br />- After writing, it waits 3 s, then re-checks whether a run with this `scheduleId` exists.<br />- `firedRunId` is the newest such run, or null. disarm never cancels that run; the caller runs `cancel` on it.<br />- `disarmed` is true when no run fired and the row can no longer fire (archived, or already failed/refused).<br />- Unknown ids and non-z3 schedules are refused, and nothing is written.<br />- It is idempotent.<br />Tests:<br />- disarm on a due row means the REAL scheduler tick fires nothing, and a re-run still reports disarmed.<br />- Race 1: the tick fired first, so disarm returns `{disarmed:false, firedRunId}` and leaves the row `completed`.<br />- Race 2: during the settle, a daemon that read the row as active overwrites it and creates the run. The re-check reports that run.<br />- A non-z3 schedule is refused and stays `active`.<br />Residual: there is no lock across the CLI and daemon processes. A tick slower than the 3 s settle could still fire unseen. The caller should re-run `disarm` or read `state`, and cancel anything with that `scheduleId`. This is marked `ponytail:` in the code.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "A-7",
+      "label": "MED",
+      "diff_context_ref": "Infra Prerequisites / \"operator setup documented?\" tests/fleet/e2e/z3-exit-round.live.test.ts:1-48, scripts/z3/crash-gate.ts:8-12",
+      "disposition": "PATCH",
+      "rationale": "One operator runbook (the doc section above) covers: prerequisites with both blockers, image rebuild plus revision label, container **recreate**, the `/factory` read-write mount, `real-cli`, the agent-token mint, participants, the parking manifest, the full env list, the GO, running the test, and the post-round evidence commit with the v6-z3 manifest rows and `STAMPED_EVIDENCE_DIRS`. `preflightFork()` runs before the GO gate and checks the env override, the wrapper and real-cli exec bits inside the container, a read-write probe of `/factory/.sandbox/z3-gate`, and that `state` answers the contract.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-8",
+      "label": "MED",
+      "diff_context_ref": "AC5 / INV-Z3-3 scripts/z3/live-round-wiring.ts:459",
+      "disposition": "DISMISS",
+      "rationale": "A bank-side \"documents carrying this runId\" listing needs a document-list read. `HindsightClient` exposes none (methods: listBanks/createBank/deleteBank/retain/recall/reflect/consolidate/mental models/listOperations/request; `src/hindsight/client.ts:185-631`), and `recall` is a semantic query, not an enumeration. Adding one would mean editing `src/` (fenced). The box half rests on the memgate issuance ledger, the only path a box has to bank-write scope (INV-MG), filtered to write verbs. Strengthened under B-6: host traces must now exactly cover the retained documents.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-9",
+      "label": "MED",
+      "diff_context_ref": "INV-Z3-6 scripts/z3/assertions.ts:379",
+      "disposition": "PATCH",
+      "rationale": "Recorded as a contract delta in the Z3 round record (\"INV-Z3-6, bank ids\"). The AC5 assertion comment points at it.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-1",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:358",
+      "disposition": "PATCH",
+      "rationale": "`state` now emits `artifacts` for every run, as persisted: `{id, kind, stepId, title, content, createdAt}`. `stepId` is the artifact's `phaseId`, i.e. the step that wrote it. Both factory adapters create artifacts with `createArtifact(run, {id: step.id}, …)`, so that field holds the step id. `content` is the raw JSON verdict or observe payload, so the factory reads the verdict status with `JSON.parse(content).status`. Test: a `factory_result` and a `factory_observe` artifact, built with the same constructor the adapters use, come back field for field, and survive the one-line JSON round trip. The run key set is pinned with `artifacts` included.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-10",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:141",
+      "disposition": "PATCH",
+      "rationale": "See A-3.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-11",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:657",
+      "disposition": "PATCH",
+      "rationale": "Cleanup attributes through the requestIds: the bound run's factoryState, and the fork cancel's `inFlightRequestIds`, both mapped via `recordsForRequestId`. It re-sweeps after the final inventory. Per ruling 4, any fresh box still unattributed after cleanup is a cleanup problem AND fails AC7 (`unattributedFreshBoxes` non-empty). Two negative controls.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-12",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:48",
+      "disposition": "PATCH",
+      "rationale": "The wrapper resolves the requestId from `--request-id <id>`, then `--request-id=<id>`, then the brief's `\"requestId\"`. An armed code submit with none resolvable exits 99 (journaled `unparsed`) and is never held blind. Fixture-tested.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-13",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:43",
+      "disposition": "PATCH",
+      "rationale": "Only `submit` buffers stdin (byte-exact); every other verb is exec'd with the original stdin, so a never-closed tty no longer hangs the wrapper. See A-12.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-14",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:296",
+      "disposition": "PATCH",
+      "rationale": "`awaitTrigger` reads `state.schedules`: a `failed`/`completed`/`cancelled` schedule with no run fails at once, and so does a missing schedule. On more than one run, every one goes into the wiring's `ownRuns`, which `disarmSchedule` reports, so the cleanup cancels all of them.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-15",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/assertions.ts:446",
+      "disposition": "PATCH",
+      "rationale": "AC7 requires every `kill-and-provision` runId to be in `cleanup.runIds`, with an exit-0 destroy receipt. Negative control added.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-16",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:166",
+      "disposition": "PATCH",
+      "rationale": "`tail()` scrubs, slices, then scrubs again.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-17",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/evidence.ts:88",
+      "disposition": "PATCH",
+      "rationale": "`scrubText` replaces known secret values before the shape regexes. Regression test added.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-18",
+      "label": "LOW",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:96",
+      "disposition": "PATCH",
+      "rationale": "`Z3_CODE_POLL_TIMEOUT_MS` is required, must be below `ROUND_BUDGET_MS`, is passed in the arm config, and is checked in the read-back (`armedCapsProblems`).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-19",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/round-plan.ts:167",
+      "disposition": "PATCH",
+      "rationale": "`gateFire` refuses a GO older than 24 h (`Z3_GO_MAX_AGE_MS`) or dated in the future. AC7 requires `go.when <= trigger.firedAt`. Both tested.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-2",
+      "label": "HIGH",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:95",
+      "disposition": "PATCH",
+      "rationale": "New verb `disarm <scheduleId>`, printing `{disarmed, firedRunId}`.<br />Behaviour:<br />- An `active` or `paused` row is archived (`archivedFromStatus` recorded, history `reason: z3_disarmed`). The tick fires only `active` rows. `paused` is archived as well, because a paused row can be resumed.<br />- After writing, it waits 3 s, then re-checks whether a run with this `scheduleId` exists.<br />- `firedRunId` is the newest such run, or null. disarm never cancels that run; the caller runs `cancel` on it.<br />- `disarmed` is true when no run fired and the row can no longer fire (archived, or already failed/refused).<br />- Unknown ids and non-z3 schedules are refused, and nothing is written.<br />- It is idempotent.<br />Tests:<br />- disarm on a due row means the REAL scheduler tick fires nothing, and a re-run still reports disarmed.<br />- Race 1: the tick fired first, so disarm returns `{disarmed:false, firedRunId}` and leaves the row `completed`.<br />- Race 2: during the settle, a daemon that read the row as active overwrites it and creates the run. The re-check reports that run.<br />- A non-z3 schedule is refused and stays `active`.<br />Residual: there is no lock across the CLI and daemon processes. A tick slower than the 3 s settle could still fire unseen. The caller should re-run `disarm` or read `state`, and cancel anything with that `scheduleId`. This is marked `ponytail:` in the code.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-20",
+      "label": "LOW",
+      "diff_context_ref": "tests/z3/wiring.test.ts:42",
+      "disposition": "PATCH",
+      "rationale": "The vacuous `RUNS_DIR.startsWith(\"/\")` test is deleted.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-21",
+      "label": "LOW",
+      "diff_context_ref": "tests/z3/fixture.ts:81",
+      "disposition": "PATCH",
+      "rationale": "New fixture switches and behaviours: `recordLag` (box and key before the runId); a dispatch recall that sees only pre-release retains; a no-held-line gate; a stop between the submitting read and the kill; a failed kill. Each has a test (see B-4, A-2, A-5).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-3",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:316",
+      "disposition": "PATCH",
+      "rationale": "See A-2.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-4",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:537",
+      "disposition": "PATCH",
+      "rationale": "No held line within the window: the watcher aborts the gate and never kills. A failed kill: abort, with no release and no restart. `stopped()` is re-checked before the kill and before the release; a stop aborts. The wrapper honours `abort` before anything else, even with `release` present. Three new driver-path tests: no held line means `killed === 0`; a failed kill means no release and no restart; a stop between submitting and the kill means no kill and no release.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-5",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:556",
+      "disposition": "PATCH",
+      "rationale": "See A-5.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-6",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:459",
+      "disposition": "PATCH",
+      "rationale": "The driver and AC5 both require the host traces to cover exactly `documentIds` (an empty trace list is a problem whenever documents were retained). Negative control added. The bank-side half: see A-8.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-7",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:265",
+      "disposition": "PATCH",
+      "rationale": "The `state()` outage budget runs from the current failure streak's start (`firstFail ??= now`), not from the last success.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-8",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:465",
+      "disposition": "PATCH",
+      "rationale": "The gateway `fetch` carries `AbortSignal.timeout(min(60 s, deadline remaining))`. The HindsightClient calls have no timeout seam we can reach without editing `src/` (fenced). They are bounded by the bun test timeout, which exceeds round budget + cleanup budget + margin.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-9",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:71",
+      "disposition": "PATCH",
+      "rationale": "Every non-submit verb is `exec \"$REAL\" \"$@\"`, so argv, stdin and signals go straight to the real CLI. A submit is exec'd the same way after its journal line, so a fork SIGTERM reaches the real CLI.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-1",
+      "label": "HIGH",
+      "diff_context_ref": "solstice `scripts/solstice/z3-exit-round.ts:88-107` and factory `scripts/z3/live-round-wiring.ts:120,363`",
+      "disposition": "PATCH",
+      "rationale": "Each event now carries `summary` (always present on the event store row). The test pins it.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-10",
+      "label": "LOW",
+      "diff_context_ref": "`tests/fleet/e2e/z3-exit-round.live.test.ts:95-107`",
+      "disposition": "PATCH",
+      "rationale": "See B-18.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-11",
+      "label": "LOW",
+      "diff_context_ref": "`scripts/z3/live-round-wiring.ts:31-33` and `scripts/z3/crash-gate.ts:8-12`",
+      "disposition": "PATCH",
+      "rationale": "The wiring header now says the fork's fleet child has no cwd (it runs in `/app`) and the allowlist strips `QDS_RUNS_DIR`, so real-cli must `cd` into the clone and use the same runs dir. The runbook adds the read-write `/factory` mount and that line. `preflightFork()` probes the mount read-write from inside the container (a nonce written there must read back host-side).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-2",
+      "label": "HIGH",
+      "diff_context_ref": "`tests/fleet/e2e/z3-exit-round.live.test.ts:94-113` and `scripts/z3/leg-drivers.ts:713-721`",
+      "disposition": "PATCH",
+      "rationale": "`arm` now throws if the persisted row has no `protocolConfig`, instead of printing null. Its output type is a non-null record, so the factory's strict schema holds.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-3",
+      "label": "HIGH",
+      "diff_context_ref": "`scripts/z3/fleet-gate.sh:54-58` and `scripts/z3/crash-gate.ts:50-54`",
+      "disposition": "PATCH",
+      "rationale": "In the wrapper, `abort` is tested FIRST for any z3 code submit, whatever `armed`/`release` say, giving exit 99 with no exec. `crashGate.abort()` no longer deletes `armed`; `arm()` clears `abort`. Fixture-tested: disarmed, released, and post-cleanup arrivals all exit 99.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-4",
+      "label": "HIGH",
+      "diff_context_ref": "`scripts/z3/leg-drivers.ts:537-559` (R1 B-3/A-4 stand-down: the fix is incomplete)",
+      "disposition": "PATCH",
+      "rationale": "See B-4.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-5",
+      "label": "MED",
+      "diff_context_ref": "`scripts/z3/leg-drivers.ts:629-658` and `scripts/z3/assertions.ts:434-458` (R1 E-20 attribution: the fix opens an excuse)",
+      "disposition": "PATCH",
+      "rationale": "`cancel` adds `inFlightRequestIds`: outstanding external_job entries that have no runId yet, meaning the submit exec is still running. Their ack lands on a cancelled run and is dropped (the F-004 guard, protocol-factory.ts:197-198). The requestId is therefore the only key the factory can map through `recordsForRequestId`. `cancelFactoryRuns` still marks those entries cancelled, so no replay resubmits them (tested). Mapping and destroy stay with the factory.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-6",
+      "label": "MED",
+      "diff_context_ref": "`scripts/z3/live-round-wiring.ts:296-316`",
+      "disposition": "PATCH",
+      "rationale": "See B-14.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-7",
+      "label": "MED",
+      "diff_context_ref": "`scripts/z3/live-round-wiring.ts:137,356`",
+      "disposition": "PATCH",
+      "rationale": "The exit-checked verify cancels now run in parallel. The awaited `cancelFactoryRuns` is the SC2.4 path; it stays sequential and is not changed here. Worst case = (outstanding external_job submits) × `FLEET_EXEC_TIMEOUT_MS` 300 s inside `cancelFactoryRuns`, plus one parallel verify of 300 s. A z3 round is a strict single-cursor `nextStepId` chain with no parallel steps, so at most one submit is outstanding at a time. Required factory budget: at least 2 × 300 s plus tsx boot, about 11 min. **Recommend `forkCli` cancel timeout = 660_000 ms.** The CLI header documents this.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-8",
+      "label": "LOW",
+      "diff_context_ref": "`scripts/z3/fleet-gate.sh:32,56-71`",
+      "disposition": "PATCH",
+      "rationale": "Hold limit 240 s (A-10), and the real CLI is exec'd (B-9), so a fork SIGTERM reaches it and no orphaned provision double-execs.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-9",
+      "label": "LOW",
+      "diff_context_ref": "`scripts/z3/fleet-gate.sh:43`",
+      "disposition": "PATCH",
+      "rationale": "See B-13.",
+      "owner": "factory"
+    }
+  ]
+}

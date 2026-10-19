@@ -1,0 +1,280 @@
+{
+  "story": "Z3",
+  "round": 3,
+  "created_at": "2026-10-19T19:22:23.527Z",
+  "layers": [
+    "blind-hunter",
+    "edge-case-hunter",
+    "acceptance-auditor"
+  ],
+  "counts": {
+    "PATCH": 30,
+    "DISMISS": 3
+  },
+  "findings": [
+    {
+      "finding_id": "A-1",
+      "label": "HIGH",
+      "diff_context_ref": "AC4 / \"using only code merged\" scripts/z3/fleet-gate.sh:1 (+ docs/planning/v6-crossrepo-contract.md:155)",
+      "disposition": "PATCH",
+      "rationale": "`git update-index --chmod=+x scripts/z3/fleet-gate.sh`: the index now shows `100755`. NOTE for the driver: update-index on the intent-to-add entry also staged the file's content at that moment, so re-`git add` before the commit. A new test asserts `git ls-files -s` reports `100755`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-10",
+      "label": "LOW",
+      "diff_context_ref": "fork scripts/solstice/z3-exit-round.test.ts (package.json)",
+      "disposition": "DISMISS",
+      "rationale": "The fork test wiring follows house convention (none of the 39 sibling `scripts/solstice/*.test.ts` are wired). Fork leaf's call.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-2",
+      "label": "MED",
+      "diff_context_ref": "AC1 / AC4 scripts/z3/leg-drivers.ts:605-608, :818 (+ scripts/z3/fleet-gate.sh:41)",
+      "disposition": "PATCH",
+      "rationale": "**The watcher kills the fork at the hold.** `armCrashWindow`: (1) a fresh `submitting` read; (2) a still-OPEN hold in the journal (`held` with no `expired`/`aborted`/`exec`), otherwise it aborts without killing, and a hold that already ended stands down with the cause named, e.g. `(held→expired)`; (3) a `stopped()` re-check; (4) the kill AT ONCE; (5) the round's last host retain runs while the fork is DOWN (the wiring serves the frozen last state, since a dead fork cannot change); (6) a `stopped()` re-check; (7) release, then restart. The hold now spans poll latency only. **The witnesses are observed, never hard-coded:** the journal lines carry `at`, and `driveCrashWindowRedrive` derives `heldAtKill` (a hold at or before `killedAt`, nothing ended before it) and `releasedAfterRetain` (the replay's `released` line ≥ `retainDoneAt`) from the journal. It records `gateJournal`, `retainDoneAt`, `releasedAt` and `holdAgeAtKillMs`. AC4 re-derives both from the recorded `gateJournal`. **Wrapper:** the hold limit is wall-clock (`$SECONDS`), and a TERM/INT trap journals `expired` and exits 99 without exec. Abort journals `aborted` (A-7). **Observe settle:** it never waits on the gated `z3-code-run` (killed at once, held pre-exec, provisions nothing). **Tests:** kill-before-last-retain ordering under a slow last retain (`slowLastRetainMs`); release after the retain; hold-expired before the kill means stand-down with that cause and no kill; AC4 negative controls for a journal showing the hold expired before the kill and for a release before the retain; the last observe's `settlePolls === 0`; wrapper TERM gives 99 with no exec; journal timestamps.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-3",
+      "label": "MED",
+      "diff_context_ref": "INV-Z3-5 / AC7 tests/fleet/e2e/z3-exit-round.live.test.ts:124-137, :190-198 (+ scripts/z3/live-round-wiring.ts:156, :180)",
+      "disposition": "PATCH",
+      "rationale": "`z3ScheduleIds()` snapshots the z3 schedules before arming. `armZ3Schedule(input, preArmIds)` sweeps on ANY failure: non-zero exit, a timeout (`FORK_ARM_TIMEOUT_MS` 240 s; runAt lead `ARM_LEAD_MS` 420 s > that), or unparseable/drifted output. The sweep re-reads `state` and disarms every z3 schedule not in the snapshot, then cancels every run each one fired (`sweepNewZ3Schedules`, every step runs). It throws an `AggregateError` with the original as `cause`. **End of cleanup:** a second `disarmSchedule` re-reads runs by scheduleId, cancels any fire that landed after the first disarm (flagged as a problem), and flags a schedule still `active`/`paused`. `disarmZ3Schedule` now returns `scheduleStatus`. **Pre-round failure path:** every step is guarded (gate abort, disarm, a cancel per fired run, none skipped), and errors become an `AggregateError` whose cause is the original error. Tests: late fire cancelled and flagged; still-active flagged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-4",
+      "label": "LOW",
+      "diff_context_ref": "runbook docs/planning/v6-crossrepo-contract.md:171-172",
+      "disposition": "PATCH",
+      "rationale": "There is no `Z3_CODE_POLL_TIMEOUT_MS` (removed in R2; `codePollTimeoutFor` is derived, 2 h), and the round budget is stated as 300 min. The `MEMGATE_ADMIN_KEY` / `QDS_MEMGATE_SIGNING_KEY` exports and the `QDS_MEMGATE_LEDGER` override are in the mint step. Also added: the arm sweep, GO consumption, the budget line, the fork-down recovery (restart, then `cancel <protocolRunId>` and re-read `state`; A-8), and red-round triage (E-3 `submit-in-flight`; E-9(d) hibernation).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-5",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:9-16",
+      "disposition": "PATCH",
+      "rationale": "The wiring header now documents the four-verb contract (`disarm` and `inFlightRequestIds` included) and the exact run keys.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-6",
+      "label": "LOW",
+      "diff_context_ref": "AC1 tests/z3/fixtures/fork-state.json:2",
+      "disposition": "DISMISS",
+      "rationale": "The fixture is hand-mirrored. It was refreshed this round to carry the real observe entry (`observe-<uuid>` requestId, `submittedAt`, `pollAttempts`, `lastError`) and a pretty-printed verdict with the real title. A generated cross-repo artifact is out of scope for this PR. Noted in the fixture's `_note`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-7",
+      "label": "LOW",
+      "diff_context_ref": "AC4 scripts/z3/fleet-gate.sh:69-70",
+      "disposition": "PATCH",
+      "rationale": "The wrapper journals `aborted` (a distinct phase in `GateLine`), and the tests assert it.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-8",
+      "label": "LOW",
+      "diff_context_ref": "runbook docs/planning/v6-crossrepo-contract.md:217-219",
+      "disposition": "PATCH",
+      "rationale": "Ruling 5 (fork-down recovery step).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-9",
+      "label": "LOW",
+      "diff_context_ref": "DoD story z3-cross-repo-live-exit-round.md:100-109",
+      "disposition": "DISMISS",
+      "rationale": "DoD ticks are in the story file (`_bmad-output/sprint-artifacts/**`, the driver's ownership).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-1",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:604",
+      "disposition": "PATCH",
+      "rationale": "**The watcher kills the fork at the hold.** `armCrashWindow`: (1) a fresh `submitting` read; (2) a still-OPEN hold in the journal (`held` with no `expired`/`aborted`/`exec`), otherwise it aborts without killing, and a hold that already ended stands down with the cause named, e.g. `(held→expired)`; (3) a `stopped()` re-check; (4) the kill AT ONCE; (5) the round's last host retain runs while the fork is DOWN (the wiring serves the frozen last state, since a dead fork cannot change); (6) a `stopped()` re-check; (7) release, then restart. The hold now spans poll latency only. **The witnesses are observed, never hard-coded:** the journal lines carry `at`, and `driveCrashWindowRedrive` derives `heldAtKill` (a hold at or before `killedAt`, nothing ended before it) and `releasedAfterRetain` (the replay's `released` line ≥ `retainDoneAt`) from the journal. It records `gateJournal`, `retainDoneAt`, `releasedAt` and `holdAgeAtKillMs`. AC4 re-derives both from the recorded `gateJournal`. **Wrapper:** the hold limit is wall-clock (`$SECONDS`), and a TERM/INT trap journals `expired` and exits 99 without exec. Abort journals `aborted` (A-7). **Observe settle:** it never waits on the gated `z3-code-run` (killed at once, held pre-exec, provisions nothing). **Tests:** kill-before-last-retain ordering under a slow last retain (`slowLastRetainMs`); release after the retain; hold-expired before the kill means stand-down with that cause and no kill; AC4 negative controls for a journal showing the hold expired before the kill and for a release before the retain; the last observe's `settlePolls === 0`; wrapper TERM gives 99 with no exec; journal timestamps.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-10",
+      "label": "LOW",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:83",
+      "disposition": "PATCH",
+      "rationale": "`Z3_LIVE_BUDGET` (live-round-wiring.ts) has the arithmetic written down. Cleanup = ⌈Σ `Z3_CLEANUP_STEPS_MS`⌉, built from the configured timeouts: disarm + re-read, ≤ 2 protocol cancels at 780 s, sweep, ONE parallel destroy pass (destroys now run in parallel), revoke-verify, two final-inventory + re-sweep passes, a leftover destroy, the residue re-check and a late cancel. That comes to 81 min. Test timeout = pre-round (≈15 min) + 300 min round + cleanup + 10 min margin. The round deadline is set from TEST START. Cleanup `state()` reads honour the cleanup deadline (round + cleanup), not the round's. `wiring.test.ts` recomputes the step sum independently and asserts cleanup ≥ it, pre + round + cleanup + margin ≤ timeout, the code run's share ≥ 1 h, and arm lead > arm timeout.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-11",
+      "label": "LOW",
+      "diff_context_ref": "src/lib/server/protocols/protocol-z3-exit-round.ts:153 (fork)",
+      "disposition": "PATCH",
+      "rationale": "`qa-observe-<lens>` now derives from the observed leg: `leg.id.replace(/^qa-leg-/, '')`. A reorder or filter in `buildQaHunterPackSteps` can no longer mispair an observe with its leg. The now-unused `QA_LENS` import is dropped. The existing tests already pin the pairing by name (each `qa-observe-<lens>` has `fromStepOutput: qa-leg-<lens>`). The step-id list is unchanged.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-2",
+      "label": "HIGH",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:124",
+      "disposition": "PATCH",
+      "rationale": "`z3ScheduleIds()` snapshots the z3 schedules before arming. `armZ3Schedule(input, preArmIds)` sweeps on ANY failure: non-zero exit, a timeout (`FORK_ARM_TIMEOUT_MS` 240 s; runAt lead `ARM_LEAD_MS` 420 s > that), or unparseable/drifted output. The sweep re-reads `state` and disarms every z3 schedule not in the snapshot, then cancels every run each one fired (`sweepNewZ3Schedules`, every step runs). It throws an `AggregateError` with the original as `cause`. **End of cleanup:** a second `disarmSchedule` re-reads runs by scheduleId, cancels any fire that landed after the first disarm (flagged as a problem), and flags a schedule still `active`/`paused`. `disarmZ3Schedule` now returns `scheduleStatus`. **Pre-round failure path:** every step is guarded (gate abort, disarm, a cancel per fired run, none skipped), and errors become an `AggregateError` whose cause is the original error. Tests: late fire cancelled and flagged; still-active flagged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-3",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:1",
+      "disposition": "PATCH",
+      "rationale": "A-1.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-4",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:83",
+      "disposition": "PATCH",
+      "rationale": "**The watcher kills the fork at the hold.** `armCrashWindow`: (1) a fresh `submitting` read; (2) a still-OPEN hold in the journal (`held` with no `expired`/`aborted`/`exec`), otherwise it aborts without killing, and a hold that already ended stands down with the cause named, e.g. `(held→expired)`; (3) a `stopped()` re-check; (4) the kill AT ONCE; (5) the round's last host retain runs while the fork is DOWN (the wiring serves the frozen last state, since a dead fork cannot change); (6) a `stopped()` re-check; (7) release, then restart. The hold now spans poll latency only. **The witnesses are observed, never hard-coded:** the journal lines carry `at`, and `driveCrashWindowRedrive` derives `heldAtKill` (a hold at or before `killedAt`, nothing ended before it) and `releasedAfterRetain` (the replay's `released` line ≥ `retainDoneAt`) from the journal. It records `gateJournal`, `retainDoneAt`, `releasedAt` and `holdAgeAtKillMs`. AC4 re-derives both from the recorded `gateJournal`. **Wrapper:** the hold limit is wall-clock (`$SECONDS`), and a TERM/INT trap journals `expired` and exits 99 without exec. Abort journals `aborted` (A-7). **Observe settle:** it never waits on the gated `z3-code-run` (killed at once, held pre-exec, provisions nothing). **Tests:** kill-before-last-retain ordering under a slow last retain (`slowLastRetainMs`); release after the retain; hold-expired before the kill means stand-down with that cause and no kill; AC4 negative controls for a journal showing the hold expired before the kill and for a release before the retain; the last observe's `settlePolls === 0`; wrapper TERM gives 99 with no exec; journal timestamps.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-5",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:740",
+      "disposition": "PATCH",
+      "rationale": "Every cleanup receipt string is scrubbed and bounded (`tail`, 600 chars) before the writer sees it. When the full record is still refused, a MINIMAL record lands (runIds, `{runId, exitCode}` destroy receipts, `{phase, ok}` revoke receipts, leftovers, a problem count), so AC7 always has its record. Destroy stderr is also cut at 600 at source. Test: a receipt carrying a bare `sk-or-` prefix still yields a cleanup record that passes AC7.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-6",
+      "label": "MED",
+      "diff_context_ref": "docs/planning/v6-crossrepo-contract.md:192",
+      "disposition": "PATCH",
+      "rationale": "There is no `Z3_CODE_POLL_TIMEOUT_MS` (removed in R2; `codePollTimeoutFor` is derived, 2 h), and the round budget is stated as 300 min. The `MEMGATE_ADMIN_KEY` / `QDS_MEMGATE_SIGNING_KEY` exports and the `QDS_MEMGATE_LEDGER` override are in the mint step. Also added: the arm sweep, GO consumption, the budget line, the fork-down recovery (restart, then `cancel <protocolRunId>` and re-read `state`; A-8), and red-round triage (E-3 `submit-in-flight`; E-9(d) hibernation).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-7",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/round-plan.ts:232",
+      "disposition": "PATCH",
+      "rationale": "Zero future tolerance (`at > now` is refused). **Chosen binding: CONSUME on fire.** `consumeOperatorGo` moves (link + unlink, so a concurrent consumer cannot both win) `operator-GO.json` to `<stamp>-operator-GO.consumed.json` once the gate passes. A second round finds no GO and refuses, and the consumed copy is the committed GO record. Documented in the runbook. Tests: 1 s ahead is refused; consuming moves the file, a second read refuses, and a second consume throws.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-8",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:219",
+      "disposition": "PATCH",
+      "rationale": "`preflightFork` RUNS the wrapper in the container (`fleet-gate.sh help`; exits 98, 126, 127 or a null exit are refused), and probes `sleep 0.1 && mktemp`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-9",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:196",
+      "disposition": "PATCH",
+      "rationale": "`z3ScheduleIds()` snapshots the z3 schedules before arming. `armZ3Schedule(input, preArmIds)` sweeps on ANY failure: non-zero exit, a timeout (`FORK_ARM_TIMEOUT_MS` 240 s; runAt lead `ARM_LEAD_MS` 420 s > that), or unparseable/drifted output. The sweep re-reads `state` and disarms every z3 schedule not in the snapshot, then cancels every run each one fired (`sweepNewZ3Schedules`, every step runs). It throws an `AggregateError` with the original as `cause`. **End of cleanup:** a second `disarmSchedule` re-reads runs by scheduleId, cancels any fire that landed after the first disarm (flagged as a problem), and flags a schedule still `active`/`paused`. `disarmZ3Schedule` now returns `scheduleStatus`. **Pre-round failure path:** every step is guarded (gate abort, disarm, a cancel per fired run, none skipped), and errors become an `AggregateError` whose cause is the original error. Tests: late fire cancelled and flagged; still-active flagged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-1",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:807-818 (with scripts/z3/fleet-gate.sh:41, :81-90 and leg-drivers.ts:601)",
+      "disposition": "PATCH",
+      "rationale": "**The watcher kills the fork at the hold.** `armCrashWindow`: (1) a fresh `submitting` read; (2) a still-OPEN hold in the journal (`held` with no `expired`/`aborted`/`exec`), otherwise it aborts without killing, and a hold that already ended stands down with the cause named, e.g. `(held→expired)`; (3) a `stopped()` re-check; (4) the kill AT ONCE; (5) the round's last host retain runs while the fork is DOWN (the wiring serves the frozen last state, since a dead fork cannot change); (6) a `stopped()` re-check; (7) release, then restart. The hold now spans poll latency only. **The witnesses are observed, never hard-coded:** the journal lines carry `at`, and `driveCrashWindowRedrive` derives `heldAtKill` (a hold at or before `killedAt`, nothing ended before it) and `releasedAfterRetain` (the replay's `released` line ≥ `retainDoneAt`) from the journal. It records `gateJournal`, `retainDoneAt`, `releasedAt` and `holdAgeAtKillMs`. AC4 re-derives both from the recorded `gateJournal`. **Wrapper:** the hold limit is wall-clock (`$SECONDS`), and a TERM/INT trap journals `expired` and exits 99 without exec. Abort journals `aborted` (A-7). **Observe settle:** it never waits on the gated `z3-code-run` (killed at once, held pre-exec, provisions nothing). **Tests:** kill-before-last-retain ordering under a slow last retain (`slowLastRetainMs`); release after the retain; hold-expired before the kill means stand-down with that cause and no kill; AC4 negative controls for a journal showing the hold expired before the kill and for a release before the retain; the last observe's `settlePolls === 0`; wrapper TERM gives 99 with no exec; journal timestamps.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-10",
+      "label": "LOW",
+      "diff_context_ref": "tests/z3/fixtures/fork-state.json:19-21",
+      "disposition": "PATCH",
+      "rationale": "The fixture observe entry is realistic, and `protocolFleet` filters out `observe-*` requestIds (they are not fleet submits).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-11",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:571-579 vs scripts/z3/leg-drivers.ts:148-149",
+      "disposition": "PATCH",
+      "rationale": "Justified: `reflect` is the only gateway-authenticated verb an M2.1 agent token can hold for a gateway-origin assertion (host = {reflect, retain}, bot = {consolidate}), and the call is host-side, never in-box. It is explicitly EXEMPT from `READ_ONLY_MEMORY_VERBS` (a rule that classifies BOX credentials), with a comment on `gatewayReflect`. Its LLM cost is budgeted: `Z3_REFLECT_CALL_USD` (0.05) × (QA legs + 2; the +2 are the priming call and the pre-GO probe) is printed on the spend line and added to what the GO must approve. The trigger's fleet-caps check stays fleet-only. The runbook contract delta now says \"not read-only\". Tests: GO covering fleet caps only is refused; the spend line names the allowance.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-12",
+      "label": "LOW",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:190-197",
+      "disposition": "PATCH",
+      "rationale": "`z3ScheduleIds()` snapshots the z3 schedules before arming. `armZ3Schedule(input, preArmIds)` sweeps on ANY failure: non-zero exit, a timeout (`FORK_ARM_TIMEOUT_MS` 240 s; runAt lead `ARM_LEAD_MS` 420 s > that), or unparseable/drifted output. The sweep re-reads `state` and disarms every z3 schedule not in the snapshot, then cancels every run each one fired (`sweepNewZ3Schedules`, every step runs). It throws an `AggregateError` with the original as `cause`. **End of cleanup:** a second `disarmSchedule` re-reads runs by scheduleId, cancels any fire that landed after the first disarm (flagged as a problem), and flags a schedule still `active`/`paused`. `disarmZ3Schedule` now returns `scheduleStatus`. **Pre-round failure path:** every step is guarded (gate abort, disarm, a cancel per fired run, none skipped), and errors become an `AggregateError` whose cause is the original error. Tests: late fire cancelled and flagged; still-active flagged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-2",
+      "label": "HIGH",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:124-137, :194-197 (scripts/z3/live-round-wiring.ts:180-186). Reopens R2 E-2 / A-6 as incomplete.",
+      "disposition": "PATCH",
+      "rationale": "`z3ScheduleIds()` snapshots the z3 schedules before arming. `armZ3Schedule(input, preArmIds)` sweeps on ANY failure: non-zero exit, a timeout (`FORK_ARM_TIMEOUT_MS` 240 s; runAt lead `ARM_LEAD_MS` 420 s > that), or unparseable/drifted output. The sweep re-reads `state` and disarms every z3 schedule not in the snapshot, then cancels every run each one fired (`sweepNewZ3Schedules`, every step runs). It throws an `AggregateError` with the original as `cause`. **End of cleanup:** a second `disarmSchedule` re-reads runs by scheduleId, cancels any fire that landed after the first disarm (flagged as a problem), and flags a schedule still `active`/`paused`. `disarmZ3Schedule` now returns `scheduleStatus`. **Pre-round failure path:** every step is guarded (gate abort, disarm, a cancel per fired run, none skipped), and errors become an `AggregateError` whose cause is the original error. Tests: late fire cancelled and flagged; still-active flagged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-3",
+      "label": "MED",
+      "diff_context_ref": "fork src/lib/server/protocols/protocol-factory.ts:285-290 (with factory src/fleet/submit.ts:287-290, :529-539)",
+      "disposition": "PATCH",
+      "rationale": "I checked the fork source and the finding holds.<br />1. `processExternalJobStep` persists `status:'submitting'` before the exec (protocol-factory.ts SC2.1 seam).<br />2. `pollFactoryRunsInner` calls `processExternalJobStep` for every `submitting` entry, and the heartbeat ticks every 60 s (`heartbeat-service.ts:41`, `:652-653`). The only guard is `pollInFlight`, which serializes the poller against itself, not against the run loop.<br />3. A replay with an id still `in-flight` gets `SubmitError(5, \"submit-in-flight\")` (factory `src/fleet/submit.ts:529-539`). `REPLAY_EXIT_CODES` is `{1, 3, 6, -1}`, so exit 5 goes to `failOrAdvance` and the step fails.<br />4. A real provisioning submit outlives 60 s (`FLEET_EXEC_TIMEOUT_MS` note: the ack was still pending at 60 s in SC2.6).<br />Every normal Z3 QA leg whose submit spans a tick can therefore reach this.<br />**Fix:** a process-local `submitsInFlight` set keyed `${runId}:${stepId}`, added just before the submit exec and deleted in `finally`. `processExternalJobStep` returns early, with no replay and no persist, while its own exec holds the key. After a crash the set is empty, so the SC2.6 replay-on-restart path is unchanged. Running steps for the same run twice is already serialized by the protocol lease, so only the poller hits the guard.<br />**Test:** `protocol-factory.test.ts`, \"Z3 R3 E-3: …\". The run loop's first submit blocks mid-exec, a `pollFactoryRuns` tick lands, and the fake returns exit 5 for any second submit. Before the fix it failed with `2 !== 1` submits. After the fix there is exactly 1 submit, the entry ends `submitted` with `runId` `qds-run-1`, and the run did not fail. The file passes 27/27.<br />**Surface:** `protocol-factory.ts` is the SC2 adapter, not a Z3 file. The change is 16 lines with a comment. It is filed under this PR because Z3 is the first round to drive it live. If you would rather land it as its own fork PR, it stands alone (one file plus its test).",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-4",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:81-84",
+      "disposition": "PATCH",
+      "rationale": "`Z3_LIVE_BUDGET` (live-round-wiring.ts) has the arithmetic written down. Cleanup = ⌈Σ `Z3_CLEANUP_STEPS_MS`⌉, built from the configured timeouts: disarm + re-read, ≤ 2 protocol cancels at 780 s, sweep, ONE parallel destroy pass (destroys now run in parallel), revoke-verify, two final-inventory + re-sweep passes, a leftover destroy, the residue re-check and a late cancel. That comes to 81 min. Test timeout = pre-round (≈15 min) + 300 min round + cleanup + 10 min margin. The round deadline is set from TEST START. Cleanup `state()` reads honour the cleanup deadline (round + cleanup), not the round's. `wiring.test.ts` recomputes the step sum independently and asserts cleanup ≥ it, pre + round + cleanup + margin ≤ timeout, the code run's share ≥ 1 h, and arm lead > arm timeout.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-5",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:701-702 / scripts/z3/live-round-wiring.ts:202-206. Reopens R2 E-2 (fork disarm residual) as incomplete.",
+      "disposition": "PATCH",
+      "rationale": "`z3ScheduleIds()` snapshots the z3 schedules before arming. `armZ3Schedule(input, preArmIds)` sweeps on ANY failure: non-zero exit, a timeout (`FORK_ARM_TIMEOUT_MS` 240 s; runAt lead `ARM_LEAD_MS` 420 s > that), or unparseable/drifted output. The sweep re-reads `state` and disarms every z3 schedule not in the snapshot, then cancels every run each one fired (`sweepNewZ3Schedules`, every step runs). It throws an `AggregateError` with the original as `cause`. **End of cleanup:** a second `disarmSchedule` re-reads runs by scheduleId, cancels any fire that landed after the first disarm (flagged as a problem), and flags a schedule still `active`/`paused`. `disarmZ3Schedule` now returns `scheduleStatus`. **Pre-round failure path:** every step is guarded (gate abort, disarm, a cancel per fired run, none skipped), and errors become an `AggregateError` whose cause is the original error. Tests: late fire cancelled and flagged; still-active flagged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-6",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/round-plan.ts:232 vs scripts/z3/assertions.ts:442",
+      "disposition": "PATCH",
+      "rationale": "Zero future tolerance (`at > now` is refused). **Chosen binding: CONSUME on fire.** `consumeOperatorGo` moves (link + unlink, so a concurrent consumer cannot both win) `operator-GO.json` to `<stamp>-operator-GO.consumed.json` once the gate passes. A second round finds no GO and refuses, and the consumed copy is the committed GO record. Documented in the runbook. Tests: 1 s ahead is refused; consuming moves the file, a second read refuses, and a second consume throws.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-7",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:483-490",
+      "disposition": "PATCH",
+      "rationale": "The #465 `pausing` clock resets only on a REAL non-pausing payload. A transient `fleet result` failure no longer resets it.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-8",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/fleet-gate.sh:81-89",
+      "disposition": "PATCH",
+      "rationale": "**The watcher kills the fork at the hold.** `armCrashWindow`: (1) a fresh `submitting` read; (2) a still-OPEN hold in the journal (`held` with no `expired`/`aborted`/`exec`), otherwise it aborts without killing, and a hold that already ended stands down with the cause named, e.g. `(held→expired)`; (3) a `stopped()` re-check; (4) the kill AT ONCE; (5) the round's last host retain runs while the fork is DOWN (the wiring serves the frozen last state, since a dead fork cannot change); (6) a `stopped()` re-check; (7) release, then restart. The hold now spans poll latency only. **The witnesses are observed, never hard-coded:** the journal lines carry `at`, and `driveCrashWindowRedrive` derives `heldAtKill` (a hold at or before `killedAt`, nothing ended before it) and `releasedAfterRetain` (the replay's `released` line ≥ `retainDoneAt`) from the journal. It records `gateJournal`, `retainDoneAt`, `releasedAt` and `holdAgeAtKillMs`. AC4 re-derives both from the recorded `gateJournal`. **Wrapper:** the hold limit is wall-clock (`$SECONDS`), and a TERM/INT trap journals `expired` and exits 99 without exec. Abort journals `aborted` (A-7). **Observe settle:** it never waits on the gated `z3-code-run` (killed at once, held pre-exec, provisions nothing). **Tests:** kill-before-last-retain ordering under a slow last retain (`slowLastRetainMs`); release after the retain; hold-expired before the kill means stand-down with that cause and no kill; AC4 negative controls for a journal showing the hold expired before the kill and for a release before the retain; the last observe's `settlePolls === 0`; wrapper TERM gives 99 with no exec; journal timestamps.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-9",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:212-234 (`preflightFork`)",
+      "disposition": "PATCH",
+      "rationale": "(a) preflight lists the runs dir (`RunRecordStore.list()`; a `listing-partial` refuses). (c) a pre-GO `preflightGateway` reflect through the gateway for the resolved bank. (d) `awaitTrigger` fails fast when the schedule is still unfired 4 min past its `runAt` (hibernation, a stalled tick); the live deps now take `runAt`. (b) DISMISS: proving real-cli's cwd and runs dir would need a fleet round trip through the container's exe.dev credentials. The B-8 wrapper-runs probe covers the exec chain, and a wrong runs dir fails closed on the first `readRecord` (documented in the runbook).",
+      "owner": "factory"
+    }
+  ]
+}

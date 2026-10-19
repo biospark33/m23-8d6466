@@ -1,0 +1,90 @@
+{
+  "_note": "The fork CLI `state` line as scripts/solstice/z3-exit-round.ts state() projects it (fork worktree z3-sc): observe entries carry an `observe-<uuid>` requestId (the factory never treats it as a fleet submit), verdict artifacts are pretty-printed JSON. Hand-mirrored (known debt, R3 A-6): the fork test pins the same run keys; a drift needs both sides edited to slip.",
+  "schedules": [
+    {
+      "id": "sch-z3",
+      "status": "active",
+      "protocolTemplateId": "z3_exit_round",
+      "protocolConfig": {
+        "templateId": "z3_exit_round",
+        "qaGroupCapUsd": 6,
+        "codeGroupCapUsd": 8
+      }
+    }
+  ],
+  "runs": [
+    {
+      "id": "pr-z3-1",
+      "templateId": "z3_exit_round",
+      "scheduleId": "sch-z3",
+      "createdAt": 1760875200000,
+      "status": "running",
+      "steps": [
+        {
+          "id": "qa-leg-correctness",
+          "kind": "external_job",
+          "externalJobConfig": {
+            "repoSlug": "Quantum-Digital-Solutions/QDS-Factory",
+            "commitSha": "0123456789abcdef0123456789abcdef01234567",
+            "workId": "w:qa-20261019T120000Z-correctness",
+            "groupCapUsd": 6
+          }
+        },
+        {
+          "id": "qa-observe-correctness",
+          "kind": "factory_observe",
+          "factoryObserveConfig": {
+            "fromStepOutput": "qa-leg-correctness",
+            "pollTimeoutMs": 3600000,
+            "onFailure": "fail"
+          }
+        }
+      ],
+      "factoryState": {
+        "qa-leg-correctness": {
+          "stepId": "qa-leg-correctness",
+          "requestId": "r1",
+          "status": "submitted",
+          "runId": "qds-20261019-aaaaa1",
+          "submittedAt": 1760875201000,
+          "pollAttempts": 0,
+          "lastError": null
+        },
+        "qa-observe-correctness": {
+          "stepId": "qa-observe-correctness",
+          "requestId": "observe-6f1c2a9e-0b7d-4c1e-9a3f-2d5e8b7c1a04",
+          "status": "completed",
+          "runId": "qds-20261019-aaaaa1",
+          "submittedAt": 1760875300500,
+          "pollAttempts": 1,
+          "lastError": null
+        }
+      },
+      "artifacts": [
+        {
+          "id": "a1",
+          "kind": "factory_result",
+          "stepId": "qa-leg-correctness",
+          "title": "Factory result qds-20261019-aaaaa1 (completed)",
+          "content": "{\n  \"runId\": \"qds-20261019-aaaaa1\",\n  \"status\": \"completed\"\n}",
+          "createdAt": 1760875300000
+        }
+      ],
+      "events": [
+        {
+          "type": "step_started",
+          "stepId": "qa-leg-correctness",
+          "summary": "started",
+          "at": 1760875200500
+        },
+        {
+          "type": "step_completed",
+          "stepId": "qa-observe-correctness",
+          "summary": "observed",
+          "at": 1760875400000
+        }
+      ]
+    }
+  ],
+  "writtenAt": 1760875500000
+}

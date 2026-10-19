@@ -1,0 +1,545 @@
+{
+  "story": "Z3",
+  "round": 1,
+  "created_at": "2026-10-19T19:22:23.336Z",
+  "layers": [
+    "blind-hunter",
+    "edge-case-hunter",
+    "acceptance-auditor"
+  ],
+  "counts": {
+    "PATCH": 61,
+    "DEFER-UPSTREAM": 2,
+    "DISMISS": 3
+  },
+  "findings": [
+    {
+      "finding_id": "A-1",
+      "label": "HIGH",
+      "diff_context_ref": "AC1 / \"No stub, no TODO: wire later\" scripts/z3/live-round-wiring.ts:51",
+      "disposition": "PATCH",
+      "rationale": "New committed CLI at `scripts/solstice/z3-exit-round.ts`, with `arm`, `state` and `cancel` on the pinned interface. Each command prints one JSON line; errors go to stderr with a non-zero exit. It lives in `scripts/solstice/`, not `scripts/`, because the production Dockerfile copies only `scripts/solstice` into the runtime image (Dockerfile:222). Tests: `scripts/solstice/z3-exit-round.test.ts`, 7 tests, run automatically by `test:solstice` (its selector covers `scripts/solstice/`).",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "A-10",
+      "label": "LOW",
+      "diff_context_ref": "AC2 / INV-Z3-2 scripts/z3/assertions.ts:173",
+      "disposition": "PATCH",
+      "rationale": "AC2 recomputes merge from `branch.eventTypes` (and fails when they are absent). It no longer trusts the `autoMerge` flag.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-11",
+      "label": "LOW",
+      "diff_context_ref": "INV-Z3-5 scripts/z3/leg-drivers.ts:466",
+      "disposition": "PATCH",
+      "rationale": "Cleanup runs a second `destroyBoxes` pass over attributed leftovers, then re-inventories, and records `leftoverDestroy` receipts.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-12",
+      "label": "LOW",
+      "diff_context_ref": "Technical Notes (fork-rev stamp) tests/fleet/e2e/z3-exit-round.live.test.ts:51",
+      "disposition": "PATCH",
+      "rationale": "The image has no .git, so `state` carries no rev. The rev is the required `SWARMCLAW_FORK_REV`, cross-checked (prefix match) against the image's `org.opencontainers.image.revision` label when present. Otherwise the trigger leg records `forkRevVerification: \"unverifiable-from-image\"`, labelled explicitly and never a silent null; AC7 requires the label.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-13",
+      "label": "LOW",
+      "diff_context_ref": "AC3 scripts/z3/leg-drivers.ts:200",
+      "disposition": "PATCH",
+      "rationale": "`driveBoxForensics` re-reads after `BOX_STABILITY_MS` before calling a box outlived.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-14",
+      "label": "LOW",
+      "diff_context_ref": "AC7 scripts/z3/live-round-wiring.ts:58",
+      "disposition": "PATCH",
+      "rationale": "One round deadline (`z3LiveDeps({deadline})`) bounds every poll. The live test sets `ROUND_BUDGET_MS` 200 min + `CLEANUP_BUDGET_MS` 25 min + 10 min margin = test timeout.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-2",
+      "label": "HIGH",
+      "diff_context_ref": "AC7 / charter §5.6 tests/fleet/e2e/z3-exit-round.live.test.ts:55",
+      "disposition": "PATCH",
+      "rationale": "The live test arms the schedule only after `gateFire`, using the caps of the same `composeRound` the spend line priced. `armedCapsProblems` refuses the round when the persisted `protocolConfig` caps differ. `driveTrigger` re-sums the fired run's own per-step `externalJobConfig.groupCapUsd` and fails unless it equals the worst case and fits the GO. AC7 re-checks `forkCapsUsd === worstCaseSpendUsd` from disk.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-3",
+      "label": "HIGH",
+      "diff_context_ref": "AC6 (and so AC1) scripts/z3/leg-drivers.ts:222",
+      "disposition": "PATCH",
+      "rationale": "Observe deltas are attributed (`observeDeltas`): boxes named for, provider keys (`record.keyHash`) of, and per-run memory keys (`run_id`) of any fleet run of the bound protocol run are excluded. Anything unattributable stays charged. The fixture now runs the fork ahead (the next leg's box, key and recall key exist before observe reads), plus a fail-closed negative control.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-4",
+      "label": "MED",
+      "diff_context_ref": "AC4 scripts/z3/leg-drivers.ts:391",
+      "disposition": "PATCH",
+      "rationale": "SC2.6 (`tests/fleet/e2e/sc2-6-lease-kill.live.test.ts`) did not catch the window by polling. It held it open with a `$SWARMCLAW_FACTORY_FLEET_CLI` wrapper that blocks the `submit` exec. SC2.1 persists the `submitting` entry with its `requestId` before that exec. The same approach works here with no fork code. The factory installs a wrapper that holds `submit` only for the `w:z3-*-code` workId (QA legs pass straight through) and waits on a gate file. The driver polls `state` until `factoryState['z3-code-run']` is `submitting` with a `requestId`, kills the container, releases the gate and restarts. Because the window stays open as long as the wrapper holds, poll cadence and the late arming of `armCrashWindow` no longer matter. Window (b) (submit done, ack not persisted) works the same way with the wrapper holding the exit. I added no production self-kill hook and no new event: the persisted `submitting` entry is already the observation point, and `state` surfaces it verbatim (pinned by test). Freshness (B-3c / B-20) is factory-side: `state.writtenAt` is the fork's own clock at dump time.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "A-5",
+      "label": "MED",
+      "diff_context_ref": "AC5 / INV-Z3-3 scripts/z3/live-round-wiring.ts:301",
+      "disposition": "PATCH",
+      "rationale": "Retain traces are now the factory host client's own journaled `retain` calls (`journalingClient`), an observation and no longer a constant. The box half rests on the memgate issuance ledger filtered to write verbs. Per INV-MG that ledger is the only path a box has to bank-write scope: the host Hindsight token is env-only (INV-HM1) and never delivered. A box-env probe would need a new in-box verb (the registry is closed, ADR-1 §2).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-6",
+      "label": "MED",
+      "diff_context_ref": "AC1 scripts/z3/assertions.ts:122",
+      "disposition": "PATCH",
+      "rationale": "`runZ3Round` writes `<stamp>-z3-round-manifest.json` (filename → sha256 for every leg) in the `finally`. `registryFromManifest` rebuilds the registry for a later audit. AC1 now requires a registry (null means a problem) and flags registered files missing from disk. The live test reads this round's window (`filesSince`) and no longer filters by the registry, so unregistered files are reported.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-7",
+      "label": "MED",
+      "diff_context_ref": "AC1/AC6 scripts/z3/live-round-wiring.ts:118",
+      "disposition": "PATCH",
+      "rationale": "`state` emits `createdAt` (run) and `at` (event) as epoch-ms numbers, pinned by a test. Events are joined from the `protocol_run_events` store. Factory-side `Date.parse` must change to a numeric compare; that part is the factory's.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "A-8",
+      "label": "MED",
+      "diff_context_ref": "AC6 scripts/z3/live-round-wiring.ts:223",
+      "disposition": "PATCH",
+      "rationale": "The fork persists no per-observe read id (`ProtocolRunFactoryStepState` has none; E-1). `observedRunId` is the configured `fromStepOutput` target, recorded as `observedRunIdSource: \"fromStepOutput\"`. The fork-side witness is the step's `step_completed` (`onFailure: 'fail'`). AC6 now requires `stepStatus === \"completed\"` and `observedRunId` equal to the matching provision leg's runId, from disk. `observedStatus` was dropped.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "A-9",
+      "label": "LOW",
+      "diff_context_ref": "AC7 / INV-Z3-5 scripts/z3/assertions.ts:357",
+      "disposition": "PATCH",
+      "rationale": "AC7 flags any receipt with `ok !== true`. Negative control added.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-1",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:551",
+      "disposition": "PATCH",
+      "rationale": "`cancel <protocolRunId>` runs the existing run-cancel path (`performProtocolRunAction` cancel, which triggers SC2.4 `cancelFactoryRuns`). It also awaits its own `cancelFactoryRuns`, so every outstanding entry is marked cancelled before the process exits. It then runs one awaited, exit-checked `fleet cancel` per outstanding external_job runId, because `cancelFactoryRuns` ignores the exec exit code. Observe entries are excluded per the read-only fence INV-Z2-1. Any non-zero exit is an error. A terminal run is not re-cancelled. A non-z3 or unknown run is refused.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-10",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/evidence.ts:56-66 (+ live test :66)",
+      "disposition": "PATCH",
+      "rationale": "`gh[pousr]_` in SCRUB and DETECT. `GH_TOKEN`/`GITHUB_TOKEN` added to the live test's `knownSecrets`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-11",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:92 (+ assertions.ts:117)",
+      "disposition": "PATCH",
+      "rationale": "See A-6. AC1 also asserts per-leg counts from the round shape (provision/forensics = lenses+1, observe/retain = lenses, others 1).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-12",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:97 (+ live-round-wiring.ts:58)",
+      "disposition": "PATCH",
+      "rationale": "See A-14.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-13",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:53, :177, :178, :269",
+      "disposition": "PATCH",
+      "rationale": "`RUNS_DIR = path.resolve(REPO_ROOT, QDS_RUNS_DIR ?? \".sandbox/runs\")` is resolved once and used for the store, the ledger, the allowlist and every `--dir`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-14",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:51",
+      "disposition": "PATCH",
+      "rationale": "See A-12.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-15",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:118 **(verify)**",
+      "disposition": "PATCH",
+      "rationale": "`state` emits `createdAt` (run) and `at` (event) as epoch-ms numbers, pinned by a test. Events are joined from the `protocol_run_events` store. Factory-side `Date.parse` must change to a numeric compare; that part is the factory's.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-16",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:284",
+      "disposition": "DEFER-UPSTREAM",
+      "rationale": "See E-2.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-17",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:334",
+      "disposition": "PATCH",
+      "rationale": "The approve leg's `exitCode` is the leg verdict. The CLI code is recorded as `cliExitCode`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-18",
+      "label": "MED",
+      "diff_context_ref": "fork src/lib/server/protocols/protocol-z3-exit-round.ts:177-181 **(verify)**",
+      "disposition": "DISMISS",
+      "rationale": "`artifact_field_equals` evaluates only the newest artifact of the kind (protocol-step-helpers.ts:367-386, `[...artifacts].reverse().find(kind)`). `factory_result` artifacts are appended in run order, and observe steps write `factory_observe`, never `factory_result` (protocol-factory-observe.ts `OBSERVE_ARTIFACT_KIND`). So at `z3-branch` the newest `factory_result` is always the code run's. The fork test this finding asked for now exists: three QA `completed` verdicts followed by a code `approved` verdict route `approved`, and a code `completed` verdict routes `completed`.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-19",
+      "label": "MED",
+      "diff_context_ref": "fork src/lib/server/runtime/scheduler.ts:504-506 **(verify)**",
+      "disposition": "PATCH",
+      "rationale": "The same patch as E-8 covers the try/catch, the import gating and continuing the tick. \"Post-launch bookkeeping\": `launchProtocolRunForSchedule` has none beyond `createProtocolRun` (protocol-run-lifecycle.ts:881-901). The `schedule_fired` event after the branch runs for both paths. It did set facilitator, observers and `config.goal`, which `fireZ3ExitRoundRun` now mirrors (see E-14).",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-2",
+      "label": "HIGH",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:55 (+ scripts/z3/round-plan.ts:161)",
+      "disposition": "PATCH",
+      "rationale": "See A-2.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-20",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:91-99",
+      "disposition": "PATCH",
+      "rationale": "No dump file is left to go stale. A `state` read that fails is retried for at most `STATE_OUTAGE_MS` (180 s, covering the crash-window restart) and then throws. zod drift throws at once.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-21",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/assertions.ts:150, :165",
+      "disposition": "PATCH",
+      "rationale": "AC2 re-derives scrypt verification from the CLI's own decided line in `stdoutTail` (`outcome`, `approverId`, `state`) plus `cliExitCode`. Negative control: a forged `scryptVerified:true`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-22",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/evidence.ts:149 (+ assertions.ts:102)",
+      "disposition": "PATCH",
+      "rationale": "`Z3_LEG_ORIGIN` is documented as a writer label, not provenance. Provenance is the registry and manifest (A-6). A per-driver capability token would be ceremony over the same in-process trust.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-23",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:327-334",
+      "disposition": "PATCH",
+      "rationale": "The allowlist is merged into the existing approvers (never replaced) and written with `mode: 0o600` from creation. `.factory` gets mode 0700 only when created and is never re-moded. The restore writes 0600.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-24",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:140",
+      "disposition": "PATCH",
+      "rationale": "`settle` spreads `body` first and the writer-derived fields last.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-25",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:395-399",
+      "disposition": "PATCH",
+      "rationale": "Kill and restart errors are both captured (`killErrors`). Any of them fails the crash-window leg.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-26",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/assertions.ts:80, :174",
+      "disposition": "PATCH",
+      "rationale": "A non-finite `writtenAt` is an AC2 problem. The branch-after-approve check is `!(at(branch) > at(approve))`, which fails closed.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-27",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:294",
+      "disposition": "PATCH",
+      "rationale": "See E-11.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-28",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/round-plan.ts:74",
+      "disposition": "DISMISS",
+      "rationale": "Already fixed in the contract-sync round: `Z3_WORK_ID` is read by AC1's stamp check, and `Z3_STEP.complete` is now read by `driveBranchAndComplete`, which requires `step_completed` on `z3-complete`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-29",
+      "label": "LOW",
+      "diff_context_ref": "fork src/lib/server/protocols/protocol-z3-exit-round.ts:209",
+      "disposition": "PATCH",
+      "rationale": "Same fix as E-17. The refusal message now names the type (`got string 7200000`).",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-3",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:391 (+ scripts/z3/live-round-wiring.ts:91, :192)",
+      "disposition": "PATCH",
+      "rationale": "SC2.6 (`tests/fleet/e2e/sc2-6-lease-kill.live.test.ts`) did not catch the window by polling. It held it open with a `$SWARMCLAW_FACTORY_FLEET_CLI` wrapper that blocks the `submit` exec. SC2.1 persists the `submitting` entry with its `requestId` before that exec. The same approach works here with no fork code. The factory installs a wrapper that holds `submit` only for the `w:z3-*-code` workId (QA legs pass straight through) and waits on a gate file. The driver polls `state` until `factoryState['z3-code-run']` is `submitting` with a `requestId`, kills the container, releases the gate and restarts. Because the window stays open as long as the wrapper holds, poll cadence and the late arming of `armCrashWindow` no longer matter. Window (b) (submit done, ack not persisted) works the same way with the wrapper holding the exit. I added no production self-kill hook and no new event: the persisted `submitting` entry is already the observation point, and `state` surfaces it verbatim (pinned by test). Freshness (B-3c / B-20) is factory-side: `state.writtenAt` is the fork's own clock at dump time.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "B-30",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/assertions.ts:316",
+      "disposition": "PATCH",
+      "rationale": "`assertZ3Round` / `assertAc7LiveRules` take `knownSecrets`, and the live test passes the sink's.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-31",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:112",
+      "disposition": "PATCH",
+      "rationale": "`boxesFor` uses an exact name (`=== runId` or `=== vmName`), never a substring.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-32",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:386",
+      "disposition": "DISMISS",
+      "rationale": "No merge path exists inside the round. Harvest lands commits only at `refs/sandbox/<runId>` (src/providers/harvest.ts header, INV-2), and the box holds no push credential (D8/INV-1). A PR is a separate human path outside the round. The event-type check covers the protocol side.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-4",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/assertions.ts:228 (+ scripts/z3/leg-drivers.ts:393)",
+      "disposition": "PATCH",
+      "rationale": "`recordAtKill` is an explicit witness (`{state:\"absent\"}` or `{state:\"present\",runId,createdAt}`). A missing witness fails AC4. A driver-path negative control (a record recreated across the kill) was added.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-5",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:182 (+ assertions.ts:192)",
+      "disposition": "PATCH",
+      "rationale": "The driver and AC3 both require the same single box in both stability samples (`boxCountSamples` all 1).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-6",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/assertions.ts:241 (+ leg-drivers.ts:425)",
+      "disposition": "PATCH",
+      "rationale": "Bookings: each ≤ 1 and the sum ≥ 1 (\"spend escaped the ledger\"). Not \"exactly 1 each\": `budget_group_admissions` exists only when the submit carries a budget group (src/fleet/submit.ts:143), so requiring both would false-red a correct run.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-7",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:301",
+      "disposition": "PATCH",
+      "rationale": "See A-5.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-8",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/assertions.ts:333",
+      "disposition": "PATCH",
+      "rationale": "See A-9. AC7 also requires one `boxDestroy` receipt per cleanup runId with `exitCode === 0`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "B-9",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:335-336, :479; scripts/z3/live-round-wiring.ts:349",
+      "disposition": "PATCH",
+      "rationale": "`tail()` scrubs before truncating everywhere (approve tails, cleanup problems, stderr). Regression test with a key straddling the cut.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-1",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:118",
+      "disposition": "PATCH",
+      "rationale": "An observe step's own `factoryState` entry carries `runId` = the target it resolved from `fromStepOutput`, written by the fork rather than copied from config (`protocol-factory-observe.ts`, processFactoryObserveStep). It also carries `status`, which reaches `completed` on a terminal verdict. `state` surfaces that entry verbatim, so A-8 can read `factoryState['qa-observe-<lens>'].runId` instead of the target step's. There is no `observedStatus` field, and none was added.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-10",
+      "label": "MED",
+      "diff_context_ref": "tests/fleet/e2e/z3-exit-round.live.test.ts:97 — test timeout below worst-case round; `finally` cleanup lost on timeout",
+      "disposition": "PATCH",
+      "rationale": "See A-14.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-11",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:294 — retain uses env commitSha/slug, not the round's pinned values",
+      "disposition": "PATCH",
+      "rationale": "`commitSha`/`repoSlug` come from the bound run's QA step `externalJobConfig`. The bank is `resolveProvisionedRepoBankId(resolveBankId(repoSlug), extractExistingBankIds(listBanks()))`, exactly dispatch's recall resolution (src/fleet/dispatch.ts:2283).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-12",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:140 (resultOf) — one transient `fleet result` failure ends the round",
+      "disposition": "PATCH",
+      "rationale": "In `awaitResult`, `fleet result` exits other than 4 are transient (polled to the round deadline). Exit 4 throws.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-13",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:178 — allowlist path diverges from fleet's when `QDS_RUNS_DIR` is absolute",
+      "disposition": "PATCH",
+      "rationale": "See B-13 / B-23.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-14",
+      "label": "MED",
+      "diff_context_ref": "src/lib/server/protocols/protocol-z3-exit-round.ts:115 — \"the LLM decider is never consulted\" is not what the code does",
+      "disposition": "PATCH",
+      "rationale": "`processBranchStep` consults the decider whenever no `when` matches, so a case without a `when` cannot act as a catch-all. `z3-branch` now has a third, last case `unmatched` with an always-true condition (`artifact_count_at_least count:0`) that routes to the new step `z3-unmatched`. That step is a branch with no cases and no default: `processBranchStep` throws \"had no satisfied path\" and the run fails. `defaultDecideBranchCase` returns null for an empty case list before it builds a model (protocol-step-helpers.ts:404), so no LLM is called. The comment is fixed. Tests run the real `processBranchStep` with an unparseable verdict: `z3-branch` takes `unmatched` without calling the decider, `z3-unmatched` rejects, and `defaultDecideBranchCase(run, step, [])` is null. Also mirrored facilitator, observers and goal from `launchProtocolRunForSchedule` into `fireZ3ExitRoundRun`. **Contract delta for the factory: the step-id list gains `z3-unmatched` (11 steps), and `branch_taken.data.caseId` can be `unmatched`.**",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-15",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:272 — ledger double-booking check can never fire",
+      "disposition": "PATCH",
+      "rationale": "`gate_admissions` and `budget_group_admissions` are both counted `WHERE request_id = ?`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-16",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:393 — `recordBeforeKill` is almost always null, so AC4's \"record untouched\" arm is vacuous",
+      "disposition": "PATCH",
+      "rationale": "See B-4.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-17",
+      "label": "LOW",
+      "diff_context_ref": "src/lib/server/protocols/protocol-z3-exit-round.ts:209 + :93 — silent fallbacks on the persisted config",
+      "disposition": "PATCH",
+      "rationale": "`readZ3Config` passes the persisted bag through raw, with no coercion or defaulting. Only an absent `codePollTimeoutMs` gets the default. A string or null is refused, and so is a string cap. The code observe step now uses `codePollTimeoutMs`; the QA observes keep the QA default. Tests cover `'7200000'`, `null` and `'25'`.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-18",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:228 — observe snapshot also charges the NEXT leg's box and keys",
+      "disposition": "PATCH",
+      "rationale": "See A-3.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-19",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:133 (settle) — a scrub refusal replaces the leg's real problems",
+      "disposition": "PATCH",
+      "rationale": "Every leg write goes through `write()`. A refused write throws an error carrying both the scrub hits and the leg's own problems.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-2",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:52 (retainFindings) + scripts/z3/leg-drivers.ts:525-534",
+      "disposition": "DEFER-UPSTREAM",
+      "rationale": "An A2 seam gap, filed by the driver as the harvest-persistence issue (TBD), sibling of #465. Traced against source: a dispatch_task phase's value is `MergedOutput` (cli-anything/src/types.ts:197), which has no `kind`. pipeline-run records envelopes only when `looksLikeEnvelope` holds (scripts/pipeline-run.ts:4700), so the team's findings JSON never reaches `trace.db`/`events.jsonl`. `PhaseRecord` carries no value, `journal/final.json` is `{ok, completedAt}`, and `fleet result` exposes only the bundle. The harvested artifacts hold the findings only in raw session transcripts. The wiring keeps an injected `readHarvest`, and the live test's refuses by name, citing both blockers: \"harvest persistence (issue TBD) and #465\". Nothing in src/ or pipeline-run.ts is touched.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-20",
+      "label": "LOW",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:466 (cleanup leftover) — any unrelated box on the account counts as a leak",
+      "disposition": "PATCH",
+      "rationale": "Leftovers are attributed to this round's runIds (tracked ∪ swept ∪ fork-cancelled). Fresh boxes nobody claims are recorded as `unattributedFreshBoxes` for the operator, not charged.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-3",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:228 + live-round-wiring.ts:277-281 (memgate ledger is append-only)",
+      "disposition": "PATCH",
+      "rationale": "See A-3. Per-run memory keys whose `run_id` is a fleet run of the protocol are excluded from observe deltas. The append-only issuance ledger no longer reads as \"observe minted a memory key\".",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-4",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:261 (findings-retain \"write credential\")",
+      "disposition": "PATCH",
+      "rationale": "`writeCredentialsFor` filters on verbs: only per-run issuances for the run carrying a non-`recall` verb count. Recall-only keys are recorded as `runMemoryKeys`. An unparseable `claims_json` is treated as write-capable (fail-closed). AC5's bank check is now `BankIdSchema` rather than a `qds-` prefix, because `retainFindings` already enforces the dispatch-recall family guard (src/qa/retain.ts:185-195, seam gap #11: org-slug families carry no `qds-` prefix).",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-5",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:552 (runCleanup) — the fork protocol keeps spending after a factory-side failure",
+      "disposition": "PATCH",
+      "rationale": "`cancel <protocolRunId>` runs the existing run-cancel path (`performProtocolRunAction` cancel, which triggers SC2.4 `cancelFactoryRuns`). It also awaits its own `cancelFactoryRuns`, so every outstanding entry is marked cancelled before the process exits. It then runs one awaited, exit-checked `fleet cancel` per outstanding external_job runId, because `cancelFactoryRuns` ignores the exec exit code. Observe entries are excluded per the read-only fence INV-Z2-1. Any non-zero exit is an error. A terminal run is not re-cancelled. A non-z3 or unknown run is refused.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-6",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/leg-drivers.ts:539 (armCrashWindow) — the crash window is raced against the factory's own retain",
+      "disposition": "PATCH",
+      "rationale": "SC2.6 (`tests/fleet/e2e/sc2-6-lease-kill.live.test.ts`) did not catch the window by polling. It held it open with a `$SWARMCLAW_FACTORY_FLEET_CLI` wrapper that blocks the `submit` exec. SC2.1 persists the `submitting` entry with its `requestId` before that exec. The same approach works here with no fork code. The factory installs a wrapper that holds `submit` only for the `w:z3-*-code` workId (QA legs pass straight through) and waits on a gate file. The driver polls `state` until `factoryState['z3-code-run']` is `submitting` with a `requestId`, kills the container, releases the gate and restarts. Because the window stays open as long as the wrapper holds, poll cadence and the late arming of `armCrashWindow` no longer matter. Window (b) (submit done, ack not persisted) works the same way with the wrapper holding the exit. I added no production self-kill hook and no new event: the persisted `submitting` entry is already the observation point, and `state` surfaces it verbatim (pinned by test). Freshness (B-3c / B-20) is factory-side: `state.writtenAt` is the fork's own clock at dump time.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-7",
+      "label": "HIGH",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:204 (awaitStepSubmitted throws on any `lastError`)",
+      "disposition": "PATCH",
+      "rationale": "`awaitStepSubmitted` returns once `runId && requestId` exist, whatever `lastError` says. It fails only on `failed`/`cancelled`. The seen `lastError` is recorded as `lastErrorSeen`.",
+      "owner": "factory"
+    },
+    {
+      "finding_id": "E-8",
+      "label": "MED",
+      "diff_context_ref": "src/lib/server/runtime/scheduler.ts:503-506 — fire-time throw rejects the whole tick (daemon shutdown)",
+      "disposition": "PATCH",
+      "rationale": "Scheduler hook: the literal `'z3_exit_round'` is compared before the lazy import, so no other protocol schedule loads the module. A test pins the literal to the exported constant. The z3 fire is wrapped in try/catch. On refusal it marks the schedule `failed`, adds a history entry (`reason: z3_fire_refused`, with the error in the summary), raises a `schedule_failed` main-loop event, and continues the tick. Test: a tampered row (string `codePollTimeoutMs`) fails only that schedule, and a valid z3 schedule due in the same tick still fires. As a negative control I restored the old hook and the test failed with the refusal error escaping the tick.",
+      "owner": "fork"
+    },
+    {
+      "finding_id": "E-9",
+      "label": "MED",
+      "diff_context_ref": "scripts/z3/live-round-wiring.ts:116-120 — each poll re-selects \"latest z3 run\", not the triggered run",
+      "disposition": "PATCH",
+      "rationale": "Bind once: `awaitTrigger` binds the single run of the armed `scheduleId` (more than one is refused), and every later read filters on `r.id === bound`. `cancelProtocolRun` refuses any id but the bound one.",
+      "owner": "factory"
+    }
+  ]
+}

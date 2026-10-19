@@ -2,9 +2,11 @@
 
 **Story Points:** 3
 **Sprint:** v6b-Autonomy (E21-gated via A2; the v6 program's exit criterion — last story on the critical path)
-**Status:** **gated** — spec complete; dev BLOCKED until predecessors **A2** (the QA protocol this round drives end-to-end), **Z2** (post-merge + schedule→protocol trigger wiring and the `factory_observe` step kind, merged to fork `origin/dev` with the factory fork-rev pin bumped), and **M2.1** (memory gateway + bank/verb-scoped agent tokens) are done. E21 lanes **S02b + S03b** are inherited through A2's gate. Live tier: **live — T2 minimum, cross-repo** (factory + fork daemon + platform schedules). **No crontab fallback exists for this story:** the round's entire value is the live proof; if a gate slips, the round slips with it.
+**Status:** **review** — code complete in both repos; live round handoff. Predecessors A2, Z2 and M2.1 are done. The factory half is on `feature/z3-cross-repo-live-exit-round`: round plan, the leg drivers with evidence written by each leg's own driver, the AC1–AC7 assertions with fixture-tier negative controls, the SC2.6-style crash-gate wrapper, the todo-gated live test and the operator runbook in `docs/planning/v6-crossrepo-contract.md` §Z3 round record. The fork counterpart is on swarmclaw `feature/z3-exit-round-counterpart`: the `z3_exit_round` protocol, the schedule fire hook and the `scripts/solstice/z3-exit-round.ts` arm/state/cancel/disarm CLI. Three pre-PR bmad review rounds ran (`_bmad-output/workflow-state/code-review/z3-r{1,2,3}/`). **The live T2 round is not fired.** It is blocked upstream on #467 (QA harvest findings never persisted host-side) and #465 (findings-only runs strand in `pausing`). The live test refuses by name, before any spend, while `Z3_UPSTREAM_BLOCKERS` is non-empty. After that, it needs the operator's GO. Live tier: **live — T2 minimum, cross-repo**. **No crontab fallback exists for this story:** the round's entire value is the live proof.
 
 ## Spec Reference
+
+> **Spec drift (2026-10-19, D-1):** this story calls ADR-2 PROPOSED. It became ACCEPTED on 2026-10-15 via G1. G1 shipped the fail-closed policy (`src/fleet/auto-merge-policy.ts` plus the run-completion consult), but ON stays structurally unreachable until the clause-5 veto-window carrier (`enqueueVetoWindow`) is in the tree. Z3 still asserts park → human decide, and it now also records the auto-merge consult state and fails AC2 if it is ON. The contract delta is recorded in `docs/planning/v6-crossrepo-contract.md` §Z3 round record.
 
 - **SC2.7 precedent** (`_bmad-output/evidence/openrig-sc2/`, 11-round evidence set): the 2026-09-30 exit chain `…T03-37-09-sc2-7-kill-and-provision.json → …-box-forensics.json → …-observe.json → …-approve.json → …-branch-and-complete.json`, plus the #383 race-window re-run `…T15-19-10-… → …-race-window-closed.json → …-branch-and-complete.json`; SC2.6's windows (`…T01-08-26-sc2-6-window-a…`) carry the mid-submit kill calibration that motivates the crash-window leg here.
 - ADR-1 (`docs/decisions/2026-09-30-adr-1-swarmclaw-macro-host.md`): clause 3 verbatim — "`fleet approve` stays scrypt-gated, allowlisted, token-on-stdin, human-only"; clause 4 — auto-approve/auto-merge is explicitly NOT decided (G1's ADR-2 is PROPOSED — it decides nothing).
@@ -97,13 +99,13 @@ The round fires A2's scheduled protocol once: QA hunter-pack legs run and retain
 
 ## Definition of Done
 
-- [ ] **Impl:** round plan + leg drivers; tsc/biome clean; `detect_changes()` 0 unexpected affected symbols.
+- [x] **Impl:** round plan + leg drivers; tsc/biome clean; `detect_changes()` 0 unexpected affected symbols. *(2026-10-19: scripts/z3/** + fork counterpart; fences byte-identical to dev; z3-r1..r3 review rounds.)*
 - [ ] **Integration:** worst-case spend printed and operator GO recorded before the first fire.
 - [ ] **Integration:** full round green — all 11 legs present, each JSON written by its own driver and stamped `swarmclawForkRev` (Z1's alarm covers the `v6-z3/` corpus — the manifest rows for it are authored by this round, per z1 AC5's per-directory growth rule).
-- [ ] **Security:** AC2/AC3/AC5 negative controls demonstrated failing (fixture-tier dry runs where live spend is not warranted).
+- [x] **Security:** AC2/AC3/AC5 negative controls demonstrated failing (fixture-tier dry runs where live spend is not warranted). *(tests/z3: named `AC<n> negative control:` tests for AC1–AC7, all through the production assertions.)*
 - [ ] **Integration:** crash-window leg live — mid-submit kill + re-drive, zero stranded boxes, zero double spend.
 - [ ] **Integration:** priming round-trip proven — the code-affecting run's `<kg_context>` contains a retained finding with citation token.
 - [ ] **Security:** `finally` cleanup verified on a failure path (deliberately failed leg → revoke-verify receipts in evidence).
 - [ ] **Test (e2e demo — MANDATORY):** the live T2 cross-repo round IS the demo; `_bmad-output/evidence/v6-z3/` scrubbed and committed.
-- [ ] **Integration:** counterpart fork-side round harness filed in the solstice repo from the same contract text.
+- [x] **Integration:** counterpart fork-side round harness filed in the solstice repo from the same contract text. *(swarmclaw `feature/z3-exit-round-counterpart`: `z3_exit_round` protocol + schedule fire hook + `scripts/solstice/z3-exit-round.ts` arm/state/cancel/disarm.)*
 - [ ] **Contract:** v6 exit criterion recorded (sprint-status v6 + program notes); `bun test tests/scripts/story-consistency.test.ts` green.
