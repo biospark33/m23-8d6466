@@ -129,9 +129,12 @@ describeIndexed("AC-1 (make-or-break): all three tools return non-empty structur
     expect(result.definitions.length).toBeGreaterThan(0);
     // AC-1 load-bearing: the query must surface the known fixture, not just any
     // route-ish symbol — semantic/embedding search can return unrelated neighbours.
-    expect(result.definitions.some((d) => isFixturePath(d.filePath))).toBe(true);
+    // Pathless minimal rows (ADOPTED in cli-contract.ts, 2026-10-19, CLI 1.6.12
+    // == pin) can carry no path, so both per-row checks SKIP them — the strict
+    // tier owns their shape; these asserts still bind every row WITH a path.
+    expect(result.definitions.some((d) => d.filePath !== undefined && isFixturePath(d.filePath))).toBe(true);
     for (const d of result.definitions) {
-      expectRepoRelativePath(d.filePath);
+      if (d.filePath !== undefined) expectRepoRelativePath(d.filePath);
     }
   });
 
@@ -191,13 +194,20 @@ describeIndexed("AC-2: zero-match query is graceful (never crash / never error o
     expect(Array.isArray(result.definitions)).toBe(true);
     expect(Array.isArray(result.processes)).toBe(true);
     for (const d of result.definitions) {
-      // Case-insensitive: a neighbor whose name case-foldedly contains the bogus
-      // query would slip past a case-sensitive check.
-      expect(d.name.toLowerCase()).not.toBe(q.toLowerCase());
-      expect(d.name.toLowerCase()).not.toContain(q.toLowerCase());
-      // The bogus query must not leak into the filePath either — semantic-search
-      // neighbours could otherwise surface a path derived from the query string.
-      expect(d.filePath.toLowerCase()).not.toContain(q.toLowerCase());
+      // Pathless minimal rows (ADOPTED in cli-contract.ts, 2026-10-19, CLI
+      // 1.6.12 == pin) carry neither name nor path, so the leak checks apply
+      // only to the fields a row actually carries.
+      if (d.name !== undefined) {
+        // Case-insensitive: a neighbor whose name case-foldedly contains the bogus
+        // query would slip past a case-sensitive check.
+        expect(d.name.toLowerCase()).not.toBe(q.toLowerCase());
+        expect(d.name.toLowerCase()).not.toContain(q.toLowerCase());
+      }
+      if (d.filePath !== undefined) {
+        // The bogus query must not leak into the filePath either — semantic-search
+        // neighbours could otherwise surface a path derived from the query string.
+        expect(d.filePath.toLowerCase()).not.toContain(q.toLowerCase());
+      }
     }
   });
 });
@@ -277,7 +287,9 @@ describeIndexed("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative
   test("query/context result file paths are repo-relative (no leading slash, no ..)", () => {
     const result = QueryResultSchema.parse(gn(["query", "SwarmClaw routes", "-r", REPO_ROOT]));
     for (const d of result.definitions) {
-      expectRepoRelativePath(d.filePath);
+      // A pathless minimal row (ADOPTED in cli-contract.ts) cannot violate
+      // INV-GN1 — skip it; every row WITH a path still binds.
+      if (d.filePath !== undefined) expectRepoRelativePath(d.filePath);
     }
   });
 
