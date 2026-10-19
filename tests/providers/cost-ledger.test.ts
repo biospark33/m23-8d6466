@@ -3280,6 +3280,11 @@ describe("DF2.11 openReadOnly", () => {
         // both insert, so both refuse on a read-only handle like the rest.
         "reserveBudgetGroup",
         "releaseBudgetGroup",
+        // A2 follow-up (swarmclaw#808 seam 2): the teardown-chain release —
+        // resolves the group from the admission row, then inserts into
+        // budget_group_releases, so it refuses on a read-only handle like
+        // every other writer.
+        "releaseBudgetGroupByRequest",
       ];
 
       const methods = Object.getOwnPropertyNames(CostLedger.prototype).filter(

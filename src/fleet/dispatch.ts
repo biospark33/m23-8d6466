@@ -4302,6 +4302,14 @@ export async function dispatch(
           // bounded + charset-guarded once, at BriefSchema (INV-KG-3) — the
           // in-box renderer (residentContextLines) emits it verbatim.
           ...(valid.kgContext === undefined ? {} : { kgContext: valid.kgContext }),
+          // A2 follow-up (swarmclaw#808 seam 3): the leg's instructions ride
+          // the same designed host→box channel as fixContext and kgContext —
+          // conditional spread, so a brief WITHOUT the key serializes
+          // byte-identical to a pre-A2 witness. Bounded + charset-guarded once
+          // at BriefSchema (the 600-char ceiling matches the fork-side
+          // carrier's normalization); the manifest task reads its lens
+          // discipline from THIS field.
+          ...(valid.instructions === undefined ? {} : { instructions: valid.instructions }),
         }),
       },
       // J3 (I2): the override rides the SAME fill, placed at the checkout's

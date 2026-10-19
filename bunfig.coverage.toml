@@ -150,6 +150,13 @@
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 
+# THE SAME ARTIFACT, VIA tests/hindsight (2026-10-19, A2 follow-through): the
+# round-trip suite added there imports src/qa/retain.ts, dragging
+# src/qa/findings.ts into the measured set at 25.00 funcs / 43.81 lines while
+# its own suite, tests/qa/findings.test.ts, sat unrun. Widened the RUN with
+# `tests/qa` (its suites cover findings + the hunter-pack fixture surface);
+# re-measured on the widened run before adopting.
+
 [test]
 coverage = true
 coverageSkipTestFiles = true
@@ -201,6 +208,16 @@ coveragePathIgnorePatterns = [
   #                                      drags the whole fleet tree into a gate
   #                                      that is not about fleet. Same shape as
   #                                      exedev/transport.ts above.
+  # THE SAME ARTIFACT, VIA tests/qa JOINING THE RUN (2026-10-19, A2
+  # follow-through): the run widening that lifted src/qa/findings.ts dragged
+  # in the live-round leg drivers — scripts/qa/leg-drivers.ts (0.00/12.00)
+  # and scripts/qa/live-round-wiring.ts (0.00/11.49 on CI). Their only
+  # consumer is tests/qa/qa-f3-round.live.test.ts (live-gated; a paid tier
+  # coverage cannot score). Debt list, the exedev/transport.ts shape: the
+  # lines are exercised by the paid live rounds, delete the entry when a
+  # unit suite covers them.
+  "scripts/qa/leg-drivers.ts",
+  "scripts/qa/live-round-wiring.ts",
   "scripts/lib/harness-notes.ts",
   "src/providers/exedev/transport.ts",
   "src/providers/fake-gate.ts",

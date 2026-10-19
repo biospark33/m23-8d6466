@@ -19,6 +19,8 @@ import { join } from "node:path";
 
 import { canonicalJson, openAuditStore, sha256Hex, type AuditStoreWriter } from "../../src/audit/link-store.ts";
 import type { HindsightClient } from "../../src/hindsight/client.ts";
+import { provisionedRepoBankCandidates, safeRepoBaseCandidates } from "../../src/hindsight/bank-provisioner.ts";
+import { resolveBankId } from "../../src/hindsight/schemas.ts";
 import { RETAIN_PAYLOAD_MAX_BYTES } from "../../src/hindsight/run-retain.ts";
 import { setLogSink, type LogEntry } from "../../src/lib/log.ts";
 import { FindingSchema, MAX_FINDINGS_PER_HARVEST, QA_LOG, type Finding } from "../../src/qa/findings.ts";
@@ -51,7 +53,10 @@ afterEach(() => {
 
 const RUN_ID = "qds-20261016-ab12cd";
 const COMMIT = `${"a".repeat(39)}0`;
-const BANK = "qds-acme-widgets";
+// The positive identity IS the slug-resolved provisioned family: the same
+// candidate resolveProvisionedRepoBankId returns and the dispatch recall
+// reads. A hand-named `qds-` bank is NOT this family (seam gap #11).
+const BANK = "acme-widgets";
 
 function finding(text: string, ref = "src/lib/log.ts:35"): Finding {
   return { runId: RUN_ID, lens: "correctness", finding_text: text, diff_context_ref: ref };
@@ -405,9 +410,12 @@ describe("qa retain refusals and surfaces", () => {
     }
   });
 
-  test("AC3 negative control: a retain targeting a NON-repo bank (solstice-* family or missing qds- prefix) is refused by the qds- guard (INV-A2-6)", async () => {
+  test("AC3 negative control: a retain targeting a NON-repo bank (solstice-* family, a foreign qds-* hand-named bank, or non-schema id) is refused by the repo-bank guard (INV-A2-6)", async () => {
     const { calls, client } = fakeClient();
-    for (const badBank of ["solstice-collective", "solstice-acme-widgets", "acme-widgets", "qds", ""]) {
+    // "qds-acme-widgets" is the legacy hand-named spelling: BankIdSchema-valid,
+    // qds-prefixed, and still FOREIGN to acme/widgets' resolved family — the
+    // exact seam-gap-#11 confusion, now refused from the other side.
+    for (const badBank of ["solstice-collective", "solstice-acme-widgets", "qds-acme-widgets", "qds-somewhere-else", "other-widgets", "qds", ""]) {
       let thrown: unknown;
       try {
         await retainFindings({ client }, input({ repoBankId: badBank }));
@@ -419,6 +427,39 @@ describe("qa retain refusals and surfaces", () => {
     }
     // Every refusal fired inside the guard — the wire was never reached.
     expect(calls.length).toBe(0);
+  });
+
+  test("family-resolved bank id is accepted (INV-A2-6): the base, a -N sibling, and both truncation-era base forms of the repo's own family pass the guard", async () => {
+    const { calls, client } = fakeClient();
+    // The resolved base and a disambiguation sibling are both in-family.
+    await retainFindings({ client }, input({ repoBankId: "acme-widgets" }));
+    await retainFindings({ client }, input({ repoBankId: "acme-widgets-3" }));
+    // A slug long enough to split the truncation eras: both safe base forms
+    // (current 50-max and legacy 52-max) are the SAME family to the guard.
+    const longSlug = "acme/quds-factory-with-a-sufficiently-long-repository-name-exceeding-fifty";
+    const longBase = resolveBankId(longSlug);
+    expect(longBase.length).toBeGreaterThan(50);
+    const [current, legacy] = safeRepoBaseCandidates(longBase);
+    expect(legacy).not.toBe(current);
+    await retainFindings({ client }, input({ repoSlug: longSlug, repoBankId: current! }));
+    await retainFindings({ client }, input({ repoSlug: longSlug, repoBankId: `${legacy}-2` }));
+    // The negative control's complement: the candidate set is exactly the
+    // resolver's enumeration — 2 base forms x (1 base + 10 suffixes).
+    expect(provisionedRepoBankCandidates(longBase).length).toBe(22);
+    // All four in-family banks took the wire (two findings per retain).
+    expect(new Set(calls.map((c) => c.bankId)).size).toBe(4);
+  });
+
+  test("a non-string repoSlug is refused by the slug guard before the bank guard resolves it (no TypeError leak)", async () => {
+    const { client } = fakeClient();
+    let thrown: unknown;
+    try {
+      await retainFindings({ client }, input({ repoSlug: undefined as unknown as string }));
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(QaRetainError);
+    expect((thrown as QaRetainError).code).toBe("retain-payload-invalid");
   });
 
   test("malformed identity and findings are refused with named codes, pre-network", async () => {

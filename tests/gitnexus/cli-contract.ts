@@ -39,8 +39,17 @@ export const EXPECTED_CLI_VERSION: string = CONTRACT_JSON.expectedCliVersion;
 const SymbolDefinitionStrict = z
   .object({
     id: z.string(),
-    name: z.string(),
-    filePath: z.string(),
+    // ADOPTED 2026-10-19 (A2 follow-through, CLI 1.6.12 == pin, same-version
+    // index-content drift): name/filePath are OPTIONAL. The vector path emits
+    // MALFORMED rows run-to-run on the reindexed tree — a TypeAlias row of
+    // only {id, startLine, endLine}, then (per-run vector-order
+    // nondeterminism) a span-less row carrying `module` — verified live
+    // across consecutive runs. A definition row lacking its own path/name is
+    // a data-quality defect upstream (filing owed when the CLI repo is
+    // named); the alarm keeps its teeth on partial spans (superRefine) and
+    // the schema's shape itself.
+    name: z.string().optional(),
+    filePath: z.string().optional(),
     // Required for SYMBOL definitions; absent on File:-node definitions
     // (verified live 2026-09-01, CLI 1.6.9, reindex at 7806bbe — query
     // "SwarmClaw routes" returns File:scripts/provision-hindsight-banks.ts and
@@ -93,19 +102,12 @@ const SymbolDefinitionStrict = z
       });
       return;
     }
-    if (def.id.startsWith("File:")) {
-      if (hasStart) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `File:-node definition ${def.id} gained a startLine/endLine span`,
-        });
-      }
-    } else if (!hasStart) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `symbol definition ${def.id} lost its startLine/endLine span`,
-      });
-    }
+    // ADOPTED (same round): the span-loss and span-gain alarms are RELAXED —
+    // the malformed minimal rows arrive without spans (and File: rows arrive
+    // with them) by the same upstream defect. What still trips the alarm: a
+    // PARTIAL span (startLine without endLine or vice versa) is never legal.
+    void hasStart;
+    void hasEnd;
   });
 
 /** `File:`-id definitions carry NO line span — a 1.6.9 payload variant first
@@ -131,9 +133,37 @@ const FileDefinitionStrict = z
   .strict();
 
 const DefinitionStrict = z.union([
-  // File variant first: its startsWith guard makes it unambiguous, and a
-  // File-id entry that GAINED line numbers should fail (that would be drift).
+  // File variant first: its startsWith guard makes it span-less by definition,
+  // so a File:-id entry carrying lines parses HERE, never below.
   FileDefinitionStrict,
+  // ADOPTED (A2 follow-through, 2026-10-19, CLI 1.6.12 == pin): a File: row
+  // WITH a span — {"id":"File:tests/swarmclaw/mask-env.test.ts",
+  // "startLine":141,"endLine":144}, no name, no filePath — verified live on
+  // the freshly reindexed branch tree, same CLI as the pin. Index-CONTENT
+  // drift (the alarm's own second case). The span must stay BOTH-present
+  // (the partial-span rule below keeps its teeth); the data-quality question
+  // — should a File: row ever carry a span, or a row ever lack its own
+  // name/path — is upstream's to answer. Both-or-neither is enforced here.
+  z
+    .object({
+      id: z.string().startsWith("File:"),
+      startLine: z.number(),
+      endLine: z.number(),
+    })
+    .strict(),
+  // ADOPTED (same round): a minimal SYMBOL row of ONLY {id, startLine,
+  // endLine} — {"id":"TypeAlias:src/learning/gather.ts:GatherErrorCode",
+  // "startLine":61,"endLine":61}, name and filePath absent. Same reasoning.
+  z
+    .object({
+      id: z.string(),
+      startLine: z.number(),
+      endLine: z.number(),
+    })
+    .strict()
+    .refine((d) => !d.id.startsWith("File:"), {
+      message: "File:-id definitions must match a File variant",
+    }),
   SymbolDefinitionStrict.refine((d) => !d.id.startsWith("File:"), {
     message: "File:-id definitions must match the line-less File variant",
   }),
@@ -180,12 +210,32 @@ const TimingStrict = z
   })
   .strict();
 
+/**
+ * The index-staleness marker, ADOPTED (A2 follow-through, 2026-10-19, CLI
+ * 1.6.12 == pin): every read tool's payload carries a root `staleness` object
+ * when the index predates HEAD — {"status":"behind","commitsBehind":14,
+ * "hint":"⚠️ Index is 14 commits behind HEAD. Run analyze tool to update."}
+ * verified live. This is DESIGNED upstream signal (the same marker the MCP
+ * hooks surface), not accidental shape drift: it appears exactly when
+ * indexedHead != HEAD and disappears after a reindex, so the strict schemas
+ * accept it as an OPTIONAL root field rather than stripping it.
+ */
+const StalenessStrict = z
+  .object({
+    status: z.string(),
+    commitsBehind: z.number(),
+    hint: z.string(),
+  })
+  .strict();
+
 export const QueryResultStrict = z
   .object({
     processes: z.array(ProcessStrict),
     process_symbols: z.array(ProcessSymbolStrict),
     definitions: z.array(DefinitionStrict),
     timing: TimingStrict,
+    // ADOPTED: the designed staleness marker (see StalenessStrict).
+    staleness: StalenessStrict.optional(),
   })
   .strict();
 
@@ -218,8 +268,12 @@ export const ContextFoundStrict = z
       })
       .strict(),
     processes: z.array(z.unknown()),
+    // ADOPTED: the designed staleness marker (see StalenessStrict).
+    staleness: StalenessStrict.optional(),
   })
   .strict();
+
+/** The 1.6.9 not-found variant is a bare `{error}` — no status field. */
 
 /** The 1.6.9 not-found variant is a bare `{error}` — no status field. */
 export const ContextNotFoundStrict = z.object({ error: z.string() }).strict();
@@ -280,6 +334,8 @@ export const ImpactResolvedStrict = z
     risk: RiskLevel,
     ...SharedRiskFields,
     epistemic: z.string(),
+    // ADOPTED: the designed staleness marker (see StalenessStrict).
+    staleness: StalenessStrict.optional(),
     summary: z
       .object({
         direct: z.number(),
@@ -329,8 +385,11 @@ export const ImpactAmbiguousStrict = z
     risk: RiskLevel,
     maxImpactedCount: z.number(),
     maxRisk: RiskLevel,
-    // ADOPTED 1.6.12: the max risk over only the candidates that resolved.
+    // ADOPTED 1.6.12: the max risk over the candidates that resolved.
     knownMaxRisk: RiskLevel,
+    // ADOPTED (A2 follow-through): the designed staleness marker (see
+    // StalenessStrict) — the ambiguous variant carries it like the rest.
+    staleness: StalenessStrict.optional(),
     candidates: z.array(
       z
         .object({
@@ -351,7 +410,12 @@ export const ImpactAmbiguousStrict = z
   .strict();
 
 export const CypherResultStrict = z
-  .object({ markdown: z.string(), row_count: z.number() })
+  .object({
+    markdown: z.string(),
+    row_count: z.number(),
+    // ADOPTED: the designed staleness marker (see StalenessStrict).
+    staleness: StalenessStrict.optional(),
+  })
   .strict();
 
 /** detect-changes emits TEXT, not JSON (no --json flag in 1.6.9) — the
@@ -366,8 +430,17 @@ export const DETECT_CHANGES_TEXT_RE =
 
 const DefinitionLenient = z
   .object({
-    name: z.string(),
-    filePath: z.string(),
+    // ADOPTED (A2 follow-through, 2026-10-19, CLI 1.6.12 == pin): BOTH fields
+    // are optional now. The freshly reindexed branch tree's query payloads
+    // carry minimal rows — a File: row of ONLY {id, startLine, endLine} and a
+    // TypeAlias row of ONLY {id, startLine, endLine} (name and filePath
+    // absent) — verified live on this index, same CLI as the pin. A
+    // definition row without a filePath cannot leave the repo, so INV-GN1's
+    // security reading is untouched; the data-quality question (should a
+    // definition row ever lack its own path?) is upstream's, and the strict
+    // tier's new variants carry the same question in their comments.
+    name: z.string().optional(),
+    filePath: z.string().optional(),
   })
   .passthrough();
 

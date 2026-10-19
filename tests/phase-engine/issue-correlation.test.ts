@@ -910,11 +910,24 @@ describe("resolveRunCorrelation workId (Q1.7)", () => {
     expect(r.workId).toBe("Sc26-HandProbe"); // the caller's id, verbatim
     expect(r.repoSlug).toBe("qds/demo");
     expect(r.issueKey).toBe("w:sc26-handprobe"); // the spend identity, folded
-    // Two briefs differing only in case share ONE budget identity — the same
-    // fail-safe over-merge direction the slug fold chose (a shared cap can
-    // over-count, never bypass).
+    // Two briefs whose workIds differ only in case share ONE budget identity —
+    // the same fail-safe over-merge direction the slug fold chose (a shared cap
+    // can over-count, never bypass).
     const again = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "sc26-handprobe", requestId: REQ_ID_B });
     expect(again.issueKey).toBe(r.issueKey);
+  });
+
+  test("run correlation does not re-prefix an already-prefixed workId — the w: namespace is minted once (A2 P3)", () => {
+    // The live round's `w:w:` debt: a workId arriving ALREADY namespaced (the
+    // fork's `w:qa-<stamp>-<lens>`) was re-prefixed on the way into the ledger
+    // identity. The prefix is minted at ONE layer; a prefixed input passes
+    // through idempotently, so new ledger rows book `w:qa-…`, never `w:w:qa-…`.
+    const r = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "w:qa-20261018t120000z-correctness", requestId: REQ_ID_A });
+    expect(r.workId).toBe("w:qa-20261018t120000z-correctness"); // verbatim, unchanged
+    expect(r.issueKey).toBe("w:qa-20261018t120000z-correctness"); // NOT w:w:…
+    // Case-folded prefixed input folds the tail but never doubles the prefix.
+    const folded = resolveRunCorrelation({ repoSlug: "qds/demo", workId: "W:QA-STAMP-LENS", requestId: REQ_ID_B });
+    expect(folded.issueKey).toBe("w:qa-stamp-lens");
   });
 
   test("the resolved work-key identity is ADDRESSABLE by a perIssueOverrides work key (#380 glue)", async () => {

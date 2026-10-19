@@ -307,6 +307,16 @@ const MAX_FIX_SNIPPET_BYTES_TOTAL = 40_000;
 const BRIEF_KG_CONTEXT_MAX_CHARS = 8_000;
 
 /**
+ * A2 follow-up (swarmclaw#808 seam 3): `instructions`' ceiling — matched to the
+ * fork-side carrier's own 600-char normalization ceiling
+ * (normalizeExternalJobConfig's cleanText, Quantum-Digital-Solutions/swarmclaw),
+ * so the two carriers cannot disagree by construction: the fork truncates at
+ * 600 before the brief is built, and this cap refuses anything past 600 anyway
+ * (fail-closed, never silently truncate twice).
+ */
+const BRIEF_INSTRUCTIONS_MAX_CHARS = 600;
+
+/**
  * kgContext's charset, unlike every other field's NO_CONTROL_CHARS above: the
  * value is a MULTI-LINE XML block rendered verbatim into the resident's prompt
  * (pipeline-run.ts's residentContextLines), so \n (0x0a) and \t (0x09) are the
@@ -547,6 +557,21 @@ export const BriefSchema = z.strictObject({
     .refine(
       kgContextIsWellFormed,
       "kgContext may not contain control characters other than newline and tab",
+    )
+    .optional(),
+  // A2 follow-up (swarmclaw#808 seam 3): the submit leg's own instructions —
+  // the per-lens hunter-pack string the fork's ProtocolExternalJobConfig
+  // carries. Optional and adds-only (a brief without it parses byte-identical);
+  // the ceiling matches the fork-side carrier's 600-char normalization, and the
+  // charset is the multi-line-prose one (newline and tab ride; every other C0
+  // is refused) — the value is copied into the box's run-context.json witness
+  // and the manifest task reads its lens discipline from there.
+  instructions: z
+    .string()
+    .max(BRIEF_INSTRUCTIONS_MAX_CHARS)
+    .refine(
+      kgContextIsWellFormed,
+      "instructions may not contain control characters other than newline and tab",
     )
     .optional(),
 })

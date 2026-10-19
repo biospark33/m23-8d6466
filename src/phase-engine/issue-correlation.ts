@@ -230,7 +230,11 @@ export function resolveRunCorrelation(
     // the same choice `canonicalRepoSlug` makes one field above: one spelling
     // per identity, minted once, at the boundary that owns identity. The raw
     // `workId` field stays verbatim — it is the caller's own identifier.
-    issueKey: workId === undefined ? String(issueId) : `w:${workId.toLowerCase()}`,
+    issueKey: workId === undefined
+      ? String(issueId)
+      : workId.toLowerCase().startsWith("w:")
+        ? workId.toLowerCase()
+        : `w:${workId.toLowerCase()}`,
     issueId,
     workId,
     issueUrl: brief.issueUrl ?? null,

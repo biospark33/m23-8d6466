@@ -2996,6 +2996,32 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     ]);
   });
 
+  test("A2 follow-up: a brief carrying instructions sees the lens on the witness verbatim, as one more additive key", async () => {
+    // The witness is instructions' only host→box ride, same channel discipline
+    // as fixContext and kgContext: verbatim carriage, bounded + charset-guarded
+    // once at BriefSchema (600-char ceiling matching the fork-side carrier).
+    // The manifest task reads its lens discipline from THIS field
+    // (.qds/run-context.json), so a transform or re-key here would hand the
+    // box a lens the submit never sent — the live round's seam-3 gap.
+    const instructions = 'Hunter-pack lens "correctness" over Quantum-Digital-Solutions/QDS-Factory @ d061869ae68d; findings only.';
+    const result = await dispatch({ ...validBrief(), instructions }, deps());
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as Record<string, unknown>;
+    expect(witness.instructions).toBe(instructions);
+    // Adds-only, LAST: the base key set is exactly the no-instructions leg's.
+    expect(Object.keys(witness)).toEqual([
+      "runId",
+      "pipelineId",
+      "requestId",
+      "effectiveCeilingMicros",
+      "budgetMs",
+      "repoSlug",
+      "issueId",
+      "instructions",
+    ]);
+  });
+
   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
     // The create step STRADDLES the record: `provisionAdmittedRun` writes the
     // run record first (INV-1), then the box. An untyped throw escaping from

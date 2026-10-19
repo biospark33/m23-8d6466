@@ -2185,9 +2185,16 @@ describe("buildIdFileInputs", () => {
       // Moved once more by f30f1339 (workId `:` charset — issue-correlation.ts
       // is a walked input); re-adopted in-branch the same way, D9's
       // same-commit ritual, ahead of the refire publish.
+      // Moved once more by the A2 follow-through branch: src/fleet/dispatch.ts
+      // (the instructions witness spread) is a walked input; re-adopted
+      // in-branch, edit-first/re-pin-last, ahead of the merge.
       // Moved by the 2026-10-17 dependency sweep (vite 8 + @types/node 26:
       // package.json and bun.lock are walked inputs); re-adopted in-branch.
-            "980ae80de6d8a5573a9cd1f4d81db7b2147915dc1fc8cd58642022d3929f75f6",
+      // Re-adopted ON THE MERGED TREE (dev #461-#463 joined), then AGAIN on
+      // 4e789ee5 (package.json/bunfig.coverage.toml are walked inputs — the
+      // coverage-run widening moved the walk): same-commit re-pin from this
+      // test's own failing run, the only run whose green binds the commit.
+            "5db559bfd89cd8bafcf4fbeccfc64a96f1fb4e731d7df5dd3bcc9ccca808e8ca",
     );
   });
 });

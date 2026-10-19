@@ -1597,3 +1597,19 @@ describe("repoUrl/repoSlug cross-check", () => {
     expect(BriefSchema.parse(plain).repoSlug).toBe("owner/repo");
   });
 });
+
+describe("A2 follow-up: the instructions carrier (swarmclaw#808 seam 3)", () => {
+  test("instructions: bounded at 600, multi-line prose charset, absent stays absent", () => {
+    const ok = BriefSchema.safeParse(
+      validBrief({ instructions: 'Hunter-pack lens "correctness" over owner/repo @ d061869ae68d; findings only.\nsecond line\ttabbed' }),
+    );
+    expect(ok.success).toBe(true);
+    expectRejected(validBrief({ instructions: "x".repeat(601) }), { field: "instructions", code: "too_big" });
+    expectRejected(validBrief({ instructions: "bad\u0000nul" }), { field: "instructions", code: "custom" });
+    const without = BriefSchema.parse(validBrief());
+    expect("instructions" in without).toBe(false);
+    const withField = BriefSchema.parse(validBrief({ instructions: "lens text" }));
+    const { instructions: _present, ...rest } = withField;
+    expect(JSON.stringify(rest)).toBe(JSON.stringify(without));
+  });
+});
