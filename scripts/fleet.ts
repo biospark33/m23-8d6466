@@ -5953,6 +5953,12 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       verbLedger = undefined;
       printError(note, "teardown-ledger-unavailable", `the ledger could not be opened for ${runIdArg}'s group-reservation release: ${redactSecrets(e instanceof Error ? e.message : String(e))} — the teardown continues; the admission row stays visible for reconciliation`, "inspect the ledger path if the release matters");
     }
+    // ONE close owner: the finally's guarded ledger arm (the documented
+    // ledger-close-failed -> exit 6 route). The ingest arms' ledger takes the
+    // slot when present; the verb arms' release ledger adopts it when not.
+    if (verbLedger !== undefined && state.ledger === undefined) {
+      state.ledger = verbLedger;
+    }
     const tdeps: TeardownDeps = {
       ...(verbLedger !== undefined ? { costLedger: verbLedger } : {}),
       driver,
@@ -6019,16 +6025,9 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       // Re-raised HERE, inside the try, so the CC-9 line still precedes the
       // `finally`'s cleanup diagnostics exactly as the inline arm's own
       // `return finish(…)` did.
-      if (armed.early === true) {
-        verbLedger?.close();
-        return armed.code;
-      }
+      if (armed.early === true) return armed.code;
       code = armed.code;
     }
-    // The verb's ledger closes HERE, in the arm scope: the release it served
-    // has landed either way, and the throw path is a process exit (the next
-    // open recovers the WAL — nothing durable hangs on an explicit close).
-    verbLedger?.close();
   } catch (e) {
     code = reportCode(note, e);
   } finally {
