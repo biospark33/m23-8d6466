@@ -1743,6 +1743,9 @@ describe("DF2.5 teardownSandbox", () => {
       const hook = new MockCostLedgerHook();
       const requestId = "req-a2f-group-release";
 
+      // The record carries the SUBMIT's requestId (W2-C5: the record is the
+      // only source) — that is the id the admission row is keyed by.
+      store.set(runId, { requestId });
       const deps_ = deps({
         gitCwd: host,
         costLedger: hook,
@@ -1771,6 +1774,7 @@ describe("DF2.5 teardownSandbox", () => {
         remediation: "retry the release; the admission row stays visible for reconciliation",
       };
 
+      store.set(runId, { requestId: "req-a2f-group-release-refused" });
       const deps_ = deps({
         gitCwd: host,
         costLedger: hook,
