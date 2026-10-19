@@ -499,7 +499,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // fourteenth records none, which reads as "not applicable" rather than "not
 // done". It is not done.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:f3f1d6cb17683bf96fadf73eaa1838a0415dc23f98977494e5e1982a6901fa3d";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:5ef5ac254e4b8f8513239121a7d95d607ead6ede96874d7c7e3a061e2148163f";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -606,7 +606,7 @@ export const DEFAULT_IMAGE_REF =
  * same commit (the whole-walk literal now 9f55e706…, its debt declared on
  * the branch).
  */
-export const DEFAULT_IMAGE_BUILD_ID = "1d97da495331292a";
+export const DEFAULT_IMAGE_BUILD_ID = "a7ce0b1bc7194631";
 
 
 

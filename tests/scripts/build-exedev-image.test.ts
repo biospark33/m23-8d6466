@@ -502,7 +502,7 @@ describe("parseBaseRefs", () => {
     // Both the engine builder and the runtime stage name the same ref. One
     // entry, one registry resolution, one digest in the buildId.
     expect(parseBaseRefs(realDockerfile())).toEqual([
-      "ghcr.io/boldsoftware/exeuntu:latest@sha256:ea6c3f5c65d4122408c504d6e6ea6e2afd4ac629557428e2bff1d3dcfe67beb2",
+      "ghcr.io/boldsoftware/exeuntu:latest@sha256:bb7e0268970e18a1e377a9e0b00896acdf7210fd1f66b57b65ba2a00d952adc9",
     ]);
   });
 
@@ -1324,7 +1324,11 @@ describe("buildIdFileInputs", () => {
       // succeeded where 37917090552 deadlocked). Dockerfile bytes only, measured
       // from this test's own failing run; the walk digest below was adopted by
       // scripts/adopt-image-pin.ts from the same run.
-      "oci/exedev/Dockerfile": "886e5c428b04c30147f61b6328e265b520a76470be9fd974e2e0572aae1adc1f",
+      //
+      // 2026-10-18: exeuntu base re-pin ea6c3f5c → bb7e0268 (scheduled
+      // base-drift, upstream's weekly rebuild). Both FROM digests only;
+      // measured with shasum -a 256 on the edited file.
+      "oci/exedev/Dockerfile": "29a314859195416f87b672dd372837c8061de5646d333218ceca3bca67616c3d",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -2184,7 +2188,13 @@ describe("buildIdFileInputs", () => {
       // Moved once more by the A2 follow-through branch: src/fleet/dispatch.ts
       // (the instructions witness spread) is a walked input; re-adopted
       // in-branch, edit-first/re-pin-last, ahead of the merge.
-            "e9d6105d4d045db0d1a24f49c104e9c34c1691a95337a56224f5d119a31f0d20",
+      // Moved by the 2026-10-17 dependency sweep (vite 8 + @types/node 26:
+      // package.json and bun.lock are walked inputs); re-adopted in-branch.
+      // Re-adopted ON THE MERGED TREE (dev #461-#463 joined): the digest is
+      // the working tree's walk, so the merge itself moves it — same-commit
+      // re-pin from this test's own failing run, the only run whose green
+      // binds the commit.
+            "3d38352e1f6833964f078279027a8cc9fd750a294abf020cc9b254b824dd7799",
     );
   });
 });
