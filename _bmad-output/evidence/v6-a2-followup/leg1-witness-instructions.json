@@ -1,0 +1,4 @@
+BOX=qds-20261019-c8ce72.exe.xyz
+{"runId":"qds-20261019-c8ce72","pipelineId":"qa-hunter-pack","requestId":"afda41f1-3b1a-4e58-bc70-c0165b63c250","effectiveCeilingMicros":6000000,"budgetMs":3599999,"repoSlug":"quantum-digital-solutions/qds-factory","issueId":"w:qa-20261019t132238z-correctness","instructions":"Hunter-pack lens \"correctness\" over Quantum-Digital-Solutions/QDS-Factory @ 8a3de673df02; findings only — the leg never edits or merges (ADR-1 §2)."}
+
+[exited with code 1]

@@ -1,0 +1,63 @@
+{
+ "fire": {
+  "protocolRun": "7c216307",
+  "mergedSha": "8a3de673df025e83bc4b6a0434f27e4fa7622227",
+  "attemptedAt": "2026-10-19"
+ },
+ "wake": {
+  "heartbeatEnabled": false,
+  "fired": true,
+  "note": "attempt-1 fire (64d9982a) proved the wake: session heartbeatEnabled=false (provision-state pre-fire) and the trigger fired the run; attempts 2-3 re-fired via the provisioning surface after substrate repairs"
+ },
+ "noWedge": {
+  "leg2SubmittedOk": false,
+  "leg1ReleaseBeforeLeg2Submit": true,
+  "detail": {
+   "leg1Admission": true,
+   "leg1Released": true,
+   "leg2Admission": false,
+   "leg1Run": "qds-20261019-c8ce72"
+  }
+ },
+ "lens": {
+  "received": true,
+  "evidenceFile": "leg1-witness-instructions.json",
+  "note": "run-context.json read off the live box qds-20261019-c8ce72.exe.xyz mid-flight; carries the per-lens instructions, single-w: identity, 6M ceiling"
+ },
+ "retain": {
+  "containsRetainedFinding": null,
+  "note": "filled post-fire from the priming round-trip against the fire's findings"
+ },
+ "spend": {
+  "totalUsd": 3.25,
+  "events": 7,
+  "note": "factory-ledger cost_events created 2026-10-19 (all three fire attempts; the two substrate-failure attempts are box-hours only, ~$1.58 combined, reported separately from the acceptance leg set)"
+ },
+ "legs": {
+  "allTerminal": false,
+  "records": {
+   "w:qa-20261019t132238z-correctness": {
+    "runId": "qds-20261019-c8ce72",
+    "closedAt": "2026-10-19T13:50:06.559Z",
+    "vmName": "qds-20261019-c8ce72"
+   }
+  }
+ },
+ "findings": [
+  {
+   "id": "QDS-Factory#465",
+   "title": "findings-only runs strand in pausing \u2014 the observe chain's reverify vetoes nothing-to-verify and no verb resolves the pause",
+   "impact": "the sequential leg advance inside ONE protocol run is blocked: leg 1 never reaches terminal:true for the fork's poller, so legs 2-3 never submit. The day-of round masked this by closing legs with fleet teardown (the verb path skips the chain+pause).",
+   "proven_instead": "the seam-2 release fired live through the chain teardown (budget_group_releases row 7c216307/afda41f1 at 2026-10-19T13:50:06Z, log line teardown.budget_group_release), so the wedge mechanism itself is fixed; what remains blocked is the DAG caller's terminal signal, not the release."
+  },
+  {
+   "id": "substrate",
+   "title": "three substrate repairs landed during the fire (compose + verb wiring)",
+   "items": [
+    "~/.ssh mounted ro -> rw (ssh could not write known_hosts for new boxes; leg-1 attempt-1 died at steering-provision)",
+    "/root/.gitconfig (credential.helper=store) was day-of hand-written state lost on every recompose \u2014 mounted from .unlazy/a2/gitconfig now (attempt-2 died at fill git fetch)",
+    "the teardown/cancel/harvest VERB arms wire the ledger hook now (scripts/fleet.ts) and the release reads the RECORD's requestId (src/providers/teardown.ts) \u2014 both measured live"
+   ]
+  }
+ ]
+}
