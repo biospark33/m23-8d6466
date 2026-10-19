@@ -162,7 +162,7 @@ The live Tier-2 round FIRED the same day, on Z2's post-merge trigger, after the 
 The day-of workarounds replaced with reviewed, tested fixes; the live acceptance fire ran the fixed chain
 against the merged sha. Evidence: `_bmad-output/evidence/v6-a2-followup/`.
 
-**Merged fixes** (factory PR #464; fork PR #822 left for review):
+**Merged fixes** (factory PR #464 merged 8a3de673 + part 2 PR #466 merged 395ed046 after the CodeRabbit round — one verb ledger, closed-cancel release recovery, single-line journal; fork PR #822 merged 898b2d46 — both branches pruned local+remote, both devs synced):
 - **P1-A seam #11**: the retain guard accepts exactly `provisionedRepoBankCandidates(resolveBankId(repoSlug))` —
   one enumeration shared with `resolveProvisionedRepoBankId`, so the guard and the recall cannot drift. Proven
   LIVE: retainFindings → primeDispatchBrief on one bank (containsRetainedFinding=true), and the fire's own
