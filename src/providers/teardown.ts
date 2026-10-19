@@ -715,10 +715,30 @@ function tokenIngestRefusalLog(ctx: StepCtx, phase: string): (e: unknown) => voi
  * reservation only overstates group usage, and the admission row stays visible
  * for reconciliation (the same posture the token-ingest reporter takes).
  */
-function releaseBudgetGroupIfWired(costLedger: CostLedgerHook, ctx: StepCtx, phase: string): void {
+function releaseBudgetGroupIfWired(costLedger: CostLedgerHook, ctx: StepCtx, rec: { requestId?: string }, phase: string): void {
   if (costLedger.releaseBudgetGroupByRequest === undefined) return;
+  // W2-C5 applies to the release too: the admission row is keyed by the
+  // SUBMIT's requestId, and the only carrier of that id is the RECORD
+  // (`rec.requestId`). ctx.requestId is this invocation's own correlation —
+  // on the verb path it is the verb's freshly minted id, which no admission
+  // ever carries (measured live, 2026-10-19: the hand teardown of a refused
+  // submit skipped with "no group admission" against ctx's id while the
+  // record carried the submit's).
+  const requestId = rec.requestId;
+  if (typeof requestId !== "string" || requestId.length === 0) {
+    log({
+      ...stepBase(ctx, "teardown", phase),
+      operation: "teardown.budget_group_release",
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      outcome: "skipped",
+      reason: "the record carries no requestId — no group admission to release",
+    });
+    return;
+  }
   try {
-    const { released } = costLedger.releaseBudgetGroupByRequest(ctx.requestId);
+    const { released } = costLedger.releaseBudgetGroupByRequest(requestId);
     log({
       ...stepBase(ctx, "teardown", phase),
       operation: "teardown.budget_group_release",
@@ -988,7 +1008,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
         // record closed before the process died still retired its reservation
         // only if THIS healing pass runs it — idempotent by (group_id,
         // request_id), so a fresh close that already released is a no-op.
-        releaseBudgetGroupIfWired(deps.costLedger, ctx, "close-recovery");
+        releaseBudgetGroupIfWired(deps.costLedger, ctx, rec, "close-recovery");
       } catch (e) {
         // Preserve the original error as cause so CostLedgerError classification survives the wrap.
         const wrapped = asTeardownError(e);
@@ -1325,7 +1345,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       }
       // A2 follow-up (swarmclaw#808 seam 2): the run's spend is final — retire
       // its group reservation now, not never. See releaseBudgetGroupIfWired.
-      releaseBudgetGroupIfWired(deps.costLedger, ctx, "close");
+      releaseBudgetGroupIfWired(deps.costLedger, ctx, closedRec, "close");
       // F032 — AFTER the ingest, so the read sees the ledger's final state for
       // this run. The box-hours row it just wrote is subtracted back out there:
       // the record's figure is token spend, so the comparison must be too.
