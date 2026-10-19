@@ -150,6 +150,13 @@
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 
+# THE SAME ARTIFACT, VIA tests/hindsight (2026-10-19, A2 follow-through): the
+# round-trip suite added there imports src/qa/retain.ts, dragging
+# src/qa/findings.ts into the measured set at 25.00 funcs / 43.81 lines while
+# its own suite, tests/qa/findings.test.ts, sat unrun. Widened the RUN with
+# `tests/qa` (its suites cover findings + the hunter-pack fixture surface);
+# re-measured on the widened run before adopting.
+
 [test]
 coverage = true
 coverageSkipTestFiles = true

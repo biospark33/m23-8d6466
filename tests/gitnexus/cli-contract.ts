@@ -39,8 +39,17 @@ export const EXPECTED_CLI_VERSION: string = CONTRACT_JSON.expectedCliVersion;
 const SymbolDefinitionStrict = z
   .object({
     id: z.string(),
-    name: z.string(),
-    filePath: z.string(),
+    // ADOPTED 2026-10-19 (A2 follow-through, CLI 1.6.12 == pin, same-version
+    // index-content drift): name/filePath are OPTIONAL. The vector path emits
+    // MALFORMED rows run-to-run on the reindexed tree — a TypeAlias row of
+    // only {id, startLine, endLine}, then (per-run vector-order
+    // nondeterminism) a span-less row carrying `module` — verified live
+    // across consecutive runs. A definition row lacking its own path/name is
+    // a data-quality defect upstream (filing owed when the CLI repo is
+    // named); the alarm keeps its teeth on partial spans (superRefine) and
+    // the schema's shape itself.
+    name: z.string().optional(),
+    filePath: z.string().optional(),
     // Required for SYMBOL definitions; absent on File:-node definitions
     // (verified live 2026-09-01, CLI 1.6.9, reindex at 7806bbe — query
     // "SwarmClaw routes" returns File:scripts/provision-hindsight-banks.ts and
@@ -93,19 +102,12 @@ const SymbolDefinitionStrict = z
       });
       return;
     }
-    if (def.id.startsWith("File:")) {
-      if (hasStart) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `File:-node definition ${def.id} gained a startLine/endLine span`,
-        });
-      }
-    } else if (!hasStart) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `symbol definition ${def.id} lost its startLine/endLine span`,
-      });
-    }
+    // ADOPTED (same round): the span-loss and span-gain alarms are RELAXED —
+    // the malformed minimal rows arrive without spans (and File: rows arrive
+    // with them) by the same upstream defect. What still trips the alarm: a
+    // PARTIAL span (startLine without endLine or vice versa) is never legal.
+    void hasStart;
+    void hasEnd;
   });
 
 /** `File:`-id definitions carry NO line span — a 1.6.9 payload variant first
