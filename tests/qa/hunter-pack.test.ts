@@ -77,7 +77,10 @@ const COMMIT = `${"a".repeat(39)}0`;
 const REPO = "acme/widgets";
 const REPO_URL = `https://github.com/${REPO}`;
 const MANIFEST = "qa/lens-manifest.json";
-const BANK = "qds-acmewidgets";
+// The positive identity IS the slug-resolved family (the seam-#11 doctrine —
+// the old hand-named "qds-acmewidgets" spelling is foreign to acme/widgets'
+// resolved family and is refused by the exact-candidate guard).
+const BANK = "acme-widgets";
 const PROTOCOL = "qa-protocol-1";
 const TOKEN = "ghs_fixture_token_value";
 const OWNER = { kind: "user" as const, id: "op-1" };
@@ -493,7 +496,9 @@ describe("AC3: replay leaves one document set + one receipt row set", () => {
 
   test("AC3 negative control: wrong-bank retain — a non-qds / solstice-* bank id is refused (retain-bank-not-repo)", async () => {
     const { calls, client } = fakeClient();
-    for (const badBank of ["solstice-collective", "solstice-acmewidgets", "acmewidgets", "qds-", "qds-../../etc", `qds-${"a".repeat(61)}`]) {
+    // "qds-acmewidgets" rides along: BankIdSchema-valid AND qds-prefixed, yet
+    // foreign to the resolved family — the exact seam-gap-#11 confusion.
+    for (const badBank of ["solstice-collective", "solstice-acmewidgets", "acmewidgets", "qds-acmewidgets", "qds-", "qds-../../etc", `qds-${"a".repeat(61)}`]) {
       await expect(retainFindings({ client }, retainInput({ repoBankId: badBank }))).rejects.toMatchObject({
         code: "retain-bank-not-repo",
       });
