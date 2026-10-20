@@ -67,12 +67,7 @@ export const Z3_UPSTREAM_BLOCKERS: ReadonlyArray<{ issue: string; url: string; w
   {
     issue: "#467",
     url: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/467",
-    what: "harvest persistence — no merged code persists a QA leg's findings JSON (MergedOutput has no envelope kind), so findings-retain has nothing to retain",
-  },
-  {
-    issue: "#465",
-    url: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/465",
-    what: "findings-only runs strand in `pausing` — every hunter-pack leg never reaches terminal",
+    what: "harvest persistence — the findings sidecar writer (src/phase-engine/findings-sidecar.ts) is merged but runs IN-BOX, so the exe.dev image must be re-published and its pin adopted before a live QA leg writes journal/findings.json",
   },
 ];
 

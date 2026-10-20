@@ -1923,6 +1923,32 @@ export class RunRecordStore {
     });
   }
 
+  /**
+   * (#465) Drop an UNBOUND `pausing` pre-registration whose `origin` is
+   * `origin` — and nothing else. The recheck and the write share ONE `withLock`
+   * acquisition (`setApprovalIfAwaiting`'s discipline), so a gate adoption that
+   * bound a `reportId` across the caller's await wins by construction: any
+   * other state, any other origin, or a bound report leaves the record
+   * byte-identical and returns `false`. The merge-only `set()` cannot remove a
+   * namespace, which is why this is its own primitive; it is deliberately this
+   * narrow — a general "delete an extension" would let any caller erase an
+   * approval audit trail.
+   */
+  clearUnboundPausing(runId: string, origin: string): boolean {
+    return this.withLock(runId, () => {
+      const current = this.get(runId);
+      const ext = current.extensions?.approval;
+      if (ext === undefined || ext.state !== "pausing" || ext.origin !== origin) return false;
+      if (typeof ext.reportId === "string" && ext.reportId !== "") return false;
+      return this.traced(runId, "clear-unbound-pausing", () => {
+        const { approval: _dropped, ...rest } = current.extensions ?? {};
+        const { extensions: _old, ...core } = current;
+        this.atomicReplace(runId, Object.keys(rest).length === 0 ? core : { ...core, extensions: rest });
+        return true;
+      });
+    });
+  }
+
   /** First-close-wins: a second close succeeds and keeps the original `closedAt`. */
   close(runId: string, now: Date = new Date()): RunRecord {
     return this.traced(runId, "close", () =>

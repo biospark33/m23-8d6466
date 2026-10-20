@@ -724,6 +724,12 @@ export async function observeSweep(deps: ObserveSweepDeps): Promise<SweepOutcome
           const line: Record<string, unknown> = { runId, event: "run-observed", chain_ms: outcome.chainMs, sweep_ms: el() };
           if (outcome.markerOk !== undefined) line.marker_ok = outcome.markerOk;
           sweepLine(deps.requestId, line);
+        } else if (outcome.kind === "completed") {
+          // (#465) A findings-only leg settled terminal: observed like a driven
+          // run (the chain landed), its reason on the line so the two stay
+          // separable without a new counter.
+          summary.runs_observed += 1;
+          sweepLine(deps.requestId, { runId, event: "run-observed", chain_ms: outcome.chainMs, completed: outcome.reason, sweep_ms: el() });
         } else if (outcome.kind === "unsettled") {
           if (outcome.terminal !== undefined && outcome.terminal.code === "run-engine-dead") {
             // The sweep's own disposition for the one unambiguous liveness

@@ -2194,7 +2194,11 @@ describe("buildIdFileInputs", () => {
       // 4e789ee5 (package.json/bunfig.coverage.toml are walked inputs — the
       // coverage-run widening moved the walk): same-commit re-pin from this
       // test's own failing run, the only run whose green binds the commit.
-            "5db559bfd89cd8bafcf4fbeccfc64a96f1fb4e731d7df5dd3bcc9ccca808e8ca",
+      // Re-adopted in-branch for #465/#467 (walked inputs: scripts/pipeline-run.ts,
+      // src/phase-engine/findings-sidecar.ts, src/fleet/*, src/providers/run-record.ts,
+      // cli-anything/scripts/team-lead-driver.ts) — re-pin LAST on the final tree;
+      // the image publish + pin adoption follows (Z3 keeps #467 listed until then).
+            "31b4078d5c00ae6813785f42fe23bde1a267a1b8e64e189b7cb8fa678d2ec941",
     );
   });
 });

@@ -126,6 +126,7 @@ import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
+import { type FindingsSidecarResult, writeFindingsSidecar } from "../src/phase-engine/findings-sidecar.ts";
 // S1: the rig_swarm phase body — the tier-2 engine INSIDE the box. The runner
 // stays the composition root: it injects the run's tracer, the money-line tee
 // and the run-scoped invocation counter, exactly as it does for dispatch_task.
@@ -664,6 +665,28 @@ function writeAll(fd: number, data: string | Buffer): void {
  * (real subprocess, real `--engine-log` file) and this file's two injection
  * sites; the TIER-2 live round is the end-to-end proof.
  */
+/**
+ * #467: write the hunt phase's findings sidecar beside `markerPath` and log one
+ * `findings_sidecar` line (quiet when no phase carried findings). Never throws;
+ * `main` calls it BEFORE `run.finish` so a marker-keyed harvest never races it.
+ */
+export function persistPhaseFindings(
+  markerPath: string,
+  values: readonly unknown[],
+  ids: { runId: string | null; requestId: string | null },
+  write: (line: string) => void = (line) => writeAll(2, line),
+): FindingsSidecarResult {
+  const findings = writeFindingsSidecar(markerPath, values);
+  if (findings.written || findings.reason !== "none") {
+    try {
+      write(`${JSON.stringify({ event: "findings_sidecar", level: findings.written ? "info" : "warn", ...ids, phaseId: null, ...findings })}\n`);
+    } catch {
+      /* a log line is a sidecar too */
+    }
+  }
+  return findings;
+}
+
 export function moneyLineTee(): (line: Record<string, unknown>) => void {
   return (line) => writeAll(2, `${JSON.stringify(line)}\n`);
 }
@@ -4715,6 +4738,11 @@ async function main(argv: readonly string[], inBoxFrontDoor = false): Promise<nu
         /* tracer is a sidecar; run settlement belongs to the journal */
       }
     }
+
+    // #467: a QA hunt phase's findings ride no envelope, so persist them beside
+    // the marker (BEFORE finish writes it) for the artifacts pull to carry home.
+    // A refusal is logged, never fatal — it writes nothing rather than garbage.
+    persistPhaseFindings(markerPath, outcomes.map((o) => o.value), { runId, requestId });
 
     const phaseWalkMs = Math.round(performance.now() - walkStartedAt);
 

@@ -1511,7 +1511,7 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
     ctx.printRefusal(outcome.code, outcome.message, outcome.remediation, { runId: ack.runId });
     return 5;
   }
-  // vetoed / approval-failed / chain-failed / handed-off: the run LANDED (the
+  // vetoed / approval-failed / chain-failed / handed-off / completed: the run LANDED (the
   // chain tore it down and judged it) but the attempt produced nothing
   // publishable — 6, the landed-but-not-reportable family. vetoed is the
   // re-verifier refusing the tree: lead_failure. The rest are transient.
@@ -1523,7 +1523,9 @@ async function invocation1(ctx: Inv1Ctx): Promise<number> {
         ? `the approval gate errored: ${outcome.error}`
         : outcome.kind === "chain-failed"
           ? `the completion chain failed at ${outcome.step}: ${outcome.error}`
-          : `the approval gate returned ${outcome.outcome}, not a fresh approval request`;
+          : outcome.kind === "completed"
+            ? "the chain settled the run as a findings-only QA leg — a fix run is never one, so it produced nothing publishable"
+            : `the approval gate returned ${outcome.outcome}, not a fresh approval request`;
   await chargeUnchargedTerminal(chainClass, chainMessage, `chain-${outcome.kind}`);
   ctx.printRefusal(
     `chain-${outcome.kind}`,

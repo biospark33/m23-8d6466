@@ -934,6 +934,44 @@ describe("set (AC2)", () => {
   }, 30_000);
 });
 
+describe("clearUnboundPausing (#465 findings-only withdraw)", () => {
+  test("drops ONLY the approval namespace of an unbound chain pre-registration; every other namespace survives", () => {
+    store.create("run-cp1");
+    store.set("run-cp1", {
+      extensions: {
+        approval: { state: "pausing", origin: "observe-chain" },
+        qaWorkKey: { workKey: "w:qa-20261016T120000Z-correctness" },
+      },
+    });
+    store.close("run-cp1");
+    expect(store.clearUnboundPausing("run-cp1", "observe-chain")).toBe(true);
+    const rec = store.get("run-cp1");
+    expect(rec.extensions?.approval).toBeUndefined();
+    expect(rec.extensions?.qaWorkKey?.workKey).toBe("w:qa-20261016T120000Z-correctness");
+    expect(rec.closedAt).toBeTruthy();
+    // idempotent: nothing left to withdraw
+    expect(store.clearUnboundPausing("run-cp1", "observe-chain")).toBe(false);
+  });
+
+  test("refuses (byte-identical) a bound report, another origin, an untagged pausing, and any other state", () => {
+    const cases: Record<string, Record<string, string>> = {
+      "run-cp-bound": { state: "pausing", origin: "observe-chain", reportId: "rv-bound" },
+      "run-cp-origin": { state: "pausing", origin: "someone-else" },
+      "run-cp-untagged": { state: "pausing" },
+      "run-cp-awaiting": { state: "awaiting-approval", origin: "observe-chain" },
+    };
+    for (const [runId, approval] of Object.entries(cases)) {
+      store.create(runId);
+      store.set(runId, { extensions: { approval } });
+      const before = readFileSync(join(dir, `${runId}.json`), "utf8");
+      expect(store.clearUnboundPausing(runId, "observe-chain")).toBe(false);
+      expect(readFileSync(join(dir, `${runId}.json`), "utf8")).toBe(before);
+    }
+    store.create("run-cp-none");
+    expect(store.clearUnboundPausing("run-cp-none", "observe-chain")).toBe(false);
+  });
+});
+
 describe("setApprovalIfAwaiting (G1 policy-mint guard)", () => {
   const REGISTRATION = {
     state: "awaiting-approval",

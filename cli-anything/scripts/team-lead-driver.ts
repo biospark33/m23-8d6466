@@ -384,8 +384,11 @@ export function harvestPiStream(stdout: string): PiHarvest {
   return { text, ...totals };
 }
 
+// #467: `result` is open past `summary` — merger.ts keeps the whole object, and
+// a task that asks for structured output under it (the QA hunt's `findings`)
+// must not be contradicted by this closing instruction.
 export const SCHEMA_INSTRUCTION =
-  'Reply with ONLY a JSON object of the shape {"changedFiles": string[], "result": {"summary": string}} — changedFiles is MANDATORY (use [] when no files changed). No prose outside the JSON.';
+  'Reply with ONLY a JSON object of the shape {"changedFiles": string[], "result": {"summary": string, ...any further fields the task asks for}} — changedFiles is MANDATORY (use [] when no files changed). No prose outside the JSON.';
 
 /**
  * Build the pi argv for one worker (DF1.9).

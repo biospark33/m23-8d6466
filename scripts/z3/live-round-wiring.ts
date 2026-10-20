@@ -63,6 +63,7 @@ import { DEFAULT_MEMGATE_LEDGER } from "../../src/memgate/schemas.ts";
 import { readAutoMergePolicy } from "../../src/fleet/auto-merge-policy.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { normalizeHarvest } from "../../src/qa/findings.ts";
+import { harvestForLens } from "../../src/qa/harvested-findings.ts";
 import { retainFindings } from "../../src/qa/retain.ts";
 import { costLedgerOpts } from "../lib/cost-ledger-opts.ts";
 import { crashGate } from "./crash-gate.ts";
@@ -155,7 +156,11 @@ const DisarmSchema = z.object({ disarmed: z.boolean(), firedRunId: z.string().nu
  */
 export const FORK_CANCEL_TIMEOUT_MS = 2 * 300_000 + 180_000;
 
-/** A findings-only QA leg reading `pausing` this long is the #465 strand, not a slow run. */
+/**
+ * A QA leg reading `pausing` this long is stranded, not slow: since #465 a
+ * GREEN findings-only leg settles `completed`, so a lingering pause is a
+ * vetoed leg (failed hunt, lost harvest, a commit) or a #465 regression.
+ */
 export const PAUSING_BOUND_MS = 20 * 60_000;
 
 /** Every other fork CLI call (`state`, a `disarm` — archive + 3 s recheck + tsx boot). */
@@ -507,8 +512,8 @@ export function z3LiveDeps(opts: {
   runAt: number;
   providerKeyHashes: Z3Deps["providerKeyHashes"];
   revokeVerify: Z3Deps["revokeVerify"];
-  /** The QA leg's harvested findings JSON (see the module header: no merged path exists yet). */
-  readHarvest: (runId: string) => unknown;
+  /** The QA leg's harvest for `normalizeHarvest`; defaults to the #467 findings sidecar under RUNS_DIR. */
+  readHarvest?: (runId: string, lens: string) => unknown;
 }): Z3Deps {
   const store = () => new RunRecordStore({ dir: RUNS_DIR, create: false });
   const allowlistPath = path.join(RUNS_DIR, ".factory", "approvers.json");
@@ -696,11 +701,11 @@ export function z3LiveDeps(opts: {
         if ("payload" in r && (r.payload.terminal || (want === "awaiting-approval" && r.payload.status === "awaiting-approval"))) {
           return { status: r.payload.status, terminal: r.payload.terminal };
         }
-        // #465: a findings-only leg strands in `pausing` forever — red by name, not at the deadline.
+        // A QA leg stranded in `pausing` is red by name, not at the deadline (see PAUSING_BOUND_MS).
         if ("payload" in r && want === "terminal" && r.payload.status === "pausing") {
           pausingSince ??= Date.now();
           if (Date.now() - pausingSince > PAUSING_BOUND_MS) {
-            throw new Error(`run ${runId} has read \`pausing\` for ${PAUSING_BOUND_MS / 60_000} min — the #465 strand (findings-only runs never reach terminal)`);
+            throw new Error(`run ${runId} has read \`pausing\` for ${PAUSING_BOUND_MS / 60_000} min — a vetoed QA leg (read its reverify report: failed hunt, lost harvest, or a commit) or a #465 regression`);
           }
         } else if ("payload" in r) {
           // only a REAL non-pausing read resets the #465 clock — a transient failure must not
@@ -761,7 +766,8 @@ export function z3LiveDeps(opts: {
       if (!/^[0-9a-f]{40}$/.test(commitSha) || repoSlug === "") throw new Error("the bound run's QA steps carry no commitSha/repoSlug");
       const result = resultOnce(runId);
       if (!("payload" in result)) throw new Error(`fleet result ${runId} unreadable (${result.transient})`);
-      const norm = normalizeHarvest(lens, result.payload, opts.readHarvest(runId));
+      const readHarvest = opts.readHarvest ?? ((id: string, l: string) => harvestForLens(RUNS_DIR, id, l));
+      const norm = normalizeHarvest(lens, result.payload, readHarvest(runId, lens));
       const journal: string[] = [];
       const client = journalingClient(journal);
       const bank = await resolveRoundBank(repoSlug, client);

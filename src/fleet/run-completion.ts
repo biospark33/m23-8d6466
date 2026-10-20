@@ -24,6 +24,13 @@
  * pre-registration when reverify presents its report; see
  * `OBSERVE_CHAIN_ORIGIN` below.
  *
+ * (#465, 2026-10-20) The ONE deliberate `closedAt`-with-no-approval shape: a
+ * findings-only QA leg (qaWorkKey stamp, zero commits, harvested ok marker)
+ * has nothing to approve, so the chain WITHDRAWS its own unbound
+ * pre-registration (`clearUnboundPausing`, under the record lock) and the
+ * record reads terminal `completed` — the outcome is final, not a window.
+ * Every other run keeps the #382 guarantee above.
+ *
  * LOCKING: this module acquires NOTHING (INV-IBOX-16). Every caller — `fleet
  * observe`, DF3.8's sweep, DF6.1a's fix run — takes `<runsDir>/<runId>.lock`
  * itself and hands the handle in as `deps.runLock`: the acquire is not
@@ -35,7 +42,8 @@
  *
  * (G1, ADR-2): the auto-merge consult's input is structurally inert in v6a — RunRecord carries no diff/scope carrier and no factory_result verdict artifact, so consultAutoMerge always sees empty diffs and a verdict-absent run until those carriers land.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { clearRunLockDestructive, markRunLockDestructive, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import type { CostLedger } from "../providers/cost-ledger.ts";
 import type { KeyApi } from "../providers/credentials.ts";
@@ -112,8 +120,16 @@ export type ChainOutcome =
   | { kind: "unsettled"; verdict: MarkerVerdict; terminal?: { code: string; message: string; remediation: string } }
   /** Every pre-chain refusal the module itself issues — refused before mutation. */
   | { kind: "refused"; code: string; message: string; remediation: string }
-  /** The re-verifier's own judgment said no (non-green, incl. `error` and `nothing-to-verify`) — exit 6. */
+  /** The re-verifier's own judgment said no (non-green, incl. `error` and `nothing-to-verify` — except a findings-only QA leg's, which is `completed`) — exit 6. */
   | { kind: "vetoed"; reason: string }
+  /**
+   * (#465) A findings-only QA leg landed: torn down, record closed, zero
+   * commits beyond base — the success shape for work that never edits — so
+   * there is no tree to re-verify and no PR to approve. The chain's own
+   * pre-registration is withdrawn and the record reads terminal `completed`.
+   * Exit 0.
+   */
+  | { kind: "completed"; reason: "findings-only"; chainMs: number }
   /** The gate leg errored — exit 6; a null approval is never a registration. */
   | { kind: "approval-failed"; error: string }
   /** A chain step other than the approval leg threw, pre- or post-close — exit 6. */
@@ -462,7 +478,7 @@ function emitTerminal(
   if (line.markerPollMs !== undefined) fields.marker_poll_ms = line.markerPollMs;
   if (outcome.kind === "refused") fields.code = outcome.code;
   else if (outcome.kind === "unsettled" && outcome.terminal !== undefined) fields.code = outcome.terminal.code;
-  else if (outcome.kind === "vetoed") fields.reason = logText(outcome.reason);
+  else if (outcome.kind === "vetoed" || outcome.kind === "completed") fields.reason = logText(outcome.reason);
   else if (outcome.kind === "approval-failed") fields.error = logText(outcome.error);
   else if (outcome.kind === "chain-failed") {
     fields.step = outcome.step;
@@ -627,7 +643,9 @@ async function reverifyAndMap(
   }
   const chainMs = Math.max(0, Date.now() - chainStartMs);
   let outcome: ChainOutcome;
-  if (result.report.verdict !== "green") {
+  if (result.report.verdict !== "green" && findingsOnlyLanded(runId, deps, result)) {
+    outcome = { kind: "completed", reason: "findings-only", chainMs };
+  } else if (result.report.verdict !== "green") {
     // The re-verifier's independent judgment — including the `error` verdict a
     // host failure produces and the `nothing-to-verify` preflight.
     outcome = { kind: "vetoed", reason: result.report.reason || result.report.verdict };
@@ -689,6 +707,68 @@ async function reverifyAndMap(
   }
   emitTerminal(requestId, runId, line, outcome, chainMs);
   return outcome;
+}
+
+/**
+ * The A2 `qaWorkKey` stamp, read inline: the AC1 fence admits only the
+ * run-record TYPES here, so `readQaWorkKey` is mirrored, not imported.
+ */
+function isQaLeg(rec: RunRecord): boolean {
+  const workKey = rec.extensions?.qaWorkKey?.workKey;
+  return typeof workKey === "string" && workKey.length > 0;
+}
+
+/**
+ * (#465) Is this `nothing-to-verify` the SUCCESS shape of a findings-only QA
+ * leg rather than a veto? All of, fail-closed:
+ *  - the verdict's reason is exactly `nothing-to-verify` (zero commits beyond
+ *    base — reverify's preflight), never `error` or a failed gate;
+ *  - the record carries the A2 `qaWorkKey` stamp (its writer admits only the
+ *    `w:qa-` grammar), the one record-visible fact that says "hunter-pack
+ *    leg" — findings-only by ADR-1 §2, so zero commits is the invariant held;
+ *  - the teardown's artifacts pull LANDED: no live loss code AND the pulled
+ *    `journal/final.json` on disk — a findings-only run whose harvest was
+ *    lost has produced nothing, and stays the veto;
+ *  - that pulled marker says `ok: true`: the chain runs on `ok:false` too (ok
+ *    is a signal to the chain, never a veto), but a hunt that failed — or a
+ *    worker that edited without committing, tripping verify-clean-tree — has
+ *    zero commits as well, and must not settle as a successful leg. The
+ *    HARVESTED marker, not the observe tick's read, so the stranded-pause
+ *    promote (which never reads a marker) decides on the same evidence;
+ *  - the chain's own unbound pre-registration is withdrawn under the record
+ *    lock (`clearUnboundPausing`). A bound report, a human decision, or any
+ *    other state that landed meanwhile refuses the withdraw — and the veto
+ *    stands.
+ * Any read or store fault answers `false`: the pre-#465 veto is the fallback.
+ */
+/** The harvested terminal marker reads `ok: true` (absent, unreadable or anything else: false). */
+function harvestedMarkerOk(runsDir: string, runId: string): boolean {
+  try {
+    const marker = JSON.parse(readFileSync(join(runsDir, `${runId}-artifacts`, "journal", "final.json"), "utf8")) as { ok?: unknown };
+    return marker?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+function findingsOnlyLanded(runId: string, deps: RunCompletionDeps, result: ReverifyOutcome): boolean {
+  // The reason alone is not "zero commits": report.ts also says nothing-to-verify
+  // for commits with an empty check set, so require the head AT the base.
+  if (result.report.reason !== "nothing-to-verify" || result.report.headSha !== result.report.baseSha) return false;
+  try {
+    const rec = deps.store.get(runId);
+    if (!isQaLeg(rec)) return false;
+    // A recovered pull clears the loss by writing `artifactsCode: ""` (teardown's
+    // "no loss" sentinel), so only a NON-EMPTY code is a loss — and absence of
+    // a code is not proof of a harvest (the box-already-gone skip writes none):
+    // require the pulled journal itself.
+    const lost = rec.extensions?.teardown?.artifactsCode;
+    if (typeof lost === "string" && lost.length > 0) return false;
+    if (!harvestedMarkerOk(deps.runsDir, runId)) return false;
+    return deps.store.clearUnboundPausing(runId, OBSERVE_CHAIN_ORIGIN);
+  } catch {
+    return false;
+  }
 }
 
 /** AC3's typed terminal arm — the window fill and the unusable-streak fill share this one code, distinct from `box-unreachable`. */
@@ -782,6 +862,25 @@ export async function observeAndDriveChain(runId: string, deps: RunCompletionDep
       message: `run ${runId} carries an approval extension this module cannot classify (state ${approvalState === undefined ? "is not a string" : `"${approvalState}"`}) — refusing rather than driving the chain over an unreadable gate namespace`,
       remediation:
         "correct or clear the record's extensions.approval entry deliberately, then re-run fleet observe; this refusal fires before any box is touched",
+    };
+  }
+  if (
+    typeof rec.closedAt === "string" &&
+    isQaLeg(rec) &&
+    rec.extensions?.cancel?.state !== "cancelled" &&
+    harvestedMarkerOk(deps.runsDir, runId)
+  ) {
+    // (#465) A closed, uncancelled QA leg with no approval extension and a
+    // harvested ok marker is a settled findings-only run (the chain's
+    // `completed` arm withdrew its pre-registration, or `fleet teardown`
+    // closed it after a green run). Anything else keeps the neutral wording. Pointing
+    // the operator at reverify would only re-present the same
+    // `nothing-to-verify`; say what the record is instead.
+    return {
+      kind: "refused",
+      code: "run-already-completed",
+      message: `run ${runId} is a findings-only QA leg that already completed (closedAt ${rec.closedAt}) — there is nothing left to observe`,
+      remediation: `read it with fleet result ${runId}; its findings are in the run's harvested artifacts`,
     };
   }
   if (typeof rec.closedAt === "string") {
