@@ -6,7 +6,7 @@
 > Derivation decisions (epic codes, DD-14+, substrate erratum, ops register, campaign adjudications):
 > `docs/superpowers/specs/2026-10-02-v6-story-derivation-decisions.md`.
 > Cross-repo contract: `docs/planning/v6-crossrepo-contract.md`.
-> ADR-2 (PROPOSED): `docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md`.
+> ADR-2 (ACCEPTED 2026-10-15 via G1, PR #430; was PROPOSED at derivation): `docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md`.
 
 > **Epic bullets are summaries, non-normative; story files govern.** Where a bullet and its
 > linked story file disagree, the story file is authoritative.
@@ -175,7 +175,7 @@ posture is demonstrated, not asserted.
 
 **Sprint:** v6b · deps: M2.2 + M1.2 · live round (T2)
 
-### Story M3.1: Manager meta banks + L3 nightly consolidate *(gated, with crontab fallback)*
+### Story M3.1: Manager meta banks + L3 nightly consolidate *(done — PR #422; was gated, with crontab fallback)*
 
 **Story File:** [`sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md`](../sprint-artifacts/dark-factory-v6/stories/m3-1-manager-meta-banks-l3-consolidate.md)
 
@@ -198,7 +198,7 @@ the meta bank and to me, So that the factory learns — and never auto-applies.
 
 ## Epic A — Autonomy (E21-gated)
 
-### Story A1: Department managers as E21 Home bots *(gated)*
+### Story A1: Department managers as E21 Home bots *(done — PR #434; was gated)*
 
 **Story File:** [`sprint-artifacts/dark-factory-v6/stories/a1-department-managers-home-bots.md`](../sprint-artifacts/dark-factory-v6/stories/a1-department-managers-home-bots.md)
 
@@ -206,18 +206,18 @@ As the **factory operator**, I want the Dev/QA/Maintenance department managers l
 bots in one factory Home — heartbeat digests, per-bot spend ceilings — So that the v3/v4
 "managers" vision runs deep, not shallow.
 
-**Sprint:** v6b · **Status: gated** (E21 S02b + S03b + Z2) · absorbs fix-loop runner duty; owner=operator-as-user (org-owner policy-refused, DD-25); spend join per DD-20
+**Sprint:** v6b · **Status: done** (PR #434, 2026-10-16; was gated on E21 S02b + S03b + Z2) · absorbs fix-loop runner duty; owner=operator-as-user (org-owner policy-refused, DD-25); spend join per DD-20
 
-### Story A2: QA department F3 *(gated)*
+### Story A2: QA department F3 *(done — PR #436; was gated)*
 
 **Story File:** [`sprint-artifacts/dark-factory-v6/stories/a2-qa-department-f3.md`](../sprint-artifacts/dark-factory-v6/stories/a2-qa-department-f3.md)
 
 As the **QA department**, I want post-merge hunter-pack protocols running real fleet QA runs
 whose findings land in the shared `qds-` bank, So that every QA run primes the next Dev run.
 
-**Sprint:** v6b · **Status: gated** (A1 + M1.2 + Z2) · `w:qa-*` work keys; host-side retain; issue filing
+**Sprint:** v6b · **Status: done** (PR #436, 2026-10-16; was gated on A1 + M1.2 + Z2) · `w:qa-*` work keys; host-side retain; issue filing
 
-### Story A3: Maintenance sweeps F4 *(gated)*
+### Story A3: Maintenance sweeps F4 *(done — PR #437; was gated)*
 
 **Story File:** [`sprint-artifacts/dark-factory-v6/stories/a3-maintenance-sweeps-f4.md`](../sprint-artifacts/dark-factory-v6/stories/a3-maintenance-sweeps-f4.md)
 
@@ -225,7 +225,7 @@ As a **maintenance manager bot**, I want weekly sweeps turning GitNexus/audit-ch
 into dep-bump and refactor briefs that park at the approve gate, So that maintenance is a
 cadence, not a crisis.
 
-**Sprint:** v6b · **Status: gated** (A1 + A6 + Z2) · parks at the gate — nothing auto-merges (ADR-2 PROPOSED until the operator decides via G1)
+**Sprint:** v6b · **Status: done** (PR #437, 2026-10-17; was gated on A1 + A6 + Z2) · parks at the gate — nothing auto-merges (ADR-2 ACCEPTED via G1 2026-10-15; auto-merge cannot arm until its veto-window queue exists)
 
 ### Story A5: Yield KPIs L5 + Goodhart counter-metrics
 
@@ -302,4 +302,4 @@ As the **factory operator**, I want the ADR-2 draft (auto-merge default, QA-owne
 S05b inbox as override surface) presented for decision and the outcome implemented — or the
 rejection recorded — So that the autonomy policy is decided, not left in limbo.
 
-**Sprint:** v6a · deps: none · input artifact: `docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md` (PROPOSED); Tier taxonomy defined there (DD-19)
+**Sprint:** v6a · deps: none · input artifact: `docs/decisions/2026-10-02-adr-2-autonomy-approval-surface.md` (PROPOSED at derivation; ACCEPTED 2026-10-15, PR #430); Tier taxonomy defined there (DD-19)

@@ -210,3 +210,17 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # detached/process-group option" notes in test-results.ts (bun 1.4.3 declares the option; that
 # module stays lead-only). PR #434 merged to dev (merge 8e78354c). Digest crontab line stays
 # operator-owned (documented in the CLI header, not installed).
+
+# 2026-10-15 (post-merge reconciliation — git history + `gh pr view` as authority):
+# v6 state: 18 of 24 rows done (Z1 Z2 Z4 Z5 · M1.1 M1.2 M1.3 M2.1 M2.2 M2.3 M3.1 M3.2 · A5 A6 ·
+# J1 J3 J4 · G1 — PR #430, 20e3a452, ADR-2 ACCEPTED; its note is in sprint-status-history.md).
+# Not done: M1.4 draft (atomicity audit owed); Z3, A1, A2, A3, J2 gated (E21 S02b/S03b external;
+# J2 on corpus milestones + operator sign-off). No v6 row is open to an unattended dev lane today.
+# STALENESS FIXED IN THIS COMMIT: the J3 row read "PR to dev at closure" (PR #427 merged
+# 2026-10-14, 5b03a7b7); the Z5 row read "PR to dev" (PR #426 merged 2026-10-14, 77b9339f). Story
+# md headers: M1.2/M1.3/M2.1/M2.2/M2.3 carried no Status line (added with PR + merge commit, each
+# verified via gh); M3.1 still read GATED-WITH-FALLBACK (merged PR #422 2026-10-10, 7c777bc9);
+# Z5/J3 headers repointed to their merge PRs. Operator-gated legs still open: image re-pin
+# ritual (blocks all T2 — J3+J4 pin moves now on the tree), M1.2 AC7 / M2.3 live-fire T2 rounds,
+# A6 AC7 + Z4 AC8 fired halves, issue #408 (M1.1 VPS-day remainder). The 2026-09-18 note this
+# replaces was drained to sprint-status-history.md.

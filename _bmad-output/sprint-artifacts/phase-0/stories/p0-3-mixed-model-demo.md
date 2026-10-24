@@ -166,7 +166,7 @@ Downstream stories (P1.4, P1.6) referencing "P0.3 canonical Warren invocation" i
 
 ## Dev Agent Record
 
-**Status:** ready-for-review — branch `feature/p0.3`, developed 2026-07-20.
+**Status:** done — PR #40 merged 2026-07-20 (was ready-for-review at this record; branch `feature/p0.3`, developed 2026-07-20).
 
 **Per-AC results:**
 
