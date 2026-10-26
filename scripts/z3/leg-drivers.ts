@@ -924,6 +924,13 @@ export async function runZ3Round(
       // Must run BEFORE awaitResult — a pure record read cannot see terminal
       // until this closes the record (#913's live mechanism).
       const legSettle = await d.settleAndTeardown(prov.runId);
+      if (legSettle.teardownExit !== 0) {
+        // Evidence-first on a failed closure: forensics (carrying the settle
+        // receipt) fails the leg with the teardown details NOW — a record the
+        // teardown did not close may never read terminal, and a 3600s poll
+        // timeout would name everything but the cause.
+        await driveBoxForensics(d, { runId: prov.runId, liveBoxesForRun: prov.liveBoxesForRun, settle: legSettle });
+      }
       await d.awaitResult(prov.runId, "terminal");
       await driveBoxForensics(d, { runId: prov.runId, liveBoxesForRun: prov.liveBoxesForRun, settle: legSettle });
       await driveQaRunObserve(d, { lens, runId: prov.runId, baseline });
