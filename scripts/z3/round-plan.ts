@@ -64,11 +64,11 @@ export const Z3_OPERATOR_GO_FILE = `${Z3_EVIDENCE_DIR}/operator-GO.json`;
  * arming, or any spend; unblocking is the code change that deletes the entry.
  */
 export const Z3_UPSTREAM_BLOCKERS: ReadonlyArray<{ issue: string; url: string; what: string }> = [
-  {
-    issue: "#467",
-    url: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/467",
-    what: "harvest persistence — the findings sidecar writer (src/phase-engine/findings-sidecar.ts) is merged but runs IN-BOX, so the exe.dev image must be re-published and its pin adopted before a live QA leg writes journal/findings.json",
-  },
+  // Emptied 2026-10-26: #467 unblocked — the exe.dev image is re-published with
+  // the sidecar writer in-box (publish run 40326654015 green: publish/attest/
+  // attested all success), the pin adopted in the same-commit ritual (#474
+  // TOFU ARGs, #476 driver REF sha256:1c8455a0… / buildId c8dd0a49…), and
+  // verify-image-pin's verify job green (40336238552).
 ];
 
 /** The refusal line naming every open blocker (empty string when none). */
