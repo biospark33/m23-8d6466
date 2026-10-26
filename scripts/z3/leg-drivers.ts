@@ -915,6 +915,8 @@ export async function runZ3Round(
     watcher = armCrashWindow(d, code.stepId, () => stopped, () => retainDoneAt);
     watcher.catch(() => {}); // settled below; never an unhandled rejection while the QA legs run
     const retainedByLens: Record<string, string[]> = {};
+    /** Per-lens baseline + runId for the observe legs, which run AFTER the code run (see below). */
+    const legObserves: Array<{ lens: string; runId: string; baseline: Z3Baseline }> = [];
     let bank = "";
     for (const run of plan.runs.filter((r) => r.kind === "qa-leg")) {
       const lens = run.lens as string;
@@ -933,7 +935,13 @@ export async function runZ3Round(
       }
       await d.awaitResult(prov.runId, "terminal");
       await driveBoxForensics(d, { runId: prov.runId, liveBoxesForRun: prov.liveBoxesForRun, settle: legSettle });
-      await driveQaRunObserve(d, { lens, runId: prov.runId, baseline });
+      // NO observe await here: since the fork's #914 reorder the factory_observe
+      // steps trail the CODE run, so awaiting this leg's observe before leg N+1
+      // would block the closure chain while the next box runs unobserved (round
+      // 11's live deadlock). The observe legs run after driveApprove below —
+      // their target records are already terminal and their attribution is by
+      // runId/requestId, never by wall clock.
+      legObserves.push({ lens, runId: prov.runId, baseline });
       const r = await driveFindingsRetain(d, { lens, runId: prov.runId });
       retainedByLens[lens] = r.documentIds;
       bank = r.bank;
@@ -948,6 +956,12 @@ export async function runZ3Round(
     await driveBoxForensics(d, { runId: prov.runId, liveBoxesForRun: prov.liveBoxesForRun });
     const codeBaseline = await snapshot(d);
     await driveApprove(d, { runId: prov.runId });
+    // The QA observes now that they can settle: the fork's trailing observe
+    // steps became current the moment the approval settled the code record,
+    // and every QA leg's record was closed at its own leg time.
+    for (const o of legObserves) {
+      await driveQaRunObserve(d, { lens: o.lens, runId: o.runId, baseline: o.baseline });
+    }
     await driveObserveReadOnly(d, { runId: prov.runId, baseline: codeBaseline });
     await driveBranchAndComplete(d, { protocolRunId: trig.protocolRunId, runId: prov.runId, fleetRunIds: runIds });
   } catch (e) {
