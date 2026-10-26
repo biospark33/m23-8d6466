@@ -492,6 +492,16 @@ echo "Running gitnexus analyze (${EMBEDDINGS_FLAG:-no embeddings}, 300s cap) ...
 # it is set only AFTER localize succeeds: a localize failure under `set -e`
 # must restore the tracked SKILL.md files, not delete their backups.
 localize_gitnexus_skills
+# 1.6.12 does not always emit the bundled skills on a successful analyze
+# (observed 2026-10-26: analyze green, skill dirs left empty, and the
+# success-path cleanup then deleted the only copies with the lock dir). Any
+# backup file whose destination is still missing comes back from the backup;
+# its bytes are the pre-analyze localized versions.
+for name in $GITNEXUS_SKILLS; do
+  if [ -f "$SKILLS_BACKUP/$name/SKILL.md" ] && [ ! -f "$SKILLS_ROOT/$name/SKILL.md" ]; then
+    mv "$SKILLS_BACKUP/$name/SKILL.md" "$SKILLS_ROOT/$name/SKILL.md"
+  fi
+done
 ANALYZE_OK=1
 
 # --- 3. Version stamp + contract pin check ----------------------------------
