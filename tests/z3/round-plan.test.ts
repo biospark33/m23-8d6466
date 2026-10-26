@@ -173,14 +173,18 @@ describe("operator-GO gate", () => {
     expect(() => consumeOperatorGo(p, "2026-10-19T12-00-00-000Z")).toThrow();
   });
 
-  test("the upstream blockers refuse the round by name while the list is non-empty", () => {
-    const line = upstreamBlockerRefusal();
-    // #465 left with its host-side fix; #467 waits on the image re-publish only.
-    expect(Z3_UPSTREAM_BLOCKERS.map((b) => b.issue)).toEqual(["#467"]);
-    expect(line).toContain("#467");
-    expect(line).not.toContain("#465");
+  test("the upstream blockers list is empty — the round is GO-gated, not blocker-refused", () => {
+    // #467 unblocked 2026-10-26: the image re-published with the sidecar
+    // writer (publish run 40326654015 green), pin adopted (#474/#476),
+    // verify-image-pin's verify job green (40336238552).
+    expect(Z3_UPSTREAM_BLOCKERS).toEqual([]);
+    expect(upstreamBlockerRefusal()).toBe("");
+  });
+
+  test("the refusal still renders by name for any future blocker", () => {
+    const line = upstreamBlockerRefusal([{ issue: "#9999", url: "u", what: "w" }]);
+    expect(line).toContain("#9999");
     expect(line).toContain("before any spend");
-    expect(upstreamBlockerRefusal([])).toBe("");
   });
 
   test("a GO recorded against another fork rev is refused", () => {
