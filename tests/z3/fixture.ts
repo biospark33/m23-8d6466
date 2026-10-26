@@ -30,6 +30,9 @@ export const GO: OperatorGo = {
   swarmclawForkRev: REV,
 };
 
+/** Lens → roster index (exported for test overrides that rebuild retained ids). */
+export const lensIndex = (lens: string) => QA_LENS.indexOf(lens as (typeof QA_LENS)[number]);
+
 export interface FixtureWorld {
   deps: Z3Deps;
   calls: {
@@ -61,6 +64,12 @@ export interface FixtureOptions {
   recordLag?: boolean;
   /** The last lens's host retain takes this long (real wall clock) — the kill must not wait for it. */
   slowLastRetainMs?: number;
+  /**
+   * The observe legs plant a fresh box nothing claims — the fail-closed charge
+   * (AC6) must red wherever the observe runs; since #914's reorder that is
+   * post-approve, with every sibling submit long settled.
+   */
+  strayBoxAtObserve?: boolean;
 }
 
 export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, opts: FixtureOptions = {}): FixtureWorld {
@@ -137,7 +146,6 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
     boxes.delete(runId);
     liveKeys.delete(`key-${runId}`);
   };
-  const lensIndex = (lens: string) => QA_LENS.indexOf(lens as (typeof QA_LENS)[number]);
   const deps: Z3Deps = {
     sink: {
       outDir,
@@ -179,11 +187,9 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
       return { runId, workId, requestId: `req-${stepId}`, lastError: null };
     },
     awaitObserveStep: async (stepId) => {
-      // The fork chains on at once: the next leg is up before the driver reads.
-      const i = QA_LENS.findIndex((l) => stepId === Z3_STEP.qaObserve(l));
-      const next = QA_LENS[i + 1];
-      if (i >= 0 && next !== undefined) provision(Z3_STEP.qaLeg(next), true);
-      if (i === QA_LENS.length - 1) openCodeWindow();
+      // #914's template: the observes trail the code run, so by the time the
+      // driver awaits one (post-approve) its target record is long terminal.
+      if (opts.strayBoxAtObserve) boxes.add("stray-observe-box");
       return { kind: "factory_observe", status: "completed", observedRunId: stepRun(stepId) };
     },
     protocolFleet: async () => ({
@@ -220,9 +226,16 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
     },
     settleAndTeardown: async (runId) => {
       // The A2 cadence pair, modeled: the settle-then-teardown CLOSES the
-      // leg's record — the transition awaitResult(terminal) then observes.
+      // leg's record — the transition awaitResult(terminal) then observes —
+      // and the moment the record closes the fork chains forward (#914's
+      // back-to-back legs): the next leg submits (or, after the last QA leg,
+      // the code run's submit window opens).
       teardown(runId);
       closed.add(runId);
+      const i = QA_LENS.findIndex((l) => qaRunId(lensIndex(l)) === runId);
+      const next = QA_LENS[i + 1];
+      if (i >= 0 && next !== undefined) provision(Z3_STEP.qaLeg(next), true);
+      if (i === QA_LENS.length - 1) openCodeWindow();
       return { state: "ok", teardownExit: 0, teardownTail: "teardown ok" };
     },
     inventory: async () => [...boxes],

@@ -24,7 +24,7 @@ import {
 } from "../../scripts/z3/assertions.ts";
 import { dashStamp } from "../../scripts/z3/evidence.ts";
 import { Z3_LEGS } from "../../scripts/z3/round-plan.ts";
-import { CODE_RUN_ID, cleanupFixture, driveFixtureRound, dropLeg, editLeg, type FixtureRound, qaRunId, REV } from "./fixture.ts";
+import { CODE_RUN_ID, cleanupFixture, docId, driveFixtureRound, dropLeg, editLeg, type FixtureRound, lensIndex, qaRunId, REV } from "./fixture.ts";
 
 const rounds: FixtureRound[] = [];
 afterEach(() => {
@@ -560,7 +560,9 @@ describe("R1 — observe/retain never false-red a correct round (A-3, E-3, E-4, 
   });
 
   test("AC6 negative control: a fresh box no run of the protocol claims stays charged (fail-closed)", async () => {
-    const r = await round({ protocolFleet: async () => ({ runIds: [], requestIds: [], submitting: [] }) });
+    // The observe legs run post-approve (#914's trailing template), so the
+    // stray is planted when the observe actually reads — order-independent.
+    const r = await round({}, { strayBoxAtObserve: true });
     some(assertAc6ObserveReadOnly(r.files), /provisioned a box/);
   });
 
@@ -609,11 +611,18 @@ describe("R1 — the GO gates the fork's own caps; cleanup stops the fork first 
   });
 
   test("a mid-round failure cancels the fork protocol run, then sweeps runs the driver never tracked", async () => {
-    // fails at leg 0's observe — the fork has ALREADY provisioned leg 1 (running ahead)
-    const r = await round({ protocolFleet: async () => ({ runIds: [qaRunId(0), qaRunId(1)], requestIds: [], submitting: [] }), memoryKeys: () => [{ tokenId: "mgat-x", kind: "agent", runId: null, verbs: ["recall"] }] });
+    // Fails at leg 1's retain — the fork has ALREADY provisioned leg 2 (the
+    // back-to-back chain starts the next submit the moment a record closes).
+    const r = await round({
+      retainFindings: async (lens) => {
+        if (lens === "secret-hygiene") throw new Error("bank down at leg 1");
+        return { bank: "qds-factory", documentIds: [docId(lensIndex(lens))], traces: [{ side: "host", documentId: docId(lensIndex(lens)) }] };
+      },
+      protocolFleet: async () => ({ runIds: [qaRunId(0), qaRunId(1), qaRunId(2)], requestIds: [], submitting: [] }),
+    });
     expect(r.outcome.failure).toBeDefined();
     expect(r.world.calls.cancelled).toEqual(["pr-z3-1"]);
-    expect(r.world.calls.destroyed[0]).toEqual([qaRunId(0), qaRunId(1)]);
+    expect(r.world.calls.destroyed[0]).toEqual([qaRunId(0), qaRunId(1), qaRunId(2)]);
     expect(r.world.boxes.has(qaRunId(1))).toBe(false);
   });
 });
@@ -723,16 +732,20 @@ describe("fork rev verification is labelled, never a silent null", () => {
 });
 
 describe("R2 — attribution inside the next leg's submitting window (A-2, B-3, E-5, B-11)", () => {
-  test("positive control: the fork-ahead leg's box/key exist BEFORE its record or runId — the observe waits for the ack, not a false red", async () => {
+  test("positive control: the fork-ahead leg's box/key exist BEFORE its record or runId — attributed once it acks, never a false red", async () => {
     const r = await round({}, { recordLag: true });
     expect(r.outcome.failure).toBeUndefined();
     expect(assertAc6ObserveReadOnly(r.files)).toEqual([]);
+    // In the #914 back-to-back shape the observe reads post-approve, when no
+    // sibling submit is in flight — the in-flight ack-wait has nothing to wait
+    // for (it stays as defense in depth; the stray-box controls prove the
+    // fail-closed charge still fires on what IS unattributable).
     const first = JSON.parse((r.files.find((f) => f.name.endsWith("-z3-qa-run-observe.json")) as LegFile).text);
-    expect(first.settlePolls).toBeGreaterThan(0);
+    expect(first.settlePolls).toBe(0);
   });
 
   test("AC6 negative control: a fresh box still unattributable once no sibling is submitting stays charged", async () => {
-    const r = await round({ protocolFleet: async () => ({ runIds: [], requestIds: [], submitting: [] }) }, { recordLag: true });
+    const r = await round({ protocolFleet: async () => ({ runIds: [], requestIds: [], submitting: [] }) }, { strayBoxAtObserve: true });
     some(assertAc6ObserveReadOnly(r.files), /provisioned a box/);
   });
 
