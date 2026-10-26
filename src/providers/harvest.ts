@@ -229,6 +229,9 @@ const BOX_HOME_SOURCES = [
  */
 const BOX_RUN_SOURCES = [
   "journal/final.json",
+  // #467: a QA hunt phase's findings (src/phase-engine/findings-sidecar.ts);
+  // absent on every other run and skipped silently like any optional source.
+  "journal/findings.json",
   "trace/trace.db",
   "trace/trace.db-wal",
   "trace/events.jsonl",

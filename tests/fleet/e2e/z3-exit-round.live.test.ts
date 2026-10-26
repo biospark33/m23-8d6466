@@ -40,12 +40,14 @@
  * (prerequisites, image rebuild + container recreate, mount, real-cli, agent
  * token, participants, the parking manifest, env, GO, run, evidence commit).
  *
- * UPSTREAM BLOCKERS (round-plan.ts Z3_UPSTREAM_BLOCKERS): #467 (harvest
- * persistence) and #465 (findings-only runs strand in `pausing`). While the
- * list is non-empty this test refuses FIRST, by name, before the GO gate,
- * arming, or any spend; unblocking is the code change that deletes an entry.
- * `readHarvest` still refuses by name as a second line of defence, and a QA
- * leg reading `pausing` past PAUSING_BOUND_MS is red with #465 named.
+ * UPSTREAM BLOCKERS (round-plan.ts Z3_UPSTREAM_BLOCKERS): #467 (the findings
+ * sidecar is merged but in-box — the image re-publish + pin adoption is owed).
+ * While the list is non-empty this test refuses FIRST, by name, before the GO
+ * gate, arming, or any spend; unblocking is the code change that deletes the
+ * entry. #465 (findings-only runs stranding in `pausing`) is fixed host-side;
+ * a QA leg reading `pausing` past PAUSING_BOUND_MS is still red with #465
+ * named, as the regression alarm. `readHarvest` takes its default — the
+ * harvested sidecar under RUNS_DIR.
  */
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
@@ -177,12 +179,6 @@ describe("Z3 live Tier-2 cross-repo exit round (scheduled fire; operator GO-gate
               receipts,
             );
             return { receipts, problems };
-          },
-          // Second line of defence behind the pre-fire blocker refusal.
-          readHarvest: () => {
-            throw new Error(
-              "findings-retain is blocked upstream: #467 (harvest persistence — no merged code persists a QA leg's findings JSON) and #465 (findings-only runs strand in `pausing`)",
-            );
           },
         });
 

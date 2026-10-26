@@ -101,6 +101,11 @@ const HarvestFindingSchema = z
   })
   .strict();
 
+/** One finding as a harvest must carry it — the per-entry gate a host-side reader filters by (#467). */
+export function isHarvestFinding(f: unknown): boolean {
+  return HarvestFindingSchema.safeParse(f).success;
+}
+
 /**
  * The structured harvest JSON a QA leg emits. Bounded, structured-only; the
  * `lens` field lets the normalizer prove no lens mixing (a harvest claiming

@@ -175,9 +175,10 @@ describe("operator-GO gate", () => {
 
   test("the upstream blockers refuse the round by name while the list is non-empty", () => {
     const line = upstreamBlockerRefusal();
-    expect(Z3_UPSTREAM_BLOCKERS.map((b) => b.issue)).toEqual(["#467", "#465"]);
+    // #465 left with its host-side fix; #467 waits on the image re-publish only.
+    expect(Z3_UPSTREAM_BLOCKERS.map((b) => b.issue)).toEqual(["#467"]);
     expect(line).toContain("#467");
-    expect(line).toContain("#465");
+    expect(line).not.toContain("#465");
     expect(line).toContain("before any spend");
     expect(upstreamBlockerRefusal([])).toBe("");
   });

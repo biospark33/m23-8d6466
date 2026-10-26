@@ -2010,7 +2010,7 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
 
     /**
      * The outcome → exit map (the registry's declared table, DF3.7 AC5):
-     * driven 0 · terminal run-engine-dead 5 · the transient pair
+     * driven 0 · completed (findings-only, #465) 0 · terminal run-engine-dead 5 · the transient pair
      * (run-completion-unobserved, box-unreachable) 1 · non-terminal unsettled
      * 0 (maxTicks — the foreground verb never sets it) · every refusal 5 ·
      * vetoed/approval-failed/chain-failed/handed-off 6.
@@ -2025,6 +2025,11 @@ async function runObserve(ctx: VerbCtx): Promise<number> {
     if (outcome.kind === "driven") {
       line.chainMs = outcome.chainMs;
       if (outcome.markerOk !== undefined) line.markerOk = outcome.markerOk;
+      code = 0;
+    } else if (outcome.kind === "completed") {
+      // (#465) a findings-only QA leg settled terminal — nothing to approve.
+      line.chainMs = outcome.chainMs;
+      line.reason = outcome.reason;
       code = 0;
     } else if (outcome.kind === "unsettled") {
       const t = outcome.terminal;
@@ -4806,7 +4811,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           "approval-not-decidable",
           `${runIdArg} is ${sanitizeLabel(outcome.state, 64)}, not awaiting approval`,
           outcome.state === "pausing"
-            ? "the run is still being torn down for its pause — re-run reverify (`bun scripts/reverify.ts <run-id>`): it re-presents the bound report and finishes the promotion; `fleet status` reports `pausing` until then"
+            ? "the run is still being torn down for its pause — re-run `fleet observe <run-id>`: it re-drives the chain's tail (reverify re-presents the bound report and promotes it, or a findings-only QA leg settles `completed` — #465); `fleet status` reports `pausing` until then"
             : "only a run paused at the pre-PR gate can be decided; `fleet status` shows which are",
           { runId: runIdArg, state: sanitizeLabel(outcome.state, 64) },
         );

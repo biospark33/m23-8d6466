@@ -1576,6 +1576,228 @@ describe("the chain: driven, ok:false, vetoed (real teardownSandbox → reverify
   }, 60_000);
 });
 
+const QA_WORK_KEY = "w:qa-20261016T120000Z-correctness";
+
+describe("#465 — a findings-only QA leg settles terminal, never strands in pausing", () => {
+  /** The A2 leg shape: settled marker, a base the host knows, no sandbox ref (zero commits), the qaWorkKey stamp. */
+  async function qaLeg(
+    s: ReturnType<typeof store>,
+    host: GitHost,
+    runId: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<{ driver: ProbeDriver; vmName: string }> {
+    const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+    const rec = await createRun(driver, s.store, { runId, recordAuditLink: () => {} });
+    // An `undefined` in `extra` DROPS that namespace (the unstamped control).
+    const extensions = Object.fromEntries(
+      Object.entries({ budget: { repoSlug: "acme/widget", issueId: "7" }, qaWorkKey: { workKey: QA_WORK_KEY }, ...extra }).filter(
+        ([, v]) => v !== undefined,
+      ),
+    );
+    s.store.set(runId, { commitSha: host.baseSha, requestId: "req-df37", extensions } as never);
+    driver.plan = [{ body: { runId, ok: true } }];
+    return { driver, vmName: rec.vmName! };
+  }
+
+  /** The pulled journal a landed harvest leaves at `<runsDir>/<runId>-artifacts/journal/final.json`. */
+  function plantHarvest(s: ReturnType<typeof store>, runId: string, ok = true): void {
+    const dir = path.join(s.dir, `${runId}-artifacts`, "journal");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "final.json"), `${JSON.stringify({ runId, ok, completedAt: "2026-10-20T00:00:00.000Z" })}\n`);
+  }
+
+  /**
+   * The fake box has no tmpfs run root, so teardown's real pull lands an
+   * artifacts dir WITHOUT the journal (and replaces the host dir wholesale).
+   * The teardown's audit link fires after that pull and before reverify — the
+   * seam that plants the journal a real box's pull would have carried.
+   */
+  const harvestOnTeardown = (s: ReturnType<typeof store>, runId: string, ok = true) => (link: ProviderAuditLink) => {
+    if (link.event === "teardown") plantHarvest(s, runId, ok);
+  };
+
+  test("nothing-to-verify on a QA leg → completed{findings-only}; the pre-registration is withdrawn and fleet result reads completed, terminal", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      const { driver, vmName } = await qaLeg(s, host, "run-qa1");
+      const out = await observeAndDriveChain(
+        "run-qa1",
+        baseDeps("run-qa1", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir, recordAuditLink: harvestOnTeardown(s, "run-qa1") }),
+      );
+      expect(out).toMatchObject({ kind: "completed", reason: "findings-only" });
+      const rec = s.store.get("run-qa1");
+      expect(rec.closedAt).toBeTruthy();
+      expect(rec.extensions?.approval).toBeUndefined();
+      expect(rec.extensions?.qaWorkKey?.workKey).toBe(QA_WORK_KEY); // the rest of the record is untouched
+      expect(driver.destroyed).toEqual([vmName]);
+      expect(buildResult(s.store, "run-qa1")).toMatchObject({ status: "completed", terminal: true });
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("negative control: the SAME leg without the qaWorkKey stamp stays vetoed in pausing (a code run with zero commits did nothing)", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      const { driver } = await qaLeg(s, host, "run-qa2", { qaWorkKey: undefined });
+      const out = await observeAndDriveChain(
+        "run-qa2",
+        baseDeps("run-qa2", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir, recordAuditLink: harvestOnTeardown(s, "run-qa2") }),
+      );
+      expect(out).toMatchObject({ kind: "vetoed", reason: "nothing-to-verify" });
+      expect(buildResult(s.store, "run-qa2")).toMatchObject({ status: "pausing", terminal: false });
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("negative control: a QA leg with NO pulled journal stays vetoed — absence of a loss code is not a harvest", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      const { driver } = await qaLeg(s, host, "run-qa3");
+      const out = await observeAndDriveChain(
+        "run-qa3",
+        baseDeps("run-qa3", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+      );
+      expect(out).toMatchObject({ kind: "vetoed", reason: "nothing-to-verify" });
+      expect(s.store.get("run-qa3").extensions?.teardown?.artifactsCode).toBeUndefined(); // no loss was ever written
+      expect(s.store.get("run-qa3").extensions?.approval?.state).toBe("pausing");
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("negative control: a harvested marker reading ok:false stays vetoed — a failed hunt has zero commits too", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      const { driver } = await qaLeg(s, host, "run-qa8");
+      driver.plan = [{ body: { runId: "run-qa8", ok: false } }];
+      const out = await observeAndDriveChain(
+        "run-qa8",
+        baseDeps("run-qa8", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir, recordAuditLink: harvestOnTeardown(s, "run-qa8", false) }),
+      );
+      expect(out).toMatchObject({ kind: "vetoed", reason: "nothing-to-verify" });
+      expect(buildResult(s.store, "run-qa8")).toMatchObject({ status: "pausing", terminal: false });
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("negative control: a LIVE artifacts loss code vetoes even with a journal on disk", async () => {
+    quietLogs();
+    const s = store();
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-rc-host-"));
+    try {
+      seedRun(s.store, "run-qa6", { extensions: { qaWorkKey: { workKey: QA_WORK_KEY } } });
+      s.store.close("run-qa6");
+      s.store.set("run-qa6", {
+        extensions: {
+          approval: { state: "pausing", origin: "observe-chain" },
+          teardown: { artifactsCode: "artifacts-failed", artifactsMessage: "x", artifactsFailedAt: "2026-10-20T00:00:00.000Z" },
+        },
+      } as never);
+      plantHarvest(s, "run-qa6");
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      const out = await promoteStrandedPause("run-qa6", baseDeps("run-qa6", { driver, store: s.store, runsDir: s.dir, hostRoot: host }));
+      expect(out.kind).toBe("vetoed");
+      expect(s.store.get("run-qa6").extensions?.approval?.state).toBe("pausing");
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+      s.cleanup();
+    }
+  });
+
+  test("a RECOVERED pull (stale loss cleared to the empty sentinel) completes — the empty code is no loss", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      const { driver } = await qaLeg(s, host, "run-qa7", {
+        teardown: { artifactsCode: "artifacts-failed", artifactsMessage: "x", artifactsFailedAt: "2026-10-20T00:00:00.000Z" },
+      });
+      const out = await observeAndDriveChain(
+        "run-qa7",
+        baseDeps("run-qa7", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir, recordAuditLink: harvestOnTeardown(s, "run-qa7") }),
+      );
+      // teardown's successful pull rewrote the stale code to "" (teardown.ts's clear-on-success)
+      expect(s.store.get("run-qa7").extensions?.teardown?.artifactsCode).toBe("");
+      expect(out).toMatchObject({ kind: "completed", reason: "findings-only" });
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("the stranded A2 shape (closed + chain pausing, unbound) is verb-resolvable: fleet observe promotes it to completed", async () => {
+    quietLogs();
+    const s = store();
+    const host = gitHost();
+    try {
+      seedRun(s.store, "run-qa4", {
+        commitSha: host.baseSha,
+        extensions: { budget: { repoSlug: "acme/widget", issueId: "7" }, qaWorkKey: { workKey: QA_WORK_KEY } },
+      });
+      s.store.close("run-qa4");
+      s.store.set("run-qa4", { extensions: { approval: { state: "pausing", origin: "observe-chain" } } } as never);
+      plantHarvest(s, "run-qa4");
+      expect(buildResult(s.store, "run-qa4")).toMatchObject({ status: "pausing", terminal: false }); // the #465 strand
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      const out = await observeAndDriveChain(
+        "run-qa4",
+        baseDeps("run-qa4", { driver, store: s.store, runsDir: s.dir, hostRoot: host.dir }),
+      );
+      expect(out).toMatchObject({ kind: "completed", reason: "findings-only" });
+      expect(driver.calls.length).toBe(0); // post-teardown: no box is touched
+      expect(buildResult(s.store, "run-qa4")).toMatchObject({ status: "completed", terminal: true });
+    } finally {
+      host.cleanup();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("re-observing a completed QA leg refuses run-already-completed — never the misleading re-run-reverify remediation", async () => {
+    const s = store();
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-rc-host-"));
+    try {
+      seedRun(s.store, "run-qa5", { extensions: { qaWorkKey: { workKey: QA_WORK_KEY } } });
+      s.store.close("run-qa5");
+      plantHarvest(s, "run-qa5");
+      const driver = new ProbeDriver(path.join(s.dir, "boxes"));
+      const out = await observeAndDriveChain(
+        "run-qa5",
+        baseDeps("run-qa5", { driver, store: s.store, runsDir: s.dir, hostRoot: host }),
+      );
+      expect(out).toMatchObject({ kind: "refused", code: "run-already-completed" });
+      expect(driver.calls.length).toBe(0);
+      // A CANCELLED leg (or one closed with no harvested ok marker) keeps the neutral wording.
+      seedRun(s.store, "run-qa9", { extensions: { qaWorkKey: { workKey: QA_WORK_KEY }, cancel: { state: "cancelled", at: "2026-10-20T00:00:00.000Z" } } });
+      s.store.close("run-qa9");
+      plantHarvest(s, "run-qa9");
+      seedRun(s.store, "run-qa10", { extensions: { qaWorkKey: { workKey: QA_WORK_KEY } } });
+      s.store.close("run-qa10");
+      for (const id of ["run-qa9", "run-qa10"]) {
+        const o = await observeAndDriveChain(id, baseDeps(id, { driver, store: s.store, runsDir: s.dir, hostRoot: host }));
+        expect(o).toMatchObject({ kind: "refused", code: "run-already-closed" });
+      }
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+      s.cleanup();
+    }
+  });
+});
+
 describe("#382 — the chain registers the gate BEFORE the close (the poller window)", () => {
   test("a vetoed chain leaves closedAt + chain-pausing — the poller payload reads pausing, NEVER completed (the regression)", async () => {
     quietLogs();

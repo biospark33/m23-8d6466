@@ -86,7 +86,7 @@ const FIXER_MODEL = "deepseek/deepseek-v3.2";
  * host engine holds it to.
  */
 const SCHEMA_INSTRUCTION =
-  'Reply with ONLY a JSON object of the shape {"changedFiles": string[], "result": {"summary": string}} — changedFiles is MANDATORY (use [] when no files changed). No prose outside the JSON.';
+  'Reply with ONLY a JSON object of the shape {"changedFiles": string[], "result": {"summary": string, ...any further fields the task asks for}} — changedFiles is MANDATORY (use [] when no files changed). No prose outside the JSON.';
 
 const FIXER_PROMPT = [
   "You are the fixer worker for a live e2e run. In the current directory:",

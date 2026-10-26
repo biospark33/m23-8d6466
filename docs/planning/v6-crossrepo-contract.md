@@ -125,11 +125,13 @@ is missing.
 - **Upstream blockers closed.** The test refuses FIRST, by name, while
   `Z3_UPSTREAM_BLOCKERS` (`scripts/z3/round-plan.ts`) is non-empty:
   - [#467](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/467): harvest
-    persistence. No merged code persists a QA leg's findings JSON.
-  - [#465](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/465): findings-only
-    runs strand in `pausing`.
+    persistence. The findings sidecar writer (`src/phase-engine/findings-sidecar.ts`) is
+    merged, but it runs in the box: the exe.dev image must be re-published and its pin
+    adopted before a live QA leg writes `journal/findings.json`.
 
-  Unblocking is the code change that deletes the entry.
+  [#465](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/465) (findings-only
+  runs stranding in `pausing`) is fixed host-side and no longer listed. Unblocking is the code
+  change that deletes the entry.
 - A2, Z2 and M2.1 are done. The fork counterpart (`protocol-z3-exit-round.ts`,
   `scripts/solstice/z3-exit-round.ts`) is merged to the fork's `dev`. The T2 box image re-pin
   ritual has landed.

@@ -1966,6 +1966,20 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     expect(extractedNames(runId)).toEqual(["journal/final.json"]);
   }, 30_000);
 
+  test("#467: a QA hunt's findings sidecar rides out beside the marker", async () => {
+    const runId = "hvst-467-findings";
+    const s = await boxSetup(runId, 1);
+    mkdirSync(join(boxRunRoot, "journal"), { recursive: true });
+    writeFileSync(join(boxRunRoot, "journal", "final.json"), '{"ok":true}');
+    writeFileSync(join(boxRunRoot, "journal", "findings.json"), '{"schemaVersion":1,"findings":[]}');
+
+    const res = await pullArtifacts(hd(s.hostDir), runId);
+
+    expect(res.artifacts).toBe("pulled");
+    expect(extractedNames(runId)).toEqual(["journal/final.json", "journal/findings.json"]);
+    expect(JSON.parse(readFileSync(join(artifactsDir(runId), "journal", "findings.json"), "utf8"))).toEqual({ schemaVersion: 1, findings: [] });
+  }, 30_000);
+
   test("nothing anywhere is NOARTIFACTS, NOT a silent success — the two outcomes stay distinguishable", async () => {
     const runId = "hvst-ac4-nothing";
     const s = await boxSetup(runId, 1); // no checkout artifacts, empty /run, empty $HOME

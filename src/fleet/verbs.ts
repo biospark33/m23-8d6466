@@ -546,6 +546,7 @@ export function listVerbs(): VerbEntry[] {
       ],
       // The six exits, one producer each (DF3.7 AC5; the story's exit table):
       // 0 = observed and driven (the chain landed and the gate registered),
+      // a findings-only QA leg settled `completed` (#465: nothing to approve),
       // and the non-terminal unsettled return (maxTicks — the foreground verb
       // never sets it; DF3.8's sweep does).
       // 1 = TRANSIENT, both arms re-runnable with the box left alive and
@@ -557,6 +558,7 @@ export function listVerbs(): VerbEntry[] {
       // assert, before the module is ever entered.
       // 5 = refused before anything was mutated and identical on every retry:
       // the module's refusals (run-engine-dead, run-already-closed,
+      // run-already-completed,
       // approval-already-registered, record-names-no-box,
       // record-not-pausing), the verb's own reverify-host-root-unusable
       // start-up refusal, and this verb's run-lock refusal.
