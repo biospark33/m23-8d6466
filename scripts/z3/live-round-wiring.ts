@@ -715,6 +715,25 @@ export function z3LiveDeps(opts: {
         await sleep(POLL_MS);
       }
     },
+    settleAndTeardown: async (runId) => {
+      // The A2 cadence pair (cadence10.sh): `fleet status` until the in-box
+      // engine settles (marker verdict ok/not-ok/engine-failed), then
+      // `fleet teardown` — the teardown is what CLOSES the record, the only
+      // transition the fork's leg poller can observe (`fleet result` is a pure
+      // record read; #913). Never `fleet observe`: its reverify/gate arms are
+      // approval surface, not a QA leg's job.
+      for (;;) {
+        const out = fleet(["status", runId, "--driver", "exedev", "--dir", RUNS_DIR]);
+        const state = /"state":"([a-z-]+)"/.exec(out.stdout)?.[1] ?? "unreadable";
+        if (state === "ok" || state === "not-ok" || state === "engine-failed") {
+          const t = fleet(["teardown", runId, "--driver", "exedev", "--dir", RUNS_DIR]);
+          const tail = `${t.stdout}\n${t.stderr}`.trim().split("\n").pop() ?? "";
+          return { state, teardownExit: t.exitCode, teardownTail: tail.slice(0, 400) };
+        }
+        pastDeadline(`run ${runId} reaching engine settle (last state ${state})`);
+        await sleep(POLL_MS);
+      }
+    },
     inventory: async () => {
       const out = execFileSync("ssh", ["exe.dev", "ls", "--json"], { timeout: 60_000, encoding: "utf8" });
       const vms = (JSON.parse(out) as { vms?: Array<{ vm_name?: string; name?: string }> }).vms;

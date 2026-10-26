@@ -209,6 +209,12 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
       teardown(runId); // the observe chain's teardown reaps the box + revokes the key before either state
       return want === "terminal" ? { status: "completed", terminal: true } : { status: "awaiting-approval", terminal: false };
     },
+    settleAndTeardown: async (runId) => {
+      // The A2 cadence pair, modeled: the settle-then-teardown closes the leg's
+      // record (idempotent with awaitResult's model of the same reaping).
+      teardown(runId);
+      return { state: "ok", teardownExit: 0, teardownTail: "teardown ok" };
+    },
     inventory: async () => [...boxes],
     readRecord: (runId) => (hidden.has(runId) ? null : (records.get(runId) ?? null)),
     recordsForRequestId: (requestId) => [...records.values()].filter((r) => r.requestId === requestId && !hidden.has(r.runId)),

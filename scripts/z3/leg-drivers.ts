@@ -107,6 +107,14 @@ export interface Z3Deps {
   restartFork: () => Promise<void>;
   /** Polls the driver-agnostic `fleet result` seam until the wanted state. */
   awaitResult: (runId: string, want: "terminal" | "awaiting-approval") => Promise<{ status: string; terminal: boolean }>;
+  /**
+   * The A2 cadence pair (`fleet status` engine-settle → `fleet teardown`):
+   * the teardown CLOSES the fleet record, the only transition the fork's leg
+   * poller can observe (`fleet result` is a pure record read — #913's live
+   * mechanism, three rounds red'd on the missing closure). Without it the
+   * record never reads terminal and the leg can only time out.
+   */
+  settleAndTeardown: (runId: string) => Promise<{ state: string; teardownExit: number; teardownTail: string }>;
   /** The provider's box listing (names). */
   inventory: () => Promise<string[]>;
   readRecord: (runId: string) => RecordView | null;
@@ -309,7 +317,10 @@ export async function driveKillAndProvision(
 }
 
 /** After teardown: re-reads the record + inventory; equality with the live box, none left (re-read once if teardown lags). */
-export async function driveBoxForensics(d: Z3Deps, input: { runId: string; liveBoxesForRun: string[] }) {
+export async function driveBoxForensics(
+  d: Z3Deps,
+  input: { runId: string; liveBoxesForRun: string[]; settle?: { state: string; teardownExit: number; teardownTail: string } },
+) {
   const rec = d.readRecord(input.runId);
   let after = boxesFor(await d.inventory(), input.runId, rec?.vmName);
   if (after.length > 0) {
@@ -322,12 +333,16 @@ export async function driveBoxForensics(d: Z3Deps, input: { runId: string; liveB
     problems.push(`live boxes ${JSON.stringify(input.liveBoxesForRun)} ≠ record vmName ${rec?.vmName}`);
   }
   if (after.length !== 0) problems.push(`box(es) outlived teardown: ${after.join(", ")}`);
+  if (input.settle && input.settle.teardownExit !== 0) problems.push(`teardown exit ${input.settle.teardownExit}: ${input.settle.teardownTail}`);
   settle(d, "box-forensics", problems, {
     runId: input.runId,
     recordRunId: rec?.runId ?? null,
     recordVmName: rec?.vmName ?? null,
     liveBoxesForRun: input.liveBoxesForRun,
     afterTeardownBoxesForRun: after,
+    // The QA legs' settle receipts (undefined on the code run: the approval
+    // gate settles that record, not a teardown).
+    ...(input.settle ? { recordSettle: input.settle } : {}),
   });
 }
 
@@ -905,8 +920,12 @@ export async function runZ3Round(
       const lens = run.lens as string;
       const baseline = await snapshot(d);
       const prov = await driveKillAndProvision(d, { stepId: run.stepId, inventoryBefore: baseline.boxes, track });
+      // The closure the fork's poller is waiting on: engine settle → teardown.
+      // Must run BEFORE awaitResult — a pure record read cannot see terminal
+      // until this closes the record (#913's live mechanism).
+      const legSettle = await d.settleAndTeardown(prov.runId);
       await d.awaitResult(prov.runId, "terminal");
-      await driveBoxForensics(d, { runId: prov.runId, liveBoxesForRun: prov.liveBoxesForRun });
+      await driveBoxForensics(d, { runId: prov.runId, liveBoxesForRun: prov.liveBoxesForRun, settle: legSettle });
       await driveQaRunObserve(d, { lens, runId: prov.runId, baseline });
       const r = await driveFindingsRetain(d, { lens, runId: prov.runId });
       retainedByLens[lens] = r.documentIds;
