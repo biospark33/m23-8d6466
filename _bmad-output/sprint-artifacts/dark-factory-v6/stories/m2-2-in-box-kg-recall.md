@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6b (Autonomy — memory lane, the un-gated second lane, lane story 2 of 3: M2.1 → M2.2 → M2.3 — note M2.1 itself ships in v6a; E21-independent by the physical cut line)
-**Status:** done — PR #416 merged to dev 2026-10-08 (merge 6dff0ba1, head 993136d0). The image re-pin ritual is operator GO and NOT fired (blocks all T2).
+**Status:** done — PR #416 merged to dev 2026-10-08 (merge 6dff0ba1, head 993136d0). The image re-pin ritual is operator GO; it has since run on a tree containing this story (publish+adopt 9ae282c9 2026-10-16 through PR #463 2026-10-18), and A2 live T2 legs fired under it.
 
 ## Spec Reference
 
@@ -56,7 +56,7 @@ This story builds the in-box half of the memory lane: a pi extension registering
 | M2.1 gateway | VPS compose service behind the Caddy allowlist (Z4 profile) | `bun test tests/memgate/` (M2.1's gateway + lifecycle suites) green **before** this story starts |
 | Dedicated Hindsight | M1.1-provisioned instance, `qds-` banks | `src/hindsight/round-trip-verifier.ts` green (real) or unit legs in mock mode |
 | Roster machinery | DF1.5 schema + `buildWorkerArgv` validation | existing roster/argv tests green **before** and **byte-identical after** |
-| Image pin | `verify-image-pin` currently RED (documented state: ee802669 MANIFEST_UNKNOWN) | NOT a prerequisite to start dev legs; the ritual fire is operator-gated (AC5) |
+| Image pin | `verify-image-pin` was RED at authoring (ee802669 MANIFEST_UNKNOWN); UPDATE 2026-10-24: its `verify (default)` + `verify (dev)` legs are green on dev after the ritual ran (only the scheduled `base-drift` alarm job is red) | NOT a prerequisite to start dev legs; the ritual fire is operator-gated (AC5) |
 
 > No live box, no real LLM/model spend, and no fired re-pin are prerequisites of this story's dev legs — they are mock-first (charter M1.2 precedent). AC5's fire-and-adopt leg is the only GO-gated item.
 
@@ -106,7 +106,7 @@ This story builds the in-box half of the memory lane: a pi extension registering
 - [x] **Test (teardown):** `tests/memory/kg-recall-teardown.test.ts` green — revoke→verify precedes destroy (11 pass / 0 fail; ordering asserted at the `teardownSandbox` hook fire point, covering every destroy path). Failed-delivery compensation is covered in `tests/fleet/dispatch-memory-seam.test.ts` (delivery-throws → revoke+verify + original error) — this line's file attribution corrected per review round 1, F-023.
 - [x] **Contract:** `QDS_KG_RECALL_KEY` / `QDS_KG_GATEWAY_URL` + char ceiling registered (flagged to the DD register — Deviation 1's seam is single-named; the `no-auth` refusal token per Deviation 2 stands flagged); roster grant documented in the roster header (`config/rosters/qds-default.roster.yaml:6-7`).
 - [x] **Security:** audit of the extension source shows zero write-verb paths; the extension's sanitize pass + ceiling asserted end-to-end at mock tier; the permission-independence escalation-payload test green in `kg-recall-extension.test.ts` — a recall payload carrying escalation text leaves tool surface/permissions unchanged and lands only as quoted data (INV-M2-2/AC3, the load-bearing fence).
-- [x] **Ritual (operator-gated):** runbook written (`docs/superpowers/specs/2026-10-08-m2-2-repin-ritual-runbook.md`); NOT fired — after operator GO: rebuild, publish, adopt, `verify-image-pin` verify leg green, base-drift-by-design documented, evidence file recorded (runbook §4; batching gate §3).
+- [x] **Ritual (operator-gated):** runbook written (`docs/superpowers/specs/2026-10-08-m2-2-repin-ritual-runbook.md`); NOT fired at merge — UPDATE 2026-10-24: since fired (publish+adopt 9ae282c9 2026-10-16, 5c541069 2026-10-17, PRs #461/#462/#463 2026-10-18; A2 live T2 legs ran under image f3f1d6cb). Steps as authored: rebuild, publish, adopt, `verify-image-pin` verify leg green, base-drift-by-design documented, evidence file recorded (runbook §4; batching gate §3).
 - [x] **Integration:** GitNexus `impact()` before editing any shared symbol — `mintAndDeliverKey` HIGH (mitigated adds-only by design), `observeAndDriveChain`/`guardedTeardown` LOW; `detect_changes({scope:"compare", base_ref:"dev"})` run pre-commit — 12 changed symbols / 7 files / medium risk, all affected processes route through `dispatch` (the designed insert point), scope matched the intended file set exactly.
 - [x] **Test (e2e demo — MANDATORY):** mock-tier chained demo — granted-role spawn → `-e` pair present → recall → truncate → teardown revoke-verify, using only this story's code plus M2.1 (`tests/memory/kg-recall-e2e-demo.test.ts`, 4 pass / 0 fail).
 

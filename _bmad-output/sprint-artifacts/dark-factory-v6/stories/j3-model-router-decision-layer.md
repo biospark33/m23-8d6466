@@ -138,7 +138,7 @@ Provenance, stated once for this whole section: the M2.2 surface (working tree o
 
 ## Dev Agent Record
 
-**Status: done — implemented, 2 bmad-code-review rounds, branch-gated, PR to dev.**
+**Status: done — implemented, 2 bmad-code-review rounds, branch-gated, PR #427 merged to dev 2026-10-14 (5b03a7b7).**
 
 ### Completion summary
 
