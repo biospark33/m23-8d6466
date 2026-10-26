@@ -49,38 +49,46 @@ const clean = log.stdout
 const adoptBlock = /export const DEFAULT_IMAGE_REF = \\?"(ghcr\.io[^"\\]+)\\?";\s*\n\s*export const DEFAULT_IMAGE_BUILD_ID = \\?"([0-9a-f]{16})\\?";/g;
 let adopt: RegExpExecArray | null = null;
 for (let m = adoptBlock.exec(clean); m !== null; m = adoptBlock.exec(clean)) adopt = m;
-if (!adopt) {
-  console.error("gate log carries no adoption block — was this actually the pin-gate failure?");
+// A build-time TOFU failure (drift inside a Dockerfile RUN) kills "Build and
+// push" before the pin-gate step runs, so the log carries no driver block but
+// MAY carry measured TOFU literals. Adopt what the log proves; refuse only a
+// log with neither (publish run 40317122238 is the first TOFU-shape drift).
+const tofuLines = [...clean.matchAll(/R3-a TOFU: [^"]*? hashes to ([0-9a-f]{64}), not (NODE_SHA256|OPENRIG_TREE_SHA256)=/g)];
+if (!adopt && tofuLines.length === 0) {
+  console.error("gate log carries no adoption block and no TOFU drift — was this actually a pin failure?");
   process.exit(2);
 }
-const [, newRef, newBuildId] = adopt;
+const [newRef, newBuildId] = [adopt?.[1], adopt?.[2]];
 
-const driver = "src/providers/exedev/driver.ts";
-let driverSrc = await Bun.file(driver).text();
-let driverChanged = false;
-driverSrc = driverSrc.replace(
-  /(export const DEFAULT_IMAGE_REF =\s*\n\s*")([^"]+)(")/,
-  (whole, a, old, c) => {
-    if (old === newRef) return whole;
-    driverChanged = true;
-    return a + newRef + c;
-  },
-);
-driverSrc = driverSrc.replace(
-  /(export const DEFAULT_IMAGE_BUILD_ID = ")([0-9a-f]{16})(")/,
-  (whole, a, old, c) => {
-    if (old === newBuildId) return whole;
-    driverChanged = true;
-    return a + newBuildId + c;
-  },
-);
-if (driverChanged) await Bun.write(driver, driverSrc);
-console.log(`driver.ts: ${driverChanged ? "REF/BUILD_ID adopted" : "already current"}`);
+if (newRef && newBuildId) {
+  const driver = "src/providers/exedev/driver.ts";
+  let driverSrc = await Bun.file(driver).text();
+  let driverChanged = false;
+  driverSrc = driverSrc.replace(
+    /(export const DEFAULT_IMAGE_REF =\s*\n\s*")([^"]+)(")/,
+    (whole, a, old, c) => {
+      if (old === newRef) return whole;
+      driverChanged = true;
+      return a + newRef + c;
+    },
+  );
+  driverSrc = driverSrc.replace(
+    /(export const DEFAULT_IMAGE_BUILD_ID = ")([0-9a-f]{16})(")/,
+    (whole, a, old, c) => {
+      if (old === newBuildId) return whole;
+      driverChanged = true;
+      return a + newBuildId + c;
+    },
+  );
+  if (driverChanged) await Bun.write(driver, driverSrc);
+  console.log(`driver.ts: ${driverChanged ? "REF/BUILD_ID adopted" : "already current"}`);
+} else {
+  console.log("driver.ts: skipped — no gate block in this log (build-time TOFU shape); the gate-verdict run after re-dispatch carries it");
+}
 
-// ── 2. TOFU tree ARGs: gate's measured-hash lines -> Dockerfile ARG + test copy ──
-const tofu = [...clean.matchAll(/R3-a TOFU: [^"]*? hashes to ([0-9a-f]{64}), not (NODE_SHA256|OPENRIG_TREE_SHA256)=/g)];
+// ── 2. TOFU tree ARGs: measured-hash lines -> Dockerfile ARG + test copy ────
 const measured = new Map<string, string>();
-for (const m of tofu) {
+for (const m of tofuLines) {
   if (m[1] === undefined || m[2] === undefined) continue;
   measured.set(m[2], m[1]);
 }
@@ -89,28 +97,38 @@ const dockerfile = "oci/exedev/Dockerfile";
 let dfSrc = await Bun.file(dockerfile).text();
 const test = "tests/scripts/build-exedev-image.test.ts";
 let testSrc = await Bun.file(test).text();
-let tofuChanged = false;
+let dfChanged = 0;
+let testCopyChanged = 0;
 for (const [name, hex] of measured) {
     if (name === undefined || hex === undefined) continue;
   dfSrc = dfSrc.replace(new RegExp(`(ARG ${name}=)([0-9a-f]{64})`), (whole, a, old) => {
     if (old === hex) return whole;
-    tofuChanged = true;
+    dfChanged++;
     return a + hex;
   });
   testSrc = testSrc.replace(
-    new RegExp(`(case "${name}":\\s*\\n\\s*return ")([0-9a-f]{64})(")`),
+    // the case arm may carry comments between `case` and `return` (the
+    // 2026-10-16 re-pin note sits there; run 40317122238's adoption first
+    // missed the copy for exactly this reason)
+    new RegExp(`(case "${name}":\\s*\\n(?:\\s*//[^\\n]*\\n)*\\s*return ")([0-9a-f]{64})(")`),
     (whole, a, old, c) => {
       if (old === hex) return whole;
-      tofuChanged = true;
+      testCopyChanged++;
       return a + hex + c;
     },
   );
 }
-if (tofuChanged) {
-  await Bun.write(dockerfile, dfSrc);
-  await Bun.write(test, testSrc);
+if (dfChanged) await Bun.write(dockerfile, dfSrc);
+if (testCopyChanged) await Bun.write(test, testSrc);
+const tofuSites: string[] = [];
+for (const [name, hex] of measured) {
+  if (!dfSrc.includes(`ARG ${name}=${hex}`) && dfSrc.includes(`ARG ${name}=`)) tofuSites.push(`Dockerfile ARG ${name}`);
+  if (!testSrc.includes(hex)) tofuSites.push(`measuredDefault ${name}`);
 }
-console.log(`TOFU ARGs + measuredDefault: ${tofuChanged ? `adopted ${[...measured.keys()].join(",")}` : measured.size ? "already current" : "no TOFU drift in this run"}`);
+if (tofuSites.length) {
+  console.log(`TOFU: WARNING sites not adopted — ${tofuSites.join(", ")} (pattern missed — triage by hand)`);
+}
+console.log(`TOFU ARGs + measuredDefault: ${dfChanged + testCopyChanged ? `adopted (${dfChanged} ARG + ${testCopyChanged} test copy)` : measured.size ? "already current" : "no TOFU drift in this run"}`);
 
 // ── 3. tracked-inputs digest: not in the gate log — measure by running the test ──
 const run = spawnSync("bun", ["test", "tests/scripts/build-exedev-image.test.ts"], { encoding: "utf8" });
@@ -147,7 +165,7 @@ if (received.length === 0) {
 // DEFAULT_IMAGE_BUILD_ID against a literal that must move with every pin
 // (adoption 1cc01c55 missed them once before; #397's thirty-first adoption
 // missed them again). Adopt from the same gate block.
-{
+if (newBuildId) {
   let icSrc = await Bun.file("tests/providers/exedev/image-contract.test.ts").text();
   let icChanged = false;
   icSrc = icSrc.replace(/(expect\(marker\.buildId\)\.toBe\(")([0-9a-f]{16})("\))/g, (whole, a, old, c) => {
@@ -173,7 +191,10 @@ if (received.length === 0) {
 const mapAnchor = out.indexOf("the ones the current pin was derived from");
 if (mapAnchor >= 0) {
   const block = out.slice(mapAnchor);
-  const receivedPairs = [...block.matchAll(/\+\s+"(oci\/[^"]+)": "([0-9a-f]{64})"/g)];
+  // bun's diff does not prefix Received lines with `+` — match the pairs
+  // wherever they appear inside the failure block (run 40317122238: the
+  // prefixed form matched nothing and the section stayed silent)
+  const receivedPairs = [...block.matchAll(/"(oci\/[^"]+)": "([0-9a-f]{64})"/g)];
   if (receivedPairs.length > 0) {
     let mapSrc = await Bun.file(test).text();
     let changed = false;
@@ -207,3 +228,4 @@ if (fails.length === 0) {
   for (const f of fails) console.log(`  (fail) ${f}`);
 }
 console.log("done — commit every changed file together (the ritual is one commit), then push to dev.");
+if (!adopt) console.log("next: push, let publish re-dispatch; its gate-verdict run carries the driver block — run this script on THAT run id.");
