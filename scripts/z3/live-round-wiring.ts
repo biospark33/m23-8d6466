@@ -53,6 +53,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 
+import { log } from "../../src/lib/log.ts";
+
 import { scryptToken, SCRYPT_PARAMS } from "../../src/fleet/approvers.ts";
 import type { ResultPayload } from "../../src/fleet/result.ts";
 import { extractExistingBankIds, resolveProvisionedRepoBankId } from "../../src/hindsight/bank-provisioner.ts";
@@ -433,12 +435,53 @@ function view(r: { runId: string; createdAt: string; requestId?: string; vmName?
 /** Readonly sqlite query; throws when the db is absent (an unread ledger is not an empty one). */
 function readonlyRows<T>(dbPath: string, sql: string, ...params: string[]): T[] {
   if (!existsSync(dbPath)) throw new Error(`${dbPath} is absent — the leg cannot be measured`);
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    return db.query(sql).all(...params) as T[];
-  } finally {
-    db.close();
+  // A readonly open that lands while the last WRITER's -shm needs recovery
+  // (the crash window SIGKILLs the fork mid-ledger-write) fails CANTOPEN —
+  // the same-process poison family of gotcha #20, reader side. A readonly
+  // connection can NEVER run the recovery, so a retry alone just spins until
+  // some writer happens by (round 13: it never did — 4 attempts, still
+  // CANTOPEN). The heal is one short READ-WRITE open: SQLite recovers the WAL
+  // on the first connection able to write; no rows are touched. At the
+  // redrive's call sites the fork is SIGKILLed and no other writer exists.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return db.query(sql).all(...params) as T[];
+      } finally {
+        db.close();
+      }
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/unable to open database file|database is locked|SQLITE_BUSY|SQLITE_CANTOPEN/i.test(msg)) throw e;
+      try {
+        // The recovery runs on the first WAL READ (prepare), never on open —
+        // so the heal is a real CHECKPOINT: it processes the WAL, truncates
+        // it, and leaves the db readable by plain readonly connections.
+        const heal = new Database(dbPath);
+        try {
+          heal.run("PRAGMA wal_checkpoint(TRUNCATE)");
+        } finally {
+          heal.close();
+        }
+      } catch (healErr) {
+        log({
+          requestId: `z3-ledger-heal-${dbPath}`,
+          operation: "z3.ledger_heal_failed",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          runId: null,
+          error: { code: "ledger-heal-failed", message: String(healErr instanceof Error ? healErr.message : healErr).slice(0, 160) },
+        });
+      }
+      Bun.spawnSync(["sleep", "2"]); // sync context: block this read, not the event loop
+    }
   }
+  throw lastErr;
 }
 
 /** `mgat.<b64url claims>.<sig>` → claims.tokenId (the token itself never leaves this function). */
