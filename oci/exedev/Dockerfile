@@ -1005,7 +1005,7 @@ ARG OPENRIG_VERSION=0.5.14
 # it moved (hono ^4.7.0 / zod ^4.3.6 / tar ^7.5.13 ranges remain open upstream).
 # No same-version npm re-publish is involved (@openrig/cli@0.5.14's
 # dist.integrity is unchanged).
-ARG OPENRIG_TREE_SHA256=4340266aaa77f0db4a35736e89ec5aa22d926bb96af397d0eea5bbace2863441
+ARG OPENRIG_TREE_SHA256=9822fb8dd488067fe5b13393125d2048a3e8593fac41b2cceaf5cf410fcdfc09
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a

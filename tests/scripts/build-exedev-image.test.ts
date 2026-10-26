@@ -1328,7 +1328,7 @@ describe("buildIdFileInputs", () => {
       // 2026-10-18: exeuntu base re-pin ea6c3f5c → bb7e0268 (scheduled
       // base-drift, upstream's weekly rebuild). Both FROM digests only;
       // measured with shasum -a 256 on the edited file.
-      "oci/exedev/Dockerfile": "29a314859195416f87b672dd372837c8061de5646d333218ceca3bca67616c3d",
+      "oci/exedev/Dockerfile": "7935a8878ea96f934df40a2dde8c76ac42ce9b094584929283012420c4fbbc7f",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -2198,7 +2198,7 @@ describe("buildIdFileInputs", () => {
       // src/phase-engine/findings-sidecar.ts, src/fleet/*, src/providers/run-record.ts,
       // cli-anything/scripts/team-lead-driver.ts) — re-pin LAST on the final tree;
       // the image publish + pin adoption follows (Z3 keeps #467 listed until then).
-            "31b4078d5c00ae6813785f42fe23bde1a267a1b8e64e189b7cb8fa678d2ec941",
+            "636b66fdc8cbfdb99d871056974af27515c7f65aa339f581a7e9cd2b51fbc156",
     );
   });
 });
@@ -3924,8 +3924,11 @@ describe("checksumArgProblems", () => {
         case "OPENRIG_TREE_SHA256":
           // 2026-10-16: re-pinned with the Dockerfile ARG (publish run
           // 38989801031's healed build — same caret-float class, the fixture
-          // is the test-side mirror of the ARG).
-          return "4340266aaa77f0db4a35736e89ec5aa22d926bb96af397d0eea5bbace2863441";
+          // is the test-side mirror of the ARG). 2026-10-26: re-pinned again
+          // (publish run 40317122238 — same class; the openrig tree drifted
+          // under the pinned 0.5.14, adopter's case-regex could not see
+          // returns behind comments).
+          return "9822fb8dd488067fe5b13393125d2048a3e8593fac41b2cceaf5cf410fcdfc09";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
