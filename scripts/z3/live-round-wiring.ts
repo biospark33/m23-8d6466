@@ -404,13 +404,13 @@ function forkImageRev(): string | null {
   return proc.exitCode === 0 && /^[0-9a-f]{7,40}$/.test(rev) ? rev : null;
 }
 
-function fleet(args: string[], stdinFile?: string): { exitCode: number; stdout: string; stderr: string } {
+function fleet(args: string[], stdinFile?: string, timeoutMs = FLEET_CLI_TIMEOUT_MS): { exitCode: number; stdout: string; stderr: string } {
   const proc = Bun.spawnSync(["bun", "scripts/fleet.ts", ...args], {
     cwd: REPO_ROOT,
     stdin: stdinFile === undefined ? "ignore" : Bun.file(stdinFile),
     stdout: "pipe",
     stderr: "pipe",
-    timeout: FLEET_CLI_TIMEOUT_MS,
+    timeout: timeoutMs,
   });
   return { exitCode: proc.exitCode ?? -1, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
 }
@@ -712,6 +712,33 @@ export function z3LiveDeps(opts: {
           pausingSince = null;
         }
         pastDeadline(`run ${runId} reaching ${want}`);
+        await sleep(POLL_MS);
+      }
+    },
+    settleAndTeardown: async (runId) => {
+      // The A2 cadence pair (cadence10.sh): `fleet status` until the in-box
+      // engine settles (marker verdict ok/not-ok/engine-failed), then
+      // `fleet teardown` — the teardown is what CLOSES the record, the only
+      // transition the fork's leg poller can observe (`fleet result` is a pure
+      // record read; #913). Never `fleet observe`: its reverify/gate arms are
+      // approval surface, not a QA leg's job. Every exec is bounded by the
+      // REMAINING round deadline, not the bare 300s default — a call that
+      // outlives the deadline would steal the cleanup's budget.
+      for (;;) {
+        const remaining = opts.deadline - Date.now();
+        if (remaining <= 0) pastDeadline(`run ${runId} reaching engine settle`);
+        const bound = Math.max(1_000, Math.min(FLEET_CLI_TIMEOUT_MS, remaining));
+        const out = fleet(["status", runId, "--driver", "exedev", "--dir", RUNS_DIR], undefined, bound);
+        const state = /"state":"([a-z-]+)"/.exec(out.stdout)?.[1] ?? "unreadable";
+        if (state === "ok" || state === "not-ok" || state === "engine-failed") {
+          // Deadline re-checked BEFORE the teardown starts (the settle wait may have eaten it).
+          const left = opts.deadline - Date.now();
+          if (left <= 0) pastDeadline(`run ${runId} teardown`);
+          const t = fleet(["teardown", runId, "--driver", "exedev", "--dir", RUNS_DIR], undefined, Math.max(1_000, Math.min(FLEET_CLI_TIMEOUT_MS, left)));
+          const tail = `${t.stdout}\n${t.stderr}`.trim().split("\n").pop() ?? "";
+          return { state, teardownExit: t.exitCode, teardownTail: tail.slice(0, 400) };
+        }
+        pastDeadline(`run ${runId} reaching engine settle (last state ${state})`);
         await sleep(POLL_MS);
       }
     },

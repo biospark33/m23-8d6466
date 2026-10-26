@@ -73,6 +73,8 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
   const acked = new Set<string>();
   /** records not yet visible (opts.recordLag) — the in-flight window. */
   const hidden = new Set<string>();
+  /** runIds whose fleet record settleAndTeardown has closed (the only source of a terminal read). */
+  const closed = new Set<string>();
   const retainedSoFar: string[] = [];
   let recallDocs: string[] = [];
   const calls = {
@@ -206,8 +208,22 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
       calls.restarted++;
     },
     awaitResult: async (runId, want) => {
-      teardown(runId); // the observe chain's teardown reaps the box + revokes the key before either state
-      return want === "terminal" ? { status: "completed", terminal: true } : { status: "awaiting-approval", terminal: false };
+      if (want === "awaiting-approval") {
+        teardown(runId); // preserved: the approval-park read still models the gate chain's reaping
+        return { status: "awaiting-approval", terminal: false };
+      }
+      // Terminal reads true ONLY once settleAndTeardown's teardown has closed
+      // the record — a pure record read cannot see terminal on its own (the
+      // #913 mechanism the live wiring now closes explicitly).
+      if (!closed.has(runId)) throw new Error(`fixture: awaitResult(terminal) before settleAndTeardown closed ${runId}`);
+      return { status: "completed", terminal: true };
+    },
+    settleAndTeardown: async (runId) => {
+      // The A2 cadence pair, modeled: the settle-then-teardown CLOSES the
+      // leg's record — the transition awaitResult(terminal) then observes.
+      teardown(runId);
+      closed.add(runId);
+      return { state: "ok", teardownExit: 0, teardownTail: "teardown ok" };
     },
     inventory: async () => [...boxes],
     readRecord: (runId) => (hidden.has(runId) ? null : (records.get(runId) ?? null)),
