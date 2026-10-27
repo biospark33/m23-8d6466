@@ -3,6 +3,34 @@
 **Story Points:** 3
 **Sprint:** v6b-Autonomy (E21-gated via A2; the v6 program's exit criterion — last story on the critical path)
 **Status:** **gated** — code merged in both repos (factory PR #468, merge `f34ad9b8`, 2026-10-19; swarmclaw PR #830, merge `cc91aac7`, 2026-10-20); live round gated on operator GO only (#469 merged to dev `13af550f` 2026-10-26, resolution `3fe36c5c`: closes #465, CLOSED COMPLETED; #467 UNBLOCKED 2026-10-26 — the exe.dev image re-published with the sidecar writer in-box: publish run 40326654015 green (publish/attest/attested), pin adopted in the same-commit ritual #474 (TOFU ARG `9822fb8d…`) + #476 (driver `sha256:1c8455a0…` / buildId `c8dd0a49…`), verify-image-pin's verify job green 40336238552); the fixes were authored on `feature/qa-findings-persist-pause-exit` (2026-10-20, merged 2026-10-26; its merge conflict vs dev was resolved in-branch keeping intent and function of both sides). The branch names below are historical; both branches are merged. Predecessors A2, Z2 and M2.1 are done. The factory half is on `feature/z3-cross-repo-live-exit-round`: round plan, the leg drivers with evidence written by each leg's own driver, the AC1–AC7 assertions with fixture-tier negative controls, the SC2.6-style crash-gate wrapper, the todo-gated live test and the operator runbook in `docs/planning/v6-crossrepo-contract.md` §Z3 round record. The fork counterpart is on swarmclaw `feature/z3-exit-round-counterpart`: the `z3_exit_round` protocol, the schedule fire hook and the `scripts/solstice/z3-exit-round.ts` arm/state/cancel/disarm CLI. Three pre-PR bmad review rounds ran (`_bmad-output/workflow-state/code-review/z3-r{1,2,3}/`). **The live T2 round is not fired.** Upstream blockers were #467 (QA harvest findings never persisted host-side) and #465 (findings-only runs strand in `pausing`); #465 is CLOSED COMPLETED (closed by #469, merged `13af550f` 2026-10-26). Remaining blocker: none — #467 unblocked 2026-10-26 (the image re-published with the sidecar writer: publish run 40326654015 green (publish/attest/attested), pin adopted #474/#476, verify-image-pin's verify job green 40336238552); `Z3_UPSTREAM_BLOCKERS` is empty and the refusal is disarmed. After that, it needs the operator's GO. Live tier: **live — T2 minimum, cross-repo**. **No crontab fallback exists for this story:** the round's entire value is the live proof.
+## Amendment — the review set is a derived, pinned round input (2026-10-27)
+
+The QA legs' bounded review set was the A2-era static lens scope constant
+(`src/qa scripts/qa tests/qa`, the hunter-pack manifest task's own diff
+command). At a pin whose own diff touches `scripts/z3` + `tests/z3`, that set
+is EMPTY: live round 18 (2026-10-27) reached priming-recall with the whole fix
+stack proven and red'd there because the hunters honestly found nothing to
+review — the chain worked; the round audited nothing.
+
+Operator-approved amendment (Steve, 2026-10-27): **the review set is derived
+from the pinned sha's own diff at round-authoring time and pinned as a round
+input.** `git diff --name-only <pinned-sha>~1..<pinned-sha>` is the derivation
+(empty refuses before the GO); the set rides `Z3ExitRoundConfig.reviewSet`
+(raw-typed, refused when absent/malformed fork-side), is cross-checked on the
+armed protocolConfig (`armedCapsProblems`) and asserted on every fired QA leg
+(`driveTrigger`, like the caps); the operator GO names the set it is funding
+the audit of (`gateFire` refuses a GO that does not match). The lenses stay
+the three postures (`QA_LENS`, unchanged) applied over the pinned set — the
+set is a path input, the lenses are review disciplines. A2's own rounds keep
+the static scopes as the default (the manifest task reads the pinned set from
+the brief's `instructions` when present, else falls back to the static diff
+command); only Z3 derives. Same text both repos: the fork counterpart carries
+`reviewSet` on `Z3ExitRoundConfig` + `ProtocolExternalJobConfig`, carries it
+through the persist choke point, and folds it into the leg instructions (the
+only carrier the box reads), under the 600-char instructions ceiling both
+sides enforce. No fork counterpart story doc exists under the fork's docs/;
+this section is the contract text of record.
+
 ## Spec Reference
 
 > **Spec drift (2026-10-19, D-1):** this story calls ADR-2 PROPOSED. It became ACCEPTED on 2026-10-15 via G1. G1 shipped the fail-closed policy (`src/fleet/auto-merge-policy.ts` plus the run-completion consult), but ON stays structurally unreachable until the clause-5 veto-window carrier (`enqueueVetoWindow`) is in the tree. Z3 still asserts park → human decide, and it now also records the auto-merge consult state and fails AC2 if it is ON. The contract delta is recorded in `docs/planning/v6-crossrepo-contract.md` §Z3 round record.

@@ -67,6 +67,12 @@ export interface Z3Trigger {
   firedAt: string;
   /** Every external_job step's fork-side groupCapUsd — what the fire may actually spend. */
   stepCaps: Array<{ stepId: string; groupCapUsd: number }>;
+  /**
+   * Each fired QA leg's wire-config review set (scope-derivation amendment),
+   * by stepId — null where the fork carried none (an A2-shaped leg is the
+   * round-18 failure mode by construction and the trigger leg refuses it).
+   */
+  qaLegReviewSets: Array<{ stepId: string; reviewSet: readonly string[] | null }>;
   /** The fork image's revision label, when the image carries one (it has no .git); null otherwise. */
   forkRev: string | null;
 }
@@ -246,7 +252,7 @@ export async function snapshot(d: Z3Deps): Promise<Z3Baseline> {
  */
 export async function driveTrigger(
   d: Z3Deps,
-  plan: { runs: readonly RoundRun[]; worstCaseUsd: number; go: OperatorGo },
+  plan: { runs: readonly RoundRun[]; worstCaseUsd: number; go: OperatorGo; reviewSet: readonly string[] },
   bind: (protocolRunId: string) => void = () => {},
 ) {
   const t = await d.awaitTrigger();
@@ -260,6 +266,14 @@ export async function driveTrigger(
     problems.push(`the fired run's caps sum to $${forkCapsUsd.toFixed(2)}, the GO-gated worst case is $${plan.worstCaseUsd.toFixed(2)}`);
   }
   if (cents(forkCapsUsd) > cents(plan.go.spendApproved.worstCaseUsd)) problems.push(`the fired caps exceed the GO's $${plan.go.spendApproved.worstCaseUsd}`);
+  // Scope-derivation amendment (2026-10-27): every fired QA leg must carry
+  // EXACTLY the pinned set — a leg hunting the A2 static scopes at this pin
+  // audits nothing (round 18) and the round must refuse, not red at priming.
+  for (const leg of t.qaLegReviewSets) {
+    if (leg.reviewSet == null || [...leg.reviewSet].sort().join("\n") !== [...plan.reviewSet].sort().join("\n")) {
+      problems.push(`the fired ${leg.stepId} carries reviewSet ${JSON.stringify(leg.reviewSet)}, the pinned ${JSON.stringify(plan.reviewSet)}`);
+    }
+  }
   // Short vs full sha: one must prefix the other (the image label may be the full rev).
   const sameRev = (a: string, b: string) => a.startsWith(b) || b.startsWith(a);
   if (t.forkRev !== null && !sameRev(t.forkRev, d.sink.forkRev)) problems.push(`the running fork reports rev ${t.forkRev}, the round stamps ${d.sink.forkRev}`);
@@ -272,6 +286,7 @@ export async function driveTrigger(
     templateId: t.templateId,
     firedAt: t.firedAt,
     stepCaps: t.stepCaps,
+    reviewSet: plan.reviewSet,
     forkCapsUsd,
     forkRevObserved: t.forkRev,
     // The image carries no .git: without a revision label the stamped rev is the operator's word, said so.
@@ -891,7 +906,7 @@ export interface Z3RoundOutcome {
  */
 export async function runZ3Round(
   d: Z3Deps,
-  plan: { runs: readonly RoundRun[]; worstCaseUsd: number; go: OperatorGo },
+  plan: { runs: readonly RoundRun[]; worstCaseUsd: number; go: OperatorGo; reviewSet: readonly string[] },
 ): Promise<Z3RoundOutcome> {
   const runIds: string[] = [];
   const track = (id: string) => {

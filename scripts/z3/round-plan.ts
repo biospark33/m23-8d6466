@@ -23,6 +23,7 @@
  * The fork's worst case is QA_LENS.length × qaGroupCapUsd + codeGroupCapUsd —
  * exactly Σ per-run groupCapUsd over `composeRound`'s default runs.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, linkSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -189,6 +190,49 @@ export function worstCaseSpendLine(runs: readonly RoundRun[]): string {
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
+/**
+ * Scope-derivation amendment (2026-10-27, operator-approved): the QA legs'
+ * bounded review set is DERIVED from the pinned sha's own diff and PINNED as
+ * a round input — never re-derived in-box from a static scope constant (the
+ * A2-era `src/qa scripts/qa tests/qa` scopes cover none of the z3 surface, so
+ * live round 18's hunters honestly found nothing and priming-recall red'd by
+ * contract). Empty refuses HERE: a round that would audit nothing must not
+ * burn its GO or its spend. The fork re-validates shape and the 600-char
+ * instructions fit at arm time (protocol-qa-hunter-pack resolveReviewSet) —
+ * one rule per layer, this layer owns derivation + prose-safety.
+ */
+export function deriveReviewSet(sha: string, opts: { cwd?: string } = {}): string[] {
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`deriveReviewSet needs a 40-hex sha, got "${sha}"`);
+  const cwd = opts.cwd ?? path.resolve(import.meta.dir, "../..");
+  const out = execFileSync("git", ["diff", "--name-only", `${sha}~1..${sha}`], { cwd, encoding: "utf8", timeout: 30_000 });
+  const paths = [...new Set(out.split("\n").map((p) => p.trim()).filter(Boolean))];
+  if (paths.length === 0) {
+    throw new Error(`the review set at ${sha} is EMPTY (git diff ${sha}~1..${sha} names no paths) — the QA legs would hunt nothing; pin a sha whose own diff is non-empty`);
+  }
+  for (const p of paths) {
+    if (!/^[A-Za-z0-9._/-]+$/.test(p) || p.split("/").includes("..")) {
+      throw new Error(`the review set carries a path outside the prose-safe, parent-traversal-free charset: ${JSON.stringify(p)}`);
+    }
+  }
+  // The set rides the leg instructions prose fork-side: 600-char ceiling,
+  // ~150-char lens prefix + 37-char clause prefix leaves ~400 for the paths
+  // joined with ", ". Refuse before the GO, not as a red arm.
+  const joined = paths.join(", ");
+  if (joined.length + 2 * paths.length > 400) {
+    throw new Error(
+      `the review set's ${paths.length} paths need ${joined.length + 2 * paths.length} prose chars — the fork's 600-char leg-instructions ceiling holds; pin a narrower commit`,
+    );
+  }
+  return paths;
+}
+
+/** Order-insensitive set equality (both sides derive paths from git, whose order is stable but not contractual). */
+function sameSet(a: unknown, b: readonly string[]): boolean {
+  if (!Array.isArray(a) || a.length !== b.length || !a.every((x) => typeof x === "string")) return false;
+  const key = (xs: readonly string[]) => [...xs].sort().join("\n");
+  return key(a as string[]) === key(b);
+}
+
 /** The GO record's shape (v6-a2/operator-GO.json precedent: who/when/spendApproved/swarmclawForkRev). */
 export const OperatorGoSchema = z
   .object({
@@ -221,18 +265,27 @@ export function readOperatorGo(file: string): OperatorGo {
 
 /**
  * The pre-fire gate: print the worst case FIRST, then refuse unless a GO is
- * recorded that covers that spend and names the round's fork rev.
+ * recorded that covers that spend and names the round's fork rev — and, since
+ * the scope-derivation amendment (2026-10-27), the review set the operator is
+ * funding the audit OF.
  */
 export function gateFire(input: {
   runs: readonly RoundRun[];
   goFile: string;
   forkRev: string;
+  /** The round's pinned review set; when passed, the GO must name the same set. */
+  reviewSet?: readonly string[];
   print?: (line: string) => void;
   now?: number;
 }): { go: OperatorGo; worstCaseUsd: number } {
   const worstCaseUsd = worstCaseSpendUsd(input.runs);
   (input.print ?? console.log)(worstCaseSpendLine(input.runs));
   const go = readOperatorGo(input.goFile);
+  if (input.reviewSet !== undefined && !sameSet(go.reviewSet, input.reviewSet)) {
+    throw new Error(
+      `operator GO ${go.reviewSet === undefined ? "does not name" : "names a different"} review set — the GO must name exactly the pinned set (${input.reviewSet.join(", ")}) the round will audit: refusing to fire`,
+    );
+  }
   const gated = Math.round((worstCaseUsd + reflectAllowanceUsd(input.runs)) * 100) / 100;
   if (go.spendApproved.worstCaseUsd < gated) {
     throw new Error(

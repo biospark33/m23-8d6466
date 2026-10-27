@@ -30,6 +30,9 @@ export const GO: OperatorGo = {
   swarmclawForkRev: REV,
 };
 
+/** The fixture round's pinned review set (the amendment's derived round input). */
+export const REVIEW_SET = ["scripts/z3/round-plan.ts", "tests/z3/fixture.ts"];
+
 /** Lens → roster index (exported for test overrides that rebuild retained ids). */
 export const lensIndex = (lens: string) => QA_LENS.indexOf(lens as (typeof QA_LENS)[number]);
 
@@ -164,6 +167,7 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
       templateId: "z3_exit_round",
       firedAt: "2026-10-19T12:00:00.000Z",
       stepCaps: [...QA_LENS.map((l) => ({ stepId: Z3_STEP.qaLeg(l), groupCapUsd: 6 })), { stepId: Z3_STEP.codeRun, groupCapUsd: 8 }],
+      qaLegReviewSets: QA_LENS.map((l) => ({ stepId: Z3_STEP.qaLeg(l), reviewSet: REVIEW_SET })),
       forkRev: REV,
     }),
     awaitStepSubmitting: async (stepId, stopped) => {
@@ -316,7 +320,7 @@ export async function driveFixtureRound(overrides: Partial<Z3Deps> = {}, opts: F
   const dir = mkdtempSync(join(tmpdir(), "z3-round-"));
   const world = fixtureWorld(dir, overrides, opts);
   const runs = composeRound({ qaGroupCapUsd: 6, codeGroupCapUsd: 8 });
-  const outcome = await runZ3Round(world.deps, { runs, worstCaseUsd: worstCaseSpendUsd(runs), go: GO });
+  const outcome = await runZ3Round(world.deps, { runs, worstCaseUsd: worstCaseSpendUsd(runs), go: GO, reviewSet: REVIEW_SET });
   return { dir, outcome, files: readLegFiles(dir), registry: world.deps.sink.registry, world };
 }
 
