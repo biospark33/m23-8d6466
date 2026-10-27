@@ -478,7 +478,9 @@ function readonlyRows<T>(dbPath: string, sql: string, ...params: string[]): T[] 
           error: { code: "ledger-heal-failed", message: String(healErr instanceof Error ? healErr.message : healErr).slice(0, 160) },
         });
       }
-      Bun.spawnSync(["sleep", "2"]); // sync context: block this read, not the event loop
+      // The sleep only buys the NEXT attempt a fresher window — after the
+      // last one it would be dead time before the throw.
+      if (attempt < 3) Bun.spawnSync(["sleep", "2"]); // sync context: block this read, not the event loop
     }
   }
   throw lastErr;
