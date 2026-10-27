@@ -86,5 +86,20 @@ function writeOrRefuse(markerPath: string, values: readonly unknown[]): Findings
       return { written: false, reason: "write-failed", detail: e instanceof Error ? e.message : String(e) };
     }
   }
-  return { written: false, reason: "none" };
+  // The "none" arm (no agent output carried a `findings` field — a model
+  // nondeterminism: the same pipeline yields findings on one leg and none on
+  // the next) used to DELETE any sidecar and return absent. A completed leg
+  // then harvested with no sidecar at all, and the host's normalizeHarvest
+  // rightly refuses a completed leg without a harvest. A zero is a RESULT,
+  // not an absence: write the empty sidecar (count 0), which the strict
+  // schema reads as legRan with zero findings. The removal semantics stay
+  // for the true refusals (malformed / oversize / write-failed): a resumed
+  // walk must not be harvested as this one's.
+  try {
+    const path = join(dirname(markerPath), FINDINGS_SIDECAR);
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, findings: [] }), { mode: 0o600 });
+    return { written: true, path, count: 0 };
+  } catch (e) {
+    return { written: false, reason: "write-failed", detail: e instanceof Error ? e.message : String(e) };
+  }
 }

@@ -41,10 +41,14 @@ describe("persistPhaseFindings", () => {
     expect(lines).toEqual([expect.objectContaining({ event: "findings_sidecar", level: "info", written: true, count: 1, ...IDS, phaseId: null })]);
   });
 
-  test("a run without findings leaves no findings.json and stays quiet", () => {
+  test("a run without findings writes the empty zero and stays quiet", () => {
+    // The zero is a RESULT (a worker reply without a `findings` key is model
+    // nondeterminism, not a refusal): an absent sidecar would make the host
+    // refuse the leg at retain (round 15/17, live). The log stays quiet — the
+    // info line documents what a harvest will read.
     const { dir, lines } = run([{ exitCode: 0 }, { agentOutputs: { fixer: { summary: "s" } } }]);
-    expect(existsSync(join(dir, "findings.json"))).toBe(false);
-    expect(lines).toEqual([]);
+    expect(JSON.parse(readFileSync(join(dir, "findings.json"), "utf8"))).toEqual({ schemaVersion: 1, findings: [] });
+    expect(lines).toEqual([expect.objectContaining({ event: "findings_sidecar", level: "info", written: true, count: 0, ...IDS, phaseId: null })]);
   });
 
   test("malformed findings write nothing and log a warn line", () => {
