@@ -83,11 +83,11 @@ describe("findings sidecar writer (in-box)", () => {
     expect(text).toContain("[REDACTED]");
   });
 
-  test("a top-level findings reply is dropped by the worker contract — nothing to write (why the task nests under result)", () => {
-    const [, marker] = runsDir();
+  test("a top-level findings reply is dropped by the worker contract — the empty zero is written, never an absence (the host refuses a completed leg with no sidecar)", () => {
+    const [dir, marker] = runsDir();
     const value = mergedFrom({ changedFiles: [], findings: FINDINGS });
-    expect(writeFindingsSidecar(marker, [value])).toEqual({ written: false, reason: "none" });
-    expect(existsSync(join(marker, "..", "findings.json"))).toBe(false);
+    expect(writeFindingsSidecar(marker, [value])).toMatchObject({ written: true, count: 0 });
+    expect(readHarvestedFindings(dir, RUN_ID)).toMatchObject({ ok: true, findings: [] });
   });
 
   test.each([
@@ -101,12 +101,14 @@ describe("findings sidecar writer (in-box)", () => {
     expect(existsSync(join(marker, "..", "findings.json"))).toBe(false);
   });
 
-  test("a later walk that yields no findings REMOVES an earlier walk's sidecar (no stale harvest)", () => {
+  test("a later walk that yields no findings OVERWRITES an earlier walk's sidecar with the empty zero (no stale findings harvested)", () => {
     const [dir, marker] = runsDir();
     writeFindingsSidecar(marker, [mergedFrom({ changedFiles: [], result: { summary: "s", findings: FINDINGS } })]);
     expect(readHarvestedFindings(dir, RUN_ID).ok).toBe(true);
-    expect(writeFindingsSidecar(marker, [mergedFrom({ changedFiles: [], result: { summary: "none" } })])).toMatchObject({ written: false, reason: "none" });
-    expect(readHarvestedFindings(dir, RUN_ID)).toMatchObject({ ok: false, reason: "absent" });
+    expect(writeFindingsSidecar(marker, [mergedFrom({ changedFiles: [], result: { summary: "none" } })])).toMatchObject({ written: true, count: 0 });
+    // The invariant is about FINDINGS, not file absence: this walk's true
+    // result (zero) is what a harvest may read — never an earlier walk's.
+    expect(readHarvestedFindings(dir, RUN_ID)).toMatchObject({ ok: true, findings: [] });
   });
 
   test("oversized findings write nothing", () => {
