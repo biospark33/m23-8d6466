@@ -74,6 +74,7 @@ import {
   codePollTimeoutFor,
   composeRound,
   consumeOperatorGo,
+  deriveReviewSet,
   gateFire,
   upstreamBlockerRefusal,
   Z3_EVIDENCE_DIR,
@@ -115,9 +116,13 @@ describe("Z3 live Tier-2 cross-repo exit round (scheduled fire; operator GO-gate
       const runs = composeRound(caps);
       // The code run's fork deadline (z3-code-run + z3-code-observe) = the round budget minus the QA legs.
       const codePollTimeoutMs = codePollTimeoutFor(Z3_FORK_STEPS_BUDGET_MS, runs);
-      // Worst case printed FIRST, then the GO gate (absent/malformed/short/stale/other-rev refused) — all BEFORE arming.
+      // Scope-derivation amendment (2026-10-27): the review set derives from
+      // the pinned sha's own diff BEFORE the GO gate — an empty set refuses
+      // here, never as a red round (round 18), and the GO must name it.
+      const reviewSet = deriveReviewSet(need("QDS_EXEDEV_SHA"), { cwd: REPO_ROOT });
+      // Worst case printed FIRST, then the GO gate (absent/malformed/short/stale/other-rev/wrong-set refused) — all BEFORE arming.
       const goFile = path.join(REPO_ROOT, Z3_OPERATOR_GO_FILE);
-      const { go, worstCaseUsd } = gateFire({ runs, goFile, forkRev });
+      const { go, worstCaseUsd } = gateFire({ runs, goFile, forkRev, reviewSet });
 
       // The key population before anything this round could mint — the
       // finally's revoke-verify diffs against it (sc2-7 KEY-COUNT leg).
@@ -142,12 +147,13 @@ describe("Z3 live Tier-2 cross-repo exit round (scheduled fire; operator GO-gate
             codePollTimeoutMs,
             codeManifestPath: need("Z3_CODE_MANIFEST_PATH"),
             codeInstructions: need("Z3_CODE_INSTRUCTIONS"),
+            reviewSet,
           },
           participants: need("Z3_PARTICIPANTS"),
           sessionId: process.env.Z3_SESSION_ID?.trim() || undefined,
           runAt,
         }, preArmIds);
-        const capProblems = armedCapsProblems(armed.protocolConfig, { ...caps, codePollTimeoutMs });
+        const capProblems = armedCapsProblems(armed.protocolConfig, { ...caps, codePollTimeoutMs, reviewSet });
         if (capProblems.length > 0) {
           throw new Error(`the armed schedule ${armed.scheduleId} does not carry the GO-gated config (${capProblems.join("; ")}) — refused; the finally disarms it`);
         }
@@ -183,7 +189,7 @@ describe("Z3 live Tier-2 cross-repo exit round (scheduled fire; operator GO-gate
         });
 
         roundOwnsCleanup = true; // from here runZ3Round's finally disarms, cancels, sweeps
-        const outcome = await runZ3Round(deps, { runs, worstCaseUsd, go });
+        const outcome = await runZ3Round(deps, { runs, worstCaseUsd, go, reviewSet });
 
         // This round's window of the (accumulating) dir — unregistered files in it are REPORTED, never filtered out.
         const files = filesSince(readLegFiles(sink.outDir), roundStart);

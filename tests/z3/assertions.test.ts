@@ -24,7 +24,7 @@ import {
 } from "../../scripts/z3/assertions.ts";
 import { dashStamp } from "../../scripts/z3/evidence.ts";
 import { Z3_LEGS } from "../../scripts/z3/round-plan.ts";
-import { CODE_RUN_ID, cleanupFixture, docId, driveFixtureRound, dropLeg, editLeg, type FixtureRound, lensIndex, qaRunId, REV } from "./fixture.ts";
+import { CODE_RUN_ID, cleanupFixture, docId, driveFixtureRound, dropLeg, editLeg, type FixtureRound, lensIndex, qaRunId, REV, REVIEW_SET } from "./fixture.ts";
 
 const rounds: FixtureRound[] = [];
 afterEach(() => {
@@ -588,6 +588,7 @@ describe("R1 — the GO gates the fork's own caps; cleanup stops the fork first 
         templateId: "z3_exit_round",
         firedAt: "2026-10-19T12:00:00.000Z",
         stepCaps: [...["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, groupCapUsd: 25 })), { stepId: "z3-code-run", groupCapUsd: 40 }],
+        qaLegReviewSets: ["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, reviewSet: REVIEW_SET })),
         forkRev: REV,
       }),
     });
@@ -604,6 +605,7 @@ describe("R1 — the GO gates the fork's own caps; cleanup stops the fork first 
         templateId: "z3_exit_round",
         firedAt: "2026-10-19T12:00:00.000Z",
         stepCaps: [...["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, groupCapUsd: 6 })), { stepId: "z3-code-run", groupCapUsd: 8 }],
+        qaLegReviewSets: ["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, reviewSet: REVIEW_SET })),
         forkRev: "fedcba9876543210fedcba9876543210fedcba98",
       }),
     });
@@ -697,6 +699,7 @@ describe("R1 fork delta — the gate-held crash window and the unmatched case", 
         templateId: "z3_exit_round",
         firedAt: "2026-10-19T12:00:00.000Z",
         stepCaps: [...["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, groupCapUsd: 6 })), { stepId: "z3-code-run", groupCapUsd: 8 }],
+        qaLegReviewSets: ["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, reviewSet: REVIEW_SET })),
         forkRev: REV.slice(0, 12),
       }),
     });
@@ -713,6 +716,7 @@ describe("fork rev verification is labelled, never a silent null", () => {
         templateId: "z3_exit_round",
         firedAt: "2026-10-19T12:00:00.000Z",
         stepCaps: [...["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, groupCapUsd: 6 })), { stepId: "z3-code-run", groupCapUsd: 8 }],
+        qaLegReviewSets: ["correctness", "secret-hygiene", "diff-scope"].map((l) => ({ stepId: `qa-leg-${l}`, reviewSet: REVIEW_SET })),
         forkRev: null,
       }),
     });

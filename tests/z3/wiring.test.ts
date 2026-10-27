@@ -58,6 +58,16 @@ describe("armed config gate", () => {
     expect(armedCapsProblems({ templateId: "z3_exit_round", ...want, codePollTimeoutMs: 3_600_000 }, want)).toHaveLength(1);
     expect(armedCapsProblems({ templateId: "qa_hunter_pack", ...want }, want)).toHaveLength(1);
   });
+
+  test("the armed reviewSet must equal the round's pinned set — absent, wrong set, and order-insensitive match (scope-derivation amendment)", () => {
+    const base = { qaGroupCapUsd: 6, codeGroupCapUsd: 8 };
+    const set = ["scripts/z3/round-plan.ts", "tests/z3/wiring.test.ts"];
+    expect(armedCapsProblems({ templateId: "z3_exit_round", ...base, reviewSet: set }, { ...base, reviewSet: set })).toEqual([]);
+    // order-insensitive: git's path order is stable but not contractual
+    expect(armedCapsProblems({ templateId: "z3_exit_round", ...base, reviewSet: [...set].reverse() }, { ...base, reviewSet: set })).toEqual([]);
+    expect(armedCapsProblems({ templateId: "z3_exit_round", ...base }, { ...base, reviewSet: set })).toHaveLength(1);
+    expect(armedCapsProblems({ templateId: "z3_exit_round", ...base, reviewSet: ["src/other.ts"] }, { ...base, reviewSet: set })).toHaveLength(1);
+  });
 });
 
 describe("budgets add up (E-4/B-10)", () => {

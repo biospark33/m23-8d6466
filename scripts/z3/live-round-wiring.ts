@@ -106,6 +106,8 @@ const StepSchema = z
         groupCapUsd: z.number().optional(),
         commitSha: z.string().optional(),
         repoSlug: z.string().optional(),
+        // The scope-derivation amendment's pinned set, read back off the fired run.
+        reviewSet: z.array(z.string()).nullish(),
       })
       .passthrough()
       .optional(),
@@ -645,6 +647,9 @@ export function z3LiveDeps(opts: {
             stepCaps: run.steps
               .filter((st2) => st2.kind === "external_job")
               .map((st2) => ({ stepId: st2.id, groupCapUsd: st2.externalJobConfig?.groupCapUsd ?? Number.NaN })),
+            qaLegReviewSets: run.steps
+              .filter((st2) => st2.kind === "external_job" && st2.id.startsWith("qa-leg-"))
+              .map((st2) => ({ stepId: st2.id, reviewSet: st2.externalJobConfig?.reviewSet ?? null })),
             forkRev: forkImageRev(),
           };
         }
@@ -931,7 +936,7 @@ export function z3LiveDeps(opts: {
 /** The persisted protocolConfig caps must be the composition the GO gated — or the round refuses. */
 export function armedCapsProblems(
   protocolConfig: Record<string, unknown>,
-  want: { qaGroupCapUsd: number; codeGroupCapUsd: number; codePollTimeoutMs?: number },
+  want: { qaGroupCapUsd: number; codeGroupCapUsd: number; codePollTimeoutMs?: number; reviewSet?: readonly string[] },
 ): string[] {
   const problems: string[] = [];
   if (protocolConfig.templateId !== Z3_TEMPLATE_ID) problems.push(`armed template ${String(protocolConfig.templateId)}, not ${Z3_TEMPLATE_ID}`);
@@ -939,6 +944,14 @@ export function armedCapsProblems(
   if (protocolConfig.codeGroupCapUsd !== want.codeGroupCapUsd) problems.push(`armed codeGroupCapUsd ${String(protocolConfig.codeGroupCapUsd)} ≠ GO-gated ${want.codeGroupCapUsd}`);
   if (want.codePollTimeoutMs !== undefined && protocolConfig.codePollTimeoutMs !== want.codePollTimeoutMs) {
     problems.push(`armed codePollTimeoutMs ${String(protocolConfig.codePollTimeoutMs)} ≠ the round's ${want.codePollTimeoutMs}`);
+  }
+  if (want.reviewSet !== undefined) {
+    const armed = protocolConfig.reviewSet;
+    const same =
+      Array.isArray(armed) &&
+      armed.length === want.reviewSet.length &&
+      [...armed].sort().join("\n") === [...want.reviewSet].sort().join("\n");
+    if (!same) problems.push(`armed reviewSet ${JSON.stringify(armed)} ≠ the round's pinned ${JSON.stringify(want.reviewSet)}`);
   }
   return problems;
 }
