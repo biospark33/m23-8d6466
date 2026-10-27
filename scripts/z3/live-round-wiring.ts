@@ -776,6 +776,13 @@ export function z3LiveDeps(opts: {
         const out = fleet(["status", runId, "--driver", "exedev", "--dir", RUNS_DIR], undefined, bound);
         const state = /"state":"([a-z-]+)"/.exec(out.stdout)?.[1] ?? "unreadable";
         if (state === "ok" || state === "not-ok" || state === "engine-failed") {
+          // Settle → teardown grace (round 15, live): the settle marker can
+          // beat the in-box findings sidecar flush, and the teardown's harvest
+          // then pulls a bundle WITHOUT journal/findings.json — leg 2's did.
+          // A2's cadence never raced this only by its 45s poll granularity.
+          // The grace is a fixed 15s: findings land at the same phase boundary
+          // as the marker, so the flush tail is short.
+          Bun.spawnSync(["sleep", "15"]);
           // Deadline re-checked BEFORE the teardown starts (the settle wait may have eaten it).
           const left = opts.deadline - Date.now();
           if (left <= 0) pastDeadline(`run ${runId} teardown`);
