@@ -204,8 +204,13 @@ export async function withQuarantineWorktree<T>(
 
 // ─── execution guards (INV-RV-3) ─────────────────────────────────────────────
 
-/** Wall-clock ceiling for one re-verify, floor 60 s (story: Guards/limits). */
-export const DEFAULT_WALL_CLOCK_MS = 30 * 60_000;
+/**
+ * Wall-clock ceiling for one re-verify, floor 60 s (story: Guards/limits).
+ * Must stay ≥ HOST_PLAN_BUDGET_MS (plan.ts) or the loader would accept host
+ * plans the guards wall cannot finish; both moved 30 → 45 min together when
+ * CI-parity host plans (full suite + typecheck + lint) no longer fit 30.
+ */
+export const DEFAULT_WALL_CLOCK_MS = 45 * 60_000;
 export const WALL_CLOCK_FLOOR_MS = 60_000;
 /** RSS ceiling for the verify process tree. */
 export const DEFAULT_RSS_BYTES = 4 * 1024 * 1024 * 1024;

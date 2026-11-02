@@ -15,8 +15,14 @@ import { z } from "zod";
 import { loadManifest } from "../phase-engine/manifest.ts";
 import { ReverifyError, exec } from "./worktree.ts";
 
-/** Ceiling handed to `loadManifest`, which refuses to assume an upstream one. */
-export const HOST_PLAN_BUDGET_MS = 30 * 60_000;
+/**
+ * Ceiling handed to `loadManifest`, which refuses to assume an upstream one.
+ * Sized for CI-parity host plans: a full test suite (~10 min for this repo)
+ * + typecheck + lint declared as single-attempt walls must fit the engine's
+ * conservative (retries+1)×(PARSE_FIX_ATTEMPTS+1) budget multiplier — 30 min
+ * capped the declared walls' sum at 595 s, below the honest ~750 s.
+ */
+export const HOST_PLAN_BUDGET_MS = 45 * 60_000;
 
 const HostEntrySchema = z
   .object({

@@ -226,7 +226,7 @@ describe("resolveHostPlan", () => {
       // Three phases of 150 ms each demand 1,365,000 ms of phase budget
       // (attempt multipliers plus routing margin — requiredBudgetMs), over
       // the two-phase fixture's 1.2 M ceiling but still under the caller's
-      // HOST_PLAN_BUDGET_MS (1.8 M).
+      // HOST_PLAN_BUDGET_MS (2.7 M).
       manifest.runBudgetMs = 1_500_000;
       fs.writeFileSync(manifestPath, JSON.stringify(manifest));
 
