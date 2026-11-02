@@ -332,6 +332,49 @@ export function cancelForkRun(protocolRunId: string, cli: ForkCli = forkCli): z.
 }
 
 /**
+ * The mid-flight-teardown heal (attempts 3 + 10, live): the engine settled
+ * green, the harvest bundle landed, then the fleet CLI exited 6 having taken
+ * the run lock and destroyed nothing — box billing, record unclosed. The
+ * operator's hand-clean (rm the dead-pid lock, one --no-harvest teardown),
+ * scripted at the arm that needs it: returns the heal result, or null when a
+ * LIVE holder owns the lock (never touched — the leg fails on evidence) or
+ * the deadline is gone.
+ */
+export function healMidFlightTeardown(input: {
+  runId: string;
+  runsDir: string;
+  fleet: (args: string[], stdinFile: string | undefined, timeoutMs: number) => { exitCode: number; stdout: string; stderr: string };
+  deadline: number;
+  pastDeadline: (what: string) => void;
+}): { exitCode: number; tail: string } | null {
+  const lockFile = `${input.runsDir}/${input.runId}.lock`;
+  let holderAlive = false;
+  try {
+    const pid = Number(readFileSync(lockFile, "utf8").trim().split(/\s+/)[0]);
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        holderAlive = true;
+      } catch {
+        // ESRCH: the holder is dead — the lock is stale
+      }
+    }
+  } catch {
+    // ENOENT: no lock file — the retry below has nothing to clear
+  }
+  if (holderAlive) return null;
+  if (existsSync(lockFile)) rmSync(lockFile);
+  const left = input.deadline - Date.now();
+  if (left <= 0) {
+    input.pastDeadline(`run ${input.runId} teardown heal`);
+    return null;
+  }
+  const t = input.fleet(["teardown", input.runId, "--driver", "exedev", "--dir", input.runsDir, "--no-harvest"], undefined, Math.max(1_000, Math.min(FLEET_CLI_TIMEOUT_MS, left)));
+  const tail = `${t.stdout}\n${t.stderr}`.trim().split("\n").pop() ?? "";
+  return { exitCode: t.exitCode, tail };
+}
+
+/**
  * Disarms a schedule this test armed (also usable before any round deps exist).
  * The fork's disarm has no cross-process lock (a tick can slip past its 3 s
  * recheck), so the fresh `state` is re-read afterwards: every run carrying the
@@ -823,6 +866,10 @@ export function z3LiveDeps(opts: {
           const left = opts.deadline - Date.now();
           if (left <= 0) pastDeadline(`run ${runId} teardown`);
           const t = fleet(["teardown", runId, "--driver", "exedev", "--dir", RUNS_DIR], undefined, Math.max(1_000, Math.min(FLEET_CLI_TIMEOUT_MS, left)));
+          if (t.exitCode !== 0) {
+            const heal = healMidFlightTeardown({ runId, runsDir: RUNS_DIR, fleet, deadline: opts.deadline, pastDeadline });
+            if (heal) return { state, teardownExit: heal.exitCode, teardownExitHealed: true, teardownTail: `heal(--no-harvest): ${heal.tail.slice(0, 340)}` };
+          }
           const tail = `${t.stdout}\n${t.stderr}`.trim().split("\n").pop() ?? "";
           return { state, teardownExit: t.exitCode, teardownTail: tail.slice(0, 400) };
         }

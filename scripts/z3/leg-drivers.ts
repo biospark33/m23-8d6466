@@ -120,7 +120,7 @@ export interface Z3Deps {
    * mechanism, three rounds red'd on the missing closure). Without it the
    * record never reads terminal and the leg can only time out.
    */
-  settleAndTeardown: (runId: string) => Promise<{ state: string; teardownExit: number; teardownTail: string }>;
+  settleAndTeardown: (runId: string) => Promise<{ state: string; teardownExit: number; teardownTail: string; teardownExitHealed?: boolean }>;
   /** The provider's box listing (names). */
   inventory: () => Promise<string[]>;
   readRecord: (runId: string) => RecordView | null;

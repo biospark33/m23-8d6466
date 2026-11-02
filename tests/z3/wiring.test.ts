@@ -6,7 +6,8 @@
  * (E-7). The substrate-touching halves run only in the live round.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
@@ -21,6 +22,7 @@ import {
   ForkStateSchema,
   IN_CONTAINER_KILL_MARGIN_MS,
   armZ3Schedule,
+  healMidFlightTeardown,
   Z3_CLEANUP_STEPS_MS,
   Z3_FORK_STEPS_BUDGET_MS,
   Z3_LIVE_BUDGET,
@@ -192,5 +194,99 @@ describe("waitFindingsRecallable — the release waits for the last retain to be
     };
     expect(await waitFindingsRecallable({ bank: "b", docIds: ["qds-y-9"] }, probe)).toBe(true);
     expect(calls).toBe(2);
+  });
+});
+
+describe("healMidFlightTeardown", () => {
+  function tmpRunsDir(): string {
+    return mkdtempSync(path.join(tmpdir(), "z3-heal-"));
+  }
+
+  test("stale dead-pid lock is cleared and one --no-harvest teardown retries", () => {
+    const dir = tmpRunsDir();
+    const lock = path.join(dir, "qds-x.lock");
+    writeFileSync(lock, "999999 dead-host 2026-11-02T00:00:00Z 7e\n");
+    const calls: string[][] = [];
+    const heal = healMidFlightTeardown({
+      runId: "qds-x",
+      runsDir: dir,
+      fleet: (args, _t) => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "torn down: qds-x", stderr: "" };
+      },
+      deadline: Date.now() + 60_000,
+      pastDeadline: () => {},
+    });
+    expect(heal).not.toBeNull();
+    expect(heal?.exitCode).toBe(0);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.join(" ")).toContain("--no-harvest");
+    expect(existsSync(lock)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a LIVE holder owns the lock — never touched, no retry", () => {
+    const dir = tmpRunsDir();
+    const lock = path.join(dir, "qds-live.lock");
+    writeFileSync(lock, `${process.pid} live-host 2026-11-02T00:00:00Z 7e\n`);
+    const calls: string[][] = [];
+    const heal = healMidFlightTeardown({
+      runId: "qds-live",
+      runsDir: dir,
+      fleet: (args) => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      deadline: Date.now() + 60_000,
+      pastDeadline: () => {},
+    });
+    expect(heal).toBeNull();
+    expect(calls.length).toBe(0);
+    expect(existsSync(lock)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("no lock file at all — retry proceeds without a clear", () => {
+    const dir = tmpRunsDir();
+    const calls: string[][] = [];
+    const heal = healMidFlightTeardown({
+      runId: "qds-bare",
+      runsDir: dir,
+      fleet: (args) => {
+        calls.push(args);
+        return { exitCode: 6, stdout: "", stderr: "still wedged" };
+      },
+      deadline: Date.now() + 60_000,
+      pastDeadline: () => {},
+    });
+    expect(heal).not.toBeNull();
+    expect(heal?.exitCode).toBe(6);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.join(" ")).toContain("--no-harvest");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a past deadline stands the heal down via pastDeadline", () => {
+    const dir = tmpRunsDir();
+    const calls: string[][] = [];
+    let named = "";
+    expect(() =>
+      healMidFlightTeardown({
+        runId: "qds-late",
+        runsDir: dir,
+        fleet: (args) => {
+          calls.push(args);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+        deadline: Date.now() - 1_000,
+        pastDeadline: (what) => {
+          named = what;
+          throw new Error(`past deadline: ${what}`);
+        },
+      }),
+    ).toThrow("past deadline");
+    expect(named).toContain("teardown heal");
+    expect(calls.length).toBe(0);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
