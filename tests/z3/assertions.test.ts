@@ -23,6 +23,7 @@ import {
   registryFromManifest,
 } from "../../scripts/z3/assertions.ts";
 import { dashStamp } from "../../scripts/z3/evidence.ts";
+import { primingRecallProblems } from "../../scripts/z3/leg-drivers.ts";
 import { Z3_LEGS } from "../../scripts/z3/round-plan.ts";
 import { CODE_RUN_ID, cleanupFixture, docId, driveFixtureRound, dropLeg, editLeg, type FixtureRound, lensIndex, qaRunId, REV, REVIEW_SET } from "./fixture.ts";
 
@@ -1028,5 +1029,32 @@ describe("R3 verification — INV-Z3-2 policy probe, AC4 counts the journal itse
       ];
     });
     some(assertAc4CrashWindow(files), /already expired\/aborted\/exec'd before the kill/);
+  });
+});
+
+describe("primingRecallProblems — the honest-empty arm", () => {
+  test("zero findings retained, recall alive: green (citing a finding that cannot exist is unsatisfiable)", () => {
+    expect(
+      primingRecallProblems({ directive: "kg_context", citedRetained: [], recalledCount: 9, retainedCount: 0 }),
+    ).toEqual([]);
+  });
+  test("zero findings retained AND zero recalled: the memory lane itself is unhealthy — red", () => {
+    expect(
+      primingRecallProblems({ directive: "kg_context", citedRetained: [], recalledCount: 0, retainedCount: 0 }),
+    ).toHaveLength(1);
+  });
+  test("findings retained but none cited: the original red stands", () => {
+    expect(
+      primingRecallProblems({ directive: "kg_context", citedRetained: [], recalledCount: 9, retainedCount: 10 }),
+    ).toHaveLength(1);
+  });
+  test("directive absent: red regardless of counts", () => {
+    expect(primingRecallProblems({ directive: null, citedRetained: [], recalledCount: 9, retainedCount: 0 })).toHaveLength(1);
+    expect(primingRecallProblems({ directive: null, citedRetained: ["qds-x"], recalledCount: 9, retainedCount: 1 })).toHaveLength(1);
+  });
+  test("findings retained and cited: green (the original contract)", () => {
+    expect(
+      primingRecallProblems({ directive: "kg_context", citedRetained: ["qds-y"], recalledCount: 9, retainedCount: 10 }),
+    ).toEqual([]);
   });
 });

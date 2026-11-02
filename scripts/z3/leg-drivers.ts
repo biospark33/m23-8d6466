@@ -492,6 +492,43 @@ export async function driveFindingsRetain(d: Z3Deps, input: { lens: string; runI
   return r;
 }
 
+/**
+ * The priming-recall leg's problem assembly, with the HONEST-EMPTY ARM
+ * (round-19 attempt 7, 2026-11-02): the release-wait diff was clean, the
+ * hunters honestly found nothing, the round retained ZERO findings — and
+ * "cites ≥1 retained finding" is UNSATISFIABLE then, the same structural
+ * shape as round 18's empty review set that the scope-derivation amendment
+ * fixed for the SET but not for the FINDINGS. The round trip is then proven
+ * by the dispatch recall RUNNING (directive kg_context) and the bank
+ * surfacing ≥1 document (the memory lane alive end to end), not by citing a
+ * finding that cannot exist. With findings retained, the original two checks
+ * stand unchanged.
+ */
+export function primingRecallProblems(input: {
+  directive: string | null;
+  citedRetained: readonly string[];
+  recalledCount: number;
+  retainedCount: number;
+}): string[] {
+  const problems: string[] = [];
+  if (input.directive !== "kg_context") {
+    problems.push(`dispatch recall directive ${input.directive ?? "absent"}, not kg_context`);
+    return problems;
+  }
+  if (input.retainedCount === 0) {
+    if (input.recalledCount === 0) {
+      problems.push(
+        "the round retained zero findings (a clean pin diff — the hunters honestly found nothing) and the bank surfaced nothing at all: the memory lane is unhealthy, not merely unprimed",
+      );
+    }
+    return problems;
+  }
+  if (input.citedRetained.length === 0) {
+    problems.push("the code run's <kg_context> cites no finding this round retained");
+  }
+  return problems;
+}
+
 export async function drivePrimingRecall(
   d: Z3Deps,
   input: { runId: string; requestId: string; bank: string; retainedByLens: Record<string, string[]> },
@@ -505,9 +542,12 @@ export async function drivePrimingRecall(
   const citedLenses = Object.entries(input.retainedByLens)
     .filter(([, ids]) => ids.some((id) => citedRetained.includes(id)))
     .map(([lens]) => lens);
-  const problems: string[] = [];
-  if (row?.directive !== "kg_context") problems.push(`dispatch recall directive ${row?.directive ?? "absent"}, not kg_context`);
-  if (citedRetained.length === 0) problems.push("the code run's <kg_context> cites no finding this round retained");
+  const problems = primingRecallProblems({
+    directive: row?.directive ?? null,
+    citedRetained,
+    recalledCount: recalled.length,
+    retainedCount: retainedDocumentIds.length,
+  });
   settle(d, "priming-recall", problems, {
     runId: input.runId,
     requestId: input.requestId,

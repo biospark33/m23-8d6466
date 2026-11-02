@@ -31,6 +31,20 @@ only carrier the box reads), under the 600-char instructions ceiling both
 sides enforce. No fork counterpart story doc exists under the fork's docs/;
 this section is the contract text of record.
 
+**Amendment — the priming assertion's honest-empty arm (2026-11-02).** Live
+round 19 (attempts 5-7, 2026-11-02) measured the amendment's own limit: a
+pin whose diff is CLEAN yields zero findings — the hunters honestly found
+nothing over the release-wait commit's four files — and "the next dispatch
+cites ≥1 retained finding" is UNSATISFIABLE then, the same structural shape
+the scope-derivation amendment fixed for the SET but not for the FINDINGS.
+Steve-approved during the round (operator directive: fix the round, do not
+re-derive). The priming-recall assertion gains the arm: with zero findings
+retained, the round trip is proven by the dispatch recall RUNNING (directive
+kg_context) and the bank surfacing ≥1 document — the memory lane alive end
+to end — not by citing a finding that cannot exist. With findings retained,
+the original two checks stand unchanged. Fixed in the same commit as the
+mechanism (`primingRecallProblems`, leg-drivers.ts).
+
 ## Spec Reference
 
 > **Spec drift (2026-10-19, D-1):** this story calls ADR-2 PROPOSED. It became ACCEPTED on 2026-10-15 via G1. G1 shipped the fail-closed policy (`src/fleet/auto-merge-policy.ts` plus the run-completion consult), but ON stays structurally unreachable until the clause-5 veto-window carrier (`enqueueVetoWindow`) is in the tree. Z3 still asserts park → human decide, and it now also records the auto-merge consult state and fails AC2 if it is ON. The contract delta is recorded in `docs/planning/v6-crossrepo-contract.md` §Z3 round record.
