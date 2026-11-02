@@ -1005,7 +1005,14 @@ ARG OPENRIG_VERSION=0.5.14
 # it moved (hono ^4.7.0 / zod ^4.3.6 / tar ^7.5.13 ranges remain open upstream).
 # No same-version npm re-publish is involved (@openrig/cli@0.5.14's
 # dist.integrity is unchanged).
-ARG OPENRIG_TREE_SHA256=9822fb8dd488067fe5b13393125d2048a3e8593fac41b2cceaf5cf410fcdfc09
+# RE-PINNED 2026-11-02 from publish run 41371967520's refusal ("the /opt/openrig
+# tree hashes to 1f9d6a1dc12ec215733d3a2a572ecd8e3f9bfad3ffe8e91b5e4b640b6de33874"):
+# same caret-float class as all prior re-pins — the rig binary is UNTOUCHED
+# (rig --version printed 0.5.14 (cc75efdd) in both the failing run 41371967520
+# and the last green run 40340198459), and @openrig/cli@0.5.14's dist.integrity
+# is unchanged since 2026-09-14; only the caret-resolved transitive deps under
+# it moved. No same-version npm re-publish is involved.
+ARG OPENRIG_TREE_SHA256=1f9d6a1dc12ec215733d3a2a572ecd8e3f9bfad3ffe8e91b5e4b640b6de33874
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a

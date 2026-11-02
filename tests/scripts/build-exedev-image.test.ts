@@ -1328,7 +1328,13 @@ describe("buildIdFileInputs", () => {
       // 2026-10-18: exeuntu base re-pin ea6c3f5c → bb7e0268 (scheduled
       // base-drift, upstream's weekly rebuild). Both FROM digests only;
       // measured with shasum -a 256 on the edited file.
-      "oci/exedev/Dockerfile": "7935a8878ea96f934df40a2dde8c76ac42ce9b094584929283012420c4fbbc7f",
+      //
+      // 2026-11-02: OPENRIG_TREE_SHA256 re-pin 9822fb8d → 1f9d6a1d (publish
+      // run 41371967520's build-time TOFU refusal — caret-float class, rig
+      // binary untouched at cc75efdd). Dockerfile bytes only, measured from
+      // this test's own failing run; the walk digest below was re-adopted
+      // with the same edit (#482's sidecar fix had already moved it).
+      "oci/exedev/Dockerfile": "52645893d91965e6fcce8a83d83447f8502a73088b9e1dec6a44e0f1972b8be3",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -2198,7 +2204,7 @@ describe("buildIdFileInputs", () => {
       // src/phase-engine/findings-sidecar.ts, src/fleet/*, src/providers/run-record.ts,
       // cli-anything/scripts/team-lead-driver.ts) — re-pin LAST on the final tree;
       // the image publish + pin adoption follows (Z3 keeps #467 listed until then).
-            "636b66fdc8cbfdb99d871056974af27515c7f65aa339f581a7e9cd2b51fbc156",
+            "aa7014aa5bb84db1cff0ea2c93b5e19f9d0c5c7a02a37b78d6b5f5d35d9d0b81",
     );
   });
 });
@@ -3927,8 +3933,10 @@ describe("checksumArgProblems", () => {
           // is the test-side mirror of the ARG). 2026-10-26: re-pinned again
           // (publish run 40317122238 — same class; the openrig tree drifted
           // under the pinned 0.5.14, adopter's case-regex could not see
-          // returns behind comments).
-          return "9822fb8dd488067fe5b13393125d2048a3e8593fac41b2cceaf5cf410fcdfc09";
+          // returns behind comments). 2026-11-02: re-pinned again (publish
+          // run 41371967520 refused — same caret-float class; the rig binary
+          // is untouched at cc75efdd in failing run and last green run alike).
+          return "1f9d6a1dc12ec215733d3a2a572ecd8e3f9bfad3ffe8e91b5e4b640b6de33874";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
