@@ -46,6 +46,22 @@ GATE="${Z3_GATE_DIR:-$here/../../.sandbox/z3-gate}"
 HOLD_LIMIT_S="${Z3_GATE_HOLD_LIMIT_S:-240}"
 J="$GATE/journal.jsonl"
 
+# The memory-lane env never crosses the SC2.5 fence (buildFleetEnv allowlists
+# PATH/HOME/TMPDIR/LANG), so the code run's dispatch could never prime — the
+# recall row is then absent and the priming-recall leg reds ("dispatch recall
+# directive absent"), measured live in round 18 AND all four round-19
+# attempts. Matching the wrapper's own philosophy — config rides FILES, not
+# env — the operator's gate-dir hindsight.env (0600, untracked) is sourced
+# here, before EVERY exec path (non-submit verbs exec'd straight through,
+# held submits released here, plain submits): one block, all crossings.
+# Absent file = the old behavior, unchanged.
+if [ -f "$GATE/hindsight.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$GATE/hindsight.env"
+  set +a
+fi
+
 if [ ! -f "$GATE/real-cli" ]; then
   echo "z3 fleet gate: $GATE/real-cli missing — write the real fleet CLI's absolute path there" >&2
   exit 98
