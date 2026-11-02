@@ -12,6 +12,7 @@ import path from "node:path";
 import {
   ARM_LEAD_MS,
   armedCapsProblems,
+  waitFindingsRecallable,
   FORK_ARM_TIMEOUT_MS,
   FORK_CANCEL_TIMEOUT_MS,
   FORK_CLI_TIMEOUT_MS,
@@ -144,5 +145,52 @@ describe("arm failure sweep (N-1)", () => {
     expect(calls).toContain("disarm sch-late");
     expect(calls).toContain("cancel pr-late");
     expect(calls.some((c) => c === "disarm sch-old")).toBe(false); // never a schedule this round did not arm
+  });
+});
+
+describe("waitFindingsRecallable — the release waits for the last retain to be recallable", () => {
+  const okProbe = (recalls: unknown[]) => {
+    let i = 0;
+    return {
+      recall: async () => recalls[Math.min(i++, recalls.length - 1)],
+      sleep: async () => {},
+      deadlineMs: Date.now() + 60_000,
+    };
+  };
+  test("true when the first probe already surfaces a round doc id", async () => {
+    const probe = okProbe([{ results: [{ documentId: "qds-x-1" }, { documentId: "qds-y-9" }] }]);
+    expect(await waitFindingsRecallable({ bank: "b", docIds: ["qds-y-9"] }, probe)).toBe(true);
+  });
+  test("keeps polling until a later probe surfaces one (the mid-ingestion window)", async () => {
+    const probe = okProbe([{ results: [{ documentId: "old-doc" }] }, { results: [{ documentId: "qds-y-9" }] }]);
+    expect(await waitFindingsRecallable({ bank: "b", docIds: ["qds-y-9"] }, probe)).toBe(true);
+  });
+  test("false when the bound passes with zero overlap (refuses the release upstream)", async () => {
+    let i = 0;
+    const probe = {
+      recall: async () => ({ results: [{ documentId: `old-${i++}` }] }),
+      sleep: async () => {},
+      deadlineMs: Date.now() + 100,
+      cadenceMs: 1,
+    };
+    expect(await waitFindingsRecallable({ bank: "b", docIds: ["qds-y-9"] }, probe)).toBe(false);
+  });
+  test("true with no doc ids owed (nothing retained this round)", async () => {
+    const probe = okProbe([{ results: [] }]);
+    expect(await waitFindingsRecallable({ bank: "b", docIds: [] }, probe)).toBe(true);
+  });
+  test("a probe that throws keeps polling (a blip is not a verdict)", async () => {
+    let calls = 0;
+    const probe = {
+      recall: async () => {
+        calls++;
+        if (calls === 1) throw new Error("blip");
+        return { results: [{ documentId: "qds-y-9" }] };
+      },
+      sleep: async () => {},
+      deadlineMs: Date.now() + 60_000,
+    };
+    expect(await waitFindingsRecallable({ bank: "b", docIds: ["qds-y-9"] }, probe)).toBe(true);
+    expect(calls).toBe(2);
   });
 });

@@ -135,7 +135,18 @@ export interface Z3Deps {
     runId: string,
   ) => Promise<{ bank: string; documentIds: string[]; traces: Array<{ side: "host" | "box"; documentId: string }> }>;
   /** A round-side gateway call authenticated by an M2.1 agent token — origin + token ID, never the token. */
-  gatewayAssert: (bank: string) => Promise<{ origin: string; agentTokenId: string }>;
+  gatewayAssert: (bank: string) => Promise<{ origin: string; agentTokenId: string }>
+  /**
+   * THE RELEASE WAITS FOR THE LAST RETAIN TO BE RECALLABLE (round-19
+   * attempt-5 finding, 2026-11-02): hindsight's recall surfaced only
+   * pre-round documents when the code run dispatched 189 ms after the last
+   * retain — the fresh findings were still mid-ingestion (directive
+   * kg_context, 7,985 chars, zero overlap: all nine recalled ids predate the
+   * round). Polls a dispatch-shaped recall until ≥1 round doc id surfaces
+   * (bounded), returning whether it ever did; the caller refuses to release
+   * the code submit into an unprimed bank.
+   */
+  waitFindingsRecallable: (input: { bank: string; docIds: readonly string[] }) => Promise<boolean>;
   /** The dispatch recall row (`_bmad-output/memory/recall/<requestId>.json`). */
   readRecall: (requestId: string) => { directive: string; recalledDocumentIds: string[] } | null;
   /** `fleet approve` with the token on stdin; returns what the CLI said. */
@@ -960,6 +971,18 @@ export async function runZ3Round(
       const r = await driveFindingsRetain(d, { lens, runId: prov.runId });
       retainedByLens[lens] = r.documentIds;
       bank = r.bank;
+    }
+    // THE RELEASE WAITS FOR THE LAST RETAIN TO BE RECALLABLE (the dep's
+    // own comment carries the measured evidence). The fork stays down the
+    // whole wait (the watcher killed it; the gate stays armed), no spend
+    // accrues, and the code submit replays fresh on restart — its dispatch
+    // recall then sees the indexed findings. The release order itself is
+    // unchanged: set retainDoneAt only once the bank is primed.
+    const recallable = await d.waitFindingsRecallable({ bank, docIds: Object.values(retainedByLens).flat() });
+    if (!recallable) {
+      throw new Error(
+        "z3 round: the retained findings never became recallable before the release — hindsight's extraction lagged the retain API past the whole bound, and releasing would strand the code run unprimed (the priming-recall leg would red on zero citation)",
+      );
     }
     retainDoneAt = Date.now(); // the watcher may now release: the replay's recall sees every finding
     const before = await d.inventory();

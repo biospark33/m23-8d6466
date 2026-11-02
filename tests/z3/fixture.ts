@@ -152,6 +152,10 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
     liveKeys.delete(`key-${runId}`);
   };
   const deps: Z3Deps = {
+    // Offline fixture: the findings are instantly recallable — the real probe
+    // (live-round-wiring waitFindingsRecallable) owns the waiting semantics
+    // and its own suite; the fixture only needs the release to proceed.
+    waitFindingsRecallable: async () => true,
     sink: {
       outDir,
       forkRev: REV,

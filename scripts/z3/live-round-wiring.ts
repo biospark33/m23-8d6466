@@ -532,6 +532,37 @@ export async function gatewayReflect(bank: string, deadline: number): Promise<{ 
   return { origin: new URL(gateway).origin, agentTokenId: agentTokenId(token) };
 }
 
+/**
+ * The recallability probe the release waits on (round-19 attempt-5 finding):
+ * a dispatch-shaped recall against the bank, repeated until ≥1 of the round's
+ * retained doc ids surfaces in the response's documentId fields (the client's
+ * camelCase view — the raw wire is snake_case document_id, and the naive
+ * `document_id ?? id` read misses every hit; measured live), or until the
+ * bound. Returns whether a hit ever landed.
+ */
+export async function waitFindingsRecallable(
+  input: { bank: string; docIds: readonly string[] },
+  probe: {
+    recall: (bank: string, query: string, limit: number) => Promise<unknown>;
+    sleep: (ms: number) => Promise<void>;
+    deadlineMs: number;
+    cadenceMs?: number;
+  },
+): Promise<boolean> {
+  const want = new Set<string>(input.docIds);
+  if (want.size === 0) return true; // nothing retained this round: no wait owed
+  const cadence = probe.cadenceMs ?? 20_000;
+  for (let attempt = 0; ; attempt++) {
+    const res = (await probe.recall(input.bank, "z3 exit round", 30).catch(() => undefined)) as
+      | { results?: Array<{ documentId?: unknown }> }
+      | undefined;
+    const ids = (res?.results ?? []).map((r) => String(r?.documentId ?? ""));
+    if (ids.some((id) => want.has(id))) return true;
+    if (Date.now() + cadence > probe.deadlineMs) return false;
+    await probe.sleep(cadence);
+  }
+}
+
 /** The bank dispatch's recall reads for this repo (dispatch.ts memory lane), never a hand-named one. */
 export async function resolveRoundBank(repoSlug: string, client: HindsightClient = new HindsightClient()): Promise<string> {
   const bank = resolveProvisionedRepoBankId(resolveBankId(repoSlug), extractExistingBankIds(await client.listBanks()));
@@ -871,6 +902,12 @@ export function z3LiveDeps(opts: {
       return { bank: res.bank, documentIds: res.documentIds, traces: journal.map((documentId) => ({ side: "host" as const, documentId })) };
     },
     gatewayAssert: (bank) => gatewayReflect(bank, opts.deadline),
+    waitFindingsRecallable: (input) =>
+      waitFindingsRecallable(input, {
+        recall: (bank, query, limit) => new HindsightClient().recall(bank, query, limit),
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        deadlineMs: Math.min(opts.deadline, Date.now() + 15 * 60_000),
+      }),
     readRecall: (requestId) => {
       const file = path.join(REPO_ROOT, DEFAULT_RECALL_DIR, `${requestId}.json`);
       if (!existsSync(file)) return null;
