@@ -191,6 +191,22 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
     }
   });
 
+  test("a cold-pull kill (exit 137) is retried once and the second `new` lands (round-19 class)", async () => {
+    const fake = fakeExeDev({ newFirstExit: 137 });
+    try {
+      const driver = new ExeDevDriver({ run: fake.run, createRetrySettleMs: 1 });
+      const created = await driver.create("cold-pull-retry");
+      // BOTH `new` invocations recorded — the killed one and the landing one.
+      expect(fake.creates.length).toBe(2);
+      // The landing `new` created the real fake box: create resolves with the
+      // recognized shape, steering channel provisioned.
+      expect(created.name).toBe("cold-pull-retry");
+      expect(created.httpsUrl).toContain("cold-pull-retry");
+    } finally {
+      fake.cleanup();
+    }
+  });
+
   test("unprovisionable channel → typed refusal, VM stays listable (INV-5)", async () => {
     const fake = fakeExeDev({ steeringProvisionFails: true });
     try {

@@ -854,6 +854,8 @@ export interface ExeDevDriverOptions {
   postureFile?: string;
   /** Per-exec default ceiling (ms). */
   execTimeoutMs?: number;
+  /** Round-19 fix: the settle before the one create retry on a cold-pull kill (exit 137). Tests pass a small value; production keeps the 30 s GC-settle default. */
+  createRetrySettleMs?: number;
   /** Propagated from the dispatch that created the run record (§5.2). */
   requestId?: string;
   /** The box's public hostname suffix. exe.dev derives `<name>.exe.xyz`. */
@@ -883,6 +885,7 @@ export class ExeDevDriver implements ProviderDriver {
   private readonly run: ExeCommand;
   private readonly postureFile: string;
   private readonly execTimeoutMs: number;
+  private readonly createRetrySettleMs: number;
   /** Propagation id (§5.2) — an id, never a credential. */
   readonly requestId: string;
   private readonly hostSuffix: string;
@@ -932,6 +935,7 @@ export class ExeDevDriver implements ProviderDriver {
     }
     this.run = opts.run ?? sshCommand();
     this.execTimeoutMs = opts.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
+    this.createRetrySettleMs = opts.createRetrySettleMs ?? 30_000;
     this.requestId = opts.requestId ?? newRequestId();
     this.hostSuffix = opts.hostSuffix ?? "exe.xyz";
     // A tag is a LEGAL image reference (the D7 tenant mirror needs one) and it
@@ -1143,6 +1147,22 @@ export class ExeDevDriver implements ProviderDriver {
     // exec timeout, a transport abort) routinely carries the whole argv in
     // `err.message`, and that one used to propagate out of `create()`
     // unredacted and with no `create_failed` line: unattributed AND leaking.
+    const newArgv = [
+      "new",
+      "--name",
+      name,
+      ...(tag === undefined ? [] : ["--tag", tag]),
+      // `--image` is UNCONDITIONAL — the constructor always assigns a pin, so
+      // there is no path through create() that boots the substrate default.
+      // That is the fail-safe posture: a conditional spread here would
+      // reintroduce an unpinned boot path. `--registry-auth` is the genuinely
+      // conditional one (default-off). Both values were validated in the
+      // constructor, before any command existed.
+      "--image",
+      this.image,
+      ...(this.registryAuth === undefined ? [] : ["--registry-auth", this.registryAuth]),
+      "--json",
+    ];
     let res: ExecResult;
     try {
       // The ratification is re-asserted per CREATE, not only at construction: a
@@ -1160,22 +1180,26 @@ export class ExeDevDriver implements ProviderDriver {
       // then `create_failed` like every other refusal, and the catch preserves
       // its typed code (a lapse must never read as `create-failed`).
       if (this.registryAuth !== undefined) assertRegistryAuthDeviation(this.postureFile);
-      res = await this.control([
-        "new",
-        "--name",
-        name,
-        ...(tag === undefined ? [] : ["--tag", tag]),
-        // `--image` is UNCONDITIONAL — the constructor always assigns a pin, so
-        // there is no path through create() that boots the substrate default.
-        // That is the fail-safe posture: a conditional spread here would
-        // reintroduce an unpinned boot path. `--registry-auth` is the genuinely
-        // conditional one (default-off). Both values were validated in the
-        // constructor, before any command existed.
-        "--image",
-        this.image,
-        ...(this.registryAuth === undefined ? [] : ["--registry-auth", this.registryAuth]),
-        "--json",
-      ]);
+      res = await this.control(newArgv);
+      // Round-19 measured class (2026-11-02): a VIRGIN image digest's first
+      // boot does a cold pull that can outlive the substrate's create ceiling
+      // — exe.dev kills the `new` with exit 137 (SIGKILL), the box wedges in
+      // `creating` until the substrate's own GC reaps it, and the leg's
+      // submit refuses (`submit-intent-corrupt`: provisioning attempted and
+      // refused). The re-issue lands on a warmed substrate (measured: a
+      // manual re-create of the same digest succeeded, buildId verified
+      // in-box). ONE retry, after a settle that gives the GC time to clear
+      // the wedged name. INV-5 untouched: the wedged box is NOT destroyed
+      // here — it may already be gone by the time we look, and a destroy
+      // racing a creating box is the exact race that red'd round 19's own
+      // cleanup. If the GC has not reaped it yet, the re-issued `new` fails
+      // with the substrate's name-taken refusal and the ordinary arm below
+      // reports it — operator-visible either way.
+      if (res.exitCode === 137) {
+        this.emit("create_retry", { ...this.imageFields(name), exitCode: 137, settle_ms: this.createRetrySettleMs }, "error");
+        await new Promise((resolve) => setTimeout(resolve, this.createRetrySettleMs));
+        res = await this.control(newArgv);
+      }
     } catch (e) {
       // `mayExist` is the field a REAPER can act on, and it is why this arm is
       // not interchangeable with the non-zero-exit arm below despite both

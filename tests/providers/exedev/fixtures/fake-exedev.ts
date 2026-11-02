@@ -395,6 +395,8 @@ export interface FakeExeDevOptions {
    * partial evidence.
    */
   truncateScript?: boolean;
+  /** Round-19 retry test knob: the FIRST `new` returns this exit code (a substrate-side cold-pull kill) without landing a box; the re-issued `new` succeeds. */
+  newFirstExit?: number;
   /**
    * The in-box gate script EXITS 0 but emits fabricated evidence — "c-only"
    * (C's line alone) or "duplicates" (C twice + D). Exit 0 is not proof of
@@ -595,6 +597,14 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       let m = /^new --name (\S+)( --tag (\S+))? --image (\S+)( --registry-auth (\S+))? --json$/.exec(sub);
       if (m) {
         const name = m[1] as string;
+        if (opts.newFirstExit !== undefined && creates.length === 0) {
+          // Round-19 retry knob: the FIRST `new` dies substrate-side (a cold
+          // pull outlived the create ceiling) WITHOUT landing a box; the
+          // driver's one retry is the thing under test. Both invocations
+          // record — the kill and the landing.
+          creates.push({ name, image: m[4] as string, ...(m[3] === undefined ? {} : { tag: m[3] }) });
+          return { stdout: "", stderr: "Killed\n", exitCode: opts.newFirstExit };
+        }
         creates.push({
           name,
           ...(m[3] === undefined ? {} : { tag: m[3] }),
