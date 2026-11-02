@@ -966,6 +966,23 @@ export function z3LiveDeps(opts: {
       return { bank: res.bank, documentIds: res.documentIds, traces: journal.map((documentId) => ({ side: "host" as const, documentId })) };
     },
     gatewayAssert: (bank) => gatewayReflect(bank, opts.deadline),
+    parkForApproval: async (runId) => {
+      // SC2.7's completion chain, driven host-side by the round (the fork's
+      // observe surface is fenced read-only — the park can only come from
+      // here). The 900 s host bound covers the chain's harvest/teardown +
+      // reverify; the in-box reverify window itself is 600 s.
+      const run = async () => {
+        const left = opts.deadline - Date.now();
+        if (left <= 0) pastDeadline(`run ${runId} observe/park`);
+        const t = fleet(["observe", runId, "--driver", "exedev", "--window-ms", "600000"], undefined, Math.max(1_000, Math.min(900_000, left)));
+        const tail = `${t.stdout}\n${t.stderr}`.trim().split("\n").pop() ?? "";
+        return { exitCode: t.exitCode, tail: tail.slice(0, 400) };
+      };
+      const first = await run();
+      if (first.exitCode === 0) return first;
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      return run();
+    },
     waitFindingsRecallable: async (input) => {
       // THE ACTUAL dispatch-shaped query (attempt 12, live: the "z3 exit
       // round" proxy ranked this round's findings high while the code run's

@@ -266,6 +266,10 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
       return { bank: "qds-factory", documentIds: [docId(lensIndex(lens))], traces: [{ side: "host", documentId: docId(lensIndex(lens)) }] };
     },
     gatewayAssert: async () => ({ origin: "http://127.0.0.1:18892", agentTokenId: AGENT_TOKEN_ID }),
+    parkForApproval: async (runId) => {
+      calls.order.push(`park:${runId}`);
+      return { exitCode: 0, tail: "parked: awaiting-approval" };
+    },
     readRecall: () => ({ directive: "kg_context", recalledDocumentIds: [...recallDocs, "qds-20261019-ffffff"] }),
     approve: async (runId) => {
       approvalSettled = true; // the ordering pin: the QA observes may only read after this

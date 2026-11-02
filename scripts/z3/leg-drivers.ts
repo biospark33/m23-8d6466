@@ -140,6 +140,14 @@ export interface Z3Deps {
   /** A round-side gateway call authenticated by an M2.1 agent token — origin + token ID, never the token. */
   gatewayAssert: (bank: string) => Promise<{ origin: string; agentTokenId: string }>
   /**
+   * THE PARK ACTOR (attempt 14, live: the round polled for awaiting-approval
+   * for ~2 h while nobody performed it — the record read settled-ok forever).
+   * `fleet observe` is the completion chain's actor (SC2.7's proven shape):
+   * pre-register → harvest/teardown → reverify → gate; a green verdict parks
+   * the run at awaiting-approval and the chain's own teardown reaps the box.
+   */
+  parkForApproval: (runId: string) => Promise<{ exitCode: number; tail: string }>;
+  /**
    * THE RELEASE WAITS FOR THE LAST RETAIN TO BE RECALLABLE (round-19
    * attempt-5 finding, 2026-11-02): hindsight's recall surfaced only
    * pre-round documents when the code run dispatched 189 ms after the last
@@ -468,7 +476,7 @@ export function writeCredentialsFor(keys: readonly MemoryKeyRow[], runId: string
 }
 
 export async function driveFindingsRetain(d: Z3Deps, input: { lens: string; runId: string; codeWorkId?: string }) {
-  let r;
+  let r: Awaited<ReturnType<typeof d.retainFindings>>;
   try {
     r = await d.retainFindings(input.lens, input.runId, input.codeWorkId);
   } catch (e) {
@@ -578,6 +586,21 @@ export async function drivePrimingRecall(
 }
 
 export async function driveApprovalPark(d: Z3Deps, input: { runId: string }) {
+  const observe = await d.parkForApproval(input.runId);
+  if (observe.exitCode !== 0) {
+    // ONE retry: the observe chain spans ssh reads and the approval gate's
+    // teardown, and the gate itself RESUMES a pausing window on the next
+    // request (AC1(c)) — a retry cannot strand state the first attempt left.
+    await d.sleep(10_000);
+    const second = await d.parkForApproval(input.runId);
+    if (second.exitCode !== 0) {
+      settle(d, "approval-park", [`fleet observe failed twice: ${observe.tail.slice(0, 200)} / ${second.tail.slice(0, 200)}`], {
+        runId: input.runId,
+        status: "observe-failed",
+        terminal: false,
+      });
+    }
+  }
   const r = await d.awaitResult(input.runId, "awaiting-approval");
   const problems = r.status === "awaiting-approval" && !r.terminal ? [] : [`not parked: ${r.status} terminal=${r.terminal}`];
   settle(d, "approval-park", problems, { runId: input.runId, status: r.status, terminal: r.terminal });
