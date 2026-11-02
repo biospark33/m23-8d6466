@@ -594,10 +594,11 @@ export async function driveApprovalPark(d: Z3Deps, input: { runId: string }) {
     await d.sleep(10_000);
     const second = await d.parkForApproval(input.runId);
     if (second.exitCode !== 0) {
-      settle(d, "approval-park", [`fleet observe failed twice: ${observe.tail.slice(0, 200)} / ${second.tail.slice(0, 200)}`], {
+      settle(d, "approval-park", [`fleet observe failed twice: ${observe.tail.slice(0, 1200)} / ${second.tail.slice(0, 1200)}`], {
         runId: input.runId,
         status: "observe-failed",
         terminal: false,
+        observeTails: [observe.tail, second.tail],
       });
     }
   }

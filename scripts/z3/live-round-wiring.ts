@@ -969,14 +969,20 @@ export function z3LiveDeps(opts: {
     parkForApproval: async (runId) => {
       // SC2.7's completion chain, driven host-side by the round (the fork's
       // observe surface is fenced read-only — the park can only come from
-      // here). The 900 s host bound covers the chain's harvest/teardown +
-      // reverify; the in-box reverify window itself is 600 s.
+      // here). The host bound must cover the chain's harvest/teardown PLUS a
+      // CI-parity reverify (install + full bun test + typecheck + lint under
+      // the 45-min reverify wall — HOST_PLAN_BUDGET_MS/DEFAULT_WALL_CLOCK_MS),
+      // not the old 600 s in-box window: 900 s reds a green round (attempt
+      // 16), so 3600 s. Still bounded by the round deadline via `left`.
       const run = async () => {
         const left = opts.deadline - Date.now();
         if (left <= 0) pastDeadline(`run ${runId} observe/park`);
-        const t = fleet(["observe", runId, "--driver", "exedev", "--window-ms", "600000"], undefined, Math.max(1_000, Math.min(900_000, left)));
+        const t = fleet(["observe", runId, "--driver", "exedev", "--window-ms", "600000"], undefined, Math.max(1_000, Math.min(3_600_000, left)));
+        // The fleet CLI's error envelope is one JSON line whose `error` field
+        // sits past char ~190; slicing the tail below that buried attempt 16's
+        // real failure (no-host-plan) behind a truncated runId.
         const tail = `${t.stdout}\n${t.stderr}`.trim().split("\n").pop() ?? "";
-        return { exitCode: t.exitCode, tail: tail.slice(0, 400) };
+        return { exitCode: t.exitCode, tail: tail.slice(0, 2000) };
       };
       const first = await run();
       if (first.exitCode === 0) return first;
