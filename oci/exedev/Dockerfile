@@ -1012,7 +1012,16 @@ ARG OPENRIG_VERSION=0.5.14
 # and the last green run 40340198459), and @openrig/cli@0.5.14's dist.integrity
 # is unchanged since 2026-09-14; only the caret-resolved transitive deps under
 # it moved. No same-version npm re-publish is involved.
-ARG OPENRIG_TREE_SHA256=1f9d6a1dc12ec215733d3a2a572ecd8e3f9bfad3ffe8e91b5e4b640b6de33874
+# RE-PINNED 2026-11-02 (second same-day pin) from publish run 41454454888's
+# refusal ("the /opt/openrig tree hashes to
+# 139620d5491a65dd62b7da6ce670ea7f531995938767a1b55130189e27a1a00b"): same
+# caret-float class as every prior pin — the rig binary is UNTOUCHED
+# (rig --version printed 0.5.14 (cc75efdd) in this run too) and
+# @openrig/cli@0.5.14's dist.integrity is unchanged; only the caret-resolved
+# transitive deps under it moved again. The floating caret has now moved the
+# tree twice within 13 hours — pinning the exact versions (npm lockfile for
+# the global install) is the standing fix candidate; filed, not done here.
+ARG OPENRIG_TREE_SHA256=139620d5491a65dd62b7da6ce670ea7f531995938767a1b55130189e27a1a00b
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a
