@@ -306,6 +306,8 @@ export function fixtureWorld(outDir: string, overrides: Partial<Z3Deps> = {}, op
       hidden.clear();
       await new Promise((r) => setTimeout(r, 0)); // yield a macrotask, as a real sleep does (no microtask spin)
     },
+    readStepWorkId: async (stepId) =>
+      stepId === Z3_STEP.codeRun ? `w:z3-${STAMP}-code` : Z3_WORK_ID.qa(STAMP, stepId.replace(/^qa-leg-/, "")),
     ...overrides,
   };
   return { deps, calls, boxes, gate: gateState };

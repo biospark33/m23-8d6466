@@ -67,6 +67,15 @@ export interface RetainFindingsInput {
   requestId: string;
   legRan: boolean;
   findings: Finding[];
+  /**
+   * The round correlation the dispatch recall query can match (round 19
+   * attempt 12, live): the query is `${repoSlug} ${codeWorkId}` and a finding
+   * that names neither ranks out of the kg_context window by construction —
+   * the priming round-trip closed everywhere except this field. The wiring
+   * composes it as the exact query string; extraction preserves the
+   * repository and run tokens it can name.
+   */
+  correlation?: string;
 }
 
 export interface QaRetainResult {
@@ -140,6 +149,7 @@ function buildFindingPayload(input: RetainFindingsInput, finding: Finding): stri
     finding_text: redactSecrets(parsed.data.finding_text),
     lens: input.lens,
     runId: input.runId,
+    ...(input.correlation !== undefined ? { correlation: input.correlation } : {}),
   };
   const json = JSON.stringify(payload);
   if (Buffer.byteLength(json, "utf8") > RETAIN_PAYLOAD_MAX_BYTES) {

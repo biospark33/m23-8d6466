@@ -565,3 +565,20 @@ describe("qa retain refusals and surfaces", () => {
     expect(FindingSchema.safeParse({ runId: parsed.runId, lens: parsed.lens, finding_text: parsed.finding_text, diff_context_ref: parsed.diff_context_ref }).success).toBe(true);
   });
 });
+
+// ─── the round correlation (round 19 attempt 12, live) ──────────────────────
+
+describe("finding payload round correlation", () => {
+  test("correlation rides the payload verbatim when present; absent stays absent", async () => {
+    const { calls, client } = fakeClient();
+    const withCorr = await retainFindings({ client }, input({ correlation: "acme/widgets w:z3-20261102T120000Z-code" }));
+    expect(withCorr.documentIds).toHaveLength(2);
+    const stored = JSON.parse(calls[0]?.content ?? "{}") as Record<string, unknown>;
+    expect(stored.correlation).toBe("acme/widgets w:z3-20261102T120000Z-code");
+
+    const { calls: calls2, client: client2 } = fakeClient();
+    await retainFindings({ client: client2 }, input());
+    const stored2 = JSON.parse(calls2[0]?.content ?? "{}") as Record<string, unknown>;
+    expect(Object.hasOwn(stored2, "correlation")).toBeFalse();
+  });
+});

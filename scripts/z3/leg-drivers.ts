@@ -133,7 +133,10 @@ export interface Z3Deps {
   retainFindings: (
     lens: string,
     runId: string,
+    codeWorkId?: string,
   ) => Promise<{ bank: string; documentIds: string[]; traces: Array<{ side: "host" | "box"; documentId: string }> }>;
+  /** The step's budget-group work id from the fork state (externalJobConfig), or undefined when the state does not carry it yet. */
+  readStepWorkId: (stepId: string) => Promise<string | undefined>;
   /** A round-side gateway call authenticated by an M2.1 agent token — origin + token ID, never the token. */
   gatewayAssert: (bank: string) => Promise<{ origin: string; agentTokenId: string }>
   /**
@@ -146,7 +149,7 @@ export interface Z3Deps {
    * (bounded), returning whether it ever did; the caller refuses to release
    * the code submit into an unprimed bank.
    */
-  waitFindingsRecallable: (input: { bank: string; docIds: readonly string[] }) => Promise<boolean>;
+  waitFindingsRecallable: (input: { bank: string; docIds: readonly string[]; codeWorkId?: string }) => Promise<boolean>;
   /** The dispatch recall row (`_bmad-output/memory/recall/<requestId>.json`). */
   readRecall: (requestId: string) => { directive: string; recalledDocumentIds: string[] } | null;
   /** `fleet approve` with the token on stdin; returns what the CLI said. */
@@ -464,8 +467,8 @@ export function writeCredentialsFor(keys: readonly MemoryKeyRow[], runId: string
   return keys.filter((k) => k.runId === runId && k.verbs.some((v) => !READ_ONLY_MEMORY_VERBS.includes(v)));
 }
 
-export async function driveFindingsRetain(d: Z3Deps, input: { lens: string; runId: string }) {
-  const r = await d.retainFindings(input.lens, input.runId);
+export async function driveFindingsRetain(d: Z3Deps, input: { lens: string; runId: string; codeWorkId?: string }) {
+  const r = await d.retainFindings(input.lens, input.runId, input.codeWorkId);
   const gatewayAssertion = await d.gatewayAssert(r.bank);
   const runKeys = d.memoryKeys().filter((k) => k.runId === input.runId);
   const boxWriteCredentials = writeCredentialsFor(runKeys, input.runId);
@@ -979,6 +982,16 @@ export async function runZ3Round(
     });
     let retainDoneAt: number | null = null;
     watcher = armCrashWindow(d, code.stepId, () => stopped, () => retainDoneAt);
+    // The findings' round correlation (attempt 12, live): the dispatch recall
+    // query is `${repoSlug} ${codeWorkId}` — a finding that names neither
+    // ranks out of the kg_context window by construction, so every retain
+    // carries the code run's own workId (read from the fork state's step
+    // config, present at fire time) and the release probe recalls with THE
+    // ACTUAL query, not a hand-shaped proxy.
+    const codeWorkId = await d.readStepWorkId(code.stepId);
+    if (codeWorkId === undefined) {
+      throw new Error(`the bound run's ${code.stepId} step carries no workId in the fork state — the findings' round correlation can never match the dispatch recall query`);
+    }
     watcher.catch(() => {}); // settled below; never an unhandled rejection while the QA legs run
     const retainedByLens: Record<string, string[]> = {};
     /** Per-lens baseline + runId for the observe legs, which run AFTER the code run (see below). */
@@ -1008,7 +1021,7 @@ export async function runZ3Round(
       // their target records are already terminal and their attribution is by
       // runId/requestId, never by wall clock.
       legObserves.push({ lens, runId: prov.runId, baseline });
-      const r = await driveFindingsRetain(d, { lens, runId: prov.runId });
+      const r = await driveFindingsRetain(d, { lens, runId: prov.runId, codeWorkId });
       retainedByLens[lens] = r.documentIds;
       bank = r.bank;
     }
@@ -1018,7 +1031,7 @@ export async function runZ3Round(
     // accrues, and the code submit replays fresh on restart — its dispatch
     // recall then sees the indexed findings. The release order itself is
     // unchanged: set retainDoneAt only once the bank is primed.
-    const recallable = await d.waitFindingsRecallable({ bank, docIds: Object.values(retainedByLens).flat() });
+    const recallable = await d.waitFindingsRecallable({ bank, docIds: Object.values(retainedByLens).flat(), codeWorkId });
     if (!recallable) {
       throw new Error(
         "z3 round: the retained findings never became recallable before the release — hindsight's extraction lagged the retain API past the whole bound, and releasing would strand the code run unprimed (the priming-recall leg would red on zero citation)",

@@ -584,7 +584,7 @@ export async function gatewayReflect(bank: string, deadline: number): Promise<{ 
  * bound. Returns whether a hit ever landed.
  */
 export async function waitFindingsRecallable(
-  input: { bank: string; docIds: readonly string[] },
+  input: { bank: string; docIds: readonly string[]; query?: string },
   probe: {
     recall: (bank: string, query: string, limit: number) => Promise<unknown>;
     sleep: (ms: number) => Promise<void>;
@@ -596,7 +596,7 @@ export async function waitFindingsRecallable(
   if (want.size === 0) return true; // nothing retained this round: no wait owed
   const cadence = probe.cadenceMs ?? 20_000;
   for (let attempt = 0; ; attempt++) {
-    const res = (await probe.recall(input.bank, "z3 exit round", 30).catch(() => undefined)) as
+    const res = (await probe.recall(input.bank, input.query ?? "z3 exit round", 30).catch(() => undefined)) as
       | { results?: Array<{ documentId?: unknown }> }
       | undefined;
     const ids = (res?.results ?? []).map((r) => String(r?.documentId ?? ""));
@@ -772,6 +772,7 @@ export function z3LiveDeps(opts: {
         if (e?.status !== "completed" && e?.status !== "failed") return undefined;
         return { kind: run.steps.find((s) => s.id === stepId)?.kind ?? "unknown", status: e.status, observedRunId: e.runId ?? null };
       }),
+    readStepWorkId: async (stepId) => (await boundRun()).steps.find((s) => s.id === stepId)?.externalJobConfig?.workId,
     protocolFleet: async () => {
       const entries = Object.entries((await boundRun()).factoryState);
       const ids = (pick: (e: (typeof entries)[number][1]) => string | null | undefined) =>
@@ -935,7 +936,7 @@ export function z3LiveDeps(opts: {
         }
         return { tokenId: r.token_id, kind: r.kind === "agent" ? "agent" : "per-run", runId: r.run_id, verbs };
       }),
-    retainFindings: async (lens, runId) => {
+    retainFindings: async (lens, runId, codeWorkId) => {
       const run = await boundRun();
       const cfg = qaStep(run);
       const commitSha = cfg?.commitSha ?? "";
@@ -959,17 +960,30 @@ export function z3LiveDeps(opts: {
           requestId: store().get(runId).requestId ?? "",
           legRan: norm.legRan,
           findings: norm.legRan ? norm.findings : [],
+          ...(codeWorkId !== undefined ? { correlation: `${repoSlug} ${codeWorkId}` } : {}),
         },
       );
       return { bank: res.bank, documentIds: res.documentIds, traces: journal.map((documentId) => ({ side: "host" as const, documentId })) };
     },
     gatewayAssert: (bank) => gatewayReflect(bank, opts.deadline),
-    waitFindingsRecallable: (input) =>
-      waitFindingsRecallable(input, {
-        recall: (bank, query, limit) => new HindsightClient().recall(bank, query, limit),
-        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-        deadlineMs: Math.min(opts.deadline, Date.now() + 15 * 60_000),
-      }),
+    waitFindingsRecallable: async (input) => {
+      // THE ACTUAL dispatch-shaped query (attempt 12, live: the "z3 exit
+      // round" proxy ranked this round's findings high while the code run's
+      // real query — repoSlug + code workId — recalled none of them; the
+      // release must prove recallability for the query the code run uses).
+      const run = await boundRun();
+      const cfg = qaStep(run);
+      const repoSlug = cfg?.repoSlug ?? "";
+      const query = input.codeWorkId !== undefined ? `${repoSlug} ${input.codeWorkId}` : "z3 exit round";
+      return waitFindingsRecallable(
+        { bank: input.bank, docIds: input.docIds, query },
+        {
+          recall: (bank, q, limit) => new HindsightClient().recall(bank, q, limit),
+          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+          deadlineMs: Math.min(opts.deadline, Date.now() + 15 * 60_000),
+        },
+      );
+    },
     readRecall: (requestId) => {
       const file = path.join(REPO_ROOT, DEFAULT_RECALL_DIR, `${requestId}.json`);
       if (!existsSync(file)) return null;
