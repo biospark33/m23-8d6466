@@ -1733,7 +1733,21 @@ export function settleRun(failure: unknown, problems: readonly string[]): void {
         // operator reads the regression first and bun keeps its own rendering.
         // Guarded against a second `settleRun` on the same object double-
         // appending the same block.
-        if (!failure.message.includes(line)) failure.message = `${failure.message}\n${line}`;
+        if (!failure.message.includes(line)) {
+          try {
+            failure.message = `${failure.message}\n${line}`;
+          } catch {
+            // Getter-only/frozen `message` (bun's SystemError from a failed
+            // execFileSync) rejects plain assignment; shadow it with an own
+            // property so the append still rides on the original object — a
+            // masked regression cost attempt 9's diagnosis (2026-11-02).
+            try {
+              Object.defineProperty(failure, "message", { value: `${failure.message}\n${line}`, configurable: true, writable: true });
+            } catch {
+              // fully frozen — stderr above already carries the problems
+            }
+          }
+        }
         throw failure;
       }
       // A non-Error throw has no `message` to append to, and stderr alone is

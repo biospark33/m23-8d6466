@@ -831,7 +831,22 @@ export function z3LiveDeps(opts: {
       }
     },
     inventory: async () => {
-      const out = execFileSync("ssh", ["exe.dev", "ls", "--json"], { timeout: 60_000, encoding: "utf8" });
+      // ONE retry on the transport only (attempt 9, 2026-11-02: a transient ssh
+      // failure mid-provision killed the whole round from a single unguarded
+      // probe — same flake family as the create-137 and steering-255 retries,
+      // which live in the driver). Parse/shape errors throw straight through:
+      // a fleet list that reads but is malformed is deterministic, not flaky.
+      let out: string;
+      try {
+        out = execFileSync("ssh", ["exe.dev", "ls", "--json"], { timeout: 60_000, encoding: "utf8" });
+      } catch (first) {
+        await new Promise((resolve) => setTimeout(resolve, 15_000));
+        try {
+          out = execFileSync("ssh", ["exe.dev", "ls", "--json"], { timeout: 60_000, encoding: "utf8" });
+        } catch (second) {
+          throw new Error(`exe.dev ls --json failed twice (inventory transport): ${second instanceof Error ? second.message : String(second)}`, { cause: first });
+        }
+      }
       const vms = (JSON.parse(out) as { vms?: Array<{ vm_name?: string; name?: string }> }).vms;
       if (!Array.isArray(vms)) throw new Error("exe.dev ls --json carried no vms array — an unread fleet is never an empty one");
       return vms.map((v) => v.vm_name ?? v.name ?? "");
