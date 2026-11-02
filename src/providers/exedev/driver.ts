@@ -856,6 +856,8 @@ export interface ExeDevDriverOptions {
   execTimeoutMs?: number;
   /** Round-19 fix: the settle before the one create retry on a cold-pull kill (exit 137). Tests pass a small value; production keeps the 30 s GC-settle default. */
   createRetrySettleMs?: number;
+  /** Round-19 attempt-2 fix: the settle before the one steering-provision retry on a mid-boot transport drop (exit 255). */
+  steeringRetrySettleMs?: number;
   /** Propagated from the dispatch that created the run record (§5.2). */
   requestId?: string;
   /** The box's public hostname suffix. exe.dev derives `<name>.exe.xyz`. */
@@ -886,6 +888,7 @@ export class ExeDevDriver implements ProviderDriver {
   private readonly postureFile: string;
   private readonly execTimeoutMs: number;
   private readonly createRetrySettleMs: number;
+  private readonly steeringRetrySettleMs: number;
   /** Propagation id (§5.2) — an id, never a credential. */
   readonly requestId: string;
   private readonly hostSuffix: string;
@@ -936,6 +939,7 @@ export class ExeDevDriver implements ProviderDriver {
     this.run = opts.run ?? sshCommand();
     this.execTimeoutMs = opts.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     this.createRetrySettleMs = opts.createRetrySettleMs ?? 30_000;
+    this.steeringRetrySettleMs = opts.steeringRetrySettleMs ?? 15_000;
     this.requestId = opts.requestId ?? newRequestId();
     this.hostSuffix = opts.hostSuffix ?? "exe.xyz";
     // A tag is a LEGAL image reference (the D7 tenant mirror needs one) and it
@@ -1326,7 +1330,24 @@ export class ExeDevDriver implements ProviderDriver {
    * just as much a steering target as one born through the recognized shape.
    */
   private async provisionSteeringChannel(name: string): Promise<void> {
-    const res = await this.exec(name, ["sh", "-c", STEERING_PROVISION_SCRIPT]);
+    let res = await this.exec(name, ["sh", "-c", STEERING_PROVISION_SCRIPT]);
+    // Round-19 attempt-2 measured class (2026-11-02): the provision ssh'd a
+    // box that was STILL MID-BOOT — "Connection ... closed by remote host"
+    // (exit 255, transport, not the script's verdict) — and the leg refused,
+    // costing a whole GO. Retry-class per the e2e skill's gotcha #12 ("the
+    // box was mid-boot when the provision script's ssh died"). ONE retry
+    // after a short settle; the script is idempotent (install -d / tee /
+    // tmpfiles all re-runnable), so a half-run first attempt cannot poison
+    // the second. A CONTENT failure (sudo refusal, tmpfiles divergence) keeps
+    // its diagnosis arm below — retrying those would only bury the signal.
+    // The signature, not the bare exit: 255 is ssh's EVERYTHING code (auth
+    // failure, refusal, transport). Only the mid-boot transport drop retries;
+    // the classification arms below keep every other 255 single-shot.
+    if (res.exitCode === 255 && /closed by remote host|connection (failed|refused|timed out)/i.test(res.stderr)) {
+      this.emit("steering_provision_retry", { vm: name, exitCode: 255, settle_ms: this.steeringRetrySettleMs }, "error");
+      await new Promise((resolve) => setTimeout(resolve, this.steeringRetrySettleMs));
+      res = await this.exec(name, ["sh", "-c", STEERING_PROVISION_SCRIPT]);
+    }
     if (res.exitCode !== 0) {
       this.emit("steering_provision", { vm: name, exitCode: res.exitCode }, "error");
       const failure = steeringProvisionFailure(name, res.exitCode, res.stderr, this.execTimeoutMs);

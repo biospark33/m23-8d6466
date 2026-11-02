@@ -207,6 +207,20 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
     }
   });
 
+  test("a mid-boot transport drop on the steering provision is retried once and the channel lands (round-19 attempt-2 class)", async () => {
+    const fake = fakeExeDev({ steeringFirstDrop: true });
+    try {
+      const driver = new ExeDevDriver({ run: fake.run, steeringRetrySettleMs: 1 });
+      const created = await driver.create("steer-drop-retry");
+      // create resolved: the retry re-ran the idempotent script and the
+      // channel EXISTS — behavioral, not textual.
+      expect(created.name).toBe("steer-drop-retry");
+      expect(existsSync(join(fake.boxDir("steer-drop-retry"), "run", "steering"))).toBe(true);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
   test("unprovisionable channel → typed refusal, VM stays listable (INV-5)", async () => {
     const fake = fakeExeDev({ steeringProvisionFails: true });
     try {
@@ -645,6 +659,10 @@ describe("ExeDevDriver — steering provision failure classification (P2: the ex
     try {
       const driver = new ExeDevDriver({
         run: seamWithProvisionResult(fake.run, arm.exitCode, arm.stderr),
+        // The retry settles are OUT OF SCOPE here — this harness classifies
+        // the SECOND result's diagnosis, so both retries resolve instantly.
+        createRetrySettleMs: 1,
+        steeringRetrySettleMs: 1,
         ...(execTimeoutMs === undefined ? {} : { execTimeoutMs }),
       });
       return (await driver.create("steer-class").then(

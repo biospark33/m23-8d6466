@@ -397,6 +397,8 @@ export interface FakeExeDevOptions {
   truncateScript?: boolean;
   /** Round-19 retry test knob: the FIRST `new` returns this exit code (a substrate-side cold-pull kill) without landing a box; the re-issued `new` succeeds. */
   newFirstExit?: number;
+  /** Round-19 attempt-2 knob: the FIRST steering-provision invocation returns a mid-boot transport drop (exit 255); the retry runs the script. */
+  steeringFirstDrop?: boolean;
   /**
    * The in-box gate script EXITS 0 but emits fabricated evidence — "c-only"
    * (C's line alone) or "duplicates" (C twice + D). Exit 0 is not proof of
@@ -465,6 +467,8 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
     if (!cfg.piMissing) writeFileSync(piPath, STUB_PI, { mode: 0o755 });
     if (!cfg.curlMissing) writeFileSync(curlPath, STUB_CURL, { mode: 0o755 });
   }
+
+  let steeringDropped = false;
 
   function readConfig(name: string): FakeBoxConfig {
     try {
@@ -684,6 +688,13 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       ) {
         if (opts.steeringProvisionFails) {
           return { stdout: "", stderr: "sudo: a password is required\n", exitCode: 1 };
+        }
+        if (opts.steeringFirstDrop && !steeringDropped) {
+          // The mid-boot transport drop: the ssh connection died before the
+          // script ran (no box state changed), and the driver's one retry is
+          // the thing under test.
+          steeringDropped = true;
+          return { stdout: "", stderr: "Connection closed by remote host\n", exitCode: 255 };
         }
         // The script's own resolution order — `root="${QDS_STEERING_ROOT:-/run/steering}"`:
         // the env override first, the /run/steering default second. Honoring it
