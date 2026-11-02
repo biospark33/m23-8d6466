@@ -468,7 +468,21 @@ export function writeCredentialsFor(keys: readonly MemoryKeyRow[], runId: string
 }
 
 export async function driveFindingsRetain(d: Z3Deps, input: { lens: string; runId: string; codeWorkId?: string }) {
-  const r = await d.retainFindings(input.lens, input.runId, input.codeWorkId);
+  let r;
+  try {
+    r = await d.retainFindings(input.lens, input.runId, input.codeWorkId);
+  } catch (e) {
+    // ONE retry on a fetch timeout (attempt 13, live: leg 2's retain POST
+    // crossed the client's 30 s RETAIN_TIMEOUT_MS while hindsight's inline
+    // extraction ran past it — a whole round died on one slow read). The
+    // retain is an idempotent upsert (fixed documentIds, replace mode) and
+    // the forensics traces dedupe through a Set, so the retry cannot
+    // double-count anything.
+    const name = (e as { name?: string })?.name ?? "";
+    if (name !== "TimeoutError") throw e;
+    await d.sleep(10_000);
+    r = await d.retainFindings(input.lens, input.runId, input.codeWorkId);
+  }
   const gatewayAssertion = await d.gatewayAssert(r.bank);
   const runKeys = d.memoryKeys().filter((k) => k.runId === input.runId);
   const boxWriteCredentials = writeCredentialsFor(runKeys, input.runId);
