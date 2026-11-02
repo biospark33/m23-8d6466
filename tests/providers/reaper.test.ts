@@ -510,7 +510,7 @@ describe("DF2.6 sweep", () => {
     expect((await fleet.keyApi.listAllKeys(20)).entries).toHaveLength(4);
     for (const id of [RUN_A, RUN_B]) expect(fleet.store.get(id).closedAt).toBeUndefined();
     // unknown population means zero headroom, never full headroom
-    const hr = await checkHeadroom(brokenList, 1, LIMITS);
+    const hr = await checkHeadroom(brokenList, 1, LIMITS, undefined, undefined, 1);
     expect(hr.allowed).toBeFalse();
     expect(hr.reason).toBe("list-unverified");
     expect(hr.headroom).toBe(0);

@@ -75,6 +75,9 @@ const LIMIT_KEYS: readonly (keyof QuotaLimits)[] = [
   "staleAfterMs",
 ];
 
+/** Settle before the one verified-list retry (driver.ts's 15 s retry idiom). */
+const HEADROOM_LIST_RETRY_SETTLE_MS = 15_000;
+
 /** The remediation body: a complete, copy-pasteable limits file (exedev posture pattern). */
 const EXAMPLE_BODY =
   '{"maxVms": 50, "maxPooledDiskGiB": 100, "perVmDiskReservationGiB": 2, "maxTransferGiB": 200, "staleAfterMs": 14400000}';
@@ -249,6 +252,7 @@ export async function checkHeadroom(
    * intents dir; the closed ceiling is the point (G5).
    */
   intents?: { dir: string; now?: () => number; exclude?: string },
+  retrySettleMs: number = HEADROOM_LIST_RETRY_SETTLE_MS,
 ): Promise<HeadroomResult> {
   // Guard against caller bugs: negative or zero requested makes headroom nonsense
   if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested < 1) {
@@ -261,42 +265,57 @@ export async function checkHeadroom(
     diskEstimated: true as const,
     limitsSource: limits.source,
   };
-  let vms: { name: string }[];
-  try {
-    // The anomaly channel when the driver has one, `list()` otherwise (same
-    // fallback contract as the seam's `driverListing` — a driver without the
-    // channel has claimed nothing about completeness either way). A non-empty
-    // `skipped` is rows this driver COULD NOT name — possible live boxes — so
-    // it refuses exactly like an enumeration failure: `list-unverified` is
-    // transient at every consumer (dispatch and fanout both classify it
-    // retryable), which is precisely the right posture for "the count is not
-    // proven": refuse once, admit on the next clean answer.
-    if (driver.listWithAnomalies !== undefined) {
-      const listing = await withTimeout(driver.listWithAnomalies(), listTimeoutMs, "driver.list()");
-      // `skipped` is part of the same verified-listing contract as `vms`: a
-      // listing whose skipped channel is missing or not an array has claimed
-      // nothing about completeness either way, and dereferencing it used to
-      // rely on the surrounding catch to land in the same refusal — refuse it
-      // in the guard itself, matching the vms check beside it.
-      const listed = Array.isArray(listing?.vms) ? listing.vms : undefined;
-      const skipped = listing?.skipped;
-      if (listed === undefined || !Array.isArray(skipped) || skipped.length > 0) {
-        return { ...base, allowed: false, liveVms: 0, headroom: 0, usedDiskGiB: 0, verified: false, reason: "list-unverified" };
+  let vms: { name: string }[] | null;
+  // ONE verified-read retry before the fail-closed arm (attempt 11, live
+  // 2026-11-02): a single flaky ssh read at dispatch's first substrate probe
+  // refused the whole submit (exit 5 no-headroom / list-unverified — live
+  // 0/50) in under a second, and the fork's step processor does not retry
+  // exit-5 refusals. The contract posture is unchanged — "refuse once, admit
+  // on the next clean answer" — it is just given a second chance here.
+  const readVerifiedList = async (): Promise<{ name: string }[] | null> => {
+    try {
+      // The anomaly channel when the driver has one, `list()` otherwise (same
+      // fallback contract as the seam's `driverListing` — a driver without the
+      // channel has claimed nothing about completeness either way). A non-empty
+      // `skipped` is rows this driver COULD NOT name — possible live boxes — so
+      // it refuses exactly like an enumeration failure: `list-unverified` is
+      // transient at every consumer (dispatch and fanout both classify it
+      // retryable), which is precisely the right posture for "the count is not
+      // proven": refuse once, admit on the next clean answer.
+      if (driver.listWithAnomalies !== undefined) {
+        const listing = await withTimeout(driver.listWithAnomalies(), listTimeoutMs, "driver.list()");
+        // `skipped` is part of the same verified-listing contract as `vms`: a
+        // listing whose skipped channel is missing or not an array has claimed
+        // nothing about completeness either way, and dereferencing it used to
+        // rely on the surrounding catch to land in the same refusal — refuse it
+        // in the guard itself, matching the vms check beside it.
+        const listed = Array.isArray(listing?.vms) ? listing.vms : undefined;
+        const skipped = listing?.skipped;
+        if (listed === undefined || !Array.isArray(skipped) || skipped.length > 0) {
+          return null;
+        }
+        return listed;
       }
-      vms = listed;
-    } else {
-      vms = await withTimeout(driver.list(), listTimeoutMs, "driver.list()");
+      return await withTimeout(driver.list(), listTimeoutMs, "driver.list()");
+    } catch {
+      return null;
     }
-  } catch {
-    return {
-      ...base,
-      allowed: false,
-      liveVms: 0,
-      headroom: 0,
-      usedDiskGiB: 0,
-      verified: false,
-      reason: "list-unverified",
-    };
+  };
+  vms = await readVerifiedList();
+  if (vms === null) {
+    await new Promise((resolve) => setTimeout(resolve, retrySettleMs));
+    vms = await readVerifiedList();
+    if (vms === null) {
+      return {
+        ...base,
+        allowed: false,
+        liveVms: 0,
+        headroom: 0,
+        usedDiskGiB: 0,
+        verified: false,
+        reason: "list-unverified",
+      };
+    }
   }
   // AC4: fail-closed — a contract-violating non-array list is unenumerable (list-unverified), never a crash
   if (!Array.isArray(vms)) {

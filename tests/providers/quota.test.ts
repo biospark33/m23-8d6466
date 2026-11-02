@@ -241,7 +241,7 @@ describe("DF2.6 quota limits", () => {
   // ─── AC4 / AC5 — the two degenerate populations ────────────────────────────
 
   test("AC4: list() throws ⇒ allowed:false reason list-unverified — never headroom from an uncounted population", async () => {
-    const r = await checkHeadroom(throwingList, 1, loaded());
+    const r = await checkHeadroom(throwingList, 1, loaded(), 25_000, undefined, 1);
     expect(r.allowed).toBeFalse();
     expect(r.reason).toBe("list-unverified");
     expect(r.liveVms).toBe(0);
@@ -254,7 +254,7 @@ describe("DF2.6 quota limits", () => {
     // reaper's sweep uses — a wedged driver must refuse here, not hang
     // createRun. Tiny injected budget so the test doesn't park on 15s.
     const hung: HeadroomInput = { list: () => new Promise(() => {}) };
-    const r = await checkHeadroom(hung, 1, loaded(), 25);
+    const r = await checkHeadroom(hung, 1, loaded(), 25, undefined, 1);
     expect(r.allowed).toBeFalse();
     expect(r.reason).toBe("list-unverified");
     expect(r.liveVms).toBe(0);
@@ -267,7 +267,7 @@ describe("DF2.6 quota limits", () => {
     // crash. The same shape as the catch path — allowed:false, verified:false,
     // headroom:0, reason:list-unverified.
     const nonArray: HeadroomInput = { list: async () => undefined as never };
-    const r = await checkHeadroom(nonArray, 1, loaded());
+    const r = await checkHeadroom(nonArray, 1, loaded(), 25_000, undefined, 1);
     expect(r.allowed).toBeFalse();
     expect(r.reason).toBe("list-unverified");
     expect(r.verified).toBeFalse();
@@ -350,5 +350,47 @@ describe("DF2.6 quota limits", () => {
     // stays unlinked: an emitter that manufactured a repoSlug to fill the
     // NOT NULL columns is exactly what INV-AUDIT-4 forbids.
     expect(auditLinks).toEqual([]);
+  });
+});
+
+// ─── the verified-list retry (round 19 attempt 11, live) ────────────────────
+
+describe("checkHeadroom verified-list retry", () => {
+  test("first read throws, second is clean ⇒ allowed — one flaky read never refuses a dispatch", async () => {
+    let calls = 0;
+    const flaky: HeadroomInput = {
+      list: async () => {
+        calls++;
+        if (calls === 1) throw new Error("ssh transport blip");
+        return [{ name: "qds-a" }];
+      },
+    };
+    const r = await checkHeadroom(flaky, 1, loaded(), 25, undefined, 1);
+    expect(calls).toBe(2);
+    expect(r.allowed).toBeTrue();
+    expect(r.verified).toBeTrue();
+  });
+
+  test("both reads fail ⇒ the list-unverified refusal is unchanged", async () => {
+    const dead: HeadroomInput = { list: async () => { throw new Error("down"); } };
+    const r = await checkHeadroom(dead, 1, loaded(), 25, undefined, 1);
+    expect(r.allowed).toBeFalse();
+    expect(r.reason).toBe("list-unverified");
+  });
+
+  test("first read carries a non-empty skipped channel, second is clean ⇒ allowed", async () => {
+    let calls = 0;
+    const partial: HeadroomInput & { listWithAnomalies: () => Promise<{ vms: { name: string }[]; skipped: string[] }> } = {
+      list: async () => [{ name: "qds-a" }],
+      listWithAnomalies: async () => {
+        calls++;
+        return calls === 1
+          ? { vms: [], skipped: ["qds-ghost"] }
+          : { vms: [{ name: "qds-a" }], skipped: [] };
+      },
+    };
+    const r = await checkHeadroom(partial, 1, loaded(), 25, undefined, 1);
+    expect(calls).toBe(2);
+    expect(r.allowed).toBeTrue();
   });
 });
