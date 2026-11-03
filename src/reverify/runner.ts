@@ -360,7 +360,13 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
           // drainPastCap: the repo's OWN test command. Killing it at the
           // output cap would parse as 0 pass / 0 fail and surface as a
           // discrepancy that is ours, not the run's.
-          const res = await exec(plan.testCommand, {
+          // nice -n 10: the suite runs INSIDE a live park chain (the round's
+          // fork/observability machinery shares the host), and its 5 s-default
+          // timing tests flaked 19-38 of ~8100 per run under that contention
+          // (attempts 23-24) while running clean idle. Lower priority for the
+          // verify tree's own CPU cuts the flake density; the verdict still
+          // comes from real runs — this is not a retry, mask or skip.
+          const res = await exec(["nice", "-n", "10", ...plan.testCommand], {
             cwd: wt.dir,
             env,
             signal: guards.signal,

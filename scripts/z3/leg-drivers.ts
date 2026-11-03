@@ -587,10 +587,13 @@ export async function drivePrimingRecall(
 
 export async function driveApprovalPark(d: Z3Deps, input: { runId: string }) {
   const observe = await d.parkForApproval(input.runId);
-  if (observe.exitCode !== 0) {
-    // ONE retry: the observe chain spans ssh reads and the approval gate's
-    // teardown, and the gate itself RESUMES a pausing window on the next
-    // request (AC1(c)) — a retry cannot strand state the first attempt left.
+  if (observe.exitCode !== 0 && observe.exitCode !== 6) {
+    // ONE retry, and only on TRANSIENT-class refusals: a red REVERIFY VERDICT
+    // (observe exit 6, exitStatus "logic" — attempts 19-24 all exited 6) is a
+    // terminal answer about the tree, not a transport flap; re-running the
+    // chain doubles the flake exposure and burns ~22 min to reach the same
+    // answer. The gate itself RESUMES a pausing window on the next request
+    // (AC1(c)), so a retry on the transient classes cannot strand state.
     await d.sleep(10_000);
     const second = await d.parkForApproval(input.runId);
     if (second.exitCode !== 0) {
