@@ -8,6 +8,9 @@
  * on bad evidence — either a misbehaving substrate dep (the drivers record
  * what really happened) or an edited/copied/forged file (the evidence lies).
  */
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import * as path from "node:path";
+
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
@@ -1056,5 +1059,53 @@ describe("primingRecallProblems — the honest-empty arm", () => {
     expect(
       primingRecallProblems({ directive: "kg_context", citedRetained: ["qds-y"], recalledCount: 9, retainedCount: 10 }),
     ).toEqual([]);
+  });
+});
+
+describe("AC1(c) terminal verdict — attempt 27's hole", () => {
+  test("observe exit 6 settles the park red with the named fails; it never polls awaiting-approval", async () => {
+    // The helper reads the authoritative report at the REPO's reverify dir
+    // (repo-root anchored, not the fixture tmpdir) — seed the code run's row,
+    // as a real vetoed park would have it, and remove only that file after.
+    const reportPath = path.join(
+      path.resolve(import.meta.dir, "../.."),
+      ".sandbox",
+      "reverify",
+      `${CODE_RUN_ID}.jsonl`,
+    );
+    mkdirSync(path.dirname(reportPath), { recursive: true });
+    writeFileSync(
+      reportPath,
+      `${JSON.stringify({
+        reverifyId: "rv-fixture-1",
+        runId: CODE_RUN_ID,
+        verdict: "red",
+        reason: "tests-failed",
+        testResults: { passed: 8074, failed: 23 },
+        checks: [
+          {
+            item: "tests: bun test ./tests",
+            ok: false,
+            note: 'exit 1, 8074 pass, 23 fail\n(fail) p0-9 leg > checkout-name leg R2-018 [5.01s]\n(fail) admission > withAdmissionSingleFlight settles 15s [5.02s]\n 23 fail, 8074 pass',
+          },
+        ],
+      })}\n`,
+    );
+    try {
+      const r = await round({
+        parkForApproval: async () => ({ exitCode: 6, tail: '{"verb":"observe","status":"error","exitCode":6,"exitStatus":"logic"}' }),
+      });
+      expect(String(r.outcome.failure)).toMatch(/reverify verdict red \(tests-failed, 8074 pass \/ 23 fail\)/);
+      const park = JSON.parse(r.files.find((f) => f.name.endsWith("-z3-approval-park.json"))?.text ?? "{}");
+      expect(park.status).toBe("reverify-vetoed");
+      expect(park.terminal).toBe(true);
+      expect(park.exitCode).toBe(1);
+      expect(park.failNames).toEqual([
+        "(fail) p0-9 leg > checkout-name leg R2-018 [5.01s]",
+        "(fail) admission > withAdmissionSingleFlight settles 15s [5.02s]",
+      ]);
+    } finally {
+      rmSync(reportPath, { force: true });
+    }
   });
 });

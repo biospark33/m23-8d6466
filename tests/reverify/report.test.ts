@@ -175,12 +175,12 @@ describe("sealReport boundary hygiene", () => {
 
   test("caps a note at NOTE_MAX_CHARS including the truncation suffix", () => {
     const r = sealReport(
-      evidence({ checks: [{ item: "tests", ok: true, note: "x".repeat(5_000) }] }),
+      evidence({ checks: [{ item: "tests", ok: true, note: "x".repeat(20_000) }] }),
       {},
     );
     const note = r.checks[0]!.note;
     expect(note.length).toBeLessThanOrEqual(NOTE_MAX_CHARS);
-    expect(note).toMatch(/\[truncated, 5000 chars total\]$/);
+    expect(note).toMatch(/\[truncated, 20000 chars total\]$/);
   });
 
   test("caps the checks array at CHECKS_MAX and flags the truncation", () => {

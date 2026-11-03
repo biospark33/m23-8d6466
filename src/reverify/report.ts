@@ -22,7 +22,11 @@ import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
 import { log, newRequestId } from "../lib/log.ts";
 
 /** Per-check evidence cap, suffix INCLUDED (story: Guards/limits). */
-export const NOTE_MAX_CHARS = 1_000;
+// 16_384 since the tests check's capture rides IN this note: the runner hands
+// over a 16 kB both-streams tail whose `(fail)` block sits ~4 kB above the
+// end (suite-fixture stderr noise trails it), so a 1_000-char head-kept cap
+// re-truncated the names away — attempt 27 red'd 8074/23 and named nothing.
+export const NOTE_MAX_CHARS = 16_384;
 /** Hard cap on examined items carried in one report. */
 export const CHECKS_MAX = 500;
 /** Hard cap on box-claimed paths carried in one report (they are untrusted). */

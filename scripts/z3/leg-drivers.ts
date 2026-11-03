@@ -23,7 +23,11 @@
  * concurrent with the QA legs, not after them. A driver-side failure cancels
  * the fork PROTOCOL run first, so the fork stops submitting before the sweep.
  */
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
+
 import { log } from "../../src/lib/log.ts";
+import { DEFAULT_REVERIFY_DIR } from "../../src/reverify/report.ts";
 import type { CrashGate } from "./crash-gate.ts";
 import { type EvidenceSink, scrubText, writeZ3Evidence } from "./evidence.ts";
 import {
@@ -587,7 +591,8 @@ export async function drivePrimingRecall(
 
 export async function driveApprovalPark(d: Z3Deps, input: { runId: string }) {
   const observe = await d.parkForApproval(input.runId);
-  if (observe.exitCode !== 0 && observe.exitCode !== 6) {
+  if (observe.exitCode === 6) settleVetoedPark(d, input.runId, observe.tail);
+  if (observe.exitCode !== 0) {
     // ONE retry, and only on TRANSIENT-class refusals: a red REVERIFY VERDICT
     // (observe exit 6, exitStatus "logic" — attempts 19-24 all exited 6) is a
     // terminal answer about the tree, not a transport flap; re-running the
@@ -596,6 +601,7 @@ export async function driveApprovalPark(d: Z3Deps, input: { runId: string }) {
     // (AC1(c)), so a retry on the transient classes cannot strand state.
     await d.sleep(10_000);
     const second = await d.parkForApproval(input.runId);
+    if (second.exitCode === 6) settleVetoedPark(d, input.runId, second.tail);
     if (second.exitCode !== 0) {
       settle(d, "approval-park", [`fleet observe failed twice: ${observe.tail.slice(0, 1200)} / ${second.tail.slice(0, 1200)}`], {
         runId: input.runId,
@@ -608,6 +614,50 @@ export async function driveApprovalPark(d: Z3Deps, input: { runId: string }) {
   const r = await d.awaitResult(input.runId, "awaiting-approval");
   const problems = r.status === "awaiting-approval" && !r.terminal ? [] : [`not parked: ${r.status} terminal=${r.terminal}`];
   settle(d, "approval-park", problems, { runId: input.runId, status: r.status, terminal: r.terminal });
+}
+
+/**
+ * A red reverify VERDICT (observe exit 6) settles the leg red HERE — awaiting
+ * `awaiting-approval` polls to the round deadline, because a vetoed chain
+ * LANDS (box torn down, record closed) and never reaches that state
+ * (attempt 27: verdict 18:42:44Z, then ~2h of polling to the deadline).
+ * The verdict comes from the authoritative report (last jsonl line wins,
+ * §DF5.2), and the capture in its tests-check note names the failing tests.
+ */
+function settleVetoedPark(d: Z3Deps, runId: string, observeTail: string): void {
+  const reportPath = path.join(path.resolve(import.meta.dir, "../.."), DEFAULT_REVERIFY_DIR, `${runId}.jsonl`);
+  let verdict = "unreadable";
+  let reason = "";
+  let passed = -1;
+  let failed = -1;
+  let failNames: string[] = [];
+  try {
+    const lines = readFileSync(reportPath, "utf8").trim().split("\n");
+    const row = JSON.parse(lines[lines.length - 1] ?? "{}") as {
+      verdict?: string;
+      reason?: string;
+      testResults?: { passed?: number; failed?: number };
+      checks?: { item?: string; note?: string }[];
+    };
+    verdict = row.verdict ?? verdict;
+    reason = row.reason ?? "";
+    passed = row.testResults?.passed ?? -1;
+    failed = row.testResults?.failed ?? -1;
+    const note = row.checks?.find((c) => (c.item ?? "").startsWith("tests:"))?.note ?? "";
+    failNames = note.split("\n").filter((l) => l.includes("(fail)")).map((l) => l.trim());
+  } catch {
+    // The report read is best-effort: the observe's own tail still settles the leg.
+  }
+  const namesLine = failNames.length > 0 ? ` ${failNames.length} named` : "";
+  settle(
+    d,
+    "approval-park",
+    [
+      `reverify verdict ${verdict} (${reason}, ${passed} pass / ${failed} fail) — observe exit 6 (reverify-vetoed): the vetoed chain lands closed, never reaching awaiting-approval${namesLine}`,
+      failNames.length > 0 ? `failing tests:\n${failNames.join("\n")}` : `observe tail: ${observeTail.slice(0, 600)}`,
+    ],
+    { runId, status: "reverify-vetoed", terminal: true, verdict, passed, failed, failNames },
+  );
 }
 
 /** The CLI's last JSON stdout line (`{outcome, state, approverId, …}`), or {} when none parses. */
