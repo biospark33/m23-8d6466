@@ -379,7 +379,10 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
                   // (fail) lines and summary at the END of the stream, so a
                   // head-kept capture names no failing test (attempts 19-21
                   // needed a fresh probe run to recover a single fail name).
-                  `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${(res.stderr || res.stdout).slice(-4000)}`) +
+                  // 16 kB: suite-fixture stderr noise (reverify-fixture jsonl
+                  // lines) trails the (fail) block by ~4 kB — a 4 kB window
+                  // lost the name again on attempt 23's chain 1.
+                  `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${(res.stderr || res.stdout).slice(-16000)}`) +
               (testOutputTruncated ? " (output truncated at the capture cap — counts may be incomplete)" : ""),
           });
           if (testOutputTruncated) flags.push("test-output-truncated");
