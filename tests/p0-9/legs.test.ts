@@ -123,6 +123,16 @@ afterEach(() => {
   }
 });
 
+/** Restore the slug env a describe pinned, without biome's noDelete false-positive shape. */
+function restoreSlugEnv(prior: string | undefined): void {
+  if (prior === undefined) {
+    // biome-ignore lint/performance/noDelete: unsetting an env var cannot be expressed by assignment — `= undefined` coerces to the string "undefined"
+    delete process.env.QDS_REPO_SLUG;
+  } else {
+    process.env.QDS_REPO_SLUG = prior;
+  }
+}
+
 /** The closure-plan evidence payload contract every driver must emit. */
 function assertEvidenceContract(e: LegEvidence): void {
   expect(typeof e.leg).toBe("string");
@@ -1208,6 +1218,19 @@ describe("hindsight-live", () => {
 // ---------------------------------------------------------------------------
 
 describe("provision-and-import", () => {
+  // The legs resolve their repo slug via R2-018's default — cwd basename —
+  // which equals "qds-factory" only in the canonical checkout. A quarantine
+  // worktree (reverify) or any other checkout dir renames the basename and
+  // the INV-MEM-1 prefix gate refuses every leg: pin the env the drivers
+  // read instead of inheriting the accident.
+  let priorSlug: string | undefined;
+  beforeEach(() => {
+    priorSlug = process.env.QDS_REPO_SLUG;
+    process.env.QDS_REPO_SLUG = "qds-factory";
+  });
+  afterEach(() => {
+    restoreSlugEnv(priorSlug);
+  });
   test.skipIf(!hasDriver("provision-and-import"))(
     "AC3 compensation fixture (R3-005 claim-scoped): fresh-failure envelope claims b1+b2; b2 delete fails → b1 delete STILL issued, residue names b2; a mid-window probe bank is unclaimed and NEVER deleted",
     async () => {
@@ -1551,6 +1574,15 @@ describe("provision-and-import", () => {
 // ---------------------------------------------------------------------------
 
 describe("idempotency-rerun", () => {
+  // Same basename accident as provision-and-import: pin the slug the legs read.
+  let priorSlug: string | undefined;
+  beforeEach(() => {
+    priorSlug = process.env.QDS_REPO_SLUG;
+    process.env.QDS_REPO_SLUG = "qds-factory";
+  });
+  afterEach(() => {
+    restoreSlugEnv(priorSlug);
+  });
   test.skipIf(!hasDriver("idempotency-rerun"))(
     "PR-review residue honesty: real-shape fresh failure + post-snapshot failure records unknown-attribution — never a clean [] implying nothing stranded",
     async () => {
@@ -1684,6 +1716,15 @@ describe("idempotency-rerun", () => {
 // ---------------------------------------------------------------------------
 
 describe("round-trip-dedicated", () => {
+  // Same basename accident as provision-and-import: pin the slug the legs read.
+  let priorSlug: string | undefined;
+  beforeEach(() => {
+    priorSlug = process.env.QDS_REPO_SLUG;
+    process.env.QDS_REPO_SLUG = "qds-factory";
+  });
+  afterEach(() => {
+    restoreSlugEnv(priorSlug);
+  });
   test.skipIf(!hasDriver("round-trip-dedicated"))(
     "live mode without prior hindsight-live evidence → exit-2 refusal naming the ordering",
     async () => {
