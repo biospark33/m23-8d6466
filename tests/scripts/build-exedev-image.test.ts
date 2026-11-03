@@ -2213,7 +2213,6 @@ describe("buildIdFileInputs", () => {
       // src/phase-engine/findings-sidecar.ts, src/fleet/*, src/providers/run-record.ts,
       // cli-anything/scripts/team-lead-driver.ts) — re-pin LAST on the final tree;
       // the image publish + pin adoption follows (Z3 keeps #467 listed until then).
-            "aa7014aa5bb84db1cff0ea2c93b5e19f9d0c5c7a02a37b78d6b5f5d35d9d0b81",
     );
   });
 });
