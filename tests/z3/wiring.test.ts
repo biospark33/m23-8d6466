@@ -23,6 +23,7 @@ import {
   IN_CONTAINER_KILL_MARGIN_MS,
   armZ3Schedule,
   healMidFlightTeardown,
+  retriedHindsightCall,
   Z3_CLEANUP_STEPS_MS,
   Z3_FORK_STEPS_BUDGET_MS,
   Z3_LIVE_BUDGET,
@@ -288,5 +289,50 @@ describe("healMidFlightTeardown", () => {
     expect(named).toContain("teardown heal");
     expect(calls.length).toBe(0);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("retriedHindsightCall — the attempt-28 seam", () => {
+  test("a TimeoutError stall retries the idempotent call once and succeeds", async () => {
+    let calls = 0;
+    const r = await retriedHindsightCall("probe", async () => {
+      calls += 1;
+      if (calls === 1) {
+        const d = new DOMException("The operation timed out.", "TimeoutError");
+        throw d;
+      }
+      return "second";
+    }, 1);
+    expect(calls).toBe(2);
+    expect(r).toBe("second");
+  });
+  test("two stalls are fatal and NAMED, never a raw DOMException", async () => {
+    let calls = 0;
+    let thrown: unknown;
+    try {
+      await retriedHindsightCall("probe", async () => {
+        calls += 1;
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }, 1);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(calls).toBe(2);
+    expect(String(thrown)).toContain("probe timed out twice");
+    expect((thrown as Error).name).not.toBe("TimeoutError");
+  });
+  test("a non-timeout error rethrows unchanged, no retry", async () => {
+    let calls = 0;
+    let thrown: unknown;
+    try {
+      await retriedHindsightCall("probe", async () => {
+        calls += 1;
+        throw new Error("HTTP 500");
+      }, 1);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(calls).toBe(1);
+    expect(String(thrown)).toContain("HTTP 500");
   });
 });

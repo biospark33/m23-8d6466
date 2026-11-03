@@ -560,17 +560,49 @@ function journalingClient(journal: string[]): HindsightClient {
  * (READ_ONLY_MEMORY_VERBS) by design: that rule classifies BOX credentials;
  * this call is host-side, and its LLM cost is budgeted (Z3_REFLECT_CALL_USD).
  */
+/**
+ * ONE retry for the hindsight HTTP seams whose AbortSignal fires on a
+ * transit/processing stall (attempt 19r: a 23.7s wall outlived the 30s
+ * bound; attempt 25: an upstream LLM ReadTimeout inside the agentic reflect;
+ * attempt 28: a ~100s transit stall — hindsight logged the retain COMPLETE
+ * 11s after the client had already given up). Both calls are idempotent at
+ * the store (retain: stable documentId + updateMode "replace"; reflect:
+ * read-side query), so the retry cannot duplicate state; a second timeout
+ * is fatal and NAMED, never a raw DOMException with no stack.
+ */
+export function isTimeoutAbort(e: unknown): boolean {
+  return (e as { name?: string })?.name === "TimeoutError" || /The operation timed out/.test(String(e));
+}
+
+export function retriedHindsightCall<T>(what: string, run: () => Promise<T>, retryDelayMs = 10_000): Promise<T> {
+  return (async () => {
+    try {
+      return await run();
+    } catch (e) {
+      if (!isTimeoutAbort(e)) throw e;
+      console.error(`[z3] ${what} stalled once (TimeoutError) — retrying the idempotent call`);
+      await sleep(retryDelayMs);
+      try {
+        return await run();
+      } catch (e2) {
+        if (!isTimeoutAbort(e2)) throw e2;
+        throw new Error(`${what} timed out twice (the AbortSignal bound each attempt) — hindsight stalled twice`);
+      }
+    }
+  })();
+}
+
 export async function gatewayReflect(bank: string, deadline: number): Promise<{ origin: string; agentTokenId: string }> {
   const gateway = process.env.QDS_KG_GATEWAY_URL ?? "";
   const token = process.env.Z3_MEMGATE_AGENT_TOKEN ?? "";
   if (gateway === "" || token === "") throw new Error("QDS_KG_GATEWAY_URL / Z3_MEMGATE_AGENT_TOKEN unset — the gateway assertion cannot authenticate");
-  const res = await fetch(`${gateway.replace(/\/+$/, "")}/v1/default/banks/${encodeURIComponent(bank)}/reflect`, {
+  const res = await retriedHindsightCall("gateway reflect", () => fetch(`${gateway.replace(/\/+$/, "")}/v1/default/banks/${encodeURIComponent(bank)}/reflect`, {
     // bounded: a hung gateway must not outlive the deadline (the finally must still run)
     signal: AbortSignal.timeout(Math.max(1_000, Math.min(60_000, deadline - Date.now()))),
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ query: "z3 exit round gateway assertion" }),
-  });
+  }));
   if (!res.ok) throw new Error(`gateway reflect through ${new URL(gateway).origin} refused: HTTP ${res.status}`);
   return { origin: new URL(gateway).origin, agentTokenId: agentTokenId(token) };
 }
@@ -949,20 +981,21 @@ export function z3LiveDeps(opts: {
       const journal: string[] = [];
       const client = journalingClient(journal);
       const bank = await resolveRoundBank(repoSlug, client);
-      const res = await retainFindings(
-        { client },
-        {
-          repoBankId: bank,
-          runId,
-          lens,
-          commitSha,
-          repoSlug,
-          requestId: store().get(runId).requestId ?? "",
-          legRan: norm.legRan,
-          findings: norm.legRan ? norm.findings : [],
-          ...(codeWorkId !== undefined ? { correlation: `${repoSlug} ${codeWorkId}` } : {}),
-        },
-      );
+      const res = await retriedHindsightCall("findings retain", () =>
+        retainFindings(
+          { client },
+          {
+            repoBankId: bank,
+            runId,
+            lens,
+            commitSha,
+            repoSlug,
+            requestId: store().get(runId).requestId ?? "",
+            legRan: norm.legRan,
+            findings: norm.legRan ? norm.findings : [],
+            ...(codeWorkId !== undefined ? { correlation: `${repoSlug} ${codeWorkId}` } : {}),
+          },
+        ));
       return { bank: res.bank, documentIds: res.documentIds, traces: journal.map((documentId) => ({ side: "host" as const, documentId })) };
     },
     gatewayAssert: (bank) => gatewayReflect(bank, opts.deadline),
