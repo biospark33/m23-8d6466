@@ -51,7 +51,14 @@ import {
 // Timeouts (story CC-7). All ≤ P0.7 invoke 120s.
 // ---------------------------------------------------------------------------
 
-export const RETAIN_TIMEOUT_MS = 30_000;
+/**
+ * Retain is hindsight's heaviest call (inline extraction + ANN + queueing
+ * behind the bank's consolidation backlog) and its wall grows with the bank:
+ * measured 23.7 s live at 15-attempt bank scale, against a 30 s client bound
+ * that then reds a green round twice in a row (attempts 13 and 18 — the
+ * single retry only rescues the first timeout). All uses ≤ P0.7's 120 s.
+ */
+export const RETAIN_TIMEOUT_MS = 120_000;
 export const RECALL_TIMEOUT_MS = 10_000;
 export const REFLECT_TIMEOUT_MS = 30_000;
 export const CONSOLIDATE_TIMEOUT_MS = 60_000;

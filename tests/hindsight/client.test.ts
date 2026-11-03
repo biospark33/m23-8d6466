@@ -389,7 +389,9 @@ describe("HindsightClient error paths", () => {
   });
 
   test("default timeout consts are the spec values", () => {
-    expect(RETAIN_TIMEOUT_MS).toBe(30_000);
+    // Retain at 120 s: its wall grows with the bank (measured 23.7 s live at
+    // 15-attempt scale); 30 s reds green rounds on a healthy server.
+    expect(RETAIN_TIMEOUT_MS).toBe(120_000);
     expect(RECALL_TIMEOUT_MS).toBe(10_000);
     expect(REFLECT_TIMEOUT_MS).toBe(30_000);
     expect(CONSOLIDATE_TIMEOUT_MS).toBe(60_000);
