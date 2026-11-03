@@ -6512,6 +6512,9 @@ process.on = ((sig, listener) => {
       const base = new FakeDriver(boxesDir);
       const d: Partial<FleetDeps> = {
         ...fanoutDeps(),
+        // Fast settle: the refusal path sleeps out the retry window; the
+        // default 15 s is a red at bun's 5 s test timeout.
+        headroomRetrySettleMs: 1,
         // quota.checkHeadroom reads listWithAnomalies when the driver has one
         // (wave-1 D3), so BOTH channels must be unreachable — the inherited
         // base.listWithAnomalies would answer cleanly and admit the fan-out.

@@ -443,7 +443,7 @@ export async function fanout(
       headroom = await checkHeadroom(deps.driver, n, deps.quotaLimits, undefined, {
         dir: fanoutIntentsDir,
         exclude: fanoutOwnIntent ? deps.requestId : undefined,
-      });
+      }, deps.headroomRetrySettleMs);
     } catch (e) {
       if (e instanceof FleetError) throw e;
       // Copied from dispatch.ts's admission gate: checkHeadroom's default

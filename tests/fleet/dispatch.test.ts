@@ -2635,7 +2635,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     keyApi.createKey = mintSpy;
 
     try {
-      await dispatch(brief, deps({ requestId }));
+      // Fast settle: the refusal path sleeps out the retry window (32faf486's
+      // one-retry), and the default 15 s is a red at bun's 5 s test timeout.
+      await dispatch(brief, deps({ requestId, headroomRetrySettleMs: 1 }));
       failUnreachable();
     } catch (e) {
       if (e instanceof UnexpectedSuccessError) throw e;

@@ -627,7 +627,9 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
           "best-of-n",
           2,
           brief(),
-          deps({ driver: brokenListDriver(driver), rosterIds: ["r0", "r1"] }),
+          // Fast settle: the refusal path sleeps out the retry window; the
+          // default 15 s is a red at bun's 5 s test timeout.
+          deps({ driver: brokenListDriver(driver), rosterIds: ["r0", "r1"], headroomRetrySettleMs: 1 }),
         ),
       );
       expect(err.exitCode).toBe(5);

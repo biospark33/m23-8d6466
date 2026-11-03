@@ -532,6 +532,13 @@ export interface DispatchDeps {
   /** Ledger factory — the ONLY way the budget gate touches storage. */
   ledgerFactory: () => LedgerLike;
   quotaLimits?: LoadedQuotaLimits;
+  /**
+   * checkHeadroom's post-failure settle (quota.ts HEADROOM_LIST_RETRY_SETTLE_MS,
+   * default 15 s) threaded through so the fail-path AC tests can inject a fast
+   * value — without it, 32faf486's one-retry leaves every tests/fleet refusal
+   * test blocking 15 s and red at bun's 5 s timeout.
+   */
+  headroomRetrySettleMs?: number;
   /** App port to expose; omit for none (httpsUrl then comes from create). */
   port?: number;
   /**
@@ -3248,7 +3255,7 @@ export async function dispatch(
     if (opts.admitted !== true) {
       let headroom: Awaited<ReturnType<typeof checkHeadroom>>;
       try {
-        headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits, undefined, { dir: quotaIntentsDir, exclude: requestId }));
+        headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits, undefined, { dir: quotaIntentsDir, exclude: requestId }, deps.headroomRetrySettleMs));
       } catch (e) {
         // `within`'s own deadline already refused this one (checked, not
         // assumed: a FleetError that never passed `refuse` gets the typed
