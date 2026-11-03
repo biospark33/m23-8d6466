@@ -1475,12 +1475,15 @@ describe("buildIdFileInputs", () => {
     // the only run whose green actually binds the commit.
 
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      // f5196fde-line: moved from aa7014aa by the round-19 admission-seam edit
+      // ab0852eb-line: moved from f6da4adb by the reverify ceilings (75a8a0bb: plan/worktree)
+      // and the verifyEnv scrub (cda77bde: runner) — both src/ walked inputs, the pin
+      // re-pinned LATE (the ritual missed twice, reding attempt 21 at 1/8097).
+      // Earlier: f6da4adb moved from aa7014aa by the round-19 admission-seam edit
       // (headroomRetrySettleMs threaded through DispatchDeps/fanout into
       // checkHeadroom, and the three AC tests' fast-settle injection) — src/
       // walked inputs, image untouched, adoption/publish not owed (a source
       // COPY input, not the driver pin itself).
-      "f6da4adb92eb57b772bcf28da51939ee828ee8194ebcebb9b2569b649aced845",
+      "ab0852eb458570eaef427b19cf59da7a3cbaeb9c2674e568230e7ad7fb0e3c7e",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
