@@ -75,16 +75,38 @@ const CREDENTIAL_KEY_RE =
   /SECRET|TOKEN|PASS|CRED|API[_-]?KEY|PRIVATE|CERT|DSN|DATABASE_URL|SSH|SIGNING|AUTH|[_-]KEY|APPROVER/i;
 
 /**
+ * The live-fire gate variables (tests/fleet/e2e/live-harness.ts). A park
+ * chain's reverify inherits THE ROUND'S environment — fire.env exports
+ * QDS_E2E_LIVE=1 — and the reverify suite would un-skip all 39 live tier
+ * files, fail ~66 of them on the stripped provisioning key (attempts 19/20,
+ * measured), and red a green round. The gate verifies the BOX's diff under
+ * the repo's offline gates, never live fire.
+ */
+const LIVE_FIRE_ENV = [
+  "QDS_E2E_LIVE",
+  "QDS_E2E_TIER",
+  "QDS_EXEDEV_REPO_URL",
+  "QDS_EXEDEV_SHA",
+  "QDS_EXEDEV_ROSTER",
+  "QDS_EXEDEV_IMAGE",
+  "QDS_EXEDEV_IMAGE_BUILD_ID",
+  "QDS_E2E_EVIDENCE_DIR",
+] as const;
+
+/**
  * A process environment with no provider key, GitHub token or approver token
  * (INV-RV-3). Built by REMOVING credential-shaped keys rather than by
  * allow-listing three names: the box's own key is minted per run and a new
  * credential added upstream must not silently start reaching this process.
+ * The live-fire gate set rides the same removal: the suite a park chain runs
+ * must be the OFFLINE suite, whatever the driving round exported.
  */
 export function verifyEnv(parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parent)) {
+  outer: for (const [key, value] of Object.entries(parent)) {
     if (typeof value !== "string") continue;
     if (CREDENTIAL_KEY_RE.test(key)) continue;
+    for (const live of LIVE_FIRE_ENV) if (key === live) continue outer;
     env[key] = value;
   }
   // The install must not reach a registry with an ambient token either.

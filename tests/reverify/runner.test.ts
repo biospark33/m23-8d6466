@@ -762,7 +762,39 @@ describe("INV-RV-3 / INV-RV-4 — credentials and redaction", () => {
     expect(Object.keys(env)).not.toContain("ANTHROPIC_API_KEY");
     expect(Object.keys(env)).not.toContain("GITHUB_TOKEN");
     expect(Object.keys(env)).not.toContain("QDS_APPROVER_TOKEN");
+    expect(Object.keys(env)).not.toContain("QDS_E2E_LIVE");
+    expect(env.CI).toBe("1");
     expect(JSON.stringify(env)).not.toContain("should-not-survive");
+  });
+
+  test("the live-fire gate set is scrubbed — the park chain's round env must not arm the suite", async () => {
+    // fire.env exports QDS_E2E_LIVE=1; a park chain's reverify inherits the
+    // round's environment, and the suite would un-skip all 39 live tier files
+    // (attempts 19/20 measured 66-98 worktree reds from exactly this leak).
+    const { verifyEnv } = await import("../../src/reverify/runner.ts");
+    const env = verifyEnv({
+      PATH: "/usr/bin",
+      QDS_E2E_LIVE: "1",
+      QDS_E2E_TIER: "2",
+      QDS_EXEDEV_SHA: "deadbeef",
+      QDS_EXEDEV_ROSTER: "/tmp/roster.yaml",
+      QDS_EXEDEV_REPO_URL: "https://github.com/x/y.git",
+      QDS_EXEDEV_IMAGE: "x",
+      QDS_EXEDEV_IMAGE_BUILD_ID: "b",
+      QDS_E2E_EVIDENCE_DIR: "d",
+      KEEP_ME: "yes",
+    });
+    for (const k of [
+      "QDS_E2E_LIVE",
+      "QDS_E2E_TIER",
+      "QDS_EXEDEV_SHA",
+      "QDS_EXEDEV_ROSTER",
+      "QDS_EXEDEV_REPO_URL",
+      "QDS_EXEDEV_IMAGE",
+      "QDS_EXEDEV_IMAGE_BUILD_ID",
+      "QDS_E2E_EVIDENCE_DIR",
+    ]) expect(env[k]).toBeUndefined();
+    expect(env.KEEP_ME).toBe("yes");
   });
 
   test("a sentinel planted in GATE OUTPUT is redacted against the run's own map, not process.env", async () => {
