@@ -17,12 +17,14 @@ import { ReverifyError, exec } from "./worktree.ts";
 
 /**
  * Ceiling handed to `loadManifest`, which refuses to assume an upstream one.
- * Sized for CI-parity host plans: a full test suite (~10 min for this repo)
- * + typecheck + lint declared as single-attempt walls must fit the engine's
- * conservative (retries+1)×(PARSE_FIX_ATTEMPTS+1) budget multiplier — 30 min
- * capped the declared walls' sum at 595 s, below the honest ~750 s.
+ * Sized for CI-parity host plans: this repo's tests/ tree measures ~21.5 min
+ * in a cold quarantine worktree (8192 tests, live 2026-11-03 probe), plus
+ * typecheck and lint. Declared walls go through the engine's conservative
+ * (retries+1)×(PARSE_FIX_ATTEMPTS+1) multiplier and the per-phase 900 s
+ * schema cap, so the honest declaration (tests at the 900 s cap) demands
+ * 3 165 000 ms — a 45-min ceiling fit that with only 165 s of margin, so 60.
  */
-export const HOST_PLAN_BUDGET_MS = 45 * 60_000;
+export const HOST_PLAN_BUDGET_MS = 60 * 60_000;
 
 const HostEntrySchema = z
   .object({

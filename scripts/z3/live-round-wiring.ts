@@ -970,10 +970,10 @@ export function z3LiveDeps(opts: {
       // SC2.7's completion chain, driven host-side by the round (the fork's
       // observe surface is fenced read-only — the park can only come from
       // here). The host bound must cover the chain's harvest/teardown PLUS a
-      // CI-parity reverify (install + full bun test + typecheck + lint under
-      // the 45-min reverify wall — HOST_PLAN_BUDGET_MS/DEFAULT_WALL_CLOCK_MS),
-      // not the old 600 s in-box window: 900 s reds a green round (attempt
-      // 16), so 3600 s. Still bounded by the round deadline via `left`.
+      // CI-parity reverify (install + the tests/ tree + typecheck + lint —
+      // measured live at 22-23 min end-to-end in attempt 19) under the 60-min
+      // reverify wall: 900 s (the old in-box window premise) reds a green
+      // round, so 3600 s. Still bounded by the round deadline via `left`.
       const run = async () => {
         const left = opts.deadline - Date.now();
         if (left <= 0) pastDeadline(`run ${runId} observe/park`);

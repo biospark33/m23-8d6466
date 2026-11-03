@@ -207,10 +207,11 @@ export async function withQuarantineWorktree<T>(
 /**
  * Wall-clock ceiling for one re-verify, floor 60 s (story: Guards/limits).
  * Must stay ≥ HOST_PLAN_BUDGET_MS (plan.ts) or the loader would accept host
- * plans the guards wall cannot finish; both moved 30 → 45 min together when
- * CI-parity host plans (full suite + typecheck + lint) no longer fit 30.
+ * plans the guards wall cannot finish; both moved 30 → 45 → 60 min together
+ * as CI-parity host plans grew (the tests/ tree measures 21.5 min in a cold
+ * worktree — live probe 2026-11-03).
  */
-export const DEFAULT_WALL_CLOCK_MS = 45 * 60_000;
+export const DEFAULT_WALL_CLOCK_MS = 60 * 60_000;
 export const WALL_CLOCK_FLOOR_MS = 60_000;
 /** RSS ceiling for the verify process tree. */
 export const DEFAULT_RSS_BYTES = 4 * 1024 * 1024 * 1024;
