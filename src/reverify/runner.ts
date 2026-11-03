@@ -375,7 +375,11 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
             note:
               (res.exitCode === 0
                 ? `exit 0, ${testResults.passed} pass, ${testResults.failed} fail`
-                : `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${res.stderr || res.stdout}`) +
+                : // The captured body keeps the TAIL: bun prints its per-test
+                  // (fail) lines and summary at the END of the stream, so a
+                  // head-kept capture names no failing test (attempts 19-21
+                  // needed a fresh probe run to recover a single fail name).
+                  `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${(res.stderr || res.stdout).slice(-4000)}`) +
               (testOutputTruncated ? " (output truncated at the capture cap — counts may be incomplete)" : ""),
           });
           if (testOutputTruncated) flags.push("test-output-truncated");
