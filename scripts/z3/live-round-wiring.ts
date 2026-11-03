@@ -985,7 +985,12 @@ export function z3LiveDeps(opts: {
         return { exitCode: t.exitCode, tail: tail.slice(0, 2000) };
       };
       const first = await run();
-      if (first.exitCode === 0) return first;
+      // A red reverify VERDICT (exit 6, exitStatus logic) is terminal — the
+      // driver settles the leg red on it. Retrying it here doubled every red
+      // into a second ~22-min chain (attempts 19-24 ran up to four observes
+      // per park leg); only the transient classes (lock refusal, transport)
+      // earn the one retry. AC1(c)'s resume arm keeps a retry safe.
+      if (first.exitCode === 0 || first.exitCode === 6) return first;
       await new Promise((resolve) => setTimeout(resolve, 10_000));
       return run();
     },
