@@ -42,6 +42,14 @@ export const SWARM_CLI_TIMEOUT_MS = 30_000;
 /** Consecutive failed/null-state polls tolerated before the phase throws (so the finally tears down). */
 export const SWARM_MAX_STALE_POLLS = 4;
 export const DEFAULT_OPENRIG_HOME = ".openrig";
+/**
+ * The in-box daemon port, overridable for hermetic tests: the F-017 test
+ * binds its own mock daemon and a host running the operator's real OpenRig
+ * daemon on the default 7433 would otherwise own the probe-first "adopt an
+ * already-green daemon" arm (the mock never sees a request, and the real
+ * daemon refuses the test's rig name with rig_name_running).
+ */
+export const OPENRIG_DAEMON_PORT = Number(process.env.OPENRIG_DAEMON_PORT ?? 7433);
 
 export interface CmdResult { exitCode: number; stdout: string; stderr: string; }
 export type CmdRunner = (argv: readonly string[], opts?: {
@@ -339,7 +347,7 @@ export function openrigSwarmPhase(
       // daemon is only ever stopped if THIS run started it. A failed start
       // throws here, not ~30s later as "failed to become healthy". ──
       const healthyProbe = async (): Promise<boolean> =>
-        (await cli(["curl", "-fsS", "127.0.0.1:7433/healthz"])).exitCode === 0;
+        (await cli(["curl", "-fsS", `127.0.0.1:${OPENRIG_DAEMON_PORT}/healthz`])).exitCode === 0;
       if (!(await healthyProbe())) {
         const start = await cli(["rig", "daemon", "start", "--no-kernel"]);
         if (start.exitCode !== 0) {
@@ -435,7 +443,7 @@ export function openrigSwarmPhase(
           if (Date.now() >= deadline) break;
         }
         imp = await cli([
-          "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/rigs/import",
+          "curl", "-sS", "-X", "POST", `127.0.0.1:${OPENRIG_DAEMON_PORT}/api/rigs/import`,
           "-H", `X-Rig-Root: ${rigDir}`,
           "-H", "Content-Type: text/yaml",
           "--data-binary", `@${path.join(rigDir, "rig.yaml")}`,
@@ -509,7 +517,7 @@ export function openrigSwarmPhase(
         nudge: true,
       });
       const q = await cli([
-        "curl", "-sS", "-X", "POST", "127.0.0.1:7433/api/queue/create",
+        "curl", "-sS", "-X", "POST", `127.0.0.1:${OPENRIG_DAEMON_PORT}/api/queue/create`,
         "-H", "Content-Type: application/json",
         "-d", queuePayload,
       ]);

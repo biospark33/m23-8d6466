@@ -3135,8 +3135,18 @@ describe("makeBodyFactory rig_swarm branch (S1)", () => {
     );
 
     let queueCreates = 0;
+    // Hermetic daemon port: the operator's real OpenRig daemon may own 7433
+    // on this host (probe-first would adopt it and refuse the rig name), so
+    // the body's port seam (OPENRIG_DAEMON_PORT) points the child at a port
+    // THIS test owns.
+    const port = await new Promise<number>((resolve) => {
+      const s = Bun.serve({ port: 0, fetch: () => new Response("") });
+      const got = s.port as number;
+      s.stop(true);
+      resolve(got);
+    });
     const server = Bun.serve({
-      port: 7433, // the body's hardcoded in-box daemon port
+      port,
       fetch: (req) => {
         const pathname = new URL(req.url).pathname;
         if (pathname === "/healthz") return new Response("OK");
@@ -3157,6 +3167,7 @@ describe("makeBodyFactory rig_swarm branch (S1)", () => {
           PATH: `${binDir}:${process.env.PATH}`, // the CHILD's boot PATH — the only one Bun consults
           HOME: home,
           [SWARM_SEAT_KEYS_ENV]: path.join(home, "seat-keys.json"),
+          OPENRIG_DAEMON_PORT: String(port),
         },
       );
       const exitCode = await proc.exited;
