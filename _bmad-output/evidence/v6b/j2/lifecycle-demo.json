@@ -1,0 +1,1517 @@
+{
+  "complete": true,
+  "scope": "demo — every flip/manifest here was produced against a TEMP fixture corpus dir (.unlazy/j2/.e2e-tmp); the real _bmad-output/judgment/arm-state.jsonl was never written and the real corpus stays recording-only",
+  "verdicts": {
+    "milestones": {
+      "confirmed": 230,
+      "confirmed_min": 200,
+      "clusters": 60,
+      "clusters_min": 20,
+      "agreed": 60,
+      "rate": 1,
+      "ci_lower": 0.9398281469657729,
+      "ci_floor": 0.9
+    },
+    "sources": {
+      "e2e-fixture": 230
+    },
+    "modes": {
+      "live": 230,
+      "mock": 10
+    },
+    "verdict": "eligible",
+    "gaps": []
+  },
+  "flip": {
+    "seq": 1,
+    "at": "2026-11-04T15:50:14.218Z",
+    "from": "recording-only",
+    "to": "armed",
+    "sign_off": "steve 2026-11-04",
+    "evidence": {
+      "confirmed": 230,
+      "agreed": 60,
+      "rate": 1,
+      "ci_lower": 0.9398281469657729,
+      "thresholds": {
+        "MIN_OUTCOME_CONFIRMED_JEV_RECORDS": 200,
+        "MIN_CONFIRMED_CLUSTERS": 20,
+        "MIN_WILSON_LOWER_AGREEMENT": 0.9,
+        "WILSON_Z": 1.959964,
+        "MIN_ROUTE_CONFIDENCE": 0.9
+      },
+      "corpus_digest": "7411693155ed2dc10901464230f3fc2733339291e636cd3a7390ee847678eef0"
+    },
+    "prev_digest": null
+  },
+  "manifest": {
+    "candidates": 1,
+    "deep": 3,
+    "armed_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174"
+  },
+  "steps": [
+    {
+      "step": "fixture corpus seeded (240 jev-arm records, 60 clusters)",
+      "ok": true
+    },
+    {
+      "step": "dry-run on absent outcomes exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "verdict not-eligible with confirmed=0 and n/a interval",
+      "ok": true,
+      "detail": {
+        "milestones": {
+          "confirmed": 0,
+          "confirmed_min": 200,
+          "clusters": 0,
+          "clusters_min": 20,
+          "agreed": 0,
+          "rate": "n/a",
+          "ci_lower": "n/a",
+          "ci_floor": 0.9
+        },
+        "sources": {},
+        "modes": {
+          "live": 0,
+          "mock": 0
+        },
+        "verdict": "not-eligible",
+        "gaps": [
+          "outcome_confirmed=0/200",
+          "confirmed_clusters=0/20",
+          "ci_lower=n/a"
+        ]
+      }
+    },
+    {
+      "step": "no arm-state written by dry-run",
+      "ok": true
+    },
+    {
+      "step": "confirm f-dismiss (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-patch-1 (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-patch-2 (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-dismiss-low (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1001-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1001-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1001-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1001-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1002-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1002-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1002-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1002-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1003-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1003-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1003-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1003-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1004-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1004-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1004-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1004-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1005-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1005-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1005-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1005-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1006-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1006-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1006-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1006-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1007-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1007-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1007-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1007-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1008-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1008-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1008-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1008-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1009-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1009-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1009-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1009-d (mock) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1010-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1010-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1010-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1010-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1011-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1011-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1011-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1011-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1012-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1012-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1012-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1012-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1013-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1013-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1013-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1013-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1014-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1014-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1014-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1014-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1015-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1015-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1015-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1015-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1016-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1016-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1016-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1016-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1017-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1017-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1017-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1017-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1018-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1018-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1018-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1018-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1019-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1019-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1019-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1019-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1020-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1020-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1020-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1020-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1021-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1021-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1021-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1021-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1022-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1022-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1022-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1022-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1023-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1023-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1023-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1023-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1024-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1024-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1024-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1024-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1025-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1025-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1025-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1025-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1026-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1026-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1026-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1026-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1027-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1027-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1027-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1027-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1028-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1028-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1028-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1028-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1029-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1029-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1029-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1029-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1030-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1030-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1030-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1030-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1031-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1031-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1031-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1031-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1032-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1032-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1032-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1032-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1033-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1033-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1033-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1033-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1034-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1034-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1034-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1034-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1035-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1035-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1035-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1035-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1036-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1036-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1036-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1036-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1037-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1037-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1037-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1037-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1038-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1038-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1038-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1038-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1039-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1039-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1039-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1039-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1040-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1040-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1040-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1040-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1041-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1041-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1041-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1041-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1042-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1042-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1042-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1042-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1043-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1043-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1043-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1043-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1044-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1044-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1044-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1044-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1045-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1045-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1045-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1045-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1046-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1046-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1046-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1046-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1047-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1047-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1047-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1047-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1048-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1048-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1048-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1048-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1049-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1049-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1049-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1049-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1050-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1050-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1050-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1050-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1051-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1051-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1051-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1051-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1052-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1052-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1052-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1052-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1053-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1053-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1053-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1053-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1054-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1054-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1054-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1054-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1055-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1055-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1055-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1055-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1056-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1056-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1056-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1056-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1057-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1057-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1057-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1057-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1058-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1058-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1058-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1058-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1059-a (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1059-b (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1059-c (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "confirm f-1059-d (live) exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "240 confirms attempted (230 live + 10 mock)",
+      "ok": true
+    },
+    {
+      "step": "identical re-confirm exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "identical re-confirm appends nothing",
+      "ok": true,
+      "detail": {
+        "lines": 240
+      }
+    },
+    {
+      "step": "conflicting outcome refuses non-zero",
+      "ok": true,
+      "detail": {
+        "code": 2
+      }
+    },
+    {
+      "step": "conflicting refusal names the recordKey",
+      "ok": true,
+      "detail": "confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins):\n  - recordKey 1000|1|f-dismiss|jev-1.13.0-observer\n  - existing: outcome_confirmed=false outcome_source=e2e-fixture answer_mode=live confirmed_at=2026-11-04T15:50:09.417Z\n  - incoming: outcome_confirmed=true outcome_source=e2e-conflict answer_mode=live\n  - resolve: hand-edit /Users/steve/QDS-Factory/.unlazy/j2/.e2e-tmp/corpus/outcomes.jsonl to remove the losing duplicate entry for this recordKey, then re-run confirm-outcome — the next read re-validates every line\n"
+    },
+    {
+      "step": "conflicting refusal appended nothing",
+      "ok": true
+    },
+    {
+      "step": "dry-run after confirms exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "eligible: confirmed=230 live-attested",
+      "ok": true,
+      "detail": {
+        "milestones": {
+          "confirmed": 230,
+          "confirmed_min": 200,
+          "clusters": 60,
+          "clusters_min": 20,
+          "agreed": 60,
+          "rate": 1,
+          "ci_lower": 0.9398281469657729,
+          "ci_floor": 0.9
+        },
+        "sources": {
+          "e2e-fixture": 230
+        },
+        "modes": {
+          "live": 230,
+          "mock": 10
+        },
+        "verdict": "eligible",
+        "gaps": []
+      }
+    },
+    {
+      "step": "60 clusters, all agreed, LB>=0.90",
+      "ok": true,
+      "detail": {
+        "milestones": {
+          "confirmed": 230,
+          "confirmed_min": 200,
+          "clusters": 60,
+          "clusters_min": 20,
+          "agreed": 60,
+          "rate": 1,
+          "ci_lower": 0.9398281469657729,
+          "ci_floor": 0.9
+        },
+        "sources": {
+          "e2e-fixture": 230
+        },
+        "modes": {
+          "live": 230,
+          "mock": 10
+        },
+        "verdict": "eligible",
+        "gaps": []
+      }
+    },
+    {
+      "step": "modes split visible: live=230 mock=10",
+      "ok": true,
+      "detail": {
+        "live": 230,
+        "mock": 10
+      }
+    },
+    {
+      "step": "sources distribution visible",
+      "ok": true,
+      "detail": {
+        "e2e-fixture": 230
+      }
+    },
+    {
+      "step": "arm without --sign-off refuses exit 2",
+      "ok": true,
+      "detail": {
+        "code": 2
+      }
+    },
+    {
+      "step": "arm without sign-off wrote nothing",
+      "ok": true
+    },
+    {
+      "step": "arm without env confirm refuses exit 2",
+      "ok": true,
+      "detail": {
+        "code": 2
+      }
+    },
+    {
+      "step": "arm without env wrote nothing",
+      "ok": true
+    },
+    {
+      "step": "arm with pair exits 0",
+      "ok": true,
+      "detail": "{\"seq\":1,\"at\":\"2026-11-04T15:50:14.218Z\",\"from\":\"recording-only\",\"to\":\"armed\",\"sign_off\":\"steve 2026-11-04\",\"evidence\":{\"confirmed\":230,\"agreed\":60,\"rate\":1,\"ci_lower\":0.9398281469657729,\"thresholds\":{\"MIN_OUTCOME_CONFIRMED_JEV_RECORDS\":200,\"MIN_CONFIRMED_CLUSTERS\":20,\"MIN_WILSON_LOWER_AGREEMENT\":0.9,\"WILSON_Z\":1.959964,\"MIN_ROUTE_CONFIDENCE\":0.9},\"corpus_digest\":\"7411693155ed2dc10901464230f3fc2733339291e636cd3a7390ee847678eef0\"},\"prev_digest\":null}\n"
+    },
+    {
+      "step": "arm-state has exactly one entry",
+      "ok": true,
+      "detail": {
+        "n": 1
+      }
+    },
+    {
+      "step": "flip entry shape",
+      "ok": true,
+      "detail": {
+        "seq": 1,
+        "at": "2026-11-04T15:50:14.218Z",
+        "from": "recording-only",
+        "to": "armed",
+        "sign_off": "steve 2026-11-04",
+        "evidence": {
+          "confirmed": 230,
+          "agreed": 60,
+          "rate": 1,
+          "ci_lower": 0.9398281469657729,
+          "thresholds": {
+            "MIN_OUTCOME_CONFIRMED_JEV_RECORDS": 200,
+            "MIN_CONFIRMED_CLUSTERS": 20,
+            "MIN_WILSON_LOWER_AGREEMENT": 0.9,
+            "WILSON_Z": 1.959964,
+            "MIN_ROUTE_CONFIDENCE": 0.9
+          },
+          "corpus_digest": "7411693155ed2dc10901464230f3fc2733339291e636cd3a7390ee847678eef0"
+        },
+        "prev_digest": null
+      }
+    },
+    {
+      "step": "route-round while armed exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "manifest written",
+      "ok": true
+    },
+    {
+      "step": "manifest armed_digest matches flip head",
+      "ok": true,
+      "detail": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174"
+    },
+    {
+      "step": "DISMISS p=0.97 → candidate; DISMISS p=0.50 → deep; PATCH → deep",
+      "ok": true,
+      "detail": {
+        "candidates": [
+          {
+            "finding_id": "f-dismiss",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
+            "rationale": "jev: is_real_defect=0.03; disposition=dismiss p=0.97"
+          }
+        ],
+        "deep": [
+          {
+            "finding_id": "f-dismiss-low",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
+            "rationale": "jev: is_real_defect=0.40; disposition=dismiss p=0.50"
+          },
+          {
+            "finding_id": "f-patch-1",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
+            "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87"
+          },
+          {
+            "finding_id": "f-patch-2",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
+            "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87"
+          }
+        ]
+      }
+    },
+    {
+      "step": "every manifest entry carries armed_state_digest",
+      "ok": true
+    },
+    {
+      "step": "unarm with pair exits 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "route after unarm refuses exit 2 not-armed",
+      "ok": true,
+      "detail": {
+        "code": 2,
+        "err": "route-round: not-armed:\n  - arm-state head (seq 2) is \"recording-only\" — routing needs an armed head\n"
+      }
+    }
+  ]
+}

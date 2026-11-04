@@ -163,3 +163,31 @@ export function recordKey(r: { pr: number | null; round: number | null; finding_
 export function zodErrors(error: z.ZodError): string[] {
   return error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
 }
+
+// ===== J2 outcome-confirmation variant (adds-only region; coordinated with J4's region above — disjoint, merge order safe) =====
+
+/**
+ * One operator-confirmed outcome entry (J2 AC5) — appended to
+ * `<corpus>/outcomes.jsonl` by `scripts/judgment/confirm-outcome.ts`. The
+ * exported `recordKey` above is the idempotence and conflict authority: a
+ * second entry for an existing key with an IDENTICAL outcome is an idempotent
+ * no-op; a CONFLICTING outcome refuses the append (never first-write-wins).
+ * `answer_mode` attests, at confirm time, the mode of the judgment answer the
+ * outcome confirms — mock-attested entries never enter the arm-gate's counted
+ * population (J2 AC5).
+ */
+export const OutcomeRecordSchema = z
+  .object({
+    pr: z.number().int().positive().refine((n) => Number.isSafeInteger(n), "must be a safe integer"),
+    round: z.number().int().positive().refine((n) => Number.isSafeInteger(n), "must be a safe integer"),
+    finding_id: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
+    labeler: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
+    outcome_confirmed: z.boolean(),
+    outcome_source: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
+    answer_mode: z.enum(["live", "mock"]),
+    confirmed_at: isoTimestamp,
+  })
+  .strict();
+export type OutcomeRecord = z.infer<typeof OutcomeRecordSchema>;
+
+// ===== end J2 outcome-confirmation variant =====

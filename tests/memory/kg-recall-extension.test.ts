@@ -18,7 +18,8 @@
  * dynamic import. The @earendil-works/pi-coding-agent import is type-only —
  * erased at runtime, no shim needed.
  */
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { registerTypeboxMock } from "./host-typebox.ts";
 
 import {
   applyCeiling,
@@ -28,18 +29,7 @@ import {
 } from "../../pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/sanitize.ts";
 import { recall } from "../../pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/client.ts";
 
-mock.module("typebox", () => ({
-	Type: {
-		String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
-		Integer: (options?: Record<string, unknown>) => ({ type: "integer", ...options }),
-		Object: (props: Record<string, unknown>, options?: Record<string, unknown>) => ({
-			type: "object",
-			properties: props,
-			...(options ?? {}),
-		}),
-		Optional: (schema: unknown) => schema,
-	},
-}));
+registerTypeboxMock();
 
 const ENTRY_PATH = "../../pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/kg-recall.ts";
 const KEY = "mgrun-test-0000000000000000000000001";
