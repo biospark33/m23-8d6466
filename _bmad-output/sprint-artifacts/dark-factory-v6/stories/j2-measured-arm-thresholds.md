@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 **Sprint:** v6b (Autonomy, lane 2 — E21-independent; the measured half of DD-21, answering handoff §9 DoD 6's standing "arm-thresholds explicitly NOT done")
-**Status:** gated — gate = corpus milestones + explicit operator sign-off (in-story ACs; the DD-21 unlock gate). J1 merged is a dep, not the gate.
+**Status:** done 2026-11-04 — implemented with the gate CLOSED by construction: the real corpus stays not-eligible (outcome_confirmed=0/200, ci_lower=n/a, proven by suite test + gate), the real `_bmad-output/judgment/arm-state.jsonl` does not exist, and the `--arm` flip remains operator-gated (DD-21 sign-off pair: `--sign-off` text AND `QDS_JUDGMENT_ARM_CONFIRMED=1`, eligibility-gated on corpus milestones). PR #485. Review campaign: 3 rounds, 53 findings, all survivors fixed (round triages at `_bmad-output/reviews/j2-round{1,2,3}/triage.md`).
 
 ## Spec Reference
 
@@ -114,7 +114,7 @@ Build the unlock machinery the Jev handoff deferred: a milestone gate over the c
 
 ## Dev Agent Record
 
-*(written at implementation time — preceded by the milestone review: the operator confirms DD-21's pinned values before `--arm` can ever succeed in the real corpus)*
+Implemented 2026-11-04 on `feature/j2` (PR #485, 4 commits, head `44d3b044`, 4878 insertions across 11 files). **The DD-21 milestone-review record is still PENDING and by design**: the operator confirms/amends the writer-proposed values (200 records / 20 clusters / Wilson LB ≥ 0.90 / z=1.959964 / MIN_ROUTE_CONFIDENCE 0.90) into the register before the first real `--arm` can ever succeed — the real corpus is not-eligible (0/200 confirmed, no outcomes.jsonl, no arm-state.jsonl), so nothing is owed today; the precondition activates only when the corpus reaches the milestones. Incorporating jev classifier calls: ZERO live jev calls in J2 surfaces (INV-J5 + AC4 negative control — the import-edge allowlist test makes a live re-judge structurally unimportable); incorporation = seam types + the rationaleFrom→parseDispositionProbability cross-pin + hand-written fixtures (mock adapter cannot fabricate DISMISS answers). 3-round review campaign (4 independent layers per round: blind-hunter, edge-case-hunter, verification-gap, acceptance-auditor; triages at `_bmad-output/reviews/j2-round{1,2,3}/triage.md`): 53 findings → all survivors fixed incl every LOW; round-3 closure auditor found zero new survivors. Deviations: arm-gate exports 3 helpers beyond the PLAN's frozen list (agrees, armStateEntryDigest, countedCorpusDigest — digest must live beside the chain verifier; counted-corpus digest must share evaluateGate's join); keyOf exported + widened to the x-form null grammar (R2-B/R3 fixes). Known handoff: the full `bun test` cannot go green on THIS host — 13 failures, one environmental root cause outside the repo (host pi install `~/.pi/agent/install/releases/1.1.0` missing the `@earendil-works/pi-ai` model-operations module, breaking the self-compact parity suite; CI unaffected — Linux runners have no `~/.pi`; suite otherwise 8975 pass). Operator-owned repair; suite expected 8988/0 after.
 
 ## Review Findings (post-merge)
 
