@@ -154,7 +154,7 @@ export interface RunWithRestartOptions {
 export async function runWithRestart<T>(
   step: (opts: { attempt: number; reducedScope: boolean }) => Promise<T> | T,
   opts: RunWithRestartOptions,
-): Promise<T> {
+): Promise<T> { // dp:ok — the step call is fully try/catch-wrapped in-loop; the only bare await is the sleep seam, a resolve-only setTimeout promise whose rejection path is structurally unreachable
   const caps = opts.caps ?? DEFAULT_RESTART_CAPS;
   const now = opts.now ?? Date.now;
   const sleep =
