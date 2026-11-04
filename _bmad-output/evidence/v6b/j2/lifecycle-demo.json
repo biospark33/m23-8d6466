@@ -24,7 +24,7 @@
   },
   "flip": {
     "seq": 1,
-    "at": "2026-11-04T14:55:21.849Z",
+    "at": "2026-11-04T15:50:14.218Z",
     "from": "recording-only",
     "to": "armed",
     "sign_off": "steve 2026-11-04",
@@ -40,14 +40,14 @@
         "WILSON_Z": 1.959964,
         "MIN_ROUTE_CONFIDENCE": 0.9
       },
-      "corpus_digest": "b5fd8cf1305e4fd4e0ee9986351fe6803b9ac5ba3d70d69cabd5be2a12101717"
+      "corpus_digest": "7411693155ed2dc10901464230f3fc2733339291e636cd3a7390ee847678eef0"
     },
     "prev_digest": null
   },
   "manifest": {
     "candidates": 1,
     "deep": 3,
-    "armed_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d"
+    "armed_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174"
   },
   "steps": [
     {
@@ -1316,7 +1316,7 @@
     {
       "step": "conflicting refusal names the recordKey",
       "ok": true,
-      "detail": "confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins):\n  - recordKey 1000|1|f-dismiss|jev-1.13.0-observer\n  - existing: outcome_confirmed=false outcome_source=e2e-fixture answer_mode=live confirmed_at=2026-11-04T14:55:17.228Z\n  - incoming: outcome_confirmed=true outcome_source=e2e-conflict answer_mode=live\n  - resolve: hand-edit /Users/steve/QDS-Factory/.unlazy/j2/.e2e-tmp/corpus/outcomes.jsonl to remove the losing duplicate entry for this recordKey, then re-run confirm-outcome — the next read re-validates every line\n"
+      "detail": "confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins):\n  - recordKey 1000|1|f-dismiss|jev-1.13.0-observer\n  - existing: outcome_confirmed=false outcome_source=e2e-fixture answer_mode=live confirmed_at=2026-11-04T15:50:09.417Z\n  - incoming: outcome_confirmed=true outcome_source=e2e-conflict answer_mode=live\n  - resolve: hand-edit /Users/steve/QDS-Factory/.unlazy/j2/.e2e-tmp/corpus/outcomes.jsonl to remove the losing duplicate entry for this recordKey, then re-run confirm-outcome — the next read re-validates every line\n"
     },
     {
       "step": "conflicting refusal appended nothing",
@@ -1417,7 +1417,7 @@
     {
       "step": "arm with pair exits 0",
       "ok": true,
-      "detail": "{\"seq\":1,\"at\":\"2026-11-04T14:55:21.849Z\",\"from\":\"recording-only\",\"to\":\"armed\",\"sign_off\":\"steve 2026-11-04\",\"evidence\":{\"confirmed\":230,\"agreed\":60,\"rate\":1,\"ci_lower\":0.9398281469657729,\"thresholds\":{\"MIN_OUTCOME_CONFIRMED_JEV_RECORDS\":200,\"MIN_CONFIRMED_CLUSTERS\":20,\"MIN_WILSON_LOWER_AGREEMENT\":0.9,\"WILSON_Z\":1.959964,\"MIN_ROUTE_CONFIDENCE\":0.9},\"corpus_digest\":\"b5fd8cf1305e4fd4e0ee9986351fe6803b9ac5ba3d70d69cabd5be2a12101717\"},\"prev_digest\":null}\n"
+      "detail": "{\"seq\":1,\"at\":\"2026-11-04T15:50:14.218Z\",\"from\":\"recording-only\",\"to\":\"armed\",\"sign_off\":\"steve 2026-11-04\",\"evidence\":{\"confirmed\":230,\"agreed\":60,\"rate\":1,\"ci_lower\":0.9398281469657729,\"thresholds\":{\"MIN_OUTCOME_CONFIRMED_JEV_RECORDS\":200,\"MIN_CONFIRMED_CLUSTERS\":20,\"MIN_WILSON_LOWER_AGREEMENT\":0.9,\"WILSON_Z\":1.959964,\"MIN_ROUTE_CONFIDENCE\":0.9},\"corpus_digest\":\"7411693155ed2dc10901464230f3fc2733339291e636cd3a7390ee847678eef0\"},\"prev_digest\":null}\n"
     },
     {
       "step": "arm-state has exactly one entry",
@@ -1431,7 +1431,7 @@
       "ok": true,
       "detail": {
         "seq": 1,
-        "at": "2026-11-04T14:55:21.849Z",
+        "at": "2026-11-04T15:50:14.218Z",
         "from": "recording-only",
         "to": "armed",
         "sign_off": "steve 2026-11-04",
@@ -1447,7 +1447,7 @@
             "WILSON_Z": 1.959964,
             "MIN_ROUTE_CONFIDENCE": 0.9
           },
-          "corpus_digest": "b5fd8cf1305e4fd4e0ee9986351fe6803b9ac5ba3d70d69cabd5be2a12101717"
+          "corpus_digest": "7411693155ed2dc10901464230f3fc2733339291e636cd3a7390ee847678eef0"
         },
         "prev_digest": null
       }
@@ -1464,7 +1464,7 @@
     {
       "step": "manifest armed_digest matches flip head",
       "ok": true,
-      "detail": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d"
+      "detail": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174"
     },
     {
       "step": "DISMISS p=0.97 → candidate; DISMISS p=0.50 → deep; PATCH → deep",
@@ -1473,24 +1473,24 @@
         "candidates": [
           {
             "finding_id": "f-dismiss",
-            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
             "rationale": "jev: is_real_defect=0.03; disposition=dismiss p=0.97"
           }
         ],
         "deep": [
           {
             "finding_id": "f-dismiss-low",
-            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
             "rationale": "jev: is_real_defect=0.40; disposition=dismiss p=0.50"
           },
           {
             "finding_id": "f-patch-1",
-            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
             "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87"
           },
           {
             "finding_id": "f-patch-2",
-            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "armed_state_digest": "dba5e55137ab855a260109f6bdfbe034af25e306f8e50af88ab6ceabec717174",
             "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87"
           }
         ]

@@ -22,7 +22,7 @@
  * Exit: 0 written or duplicate · 2 invalid input / conflict / malformed store.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
 import { DEFAULT_CORPUS_DIR } from "../corpus/merge.ts";
@@ -143,6 +143,12 @@ export async function main(argv: string[]): Promise<number> {
   try {
     const { corpusDir, ...fields } = args;
     const dir = corpusDir ?? DEFAULT_CORPUS_DIR;
+    // An absent corpus dir would sail into the join precheck below and be
+    // misdiagnosed as a finding-id typo — refuse naming the path, mirroring
+    // arm-thresholds' guard (R3-2).
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+      exitWithFailure("confirm-outcome:", 2, [`--corpus-dir "${dir}" does not exist or is not a directory — a missing corpus is a path error, never an empty corpus`]);
+    }
     const file = join(dir, "outcomes.jsonl");
 
     // confirmed_at attests at confirm time (parse re-stamps it).

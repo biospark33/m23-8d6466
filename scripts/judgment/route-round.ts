@@ -212,7 +212,30 @@ export function main(argv: string[]): number {
     const routingDir = join(judgmentDir, "routing");
     const manifestPath = join(routingDir, `${args.pr}-${args.round}.json`);
     if (existsSync(manifestPath)) {
-      const prior = JSON.parse(readFileSync(manifestPath, "utf8")) as RoutingManifest;
+      // The prior manifest is operator-owned provenance: corrupt or hand-edited
+      // JSON must be named AS the manifest — never a raw SyntaxError, and never
+      // a wrong-cause "shard changed" diagnosis (R3-7).
+      let priorRaw: unknown;
+      try {
+        priorRaw = JSON.parse(readFileSync(manifestPath, "utf8"));
+      } catch {
+        exitWithFailure("route-round:", 2, [
+          `existing routing manifest at ${manifestPath} is not valid JSON — delete it explicitly to re-route`,
+        ]);
+      }
+      const prior = priorRaw as RoutingManifest;
+      if (
+        typeof priorRaw !== "object" ||
+        priorRaw === null ||
+        Array.isArray(priorRaw) ||
+        typeof prior.armed_digest !== "string" ||
+        !Array.isArray(prior.deep_adjudication) ||
+        !Array.isArray(prior.obvious_dismiss_candidates)
+      ) {
+        exitWithFailure("route-round:", 2, [
+          `existing routing manifest at ${manifestPath} does not match the routing manifest shape — the manifest was edited, not the shard`,
+        ]);
+      }
       if (prior.armed_digest !== digest) {
         exitWithFailure("route-round:", 2, [
           `manifest ${manifestPath} exists under a different armed digest — prior routing provenance is not overwritten`,

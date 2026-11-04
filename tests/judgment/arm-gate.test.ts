@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { outcomeAgrees } from "../../scripts/judgment/ab-report.ts";
+import { loadJevCorpusRecords } from "../../scripts/judgment/arm-thresholds.ts";
 import { DISPOSITIONS, OutcomeRecordSchema, recordKey } from "../../scripts/corpus/schema.ts";
 import {
   MIN_CONFIRMED_CLUSTERS,
@@ -604,6 +605,16 @@ describe("verifyArmStateLog", () => {
     }
   });
 
+  test("whitespace-only sign_off refuses naming sign_off — as weak as the CLI's own trim gate is forbidden (R3-6)", () => {
+    for (const bad of ["", " ", "  \t "]) {
+      const entry: Record<string, unknown> = { ...mkEntry(1, null, "recording-only", "armed"), sign_off: bad };
+      const r = verifyArmStateLog([JSON.stringify(entry)]);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error(`sign_off ${JSON.stringify(bad)} verified — must refuse`);
+      expect(r.reason).toMatch(/sign_off/);
+    }
+  });
+
   test("an entry with an extra top-level field refuses — the key set is exact (R2-K)", () => {
     const good = mkEntry(1, null, "recording-only", "armed");
     const entry: Record<string, unknown> = { ...good, note: "a future writer added me" };
@@ -730,7 +741,9 @@ describe("arm-thresholds CLI", () => {
     const judgmentDir = tmpDir("arm-gate-jdg-");
     try {
       writeEligibleCorpusDir(corpusDir);
-      const p = runArm(["--arm", "--sign-off", "steve 2026-11-04", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], {
+      // Padded on purpose (R3-6): the writer must TRIM before the append — an
+      // untrimmed " steve 2026-11-04 " must never be frozen into the chain.
+      const p = runArm(["--arm", "--sign-off", " steve 2026-11-04 ", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], {
         QDS_JUDGMENT_ARM_CONFIRMED: "1",
       });
       expect(p.exitCode).toBe(0);
@@ -742,7 +755,7 @@ describe("arm-thresholds CLI", () => {
       const entry = JSON.parse(lines[0]!) as ArmStateEntry;
       expect(entry.seq).toBe(1);
       expect(entry.prev_digest).toBeNull();
-      expect(entry.sign_off).toBe("steve 2026-11-04");
+      expect(entry.sign_off).toBe("steve 2026-11-04"); // the trimmed value
       expect(entry.evidence.confirmed).toBe(240);
       expect(entry.evidence.agreed).toBe(60);
       expect(entry.evidence.thresholds).toEqual(THRESHOLDS_EVIDENCE);
@@ -786,6 +799,77 @@ describe("arm-thresholds CLI", () => {
       const unarmBare = runArm(["--unarm", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], pair);
       expect(unarmBare.exitCode).toBe(2);
       expect(readArmState(judgmentDir)).toHaveLength(2);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("--unarm with the full DD-21 pair on an EMPTY judgment dir refuses exit 2 'nothing to unarm', nothing appended (R3-9)", () => {
+    const corpusDir = tmpDir("arm-gate-empty-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      mkdirSync(corpusDir, { recursive: true });
+      const p = runArm(["--unarm", "--sign-off", "steve 2026-11-05", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], {
+        QDS_JUDGMENT_ARM_CONFIRMED: "1",
+      });
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toMatch(/nothing to unarm/);
+      expect(readArmState(judgmentDir)).toEqual([]);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("--unarm with the pair on a RECORDING-ONLY head refuses exit 2 'nothing to unarm', log unchanged (R3-9)", () => {
+    const corpusDir = tmpDir("arm-gate-cli-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      writeEligibleCorpusDir(corpusDir);
+      const pair = { QDS_JUDGMENT_ARM_CONFIRMED: "1" };
+      expect(runArm(["--arm", "--sign-off", "steve 2026-11-04", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], pair).exitCode).toBe(0);
+      expect(runArm(["--unarm", "--sign-off", "steve 2026-11-05", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], pair).exitCode).toBe(0);
+      const before = readArmState(judgmentDir);
+      expect(before).toHaveLength(2);
+      // A regression here appends a no-op flip: exit 0 now, then a PERMANENT
+      // exit 2 (from===to refuses) — the log is bricked. Pinned: refuse, unchanged.
+      const p = runArm(["--unarm", "--sign-off", "steve 2026-11-06", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], pair);
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toMatch(/nothing to unarm/);
+      expect(readArmState(judgmentDir)).toEqual(before);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("unarm over an EMPTIED corpus: exit 0, appended entry carries rate/ci_lower 'n/a', chain verifies (R3-10)", () => {
+    const corpusDir = tmpDir("arm-gate-cli-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      writeEligibleCorpusDir(corpusDir);
+      const pair = { QDS_JUDGMENT_ARM_CONFIRMED: "1" };
+      expect(runArm(["--arm", "--sign-off", "steve 2026-11-04", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], pair).exitCode).toBe(0);
+      // Data incident: the corpus is emptied AFTER arming — the disarm flip's
+      // evidence must honestly record confirmed=0 / rate "n/a" (never a
+      // fabricated interval), and that "n/a" entry must chain-verify.
+      rmSync(corpusDir, { recursive: true, force: true });
+      mkdirSync(corpusDir, { recursive: true });
+      const p = runArm(["--unarm", "--sign-off", "steve 2026-11-05", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir], pair);
+      expect(p.exitCode).toBe(0);
+      const lines = readArmState(judgmentDir);
+      expect(lines).toHaveLength(2);
+      const entry = JSON.parse(lines[1]!) as ArmStateEntry;
+      expect(entry.from).toBe("armed");
+      expect(entry.to).toBe("recording-only");
+      expect(entry.evidence.confirmed).toBe(0);
+      expect(entry.evidence.rate).toBe("n/a");
+      expect(entry.evidence.ci_lower).toBe("n/a");
+      const r = verifyArmStateLog(lines);
+      expect(r.ok).toBe(true); // pins the verifier's "n/a" arm
+      if (!r.ok) throw new Error("unreachable");
+      expect(r.head.to).toBe("recording-only");
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
       rmSync(judgmentDir, { recursive: true, force: true });
@@ -869,6 +953,31 @@ describe("arm-thresholds CLI", () => {
     }
   });
 
+  test("--corpus-dir pointing at a regular FILE refuses exit 2 naming the path — the isDirectory half of R2-H (R3-8)", () => {
+    const fileAsDir = join("/tmp", `arm-gate-fileasdir-${process.pid}-${Date.now()}`);
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      writeFileSync(fileAsDir, "not a dir");
+      const p = runArm(["--corpus-dir", fileAsDir, "--judgment-dir", judgmentDir]);
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toContain(fileAsDir);
+      expect(p.stderr.toString()).toContain("not a directory");
+    } finally {
+      rmSync(fileAsDir, { force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("loadJevCorpusRecords rethrows non-ENOENT readdir errors — a file path is a path error, not an empty corpus (R3-2)", () => {
+    const fileAsDir = join("/tmp", `arm-gate-fileasdir-${process.pid}-${Date.now()}`);
+    writeFileSync(fileAsDir, "x");
+    try {
+      expect(() => loadJevCorpusRecords(fileAsDir)).toThrow(/ENOTDIR/);
+    } finally {
+      rmSync(fileAsDir, { force: true });
+    }
+  });
+
   test("interior blank line in arm-state.jsonl refuses naming the line — torn double-append (R2-D)", () => {
     const corpusDir = tmpDir("arm-gate-cli-");
     const judgmentDir = tmpDir("arm-gate-jdg-");
@@ -880,6 +989,13 @@ describe("arm-thresholds CLI", () => {
       const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
       expect(p.exitCode).toBe(2);
       expect(p.stderr.toString()).toContain("line 2 is blank");
+      // R3-3: a whitespace-only LAST line is not a trailing-newline artifact —
+      // the tail-drop is exact-"" only (route-round parity), so it must reach
+      // the verifier and refuse under the SAME message shape.
+      writeFileSync(join(judgmentDir, "arm-state.jsonl"), `${JSON.stringify(entries[0])}\n${JSON.stringify(entries[1])}\n  `);
+      const tail = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+      expect(tail.exitCode).toBe(2);
+      expect(tail.stderr.toString()).toContain("line 3 is blank");
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
       rmSync(judgmentDir, { recursive: true, force: true });
@@ -940,7 +1056,7 @@ describe("arm-thresholds CLI", () => {
         QDS_JUDGMENT_ARM_CONFIRMED: "1",
       });
       expect(p.exitCode).toBe(2);
-      expect(p.stderr.toString()).not.toMatch(/\bat \S/);
+      expect(p.stderr.toString()).not.toMatch(/\n\s*at\s/); // no stack frame
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
       rmSync(judgmentDirAsFile, { force: true });
@@ -1160,6 +1276,35 @@ describe("confirm-outcome CLI", () => {
         expect(OutcomeRecordSchema.safeParse({ ...base, [f]: bad }).success).toBe(false);
       }
     }
+  });
+
+  // R3-5: pr/round beyond Number.MAX_SAFE_INTEGER are integers by
+  // Number.isInteger (1e21 parses) yet their recordKey "1e+21|…" can never
+  // join a shard — the schema's isSafeInteger refine (driver-landed in
+  // scripts/corpus/schema.ts) must refuse them.
+  test("schema refuses non-safe-integer pr/round — 1e21 must not parse (R3-5)", () => {
+    const base = {
+      pr: 901,
+      round: 1,
+      finding_id: "F-1",
+      labeler: LABELER,
+      outcome_confirmed: true,
+      outcome_source: "operator-merge-evidence",
+      answer_mode: "live" as const,
+      confirmed_at: "2026-11-04T00:00:00Z",
+    };
+    for (const f of ["pr", "round"] as const) {
+      expect(OutcomeRecordSchema.safeParse({ ...base, [f]: 1e21 }).success).toBe(false);
+    }
+  });
+
+  test("confirm-outcome with an absent --corpus-dir refuses exit 2 naming it as a path error, never 'no joining record' (R3-2)", () => {
+    const missing = join("/tmp", `confirm-missing-${process.pid}-${Date.now()}`);
+    const p = runConfirm([...CONFIRM_ARGS, "--corpus-dir", missing]);
+    expect(p.exitCode).toBe(2);
+    expect(p.stderr.toString()).toContain(missing);
+    expect(p.stderr.toString()).toContain("path error");
+    expect(p.stderr.toString()).not.toContain("no jev-arm corpus record");
   });
 
   test("torn outcomes.jsonl line: confirm-outcome exits 2 leaving the file byte-unchanged; arm-thresholds dry-run also exits 2 (F10)", () => {

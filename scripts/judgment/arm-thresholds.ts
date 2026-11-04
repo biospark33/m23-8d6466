@@ -114,8 +114,11 @@ export function loadJevCorpusRecords(corpusDir: string): GateCorpusRecord[] {
   let names: string[];
   try {
     names = readdirSync(corpusDir);
-  } catch {
-    return []; // no corpus dir at all: zero confirmed, honestly reported
+  } catch (e) {
+    // no corpus dir at all: zero confirmed, honestly reported — ENOENT ONLY;
+    // EACCES/EMFILE/ENOTDIR are path/permission errors, never empty corpora (R3-2).
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    return [];
   }
   const out: GateCorpusRecord[] = [];
   for (const n of names.sort()) {
@@ -136,14 +139,15 @@ export function loadJevCorpusRecords(corpusDir: string): GateCorpusRecord[] {
 
 /**
  * arm-state.jsonl lines (absent file = []). ONLY split()'s single trailing
- * empty element is dropped — an INTERIOR blank line (torn double-append)
+ * EMPTY-STRING element is dropped (exact "", matching route-round's pop —
+ * R3-3): a whitespace-only tail or an INTERIOR blank line (torn double-append)
  * reaches verifyArmStateLog and refuses; pre-dropping all blanks would make
  * the verifier's blank-line refusal dead code (R2-D).
  */
 function readArmStateLines(judgmentDir: string): string[] {
   const file = join(judgmentDir, "arm-state.jsonl");
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8").split("\n").filter((l, i, a) => i < a.length - 1 || l.trim() !== "");
+  return readFileSync(file, "utf8").split("\n").filter((l, i, a) => i < a.length - 1 || l !== "");
 }
 
 /**
@@ -216,7 +220,7 @@ export async function main(argv: string[]): Promise<number> {
       at: new Date().toISOString(),
       from: armState.state,
       to: args.arm ? "armed" : "recording-only",
-      sign_off: args.signOff!,
+      sign_off: args.signOff!.trim(), // never freeze an untrimmed value into the chain (R3-6)
       evidence: {
         confirmed: verdict.milestones.confirmed,
         agreed: verdict.milestones.agreed,

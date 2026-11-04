@@ -178,8 +178,8 @@ export function zodErrors(error: z.ZodError): string[] {
  */
 export const OutcomeRecordSchema = z
   .object({
-    pr: z.number().int().positive(),
-    round: z.number().int().positive(),
+    pr: z.number().int().positive().refine((n) => Number.isSafeInteger(n), "must be a safe integer"),
+    round: z.number().int().positive().refine((n) => Number.isSafeInteger(n), "must be a safe integer"),
     finding_id: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
     labeler: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
     outcome_confirmed: z.boolean(),

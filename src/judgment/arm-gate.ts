@@ -425,7 +425,9 @@ function entryProblem(raw: unknown, expectedSeq: number, prevDigest: string | nu
     return `entry 1 is genesis — from must be "recording-only", got "${e.from}"`;
   }
   if (prevTo !== null && e.from !== prevTo) return `entry ${expectedSeq} from "${e.from}" does not continue entry ${expectedSeq - 1} to "${prevTo}"`;
-  if (typeof e.sign_off !== "string" || e.sign_off.length === 0) return `entry ${expectedSeq} sign_off must be a non-empty string`;
+  // trim-gated, matching the CLI's own --sign-off gate: a whitespace-only
+  // sign-off must not chain-verify either (R3-6).
+  if (typeof e.sign_off !== "string" || e.sign_off.trim().length === 0) return `entry ${expectedSeq} sign_off must be a non-empty string, not whitespace-only`;
   if (typeof e.at !== "string" || !isIsoInstant(e.at)) {
     return `entry ${expectedSeq} at must be an ISO-8601 instant (e.g. "2026-11-04T00:00:00Z")`;
   }
