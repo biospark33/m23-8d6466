@@ -1,0 +1,46 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "a79d4730",
+  "scheduleId": "d0a2fd1b",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-10-26T16:21:23.525Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-10-26; re-fire #2 after schedule-tamper red — finding filed as #478; prior GOs consumed by substrate reds, zero fleet spend)",
+    "when": "2026-10-26T16:10:43Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-10-26T16:21:32.979Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"a79d4730\"}"
+  ],
+  "writtenAt": "2026-10-26T16:21:32.979Z",
+  "swarmclawForkRev": "cc91aac7737084be0abec5e278f8e48afc2ca3b0"
+}

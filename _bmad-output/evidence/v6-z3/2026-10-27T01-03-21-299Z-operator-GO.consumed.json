@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 16 — round 15 red'd at leg 2's retain on a NEW substrate race, not the fix stack: the teardown's harvest pulled the bundle before the in-box findings sidecar flushed (leg 2's bundle had final.json but no findings.json; leg 1's landed); fixed with a 15s settle→teardown grace (A2's cadence avoided the race only by its 45s poll granularity); checkpoint heal + retry remain in place from #482",
+  "when": "2026-10-27T01:02:57Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

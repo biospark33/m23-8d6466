@@ -1,0 +1,69 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "a2c42130",
+  "scheduleDisarm": null,
+  "scheduleResidue": null,
+  "protocolCancel": [
+    {
+      "protocolRunId": "a2c42130",
+      "cancelled": true,
+      "fleetCancelled": [
+        "qds-20261027-712688"
+      ],
+      "inFlightRequestIds": []
+    }
+  ],
+  "runIds": [
+    "qds-20261027-96ac0f",
+    "qds-20261027-4d7c20",
+    "qds-20261027-fb2472",
+    "qds-20261027-712688"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261027-96ac0f",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"fbbd686d-e3f2-4977-b3e9-8b5c157397d5\",\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20261027-96ac0f\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-96ac0f hop run-box.teardown\"}\n{\"requestId\":\"8f08f856-22c9-4bac-9e77-dd0c74297ba0\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T01:34:22.173Z\",\"duration\":1190,\"durationMs\":1190,\"status\":\"ok\",\"runId\":\"qds-20261027-96ac0f\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261027-4d7c20",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"57589755-a499-4870-8475-3ca667bf5bb4\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261027-4d7c20\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-4d7c20 hop run-box.teardown\"}\n{\"requestId\":\"0f898968-b6bd-4594-8084-bae44a359899\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T01:34:22.209Z\",\"duration\":1247,\"durationMs\":1247,\"status\":\"ok\",\"runId\":\"qds-20261027-4d7c20\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261027-fb2472",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"78f29c2e-a5dc-4829-838b-2f6cc0d17c6b\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"qds-20261027-fb2472\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-fb2472 hop run-box.teardown\"}\n{\"requestId\":\"5c0e2f5d-2a26-4543-a886-163adc35d764\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T01:34:22.191Z\",\"duration\":1218,\"durationMs\":1218,\"status\":\"ok\",\"runId\":\"qds-20261027-fb2472\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261027-712688",
+      "exitCode": 0,
+      "stderrTail": "equestId\":\"165b4458-bfe2-4372-8bfa-ac2ba19be683\",\"durationMs\":13,\"status\":\"ok\",\"runId\":\"qds-20261027-712688\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-712688 hop run-box.teardown\"}\n{\"requestId\":\"8b6e218b-ded1-43d9-aac0-bcdaf1d4421a\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T01:34:22.182Z\",\"duration\":1206,\"durationMs\":1206,\"status\":\"ok\",\"runId\":\"qds-20261027-712688\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    }
+  ],
+  "leftoverDestroy": [],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [],
+  "unattributedFreshBoxes": [],
+  "problems": [
+    "fork schedule disarm FAILED: JSON Parse error: Unexpected EOF",
+    "fork state sweep FAILED: fork state unreadable for 180s: SyntaxError: JSON Parse error: Unterminated string",
+    "final schedule re-check FAILED: JSON Parse error: Unterminated string"
+  ],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fork schedule disarm FAILED: JSON Parse error: Unexpected EOF\nfork state sweep FAILED: fork state unreadable for 180s: SyntaxError: JSON Parse error: Unterminated string\nfinal schedule re-check FAILED: JSON Parse error: Unterminated string",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-10-27T01:34:30.326Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"failed\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-10-27T01:34:30.326Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

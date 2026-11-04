@@ -1,0 +1,74 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "ff3ec254",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "ff3ec254"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "ff3ec254"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [],
+  "runIds": [
+    "qds-20261102-383b91",
+    "qds-20261102-751efc",
+    "qds-20261102-b4ed88"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261102-383b91",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"3b3cc0cb-cc0f-4725-9a45-76a2f383e6b1\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261102-383b91\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-383b91 hop run-box.teardown\"}\n{\"requestId\":\"ba1e8db9-65ef-461c-ab75-099244f7af23\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:47.254Z\",\"duration\":1164,\"durationMs\":1164,\"status\":\"ok\",\"runId\":\"qds-20261102-383b91\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-751efc",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"c3a9e8d2-89e7-4779-9210-298198e504a8\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261102-751efc\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-751efc hop run-box.teardown\"}\n{\"requestId\":\"6e509202-c9a1-4b0d-828f-e99ab36c66cd\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:47.193Z\",\"duration\":1103,\"durationMs\":1103,\"status\":\"ok\",\"runId\":\"qds-20261102-751efc\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-b4ed88",
+      "exitCode": 5,
+      "stderrTail": "e\":\"another fleet invocation holds /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-b4ed88.lock (pid 91944 is not running, held 23s)\",\"remediation\":\"no live process holds it (pid 91944 is not running, held 23s) — rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-b4ed88.lock to clear the stale lock, then re-run\"}\n{\"requestId\":\"c45de074-bae6-42db-a3c7-623466d14fbe\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:46.094Z\",\"duration\":4,\"durationMs\":4,\"status\":\"error\",\"runId\":\"qds-20261102-b4ed88\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}\n"
+    }
+  ],
+  "leftoverDestroy": [
+    {
+      "runId": "qds-20261102-b4ed88",
+      "exitCode": 5,
+      "stderrTail": "e\":\"another fleet invocation holds /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-b4ed88.lock (pid 91944 is not running, held 26s)\",\"remediation\":\"no live process holds it (pid 91944 is not running, held 26s) — rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-b4ed88.lock to clear the stale lock, then re-run\"}\n{\"requestId\":\"5eae8829-867a-46ff-9931-f7d216bb4a7b\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:49.473Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"qds-20261102-b4ed88\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}\n"
+    }
+  ],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [
+    "qds-20261102-b4ed88"
+  ],
+  "unattributedFreshBoxes": [],
+  "problems": [
+    "fork protocol cancel ff3ec254 FAILED: fork CLI cancel failed (exit 1):  is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\nz3-exit-round: fleet cancel failed for: qds-20261102-b4ed88 (exit 5: \",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:45.313Z\",\"duration\":8,\"durationMs\":8,\"status\":\"error\",\"runId\":\"qds-20261102-b4ed88\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"})\n",
+    "fleet cancel qds-20261102-b4ed88 failed (exit 5)",
+    "boxes outlived the round: qds-20261102-b4ed88"
+  ],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fork protocol cancel ff3ec254 FAILED: fork CLI cancel failed (exit 1):  is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\nz3-exit-round: fleet cancel failed for: qds-20261102-b4ed88 (exit 5: \",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:45.313Z\",\"duration\":8,\"durationMs\":8,\"status\":\"error\",\"runId\":\"qds-20261102-b4ed88\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"})\n\nfleet cancel qds-20261102-b4ed88 failed (exit 5)\nboxes outlived the round: qds-20261102-b4ed88",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-11-02T04:00:53.440Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"failed\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-11-02T04:00:53.440Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

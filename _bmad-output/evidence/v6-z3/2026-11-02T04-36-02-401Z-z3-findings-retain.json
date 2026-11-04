@@ -1,0 +1,56 @@
+{
+  "leg": "findings-retain",
+  "origin": "scripts/z3/leg-drivers.ts driveFindingsRetain",
+  "lens": "correctness",
+  "runId": "qds-20261102-d3bcd9",
+  "bank": "quantum-digital-solutions-qds-factory",
+  "documentIds": [
+    "qds-20261102-34f17a",
+    "qds-20261102-99f2f3",
+    "qds-20261102-ed4445",
+    "qds-20261102-cd9aaf",
+    "qds-20261102-401510",
+    "qds-20261102-1075f6"
+  ],
+  "retainSide": "host",
+  "retainTraces": [
+    {
+      "side": "host",
+      "documentId": "qds-20261102-34f17a"
+    },
+    {
+      "side": "host",
+      "documentId": "qds-20261102-99f2f3"
+    },
+    {
+      "side": "host",
+      "documentId": "qds-20261102-ed4445"
+    },
+    {
+      "side": "host",
+      "documentId": "qds-20261102-cd9aaf"
+    },
+    {
+      "side": "host",
+      "documentId": "qds-20261102-401510"
+    },
+    {
+      "side": "host",
+      "documentId": "qds-20261102-1075f6"
+    }
+  ],
+  "gatewayAssertion": {
+    "origin": "http://127.0.0.1:18890",
+    "agentTokenId": "mgat-729607348622660f7f78b452"
+  },
+  "runMemoryKeys": [],
+  "boxWriteCredentials": [],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-findings-retain\",\"operation\":\"z3-findings-retain\",\"agentId\":null,\"timestamp\":\"2026-11-02T04:36:02.401Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"findings-retain\",\"outcome\":\"ok\",\"runId\":\"qds-20261102-d3bcd9\",\"lens\":\"correctness\"}"
+  ],
+  "writtenAt": "2026-11-02T04:36:02.401Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

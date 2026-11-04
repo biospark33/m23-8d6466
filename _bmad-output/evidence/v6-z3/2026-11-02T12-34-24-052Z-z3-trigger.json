@@ -1,0 +1,52 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "894b7c97",
+  "scheduleId": "6c2679bb",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T12:34:16.340Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "scripts/z3/live-round-wiring.ts",
+    "tests/z3/fixture.ts",
+    "tests/z3/wiring.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 (attempt 6). Attempt 5 proved the priming fix end to end (directive kg_context, 7,985 chars — the SC2.5 fence fix live) and surfaced the LAST substrate gap: the code run's dispatch recall ran 189 ms after the last retain and surfaced zero round findings, while the same bank six hours later surfaces 14 of 19 (documentId camelCase view; extraction completes inline at retain but recallability lags). Fixed at the release: the crash window now polls a dispatch-shaped recall until a retained doc id surfaces (bounded 15 min, zero spend while waiting), then releases — commit c9d5fa8b. [attempts 6-7: pin moved to c9d5fa8b (the release-wait fix); review set = that commit's own diff.]",
+    "when": "2026-11-02T12:24:07Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T12:34:24.051Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"894b7c97\"}"
+  ],
+  "writtenAt": "2026-11-02T12:34:24.052Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

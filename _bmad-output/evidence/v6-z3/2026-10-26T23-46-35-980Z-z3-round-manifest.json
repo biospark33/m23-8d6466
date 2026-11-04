@@ -1,0 +1,26 @@
+{
+  "leg": "round-manifest",
+  "origin": "scripts/z3/leg-drivers.ts writeRoundManifest",
+  "files": {
+    "2026-10-26T23-33-09-939Z-z3-trigger.json": "11a3726a10f8d83e9e3d98145d77883e8878061c09f1cf4b725a87babb776b06",
+    "2026-10-26T23-34-14-037Z-z3-kill-and-provision.json": "b03150a3e37666b1bab08a70373d456122eb8d53b4f0add29d45f408421ce69e",
+    "2026-10-26T23-35-09-630Z-z3-box-forensics.json": "abae16034a1dd2d13df6844a1c062aefa69e9e3828d68834ffe6558c5072ddf1",
+    "2026-10-26T23-35-37-440Z-z3-findings-retain.json": "5b85dd5ac5f0625f5f4f35f8490f02823fca82dcb4518e1b0b8d8d47af41fcf6",
+    "2026-10-26T23-37-17-984Z-z3-kill-and-provision.json": "6343dafaf544e64557bfc4fbfeba14aca226b9ed8565c727f2121a3eba764497",
+    "2026-10-26T23-38-09-054Z-z3-box-forensics.json": "2c6dc532de5f61199ca8b0717339ad7dd35e4cdbc6161e872186465cc6d785bb",
+    "2026-10-26T23-38-35-138Z-z3-findings-retain.json": "c359f5818522281f0b3f87dafd2645354a3251a37141042f00039934ca576878",
+    "2026-10-26T23-40-14-949Z-z3-kill-and-provision.json": "42ee881351ba5daf1b32b2350d12866f8425c9099414023add7665a576adcbb0",
+    "2026-10-26T23-41-09-367Z-z3-box-forensics.json": "928effddf5045df370cc1a729ade51fda27edcb83c57d20457c55b9946c019a9",
+    "2026-10-26T23-41-42-953Z-z3-findings-retain.json": "0c82b2767bcd3dfb3b0a2b405a67d6b865d350327f652ba824987bd179216f44",
+    "2026-10-26T23-46-11-846Z-z3-kill-and-provision.json": "db9675e65c1f68cbfa328b31d39a2e4d197c42f85a9664a9f25af65dcd862f87",
+    "2026-10-26T23-46-35-979Z-z3-cleanup.json": "a10893d55ced06b7a409a8992ecdf404e7a9f1c0771d330460243f8bf49f01f6"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-round-manifest\",\"operation\":\"z3-round-manifest\",\"agentId\":null,\"timestamp\":\"2026-10-26T23:46:35.980Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"round-manifest\",\"outcome\":\"ok\",\"fileCount\":12}"
+  ],
+  "writtenAt": "2026-10-26T23:46:35.980Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

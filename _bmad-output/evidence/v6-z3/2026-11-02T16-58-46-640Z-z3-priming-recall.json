@@ -1,0 +1,40 @@
+{
+  "leg": "priming-recall",
+  "origin": "scripts/z3/leg-drivers.ts drivePrimingRecall",
+  "runId": "qds-20261102-5973ea",
+  "requestId": "3e9d3a83-4236-493f-8464-0b457a6fa3b3",
+  "directive": "kg_context",
+  "recalledDocumentIds": [
+    "qds-20261102-8a255e",
+    "qds-20261102-6b76d2",
+    "qds-20261102-3150a7",
+    "qds-20261102-8ed95d",
+    "qds-20261027-9f4757",
+    "qds-20261102-401510",
+    "qds-20261017-105677",
+    "qds-20261017-0140a5",
+    "qds-20261017-1f1100",
+    "qds-20261102-abe452"
+  ],
+  "retainedDocumentIds": [
+    "qds-20261102-8eacce",
+    "qds-20261102-d9853d",
+    "qds-20261102-2c7016",
+    "qds-20261102-2af086",
+    "qds-20261102-886de8"
+  ],
+  "citedRetained": [],
+  "citedLenses": [],
+  "gatewayAssertion": {
+    "origin": "http://127.0.0.1:18890",
+    "agentTokenId": "mgat-729607348622660f7f78b452"
+  },
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "the code run's <kg_context> cites no finding this round retained",
+  "observability": [
+    "{\"requestId\":\"z3-priming-recall\",\"operation\":\"z3-priming-recall\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:58:46.640Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"priming-recall\",\"outcome\":\"failed\",\"runId\":\"qds-20261102-5973ea\"}"
+  ],
+  "writtenAt": "2026-11-02T16:58:46.640Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

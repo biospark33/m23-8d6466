@@ -1,0 +1,69 @@
+{
+  "test": "T2.2",
+  "outcome": "fail",
+  "runId": "qds-20261026-d138cb",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "e to this box would be refused at send time (attach reason \\\"send-failed\\\")\",\"remediation\":\"this is a transport fault, not a sudo-policy finding: confirm the box is up (ssh qds-20261026-d138cb.exe.xyz true) and re-create it; if the sudo question is still open afterwards, run the provision script by hand\"}\n{\"requestId\":\"dbe5e4fc-9d68-4c98-9863-19a468e34b93\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-10-26T17:59:34.702Z\",\"duration\":55754,\"durationMs\":55754,\"status\":\"error\",\"runId\":\"qds-20261026-d138cb\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20261026-d138cb",
+      "vmName": "qds-20261026-d138cb"
+    },
+    {
+      "at": "t2.2-cleanup",
+      "runId": "qds-20261026-d138cb",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":4}\n{\"requestId\":\"58b702db-c21d-4dfe-80f2-82f0b4569af5\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-10-26T17:59:37.692Z\",\"duration\":2941,\"durationMs\":2941,\"status\":\"ok\",\"runId\":\"qds-20261026-d138cb\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261026-d138cb",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "workspace-kept",
+      "workspace": "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/qds-e2e-t22-vkuto2",
+      "reason": "RED round — forensics kept"
+    }
+  ],
+  "writtenAt": "2026-10-26T17:59:42.190Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1c8455a0396d6ace999de068abaf6a7fd6a8f80fa95218f0c1d356a6f6042100",
+    "buildId": "c8dd0a4967a70a84",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

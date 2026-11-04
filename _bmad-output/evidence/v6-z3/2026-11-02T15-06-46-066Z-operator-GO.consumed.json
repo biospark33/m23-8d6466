@@ -1,0 +1,7 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 10. Since the last GO (attempt 9): attempt 9 red on leg 2 provision — a transient ssh failure in the unguarded inventory probe killed the round; fix 971690f7 (one transport-only inventory retry + settleRun readonly-message guard so a masked regression can never again eat the diagnosis), 165/165 tests/z3 green, tsc 0, lint clean.",
+  "when": "2026-11-02T15:05:42Z",
+  "spendApproved": { "worstCaseUsd": 5.25 },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": ["scripts/z3/live-round-wiring.ts", "tests/fleet/e2e/live-harness.ts"]
+}

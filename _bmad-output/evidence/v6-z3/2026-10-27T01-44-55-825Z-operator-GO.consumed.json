@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 17 — round 16's cleanup red was the fork z3 CLI dropping pipe tails beyond 64 KiB: it process.exit()s an async stdout write, and tonight's state JSON crossed 66,537 bytes with 11 runs stored; root-caused live (file redirect full at 66,537, pipe cut at 65,536, writeSync EAGAINs on the non-blocking pipe) and fixed in swarmclaw PR #916, deployed into the container in place via docker cp (image rebuild pending, byte-identical to the branch); the flush fix is byte-proven in-container; round 16's substrate was otherwise green — legs 1-3 closed+retained through the new grace",
+  "when": "2026-10-27T01:44:18Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

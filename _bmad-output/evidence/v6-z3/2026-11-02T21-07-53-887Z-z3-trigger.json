@@ -1,0 +1,51 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "6e8070a7",
+  "scheduleId": "2ea2f800",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T21:07:53.611Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "scripts/z3/live-round-wiring.ts",
+    "tests/z3/fixture.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 16. Since the last GO (attempt 15): attempt 15 red at priming-recall gatewayAssert — OpenRouter HTTP 402, account exhausted (remaining -$0.01), nothing code-side. Operator topped up: verified 1597 total / 1564.04 used → $32.96 remaining, worst-case $5.25 covered. Zero code changes since 16f4f640 (attempt 15 fired at same SHA). Substrate sweep green: 0 boxes, no run/fleet locks, hindsight healthy, ledger dry-run 13 SKIPs only, memgate token fresh (~5.8 h), fork daemon healthy (Up 17 min). 169/169 tests/z3, tsc 0, lint 0 at 16f4f640.",
+    "when": "2026-11-02T20:57:01Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T21:07:53.887Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"6e8070a7\"}"
+  ],
+  "writtenAt": "2026-11-02T21:07:53.887Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

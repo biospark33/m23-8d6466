@@ -1,0 +1,80 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "5af425c7",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "5af425c7"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "5af425c7"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [],
+  "runIds": [
+    "qds-20261102-f5daf3",
+    "qds-20261102-21d32a",
+    "qds-20261102-9534f9",
+    "qds-20261102-5973ea"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261102-f5daf3",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"3c1e92ac-f9e2-4f54-8e43-e216594229c7\",\"durationMs\":3,\"status\":\"ok\",\"runId\":\"qds-20261102-f5daf3\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-f5daf3 hop run-box.teardown\"}\n{\"requestId\":\"6cf7ff6e-140e-41ca-b7c6-34b4c39018e2\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:59:08.640Z\",\"duration\":1181,\"durationMs\":1181,\"status\":\"ok\",\"runId\":\"qds-20261102-f5daf3\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-21d32a",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"015df5df-5dce-4118-b957-2c175968aa78\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261102-21d32a\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-21d32a hop run-box.teardown\"}\n{\"requestId\":\"8890a9e1-5fe3-4899-9194-b00742b64d71\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:59:08.477Z\",\"duration\":1018,\"durationMs\":1018,\"status\":\"ok\",\"runId\":\"qds-20261102-21d32a\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-9534f9",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"49880f51-d1c5-4ab0-86a8-557f226873c2\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261102-9534f9\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-9534f9 hop run-box.teardown\"}\n{\"requestId\":\"0459dc54-9537-43c2-8a42-53eac4a7d5fe\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:59:08.646Z\",\"duration\":1187,\"durationMs\":1187,\"status\":\"ok\",\"runId\":\"qds-20261102-9534f9\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-5973ea",
+      "exitCode": 5,
+      "stderrTail": " THIS box matching nothing): if e8cf4b87e46d/4026532565 looks like this machine under an older name and no harvest or teardown of this run is running anywhere sharing this directory, that long silence is the evidence — check `ps -p 1528` on the box; this module will not probe or clear a lock whose host it cannot match\"}\n{\"requestId\":\"2e9b4cee-ad3a-4a32-8748-45ba2899032a\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:59:07.463Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"qds-20261102-5973ea\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}\n"
+    }
+  ],
+  "leftoverDestroy": [
+    {
+      "runId": "qds-20261102-5973ea",
+      "exitCode": 5,
+      "stderrTail": " THIS box matching nothing): if e8cf4b87e46d/4026532565 looks like this machine under an older name and no harvest or teardown of this run is running anywhere sharing this directory, that long silence is the evidence — check `ps -p 1528` on the box; this module will not probe or clear a lock whose host it cannot match\"}\n{\"requestId\":\"b2e98118-f5c2-447f-b3b1-4d3416d032e8\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:59:11.398Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"qds-20261102-5973ea\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}\n"
+    }
+  ],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [
+    "qds-20261102-5973ea"
+  ],
+  "unattributedFreshBoxes": [],
+  "problems": [
+    "fork protocol cancel 5af425c7 FAILED: fork CLI cancel failed (exit 1):  is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\nz3-exit-round: fleet cancel failed for: qds-20261102-5973ea (exit 5: \"agentId\":null,\"timestamp\":\"2026-11-02T16:59:06.580Z\",\"duration\":15,\"durationMs\":15,\"status\":\"error\",\"runId\":\"qds-20261102-5973ea\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"})\n",
+    "fleet cancel qds-20261102-5973ea failed (exit 5)",
+    "boxes outlived the round: qds-20261102-5973ea"
+  ],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fork protocol cancel 5af425c7 FAILED: fork CLI cancel failed (exit 1):  is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\nz3-exit-round: fleet cancel failed for: qds-20261102-5973ea (exit 5: \"agentId\":null,\"timestamp\":\"2026-11-02T16:59:06.580Z\",\"duration\":15,\"durationMs\":15,\"status\":\"error\",\"runId\":\"qds-20261102-5973ea\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"})\n\nfleet cancel qds-20261102-5973ea failed (exit 5)\nboxes outlived the round: qds-20261102-5973ea",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:59:14.941Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"failed\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-11-02T16:59:14.941Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

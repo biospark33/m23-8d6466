@@ -1,0 +1,50 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "ceffacda",
+  "scheduleId": "e33b79df",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T14:46:58.743Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "src/providers/exedev/driver.ts",
+    "tests/providers/exedev/image-contract.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 9. Since the last GO (attempt 8): openrig re-pin 04fe77bb, qds-exedev image re-published (run 41456956864) and pin adopted fb4d1ee8, verify-image-pin green, memgate token fresh, substrate sweep green (0 boxes, ledger clean, no locks).",
+    "when": "2026-11-02T14:36:24Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T14:47:03.413Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"ceffacda\"}"
+  ],
+  "writtenAt": "2026-11-02T14:47:03.414Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

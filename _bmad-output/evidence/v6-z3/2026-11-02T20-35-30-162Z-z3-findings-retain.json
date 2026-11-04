@@ -1,0 +1,24 @@
+{
+  "leg": "findings-retain",
+  "origin": "scripts/z3/leg-drivers.ts driveFindingsRetain",
+  "lens": "secret-hygiene",
+  "runId": "qds-20261102-4859f5",
+  "bank": "quantum-digital-solutions-qds-factory",
+  "documentIds": [],
+  "retainSide": "host",
+  "retainTraces": [],
+  "gatewayAssertion": {
+    "origin": "http://127.0.0.1:18890",
+    "agentTokenId": "mgat-729607348622660f7f78b452"
+  },
+  "runMemoryKeys": [],
+  "boxWriteCredentials": [],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-findings-retain\",\"operation\":\"z3-findings-retain\",\"agentId\":null,\"timestamp\":\"2026-11-02T20:35:30.162Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"findings-retain\",\"outcome\":\"ok\",\"runId\":\"qds-20261102-4859f5\",\"lens\":\"secret-hygiene\"}"
+  ],
+  "writtenAt": "2026-11-02T20:35:30.162Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

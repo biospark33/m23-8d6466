@@ -1,0 +1,24 @@
+{
+  "leg": "box-forensics",
+  "origin": "scripts/z3/leg-drivers.ts driveBoxForensics",
+  "runId": "qds-20261103-ac55f1",
+  "recordRunId": "qds-20261103-ac55f1",
+  "recordVmName": "qds-20261103-ac55f1",
+  "liveBoxesForRun": [
+    "qds-20261103-ac55f1"
+  ],
+  "afterTeardownBoxesForRun": [],
+  "recordSettle": {
+    "state": "ok",
+    "teardownExit": 0,
+    "teardownTail": "{\"requestId\":\"e8107417-524e-4aea-8697-ba2a1967cc89\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-11-03T12:35:57.731Z\",\"duration\":8728,\"durationMs\":8728,\"status\":\"ok\",\"runId\":\"qds-20261103-ac55f1\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-box-forensics\",\"operation\":\"z3-box-forensics\",\"agentId\":null,\"timestamp\":\"2026-11-03T12:35:58.856Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"box-forensics\",\"outcome\":\"ok\",\"runId\":\"qds-20261103-ac55f1\"}"
+  ],
+  "writtenAt": "2026-11-03T12:35:58.857Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

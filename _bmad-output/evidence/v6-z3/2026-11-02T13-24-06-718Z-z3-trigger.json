@@ -1,0 +1,51 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "7aca33ba",
+  "scheduleId": "49fbf6e4",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T13:23:59.965Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "_bmad-output/sprint-artifacts/dark-factory-v6/stories/z3-cross-repo-live-exit-round.md",
+    "scripts/z3/leg-drivers.ts",
+    "tests/z3/assertions.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 (attempt 8). Attempt 7 proved the fence fix end to end (priming FIRED: directive kg_context) and measured the LAST structural gap: the release-wait commit's diff was clean, the hunters honestly found nothing, the round retained zero findings, and 'cites >=1 retained finding' was unsatisfiable — the scope-derivation amendment's own limit, same shape as round 18's empty review set. Fixed: primingRecallProblems gains the honest-empty arm (44433a3a, dated story amendment included). Chain of proven fixes tonight: cold-pull create retry (0583a5c4), steering transport retry (a7fa61e1), fleet-gate memory-env crossing (c1fc8a2b + 114e57ef), release-wait for recallability (c9d5fa8b), honest-empty arm (44433a3a).",
+    "when": "2026-11-02T13:10:50Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T13:24:06.717Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"7aca33ba\"}"
+  ],
+  "writtenAt": "2026-11-02T13:24:06.718Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

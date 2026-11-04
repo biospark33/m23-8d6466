@@ -1,0 +1,63 @@
+{
+  "test": "T1.1",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "whoami",
+      "ok": true,
+      "answered": true,
+      "length": 299
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t11-mvph9qxk3my",
+      "providerName": "e2e-t11-mvph9qxk3my"
+    },
+    {
+      "phase": "list-after-create",
+      "vm": "e2e-t11-mvph9qxk3my",
+      "count": 1
+    },
+    {
+      "phase": "exec-python3-version",
+      "exitCode": 0,
+      "stdout": "Python 3.12.3"
+    },
+    {
+      "phase": "exec-uname",
+      "exitCode": 0,
+      "stdout": "Linux e2e-t11-mvph9qxk3my 6.12.113 #1 SMP Sun Oct 18 07:08:09 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux"
+    },
+    {
+      "phase": "exec-git-version",
+      "exitCode": 0,
+      "stdout": "git version 2.43.0"
+    },
+    {
+      "phase": "copyFile-roundtrip",
+      "ok": true,
+      "bytes": 48
+    },
+    {
+      "phase": "list-after-destroy",
+      "vm": "e2e-t11-mvph9qxk3my",
+      "count": 0
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-10-26T16:35:41.762Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1c8455a0396d6ace999de068abaf6a7fd6a8f80fa95218f0c1d356a6f6042100",
+    "buildId": "c8dd0a4967a70a84",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

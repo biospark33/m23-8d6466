@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 9 — re-fire after round 8 refused at arm pre-create: the recomposed fork's base compose had moved DATA_DIR to /app/data, pinned back to /var/lib/solstice/swarmclaw-data in the qa-f3 override; round 8 spent nothing, armed nothing; fixes unchanged: #914 202ebd686 + #480 6b522fe0)",
+  "when": "2026-10-26T20:42:56Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

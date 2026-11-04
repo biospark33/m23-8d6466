@@ -1,0 +1,46 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "a403269f",
+  "scheduleId": "7be6a5d8",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-10-27T00:52:08.168Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 15 — round 14 falsified the open-close heal (WAL recovery runs on first READ at prepare, not on open; the stack died at prepare with the heal open succeeding silently); #482 amended again (7642b2ab): the heal is now a real wal_checkpoint(TRUNCATE) on a read-write handle; fix stack proven through redrive since round 12, remaining unknowns are the post-redrive tail",
+    "when": "2026-10-27T00:41:29Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-10-27T00:52:18.552Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"a403269f\"}"
+  ],
+  "writtenAt": "2026-10-27T00:52:18.552Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

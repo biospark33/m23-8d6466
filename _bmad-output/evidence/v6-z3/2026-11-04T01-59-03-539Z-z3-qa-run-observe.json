@@ -1,0 +1,28 @@
+{
+  "leg": "qa-run-observe",
+  "origin": "scripts/z3/leg-drivers.ts driveQaRunObserve",
+  "lens": "secret-hygiene",
+  "stepId": "qa-observe-secret-hygiene",
+  "stepKind": "factory_observe",
+  "stepStatus": "completed",
+  "observedRunId": "qds-20261104-11ce10",
+  "observedRunIdSource": "fromStepOutput",
+  "attributedToRuns": [
+    "qds-20261104-2936ae",
+    "qds-20261104-11ce10",
+    "qds-20261104-1a0c31",
+    "qds-20261104-6d5636"
+  ],
+  "boxesProvisioned": [],
+  "providerKeysMinted": [],
+  "memoryKeysMinted": [],
+  "settlePolls": 0,
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-qa-run-observe\",\"operation\":\"z3-qa-run-observe\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:59:03.539Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"qa-run-observe\",\"outcome\":\"ok\",\"stepId\":\"qa-observe-secret-hygiene\",\"lens\":\"secret-hygiene\"}"
+  ],
+  "writtenAt": "2026-11-04T01:59:03.539Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

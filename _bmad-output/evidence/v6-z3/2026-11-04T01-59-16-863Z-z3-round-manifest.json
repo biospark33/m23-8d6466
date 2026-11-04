@@ -1,0 +1,36 @@
+{
+  "leg": "round-manifest",
+  "origin": "scripts/z3/leg-drivers.ts writeRoundManifest",
+  "files": {
+    "2026-11-04T01-14-59-612Z-z3-trigger.json": "7c465e22a2acc24f670f00b71282ca953c0c929de69d8485e4c0bc97835814b2",
+    "2026-11-04T01-15-47-675Z-z3-kill-and-provision.json": "0ec08f1052c4c13705280f486da3d890524eb803cb8fcd5e3dea1fdb25374d0e",
+    "2026-11-04T01-21-36-170Z-z3-box-forensics.json": "9f7403b9ab3b9eefe1708391965958dfc65b23c336328df0b3703a3884b3c77a",
+    "2026-11-04T01-22-34-372Z-z3-findings-retain.json": "d658c482e4c4c0aeb0daa4b66b30266d7a2342651fd7560925a1b09341603a16",
+    "2026-11-04T01-22-49-002Z-z3-kill-and-provision.json": "96db2bade0d1b2fbffbf4c04c074c0d3411874858bc16996261cfe60d5f425dd",
+    "2026-11-04T01-25-58-155Z-z3-box-forensics.json": "55b4ebc267f903a5bf94fe9a8628fc0891f725585172c9f9b82f142436150ae8",
+    "2026-11-04T01-26-54-139Z-z3-findings-retain.json": "44f466e787cae519879bdc489128e0c41d761aeabaa6be2201f7cd9853afe1ca",
+    "2026-11-04T01-27-51-388Z-z3-kill-and-provision.json": "13d2abe98ab7942d72bf042d5e772c25c7da506d9352277c621483e348717baa",
+    "2026-11-04T01-32-21-507Z-z3-box-forensics.json": "cf06f2e285645edc6cb04d7512c82655f083426dca1a4336e783d6317fcc255a",
+    "2026-11-04T01-33-33-325Z-z3-findings-retain.json": "a2e134367434955723432351c63ab3d70741bef3693a4a20ef59ac1764ade74a",
+    "2026-11-04T01-36-48-352Z-z3-kill-and-provision.json": "67b7837028e93c7c161871311f3f05e2263d002d1ec5145d8ce6f830e2d9f483",
+    "2026-11-04T01-36-51-450Z-z3-crash-window-redrive.json": "0da977bc38ca52931519c1ae355666d26df525b79422423a830913b54128d3c4",
+    "2026-11-04T01-37-31-436Z-z3-priming-recall.json": "32dc356537292d1137fc4d27af8ffb8694b70baa67c7b8782df569178ab93ab9",
+    "2026-11-04T01-58-44-556Z-z3-approval-park.json": "1d1d2c6a5ffd56b42367e95034da87aa1a3e2278490ee4e4cf1dc64a91ebfab3",
+    "2026-11-04T01-58-45-812Z-z3-box-forensics.json": "77222d2126ad7d2d395d5cc63819b2a26346d27e716f3ccb223ff0216a91261c",
+    "2026-11-04T01-58-47-372Z-z3-approve.json": "03a42a2e56951c9f916c35bf4be8df23d082e4524d52900f50726e8ef85adf0e",
+    "2026-11-04T01-59-00-725Z-z3-qa-run-observe.json": "24493cc889fa9339f4380e6c66360a8a87503d19b7afe759f48a566c5212b347",
+    "2026-11-04T01-59-03-539Z-z3-qa-run-observe.json": "8e9cdf6d9f4ffb20693027fc874d69c2604cff9d82d8d94b506ad37d65213119",
+    "2026-11-04T01-59-06-143Z-z3-qa-run-observe.json": "ab82669d24bd3e7d9e5716cdf2d1287306eb1045747c62872afb36373186814a",
+    "2026-11-04T01-59-08-835Z-z3-observe-read-only.json": "38885d0385ca2667d8bfdea267d03542c06ec369f7a9f9c769961ee661df54dc",
+    "2026-11-04T01-59-09-423Z-z3-branch-and-complete.json": "081a71f03897331f62743f6614ab3033d5084533e69369e7b93a84499fdb6f80",
+    "2026-11-04T01-59-16-862Z-z3-cleanup.json": "d88e333ba1151e39de83c0c7f9d2070c7617ec5e0b41f960b95c1ea604721df5"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-round-manifest\",\"operation\":\"z3-round-manifest\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:59:16.863Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"round-manifest\",\"outcome\":\"ok\",\"fileCount\":22}"
+  ],
+  "writtenAt": "2026-11-04T01:59:16.863Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

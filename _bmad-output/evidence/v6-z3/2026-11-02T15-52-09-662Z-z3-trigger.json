@@ -1,0 +1,51 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "c10034bd",
+  "scheduleId": "a405f0e8",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T15:51:59.290Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "scripts/z3/live-round-wiring.ts",
+    "tests/z3/wiring.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 11. Since the last GO (attempt 10): attempt 10 red at leg 1 closure — engine settled green then the fleet teardown died mid-flight (exit 6, run lock taken, box never destroyed); fix 9b1408d0 (healMidFlightTeardown: clear the dead-pid lock, one --no-harvest retry, live holder never touched), hand-clean applied (box destroyed, record closed exit 0, no key leak per cleanup revokeVerify), 169/169 tests/z3, tsc 0, lint clean.",
+    "when": "2026-11-02T15:40:52Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T15:52:09.661Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"c10034bd\"}"
+  ],
+  "writtenAt": "2026-11-02T15:52:09.662Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,26 @@
+{
+  "leg": "kill-and-provision",
+  "origin": "scripts/z3/leg-drivers.ts driveKillAndProvision",
+  "stepId": "z3-code-run",
+  "runId": "qds-20261104-6a5578",
+  "workId": "w:z3-20261104T000129Z-code",
+  "requestId": "f8594a1b-2fa1-498f-a6e1-219705350321",
+  "lastErrorSeen": null,
+  "vmName": "qds-20261104-6a5578",
+  "inventoryBefore": [],
+  "boxCountSamples": [
+    1,
+    1
+  ],
+  "liveBoxesForRun": [
+    "qds-20261104-6a5578"
+  ],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-kill-and-provision\",\"operation\":\"z3-kill-and-provision\",\"agentId\":null,\"timestamp\":\"2026-11-04T00:24:28.153Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"kill-and-provision\",\"outcome\":\"ok\",\"runId\":\"qds-20261104-6a5578\",\"stepId\":\"z3-code-run\"}"
+  ],
+  "writtenAt": "2026-11-04T00:24:28.153Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,49 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "a20088f4",
+  "scheduleId": "07c7b63b",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T17:50:50.732Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 14. Since the last GO (attempt 13): attempt 13 red on leg 2's findings retain — one POST crossed the hindsight client's 30s RETAIN_TIMEOUT_MS (inline extraction ran past it); fix 8205e3dd (one idempotent upsert-safe retry on TimeoutError in driveFindingsRetain), 169/169 tests/z3, tsc 0, lint 0.",
+    "when": "2026-11-02T17:40:14Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:50:55.107Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"a20088f4\"}"
+  ],
+  "writtenAt": "2026-11-02T17:50:55.107Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,50 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "35632f2f",
+  "scheduleId": "4cb97586",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-03T01:29:01.173Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "src/hindsight/client.ts",
+    "tests/hindsight/client.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 19. Since the last GO (attempt 18): attempt 18 red at leg-2 findings-retain — hindsight's /memories POST took >30s twice (server-side wall measured 23.7s after queueing, completed 01:10:21.9, three seconds AFTER the round's client gave up; the 8205e3dd single retry only rescues the first timeout). Fix f5196fde: RETAIN_TIMEOUT_MS 30s → 120s (retain wall grows with the bank — 15 attempts of retained docs + consolidation backlog; same stale-premise class as the reverify ceilings and the park bound). Attempt 17 remains classified environmental (local network outage 22:47→00:40Z). Hand-clean after 18: nothing leaked (0 sbx-qds keys, 3 records closed, no locks, 0 boxes — the cleanup chain was machine-verified green on a mid-arc red, first time). Gates: tsc 0, biome 0, tests/hindsight+tests/z3 438/438. Sweep green: 0 boxes, no locks, hindsight healthy, .36 credits remaining vs .25 worst case. Fork protocol run 3d411b7d cancelled by the round's own cleanup.",
+    "when": "2026-11-03T01:18:05Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-03T01:29:07.469Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"35632f2f\"}"
+  ],
+  "writtenAt": "2026-11-03T01:29:07.469Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

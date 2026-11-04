@@ -1,0 +1,28 @@
+{
+  "leg": "round-manifest",
+  "origin": "scripts/z3/leg-drivers.ts writeRoundManifest",
+  "files": {
+    "2026-11-02T05-41-12-529Z-z3-trigger.json": "2b336464f85e00ddf6fcd1506fdbd78e502b0174eb0140445d5b80aacaac2a76",
+    "2026-11-02T05-43-56-914Z-z3-kill-and-provision.json": "7a1a5bfba70d83aa7e772048f04659c32ad98f303d8a51d287fc35178286bd72",
+    "2026-11-02T05-49-21-880Z-z3-box-forensics.json": "eb273115010916e87e7142d386a0db1636d22d01c87454c57e74db5f7db33a01",
+    "2026-11-02T05-50-11-669Z-z3-findings-retain.json": "ebbc2ead2b7865bce9a5beeef77d94e9a455e573f834878ea373ef1830085e49",
+    "2026-11-02T05-51-19-329Z-z3-kill-and-provision.json": "3fd17cf67c79f30da8448bb116a79ea7ab842c5779504a11f5628fb49e028e80",
+    "2026-11-02T05-56-19-152Z-z3-box-forensics.json": "31bcbcc67e8cc98726a043d1a5e4b064078d43b485b65a91d809d0788b44d477",
+    "2026-11-02T05-57-15-372Z-z3-findings-retain.json": "0bf1fe2c8d94cf46982fad631c8f925f4a85ad5d790560652262abb1ec59df1c",
+    "2026-11-02T05-58-23-788Z-z3-kill-and-provision.json": "8b3f61cb6fae9fa643230ff0e9e2c9b9746f919f6a5161ea5618ac546a0fb76c",
+    "2026-11-02T06-01-21-451Z-z3-box-forensics.json": "8dd33c8b430cdbc108aaf0cfe832da21d16f6420a6b2485a9188cf98a08ffcd2",
+    "2026-11-02T06-02-18-674Z-z3-findings-retain.json": "ee4a9037b7e80b78ec610915f80c73ce9ae44415e1db98e17179ca084af0aad3",
+    "2026-11-02T06-06-18-089Z-z3-kill-and-provision.json": "c26bcb25c89e9a893ceeac90a35153abeaee56274fdb8b9bd6aa91012e44371b",
+    "2026-11-02T06-06-21-202Z-z3-crash-window-redrive.json": "6c05844eab41642399933fea0b28d1e5f09d2a3bd93c0f48ff0e82a27f4c855a",
+    "2026-11-02T06-06-48-842Z-z3-priming-recall.json": "145dbd2c1aafb481a2bdcaa233a308cca0690661900c1cdae57bc4ac5fa83b7c",
+    "2026-11-02T06-07-16-206Z-z3-cleanup.json": "62335676e2895fb2bd49b9000e205a6fbb16aac5ecf7f25d3cfe8e32bb3d54ac"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-round-manifest\",\"operation\":\"z3-round-manifest\",\"agentId\":null,\"timestamp\":\"2026-11-02T06:07:16.207Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"round-manifest\",\"outcome\":\"ok\",\"fileCount\":14}"
+  ],
+  "writtenAt": "2026-11-02T06:07:16.207Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,12 @@
+{
+  "who": "steve (operator authorization via chat 2026-11-03 'yes LFG' on fix-and-refire; attempt 30 \u2014 re-fire after attempt 29 red: reverify verdict red 8100/1 \u2014 ONE flake, the density mitigations cut it 38\u219223\u21921 \u2014 but the 16 kB TAIL capture was 100% atexit fixture noise so the name sat above the window; fixed in 71680335: the capture EXTRACTS every (fail) line from the full body (a 1-fail red names its test); this tree also carries ca1d2c38 (vetoed park settles red \u2014 attempt 29 proved it live: red settled 35s after the verdict, no 2h poll) and 81a2ec99 (hindsight seams retry transit stalls); host state: Docker VM 11.7 GB, fresh memgate token to 23:13Z Nov 4, sweep green 23:12Z, GO clock-stamped at fire time",
+  "when": "2026-11-04T01:04:04Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": [
+    "src/reverify/runner.ts",
+    "tests/reverify/runner.test.ts"
+  ]
+}

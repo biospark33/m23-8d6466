@@ -1,0 +1,50 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "be98b801",
+  "scheduleId": "89cb8e96",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T15:16:58.905Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/live-round-wiring.ts",
+    "tests/fleet/e2e/live-harness.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 10. Since the last GO (attempt 9): attempt 9 red on leg 2 provision — a transient ssh failure in the unguarded inventory probe killed the round; fix 971690f7 (one transport-only inventory retry + settleRun readonly-message guard so a masked regression can never again eat the diagnosis), 165/165 tests/z3 green, tsc 0, lint clean.",
+    "when": "2026-11-02T15:05:42Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T15:16:59.826Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"be98b801\"}"
+  ],
+  "writtenAt": "2026-11-02T15:16:59.826Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

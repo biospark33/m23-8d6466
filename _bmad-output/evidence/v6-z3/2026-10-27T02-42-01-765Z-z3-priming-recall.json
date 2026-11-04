@@ -1,0 +1,27 @@
+{
+  "leg": "priming-recall",
+  "origin": "scripts/z3/leg-drivers.ts drivePrimingRecall",
+  "runId": "qds-20261027-93459c",
+  "requestId": "03a7ea9f-8a1f-48e8-acfe-b98d2f87b0c8",
+  "directive": null,
+  "recalledDocumentIds": [],
+  "retainedDocumentIds": [
+    "qds-20261027-e45938",
+    "qds-20261027-9f4757",
+    "qds-20261027-b2174e"
+  ],
+  "citedRetained": [],
+  "citedLenses": [],
+  "gatewayAssertion": {
+    "origin": "http://127.0.0.1:18890",
+    "agentTokenId": "mgat-d570ff4346310cc055a9675a"
+  },
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "dispatch recall directive absent, not kg_context\nthe code run's <kg_context> cites no finding this round retained",
+  "observability": [
+    "{\"requestId\":\"z3-priming-recall\",\"operation\":\"z3-priming-recall\",\"agentId\":null,\"timestamp\":\"2026-10-27T02:42:01.765Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"priming-recall\",\"outcome\":\"failed\",\"runId\":\"qds-20261027-93459c\"}"
+  ],
+  "writtenAt": "2026-10-27T02:42:01.765Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

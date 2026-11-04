@@ -1,0 +1,68 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "faabe423",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "faabe423"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "faabe423"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [],
+  "runIds": [
+    "qds-20261102-21d24c",
+    "qds-20261102-7c4851",
+    "qds-20261102-434a25"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261102-21d24c",
+      "exitCode": 0,
+      "stderrTail": "edev\",\"duration\":0,\"durationMs\":0,\"status\":\"error\",\"event\":\"teardown\",\"reason\":\"box-not-proven-gone\",\"message\":\"run qds-20261102-21d24c's record is closed but qds-20261102-21d24c could not be proven gone — refusing to heal a teardown link for a box that may still be live (INV-AUDIT-4); hop 5 reports this run unlinked\"}\n{\"requestId\":\"846cb93b-3e96-44d8-926c-fba8935ea12d\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T23:56:46.761Z\",\"duration\":20,\"durationMs\":20,\"status\":\"ok\",\"runId\":\"qds-20261102-21d24c\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-7c4851",
+      "exitCode": 0,
+      "stderrTail": "edev\",\"duration\":0,\"durationMs\":0,\"status\":\"error\",\"event\":\"teardown\",\"reason\":\"box-not-proven-gone\",\"message\":\"run qds-20261102-7c4851's record is closed but qds-20261102-7c4851 could not be proven gone — refusing to heal a teardown link for a box that may still be live (INV-AUDIT-4); hop 5 reports this run unlinked\"}\n{\"requestId\":\"49236695-909a-4b3e-8a25-39f704a8e6f8\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T23:56:46.761Z\",\"duration\":19,\"durationMs\":19,\"status\":\"ok\",\"runId\":\"qds-20261102-7c4851\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-434a25",
+      "exitCode": 6,
+      "stderrTail": "2c-4beb-b371-b4d7e1cd46d1\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T23:56:47.137Z\",\"duration\":397,\"durationMs\":397,\"status\":\"error\",\"runId\":\"qds-20261102-434a25\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}\n!! lock-held: /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-434a25.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-434a25.lock only once you know the teardown state\n"
+    }
+  ],
+  "leftoverDestroy": [],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "error": "GET https://openrouter.ai/api/v1/keys?offset=0 failed after 3 attempts: getaddrinfo ENOTFOUND openrouter.ai"
+    }
+  ],
+  "leftoverBoxes": null,
+  "unattributedFreshBoxes": null,
+  "problems": [
+    "fork protocol cancel faabe423 FAILED: fork CLI cancel failed (exit 0): [2026-11-02T23:56:45.818Z] [INFO] [presidio-safety-scan] safety-net scan initialized | {\"recognizers\":[\"US_SSN\",\"EMAIL_ADDRESS\",\"PHONE_NUMBER\",\"URL\",\"CREDIT_CARD\"],\"timeout_ms\":2000}\n",
+    "fleet cancel qds-20261102-434a25 failed (exit 6)",
+    "the key-hash delta could not be rendered (GET https://openrouter.ai/api/v1/keys?offset=0 failed after 3 attempts: getaddrinfo ENOTFOUND openrouter.ai) — an unmeasured key population is never a clean one",
+    "final inventory FAILED: exe.dev ls --json failed twice (inventory transport): Command failed: ssh exe.dev ls --json\nssh: connect to host exe.dev port 22: Undefined error: 0\r\n",
+    "the final box listing is unmeasured — an unmeasured fleet is never a clean one"
+  ],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fork protocol cancel faabe423 FAILED: fork CLI cancel failed (exit 0): [2026-11-02T23:56:45.818Z] [INFO] [presidio-safety-scan] safety-net scan initialized | {\"recognizers\":[\"US_SSN\",\"EMAIL_ADDRESS\",\"PHONE_NUMBER\",\"URL\",\"CREDIT_CARD\"],\"timeout_ms\":2000}\n\nfleet cancel qds-20261102-434a25 failed (exit 6)\nthe key-hash delta could not be rendered (GET https://openrouter.ai/api/v1/keys?offset=0 failed after 3 attempts: getaddrinfo ENOTFOUND openrouter.ai) — an unmeasured key population is never a clean one\nfinal inventory FAILED: exe.dev ls --json failed twice (inventory transport): Command failed: ssh exe.dev ls --json\nssh: connect to host exe.dev port 22: Undefined error: 0\r\n\nthe final box listing is unmeasured — an unmeasured fleet is never a clean one",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-11-03T00:40:49.279Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"failed\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-11-03T00:40:49.279Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

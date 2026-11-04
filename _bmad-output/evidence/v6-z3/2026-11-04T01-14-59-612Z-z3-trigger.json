@@ -1,0 +1,50 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "f4178ff0",
+  "scheduleId": "5f16e3d8",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-04T01:14:51.865Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "src/reverify/runner.ts",
+    "tests/reverify/runner.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-11-03 'yes LFG' on fix-and-refire; attempt 30 — re-fire after attempt 29 red: reverify verdict red 8100/1 — ONE flake, the density mitigations cut it 38→23→1 — but the 16 kB TAIL capture was 100% atexit fixture noise so the name sat above the window; fixed in 71680335: the capture EXTRACTS every (fail) line from the full body (a 1-fail red names its test); this tree also carries ca1d2c38 (vetoed park settles red — attempt 29 proved it live: red settled 35s after the verdict, no 2h poll) and 81a2ec99 (hindsight seams retry transit stalls); host state: Docker VM 11.7 GB, fresh memgate token to 23:13Z Nov 4, sweep green 23:12Z, GO clock-stamped at fire time",
+    "when": "2026-11-04T01:04:04Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:14:59.612Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"f4178ff0\"}"
+  ],
+  "writtenAt": "2026-11-04T01:14:59.612Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

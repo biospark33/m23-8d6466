@@ -1,0 +1,19 @@
+{
+  "leg": "approval-park",
+  "origin": "scripts/z3/leg-drivers.ts driveApprovalPark",
+  "runId": "qds-20261104-6a5578",
+  "status": "reverify-vetoed",
+  "terminal": true,
+  "verdict": "red",
+  "passed": 8100,
+  "failed": 1,
+  "failNames": [],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "reverify verdict red (tests-failed, 8100 pass / 1 fail) — observe exit 6 (reverify-vetoed): the vetoed chain lands closed, never reaching awaiting-approval\nobserve tail: {\"requestId\":\"9401b1cd-727e-433f-88e7-c1c6239d6e45\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-04T00:57:57.602Z\",\"duration\":1976970,\"durationMs\":1976970,\"status\":\"error\",\"runId\":\"qds-20261104-6a5578\",\"verb\":\"observe\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}",
+  "observability": [
+    "{\"requestId\":\"z3-approval-park\",\"operation\":\"z3-approval-park\",\"agentId\":null,\"timestamp\":\"2026-11-04T00:57:57.608Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"approval-park\",\"outcome\":\"failed\",\"runId\":\"qds-20261104-6a5578\"}"
+  ],
+  "writtenAt": "2026-11-04T00:57:57.608Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

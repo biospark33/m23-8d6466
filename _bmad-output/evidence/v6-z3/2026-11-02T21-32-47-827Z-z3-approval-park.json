@@ -1,0 +1,15 @@
+{
+  "leg": "approval-park",
+  "origin": "scripts/z3/leg-drivers.ts driveApprovalPark",
+  "runId": "qds-20261102-81e100",
+  "status": "observe-failed",
+  "terminal": false,
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fleet observe failed twice: {\"requestId\":\"ad4dfb32-0dbf-4acd-8f00-0297949c3442\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-02T21:32:27.634Z\",\"duration\":54,\"durationMs\":54,\"status\":\"error\",\"runId\":\"qds-202611 / {\"requestId\":\"d41f89be-f6f8-4661-80da-c29b0ab87e34\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-02T21:32:47.826Z\",\"duration\":57,\"durationMs\":57,\"status\":\"error\",\"runId\":\"qds-202611",
+  "observability": [
+    "{\"requestId\":\"z3-approval-park\",\"operation\":\"z3-approval-park\",\"agentId\":null,\"timestamp\":\"2026-11-02T21:32:47.827Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"approval-park\",\"outcome\":\"failed\",\"runId\":\"qds-20261102-81e100\"}"
+  ],
+  "writtenAt": "2026-11-02T21:32:47.827Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

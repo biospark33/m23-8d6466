@@ -1,0 +1,14 @@
+{
+  "who": "steve (operator authorization via chat 2026-11-03 'yes LFG' on the fix + re-fire; attempt 28 \u2014 re-fire after attempt 27 red: reverify verdict red 8074/23 at 18:42:44Z, then the park polled `awaiting-approval` \u2014 a state a reverify-VETOED run never reaches (the chain lands closed) \u2014 2h to the round deadline; fixed in ca1d2c38: the park settles red on observe exit 6 with the failing tests NAMED from the authoritative report, and NOTE_MAX_CHARS 1_000\u219216_384 so the 16 kB capture survives the note cap (attempt 27's red named nothing \u2014 the report cap ate it); probe on the produced tree 4994e7f4: 8859/15 all interference class (greens isolated in the probe worktree AND on dev idle \u2014 no product regression); host softened before this fire: Docker VM 23.4\u219211.7 GB (host swap was 34.6/35.8 GB), memgate token re-minted 24h (mgat-c462941bf8004cd85886633a), sweep green 23:12Z)",
+  "when": "2026-11-03T23:13:38Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "src/reverify/report.ts",
+    "tests/reverify/report.test.ts",
+    "tests/z3/assertions.test.ts"
+  ]
+}
