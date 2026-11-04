@@ -1337,7 +1337,7 @@ describe("buildIdFileInputs", () => {
       // 2026-11-02 (second pin): OPENRIG_TREE_SHA256 1f9d6a1d → 139620d5
       // (run 41454454888's TOFU refusal). Dockerfile bytes only; measured
       // from this test's own failing run.
-      "oci/exedev/Dockerfile": "6e7045214e64c613014ac6fd52055a5cfa7e0a76a7bb2d5f0ab480bfa648ffd1",
+      "oci/exedev/Dockerfile": "666a207af863aa9b3831a31bece269dfb8c8168c275dd5cb517558417dd8e650",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -3949,7 +3949,7 @@ describe("checksumArgProblems", () => {
           // is untouched at cc75efdd in failing run and last green run alike).
           // 2026-11-02 (second same-day pin): re-pinned again from publish
           // run 41454454888's refusal — the floats moved within 13 hours.
-          return "139620d5491a65dd62b7da6ce670ea7f531995938767a1b55130189e27a1a00b";
+          return "5c4ae1d1e412bbe5806f84eccd51d20405a2ab9a7c14fd90cb12c4c1653ee798";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
