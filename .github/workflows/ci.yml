@@ -229,6 +229,25 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
+      # The tests job has died mid-suite (~18 min in, batch ~235/305, every
+      # batch exit=0, log truncated with no error line) on every PR since
+      # 2026-10-27 — a runner-level kill, not a test failure. Two suspects:
+      # (a) disk — 305 bun spawns each leave .sandbox/evidence artifacts and
+      #     the hosted image's preinstalled SDKs waste ~25 GB;
+      # (b) the ubuntu-latest -> Ubuntu 26 runner migration (announced for
+      #     2026-10-19; the kills began 2026-10-27 — the check job survives
+      #     the same image, so it is the spawn-heavy shape that trips).
+      # The reclaim is (a)'s fix AND (a)'s evidence: the df pair below names
+      # disk free before/after; if it reds again at ~18 min with disk free,
+      # the answer is (b) — pin ubuntu-24.04 explicitly.
+      - name: Reclaim runner disk before the batched suite
+        run: |
+          set -uo pipefail
+          echo "before:"; df -h / /mnt 2>/dev/null || df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          echo "after:"; df -h / /mnt 2>/dev/null || df -h /
       # Explicit roots (tests visualizer cli-anything) = every bun test file in
       # the repo. The roots are REAL roots here — test-batches.ts globs each
       # root — not bun's substring path args, so the vendored
