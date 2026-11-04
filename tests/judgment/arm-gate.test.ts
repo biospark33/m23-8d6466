@@ -1020,15 +1020,26 @@ describe("arm-thresholds CLI", () => {
     }
   });
 
-  test("dry-run against the REAL repo corpus (default dirs) is not-eligible naming outcome_confirmed=0/200 (F3)", () => {
+  test("dry-run against the REAL repo corpus (default dirs) is not-eligible naming the volume-floor gaps (F3)", () => {
     // DATA-DEPENDENT BY DESIGN: the day the real corpus meets the milestones
     // this test FAILS — that failure is the alarm telling the operator to run
-    // the DD-21 milestone review, not a bug to fix in the test.
+    // the DD-21 milestone review, not a bug to fix in the test. Outcomes
+    // accumulating BELOW the floor are the expected normal state, so the gap
+    // assertions only require the floor to still be named, not the exact
+    // zero count (CodeRabbit round 4: exact 0/200 would trip on the first
+    // confirmed outcome).
     const p = runArm([]);
     expect(p.exitCode).toBe(0);
     const verdict = JSON.parse(p.stdout.toString());
     expect(verdict.verdict).toBe("not-eligible");
-    expect(verdict.gaps).toContain("outcome_confirmed=0/200");
+    expect(
+      verdict.gaps.some(
+        (g: string) =>
+          g.startsWith("outcome_confirmed=") ||
+          g.startsWith("ci_lower=") ||
+          g.startsWith("confirmed_clusters="),
+      ),
+    ).toBe(true);
   });
 
   test("malformed corpus shard line: dry-run exits 2 with a clean message, no stack (F5)", () => {

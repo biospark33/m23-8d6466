@@ -15,7 +15,7 @@
  * Exit: 0 manifest written + one-line summary · 2 fatal before any conclusion.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
@@ -252,7 +252,10 @@ export function main(argv: string[]): number {
       }
     }
     mkdirSync(routingDir, { recursive: true });
-    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    // Atomic write: readers see old-or-complete manifest, a crash cannot tear it.
+    const manifestTmp = `${manifestPath}.${process.pid}.tmp`;
+    writeFileSync(manifestTmp, `${JSON.stringify(manifest, null, 2)}\n`);
+    renameSync(manifestTmp, manifestPath);
 
     process.stdout.write(
       `${JSON.stringify({
