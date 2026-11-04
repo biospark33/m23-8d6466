@@ -1490,7 +1490,10 @@ describe("buildIdFileInputs", () => {
       // own deferral precedent: the pin attests the tree, publish→adopt lands
       // with the next wave that touches walked inputs (or on the next
       // operator window). The re-pin is same-commit (this file is not walked).
-      "8a993b22e5eb740c8361e3c3f1387b261d52074594950c1253ba3d76ece83cd1",
+      // e1f65418: moved from 8a993b22 by P1.2 (feature/p1-2, 2026-11-04) —
+      // `src/pr/github.ts` (labels param) is a walked COPY input. Same
+      // publish-deferred-with-recorded-debt treatment as the P1.9 wave above.
+      "e1f65418262b253f560d19ccf455fb7d90d027ab6277b746b13e2e6d46f6a412",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

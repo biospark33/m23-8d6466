@@ -23,6 +23,7 @@ import {
 } from "./routes/mcp-servers.ts";
 import { AgentStore } from "./store/agent-store.ts";
 import { MCPStore } from "./store/mcp-store.ts";
+import { makeIntakeService, type IntakeDeps } from "./intake.ts";
 
 export interface SwarmClawServer {
   port: number;
@@ -32,9 +33,15 @@ export interface SwarmClawServer {
   stop: () => Promise<void>;
 }
 
-export function createServer(port = 0): SwarmClawServer {
+export function createServer(
+  port = 0,
+  options?: { /** P1.2: when configured, POST /api/intake is live (owner/repo/token explicit, never env). */
+    intake?: IntakeDeps;
+  },
+): SwarmClawServer {
   const agentStore = new AgentStore();
   const mcpStore = new MCPStore();
+  const intakeService = options?.intake === undefined ? undefined : makeIntakeService(options.intake);
 
   // F002: loopback-only by default. The routes spawn subprocesses and proxy
   // arbitrary tool calls into them, so the listener must not be reachable off
@@ -161,6 +168,18 @@ export function createServer(port = 0): SwarmClawServer {
         }
         if (method === "POST" && path === "/api/mcp-servers") {
           return json(await handleRegisterMCPServer(mcpStore, await safeJson(req), requestId));
+        }
+        if (method === "POST" && path === "/api/intake") {
+          // P1.2: live only when the operator configured intake deps — without
+          // them the route answers 503 rather than silently creating nothing.
+          if (intakeService === undefined) {
+            // Drain before the short answer: an undrained POST body poisons
+            // the keep-alive connection for the next request (the same
+            // hazard the 401/413 paths guard).
+            await drainBody(req);
+            return json({ status: 503, body: { error: "intake not configured" } });
+          }
+          return json(await intakeService.handle(await safeJson(req)));
         }
         const testMatch = path.match(/^\/api\/mcp-servers\/([^/]+)\/test$/);
         if (method === "POST" && testMatch) {

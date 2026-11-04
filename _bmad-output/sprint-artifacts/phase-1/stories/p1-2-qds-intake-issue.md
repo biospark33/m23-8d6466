@@ -54,18 +54,39 @@ When the Dev Manager agent receives an intake request via A2A (simulating a /qds
 
 ## Definition of Done
 
-- [ ] **Impl:** Intake handler receives A2A method "qds.intake" and validates request schema.
-- [ ] **Impl:** SwarmClaw session created with UUIDv4 sessionId and initial state "intake".
-- [ ] **Impl:** `gh issue create` invoked with `[QDS-{short-id}] {brief}` title (where short-id = first 8 hex chars of sessionId), `qds-intake` label, and domain label.
-- [ ] **Impl:** Response returns `{ sessionId, issueUrl, issueNumber }` on success.
-- [ ] **Contract:** Intake request schema enforced: brief 1-280 chars, domain enum-validated.
-- [ ] **Integration:** Session ID stored in GitHub issue body for traceability.
-- [ ] **Integration:** Failure in `gh issue create` rolls back session to "intake-failed" state (no orphan active sessions).
-- [ ] **Security:** Brief field sanitized (strip backticks, quotes, newlines) before GitHub API call.
-- [ ] **Security:** Rate limit enforced on intake endpoint per requesterAgentId.
-- [ ] **Test (unit):** Intake validation rejects empty brief, oversize brief, and invalid domain values.
-- [ ] **Test (e2e demo — MANDATORY):** Send intake A2A call → verify GitHub issue exists with correct title/labels → verify response contains valid sessionId and issueUrl.
+Reconciled 2026-11-04 (dev, PR open). The spec's Dev-Manager/A2A front door and session store died with the protocol engine (audit §2, per the DF5.5 amendment note in this file); the live HTTP front door is the SwarmClaw server, so intake is a route there. INV-2 holds by construction (owner/repo/token are explicit handler deps, never env). "Session" has no surviving store — the issue IS the trace.
+
+- [x] **Impl:** Intake handler receives A2A method "qds.intake" and validates request schema.
+      *Re-homed: `POST /api/intake` on the SwarmClaw server (`src/swarmclaw/intake.ts` + route in `src/swarmclaw/index.ts`); `IntakeRequestSchema` strictObject validates brief/domain/priority. 503 when intake deps unconfigured — the route never silently creates nothing.*
+- [~] **Impl:** SwarmClaw session created with UUIDv4 sessionId and initial state "intake".
+      *UUIDv4 sessionId IS minted (`randomUUID`) and returned; no session STORE survives in this architecture — the issue (body carrying the sessionId) is the durable trace. "Initial state" has no state machine to join; recorded as the re-home delta.*
+- [x] **Impl:** `gh issue create` invoked with `[QDS-{short-id}] {brief}` title (where short-id = first 8 hex chars of sessionId), `qds-intake` label, and domain label.
+      *`buildIntakeIssue` (`src/swarmclaw/intake.ts`): title `\[QDS-{8-hex}\] {sanitized brief}` (regex-asserted in tests), labels `["qds-intake", domain]` via `createIssue(labels)` (additive param on the GitHub API, P1.2's only edit there).*
+- [x] **Impl:** Response returns `{ sessionId, issueUrl, issueNumber }` on success.
+      *201 with `{sessionId, issueUrl, issueNumber}` asserted in handler + server-route tests.*
+- [x] **Contract:** Intake request schema enforced: brief 1-280 chars, domain enum-validated.
+      *`IntakeRequestSchema`: brief 1–280, domain enum (backend/frontend/infra/docs/test), priority enum (low/normal/high) optional, unknown keys refuse.*
+- [x] **Integration:** Session ID stored in GitHub issue body for traceability.
+      *Issue body embeds sessionId + domain + brief (asserted).*
+- [~] **Integration:** Failure in `gh issue create` rolls back session to "intake-failed" state (no orphan active sessions).
+      *Satisfied by construction: nothing pre-exists the issue call, so a failure orphans nothing — but the spec's "intake-failed" STATE has no surviving state machine. GitHub failures map to the structured -32603 error (asserted).*
+- [x] **Security:** Brief field sanitized (strip backticks, quotes, newlines) before GitHub API call.
+      *`sanitizeBrief` runs after validation, before the title/body are built; a brief that sanitizes to empty 400s before GitHub. Asserted by tests.*
+- [~] **Security:** Rate limit enforced on intake endpoint per requesterAgentId.
+      *INV-3 enforced: sliding-window 10/60s via `makeIntakeRateLimiter`, the service form (`makeIntakeService`) holds the limiter state, 11th call → 429 (asserted). DELTA: the key is the endpoint (one intake service), not requesterAgentId — the re-homed request shape carries no requesterAgentId field; per-agent attribution needs an identity layer that does not exist here. Recorded as the re-home delta.*
+- [x] **Test (unit):** Intake validation rejects empty brief, oversize brief, and invalid domain values.
+      *`tests/swarmclaw/intake.test.ts` 14 tests + server route test (503 unconfigured / 201 configured): schema refusals, sanitization, title pattern, labels, limiter boundaries (window slide, per-key isolation), GitHub-failure mapping, rate-limit e2e.*
+- [~] **Test (e2e demo — MANDATORY):** Send intake A2A call → verify GitHub issue exists with correct title/labels → verify response contains valid sessionId and issueUrl.
+      *Mock-level e2e green (handler + live server route against an injected GitHub seam, asserting call shape + response). The LIVE leg — a real issue on the real repo — is an outward-facing act: operator-gated, rides the same window as the P0.5 live legs. NOT run autonomously.*
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status: implemented, PR open — story row stays `draft` until steve flips it after merge.**
+
+- **Branch:** `feature/p1-2` (from dev lineage via feature/p1-9 HEAD — contains #486's commits; PR targets dev). **Files:** `src/swarmclaw/intake.ts` (new), `src/swarmclaw/routes`-style wiring inside `src/swarmclaw/index.ts` (optional `options.intake` + POST /api/intake), `src/pr/github.ts` (additive `labels?`), `tests/swarmclaw/intake.test.ts` (new, 14 tests), `tests/swarmclaw/index.test.ts` (+1 route test).
+- **Gates:** tsc 0 errors; biome clean on touched files; dp-scan diff-scoped OK; swarmclaw suite 247+ green; full suite run recorded on this tree.
+- **Re-home deltas (declared, not silent):** (1) A2A method envelope → plain POST /api/intake; (2) session store → the issue itself; (3) rollback state machine → vacuous-by-construction; (4) rate-limit key = endpoint not requesterAgentId (no identity layer exists). The MANDATORY live e2e stays operator-gated (real repo write).
+
+## Dev Agent Record
+
+
