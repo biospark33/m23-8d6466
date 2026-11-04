@@ -456,7 +456,12 @@ export class Run {
               error,
               durationMs: Math.round(bodyMs),
             });
-            return declaredStatus === "lead_failure"
+            // Omit ONLY when the settled verdict itself is lead_failure —
+            // i.e. the body's declared verdict survived the precedence path
+            // (verdictFailed). A body that declares lead_failure but settles
+            // through an abort (overflow/transient/logic) still owes its
+            // audit: the settled verdict is what the restart policy reads.
+            return verdictFailed && declaredStatus === "lead_failure"
               ? {}
               : {
                   restart: {

@@ -68,8 +68,24 @@ export interface EvaluateRestartInput {
  * time directly is what keeps this testable and deterministic).
  */
 export function evaluateRestart(signal: FailureSignal, input: EvaluateRestartInput): RestartDecision {
-  const caps = input.caps ?? DEFAULT_RESTART_CAPS;
+  // INV-RESTART-1 hardening: caps may be TIGHTENED by the caller, never
+  // loosened — the documented ceiling (8 retries / 1h wall-clock) is the
+  // policy, so a larger request clamps down to it.
+  const requested = input.caps ?? DEFAULT_RESTART_CAPS;
+  const caps: RestartCaps = {
+    maxRetries: Math.min(Math.max(1, Math.floor(requested.maxRetries) || 1), DEFAULT_RESTART_CAPS.maxRetries),
+    maxWallClockMs: Math.min(
+      Math.max(1, Math.floor(requested.maxWallClockMs) || 1),
+      DEFAULT_RESTART_CAPS.maxWallClockMs,
+    ),
+  };
   const cls = input.class ?? classifyFailure(signal);
+  // Non-finite accounting (NaN/±Infinity from a hostile caller or a broken
+  // injected clock — e.g. Infinity - Infinity) fails CLOSED: the decision is
+  // a cap refusal, never a retry with NaN backoff.
+  if (!Number.isFinite(input.retriesUsed) || !Number.isFinite(input.wallClockMs)) {
+    return { class: cls, shouldRetry: false, retriesRemaining: 0, wallClockRemainingMs: 0, reason: "cap-exceeded" };
+  }
   // Clamp the caller-supplied accounting (INV-RESTART-1 hardening): a negative
   // or fractional retriesUsed would push `retriesRemaining` past the cap and
   // make the backoff exponent fractional (violating RestartDecisionSchema);

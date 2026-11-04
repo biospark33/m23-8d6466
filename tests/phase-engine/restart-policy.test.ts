@@ -333,6 +333,42 @@ describe("runWithRestart (P1.9 AC2/AC4 e2e demo)", () => {
     expect(d.nextBackoffMs).toBe(2000);
     expect(RestartDecisionSchema.safeParse(d).success).toBe(true);
   });
+  test("custom caps above the documented ceiling clamp DOWN to the policy ceiling (INV-RESTART-1)", () => {
+    const d = evaluateRestart({ type: "timeout", message: "m" }, { retriesUsed: 8, wallClockMs: 0, caps: { maxRetries: 64, maxWallClockMs: 86_400_000 } });
+    expect(d.shouldRetry).toBe(false);
+    expect(d.reason).toBe("cap-exceeded");
+    const ok = evaluateRestart({ type: "timeout", message: "m" }, { retriesUsed: 0, wallClockMs: 0, caps: { maxRetries: 64, maxWallClockMs: 86_400_000 } });
+    expect(ok.retriesRemaining).toBe(DEFAULT_RESTART_CAPS.maxRetries);
+    expect(ok.wallClockRemainingMs).toBe(DEFAULT_RESTART_CAPS.maxWallClockMs);
+  });
+
+  test("non-finite accounting fails closed (NaN retriesUsed / wallClockMs / Infinity-derived clock)", () => {
+    for (const input of [
+      { retriesUsed: Number.NaN, wallClockMs: 0 },
+      { retriesUsed: 0, wallClockMs: Number.NaN },
+      { retriesUsed: Number.POSITIVE_INFINITY, wallClockMs: 0 },
+    ]) {
+      const d = evaluateRestart({ type: "timeout", message: "m" }, { ...input });
+      expect(d.shouldRetry).toBe(false);
+      expect(d.reason).toBe("cap-exceeded");
+    }
+  });
+
+  test("runWithRestart with an Infinity clock refuses instead of retrying with NaN backoff", async () => {
+    let calls = 0;
+    try {
+      await runWithRestart(() => {
+        calls++;
+        throw newSignalError({ type: "timeout", message: "m" });
+      }, { runId: "r9", stepId: "s9", now: () => Number.POSITIVE_INFINITY });
+      expect.unreachable();
+    } catch (err) {
+      expect((err as CapExceededError).name).toBe("CapExceededError");
+      expect(Number.isFinite((err as CapExceededError).decision.nextBackoffMs ?? 0) || (err as CapExceededError).decision.nextBackoffMs === undefined).toBe(true);
+    }
+    expect(calls).toBe(1);
+  });
+
   test("a backoff that would start the next attempt past the wall-clock cap refuses (INV-RESTART-1)", () => {
     // 59:59 elapsed, 1s remaining: the 2s initial backoff would land past 1h.
     const d = evaluateRestart(
@@ -456,5 +492,40 @@ describe("phase settle restart audit (P1.9 integration)", () => {
     const row = journal.phases().find((p) => p.name === "lead-fail");
     expect(row?.exitStatus).toBe("lead_failure");
     expect(row?.restart).toBeUndefined();
+  });
+
+  test("a body that declares lead_failure but settles through a timer abort still owes its audit (CR round 1)", async () => {
+    const journalPath = tmpJournalPath();
+    const runId = "restart-audit-lead-abort";
+    const journal = new FileJournal(journalPath, runId);
+    const run = new Run({
+      ctx: { runId, pipelineId: "restart-demo", requestId: "req-restart-lead-abort" },
+      journal,
+      log: () => {},
+    });
+    const phases: PhaseSpec[] = [
+      {
+        name: "lead-abort",
+        kind: "code",
+        description: "Declare lead_failure only after the abort arrives",
+        maxDurationMs: 40,
+        retries: 0,
+        command: ["true"],
+      },
+    ];
+    const bodies: (spec: PhaseSpec) => PhaseBody<unknown> = () =>
+      (bodyCtx) =>
+        new Promise((resolve) => {
+          bodyCtx.signal.addEventListener(
+            "abort",
+            () => resolve({ exitStatus: "lead_failure", error: { message: "declared late" } }),
+            { once: true },
+          );
+        });
+    await walkPhases(run, phases, bodies);
+    const row = journal.phases().find((p) => p.name === "lead-abort");
+    expect(row?.exitStatus).toBe("overflow"); // settled engine verdict
+    expect(row?.restart?.class).toBe("transient"); // timeout signal — audit PRESERVED
+    expect(row?.restart?.signal.type).toBe("timeout");
   });
 });
