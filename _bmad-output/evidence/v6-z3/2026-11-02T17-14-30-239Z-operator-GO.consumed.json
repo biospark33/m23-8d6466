@@ -1,0 +1,7 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 13. Since the last GO (attempt 12): attempt 12 red at priming-recall WITH the mechanism proven end-to-end for the first time (4 QA legs, retain x4, recallable wait, crash-window replay, directive present) — the code run's recall cited none of the round's 5 retained findings because the dispatch recall query (repoSlug + code workId) structurally cannot rank findings that name neither token; fix cdf22cf3 (correlation tag rides the finding payload; the release probe recalls with the actual dispatch query; readStepWorkId dep), 283 pass z3+qa, tsc 0, lint 0.",
+  "when": "2026-11-02T17:13:13Z",
+  "spendApproved": { "worstCaseUsd": 5.25 },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": ["src/qa/retain.ts", "scripts/z3/leg-drivers.ts", "scripts/z3/live-round-wiring.ts", "tests/z3/fixture.ts", "tests/qa/retain.test.ts"]
+}

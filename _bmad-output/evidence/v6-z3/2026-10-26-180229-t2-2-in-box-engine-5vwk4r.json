@@ -1,0 +1,287 @@
+{
+  "test": "T2.2",
+  "outcome": "pass",
+  "runId": "qds-20261026-92aac5",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20261026-92aac5\",\"requestId\":\"ba57e63b-fee4-4de7-83d1-37813a39d436\",\"state\":\"ready\",\"vmName\":\"qds-20261026-92aac5\",\"httpsUrl\":\"https://qds-20261026-92aac5.exe.xyz\"}",
+      "stderrTail": "0-26T18:01:04.128Z\",\"duration\":47553,\"durationMs\":47553,\"status\":\"ok\",\"runId\":\"qds-20261026-92aac5\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3364,\"mint_ms\":1474,\"fill_ms\":27816,\"setup_gate_ms\":13815}}\n{\"requestId\":\"ba57e63b-fee4-4de7-83d1-37813a39d436\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:01:04.129Z\",\"duration\":47558,\"durationMs\":47558,\"status\":\"ok\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20261026-92aac5",
+      "vmName": "qds-20261026-92aac5"
+    },
+    {
+      "phase": "manifest-pair",
+      "exitCode": 0,
+      "manifestBoxPath": "/home/exedev/src/.qds/pipeline.yaml",
+      "witnessBoxPath": "/home/exedev/src/.qds/run-context.json"
+    },
+    {
+      "phase": "witness",
+      "budgetMs": 600000,
+      "effectiveCeilingMicros": 50000,
+      "manifestSource": "sha",
+      "armsResident": true
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "7c2db2395a42478b24aa80bb03a0c2f6980043cb79aa0385c970729a28e18da2",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "status-read",
+      "runId": "qds-20261026-92aac5",
+      "state": "not-running",
+      "exitCode": 0,
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "not-running"
+        }
+      ]
+    },
+    {
+      "phase": "host-walk-negative-control",
+      "walked": [
+        "t2-engine-probe:0:t2-e2e-engine-ran",
+        "t2-engine-verify:0:"
+      ],
+      "probe": "MISSING /run/qds-run/qds-20261026-92aac5/journal/final.json\nMISSING /home/exedev/qds-20261026-92aac5.journal.jsonl\nMISSING /home/exedev/qds-20261026-92aac5.engine.log\nMISSING /run/qds-run/qds-20261026-92aac5/trace/trace.db",
+      "markerKind": "absent",
+      "statusState": "not-running"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "startMs": 4067,
+      "stdout": "started: qds-20261026-92aac5",
+      "stderrTail": "1-37813a39d436\",\"outcome\":\"started\",\"vm\":\"qds-20261026-92aac5\",\"unit\":\"qds-run@qds-20261026-92aac5.service\",\"printed\":true}\n{\"requestId\":\"e5121c98-8b68-42e2-afa8-3dcbdf73f8c4\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:01:18.075Z\",\"duration\":4032,\"durationMs\":4032,\"status\":\"ok\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "status-poll",
+      "seenStates": [
+        "running",
+        "ok"
+      ],
+      "terminal": "ok",
+      "attempts": 2,
+      "statusExitFailures": 0
+    },
+    {
+      "phase": "marker-read",
+      "markerBoxPath": "/run/qds-run/qds-20261026-92aac5/journal/final.json",
+      "expectedRunId": "qds-20261026-92aac5",
+      "kind": "settled"
+    },
+    {
+      "phase": "durability-probe",
+      "exitCode": 0,
+      "stdout": "HOME_FS=ext2/ext3\nRUN_FS=tmpfs\nPRESENT /home/exedev/qds-20261026-92aac5.journal.jsonl\nPRESENT /home/exedev/qds-20261026-92aac5.engine.log\nPRESENT /run/qds-run/qds-20261026-92aac5/journal/final.json\nPRESENT /run/qds-run/qds-20261026-92aac5/trace/trace.db"
+    },
+    {
+      "phase": "durability-fs",
+      "homeFs": "ext2/ext3",
+      "runFs": "tmpfs"
+    },
+    {
+      "phase": "unit-restart",
+      "stdout": "Restart=no",
+      "exitCode": 0
+    },
+    {
+      "phase": "replay-run-verb",
+      "exitCode": 5,
+      "stdout": "",
+      "stderrTail": "s qds-run@qds-20261026-92aac5.service`: the unit is Restart=no, so this failure is terminal and identical on every retry\"}\n{\"requestId\":\"989c30a7-4b7a-4e8f-90ad-f14ad53fcd7e\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:01:49.924Z\",\"duration\":3087,\"durationMs\":3087,\"status\":\"error\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "replay-engine-log-untouched",
+      "ok": true,
+      "bytes": 4079
+    },
+    {
+      "phase": "replay-journal-untouched",
+      "ok": true,
+      "bytes": 1482
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: none",
+      "stderrTail": "2aac5\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":3786,\"outcome\":\"ok\",\"harvested\":\"none\",\"artifacts\":\"pulled\"}\n{\"requestId\":\"ec3fd499-4581-4173-9d4e-b43e989b7932\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:01:59.387Z\",\"duration\":3793,\"durationMs\":3793,\"status\":\"ok\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "artifacts",
+      "artifactsDir": "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/qds-e2e-t22-YxFDzz/runs/qds-20261026-92aac5-artifacts",
+      "required": [
+        "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/qds-e2e-t22-YxFDzz/runs/qds-20261026-92aac5-artifacts/journal/final.json",
+        "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/qds-e2e-t22-YxFDzz/runs/qds-20261026-92aac5-artifacts/trace/trace.db",
+        "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/qds-e2e-t22-YxFDzz/runs/qds-20261026-92aac5-artifacts/qds-20261026-92aac5.journal.jsonl",
+        "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/qds-e2e-t22-YxFDzz/runs/qds-20261026-92aac5-artifacts/qds-20261026-92aac5.engine.log"
+      ],
+      "missing": [],
+      "extracted": [
+        "qds-20261026-92aac5.engine.log",
+        "qds-20261026-92aac5-solicit-1-reply.txt",
+        "qds-20261026-92aac5.resident.jsonl",
+        "qds-20261026-92aac5-solicit-1-prompt.txt",
+        "qds-20261026-92aac5-solicit-2-reply.txt",
+        "qds-20261026-92aac5-solicit-2-prompt.txt",
+        "qds-20261026-92aac5.journal.jsonl",
+        "journal/final.json",
+        "trace/events.jsonl",
+        "trace/trace.db"
+      ]
+    },
+    {
+      "phase": "trace-db",
+      "bytes": 65536,
+      "sqliteHeader": true
+    },
+    {
+      "phase": "resident-artifacts",
+      "residentStatus": "active",
+      "residentSessionPresent": true,
+      "residentWarnings": [
+        "Oct 26 18:01:22 qds-20261026-92aac5 qds-engine[709]: [resident] pi wrote to stderr on a successful call (qds-20261026-92aac5 solicit 1): [pi-exe-dev] missing pricing for integration model fireworks/accounts/fireworks/models/deepseek-v4p1-flash-1017; pi usage cost will be reported as zero",
+        "Oct 26 18:01:22 qds-20261026-92aac5 qds-engine[709]: [resident] {\"event\":\"resident_cgroup\",\"bound\":\"rss\",\"allowed\":true,\"runId\":\"qds-20261026-92aac5\",\"seq\":1,\"residentRssBytes\":536870912,\"rssPeakBytes\":137547776,\"oomKilled\":false,\"cgroup_setup_ms\":0,\"cgroup_teardown_ms\":1}",
+        "Oct 26 18:01:25 qds-20261026-92aac5 qds-engine[709]: [resident] pi wrote to stderr on a successful call (qds-20261026-92aac5 solicit 2): [pi-exe-dev] missing pricing for integration model fireworks/accounts/fireworks/models/deepseek-v4p1-flash-1017; pi usage cost will be reported as zero",
+        "Oct 26 18:01:25 qds-20261026-92aac5 qds-engine[709]: [resident] {\"event\":\"resident_cgroup\",\"bound\":\"rss\",\"allowed\":true,\"runId\":\"qds-20261026-92aac5\",\"seq\":2,\"residentRssBytes\":536870912,\"rssPeakBytes\":113303552,\"oomKilled\":false,\"cgroup_setup_ms\":0,\"cgroup_teardown_ms\":1}"
+      ]
+    },
+    {
+      "phase": "redaction-sweep",
+      "scanned": 10,
+      "leaked": []
+    },
+    {
+      "phase": "tmpfs-wipe-simulated",
+      "exitCode": 0,
+      "markerBoxPath": "/run/qds-run/qds-20261026-92aac5/journal/final.json",
+      "stderrTail": ""
+    },
+    {
+      "phase": "orphaned-preconditions",
+      "journalBytes": 1482,
+      "journalPhaseRows": 2,
+      "markerRootListing": "total 0\ndrwx------ 2 exedev exedev 40 Oct 26 18:02 .\ndrwxr-xr-x 4 root   root   80 Oct 26 18:01 ..",
+      "boxEngineProbe": "entry=/opt/qds-factory/scripts/pipeline-run.ts hits=2",
+      "boxEngineEntry": "/opt/qds-factory/scripts/pipeline-run.ts",
+      "boxEngineCarriesGuard": true
+    },
+    {
+      "phase": "orphaned-replay",
+      "exitCode": 5,
+      "probeWonTheRace": true,
+      "envelope": {
+        "runId": "qds-20261026-92aac5",
+        "unit": "qds-run@qds-20261026-92aac5.service",
+        "reason": "unit-refused",
+        "code": "engine-start-refused",
+        "message": "systemd refused to start the engine for qds-20261026-92aac5: systemctl start returned 0 but qds-run@qds-20261026-92aac5.service is already `failed` — the engine died after the fork (Type=simple reports a start at fork, and Restart=no leaves the unit failed). Read `journalctl -u qds-run@qds-20261026-92aac5.service` on the box",
+        "remediation": "ssh the box and read `systemctl status qds-run@qds-20261026-92aac5.service`: the unit is Restart=no, so this failure is terminal and identical on every retry"
+      },
+      "stderrTail": " (Type=simple reports a start at fork, and Restart=no leaves the unit failed). Read `journalctl -u qds-run@qds-20261026-92aac5.service` on the box\",\"remediation\":\"ssh the box and read `systemctl status qds-run@qds-20261026-92aac5.service`: the unit is Restart=no, so this failure is terminal and identical on every retry\"}\n{\"requestId\":\"0d82664c-5879-4b2d-9e86-6f72b7629a4f\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:02:08.619Z\",\"duration\":3850,\"durationMs\":3850,\"status\":\"error\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "orphaned-engine-log",
+      "tail": "lready carries 2 phase row(s) but no terminal marker exists: a previous engine walked this run and was killed (or the box rebooted, wiping tmpfs /run) before it could settle\",\"remediation\":\"refusing rather than re-walking phases whose spend and commits already happened, and rather than truncating the rows that are the only record of them (INV-IBOX-6). Read the journal for what settled, then this run is over: `fleet harvest <run-id>` pulls its evidence and `fleet teardown <run-id>` reclaims the box. To run again, dispatch a NEW run — the journal has no attempt column and this engine adds none, so re-walking would overwrite a `fail` row that was recorded deliberately (INV-IBOX-6)\"},\"level\":\"error\",\"event\":\"engine_refused_replay\",\"runId\":\"qds-20261026-92aac5\",\"requestId\":null,\"phaseId\":null}\n"
+    },
+    {
+      "phase": "orphaned-journal-untouched",
+      "ok": true,
+      "bytes": 1482
+    },
+    {
+      "phase": "orphaned-status",
+      "state": "engine-failed",
+      "statusVerbThrows": 0
+    },
+    {
+      "phase": "orphan-skip-count",
+      "skips": 0,
+      "reasons": []
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 0,
+      "stdout": "teardown.harvest_waived qds-20261026-92aac5\ntorn down: qds-20261026-92aac5",
+      "stderrTail": "-92aac5\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":6}\n{\"requestId\":\"2256b65d-c86a-4fd7-8e84-d9b451177ce6\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:02:22.727Z\",\"duration\":8809,\"durationMs\":8809,\"status\":\"ok\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "spend",
+      "capMicroUsd": 50000,
+      "actualMicroUsd": 319
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20261026-92aac5",
+      "attempts": 1
+    },
+    {
+      "phase": "teardown-box-absence",
+      "absent": true,
+      "attempts": 1,
+      "enforcedBy": "fleetLeftovers (finally)"
+    },
+    {
+      "phase": "run-after-teardown",
+      "exitCode": 5,
+      "stderrTail": "92aac5 cannot be started: it is closed\",\"remediation\":\"this run is over and its box was torn down — dispatch a new run instead\"}\n{\"requestId\":\"6b1bdc13-6c7c-4098-ad3d-1e70efeb3a9b\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:02:24.459Z\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "run-unknown-id",
+      "exitCode": 4,
+      "stderrTail": "\"refused\",\"exitCode\":4}\n{\"requestId\":\"f89d8f73-847c-4488-a61b-4c2ad795e04c\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:02:24.494Z\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"runId\":\"qds-20261026-92aac5-nope\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":4,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "at": "t2.2-cleanup",
+      "runId": "qds-20261026-92aac5",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "ox.teardown\"}\n{\"requestId\":\"4f312e30-bc48-4165-a6af-ddbd63b7f7ae\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-10-26T18:02:25.653Z\",\"duration\":1125,\"durationMs\":1125,\"status\":\"ok\",\"runId\":\"qds-20261026-92aac5\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261026-92aac5",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-10-26T18:02:29.907Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1c8455a0396d6ace999de068abaf6a7fd6a8f80fa95218f0c1d356a6f6042100",
+    "buildId": "c8dd0a4967a70a84",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

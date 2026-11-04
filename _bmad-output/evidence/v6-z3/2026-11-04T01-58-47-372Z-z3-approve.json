@@ -1,0 +1,21 @@
+{
+  "leg": "approve",
+  "origin": "scripts/z3/leg-drivers.ts driveApprove",
+  "runId": "qds-20261104-6d5636",
+  "cliExitCode": 0,
+  "approverId": "z3-e2e-approver",
+  "scryptVerified": true,
+  "tokenChannel": "stdin",
+  "decisionSource": "fleet-approve-stdin",
+  "executedBy": "driver",
+  "scripted": true,
+  "decidedState": "approved",
+  "exitCode": 0,
+  "stdoutTail": "{\"runId\":\"qds-20261104-6d5636\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"z3-e2e-approver\",\"decidedAt\":\"2026-11-04T01:58:47.369Z\",\"reason\":\"z3-exit-round\"}\n",
+  "stderrTail": "it_ms\":2,\"reason\":\"z3-exit-round\",\"requestId\":\"55632c4a-6244-462f-aa95-853cafda0015\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:58:47.370Z\",\"duration\":37,\"durationMs\":37,\"status\":\"ok\",\"runId\":\"qds-20261104-6d5636\",\"event\":\"approve\",\"dispatchRequestId\":\"f7cee497-2cff-4167-8b3f-5a7fd48a1ab1\"}\n{\"requestId\":\"55632c4a-6244-462f-aa95-853cafda0015\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:58:47.370Z\",\"duration\":37,\"durationMs\":37,\"status\":\"ok\",\"runId\":\"qds-20261104-6d5636\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n",
+  "observability": [
+    "{\"requestId\":\"z3-approve\",\"operation\":\"z3-approve\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:58:47.372Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"approve\",\"runId\":\"qds-20261104-6d5636\",\"outcome\":\"ok\"}"
+  ],
+  "writtenAt": "2026-11-04T01:58:47.372Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

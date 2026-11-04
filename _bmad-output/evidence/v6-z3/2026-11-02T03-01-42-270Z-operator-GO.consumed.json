@@ -1,0 +1,13 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01 'billing fixed. LFG' + 2026-11-02 'fix all pre-existing issues you find along the way / we need this working properly' \u2014 Z3 live exit round 19 (attempt 2). Attempt 1 (GO consumed 2026-11-02T02:14:50Z) red'd pre-spend: a virgin-digest cold pull outlived exe.dev's create ceiling (exit 137, box wedged in creating, submit-intent-corrupt); substrate warmed via a throwaway box (buildId 4f5e70cccbe3cbef verified in-box, destroyed); driver create-retry fix pushed (0583a5c4). Round inputs unchanged otherwise: fork image combined-d8adbd2 (5/5 checklist green), memgate token fresh, ledger repaired (7 stale reservations released).",
+  "when": "2026-11-02T02:51:39Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": [
+    "src/providers/exedev/driver.ts",
+    "tests/providers/exedev/driver.test.ts",
+    "tests/providers/exedev/fixtures/fake-exedev.ts"
+  ]
+}

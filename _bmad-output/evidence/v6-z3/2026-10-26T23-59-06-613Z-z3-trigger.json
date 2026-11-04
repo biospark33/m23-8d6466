@@ -1,0 +1,46 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "6033474d",
+  "scheduleId": "2598c2cc",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-10-26T23:59:05.755Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 13 — retry of round 12's single unretried read: rounds 8-12 trace is complete and the fix stack is proven (round 12: all 3 QA legs closed+retained+attributed, code-run redrive reached); round 12 red was one readonly ledger open racing the crash window's WAL recovery, fixed by bounded retry (PR #482, fire sha = this branch head, merge pending in parallel)",
+    "when": "2026-10-26T23:48:40Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-10-26T23:59:06.613Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"6033474d\"}"
+  ],
+  "writtenAt": "2026-10-26T23:59:06.613Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

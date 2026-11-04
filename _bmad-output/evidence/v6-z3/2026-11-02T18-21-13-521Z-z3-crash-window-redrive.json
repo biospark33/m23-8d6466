@@ -1,0 +1,58 @@
+{
+  "leg": "crash-window-redrive",
+  "origin": "scripts/z3/leg-drivers.ts driveCrashWindowRedrive",
+  "stepId": "z3-code-run",
+  "runId": "qds-20261102-f6ff02",
+  "killedAt": "2026-11-02T18:16:58.671Z",
+  "retainDoneAt": "2026-11-02T18:17:42.122Z",
+  "releasedAt": "2026-11-02T18:17:44.106Z",
+  "stepStatusAtKill": "submitting",
+  "heldAtKill": true,
+  "releasedAfterRetain": true,
+  "holdAgeAtKillMs": 4671,
+  "gateJournal": [
+    {
+      "phase": "held",
+      "at": 1793643414000
+    },
+    {
+      "phase": "held",
+      "at": 1793643592000
+    },
+    {
+      "phase": "released",
+      "at": 1793643592000
+    },
+    {
+      "phase": "exec",
+      "at": 1793643592000
+    }
+  ],
+  "submitExecs": 1,
+  "recordAtKill": {
+    "state": "absent"
+  },
+  "requestIdBeforeKill": "a5065eac-8086-4761-abed-f376bce54636",
+  "requestIdAfterRedrive": "a5065eac-8086-4761-abed-f376bce54636",
+  "recordsForRequestId": [
+    {
+      "runId": "qds-20261102-f6ff02",
+      "createdAt": "2026-11-02T18:19:54.632Z"
+    }
+  ],
+  "boxCountSamples": [
+    1,
+    1,
+    1
+  ],
+  "gateAdmissionsForRequest": 1,
+  "groupReservationsForRequest": 1,
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-crash-window-redrive\",\"operation\":\"z3-crash-window-redrive\",\"agentId\":null,\"timestamp\":\"2026-11-02T18:21:13.520Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"crash-window-redrive\",\"outcome\":\"ok\",\"runId\":\"qds-20261102-f6ff02\",\"stepId\":\"z3-code-run\"}"
+  ],
+  "writtenAt": "2026-11-02T18:21:13.521Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

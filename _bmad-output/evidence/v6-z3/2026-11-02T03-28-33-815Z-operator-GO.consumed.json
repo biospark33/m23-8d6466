@@ -1,0 +1,13 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01/02 ('billing fixed. LFG' / 'fix all pre-existing issues you find along the way' / 'we need this working properly') \u2014 Z3 live exit round 19 (attempt 3). Attempt 1: virgin-digest cold pull killed the create (exit 137) \u2014 fixed by substrate warm-up + driver create-retry (0583a5c4). Attempt 2: steering provision ssh'd a mid-boot box (255 drop) \u2014 fixed by transport-signature retry (a7fa61e1). Both reds cost no model spend; substrate now proven on both failure modes; ledger hygiene maintained (7 stale reservations released, attempt-2 rows self-released at close).",
+  "when": "2026-11-02T03:28:00Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": [
+    "src/providers/exedev/driver.ts",
+    "tests/providers/exedev/driver.test.ts",
+    "tests/providers/exedev/fixtures/fake-exedev.ts"
+  ]
+}

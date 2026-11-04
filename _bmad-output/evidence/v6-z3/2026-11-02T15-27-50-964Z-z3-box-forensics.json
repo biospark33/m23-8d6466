@@ -1,0 +1,26 @@
+{
+  "leg": "box-forensics",
+  "origin": "scripts/z3/leg-drivers.ts driveBoxForensics",
+  "runId": "qds-20261102-fb08ef",
+  "recordRunId": "qds-20261102-fb08ef",
+  "recordVmName": "qds-20261102-fb08ef",
+  "liveBoxesForRun": [
+    "qds-20261102-fb08ef"
+  ],
+  "afterTeardownBoxesForRun": [
+    "qds-20261102-fb08ef"
+  ],
+  "recordSettle": {
+    "state": "ok",
+    "teardownExit": 6,
+    "teardownTail": "next: check the run's box, key and record before anything else touches it; rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-fb08ef.lock only once you know the teardown state"
+  },
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "box(es) outlived teardown: qds-20261102-fb08ef\nteardown exit 6: next: check the run's box, key and record before anything else touches it; rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-fb08ef.lock only once you know the teardown state",
+  "observability": [
+    "{\"requestId\":\"z3-box-forensics\",\"operation\":\"z3-box-forensics\",\"agentId\":null,\"timestamp\":\"2026-11-02T15:27:50.964Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"box-forensics\",\"outcome\":\"failed\",\"runId\":\"qds-20261102-fb08ef\"}"
+  ],
+  "writtenAt": "2026-11-02T15:27:50.964Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

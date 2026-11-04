@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26; re-fire #3 — prior reds: schedule-tamper #478, first-boot provision flake (audit chain shows box created, provision hop absent; tier1 driver-lifecycle green on this image this hour); zero fleet-model spend so far)",
+  "when": "2026-10-26T16:38:17Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "cc91aac7737084be0abec5e278f8e48afc2ca3b0"
+}

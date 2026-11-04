@@ -92,6 +92,7 @@ _bmad-output/workflow-state/**/*.patch
 # the growing opaque binary offered for commit does not. Per-round naming is
 # deferred (it would split a resumed round's links across files).
 _bmad-output/evidence/**/audit-links.db
+_bmad-output/evidence/**/fire.env
 
 # operator-local factory config (repos/approvers allowlists, 0600) + local demo byproducts
 .factory/

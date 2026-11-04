@@ -1,0 +1,52 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "f468ce1d",
+  "scheduleId": "87ec9f90",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-03T23:24:29.575Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "src/reverify/report.ts",
+    "tests/reverify/report.test.ts",
+    "tests/z3/assertions.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-11-03 'yes LFG' on the fix + re-fire; attempt 28 — re-fire after attempt 27 red: reverify verdict red 8074/23 at 18:42:44Z, then the park polled `awaiting-approval` — a state a reverify-VETOED run never reaches (the chain lands closed) — 2h to the round deadline; fixed in ca1d2c38: the park settles red on observe exit 6 with the failing tests NAMED from the authoritative report, and NOTE_MAX_CHARS 1_000→16_384 so the 16 kB capture survives the note cap (attempt 27's red named nothing — the report cap ate it); probe on the produced tree 4994e7f4: 8859/15 all interference class (greens isolated in the probe worktree AND on dev idle — no product regression); host softened before this fire: Docker VM 23.4→11.7 GB (host swap was 34.6/35.8 GB), memgate token re-minted 24h (mgat-c462941bf8004cd85886633a), sweep green 23:12Z)",
+    "when": "2026-11-03T23:13:38Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-03T23:24:31.286Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"f468ce1d\"}"
+  ],
+  "writtenAt": "2026-11-03T23:24:31.286Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

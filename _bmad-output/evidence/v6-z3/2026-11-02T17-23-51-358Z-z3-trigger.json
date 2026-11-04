@@ -1,0 +1,53 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "e8b6cd9a",
+  "scheduleId": "aacd7850",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T17:23:50.757Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "scripts/z3/live-round-wiring.ts",
+    "src/qa/retain.ts",
+    "tests/qa/retain.test.ts",
+    "tests/z3/fixture.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 13. Since the last GO (attempt 12): attempt 12 red at priming-recall WITH the mechanism proven end-to-end for the first time (4 QA legs, retain x4, recallable wait, crash-window replay, directive present) — the code run's recall cited none of the round's 5 retained findings because the dispatch recall query (repoSlug + code workId) structurally cannot rank findings that name neither token; fix cdf22cf3 (correlation tag rides the finding payload; the release probe recalls with the actual dispatch query; readStepWorkId dep), 283 pass z3+qa, tsc 0, lint 0.",
+    "when": "2026-11-02T17:13:13Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:23:51.357Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"e8b6cd9a\"}"
+  ],
+  "writtenAt": "2026-11-02T17:23:51.358Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26; re-fire after participant-agent fix — prior GO consumed by the refused arm, untracked at 2026-10-26T15-49-23-449Z-operator-GO.consumed.json)",
+  "when": "2026-10-26T15:52:25Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "cc91aac7737084be0abec5e278f8e48afc2ca3b0"
+}

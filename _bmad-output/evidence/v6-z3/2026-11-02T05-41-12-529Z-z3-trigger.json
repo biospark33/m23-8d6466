@@ -1,0 +1,49 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "6581a18c",
+  "scheduleId": "cf181648",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T05:41:12.185Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "tests/z3/fleet-gate.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 (attempt 5). Chain of measured fixes since attempt 1, each red pre-spend or at one leg: (1) cold-pull create kill 137 — driver create-retry 0583a5c4 + warmed substrate; (2) steering provision 255 mid-boot drop — transport-signature retry a7fa61e1; (3) single fork-side teardown exit 6 (box outlived) — retry-class, hand-cleaned; (4) priming-recall directive absent — THE FINDING: the SC2.5 fence stripped HINDSIGHT_* from the fleet-CLI child, so the priming round-trip never worked in ANY cross-repo live round (round 18 evidence identical); fixed factory-side in the fleet-gate wrapper (c1fc8a2b + 114e57ef, live via the /factory mount — no fork rebuild), proven in-container: the sourced env lists the repo bank through host.docker.internal:18890. Ledger hygiene maintained across all attempts.",
+    "when": "2026-11-02T05:31:08Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T05:41:12.529Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"6581a18c\"}"
+  ],
+  "writtenAt": "2026-11-02T05:41:12.529Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

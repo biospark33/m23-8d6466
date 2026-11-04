@@ -1,0 +1,19 @@
+{
+  "leg": "approval-park",
+  "origin": "scripts/z3/leg-drivers.ts driveApprovalPark",
+  "runId": "qds-20261103-ec79bc",
+  "status": "observe-failed",
+  "terminal": false,
+  "observeTails": [
+    "{\"requestId\":\"22864743-b28f-4d97-91a4-ee261f9a40cc\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-03T08:47:15.085Z\",\"duration\":1257663,\"durationMs\":1257663,\"status\":\"error\",\"runId\":\"qds-20261103-ec79bc\",\"verb\":\"observe\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}",
+    "{\"requestId\":\"d7e67724-cd1a-4e9e-b149-dab4a80e9cd4\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-03T09:29:31.775Z\",\"duration\":1256790,\"durationMs\":1256790,\"status\":\"error\",\"runId\":\"qds-20261103-ec79bc\",\"verb\":\"observe\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+  ],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fleet observe failed twice: {\"requestId\":\"22864743-b28f-4d97-91a4-ee261f9a40cc\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-03T08:47:15.085Z\",\"duration\":1257663,\"durationMs\":1257663,\"status\":\"error\",\"runId\":\"qds-20261103-ec79bc\",\"verb\":\"observe\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"} / {\"requestId\":\"d7e67724-cd1a-4e9e-b149-dab4a80e9cd4\",\"operation\":\"fleet.observe\",\"agentId\":null,\"timestamp\":\"2026-11-03T09:29:31.775Z\",\"duration\":1256790,\"durationMs\":1256790,\"status\":\"error\",\"runId\":\"qds-20261103-ec79bc\",\"verb\":\"observe\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}",
+  "observability": [
+    "{\"requestId\":\"z3-approval-park\",\"operation\":\"z3-approval-park\",\"agentId\":null,\"timestamp\":\"2026-11-03T09:29:31.777Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"approval-park\",\"outcome\":\"failed\",\"runId\":\"qds-20261103-ec79bc\"}"
+  ],
+  "writtenAt": "2026-11-03T09:29:31.777Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

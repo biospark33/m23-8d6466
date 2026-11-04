@@ -1,0 +1,57 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "a79d4730",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "a79d4730"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "a79d4730"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [
+    {
+      "protocolRunId": "a79d4730",
+      "cancelled": false,
+      "fleetCancelled": [],
+      "inFlightRequestIds": []
+    }
+  ],
+  "runIds": [
+    "qds-20261026-fb6cde"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261026-fb6cde",
+      "exitCode": 0,
+      "stderrTail": "run qds-20261026-fb6cde hop run-box.teardown\"}\n{\"requestId\":\"6def33bd-b278-4627-bf5b-fae9888ada99\",\"operation\":\"teardown.close\",\"agentId\":null,\"timestamp\":\"2026-10-26T16:24:45.956Z\",\"runId\":\"qds-20261026-fb6cde\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":6}\n{\"requestId\":\"6def33bd-b278-4627-bf5b-fae9888ada99\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-26T16:24:45.962Z\",\"duration\":3267,\"durationMs\":3267,\"status\":\"ok\",\"runId\":\"qds-20261026-fb6cde\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    }
+  ],
+  "leftoverDestroy": [],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [],
+  "unattributedFreshBoxes": [],
+  "problems": [],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-10-26T16:24:53.488Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"ok\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-10-26T16:24:53.489Z",
+  "swarmclawForkRev": "cc91aac7737084be0abec5e278f8e48afc2ca3b0"
+}

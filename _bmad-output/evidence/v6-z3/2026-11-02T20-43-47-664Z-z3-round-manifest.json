@@ -1,0 +1,27 @@
+{
+  "leg": "round-manifest",
+  "origin": "scripts/z3/leg-drivers.ts writeRoundManifest",
+  "files": {
+    "2026-11-02T20-21-59-189Z-z3-trigger.json": "d340c537a852e66975c5c0e68149401e3ce2e9f91423d3ae676d4d7a31e05dc0",
+    "2026-11-02T20-23-08-360Z-z3-kill-and-provision.json": "996682307f09a1f4ee8b374d1c2b5225f0d798a25d5b6974f35c415b2928752a",
+    "2026-11-02T20-29-02-795Z-z3-box-forensics.json": "9ac3cebde2f74ee1c06d1c190dd9e715a9918aed01eb92dcad5ee94ff8891720",
+    "2026-11-02T20-30-10-913Z-z3-findings-retain.json": "cca978351f8345a33ad924c7356f9f7abb9d5bf4775139651a9e68fe28a3dc66",
+    "2026-11-02T20-31-08-336Z-z3-kill-and-provision.json": "e72658bc66332abb6414115143ae852b5a167bc0655abd2baa165043cead6cd1",
+    "2026-11-02T20-34-52-783Z-z3-box-forensics.json": "efafac91ba8277862dcf1cd359fbd48369380ee10afb0a89ab8212c5dc43255f",
+    "2026-11-02T20-35-30-162Z-z3-findings-retain.json": "a6c3ebdefdff4720c59128f186c37434a34f5e614ca4f606fcb77d7889960a2e",
+    "2026-11-02T20-35-55-181Z-z3-kill-and-provision.json": "bc9da310a20e2c163fb2cec295c87c680c773409864ee63cefdad06600231986",
+    "2026-11-02T20-38-20-823Z-z3-box-forensics.json": "636213dd592dae9afab832d24f09d2f8d7cf2c9a1c4060867f0d9eda64c85519",
+    "2026-11-02T20-39-05-174Z-z3-findings-retain.json": "05f796e2e27ca31766eb97c005a285f8975224e2837c981a7ac9c2f701046c8c",
+    "2026-11-02T20-43-03-364Z-z3-kill-and-provision.json": "ac7b08ca0a4e86577386eb57311954b0da4f0c67eb24d492cd4d56e6eace7b15",
+    "2026-11-02T20-43-06-446Z-z3-crash-window-redrive.json": "2837c57e436b742eaef7926af9cf9e84b9c9dc3a6f985a8df59f8b727c2e5989",
+    "2026-11-02T20-43-47-663Z-z3-cleanup.json": "29647267215d350fd629f2d20fe86a81a6657a1af01a06724f449f92d2ba56a2"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-round-manifest\",\"operation\":\"z3-round-manifest\",\"agentId\":null,\"timestamp\":\"2026-11-02T20:43:47.664Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"round-manifest\",\"outcome\":\"ok\",\"fileCount\":13}"
+  ],
+  "writtenAt": "2026-11-02T20:43:47.664Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,14 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01/02 \u2014 Z3 live exit round 19 (attempt 6). Attempt 5 proved the priming fix end to end (directive kg_context, 7,985 chars \u2014 the SC2.5 fence fix live) and surfaced the LAST substrate gap: the code run's dispatch recall ran 189 ms after the last retain and surfaced zero round findings, while the same bank six hours later surfaces 14 of 19 (documentId camelCase view; extraction completes inline at retain but recallability lags). Fixed at the release: the crash window now polls a dispatch-shaped recall until a retained doc id surfaces (bounded 15 min, zero spend while waiting), then releases \u2014 commit c9d5fa8b. [attempts 6-7: pin moved to c9d5fa8b (the release-wait fix); review set = that commit's own diff.]",
+  "when": "2026-11-02T12:24:07Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "scripts/z3/live-round-wiring.ts",
+    "tests/z3/fixture.ts",
+    "tests/z3/wiring.test.ts"
+  ]
+}

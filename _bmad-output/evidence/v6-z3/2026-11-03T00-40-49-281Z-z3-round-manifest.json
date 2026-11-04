@@ -1,0 +1,21 @@
+{
+  "leg": "round-manifest",
+  "origin": "scripts/z3/leg-drivers.ts writeRoundManifest",
+  "files": {
+    "2026-11-02T22-34-58-083Z-z3-trigger.json": "d1efbad6371b2da834451e433a095a58e66cc42e9d739588ca6abc968294492d",
+    "2026-11-02T22-37-15-992Z-z3-kill-and-provision.json": "8435ffc34675603c81d7d1bf1ec5a0d544d0757c086a909e98f12b595fc70cb6",
+    "2026-11-02T22-40-40-986Z-z3-box-forensics.json": "a6f6c77c149cacf5443340f63039a814e73ffcf29df38fc1ee1e969f78dad93a",
+    "2026-11-02T22-41-07-965Z-z3-findings-retain.json": "9eb414adad030a606e7e6bb87f8fdd59601327e9eb3d4d5eac4a6a57d08ebcf9",
+    "2026-11-02T22-43-11-432Z-z3-kill-and-provision.json": "3dc44109108ac22841a99495a4d77d2c35a9353d5680dec7450adcb50b80c63f",
+    "2026-11-02T22-47-12-486Z-z3-box-forensics.json": "3d00ef4de8f29d881b22d822dd93ca84532ff60f8119a52341c85b4782c95c28",
+    "2026-11-03T00-40-49-279Z-z3-cleanup.json": "55bffde7720be8c2f57a87b073a4769462b0a187106cf04bd1325fa50a439a7c"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-round-manifest\",\"operation\":\"z3-round-manifest\",\"agentId\":null,\"timestamp\":\"2026-11-03T00:40:49.280Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"round-manifest\",\"outcome\":\"ok\",\"fileCount\":7}"
+  ],
+  "writtenAt": "2026-11-03T00:40:49.281Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

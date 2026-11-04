@@ -1,0 +1,51 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "5af425c7",
+  "scheduleId": "6775ebb1",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-02T16:32:59.343Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "src/providers/quota.ts",
+    "tests/providers/quota.test.ts",
+    "tests/providers/reaper.test.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 12. Since the last GO (attempt 11): attempt 11 red fork-side — fleet submit refused exit 5 (no-headroom/list-unverified): one flaky ssh read in checkHeadroom refused the submit in <1s; fix 32faf486 (one verified-list retry inside checkHeadroom, injectable 15s settle, fail-close unchanged), 1512/1512 providers+z3, tsc 0, repo lint clean.",
+    "when": "2026-11-02T16:22:15Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-02T16:33:08.406Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"5af425c7\"}"
+  ],
+  "writtenAt": "2026-11-02T16:33:08.406Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

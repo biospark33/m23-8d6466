@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 11 — retry-once per the runbook transient protocol: round 10 leg-1's first provision hit the documented first-boot/ssh transient (3 of ~8 boxes today); a direct probe through the identical fork pipeline (gate wrapper, stripped env, stdin brief) provisioned green in 54s and was reaped (teardown ok, fleet empty) — the #914/#480 fixes are not implicated; no spend beyond the probe's ~1 box-minute)",
+  "when": "2026-10-26T21:39:50Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

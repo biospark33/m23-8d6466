@@ -1,0 +1,7 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 17. Since the last GO (attempt 16): attempt 16 red at the park leg — the fleet observe chain reached teardown (record 81e100 closed 21:32:17, approval pausing/observe-chain) then reverify refused no-host-plan (54ms): the operator checkout lacked .factory/pipeline.json (gitignored operator config, existed in Sep, deleted since). Fixes pushed to dev b2e7dfbf: 1b5a124e reverify ceilings 30→45 min (HOST_PLAN_BUDGET_MS + DEFAULT_WALL_CLOCK_MS, loader=wall invariant), b2e7dfbf park bound 900s→3600s + observe tails 400→2000/1200 + full tails in evidence payload. Operator config created and validated offline via resolveHostPlan probe: .factory/pipeline.json → .factory/qds-factory.json (bun test 600s + typecheck 120s + lint 30s, budget 2.4M ≤ 2.7M ceiling). Gates: tsc 0, biome repo-wide 0, tests/reverify 100/100, tests/z3 169/169. Substrate sweep green (0 boxes, no locks, hindsight healthy, ledger 13 SKIPs, token fresh, fork daemon healthy). One transient: exe.dev ssh gateway refused 21:40-22:0xZ, recovered.",
+  "when": "2026-11-02T22:23:51Z",
+  "spendApproved": { "worstCaseUsd": 5.25 },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": ["scripts/z3/leg-drivers.ts","scripts/z3/live-round-wiring.ts"]
+}

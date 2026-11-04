@@ -1,0 +1,9 @@
+{
+  "who": "steve (operator authorization given in chat 2026-10-26 ~15:00 EDT, transcribed verbatim by the agent — decision, spend envelope, and fire order are the operator's)",
+  "who_simpl": "steve",
+  "when": "2026-10-26T15:48:47Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "cc91aac7737084be0abec5e278f8e48afc2ca3b0"
+}

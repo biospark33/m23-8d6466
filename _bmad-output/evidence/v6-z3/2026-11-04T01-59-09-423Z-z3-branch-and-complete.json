@@ -1,0 +1,66 @@
+{
+  "leg": "branch-and-complete",
+  "origin": "scripts/z3/leg-drivers.ts driveBranchAndComplete",
+  "protocolRunId": "f4178ff0",
+  "runId": "qds-20261104-6d5636",
+  "runStatus": "completed",
+  "factoryResults": [
+    {
+      "runId": "qds-20261104-2936ae",
+      "status": "completed"
+    },
+    {
+      "runId": "qds-20261104-11ce10",
+      "status": "completed"
+    },
+    {
+      "runId": "qds-20261104-1a0c31",
+      "status": "completed"
+    },
+    {
+      "runId": "qds-20261104-6d5636",
+      "status": "approved"
+    }
+  ],
+  "verdictStatus": "approved",
+  "branchTaken": {
+    "stepId": "z3-branch",
+    "caseId": "approved",
+    "summary": "Branch \"Z3 decision branch\" selected case approved."
+  },
+  "completeStepRan": true,
+  "eventTypes": [
+    "created",
+    "step_started",
+    "step_waiting",
+    "step_completed",
+    "step_started",
+    "step_waiting",
+    "step_completed",
+    "step_started",
+    "step_waiting",
+    "step_completed",
+    "step_started",
+    "step_waiting",
+    "step_completed",
+    "step_completed",
+    "step_completed",
+    "step_completed",
+    "step_completed",
+    "step_started",
+    "branch_taken",
+    "step_completed",
+    "step_started",
+    "step_completed",
+    "completed"
+  ],
+  "autoMerge": false,
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-branch-and-complete\",\"operation\":\"z3-branch-and-complete\",\"agentId\":null,\"timestamp\":\"2026-11-04T01:59:09.423Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"branch-and-complete\",\"outcome\":\"ok\",\"runId\":\"qds-20261104-6d5636\",\"protocolRunId\":\"f4178ff0\"}"
+  ],
+  "writtenAt": "2026-11-04T01:59:09.423Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

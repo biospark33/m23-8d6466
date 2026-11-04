@@ -1,0 +1,71 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "3d411b7d",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "3d411b7d"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "3d411b7d"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [
+    {
+      "protocolRunId": "3d411b7d",
+      "cancelled": true,
+      "fleetCancelled": [
+        "qds-20261103-bc4b03"
+      ],
+      "inFlightRequestIds": []
+    }
+  ],
+  "runIds": [
+    "qds-20261103-f2a537",
+    "qds-20261103-876da3",
+    "qds-20261103-bc4b03"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261103-f2a537",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"2c7e8fdc-a5fa-49cc-8c29-122e1d4c0381\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"qds-20261103-f2a537\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261103-f2a537 hop run-box.teardown\"}\n{\"requestId\":\"4d4fbc46-1723-4193-bbfd-fea7ecd5423a\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-03T01:10:14.603Z\",\"duration\":1067,\"durationMs\":1067,\"status\":\"ok\",\"runId\":\"qds-20261103-f2a537\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261103-876da3",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"f1aa2051-0e46-448b-bca8-71f548bb4be0\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"qds-20261103-876da3\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261103-876da3 hop run-box.teardown\"}\n{\"requestId\":\"81973bee-1d1d-4c58-a415-3acdb1201e53\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-03T01:10:14.621Z\",\"duration\":1085,\"durationMs\":1085,\"status\":\"ok\",\"runId\":\"qds-20261103-876da3\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261103-bc4b03",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"5379800e-00ea-4ea1-ba33-0e2a6f6aeb35\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"qds-20261103-bc4b03\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261103-bc4b03 hop run-box.teardown\"}\n{\"requestId\":\"e70a55fe-248a-4376-9830-2a491e091bd6\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-03T01:10:14.668Z\",\"duration\":1132,\"durationMs\":1132,\"status\":\"ok\",\"runId\":\"qds-20261103-bc4b03\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    }
+  ],
+  "leftoverDestroy": [],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [],
+  "unattributedFreshBoxes": [],
+  "problems": [],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-11-03T01:10:18.059Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"ok\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-11-03T01:10:18.059Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

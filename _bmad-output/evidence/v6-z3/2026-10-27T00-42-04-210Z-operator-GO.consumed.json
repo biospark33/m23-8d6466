@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 15 — round 14 falsified the open-close heal (WAL recovery runs on first READ at prepare, not on open; the stack died at prepare with the heal open succeeding silently); #482 amended again (7642b2ab): the heal is now a real wal_checkpoint(TRUNCATE) on a read-write handle; fix stack proven through redrive since round 12, remaining unknowns are the post-redrive tail",
+  "when": "2026-10-27T00:41:29Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

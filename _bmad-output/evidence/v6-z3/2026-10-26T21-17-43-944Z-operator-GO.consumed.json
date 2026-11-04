@@ -1,0 +1,8 @@
+{
+  "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 10 — re-fire after rounds 8-9 substrate refusals, both zero-spend: 8 arm refusal = base compose DATA_DIR drift (pinned in qa-f3 override); 9 the fork scheduler never fired = the new image's instrumentation died on the stored-text keyring (rows sealed kid devlocal) — fixed by including docker-compose.local.yml (the published dev keyring overlay) in the recreate; fixes under test unchanged: #914 202ebd686 + #480 6b522fe0)",
+  "when": "2026-10-26T21:16:55Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

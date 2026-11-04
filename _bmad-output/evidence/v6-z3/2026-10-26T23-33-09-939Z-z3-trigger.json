@@ -1,0 +1,46 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "fb9b7a08",
+  "scheduleId": "1ac690c9",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-10-26T23:33:02.747Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 12 — the complete fix stack: swarmclaw#914 (template reorder, merged 202ebd686) + #480 (host closure, merged 6b522fe0) + #481 (observe ordering, merged 07e3490e); rounds 8-11 reds were all substrate/ordering discoveries with the fixes themselves proven live by round 11's leg 1; driver runs from merged dev @ 07e3490e)",
+    "when": "2026-10-26T23:22:25Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-10-26T23:33:09.939Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"fb9b7a08\"}"
+  ],
+  "writtenAt": "2026-10-26T23:33:09.939Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

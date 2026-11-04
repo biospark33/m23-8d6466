@@ -1,0 +1,12 @@
+{
+  "who": "Steve (biospark33), chat authorization 2026-11-01 'billing fixed. LFG' on the round-19 handoff \u2014 Z3 live exit round 19 (scope-derivation amendment, factory #483 + swarmclaw #918). What changed since round 18: fork dev d8adbd2d5 (reviewSet required on Z3ExitRoundConfig, carried in leg instructions + wire config), fork image rebuilt solstice-swarmclaw:combined-d8adbd2 (5/5 checklist green 2026-10-27), exe.dev image re-pinned through the billing outage (OPENRIG caret-float re-pin be94e66d + adoption 4fd79684, publish run 41374771831 publish/attest/attested green), memgate token re-minted. Review set = the adoption commit's own diff.",
+  "when": "2026-11-02T02:07:37Z",
+  "spendApproved": {
+    "worstCaseUsd": 5.25
+  },
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f",
+  "reviewSet": [
+    "src/providers/exedev/driver.ts",
+    "tests/providers/exedev/image-contract.test.ts"
+  ]
+}

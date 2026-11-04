@@ -1,0 +1,50 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "3d411b7d",
+  "scheduleId": "318893d2",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-11-03T00:56:01.304Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "reviewSet": [
+    "scripts/z3/leg-drivers.ts",
+    "scripts/z3/live-round-wiring.ts"
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "Steve (biospark33), chat authorization 2026-11-01/02 — Z3 live exit round 19 attempt 18. Since the last GO (attempt 17): attempt 17 red on the round's own timeout (8210s) after a LOCAL network outage stalled the round at 22:47Z (leg 2 box-forensics was the last progress; ssh 'Undefined error: 0' + DNS ENOTFOUND openrouter.ai through the cleanup at 00:40Z) — environmental, no product defect; the deadline + cleanup-attempt behavior worked as designed. Hand-clean applied: box qds-20261102-434a25 destroyed, stale dead-pid run lock (pid 77271) cleared per remediation, record closed exit 0 via fleet cancel --driver exedev, leaked key sbx-qds-20261102-434a25 (usage 0, limit $1) revoked, final listing [] — no sbx-qds keys remain; fork protocol run faabe423 already fired (cancel reports cancelled:false, nothing outstanding). Fresh 24h memgate token minted (mgat-d7a635229f3543032affc350) replacing the ~2h-remaining one. Sweep green: 0 boxes, no locks, ledger 13 SKIPs, fork daemon healthy. No code changes since b2e7dfbf. OpenRouter credits: 1597 total / 1566.12 used.",
+    "when": "2026-11-03T00:45:39Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-11-03T00:56:06.436Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"3d411b7d\"}"
+  ],
+  "writtenAt": "2026-11-03T00:56:06.436Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,68 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "dfd394da",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "dfd394da"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "dfd394da"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [
+    {
+      "protocolRunId": "dfd394da",
+      "cancelled": false,
+      "fleetCancelled": [],
+      "inFlightRequestIds": []
+    }
+  ],
+  "runIds": [
+    "qds-20261102-09cfeb"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261102-09cfeb",
+      "exitCode": 6,
+      "stderrTail": "-456d-8abd-70f83d6bc358\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T02:26:40.612Z\",\"duration\":2553,\"durationMs\":2553,\"status\":\"error\",\"runId\":\"qds-20261102-09cfeb\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}\n!! lock-held: /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-09cfeb.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-09cfeb.lock only once you know the teardown state\n"
+    }
+  ],
+  "leftoverDestroy": [
+    {
+      "runId": "qds-20261102-09cfeb",
+      "exitCode": 5,
+      "stderrTail": "age\":\"another fleet invocation holds /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-09cfeb.lock (pid 68779 is not running, held 5s)\",\"remediation\":\"no live process holds it (pid 68779 is not running, held 5s) — rm /Users/steve/QDS-Factory/.sandbox/runs/qds-20261102-09cfeb.lock to clear the stale lock, then re-run\"}\n{\"requestId\":\"354c9f29-e08a-4f3b-854f-1bb5d2bd3202\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T02:26:42.777Z\",\"duration\":4,\"durationMs\":4,\"status\":\"error\",\"runId\":\"qds-20261102-09cfeb\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}\n"
+    }
+  ],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [
+    "qds-20261102-09cfeb"
+  ],
+  "unattributedFreshBoxes": [],
+  "problems": [
+    "fleet cancel qds-20261102-09cfeb failed (exit 6)",
+    "boxes outlived the round: qds-20261102-09cfeb"
+  ],
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "fleet cancel qds-20261102-09cfeb failed (exit 6)\nboxes outlived the round: qds-20261102-09cfeb",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-11-02T02:26:45.661Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"failed\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-11-02T02:26:45.661Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

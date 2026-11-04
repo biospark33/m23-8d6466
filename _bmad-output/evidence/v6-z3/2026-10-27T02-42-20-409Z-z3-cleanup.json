@@ -1,0 +1,77 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "2d29106f",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "2d29106f"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "2d29106f"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [
+    {
+      "protocolRunId": "2d29106f",
+      "cancelled": true,
+      "fleetCancelled": [
+        "qds-20261027-93459c"
+      ],
+      "inFlightRequestIds": []
+    }
+  ],
+  "runIds": [
+    "qds-20261027-71aa35",
+    "qds-20261027-67f9b3",
+    "qds-20261027-6ab872",
+    "qds-20261027-93459c"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261027-71aa35",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"879dfae8-219b-4810-9b68-eb53f9670c61\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261027-71aa35\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-71aa35 hop run-box.teardown\"}\n{\"requestId\":\"b8b2b5f0-8468-4b5b-9dc6-df2398d1b892\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T02:42:16.793Z\",\"duration\":1208,\"durationMs\":1208,\"status\":\"ok\",\"runId\":\"qds-20261027-71aa35\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261027-67f9b3",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"59b710c0-ecff-4673-a0a4-cc8c2b8fcae0\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261027-67f9b3\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-67f9b3 hop run-box.teardown\"}\n{\"requestId\":\"c0414221-2f02-4090-a4dc-9d122c6fca7c\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T02:42:16.796Z\",\"duration\":1211,\"durationMs\":1211,\"status\":\"ok\",\"runId\":\"qds-20261027-67f9b3\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261027-6ab872",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"c7c0894d-7b10-4f27-b846-4b070534a36e\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261027-6ab872\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-6ab872 hop run-box.teardown\"}\n{\"requestId\":\"e3d7eddd-e71b-4170-961a-64c059191a9a\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T02:42:16.792Z\",\"duration\":1206,\"durationMs\":1206,\"status\":\"ok\",\"runId\":\"qds-20261027-6ab872\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261027-93459c",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"03a7ea9f-8a1f-48e8-acfe-b98d2f87b0c8\",\"durationMs\":0,\"status\":\"ok\",\"runId\":\"qds-20261027-93459c\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261027-93459c hop run-box.teardown\"}\n{\"requestId\":\"6f208802-9feb-41d4-816b-8fdb803ddab9\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-10-27T02:42:16.799Z\",\"duration\":1214,\"durationMs\":1214,\"status\":\"ok\",\"runId\":\"qds-20261027-93459c\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    }
+  ],
+  "leftoverDestroy": [],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [],
+  "unattributedFreshBoxes": [],
+  "problems": [],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-10-27T02:42:20.409Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"ok\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-10-27T02:42:20.409Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}

@@ -1,0 +1,16 @@
+{
+  "leg": "round-manifest",
+  "origin": "scripts/z3/leg-drivers.ts writeRoundManifest",
+  "files": {
+    "2026-11-02T15-52-09-662Z-z3-trigger.json": "01dc336092e10f0061f46887eb6d1383c59a320a4f714bd4e2be9761d3a7b4f1",
+    "2026-11-02T15-52-30-334Z-z3-cleanup.json": "641c961c994e538919315f45431c43bc575672bfe46df67d271677f76de4905e"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-round-manifest\",\"operation\":\"z3-round-manifest\",\"agentId\":null,\"timestamp\":\"2026-11-02T15:52:30.335Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"round-manifest\",\"outcome\":\"ok\",\"fileCount\":2}"
+  ],
+  "writtenAt": "2026-11-02T15:52:30.335Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

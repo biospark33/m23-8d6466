@@ -1,0 +1,71 @@
+{
+  "leg": "cleanup",
+  "origin": "scripts/z3/leg-drivers.ts runCleanup",
+  "failurePath": true,
+  "protocolRunId": "e8b6cd9a",
+  "scheduleDisarm": {
+    "disarmed": false,
+    "firedRunIds": [
+      "e8b6cd9a"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "scheduleResidue": {
+    "disarmed": false,
+    "firedRunIds": [
+      "e8b6cd9a"
+    ],
+    "scheduleStatus": "completed"
+  },
+  "protocolCancel": [
+    {
+      "protocolRunId": "e8b6cd9a",
+      "cancelled": true,
+      "fleetCancelled": [],
+      "inFlightRequestIds": [
+        "57c111f3-481f-4f6c-9641-268650c00919"
+      ]
+    }
+  ],
+  "runIds": [
+    "qds-20261102-5fb459",
+    "qds-20261102-23d092",
+    "qds-20261102-a19a86"
+  ],
+  "boxDestroy": [
+    {
+      "runId": "qds-20261102-5fb459",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"0485efdb-d98e-4f56-be80-27e88ed4e389\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261102-5fb459\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-5fb459 hop run-box.teardown\"}\n{\"requestId\":\"ea03c280-d55a-4935-a987-4dd5c1c973cf\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:37:39.204Z\",\"duration\":1152,\"durationMs\":1152,\"status\":\"ok\",\"runId\":\"qds-20261102-5fb459\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-23d092",
+      "exitCode": 0,
+      "stderrTail": "requestId\":\"992a8b24-9bfc-47d5-a69f-f5117561ba4d\",\"durationMs\":1,\"status\":\"ok\",\"runId\":\"qds-20261102-23d092\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"hop\":\"run-box\",\"event\":\"teardown\",\"subjectKind\":\"box\",\"outcome\":\"duplicate\",\"message\":\"audit link duplicate: run qds-20261102-23d092 hop run-box.teardown\"}\n{\"requestId\":\"8803221d-343c-4842-87d6-9a23e481bf8e\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:37:39.213Z\",\"duration\":1160,\"durationMs\":1160,\"status\":\"ok\",\"runId\":\"qds-20261102-23d092\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    },
+    {
+      "runId": "qds-20261102-a19a86",
+      "exitCode": 0,
+      "stderrTail": "run qds-20261102-a19a86 hop run-box.teardown\"}\n{\"requestId\":\"41e64df9-768b-491c-bf4e-5520aca96216\",\"operation\":\"teardown.close\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:37:45.056Z\",\"runId\":\"qds-20261102-a19a86\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":7}\n{\"requestId\":\"41e64df9-768b-491c-bf4e-5520aca96216\",\"operation\":\"fleet.cancel\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:37:45.064Z\",\"duration\":7012,\"durationMs\":7012,\"status\":\"ok\",\"runId\":\"qds-20261102-a19a86\",\"verb\":\"cancel\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}\n"
+    }
+  ],
+  "leftoverDestroy": [],
+  "revokeVerify": [
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "leftoverBoxes": [],
+  "unattributedFreshBoxes": [],
+  "problems": [],
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-cleanup\",\"operation\":\"z3-cleanup\",\"agentId\":null,\"timestamp\":\"2026-11-02T17:37:49.914Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"cleanup\",\"outcome\":\"ok\",\"failurePath\":true}"
+  ],
+  "writtenAt": "2026-11-02T17:37:49.914Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

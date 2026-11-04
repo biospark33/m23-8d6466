@@ -1,0 +1,51 @@
+{
+  "leg": "priming-recall",
+  "origin": "scripts/z3/leg-drivers.ts drivePrimingRecall",
+  "runId": "qds-20261102-81e100",
+  "requestId": "d2374dde-09ca-401b-bb8a-74cc8fdb9d29",
+  "directive": "kg_context",
+  "recalledDocumentIds": [
+    "qds-20261102-deb162",
+    "qds-20261102-64df0c",
+    "qds-20261102-d5ee0f",
+    "qds-20261102-070a95",
+    "qds-20261102-49c9b1",
+    "qds-20261102-889baf",
+    "qds-20261102-e9a312",
+    "qds-20261102-43d867",
+    "qds-20261102-5973ea",
+    "qds-20261102-8a255e",
+    "qds-20261102-179bf3",
+    "qds-20261102-f6ff02",
+    "qds-20261102-6b76d2",
+    "qds-20261102-c1b4ae",
+    "qds-20261102-probecorr",
+    "qds-20261102-b19a78"
+  ],
+  "retainedDocumentIds": [
+    "qds-20261102-64df0c",
+    "qds-20261102-d5ee0f",
+    "qds-20261102-ad89f2",
+    "qds-20261102-c1bf30"
+  ],
+  "citedRetained": [
+    "qds-20261102-64df0c",
+    "qds-20261102-d5ee0f"
+  ],
+  "citedLenses": [
+    "correctness",
+    "secret-hygiene"
+  ],
+  "gatewayAssertion": {
+    "origin": "http://127.0.0.1:18890",
+    "agentTokenId": "mgat-729607348622660f7f78b452"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-priming-recall\",\"operation\":\"z3-priming-recall\",\"agentId\":null,\"timestamp\":\"2026-11-02T21:32:00.362Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"priming-recall\",\"outcome\":\"ok\",\"runId\":\"qds-20261102-81e100\"}"
+  ],
+  "writtenAt": "2026-11-02T21:32:00.362Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

@@ -1,0 +1,65 @@
+{
+  "leg": "priming-recall",
+  "origin": "scripts/z3/leg-drivers.ts drivePrimingRecall",
+  "runId": "qds-20261103-435a17",
+  "requestId": "40bece27-547a-42bb-a3f7-12ce057cd032",
+  "directive": "kg_context",
+  "recalledDocumentIds": [
+    "qds-20261102-58a83a",
+    "qds-20261103-bfdb37",
+    "qds-20261102-e0cbd5",
+    "qds-20261103-eebbfe",
+    "qds-20261102-147569",
+    "qds-20261103-7dbc46",
+    "qds-20261102-d5ee0f",
+    "qds-20261102-deb162",
+    "qds-20261103-c4ce7b",
+    "qds-20261103-ae9cc0",
+    "qds-20261102-c1bf30",
+    "qds-20261102-5973ea",
+    "qds-20261102-6b76d2",
+    "qds-20261102-9a7da4",
+    "qds-20261103-00e0bf",
+    "qds-20261102-8a255e"
+  ],
+  "retainedDocumentIds": [
+    "qds-20261103-c05c54",
+    "qds-20261103-b57bd1",
+    "qds-20261103-7dbc46",
+    "qds-20261103-c628d9",
+    "qds-20261103-00e0bf",
+    "qds-20261103-c4ce7b",
+    "qds-20261103-bfdb37",
+    "qds-20261103-436671",
+    "qds-20261103-0f673a",
+    "qds-20261103-a39083",
+    "qds-20261103-517538",
+    "qds-20261103-aaf0a1",
+    "qds-20261103-ae9cc0",
+    "qds-20261103-4170a1"
+  ],
+  "citedRetained": [
+    "qds-20261103-bfdb37",
+    "qds-20261103-7dbc46",
+    "qds-20261103-c4ce7b",
+    "qds-20261103-ae9cc0",
+    "qds-20261103-00e0bf"
+  ],
+  "citedLenses": [
+    "correctness",
+    "secret-hygiene",
+    "diff-scope"
+  ],
+  "gatewayAssertion": {
+    "origin": "http://127.0.0.1:18890",
+    "agentTokenId": "mgat-d7a635229f3543032affc350"
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-priming-recall\",\"operation\":\"z3-priming-recall\",\"agentId\":null,\"timestamp\":\"2026-11-03T05:20:47.345Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"priming-recall\",\"outcome\":\"ok\",\"runId\":\"qds-20261103-435a17\"}"
+  ],
+  "writtenAt": "2026-11-03T05:20:47.345Z",
+  "swarmclawForkRev": "d8adbd2d5ef85f3d98119d1c2ab6e7d5925e426f"
+}

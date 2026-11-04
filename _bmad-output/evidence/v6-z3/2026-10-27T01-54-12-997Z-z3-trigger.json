@@ -1,0 +1,46 @@
+{
+  "leg": "trigger",
+  "origin": "scripts/z3/leg-drivers.ts driveTrigger",
+  "protocolRunId": "49274361",
+  "scheduleId": "c1b7eccf",
+  "templateId": "z3_exit_round",
+  "firedAt": "2026-10-27T01:54:12.507Z",
+  "stepCaps": [
+    {
+      "stepId": "qa-leg-correctness",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-secret-hygiene",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "qa-leg-diff-scope",
+      "groupCapUsd": 1
+    },
+    {
+      "stepId": "z3-code-run",
+      "groupCapUsd": 2
+    }
+  ],
+  "forkCapsUsd": 5,
+  "forkRevObserved": null,
+  "forkRevVerification": "unverifiable-from-image",
+  "autoMergePolicy": {
+    "state": "absent"
+  },
+  "worstCaseSpendUsd": 5,
+  "operatorGo": {
+    "who": "steve (operator authorization via chat 2026-10-26 'LFG'; round 17 — round 16's cleanup red was the fork z3 CLI dropping pipe tails beyond 64 KiB: it process.exit()s an async stdout write, and tonight's state JSON crossed 66,537 bytes with 11 runs stored; root-caused live (file redirect full at 66,537, pipe cut at 65,536, writeSync EAGAINs on the non-blocking pipe) and fixed in swarmclaw PR #916, deployed into the container in place via docker cp (image rebuild pending, byte-identical to the branch); the flush fix is byte-proven in-container; round 16's substrate was otherwise green — legs 1-3 closed+retained through the new grace",
+    "when": "2026-10-27T01:44:18Z",
+    "approvedUsd": 5.25
+  },
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "",
+  "observability": [
+    "{\"requestId\":\"z3-trigger\",\"operation\":\"z3-trigger\",\"agentId\":null,\"timestamp\":\"2026-10-27T01:54:12.997Z\",\"duration\":0,\"status\":\"ok\",\"event\":\"z3-leg\",\"leg\":\"trigger\",\"outcome\":\"ok\",\"protocolRunId\":\"49274361\"}"
+  ],
+  "writtenAt": "2026-10-27T01:54:12.997Z",
+  "swarmclawForkRev": "202ebd686f2d50d582bdf4f6a578ac67e2a9a929"
+}
