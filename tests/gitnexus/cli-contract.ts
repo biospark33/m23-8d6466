@@ -421,7 +421,12 @@ export const CypherResultStrict = z
 /** detect-changes emits TEXT, not JSON (no --json flag in 1.6.9) — the
  * contract is its two headline forms. */
 export const DETECT_CHANGES_TEXT_RE =
-  /^(No changes detected\.|Changes: \d+ files?, \d+ symbols?\n)/;
+  // Third form (2026-11-04, CLI 1.6.12): the dirty-tree headline — the suite
+  // itself rewrites tracked runtime artifacts mid-run, so the previously
+  // assumed clean tree does not exist during a full `bun test`. Observed live
+  // twice (both evidence-file-only diffs), then adopted here; not drift —
+  // an unhandled output form within the pinned version.
+  /^(No changes detected\.|Changes: \d+ files?, \d+ symbols?\n|Diff touched \d+ file\(s\) but no indexed symbols overlap those hunks [—-] not a clean tree\.\n?)/;
 
 // ---------------------------------------------------------------------------
 // LENIENT tier — graph-queries.test.ts functional assertions. Passthrough:
