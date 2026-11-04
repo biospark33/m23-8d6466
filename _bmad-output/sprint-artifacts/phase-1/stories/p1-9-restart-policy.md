@@ -1,5 +1,7 @@
 # P1.9: Restart Policy (Deterministic Classify + Retry/Wall-Clock Caps)
 
+**DONE 2026-11-04 — PR #486 merged to dev (618d2e00).** Dev gates + review rounds: CodeRabbit round 1: 2 findings (lead_failure omission, caps/non-finite hardening) both real, both fixed. DoD states + Dev Agent Record below.
+
 **Story Points:** 3
 
 ## Spec Reference

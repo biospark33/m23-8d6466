@@ -1,5 +1,7 @@
 # P1.2: /qds Intake -> SwarmClaw Session + GitHub Issue Created
 
+**DONE 2026-11-04 — PR #487 merged to dev (8545dc8e).** Dev gates + review rounds: Dev self-review round: 3 findings (title cap, undrained 503, limiter doc) all applied. DoD states + Dev Agent Record below.
+
 **Story Points:** 3
 
 ## Spec Reference

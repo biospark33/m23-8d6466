@@ -50,6 +50,68 @@ policy call (§8 Q2) and remains open to the maintainer.
 
 ---
 
+## Update 2026-11-04 — evidence refresh only (no status changed, no box changed)
+
+**Why:** the board and §6/§7 still argue from a wall that no longer exists. This
+block records post-reconciliation evidence so the maintainer's policy call is
+made on the current picture. It changes nothing else.
+
+### P0.9 — OQ-4 is no longer the wall; 0.10.0 response drift is
+
+Hindsight **did boot**: dedicated instance on qds-alpha (VPS), 2026-10-04, via
+M1.1's closure legs (PR #407 dev-half, PR #410 probe fixes; evidence
+`_bmad-output/evidence/p0-9-closure/`). Leg outcomes as captured:
+
+| Leg | Outcome | Note |
+|---|---|---|
+| `hindsight-live` (raw shape probe) | **pass** (3rd run, `…-lbghxg.json`) | boot/health/digest identity + raw retain/recall bodies — the "deciding evidence" issue #408 names for the amendment |
+| `provision-and-import` | **fail** 2026-10-04 → **pass** rerun 2026-10-07 (`…-kvdvho.json`) | 3 banks + Mulch import + seed-probe on real instance |
+| `idempotency-rerun` | **pass** (`…-hddo6j.json`) | bank IDs + entry counts stable live |
+| `round-trip-via-bridge` (**DoD 9, MANDATORY**) | **fail** (`…-euvtm2.json`) | retain response failed `RetainResponseSchema` — 0.10.0 sends no `memoryId`/`bankId`/`status`/`durationMs` |
+| `negative-probes` | **fail** (`…-pisa2e.json`) | nonexistent-bank probe not refused 404 (drift); 2 probe mislabels corrected in README |
+| `auth-retired-check` | **inconclusive** | bank-profile endpoint removed in 0.10.0 → HTTP 410; proves nothing about authz |
+| `document-id-retain-twice` | **measured** | identical re-retain is a no-op (no duplicate); **changed-content update path unproven** |
+
+Classification shift vs §6: DoD 9 moves from NOT-SATISFIED/BLOCKED-on-env to
+**ran-and-failed on schema drift**; DoD 10's live half has positive evidence
+(idempotency-rerun pass) though the content-comparison recall clause is still
+unasserted; DoD 7's recall half gains M1.3's live hit-rate baseline (canary hit,
+2026-10-07) but no per-bank content assertion. The residual blocker is **one
+decision**: the measurement-gated `schemas.ts` conformance amendment (issue
+#408, C8) — adapter-in-schema via Zod `.transform()` recommended, with an OPEN
+sub-decision on `memoryId` (placeholder-in-transform vs `RoundTripOk` type
+change vs verifier-modification waiver). `hindsight-live`'s raw bodies are the
+deciding evidence; the amendment decision is operator-owned. Note also README's
+redaction note: the 2026-10-07 import file had a revoked key id scrubbed — the
+folder's "never edited after capture" rule has one sanctioned deviation.
+
+### P0.5 — the July settle is not reproducible on this host TODAY (host drift)
+
+`pi-lens` is **not installed** anywhere this session can find (checked
+`~/.pi/agent/npm/node_modules`, `~/.local/node-arm64` (exists but `bin/` empty,
+no `lib/`), `/opt/homebrew/lib/node_modules`, plus a bounded find; `pi-gitnexus-plus`
+survives, `pi-lens` does not; `~/.pi/agent/settings.json` no longer lists
+`npm:pi-lens`). Consequences measured today:
+
+- `bun scripts/pi-lens-verify.ts --strict` → **exit 2**, the §4 fatal
+  (`resolveGlobalPiLens` throws) — NOT the pre-#84 resolver defect; the resolver
+  is correct, the package is gone.
+- `gitleaks`, `trivy`, `opengrep`, `pyright`, `typescript-language-server` all
+  absent from this session's PATH — even secret-scan *detection* (opengrep),
+  live in July, is gone.
+- Repo side intact: `bun test tests/pi-lens-verify.test.ts tests/lsp-verify.test.ts`
+  → **38 pass / 2 skip / 0 fail** (the 2 skips are the live checks).
+
+The DoD 2 "satisfied" settle of 2026-07-28 is therefore host-dependent and
+currently un-reproducible without a reinstall (pi-lens 3.8.x per P1.7's pin
+line — do not re-pin to 3.8.47). Reinstall is host-changing: operator call.
+P0.5's closure legs (mode-json agent e2e, secret-scan emit-block, python-lsp
+discovery, version-pin editorial) ride issue #408's window per the closure
+plan; the version-pin editorial is the one pure-repo item and could land as a
+tiny docs-only PR independent of any window.
+
+---
+
 ## 0. TL;DR
 
 - **P0.5 is not done.** Its own evidence artifact — written by the story's own
