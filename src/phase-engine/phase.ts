@@ -22,6 +22,8 @@ import {
 } from "./journal.ts";
 import { redactSecrets } from "../../cli-anything/src/redact.ts";
 import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
+import { classifyFailure, isFailureClass, type FailureClass, type FailureSignal } from "./failure-signal.ts";
+import { evaluateRestart } from "./restart-policy.ts";
 import { PhaseAgentSchema } from "./manifest.ts";
 import {
   CANCEL_GRACE_MS,
@@ -96,6 +98,69 @@ export function assertLegibleDescription(name: string, description: string): voi
   if (defect !== null) {
     throw new PhaseConstructionError(`phase '${sanitizeForMessage(name)}': ${defect}`);
   }
+}
+
+/**
+ * P1.9 — build the failure SIGNAL a settled non-success phase hands to the
+ * restart audit, plus the explicit class the engine already knows (the
+ * precedence-classified dispatch verdict, when it falls inside the three-value
+ * FailureClass subset). Signal space and attempt-verdict space are independent
+ * taxonomies (DF5.5 amendment): an external termination keeps its engine
+ * `transient` exitStatus while the signal — an operator-ordered shutdown —
+ * classifies `logic`, because an abort signal is intent, not a blip to retry.
+ */
+function failureSignalFor(o: {
+  overflowed: boolean;
+  unsettled: boolean;
+  verdictFailed: boolean;
+  declaredStatus: ExitStatus | undefined;
+  safeName: string;
+  error: unknown;
+  durationMs: number;
+}): { signal: FailureSignal; explicitClass: FailureClass | undefined } {
+  const message = (reason: unknown, fallback: string): string =>
+    // INV-4: the audit row is a journal row — error text passes the same
+    // parent-env redactor the `error` field uses, so a secret in a body's
+    // failure message cannot reach the journal through the signal either.
+    scrubErrorText(reason instanceof Error && reason.message !== "" ? reason.message : fallback, ERROR_MESSAGE_CAP);
+  if (o.verdictFailed) {
+    return {
+      signal: {
+        type: "exit-status",
+        message: message(o.error, `phase '${o.safeName}' returned exitStatus '${o.declaredStatus ?? "unknown"}'`),
+        duration: o.durationMs,
+      },
+      explicitClass: isFailureClass(o.declaredStatus) ? o.declaredStatus : undefined,
+    };
+  }
+  if (o.overflowed) {
+    return {
+      signal: {
+        type: "timeout",
+        message: message(o.error, `phase '${o.safeName}' exceeded its attempt budget`),
+        duration: o.durationMs,
+      },
+      explicitClass: undefined,
+    };
+  }
+  if (o.unsettled) {
+    return {
+      signal: {
+        type: "cancel-timeout",
+        message: message(o.error, `phase '${o.safeName}' did not cancel within the grace window`),
+        duration: o.durationMs,
+      },
+      explicitClass: undefined,
+    };
+  }
+  return {
+    signal: {
+      type: "exception",
+      message: message(o.error, `phase '${o.safeName}' failed`),
+      duration: o.durationMs,
+    },
+    explicitClass: undefined,
+  };
 }
 
 export interface RunOptions {
@@ -372,6 +437,44 @@ export class Run {
       updatedAt: new Date().toISOString(),
       durationMs: Math.round(bodyMs),
       ...(error === undefined ? {} : { error: toErrorShape(error) }),
+      // P1.9 restart audit: classify the failure SIGNAL at settle (cross-run
+      // taxonomy — a wall-clock abort is a `timeout` signal and classifies
+      // transient, even though this engine's attempt verdict stays `overflow`;
+      // the DF5.5 amendment keeps the two taxonomies independent). The
+      // precedence-classified dispatch verdict wins as the explicit class when
+      // the body declared one; `lead_failure` writes no audit row here at all
+      // (the DF6.1b escalation lane owns it).
+      ...(clean
+        ? {}
+        : (() => {
+            const { signal, explicitClass } = failureSignalFor({
+              overflowed,
+              unsettled: outcome === "unsettled",
+              verdictFailed,
+              declaredStatus,
+              safeName,
+              error,
+              durationMs: Math.round(bodyMs),
+            });
+            // Omit ONLY when the settled verdict itself is lead_failure —
+            // i.e. the body's declared verdict survived the precedence path
+            // (verdictFailed). A body that declares lead_failure but settles
+            // through an abort (overflow/transient/logic) still owes its
+            // audit: the settled verdict is what the restart policy reads.
+            return verdictFailed && declaredStatus === "lead_failure"
+              ? {}
+              : {
+                  restart: {
+                    class: explicitClass ?? classifyFailure(signal),
+                    signal,
+                    decision: evaluateRestart(signal, {
+                      class: explicitClass,
+                      retriesUsed: 0,
+                      wallClockMs: Math.round(bodyMs),
+                    }),
+                  },
+                };
+          })()),
       ...(metrics.malformedLines !== undefined &&
         Number.isFinite(metrics.malformedLines) &&
         metrics.malformedLines >= 0 &&

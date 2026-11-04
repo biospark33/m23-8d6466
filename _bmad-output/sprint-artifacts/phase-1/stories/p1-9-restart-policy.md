@@ -64,12 +64,36 @@ When a Pi agent step or protocol phase fails during a run, SwarmClaw classifies 
 
 ## Definition of Done
 
-- [ ] **Impl:** Deterministic `classify(signal)` pure function mapping `FailureSignal` → `FailureClass`
-- [ ] **Impl:** `transient` → retry with exponential backoff (2s initial, 2x growth, 60s max) within caps
-- [ ] **Impl:** `overflow` → retry with reduced scope within caps
-- [ ] **Impl:** `logic` → no retry, step halts with `status: 'failed'`
-- [ ] **Contract:** `FailureSignal`, `FailureClass`, `RestartDecision`, `RestartCaps` schemas defined and exported
-- [ ] **Integration:** Failure classifier integrated into phase executor; classification and cap events logged to Hindsight
-- [ ] **Security:** Caps enforced atomically; classification is pure; audit trail persisted
-- [ ] **Test (unit):** Classification determinism (same signal → same class); transient retry backoff sequence; cap enforcement at 8 retries; cap enforcement at 1h wall-clock; logic halt; overflow retry with scope reduction
-- [ ] **Test (e2e demo — MANDATORY):** Protocol run where a step fails transient 3 times then succeeds on retry 4, with classification logged; separate run where logic error halts immediately; separate run where cap is exceeded and step halts with `reason: 'cap-exceeded'`
+Reconciled 2026-11-04 (dev, PR branch `feature/p1-9`). Legend follows P0.11's `[x]` / `[~]` / `[ ]`
+convention; the spec's `src/protocol/*` paths never existed — the DF5.5 amendment re-homes the
+cross-run restart classification in the phase engine, and the integration points below reflect the
+CURRENT architecture (DF1.10 engine, DF1.3 in-phase retries, DF6.1b escalation lane).
+
+- [x] **Impl:** Deterministic `classify(signal)` pure function mapping `FailureSignal` → `FailureClass`
+      *`src/phase-engine/failure-signal.ts` — `classifyFailure`, pure, fail-closed to `logic`; rule precedence documented in-file (token arithmetic beats label → timeout → token-overflow → http-status code table → logic). INV-RESTART-2 asserted by the 100-iteration determinism test (`tests/phase-engine/restart-policy.test.ts`).*
+- [x] **Impl:** `transient` → retry with exponential backoff (2s initial, 2x growth, 60s max) within caps
+      *`src/phase-engine/restart-policy.ts` — `evaluateRestart` (2s × 2^retriesUsed, saturating at `MAX_BACKOFF_MS` = 60s) + `runWithRestart` executor (injectable `now`/`sleep` seams). Backoff sequence asserted: 2000/4000/8000/16000/32000/60000/….*
+- [~] **Impl:** `overflow` → retry with reduced scope within caps
+      *Decision carries `reducedScope: true` and immediate retry (no backoff); `runWithRestart` passes `attempt`/`reducedScope` to the step so the step reduces its own scope. The scope reduction itself is the step's obligation — the policy enforces the retry shape, not the step's internals.*
+- [x] **Impl:** `logic` → no retry, step halts with `status: 'failed'`
+      *`evaluateRestart` returns `shouldRetry: false`; `runWithRestart` rethrows the original error after exactly one attempt (asserted: calls=1, no sleeps).*
+- [x] **Contract:** `FailureSignal`, `FailureClass`, `RestartDecision`, `RestartCaps` schemas defined and exported
+      *`FailureSignalSchema` / `FailureClass` (`failure-signal.ts`), `RestartDecisionSchema` / `RestartCapsSchema` / `DEFAULT_RESTART_CAPS` (`restart-policy.ts`), all re-exported through `src/phase-engine/index.ts`.*
+- [~] **Integration:** Failure classifier integrated into phase executor; classification and cap events logged to Hindsight
+      *Phase executor: DONE — every settled non-success phase writes `PhaseRecord.restart` {class, signal, decision} to the journal (lead_failure excluded; INV-4 honoured via `scrubErrorText`). Hindsight dev-meta logging: NOT WIRED — the classification is durable in the in-box journal; carrying it to the `{repo}-dev-meta` bank needs a live Hindsight and rides the M1.1/#408 operator window (the retain seam is `src/fleet/retain-best-effort.ts` at harvest).*
+- [x] **Security:** Caps enforced atomically; classification is pure; audit trail persisted
+      *INV-RESTART-1: caps evaluated inside `evaluateRestart` before any retry, from caller-observed wall clock; executor throws `CapExceededError` and emits `restart_cap_exceeded` rather than a 9th retry. INV-RESTART-2: `classifyFailure` has no clock, randomness, or state. INV-RESTART-3: journal rows carry runId + phaseId + full audit; issueId rides DF1.8's trace-session correlation.*
+- [x] **Test (unit):** Classification determinism (same signal → same class); transient retry backoff sequence; cap enforcement at 8 retries; cap enforcement at 1h wall-clock; logic halt; overflow retry with scope reduction
+      *`tests/phase-engine/restart-policy.test.ts` — 25 tests green (determinism ×100; backoff sequence; 8-retry cap; wall-clock cap via fake clock; logic halt; overflow reducedScope; custom caps; strictObject schema rejection).*
+- [~] **Test (e2e demo — MANDATORY):** Protocol run where a step fails transient 3 times then succeeds on retry 4, with classification logged; separate run where logic error halts immediately; separate run where cap is exceeded and step halts with `reason: 'cap-exceeded'`
+      *All three demos green at mock level (`runWithRestart` integration tests + phase-settle journal audit tests; the "hang" demo exercises the engine's real timer abort → `restart.class: transient` journal row). The LIVE leg — the same three demos with the cap-breach classification retained to the Hindsight dev-meta bank — rides the M1.1/#408 operator window, same as the P0.9 live legs.*
+
+## Dev Agent Record
+
+**Status: implemented, PR open — story row stays `draft` until steve flips it after merge.**
+
+- **Branch:** `feature/p1-9` (from dev). **Files:** `src/phase-engine/failure-signal.ts` (new), `src/phase-engine/restart-policy.ts` (new), `src/phase-engine/phase.ts` (settle integration), `src/phase-engine/types.ts` (additive optional `PhaseRecord.restart`), `src/phase-engine/index.ts` (additive exports), `tests/phase-engine/restart-policy.test.ts` (new, 25 tests).
+- **Gates:** `bunx tsc --noEmit` 0 errors; biome check clean on all touched files; `bun test tests/phase-engine/` 1140 pass / 0 fail (includes the 25 new); full repo suite run before PR.
+- **Two findings fixed during TDD:** (1) first draft passed raw error text into `restart.signal.message` — INV-4 journal-leak, caught by the existing phase-lifecycle secret test, fixed via `scrubErrorText`; (2) `err` scope bug in `runWithRestart`'s rethrow, caught by own tests.
+- **Self-review round (2026-11-04, 4 findings, none HIGH, all applied):** (1) MED — `runWithRestart` derived `reducedScope` from the attempt ordinal, so transient retries ran scope-reduced; now threads the last decision's flag. (2) LOW — a backoff granted near the wall-clock cap could start the next attempt past 1h; the decision now refuses when `wallClockRemainingMs <= nextBackoffMs`. (3) LOW — `CapExceededError` swallowed the last attempt's original error; now carried as `cause`. (4) LOW — `evaluateRestart` clamps hostile numerics (negative/fractional retriesUsed, negative wallClockMs) and the result re-validates against `RestartDecisionSchema`. Post-fix: story suite 29/29, phase-engine 1144/1144, tsc + biome clean.
+- **Amendment note:** the story's spec paths (`src/protocol/*`, `src/models/*`) never existed in this repo; integration points follow the DF5.5 amendment on the current architecture. In-phase retry stays DF1.3's; cross-run RETRY EXECUTION at the dispatcher stays open for whichever driver story consumes `runWithRestart` (the executor is the seam).
