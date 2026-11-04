@@ -180,6 +180,11 @@ describe("reverify — the e2e slice (MANDATORY demo)", () => {
       expect(report.testResults.failed).toBe(1);
       expect(report.discrepancies).toContain("testResults.failed: claimed 0, host 1");
       expect(approval).toBeNull();
+      // Attempt 29's red class: 8100 pass / 1 fail and the 16 kB TAIL window
+      // was 100% atexit fixture noise — the (fail) line sat above it. The
+      // capture now EXTRACTS the (fail) lines from the full body.
+      const testsNote = report.checks.find((c) => c.item.startsWith("tests:"))?.note ?? "";
+      expect(testsNote).toContain("(fail) sums");
     } finally {
       red.cleanup();
     }

@@ -381,13 +381,20 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
             note:
               (res.exitCode === 0
                 ? `exit 0, ${testResults.passed} pass, ${testResults.failed} fail`
-                : // The captured body keeps the TAIL of BOTH streams: bun
-                  // prints its (fail) block and summary on whichever channel
-                  // it chose, and suite fixtures interleave their own stderr
-                  // noise after it — a single-stream or small-window capture
-                  // lost the names on attempts 19-24 (4 kB stderr-only kept
-                  // fixture jsonl instead of the (fail) block).
-                  `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${(`${res.stderr}\n${res.stdout}`).slice(-16000)}`) +
+                : // The capture EXTRACTS the (fail) lines from the FULL both-streams
+                  // body, then appends a small tail: bun prints its (fail) block
+                  // mid-stream while suite fixtures keep logging until exit —
+                  // attempt 29's 16 kB TAIL window was 100% atexit fixture noise
+                  // (8100/1 and the name sat above it; the same class ate the
+                  // names on attempts 19-28 by head-keep, single-stream, and
+                  // small-window shapes). A 1-fail red now names its test.
+                  `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${
+                    (() => {
+                      const both = `${res.stderr}\n${res.stdout}`;
+                      const failLines = both.split("\n").filter((l) => l.includes("(fail)")).join("\n");
+                      return `${failLines.slice(-12000)}\n${both.slice(-4000)}`;
+                    })()
+                  }`) +
               (testOutputTruncated ? " (output truncated at the capture cap — counts may be incomplete)" : ""),
           });
           if (testOutputTruncated) flags.push("test-output-truncated");
