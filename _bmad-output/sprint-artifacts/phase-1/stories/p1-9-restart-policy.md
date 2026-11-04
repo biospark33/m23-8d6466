@@ -1,5 +1,7 @@
 # P1.9: Restart Policy (Deterministic Classify + Retry/Wall-Clock Caps)
 
+**DONE 2026-11-04 — PR #486 merged to dev (618d2e00).** Dev gates + review rounds: CodeRabbit round 1: 2 findings (lead_failure omission, caps/non-finite hardening) both real, both fixed. DoD states + Dev Agent Record below.
+
 **Story Points:** 3
 
 ## Spec Reference
@@ -64,7 +66,7 @@ When a Pi agent step or protocol phase fails during a run, SwarmClaw classifies 
 
 ## Definition of Done
 
-Reconciled 2026-11-04 (dev, PR branch `feature/p1-9`). Legend follows P0.11's `[x]` / `[~]` / `[ ]`
+Reconciled 2026-11-04 (dev; PR #486 merged to dev 2026-11-04, 618d2e00). Legend follows P0.11's `[x]` / `[~]` / `[ ]`
 convention; the spec's `src/protocol/*` paths never existed — the DF5.5 amendment re-homes the
 cross-run restart classification in the phase engine, and the integration points below reflect the
 CURRENT architecture (DF1.10 engine, DF1.3 in-phase retries, DF6.1b escalation lane).
@@ -90,10 +92,11 @@ CURRENT architecture (DF1.10 engine, DF1.3 in-phase retries, DF6.1b escalation l
 
 ## Dev Agent Record
 
-**Status: implemented, PR open — story row stays `draft` until steve flips it after merge.**
+**Status: DONE — PR #486 merged to dev (618d2e00, 2026-11-04); sprint row flipped `done` with merge citation.**
 
-- **Branch:** `feature/p1-9` (from dev). **Files:** `src/phase-engine/failure-signal.ts` (new), `src/phase-engine/restart-policy.ts` (new), `src/phase-engine/phase.ts` (settle integration), `src/phase-engine/types.ts` (additive optional `PhaseRecord.restart`), `src/phase-engine/index.ts` (additive exports), `tests/phase-engine/restart-policy.test.ts` (new, 25 tests).
+- **Branch:** `feature/p1-9` (merged as PR #486 → dev, 618d2e00). **Files:** `src/phase-engine/failure-signal.ts` (new), `src/phase-engine/restart-policy.ts` (new), `src/phase-engine/phase.ts` (settle integration), `src/phase-engine/types.ts` (additive optional `PhaseRecord.restart`), `src/phase-engine/index.ts` (additive exports), `tests/phase-engine/restart-policy.test.ts` (new; 33 tests after the review rounds).
 - **Gates:** `bunx tsc --noEmit` 0 errors; biome check clean on all touched files; `bun test tests/phase-engine/` 1140 pass / 0 fail (includes the 25 new); full repo suite run before PR.
 - **Two findings fixed during TDD:** (1) first draft passed raw error text into `restart.signal.message` — INV-4 journal-leak, caught by the existing phase-lifecycle secret test, fixed via `scrubErrorText`; (2) `err` scope bug in `runWithRestart`'s rethrow, caught by own tests.
 - **Self-review round (2026-11-04, 4 findings, none HIGH, all applied):** (1) MED — `runWithRestart` derived `reducedScope` from the attempt ordinal, so transient retries ran scope-reduced; now threads the last decision's flag. (2) LOW — a backoff granted near the wall-clock cap could start the next attempt past 1h; the decision now refuses when `wallClockRemainingMs <= nextBackoffMs`. (3) LOW — `CapExceededError` swallowed the last attempt's original error; now carried as `cause`. (4) LOW — `evaluateRestart` clamps hostile numerics (negative/fractional retriesUsed, negative wallClockMs) and the result re-validates against `RestartDecisionSchema`. Post-fix: story suite 29/29, phase-engine 1144/1144, tsc + biome clean.
+- **CodeRabbit round 1 (2026-11-04, 2 findings, both confirmed real, both fixed in `89afcb2d`):** (1) the `lead_failure` audit omission was not gated on `verdictFailed`, so a body declaring lead_failure during the cancel grace settled overflow/transient/logic without its audit row — omission now fires only when the settled verdict itself is lead_failure (regression: abort-then-declare test). (2) `evaluateRestart` hardening: custom caps clamp DOWN to the documented ceiling (tighten-only — INV-RESTART-1 cannot be loosened by injection) and non-finite accounting (NaN/±Infinity, incl. `Infinity - Infinity` from a broken injected clock) fails closed to a cap-exceeded refusal instead of a `shouldRetry: true` decision with NaN backoff. Post-fix: story suite 33/33, phase-engine 1148/1148.
 - **Amendment note:** the story's spec paths (`src/protocol/*`, `src/models/*`) never existed in this repo; integration points follow the DF5.5 amendment on the current architecture. In-phase retry stays DF1.3's; cross-run RETRY EXECUTION at the dispatcher stays open for whichever driver story consumes `runWithRestart` (the executor is the seam).

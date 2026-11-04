@@ -1493,7 +1493,15 @@ describe("buildIdFileInputs", () => {
       // e1f65418: moved from 8a993b22 by P1.2 (feature/p1-2, 2026-11-04) —
       // `src/pr/github.ts` (labels param) is a walked COPY input. Same
       // publish-deferred-with-recorded-debt treatment as the P1.9 wave above.
-      "e1f65418262b253f560d19ccf455fb7d90d027ab6277b746b13e2e6d46f6a412",
+      //
+      // b055ee29: moved from e1f65418 by the P1.9 CR round (89afcb2d) —
+      // `src/phase-engine/{restart-policy,phase}.ts` (caps clamp, non-finite
+      // guard, lead_failure gate) are walked inputs. THE RITUAL MISSED (the
+      // CR fixes landed without a same-commit re-pin; this literal was
+      // re-computed LATE on merged dev, exactly the failure mode the
+      // LIMITATION paragraph above names). Re-pinned late here; publish→adopt
+      // still deferred with the accumulated debt.
+      "b055ee29fb5fb948e2ee6a2134425c92e5c8db293235b12e2d01771b59824e37",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
