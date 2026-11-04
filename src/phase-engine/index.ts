@@ -77,6 +77,33 @@ export {
 } from "./gates/library.ts";
 export { GateReport, type GateCheck } from "./gates/report.ts";
 export { GATE_NOTE_TAIL_CHARS, commandGate, type CommandGateOptions } from "./gates/command-gate.ts";
+// P1.9: deterministic failure classification + cross-run restart policy
+export {
+  classifyFailure,
+  FAILURE_CLASSES,
+  isFailureClass,
+  TRANSIENT_HTTP_CODES,
+  FailureSignalSchema,
+  type FailureClass,
+  type FailureSignal,
+} from "./failure-signal.ts";
+export {
+  DEFAULT_RESTART_CAPS,
+  INITIAL_BACKOFF_MS,
+  MAX_BACKOFF_MS,
+  FAILURE_SIGNAL_PROPERTY,
+  RestartCapsSchema,
+  RestartDecisionSchema,
+  evaluateRestart,
+  runWithRestart,
+  CapExceededError,
+  type EvaluateRestartInput,
+  type RestartAudit,
+  type RestartCaps,
+  type RestartDecision,
+  type RestartEvent,
+  type RunWithRestartOptions,
+} from "./restart-policy.ts";
 // DF1.4: trace store — writer, reader, and journal bridge
 export {
   Tracer,

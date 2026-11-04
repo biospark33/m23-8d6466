@@ -345,6 +345,10 @@ export interface PhaseRecord {
    * the phase value does not carry them (Run.phase never fabricates a 0). */
   malformedLines?: number;
   droppedOversizeLines?: number;
+  /** P1.9 restart audit — written at settle for every non-success phase whose
+   * verdict falls inside the three-value FailureClass subset. `lead_failure`
+   * carries none (its own DF6.1b escalation lane owns it). */
+  restart?: import("./restart-policy.ts").RestartAudit;
 }
 
 /** DF1.2 owns this event's shape; the port accepts it append-only from this story on. */
