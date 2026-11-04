@@ -67,7 +67,7 @@ M1.1's closure legs (PR #407 dev-half, PR #410 probe fixes; evidence
 | `hindsight-live` (raw shape probe) | **pass** (3rd run, `…-lbghxg.json`) | boot/health/digest identity + raw retain/recall bodies — the "deciding evidence" issue #408 names for the amendment |
 | `provision-and-import` | **fail** 2026-10-04 → **pass** rerun 2026-10-07 (`…-kvdvho.json`) | 3 banks + Mulch import + seed-probe on real instance |
 | `idempotency-rerun` | **pass** (`…-hddo6j.json`) | bank IDs + entry counts stable live |
-| `round-trip-via-bridge` (**DoD 9, MANDATORY**) | **fail** (`…-euvtm2.json`) | retain response failed `RetainResponseSchema` — 0.10.0 sends no `memoryId`/`bankId`/`status`/`durationMs` |
+| `round-trip-via-bridge` (**DoD 9, MANDATORY**) | **fail** (`…-euvtm2.json`) | retain response failed the **PRE-transform** strict `RetainResponseSchema` (the PR-#37-era camelCase contract) — 0.10.0 sends no `memoryId`/`bankId`/`status`/`durationMs`. This failure does NOT describe current code: M3.1 (`4b73e1b2`) since landed the adapter-in-schema (measured snake_case wire → `.transform()` legacy view, `src/hindsight/schemas.ts:141-181`), so **DoD 9's current status requires a fresh live round-trip run** against the transformed schema |
 | `negative-probes` | **fail** (`…-pisa2e.json`) | nonexistent-bank probe not refused 404 (drift); 2 probe mislabels corrected in README |
 | `auth-retired-check` | **inconclusive** | bank-profile endpoint removed in 0.10.0 → HTTP 410; proves nothing about authz |
 | `document-id-retain-twice` | **measured** | identical re-retain is a no-op (no duplicate); **changed-content update path unproven** |
@@ -76,12 +76,15 @@ Classification shift vs §6: DoD 9 moves from NOT-SATISFIED/BLOCKED-on-env to
 **ran-and-failed on schema drift**; DoD 10's live half has positive evidence
 (idempotency-rerun pass) though the content-comparison recall clause is still
 unasserted; DoD 7's recall half gains M1.3's live hit-rate baseline (canary hit,
-2026-10-07) but no per-bank content assertion. The residual blocker is **one
-decision**: the measurement-gated `schemas.ts` conformance amendment (issue
-#408, C8) — adapter-in-schema via Zod `.transform()` recommended, with an OPEN
-sub-decision on `memoryId` (placeholder-in-transform vs `RoundTripOk` type
-change vs verifier-modification waiver). `hindsight-live`'s raw bodies are the
-deciding evidence; the amendment decision is operator-owned. Note also README's
+2026-10-07) but no per-bank content assertion. The #408 conformance slice has
+since **landed** (M3.1, `4b73e1b2`): `src/hindsight/schemas.ts` now parses the
+measured 0.10.0 wire and `.transform()`s it into the legacy view — the euvtm2
+failure predates it. What remains open is the `memoryId` sub-decision only
+(placeholder-in-transform vs `RoundTripOk` type change vs
+verifier-modification waiver — the transform currently pins `""` from a
+forward-compat `id` field no server emits), and a **fresh live run** of
+`round-trip-dedicated.ts` to establish DoD 9's status under the transformed
+schema; both operator-owned. Note also README's
 redaction note: the 2026-10-07 import file had a revoked key id scrubbed — the
 folder's "never edited after capture" rule has one sanctioned deviation.
 

@@ -56,7 +56,7 @@ When the Dev Manager agent receives an intake request via A2A (simulating a /qds
 
 ## Definition of Done
 
-Reconciled 2026-11-04 (dev, PR open). The spec's Dev-Manager/A2A front door and session store died with the protocol engine (audit §2, per the DF5.5 amendment note in this file); the live HTTP front door is the SwarmClaw server, so intake is a route there. INV-2 holds by construction (owner/repo/token are explicit handler deps, never env). "Session" has no surviving store — the issue IS the trace.
+Reconciled 2026-11-04 (dev; PR #487 merged to dev 2026-11-04, 8545dc8e). The spec's Dev-Manager/A2A front door and session store died with the protocol engine (audit §2, per the DF5.5 amendment note in this file); the live HTTP front door is the SwarmClaw server, so intake is a route there. INV-2 holds by construction (owner/repo/token are explicit handler deps, never env). "Session" has no surviving store — the issue IS the trace.
 
 - [x] **Impl:** Intake handler receives A2A method "qds.intake" and validates request schema.
       *Re-homed: `POST /api/intake` on the SwarmClaw server (`src/swarmclaw/intake.ts` + route in `src/swarmclaw/index.ts`); `IntakeRequestSchema` strictObject validates brief/domain/priority. 503 when intake deps unconfigured — the route never silently creates nothing.*
@@ -83,12 +83,8 @@ Reconciled 2026-11-04 (dev, PR open). The spec's Dev-Manager/A2A front door and 
 
 ## Dev Agent Record
 
-**Status: implemented, PR open — story row stays `draft` until steve flips it after merge.**
+**Status: DONE — PR #487 merged to dev (8545dc8e, 2026-11-04); sprint row flipped `done` with merge citation.**
 
-- **Branch:** `feature/p1-2` (from dev lineage via feature/p1-9 HEAD — contains #486's commits; PR targets dev). **Files:** `src/swarmclaw/intake.ts` (new), `src/swarmclaw/routes`-style wiring inside `src/swarmclaw/index.ts` (optional `options.intake` + POST /api/intake), `src/pr/github.ts` (additive `labels?`), `tests/swarmclaw/intake.test.ts` (new, 14 tests), `tests/swarmclaw/index.test.ts` (+1 route test).
+- **Branch:** `feature/p1-2` (merged as PR #487 → dev, 8545dc8e). **Files:** `src/swarmclaw/intake.ts` (new), `src/swarmclaw/routes`-style wiring inside `src/swarmclaw/index.ts` (optional `options.intake` + POST /api/intake), `src/pr/github.ts` (additive `labels?`), `tests/swarmclaw/intake.test.ts` (new, 14 tests), `tests/swarmclaw/index.test.ts` (+1 route test).
 - **Gates:** tsc 0 errors; biome clean on touched files; dp-scan diff-scoped OK; swarmclaw suite 247+ green; full suite run recorded on this tree.
 - **Re-home deltas (declared, not silent):** (1) A2A method envelope → plain POST /api/intake; (2) session store → the issue itself; (3) rollback state machine → vacuous-by-construction; (4) rate-limit key = endpoint not requesterAgentId (no identity layer exists). The MANDATORY live e2e stays operator-gated (real repo write).
-
-## Dev Agent Record
-
-
