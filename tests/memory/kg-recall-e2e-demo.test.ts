@@ -26,6 +26,7 @@
  * import — the same loading technique as kg-recall-extension.test.ts.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { registerTypeboxMock } from "./host-typebox.ts";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -50,18 +51,7 @@ import {
 	QDS_MEMGATE_SIGNING_KEY,
 } from "../../src/memgate/schemas.ts";
 
-mock.module("typebox", () => ({
-	Type: {
-		String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
-		Integer: (options?: Record<string, unknown>) => ({ type: "integer", ...options }),
-		Object: (props: Record<string, unknown>, options?: Record<string, unknown>) => ({
-			type: "object",
-			properties: props,
-			...(options ?? {}),
-		}),
-		Optional: (schema: unknown) => schema,
-	},
-}));
+registerTypeboxMock();
 
 const ENTRY_PATH = "../../pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/kg-recall.ts";
 const ROSTER_PATH = resolve(import.meta.dir, "../../config/rosters/qds-default.roster.yaml");
