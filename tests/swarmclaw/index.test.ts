@@ -284,3 +284,48 @@ test("DELETE is refused without the bearer, and refused outright with an Origin 
     (await fetch(target, { method: "DELETE", headers: { authorization: "Bearer t0ken" } })).status,
   ).toBe(404);
 });
+
+// ─── P1.2: POST /api/intake — live only when configured, 503 otherwise ──────
+
+test("503 without intake deps; 201 issue creation with them", async () => {
+    const srv = createServer(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/intake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ brief: "x", domain: "backend" }),
+      });
+      expect(res.status).toBe(503);
+    } finally {
+      await srv.stop();
+    }
+
+    const titles: string[] = [];
+    const configured = createServer(0, {
+      intake: {
+        owner: "o",
+        repo: "r",
+        token: "t",
+        github: {
+          createIssue: async (o) => {
+            titles.push(o.title);
+            return { issueNumber: 5, htmlUrl: "https://github.com/o/r/issues/5" };
+          },
+        },
+      },
+    });
+    try {
+      const ok = await fetch(`http://127.0.0.1:${configured.port}/api/intake`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer t" },
+        body: JSON.stringify({ brief: "Add auth middleware", domain: "backend" }),
+      });
+      expect(ok.status).toBe(201);
+      const body = (await ok.json()) as { sessionId: string; issueNumber: number };
+      expect(body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.issueNumber).toBe(5);
+      expect(titles[0]).toMatch(/^\[QDS-[a-f0-9]{8}\] /);
+    } finally {
+      await configured.stop();
+    }
+  });

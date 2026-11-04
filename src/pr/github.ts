@@ -75,8 +75,8 @@ export interface GitHubApi {
   createPr(o: CreatePrInput): Promise<PrRef>;
   /** Best-effort refusal notification (AC3). Its failure never rescues a refusal. */
   commentIssue(o: { owner: string; repo: string; issueNumber: number; body: string; token: string }): Promise<void>;
-  /** A2 QA findings filing — host-side, F3. */
-  createIssue(o: { owner: string; repo: string; title: string; body: string; token: string }): Promise<IssueRef>;
+  /** A2 QA findings filing — host-side, F3. P1.2 adds optional intake labels. */
+  createIssue(o: { owner: string; repo: string; title: string; body: string; token: string; labels?: string[] }): Promise<IssueRef>;
 }
 
 export const API_TIMEOUT_MS = 30_000;
@@ -194,10 +194,10 @@ export function httpGitHubApi(apiBase = API_BASE): GitHubApi {
       await request(`/repos/${owner}/${repo}/issues/${issueNumber}/comments`, { method: "POST", token, body: { body } }, apiBase);
     },
 
-    async createIssue({ owner, repo, title, body, token }) {
+    async createIssue({ owner, repo, title, body, token, labels }) { // dp:ok — thin API adapter; errors propagate to the caller (handleIntake maps them to the structured -32603 response), wrapping here would only re-label them
       const created = (await request(
         `/repos/${owner}/${repo}/issues`,
-        { method: "POST", token, body: { title, body } },
+        { method: "POST", token, body: { title, body, ...(labels === undefined ? {} : { labels }) } },
         apiBase,
       )) as { html_url?: unknown; number?: unknown };
       if (typeof created?.html_url !== "string" || typeof created?.number !== "number") {
