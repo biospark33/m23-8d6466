@@ -17,6 +17,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
 import { DEFAULT_CORPUS_DIR, corpusFilePath, readRecords } from "../corpus/merge.ts";
 import type { TriageRecord } from "../corpus/schema.ts";
@@ -62,10 +63,15 @@ export function parseArgs(argv: string[]): RouteRoundArgs {
     ],
   });
   // Strict digits, never Number() coercion: 0x10/1e2/" 5" all coerce to valid
-  // integers and would route a round that was never named (F14).
+  // integers and would route a round that was never named (F14). Same strict
+  // shape as confirm-outcome's parsePositiveInt: a 20-digit pr is not a safe
+  // integer and must fail HERE naming the flag, not later as an unrelated
+  // shard miss (R2-L).
   for (const [name, v] of [["--pr", pr], ["--round", round]] as const) {
     if (v === undefined) throw new Error(`${name} <N> is required (a positive integer)`);
-    if (!/^\d+$/.test(v) || Number(v) <= 0) throw new Error(`${name} must be a positive integer in plain digits (got "${v}")`);
+    if (!/^\d+$/.test(v)) throw new Error(`${name} must be a positive integer in plain digits (got "${v}")`);
+    const n = Number(v);
+    if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`${name} must be a safe positive integer (got "${v}")`);
   }
   return { pr: Number(pr), round: Number(round), corpusDir, judgmentDir };
 }
@@ -82,7 +88,11 @@ export function parseArgs(argv: string[]): RouteRoundArgs {
  */
 function armedHeadDigest(judgmentDir: string): string {
   const file = join(judgmentDir, "arm-state.jsonl");
-  const lines = existsSync(file) ? readFileSync(file, "utf8").split("\n").filter((l) => l.trim() !== "") : [];
+  // Drop ONLY the trailing empty element split("\n") yields for a final
+  // newline — interior blanks must reach the verifier, which refuses them by
+  // physical line number (a torn double-append is a defect, not whitespace).
+  const lines = existsSync(file) ? readFileSync(file, "utf8").split("\n") : [];
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   if (lines.length === 0) {
     exitWithFailure("route-round: not-armed:", 2, [
       `arm-state log absent or empty at ${file} — absent or empty means recording-only, never armed`,
@@ -153,7 +163,9 @@ function partition(records: TriageRecord[], digest: string): { deep: RoutingEntr
       clause.p >= MIN_ROUTE_CONFIDENCE &&
       clause.p <= 1;
     const entry: RoutingEntry = { finding_id: r.finding_id, armed_state_digest: digest };
-    if (r.arm === "jev" && clause !== "not-recorded") entry.rationale = r.rationale;
+    // AC4: the entry carries "the jev rationale" whenever the record carries
+    // one — clause parseability gates the LANE, not the rationale's presence.
+    if (r.arm === "jev" && r.rationale) entry.rationale = r.rationale;
     (obvious ? candidates : deep).push(entry);
   }
   return { deep, candidates };
@@ -181,6 +193,13 @@ export function main(argv: string[]): number {
       ]);
     }
     const records = readRecords(shard);
+    // A zero-byte or otherwise record-less shard that EXISTS is truncation,
+    // not an empty round — an empty-lane manifest would launder it as exit 0.
+    if (records.length === 0) {
+      exitWithFailure("route-round:", 2, [
+        `corpus shard ${shard} exists but holds zero records — truncation is not an empty round; restore the shard before routing`,
+      ]);
+    }
     const { deep, candidates } = partition(records, digest);
 
     const manifest: RoutingManifest = {
@@ -199,7 +218,15 @@ export function main(argv: string[]): number {
           `manifest ${manifestPath} exists under a different armed digest — prior routing provenance is not overwritten`,
         ]);
       }
-      // Same digest: an idempotent rewrite, allowed.
+      // Same digest: only an identical routing is an idempotent rewrite.
+      // Deep-compare the PARSED JSON (never raw file text — a pretty-print
+      // difference must not false-trip): a different partition under the same
+      // digest means the corpus shard changed since the manifest was written.
+      if (!isDeepStrictEqual(prior, manifest)) {
+        exitWithFailure("route-round:", 2, [
+          `manifest ${manifestPath} differs from the new routing under the same armed digest — the corpus shard changed since it was written; delete the manifest explicitly to re-route`,
+        ]);
+      }
     }
     mkdirSync(routingDir, { recursive: true });
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);

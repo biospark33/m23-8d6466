@@ -1,5 +1,6 @@
 {
   "complete": true,
+  "scope": "demo — every flip/manifest here was produced against a TEMP fixture corpus dir (.unlazy/j2/.e2e-tmp); the real _bmad-output/judgment/arm-state.jsonl was never written and the real corpus stays recording-only",
   "verdicts": {
     "milestones": {
       "confirmed": 230,
@@ -23,7 +24,7 @@
   },
   "flip": {
     "seq": 1,
-    "at": "2026-11-04T13:41:51.163Z",
+    "at": "2026-11-04T14:55:21.849Z",
     "from": "recording-only",
     "to": "armed",
     "sign_off": "steve 2026-11-04",
@@ -39,14 +40,14 @@
         "WILSON_Z": 1.959964,
         "MIN_ROUTE_CONFIDENCE": 0.9
       },
-      "corpus_digest": "3db918f655614d14cd9c7c8cb9d8c0245413a9534dfbf4d02e311b96d4cf7b71"
+      "corpus_digest": "b5fd8cf1305e4fd4e0ee9986351fe6803b9ac5ba3d70d69cabd5be2a12101717"
     },
     "prev_digest": null
   },
   "manifest": {
     "candidates": 1,
     "deep": 3,
-    "armed_digest": "871542589c614fe1ce89e1ed3ee572bcba40c9ddd34dcc4eaaf1b7aeced1cbfc"
+    "armed_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d"
   },
   "steps": [
     {
@@ -1315,7 +1316,7 @@
     {
       "step": "conflicting refusal names the recordKey",
       "ok": true,
-      "detail": "confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins; resolve explicitly):\n  - recordKey 1000|1|f-dismiss|jev-1.13.0-observer\n  - existing: outcome_confirmed=false outcome_source=e2e-fixture answer_mode=live confirmed_at=2026-11-04T13:41:47.151Z\n  - incoming: outcome_confirmed=true outcome_source=e2e-conflict answer_mode=live\n"
+      "detail": "confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins):\n  - recordKey 1000|1|f-dismiss|jev-1.13.0-observer\n  - existing: outcome_confirmed=false outcome_source=e2e-fixture answer_mode=live confirmed_at=2026-11-04T14:55:17.228Z\n  - incoming: outcome_confirmed=true outcome_source=e2e-conflict answer_mode=live\n  - resolve: hand-edit /Users/steve/QDS-Factory/.unlazy/j2/.e2e-tmp/corpus/outcomes.jsonl to remove the losing duplicate entry for this recordKey, then re-run confirm-outcome — the next read re-validates every line\n"
     },
     {
       "step": "conflicting refusal appended nothing",
@@ -1416,7 +1417,7 @@
     {
       "step": "arm with pair exits 0",
       "ok": true,
-      "detail": "{\"seq\":1,\"at\":\"2026-11-04T13:41:51.163Z\",\"from\":\"recording-only\",\"to\":\"armed\",\"sign_off\":\"steve 2026-11-04\",\"evidence\":{\"confirmed\":230,\"agreed\":60,\"rate\":1,\"ci_lower\":0.9398281469657729,\"thresholds\":{\"MIN_OUTCOME_CONFIRMED_JEV_RECORDS\":200,\"MIN_CONFIRMED_CLUSTERS\":20,\"MIN_WILSON_LOWER_AGREEMENT\":0.9,\"WILSON_Z\":1.959964,\"MIN_ROUTE_CONFIDENCE\":0.9},\"corpus_digest\":\"3db918f655614d14cd9c7c8cb9d8c0245413a9534dfbf4d02e311b96d4cf7b71\"},\"prev_digest\":null}\n"
+      "detail": "{\"seq\":1,\"at\":\"2026-11-04T14:55:21.849Z\",\"from\":\"recording-only\",\"to\":\"armed\",\"sign_off\":\"steve 2026-11-04\",\"evidence\":{\"confirmed\":230,\"agreed\":60,\"rate\":1,\"ci_lower\":0.9398281469657729,\"thresholds\":{\"MIN_OUTCOME_CONFIRMED_JEV_RECORDS\":200,\"MIN_CONFIRMED_CLUSTERS\":20,\"MIN_WILSON_LOWER_AGREEMENT\":0.9,\"WILSON_Z\":1.959964,\"MIN_ROUTE_CONFIDENCE\":0.9},\"corpus_digest\":\"b5fd8cf1305e4fd4e0ee9986351fe6803b9ac5ba3d70d69cabd5be2a12101717\"},\"prev_digest\":null}\n"
     },
     {
       "step": "arm-state has exactly one entry",
@@ -1430,7 +1431,7 @@
       "ok": true,
       "detail": {
         "seq": 1,
-        "at": "2026-11-04T13:41:51.163Z",
+        "at": "2026-11-04T14:55:21.849Z",
         "from": "recording-only",
         "to": "armed",
         "sign_off": "steve 2026-11-04",
@@ -1446,7 +1447,7 @@
             "WILSON_Z": 1.959964,
             "MIN_ROUTE_CONFIDENCE": 0.9
           },
-          "corpus_digest": "3db918f655614d14cd9c7c8cb9d8c0245413a9534dfbf4d02e311b96d4cf7b71"
+          "corpus_digest": "b5fd8cf1305e4fd4e0ee9986351fe6803b9ac5ba3d70d69cabd5be2a12101717"
         },
         "prev_digest": null
       }
@@ -1463,7 +1464,7 @@
     {
       "step": "manifest armed_digest matches flip head",
       "ok": true,
-      "detail": "871542589c614fe1ce89e1ed3ee572bcba40c9ddd34dcc4eaaf1b7aeced1cbfc"
+      "detail": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d"
     },
     {
       "step": "DISMISS p=0.97 → candidate; DISMISS p=0.50 → deep; PATCH → deep",
@@ -1472,25 +1473,25 @@
         "candidates": [
           {
             "finding_id": "f-dismiss",
-            "rationale": "jev: is_real_defect=0.03; disposition=dismiss p=0.97",
-            "armed_state_digest": "871542589c614fe1ce89e1ed3ee572bcba40c9ddd34dcc4eaaf1b7aeced1cbfc"
+            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "rationale": "jev: is_real_defect=0.03; disposition=dismiss p=0.97"
           }
         ],
         "deep": [
           {
             "finding_id": "f-dismiss-low",
-            "rationale": "jev: is_real_defect=0.40; disposition=dismiss p=0.50",
-            "armed_state_digest": "871542589c614fe1ce89e1ed3ee572bcba40c9ddd34dcc4eaaf1b7aeced1cbfc"
+            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "rationale": "jev: is_real_defect=0.40; disposition=dismiss p=0.50"
           },
           {
             "finding_id": "f-patch-1",
-            "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87",
-            "armed_state_digest": "871542589c614fe1ce89e1ed3ee572bcba40c9ddd34dcc4eaaf1b7aeced1cbfc"
+            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87"
           },
           {
             "finding_id": "f-patch-2",
-            "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87",
-            "armed_state_digest": "871542589c614fe1ce89e1ed3ee572bcba40c9ddd34dcc4eaaf1b7aeced1cbfc"
+            "armed_state_digest": "95c27d20ab8a5a21246f4d1e4536cfb6cc85e01f682a08f39ecb88985736c67d",
+            "rationale": "jev: is_real_defect=0.90; disposition=patch p=0.87"
           }
         ]
       }

@@ -20,7 +20,7 @@
  * Exit: 0 verdict printed / flip appended · 2 fatal before any conclusion.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
 import { DEFAULT_CORPUS_DIR, readRecords } from "../corpus/merge.ts";
@@ -87,24 +87,26 @@ export function parseArgs(argv: string[]): ArmThresholdsArgs {
 // Loading (the scripts layer feeds the pure evaluator)
 // ---------------------------------------------------------------------------
 
-/** outcomes.jsonl entries; absent file = zero entries; a malformed line is a loud error. */
+/** outcomes.jsonl entries; absent file = zero entries; a malformed line is a loud error naming its PHYSICAL line (R2-M). */
 export function loadOutcomeEntries(corpusDir: string): GateOutcomeEntry[] {
   const file = join(corpusDir, "outcomes.jsonl");
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .split("\n")
-    .filter((l) => l.trim() !== "")
-    .map((l, i) => {
-      let raw: unknown;
-      try {
-        raw = JSON.parse(l);
-      } catch (e) {
-        throw new Error(`outcomes.jsonl line ${i + 1} is not valid JSON: ${(e as Error).message}`);
-      }
-      const parsed = OutcomeRecordSchema.safeParse(raw);
-      if (!parsed.success) throw new Error(`outcomes.jsonl line ${i + 1} failed OutcomeRecordSchema validation: ${parsed.error.issues.map((x) => `${x.path.join(".")}: ${x.message}`).join("; ")}`);
-      return parsed.data;
-    });
+  const out: GateOutcomeEntry[] = [];
+  const lines = readFileSync(file, "utf8").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (l.trim() === "") continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(l);
+    } catch (e) {
+      throw new Error(`outcomes.jsonl line ${i + 1} is not valid JSON: ${(e as Error).message}`);
+    }
+    const parsed = OutcomeRecordSchema.safeParse(raw);
+    if (!parsed.success) throw new Error(`outcomes.jsonl line ${i + 1} failed OutcomeRecordSchema validation: ${parsed.error.issues.map((x) => `${x.path.join(".")}: ${x.message}`).join("; ")}`);
+    out.push(parsed.data);
+  }
+  return out;
 }
 
 /** jev-arm records of every `<pr|x>-r<round>.jsonl` corpus shard (machine-state never enters: readRecords refuses it loudly). */
@@ -132,11 +134,16 @@ export function loadJevCorpusRecords(corpusDir: string): GateCorpusRecord[] {
   return out;
 }
 
-/** arm-state.jsonl lines (absent file = []); blank lines dropped before the chain walk. */
+/**
+ * arm-state.jsonl lines (absent file = []). ONLY split()'s single trailing
+ * empty element is dropped — an INTERIOR blank line (torn double-append)
+ * reaches verifyArmStateLog and refuses; pre-dropping all blanks would make
+ * the verifier's blank-line refusal dead code (R2-D).
+ */
 function readArmStateLines(judgmentDir: string): string[] {
   const file = join(judgmentDir, "arm-state.jsonl");
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8").split("\n").filter((l) => l.trim() !== "");
+  return readFileSync(file, "utf8").split("\n").filter((l, i, a) => i < a.length - 1 || l.trim() !== "");
 }
 
 /**
@@ -165,6 +172,11 @@ export async function main(argv: string[]): Promise<number> {
   }
   const corpusDir = args.corpusDir ?? DEFAULT_CORPUS_DIR;
   const judgmentDir = args.judgmentDir ?? DEFAULT_JUDGMENT_DIR;
+  // An absent corpus dir would read as an empty corpus and misdiagnose a path
+  // typo as a data gap ("0/200") — refuse naming the path (R2-H).
+  if (!existsSync(corpusDir) || !statSync(corpusDir).isDirectory()) {
+    exitWithFailure("arm-thresholds:", 2, [`--corpus-dir "${corpusDir}" does not exist or is not a directory — a missing corpus is a path error, never an empty corpus`]);
+  }
 
   // The whole main body (not just the loading half): an uncaught exception
   // anywhere — shard I/O, the flip's mkdir/append — would exit 1 with a stack,

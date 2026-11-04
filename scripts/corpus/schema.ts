@@ -180,10 +180,10 @@ export const OutcomeRecordSchema = z
   .object({
     pr: z.number().int().positive(),
     round: z.number().int().positive(),
-    finding_id: z.string().min(1).refine((s) => s.trim().length > 0, "must be non-empty after trim"),
-    labeler: z.string().min(1).refine((s) => s.trim().length > 0, "must be non-empty after trim"),
+    finding_id: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
+    labeler: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
     outcome_confirmed: z.boolean(),
-    outcome_source: z.string().min(1).refine((s) => s.trim().length > 0, "must be non-empty after trim"),
+    outcome_source: z.string().min(1).refine((s) => s === s.trim(), "must not carry surrounding whitespace"),
     answer_mode: z.enum(["live", "mock"]),
     confirmed_at: isoTimestamp,
   })

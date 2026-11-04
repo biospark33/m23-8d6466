@@ -150,12 +150,17 @@ export function agrees(disposition: string, outcome_confirmed: boolean): boolean
 
 /**
  * Two-sided Wilson score-interval lower bound for agreed/n at z. Throws on
- * invalid inputs (n ≤ 0, agreed < 0, agreed > n): evaluateGate guards its own
- * calls, but a silent NaN would lie to any future caller.
+ * invalid inputs (n ≤ 0, agreed < 0, agreed > n, z non-finite or ≤ 0):
+ * evaluateGate guards its own calls, but a silent NaN would lie to any future
+ * caller — and z=0 would sell the point estimate as the lower bound, z<0 a
+ * bound above p̂ (R2-J).
  */
 export function wilsonLowerBound(agreed: number, n: number, z: number): number {
   if (!(n > 0) || agreed < 0 || agreed > n) {
     throw new Error(`wilsonLowerBound: invalid inputs (agreed=${agreed}, n=${n}) — need n>0 and 0 ≤ agreed ≤ n`);
+  }
+  if (!(Number.isFinite(z) && z > 0)) {
+    throw new Error(`wilsonLowerBound: invalid z=${z} — need a finite z > 0`);
   }
   const p = agreed / n;
   const denom = 1 + (z * z) / n;
@@ -168,9 +173,16 @@ export function wilsonLowerBound(agreed: number, n: number, z: number): number {
 // Population resolution + join (AC5)
 // ---------------------------------------------------------------------------
 
-/** The recordKey string form (scripts/corpus/schema.ts grammar, pr/round always positive here). */
-function keyOf(r: { pr: number; round: number; finding_id: string; labeler: string }): string {
-  return `${r.pr}|${r.round}|${r.finding_id}|${r.labeler}`;
+/**
+ * The recordKey string form — the SAME grammar as scripts/corpus/schema.ts's
+ * `recordKey`, null pr/round rendering "x" included (the x-rN backfill form;
+ * the gate's loaders only ever pass positive ints, but the grammars must stay
+ * byte-equal). Exported so the suite can pin the equivalence adversarially:
+ * confirm-outcome's idempotence key and the gate's join key are one grammar,
+ * and any divergence between them becomes a loud test failure (R2-B).
+ */
+export function keyOf(r: { pr: number | null; round: number | null; finding_id: string; labeler: string }): string {
+  return `${r.pr ?? "x"}|${r.round ?? "x"}|${r.finding_id}|${r.labeler}`;
 }
 
 /**
@@ -199,23 +211,15 @@ function resolvedByKey(outcomeEntries: GateOutcomeEntry[]): { resolved: Map<stri
   return { resolved, unresolved };
 }
 
-/** The counted population: resolved live-attested entries joined to a corpus record, key-sorted (canonical order). */
-function countedEntries(outcomeEntries: GateOutcomeEntry[], corpusRecords: GateCorpusRecord[]): GateOutcomeEntry[] {
-  const { resolved } = resolvedByKey(outcomeEntries);
-  const joined = new Set<string>();
-  for (const r of corpusRecords) {
-    const k = keyOf(r);
-    const o = resolved.get(k);
-    if (o !== undefined && o.answer_mode === "live") joined.add(k);
-  }
-  return [...joined].sort().map((k) => resolved.get(k)!);
-}
-
 /**
- * Fixed literal key order for a counted entry — the digest must not depend on
- * the JSON key order the file happened to carry (the ArmStateEntry precedent:
- * build the digest input from explicitly constructed objects, never raw
- * JSON.parse output).
+ * Fixed literal key order for a counted entry — the CORPUS digest is a
+ * content identity: it must not depend on the row order or JSON key order the
+ * files happened to carry, so it is built from explicitly constructed objects,
+ * never raw JSON.parse output. The CHAIN digest (armStateEntryDigest below)
+ * deliberately takes the opposite policy — it hashes the entry exactly as
+ * parsed, so ANY byte change, cosmetic reordering included, yields a new
+ * digest and breaks the chain: content-identity across serializations for the
+ * corpus, byte-level tamper evidence for the chain (R2-N).
  */
 function canonicalOutcomeEntry(e: GateOutcomeEntry): GateOutcomeEntry {
   return {
@@ -231,14 +235,33 @@ function canonicalOutcomeEntry(e: GateOutcomeEntry): GateOutcomeEntry {
 }
 
 /**
- * The corpus digest a flip records: sha256 over the counted population's
- * canonical serialization at flip time — key-sorted entries, each serialized
- * in fixed literal key order, so the digest is deterministic under file order
- * AND under cosmetic key reordering.
+ * The corpus digest a flip records: sha256 over the counted population at
+ * flip time — key-sorted, each side serialized in fixed literal key order, so
+ * the digest is deterministic under file order AND cosmetic key reordering.
+ * Both sides of the join are witnessed (R2-E): the canonical outcome entries
+ * AND, per counted key, the joined corpus row's {recordKey, disposition} —
+ * the dispositions are what decide agreement, so two corpora differing only
+ * in dispositions must NOT share one digest. Corpus rows dedupe by recordKey,
+ * first occurrence wins (evaluateGate's hand-merged-shard precedent).
  */
 export function countedCorpusDigest(outcomeEntries: GateOutcomeEntry[], corpusRecords: GateCorpusRecord[]): string {
+  const { resolved } = resolvedByKey(outcomeEntries);
+  const corpusByKey = new Map<string, GateCorpusRecord>();
+  const joined = new Set<string>();
+  for (const r of corpusRecords) {
+    const k = keyOf(r);
+    if (!corpusByKey.has(k)) corpusByKey.set(k, r);
+    const o = resolved.get(k);
+    if (o !== undefined && o.answer_mode === "live") joined.add(k);
+  }
+  const keys = [...joined].sort();
   return createHash("sha256")
-    .update(JSON.stringify(countedEntries(outcomeEntries, corpusRecords).map(canonicalOutcomeEntry)))
+    .update(
+      JSON.stringify({
+        outcomes: keys.map((k) => canonicalOutcomeEntry(resolved.get(k)!)),
+        corpus: keys.map((k) => ({ recordKey: k, disposition: corpusByKey.get(k)!.disposition })),
+      }),
+    )
     .digest("hex");
 }
 
@@ -358,27 +381,38 @@ function evidenceProblem(raw: unknown, seq: number): string | null {
   const e = raw as Record<string, unknown>;
   for (const f of EVIDENCE_KEYS) if (!(f in e)) return `entry ${seq} evidence.${f} is missing`;
   for (const k of Object.keys(e)) if (!(EVIDENCE_KEYS as readonly string[]).includes(k)) return `entry ${seq} evidence has unexpected field "${k}"`;
-  if (typeof e.confirmed !== "number" || !Number.isFinite(e.confirmed)) return `entry ${seq} evidence.confirmed must be a number`;
-  if (typeof e.agreed !== "number" || !Number.isFinite(e.agreed)) return `entry ${seq} evidence.agreed must be a number`;
+  if (typeof e.confirmed !== "number" || !Number.isFinite(e.confirmed) || !Number.isInteger(e.confirmed) || e.confirmed < 0) {
+    return `entry ${seq} evidence.confirmed must be a non-negative integer`;
+  }
+  if (typeof e.agreed !== "number" || !Number.isFinite(e.agreed) || !Number.isInteger(e.agreed) || e.agreed < 0 || e.agreed > e.confirmed) {
+    return `entry ${seq} evidence.agreed must be a non-negative integer ≤ confirmed`;
+  }
   for (const f of ["rate", "ci_lower"] as const) {
     const v = e[f];
     if (v !== "n/a" && (typeof v !== "number" || !Number.isFinite(v))) return `entry ${seq} evidence.${f} must be a number or "n/a"`;
+    if (v !== "n/a" && (v < 0 || v > 1)) return `entry ${seq} evidence.${f} must be within [0,1] or "n/a"`;
   }
   const th = e.thresholds;
   if (typeof th !== "object" || th === null || Array.isArray(th)) return `entry ${seq} evidence.thresholds must be an object`;
   for (const k of THRESHOLD_KEYS) {
     const v = (th as Record<string, unknown>)[k];
-    if (typeof v !== "number" || !Number.isFinite(v)) return `entry ${seq} evidence.thresholds.${k} must be a number`;
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return `entry ${seq} evidence.thresholds.${k} must be a finite number > 0`;
   }
   for (const k of Object.keys(th)) if (!(THRESHOLD_KEYS as readonly string[]).includes(k)) return `entry ${seq} evidence.thresholds has unexpected field "${k}"`;
   if (typeof e.corpus_digest !== "string" || !/^[0-9a-f]{64}$/.test(e.corpus_digest)) return `entry ${seq} evidence.corpus_digest must be 64 hex chars`;
   return null;
 }
 
+/** The exact top-level key set an ArmStateEntry may carry (R2-K — extras refuse). */
+const ENTRY_KEYS = ["seq", "at", "from", "to", "sign_off", "evidence", "prev_digest"] as const;
+
 /** Structural + chain check of one parsed entry at its expected position. */
 function entryProblem(raw: unknown, expectedSeq: number, prevDigest: string | null, prevTo: string | null): string | null {
   const e = raw as Partial<ArmStateEntry>;
   if (typeof e !== "object" || e === null) return `entry ${expectedSeq} is not an object`;
+  // Exact key set: a future writer's added field must refuse here, not ship
+  // green and get chain-frozen into the log's canonical shape (R2-K).
+  for (const k of Object.keys(e)) if (!(ENTRY_KEYS as readonly string[]).includes(k)) return `entry ${expectedSeq} has unexpected field "${k}"`;
   if (e.seq !== expectedSeq) return `entry ${expectedSeq} has seq ${String(e.seq)} — the walk starts at seq 1 and must be gapless and in order`;
   if (e.prev_digest !== prevDigest) {
     return `entry ${expectedSeq} prev_digest does not equal the computed digest of entry ${expectedSeq - 1} (chain broken — hand-edited, spliced, or reordered log)`;

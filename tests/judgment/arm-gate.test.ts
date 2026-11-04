@@ -30,6 +30,7 @@ import {
   armStateEntryDigest,
   countedCorpusDigest,
   evaluateGate,
+  keyOf,
   verifyArmStateLog,
   wilsonLowerBound,
   type ArmStateEntry,
@@ -276,6 +277,11 @@ describe("AC2 threshold constants", () => {
     expect(() => wilsonLowerBound(1, 0, WILSON_Z)).toThrow(); // n=0
     expect(() => wilsonLowerBound(3, 2, WILSON_Z)).toThrow(); // agreed>n
     expect(() => wilsonLowerBound(-1, 10, WILSON_Z)).toThrow(); // agreed<0
+    // z must be finite and > 0 (R2-J): z=0 sells the point estimate as the
+    // lower bound; z<0 bounds above p̂; NaN lies silently.
+    expect(() => wilsonLowerBound(1, 10, 0)).toThrow();
+    expect(() => wilsonLowerBound(1, 10, -1)).toThrow();
+    expect(() => wilsonLowerBound(1, 10, Number.NaN)).toThrow();
   });
 
   test("agrees() matches ab-report outcomeAgrees across all 6 dispositions x both booleans", () => {
@@ -434,6 +440,23 @@ describe("countedCorpusDigest determinism", () => {
     });
     expect(countedCorpusDigest(reordered, corpus)).toBe(countedCorpusDigest(outcomes, corpus));
   });
+
+  test("corpus side is witnessed: disposition changes flip the digest; reordered corpus keys do not (R2-E)", () => {
+    const { outcomes, corpus } = eligibleFixture();
+    const base = countedCorpusDigest(outcomes, corpus);
+    // Same keys, same join — only one disposition differs: the digest must
+    // move, or two corpora disagreeing on every judgment would share it.
+    const flipped = corpus.map((r, i) => (i === 0 ? { ...r, disposition: r.disposition === "PATCH" ? "DISMISS" : "PATCH" } : r));
+    expect(countedCorpusDigest(outcomes, flipped)).not.toBe(base);
+    // Cosmetic key reorder on the corpus rows: identical digest (the corpus
+    // side is serialized in its own fixed literal key order).
+    const reorderedCorpus = corpus.map((r) => {
+      const obj: Record<string, unknown> = {};
+      for (const k of Object.keys(r).reverse()) obj[k] = (r as unknown as Record<string, unknown>)[k];
+      return obj as unknown as GateCorpusRecord;
+    });
+    expect(countedCorpusDigest(outcomes, reorderedCorpus)).toBe(base);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -529,9 +552,9 @@ describe("verifyArmStateLog", () => {
 
   test("missing or non-ISO at refuses naming at (F1)", () => {
     for (const bad of [undefined, "yesterday", "2026-11-04", "2026-02-30T00:00:00Z"] as const) {
-      const entry: Record<string, unknown> = { ...mkEntry(1, null, "recording-only", "armed") };
-      if (bad === undefined) delete entry.at;
-      else entry.at = bad;
+      const base: Record<string, unknown> = { ...mkEntry(1, null, "recording-only", "armed") };
+      const { at, ...rest } = base;
+      const entry: Record<string, unknown> = bad === undefined ? { ...rest } : { ...rest, at: bad };
       const r = verifyArmStateLog([JSON.stringify(entry)]);
       expect(r.ok).toBe(false);
       if (r.ok) throw new Error(`at=${String(bad)} verified — must refuse`);
@@ -542,11 +565,11 @@ describe("verifyArmStateLog", () => {
   test("garbled evidence refuses naming the problem (F1)", () => {
     const good = mkEntry(1, null, "recording-only", "armed");
     const thNoZ: Record<string, unknown> = { ...THRESHOLDS_EVIDENCE };
-    delete thNoZ.WILSON_Z;
+    const { WILSON_Z: _omittedZ, ...thWithoutZ } = thNoZ;
     const cases: [string, unknown][] = [
       ["evidence absent", undefined],
       ["evidence a string", "eligible!"],
-      ["thresholds missing WILSON_Z", { ...good.evidence, thresholds: thNoZ }],
+      ["thresholds missing WILSON_Z", { ...good.evidence, thresholds: thWithoutZ }],
       ["non-number threshold", { ...good.evidence, thresholds: { ...THRESHOLDS_EVIDENCE, WILSON_Z: "1.96" } }],
       ["short corpus_digest", { ...good.evidence, corpus_digest: "ab" }],
     ];
@@ -557,6 +580,37 @@ describe("verifyArmStateLog", () => {
       if (r.ok) throw new Error(`case "${label}" verified — must refuse`);
       expect(r.reason).toContain("evidence");
     }
+  });
+
+  test("out-of-range evidence refuses naming the field — shape alone is not enough (R2-I)", () => {
+    const good = mkEntry(1, null, "recording-only", "armed");
+    const cases: [string, unknown][] = [
+      ["confirmed non-integer", { ...good.evidence, confirmed: 2.5 }],
+      ["confirmed negative", { ...good.evidence, confirmed: -3 }],
+      ["agreed non-integer", { ...good.evidence, agreed: 60.5 }],
+      ["agreed above confirmed", { ...good.evidence, confirmed: 10, agreed: 11 }],
+      ["rate above 1", { ...good.evidence, rate: 5 }],
+      ["rate below 0", { ...good.evidence, rate: -0.1 }],
+      ["ci_lower above 1", { ...good.evidence, ci_lower: 17 }],
+      ["ci_lower below 0", { ...good.evidence, ci_lower: -1 }],
+      ["threshold zero", { ...good.evidence, thresholds: { ...THRESHOLDS_EVIDENCE, WILSON_Z: 0 } }],
+      ["threshold negative", { ...good.evidence, thresholds: { ...THRESHOLDS_EVIDENCE, MIN_ROUTE_CONFIDENCE: -0.9 } }],
+    ];
+    for (const [label, evidence] of cases) {
+      const entry: Record<string, unknown> = { ...good, evidence };
+      const r = verifyArmStateLog([JSON.stringify(entry)]);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error(`case "${label}" verified — must refuse`);
+    }
+  });
+
+  test("an entry with an extra top-level field refuses — the key set is exact (R2-K)", () => {
+    const good = mkEntry(1, null, "recording-only", "armed");
+    const entry: Record<string, unknown> = { ...good, note: "a future writer added me" };
+    const r = verifyArmStateLog([JSON.stringify(entry)]);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("extra field verified — must refuse");
+    expect(r.reason).toContain("note");
   });
 });
 
@@ -603,9 +657,10 @@ describe("arm-thresholds CLI", () => {
 
   test("dry-run on an empty corpus dir: not-eligible naming both gaps (AC1)", () => {
     const corpusDir = tmpDir("arm-gate-empty-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
     try {
       mkdirSync(corpusDir, { recursive: true });
-      const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", tmpDir("arm-gate-jdg-")]);
+      const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
       expect(p.exitCode).toBe(0);
       const verdict = JSON.parse(p.stdout.toString());
       expect(verdict.verdict).toBe("not-eligible");
@@ -613,6 +668,7 @@ describe("arm-thresholds CLI", () => {
       expect(verdict.gaps).toContain("ci_lower=n/a");
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
     }
   });
 
@@ -792,8 +848,60 @@ describe("arm-thresholds CLI", () => {
   });
 
   test("--arm and --unarm together refuse (mutually exclusive)", () => {
-    const p = runArm(["--arm", "--unarm", "--sign-off", "steve", "--judgment-dir", tmpDir("arm-gate-jdg-")]);
-    expect(p.exitCode).toBe(2);
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      const p = runArm(["--arm", "--unarm", "--sign-off", "steve", "--judgment-dir", judgmentDir]);
+      expect(p.exitCode).toBe(2);
+    } finally {
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("absent --corpus-dir refuses exit 2 naming the path — a typo is not a data gap (R2-H)", () => {
+    const missing = join("/tmp", `arm-gate-missing-${process.pid}-${Date.now()}`);
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      const p = runArm(["--corpus-dir", missing, "--judgment-dir", judgmentDir]);
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toContain(missing);
+    } finally {
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("interior blank line in arm-state.jsonl refuses naming the line — torn double-append (R2-D)", () => {
+    const corpusDir = tmpDir("arm-gate-cli-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      writeEligibleCorpusDir(corpusDir);
+      const entries = chainedEntries(2);
+      mkdirSync(judgmentDir, { recursive: true });
+      writeFileSync(join(judgmentDir, "arm-state.jsonl"), `${JSON.stringify(entries[0])}\n\n${JSON.stringify(entries[1])}\n`);
+      const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toContain("line 2 is blank");
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("outcomes.jsonl readers name the PHYSICAL line: leading blank + malformed line 2 (R2-M)", () => {
+    const corpusDir = tmpDir("arm-gate-lines-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      mkdirSync(corpusDir, { recursive: true });
+      writeFileSync(join(corpusDir, "outcomes.jsonl"), `\n{"pr": 901, "rou`);
+      const a = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+      expect(a.exitCode).toBe(2);
+      expect(a.stderr.toString()).toContain("outcomes.jsonl line 2");
+      const c = runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]);
+      expect(c.exitCode).toBe(2);
+      expect(c.stderr.toString()).toContain("outcomes.jsonl line 2");
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
   });
 
   test("dry-run against the REAL repo corpus (default dirs) is not-eligible naming outcome_confirmed=0/200 (F3)", () => {
@@ -815,7 +923,7 @@ describe("arm-thresholds CLI", () => {
       writeFileSync(join(corpusDir, "901-r1.jsonl"), '{"finding_id":"F1","broken\n');
       const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
       expect(p.exitCode).toBe(2); // never exit 1 — the 0/2 exit contract
-      expect(p.stderr.toString()).not.toMatch(/\bat \S/); // no stack frame
+      expect(p.stderr.toString()).not.toMatch(/\n\s*at\s/); // no stack frame
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
       rmSync(judgmentDir, { recursive: true, force: true });
@@ -889,9 +997,15 @@ const CONFIRM_ARGS = [
 ];
 
 describe("confirm-outcome CLI", () => {
+  /** A corpus dir holding the shard matching CONFIRM_ARGS's recordKey (R2-G precheck needs a joinable record). */
+  function writeConfirmCorpusDir(dir: string): void {
+    writeFileSync(join(dir, "901-r1.jsonl"), `${triageLine(recEntry(901, 1, "F-1", "PATCH"))}\n`);
+  }
+
   test("appends a schema-valid OutcomeRecord line and prints it", () => {
     const corpusDir = tmpDir("confirm-out-");
     try {
+      writeConfirmCorpusDir(corpusDir);
       const p = runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]);
       expect(p.exitCode).toBe(0);
       const file = join(corpusDir, "outcomes.jsonl");
@@ -908,6 +1022,7 @@ describe("confirm-outcome CLI", () => {
   test("identical re-confirm is an idempotent no-op: no duplicate row (AC5 negative control)", () => {
     const corpusDir = tmpDir("confirm-out-");
     try {
+      writeConfirmCorpusDir(corpusDir);
       expect(runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]).exitCode).toBe(0);
       const again = runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]);
       expect(again.exitCode).toBe(0);
@@ -920,9 +1035,10 @@ describe("confirm-outcome CLI", () => {
     }
   });
 
-  test("conflicting recordKey refuses the append naming the recordKey and both outcomes (AC5 negative control)", () => {
+  test("conflicting recordKey refuses the append naming the recordKey, both outcomes, and the resolution procedure (AC5 negative control)", () => {
     const corpusDir = tmpDir("confirm-out-");
     try {
+      writeConfirmCorpusDir(corpusDir);
       expect(runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]).exitCode).toBe(0);
       const before = readFileSync(join(corpusDir, "outcomes.jsonl"), "utf8");
       const conflictArgs = [
@@ -941,6 +1057,10 @@ describe("confirm-outcome CLI", () => {
       expect(err).toContain(`901|1|F-1|${LABELER}`);
       expect(err).toContain("true");
       expect(err).toContain("false");
+      // R2-F: the refusal names the exact resolution procedure, not just "resolve explicitly".
+      expect(err).toContain("hand-edit");
+      expect(err).toContain(join(corpusDir, "outcomes.jsonl"));
+      expect(err).toContain("re-run confirm-outcome");
       expect(readFileSync(join(corpusDir, "outcomes.jsonl"), "utf8")).toBe(before);
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
@@ -960,11 +1080,86 @@ describe("confirm-outcome CLI", () => {
     }
   });
 
-  test("recordKey join authority: the gate joins confirmed outcomes by the same string key", () => {
-    // Pins that confirm-outcome's idempotence key and the gate's join key are
-    // the same recordKey grammar (scripts/corpus/schema.ts).
-    const r = { pr: 901, round: 1, finding_id: "F-1", labeler: LABELER };
-    expect(recordKey(r)).toBe("901|1|F-1|jev-1");
+  test("recordKey join authority: keyOf === schema recordKey across adversarial tuples (R2-B)", () => {
+    // The gate's join key (arm-gate.keyOf) and confirm-outcome's idempotence
+    // key (schema recordKey) must be ONE grammar — a divergence would let an
+    // entry confirm idempotently yet never join the gate (or vice versa).
+    // Adversarial tuples: x-form nulls, pipe/dot/unicode ids, empty-ish strings.
+    const prs: (number | null)[] = [1, 42, 901, null];
+    const rounds: (number | null)[] = [1, 7, null];
+    const ids = ["F1", "F-1", "a|b", "x.y", "héllo|θ", "", " "];
+    const labelers = ["jev-1", "op|x", ""];
+    let checked = 0;
+    for (const pr of prs) {
+      for (const round of rounds) {
+        for (const finding_id of ids) {
+          for (const labeler of labelers) {
+            const t = { pr, round, finding_id, labeler };
+            expect(keyOf(t)).toBe(recordKey(t));
+            checked++;
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(200); // the pin is generated, not a literal
+  });
+
+  test("no joining corpus record refuses the append naming the key and dir; a matching key appends (R2-G)", () => {
+    const corpusDir = tmpDir("confirm-join-");
+    try {
+      writeConfirmCorpusDir(corpusDir);
+      // Typo'd finding-id: no corpus record joins 901|1|F-typo|jev-1.
+      const typo = runConfirm([...CONFIRM_ARGS.slice(0, 4), "--finding-id", "F-typo", ...CONFIRM_ARGS.slice(6), "--corpus-dir", corpusDir]);
+      expect(typo.exitCode).toBe(2);
+      expect(typo.stderr.toString()).toContain("901|1|F-typo|jev-1");
+      expect(typo.stderr.toString()).toContain(corpusDir);
+      expect(existsSync(join(corpusDir, "outcomes.jsonl"))).toBe(false); // nothing appended
+      // Matching key: appends.
+      const ok = runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]);
+      expect(ok.exitCode).toBe(0);
+      expect(existsSync(join(corpusDir, "outcomes.jsonl"))).toBe(true);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+    }
+  });
+
+  test("surrounding-whitespace flag values refuse exit 2 naming the field, nothing written (R2-Q)", () => {
+    const corpusDir = tmpDir("confirm-ws-");
+    try {
+      const ws: [string, string][] = [
+        ["--finding-id", "finding_id"],
+        ["--labeler", "labeler"],
+        ["--outcome-source", "outcome_source"],
+      ];
+      for (const [flag, field] of ws) {
+        const args = [...CONFIRM_ARGS, "--corpus-dir", corpusDir];
+        args[args.indexOf(flag) + 1] = " ";
+        const p = runConfirm(args);
+        expect(p.exitCode).toBe(2);
+        expect(p.stderr.toString()).toContain(field);
+      }
+      expect(existsSync(join(corpusDir, "outcomes.jsonl"))).toBe(false);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+    }
+  });
+
+  test("schema refines refuse surrounding whitespace: ' F1' and ' ' never pass (R2-Q)", () => {
+    const base = {
+      pr: 901,
+      round: 1,
+      finding_id: "F-1",
+      labeler: LABELER,
+      outcome_confirmed: true,
+      outcome_source: "operator-merge-evidence",
+      answer_mode: "live" as const,
+      confirmed_at: "2026-11-04T00:00:00Z",
+    };
+    for (const f of ["finding_id", "labeler", "outcome_source"] as const) {
+      for (const bad of [" F1", " "]) {
+        expect(OutcomeRecordSchema.safeParse({ ...base, [f]: bad }).success).toBe(false);
+      }
+    }
   });
 
   test("torn outcomes.jsonl line: confirm-outcome exits 2 leaving the file byte-unchanged; arm-thresholds dry-run also exits 2 (F10)", () => {

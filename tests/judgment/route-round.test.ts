@@ -28,12 +28,15 @@ const ROUTE_SRC = join(REPO_ROOT, "scripts", "judgment", "route-round.ts");
 type RoutingEntryJson = { finding_id: string; rationale?: string; armed_state_digest: string };
 
 // The fence.test.ts import-edge scanner (import-from, export-from, and bare
-// side-effect edges) — duplicated here because the fence binds src/judgment/,
-// not this CLI.
-function importSpecifiers(source: string): string[] {
+// side-effect edges) plus its dynamic import()/require() regexes — fence's
+// hardened allSpecifiers idiom, duplicated here because the fence binds
+// src/judgment/, not this CLI.
+function allSpecifiers(source: string): string[] {
   return [
     ...source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^"']*?\bfrom\s*["']([^"']+)["']/g),
     ...source.matchAll(/(?:^|\n)\s*import\s*["']([^"']+)["']/g),
+    ...source.matchAll(/\bimport\s*\(\s*["'`]([^"'`]+)["'`]/g),
+    ...source.matchAll(/\brequire\s*\(\s*["'`]([^"'`]+)["'`]/g),
   ].map((m) => m[1] ?? "");
 }
 
@@ -196,6 +199,27 @@ describe("route-round — not-armed refusal (fail-closed, writes nothing)", () =
     }
   });
 
+  test("interior blank line (torn double-append) refuses exit 2 naming the blank physical line — the CLI no longer pre-filters blanks (R2-D)", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      writeShard(corpusDir, partitionShard());
+      const entries = chainedEntries(3);
+      mkdirSync(judgmentDir, { recursive: true });
+      // Blank lines BETWEEN entries: physical line 2 is blank.
+      writeFileSync(join(judgmentDir, "arm-state.jsonl"), `${entries.map((e) => JSON.stringify(e)).join("\n\n")}\n`);
+      const p = runRoute(routeArgs(corpusDir, judgmentDir));
+      expect(p.exitCode).toBe(2);
+      const err = p.stderr.toString();
+      expect(err).toMatch(/not-armed/);
+      expect(err).toMatch(/arm-state line 2 is blank/);
+      expect(existsSync(join(judgmentDir, "routing"))).toBe(false);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
   test("chain-valid recording-only head still refuses (the head IS the state)", () => {
     const corpusDir = tmpDir("route-c-");
     const judgmentDir = tmpDir("route-j-");
@@ -235,7 +259,7 @@ describe("route-round — armed manifest partition by recorded answers only", ()
     }
   });
 
-  test("every entry carries armed_state_digest equal to the manifest armed_digest; rationale present ONLY for jev-arm records with a parseable clause (F18)", () => {
+  test("every entry carries armed_state_digest equal to the manifest armed_digest; rationale present exactly when the record is jev-arm and carries a recorded rationale (F18 + round-2 audit)", () => {
     const { corpusDir, judgmentDir, entries, p } = armedRun();
     try {
       expect(p.exitCode).toBe(0);
@@ -245,15 +269,18 @@ describe("route-round — armed manifest partition by recorded answers only", ()
         [...manifest.deep_adjudication, ...manifest.obvious_dismiss_candidates].map((e: RoutingEntryJson) => [e.finding_id, e]),
       );
       for (const e of byId.values()) {
-        expect(e["armed_state_digest"]).toBe(manifest.armed_digest);
+        expect(e.armed_state_digest).toBe(manifest.armed_digest);
       }
-      // AC4: "the jev rationale" — present exactly when a jev-arm record's
-      // recorded rationale yielded a parseable disposition clause; absent (not
-      // "" and not frontier text) otherwise.
+      // AC4: "the jev rationale" — present whenever the record is jev-arm and
+      // carries a recorded rationale, even when the clause fails the strict
+      // parse (the F-dismiss-exponent record routes deep but its recorded jev
+      // rationale is still the operator's evidence of why); absent (not "" and
+      // not frontier text) for non-jev arms and rationale-less records.
       expect("rationale" in byId.get("F-dismiss-high")!).toBe(true);
       expect("rationale" in byId.get("F-dismiss-low")!).toBe(true);
       expect("rationale" in byId.get("F-patch-high")!).toBe(true);
       expect("rationale" in byId.get("F-clause-mismatch")!).toBe(true);
+      expect("rationale" in byId.get("F-dismiss-exponent")!).toBe(true);
       expect("rationale" in byId.get("F-no-rationale")!).toBe(false);
       expect("rationale" in byId.get("F-frontier-arm")!).toBe(false);
       expect(byId.get("F-frontier-arm")).toEqual({ finding_id: "F-frontier-arm", armed_state_digest: manifest.armed_digest });
@@ -296,14 +323,30 @@ describe("route-round — no live judgment path (AC4 negative control)", () => {
 
   // The fence.test.ts import-edge scanner, applied to route-round itself: the
   // name blocklist above stays as belt-and-suspenders, but the allowlist is
-  // the structural pin — no live-path module can even be imported.
-  test("static import specifiers ⊆ node:*, cli-args, corpus merge/schema, arm-gate (F8)", () => {
+  // the structural pin — no live-path module can even be imported, statically
+  // OR dynamically (R2-R).
+  test("all import specifiers, static and dynamic, ⊆ node:*, cli-args, corpus merge/schema, arm-gate (F8 + R2-R)", () => {
     const src = readFileSync(ROUTE_SRC, "utf8");
-    const specs = importSpecifiers(src);
+    const specs = allSpecifiers(src);
     expect(specs.length).toBeGreaterThan(0);
     const allowed = new Set(["../lib/cli-args.ts", "../corpus/merge.ts", "../corpus/schema.ts", "../../src/judgment/arm-gate.ts"]);
     const violations = specs.filter((spec) => !spec.startsWith("node:") && !allowed.has(spec));
     expect(violations).toEqual([]);
+  });
+
+  // R2-R: the scanner must carry fence's dynamic edges too — a static-only
+  // walk lets `await import("...")`/`require("...")` bypass the allowlist pin.
+  test("the scanner also collects dynamic import()/require() edges (fence's allSpecifiers idiom) — pinned on a sample, not just claimed", () => {
+    const sample = [
+      'import { x } from "../lib/cli-args.ts";',
+      'const jev = await import("../../src/judgment/adapters/jev.ts");',
+      'const legacy = require("evil-pkg");',
+    ].join("\n");
+    expect(allSpecifiers(sample)).toEqual([
+      "../lib/cli-args.ts",
+      "../../src/judgment/adapters/jev.ts",
+      "evil-pkg",
+    ]);
   });
 });
 
@@ -364,6 +407,24 @@ describe("route-round — absent corpus shard refuses (F4)", () => {
       const err = p.stderr.toString();
       expect(err).toMatch(/no corpus shard/);
       expect(err).toContain("184-r4.jsonl");
+      expect(existsSync(join(judgmentDir, "routing"))).toBe(false);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+  test("zero-byte shard that exists → exit 2 naming the shard: truncation is not an empty round (R2-O)", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      mkdirSync(corpusDir, { recursive: true });
+      writeFileSync(corpusFilePath(corpusDir, 184, 4), "");
+      writeArmState(judgmentDir, chainedEntries(1));
+      const p = runRoute(routeArgs(corpusDir, judgmentDir));
+      expect(p.exitCode).toBe(2);
+      const err = p.stderr.toString();
+      expect(err).toMatch(/zero records/);
+      expect(err).toMatch(/truncation is not an empty round/);
       expect(existsSync(join(judgmentDir, "routing"))).toBe(false);
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
@@ -436,6 +497,54 @@ describe("route-round — manifest overwrite provenance (F6)", () => {
       rmSync(judgmentDir, { recursive: true, force: true });
     }
   });
+
+  test("rerun under the SAME armed digest but a CHANGED shard → exit 2 refuses, prior manifest byte-unchanged (R2-C)", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      writeShard(corpusDir, partitionShard());
+      writeArmState(judgmentDir, chainedEntries(1));
+      expect(runRoute(routeArgs(corpusDir, judgmentDir)).exitCode).toBe(0);
+      const manifestPath = join(judgmentDir, "routing", "184-4.json");
+      const before = readFileSync(manifestPath, "utf8");
+
+      // Same armed digest, one more record → a different partition.
+      writeShard(corpusDir, [
+        ...partitionShard(),
+        mkRecord({ finding_id: "F-extra", disposition: "PATCH", rationale: "jev: is_real_defect=0.90; disposition=patch p=0.99" }),
+      ]);
+
+      const p = runRoute(routeArgs(corpusDir, judgmentDir));
+      expect(p.exitCode).toBe(2);
+      const err = p.stderr.toString();
+      expect(err).toMatch(/same armed digest/);
+      expect(err).toMatch(/delete the manifest/);
+      expect(readFileSync(manifestPath, "utf8")).toBe(before);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("same digest + same routing but a reparsed/reformatted prior file → idempotent rewrite, not a false refusal (deep-compare, not raw text)", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      writeShard(corpusDir, partitionShard());
+      writeArmState(judgmentDir, chainedEntries(1));
+      expect(runRoute(routeArgs(corpusDir, judgmentDir)).exitCode).toBe(0);
+      const manifestPath = join(judgmentDir, "routing", "184-4.json");
+      const before = readFileSync(manifestPath, "utf8");
+
+      // Same manifest, different bytes: compact JSON, no trailing newline.
+      writeFileSync(manifestPath, JSON.stringify(JSON.parse(before)));
+      expect(runRoute(routeArgs(corpusDir, judgmentDir)).exitCode).toBe(0);
+      expect(readFileSync(manifestPath, "utf8")).toBe(before);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -460,11 +569,30 @@ describe("route-round — clause probability must be in [MIN_ROUTE_CONFIDENCE, 1
 });
 
 describe("route-round — --pr/--round strict plain-digit parse (F14)", () => {
-  for (const bad of ["0x10", "1e2", " 5", "0", "-1"]) {
+  // 9007199254740993 = 2^53+1: regex-clean digits but not a safe integer —
+  // must fail HERE naming the flag, not later as an unrelated shard miss (R2-L).
+  for (const bad of ["0x10", "1e2", " 5", "0", "-1", "9007199254740993"]) {
     test(`--pr "${bad}" → exit 2 naming --pr (Number() coercion forms rejected)`, () => {
       const p = runRoute(["--pr", bad, "--round", "4", "--corpus-dir", tmpDir("route-c-"), "--judgment-dir", tmpDir("route-j-")]);
       expect(p.exitCode).toBe(2);
       expect(p.stderr.toString()).toMatch(/--pr/);
+    });
+  }
+});
+
+describe("route-round — --round strict parse mirrors --pr (R2-P)", () => {
+  for (const bad of ["0x10", "1e2", " 5", "0", "-1", "9007199254740993"]) {
+    test(`--round "${bad}" (--pr valid) → exit 2 naming --round`, () => {
+      const corpusDir = tmpDir("route-c-");
+      const judgmentDir = tmpDir("route-j-");
+      try {
+        const p = runRoute(["--pr", "184", "--round", bad, "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+        expect(p.exitCode).toBe(2);
+        expect(p.stderr.toString()).toMatch(/--round/);
+      } finally {
+        rmSync(corpusDir, { recursive: true, force: true });
+        rmSync(judgmentDir, { recursive: true, force: true });
+      }
     });
   }
 });

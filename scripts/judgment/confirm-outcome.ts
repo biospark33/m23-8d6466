@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { exitWithFailure, parseValueFlags, tokenizeArgs } from "../lib/cli-args.ts";
 import { DEFAULT_CORPUS_DIR } from "../corpus/merge.ts";
 import { OutcomeRecordSchema, recordKey, zodErrors, type OutcomeRecord } from "../corpus/schema.ts";
+import { loadJevCorpusRecords } from "./arm-thresholds.ts";
 
 export interface ConfirmOutcomeArgs extends Omit<OutcomeRecord, "confirmed_at"> {
   corpusDir?: string;
@@ -107,23 +108,25 @@ export function parseArgs(argv: string[]): ConfirmOutcomeArgs {
   };
 }
 
-/** Existing entries of outcomes.jsonl; absent file = []; a malformed line is a loud error (a torn write is an operator fact). */
+/** Existing entries of outcomes.jsonl; absent file = []; a malformed line is a loud error (a torn write is an operator fact) naming its PHYSICAL line (R2-M). */
 export function readOutcomeEntries(file: string): OutcomeRecord[] {
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .split("\n")
-    .filter((l) => l.trim() !== "")
-    .map((l, i) => {
-      let raw: unknown;
-      try {
-        raw = JSON.parse(l);
-      } catch (e) {
-        throw new Error(`outcomes.jsonl line ${i + 1} is not valid JSON: ${(e as Error).message}`);
-      }
-      const parsed = OutcomeRecordSchema.safeParse(raw);
-      if (!parsed.success) throw new Error(`outcomes.jsonl line ${i + 1} failed OutcomeRecordSchema validation: ${zodErrors(parsed.error).join("; ")}`);
-      return parsed.data;
-    });
+  const out: OutcomeRecord[] = [];
+  const lines = readFileSync(file, "utf8").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (l.trim() === "") continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(l);
+    } catch (e) {
+      throw new Error(`outcomes.jsonl line ${i + 1} is not valid JSON: ${(e as Error).message}`);
+    }
+    const parsed = OutcomeRecordSchema.safeParse(raw);
+    if (!parsed.success) throw new Error(`outcomes.jsonl line ${i + 1} failed OutcomeRecordSchema validation: ${zodErrors(parsed.error).join("; ")}`);
+    out.push(parsed.data);
+  }
+  return out;
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -156,14 +159,26 @@ export async function main(argv: string[]): Promise<number> {
       );
       if (!identical) {
         const p = prior[0]!;
-        exitWithFailure("confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins; resolve explicitly):", 2, [
+        exitWithFailure("confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins):", 2, [
           `recordKey ${key}`,
           `existing: outcome_confirmed=${p.outcome_confirmed} outcome_source=${p.outcome_source} answer_mode=${p.answer_mode} confirmed_at=${p.confirmed_at}`,
           `incoming: outcome_confirmed=${incoming.outcome_confirmed} outcome_source=${incoming.outcome_source} answer_mode=${incoming.answer_mode}`,
+          `resolve: hand-edit ${file} to remove the losing duplicate entry for this recordKey, then re-run confirm-outcome — the next read re-validates every line`,
         ]);
       }
       process.stdout.write(`${JSON.stringify({ status: "duplicate", recordKey: key })}\n`);
       return 0;
+    }
+
+    // Join precheck (R2-G): a typo'd finding-id would append an entry that
+    // never joins any corpus record — silently uncounted forever. Same shard
+    // loader + grammar the gate reads (loadJevCorpusRecords).
+    const corpusRecords = loadJevCorpusRecords(dir);
+    if (!corpusRecords.some((r) => recordKey(r) === key)) {
+      exitWithFailure("confirm-outcome: no jev-arm corpus record joins this recordKey — refusing the append:", 2, [
+        `recordKey ${key}`,
+        `no corpus record in "${dir}" (shards <pr|x>-r<round>.jsonl) carries this key — check the finding-id for typos`,
+      ]);
     }
 
     mkdirSync(dir, { recursive: true });
