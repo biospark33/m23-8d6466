@@ -28,6 +28,7 @@ import {
   WILSON_Z,
   agrees,
   armStateEntryDigest,
+  countedCorpusDigest,
   evaluateGate,
   verifyArmStateLog,
   wilsonLowerBound,
@@ -271,6 +272,12 @@ describe("AC2 threshold constants", () => {
     expect(wilsonLowerBound(51, 52, WILSON_Z)).toBeLessThan(0.9);
   });
 
+  test("wilsonLowerBound throws on invalid inputs — never a silent NaN (F17)", () => {
+    expect(() => wilsonLowerBound(1, 0, WILSON_Z)).toThrow(); // n=0
+    expect(() => wilsonLowerBound(3, 2, WILSON_Z)).toThrow(); // agreed>n
+    expect(() => wilsonLowerBound(-1, 10, WILSON_Z)).toThrow(); // agreed<0
+  });
+
   test("agrees() matches ab-report outcomeAgrees across all 6 dispositions x both booleans", () => {
     for (const d of DISPOSITIONS) {
       for (const oc of [true, false]) {
@@ -385,6 +392,48 @@ describe("evaluateGate", () => {
     expect(v.sources).toEqual({ "operator-merge-evidence": 140, "operator-review": 100 });
     expect(v.modes).toEqual({ live: 240, mock: 5 });
   });
+
+  test("duplicate corpus rows (hand-merged shards) dedupe by recordKey — verdict and sources identical to the deduped run (F7)", () => {
+    const { outcomes, corpus } = eligibleFixture();
+    const base = evaluateGate(outcomes, corpus);
+    // Every corpus row duplicated: confirmed dedupes, so cluster totals and
+    // source counts must not inflate behind the same confirmed number.
+    const dup = evaluateGate(outcomes, [...corpus, ...corpus]);
+    expect(dup.milestones.confirmed).toBe(base.milestones.confirmed);
+    expect(dup.milestones.clusters).toBe(base.milestones.clusters);
+    expect(dup.milestones.rate).toBe(base.milestones.rate);
+    expect(dup.sources).toEqual(base.sources);
+  });
+
+  test("conflicting outcome entries surface unresolved_outcome_keys=N — the counted population never silently shrinks (F11)", () => {
+    const { outcomes, corpus } = eligibleFixture();
+    const first = outcomes[0]!;
+    const v = evaluateGate([...outcomes, { ...first, outcome_confirmed: !first.outcome_confirmed }], corpus);
+    expect(v.milestones.confirmed).toBe(239); // the conflicting key drops out — and that is now VISIBLE
+    expect(v.gaps).toContain("unresolved_outcome_keys=1");
+    expect(v.verdict).toBe("not-eligible");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// countedCorpusDigest determinism (F9/F16)
+// ---------------------------------------------------------------------------
+
+describe("countedCorpusDigest determinism", () => {
+  test("shuffled outcomes + reversed corpus records give the same digest (F9)", () => {
+    const { outcomes, corpus } = eligibleFixture();
+    expect(countedCorpusDigest([...outcomes].reverse(), [...corpus].reverse())).toBe(countedCorpusDigest(outcomes, corpus));
+  });
+
+  test("the same entries JSON-parsed with reordered keys give the same digest (F16)", () => {
+    const { outcomes, corpus } = eligibleFixture();
+    const reordered: GateOutcomeEntry[] = outcomes.map((o) => {
+      const obj: Record<string, unknown> = {};
+      for (const k of Object.keys(o).reverse()) obj[k] = (o as unknown as Record<string, unknown>)[k];
+      return obj as unknown as GateOutcomeEntry;
+    });
+    expect(countedCorpusDigest(reordered, corpus)).toBe(countedCorpusDigest(outcomes, corpus));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -450,13 +499,64 @@ describe("verifyArmStateLog", () => {
   });
 
   test("from/to continuity is checked — a spliced entry with the wrong from-state refuses", () => {
-    const entries = chainedEntries(2);
-    const spliced = mkEntry(2, sha(entries[0]!), "armed", "recording-only");
-    // seq 2 chains correctly but claims from "armed" while entry 1 ended "armed"
-    // only if entry 1.to === "armed"; make entry 1 end recording-only instead.
-    const e1 = mkEntry(1, null, "recording-only", "recording-only");
-    const r = verifyArmStateLog([JSON.stringify(e1), JSON.stringify(spliced)]);
+    // Genesis is the only legal first flip (recording-only→armed — from must
+    // differ from to and start recording-only), so entry 2 must continue
+    // "armed"; this splice carries a correct prev_digest and still refuses.
+    const genesis = mkEntry(1, null, "recording-only", "armed");
+    const spliced = mkEntry(2, sha(genesis), "recording-only", "armed");
+    const r = verifyArmStateLog([JSON.stringify(genesis), JSON.stringify(spliced)]);
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.reason).toMatch(/continue/);
+  });
+
+  test("genesis from must be recording-only — an armed genesis refuses (F1)", () => {
+    const forged = mkEntry(1, null, "armed", "recording-only");
+    const r = verifyArmStateLog([JSON.stringify(forged)]);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.reason).toMatch(/genesis/);
+  });
+
+  test("no-op flips (from===to) refuse (F1)", () => {
+    const e1 = mkEntry(1, null, "recording-only", "armed");
+    const noop = mkEntry(2, sha(e1), "armed", "armed");
+    const r = verifyArmStateLog([JSON.stringify(e1), JSON.stringify(noop)]);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.reason).toMatch(/no-op/);
+  });
+
+  test("missing or non-ISO at refuses naming at (F1)", () => {
+    for (const bad of [undefined, "yesterday", "2026-11-04", "2026-02-30T00:00:00Z"] as const) {
+      const entry: Record<string, unknown> = { ...mkEntry(1, null, "recording-only", "armed") };
+      if (bad === undefined) delete entry.at;
+      else entry.at = bad;
+      const r = verifyArmStateLog([JSON.stringify(entry)]);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error(`at=${String(bad)} verified — must refuse`);
+      expect(r.reason).toMatch(/\bat\b/);
+    }
+  });
+
+  test("garbled evidence refuses naming the problem (F1)", () => {
+    const good = mkEntry(1, null, "recording-only", "armed");
+    const thNoZ: Record<string, unknown> = { ...THRESHOLDS_EVIDENCE };
+    delete thNoZ.WILSON_Z;
+    const cases: [string, unknown][] = [
+      ["evidence absent", undefined],
+      ["evidence a string", "eligible!"],
+      ["thresholds missing WILSON_Z", { ...good.evidence, thresholds: thNoZ }],
+      ["non-number threshold", { ...good.evidence, thresholds: { ...THRESHOLDS_EVIDENCE, WILSON_Z: "1.96" } }],
+      ["short corpus_digest", { ...good.evidence, corpus_digest: "ab" }],
+    ];
+    for (const [label, evidence] of cases) {
+      const entry: Record<string, unknown> = { ...good, evidence };
+      const r = verifyArmStateLog([JSON.stringify(entry)]);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error(`case "${label}" verified — must refuse`);
+      expect(r.reason).toContain("evidence");
+    }
   });
 });
 
@@ -695,6 +795,73 @@ describe("arm-thresholds CLI", () => {
     const p = runArm(["--arm", "--unarm", "--sign-off", "steve", "--judgment-dir", tmpDir("arm-gate-jdg-")]);
     expect(p.exitCode).toBe(2);
   });
+
+  test("dry-run against the REAL repo corpus (default dirs) is not-eligible naming outcome_confirmed=0/200 (F3)", () => {
+    // DATA-DEPENDENT BY DESIGN: the day the real corpus meets the milestones
+    // this test FAILS — that failure is the alarm telling the operator to run
+    // the DD-21 milestone review, not a bug to fix in the test.
+    const p = runArm([]);
+    expect(p.exitCode).toBe(0);
+    const verdict = JSON.parse(p.stdout.toString());
+    expect(verdict.verdict).toBe("not-eligible");
+    expect(verdict.gaps).toContain("outcome_confirmed=0/200");
+  });
+
+  test("malformed corpus shard line: dry-run exits 2 with a clean message, no stack (F5)", () => {
+    const corpusDir = tmpDir("arm-gate-malformed-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      mkdirSync(corpusDir, { recursive: true });
+      writeFileSync(join(corpusDir, "901-r1.jsonl"), '{"finding_id":"F1","broken\n');
+      const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+      expect(p.exitCode).toBe(2); // never exit 1 — the 0/2 exit contract
+      expect(p.stderr.toString()).not.toMatch(/\bat \S/); // no stack frame
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("flip whose append fails (judgment dir occupied by a file) exits 2 clean, no stack (F5)", () => {
+    const corpusDir = tmpDir("arm-gate-cli-");
+    const judgmentDirAsFile = join("/tmp", `arm-gate-notadir-${process.pid}-${Date.now()}`);
+    try {
+      writeEligibleCorpusDir(corpusDir);
+      writeFileSync(judgmentDirAsFile, "not a dir"); // mkdirSync(judgmentDir) will throw
+      const p = runArm(["--arm", "--sign-off", "steve 2026-11-04", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDirAsFile], {
+        QDS_JUDGMENT_ARM_CONFIRMED: "1",
+      });
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).not.toMatch(/\bat \S/);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDirAsFile, { force: true });
+    }
+  });
+
+  test("shard membership is strict: a foreign notes-round.jsonl is ignored; the x-rN backfill form still loads (F13)", () => {
+    const corpusDir = tmpDir("arm-gate-shards-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      mkdirSync(corpusDir, { recursive: true });
+      // F-A lives in a real pr-rN shard; F-B in a foreign name the old /-r./
+      // substring admitted; F-C in the x-rN (null-pr backfill) form. Record
+      // content, not file name, carries pr/round — so all three WOULD count if loaded.
+      writeFileSync(join(corpusDir, "901-r1.jsonl"), `${triageLine(recEntry(901, 1, "F-A", "PATCH"))}\n`);
+      writeFileSync(join(corpusDir, "notes-round.jsonl"), `${triageLine(recEntry(901, 1, "F-B", "PATCH"))}\n`);
+      writeFileSync(join(corpusDir, "x-r7.jsonl"), `${triageLine(recEntry(902, 2, "F-C", "PATCH"))}\n`);
+      const outcomes = [outEntry(901, 1, "F-A", true), outEntry(901, 1, "F-B", true), outEntry(902, 2, "F-C", true)];
+      writeFileSync(join(corpusDir, "outcomes.jsonl"), `${outcomes.map((o) => JSON.stringify(o)).join("\n")}\n`);
+      const p = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+      expect(p.exitCode).toBe(0);
+      const verdict = JSON.parse(p.stdout.toString());
+      // 3 = everything loaded (the bug); 1 = the x-form wrongly excluded; 2 = correct.
+      expect(verdict.milestones.confirmed).toBe(2);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -798,5 +965,39 @@ describe("confirm-outcome CLI", () => {
     // the same recordKey grammar (scripts/corpus/schema.ts).
     const r = { pr: 901, round: 1, finding_id: "F-1", labeler: LABELER };
     expect(recordKey(r)).toBe("901|1|F-1|jev-1");
+  });
+
+  test("torn outcomes.jsonl line: confirm-outcome exits 2 leaving the file byte-unchanged; arm-thresholds dry-run also exits 2 (F10)", () => {
+    const corpusDir = tmpDir("confirm-torn-");
+    const judgmentDir = tmpDir("arm-gate-jdg-");
+    try {
+      mkdirSync(corpusDir, { recursive: true });
+      const file = join(corpusDir, "outcomes.jsonl");
+      writeFileSync(file, `${JSON.stringify(outEntry(901, 1, "F-1", true))}\n{"pr": 901, "rou`);
+      const before = readFileSync(file, "utf8");
+      const c = runConfirm([...CONFIRM_ARGS, "--corpus-dir", corpusDir]);
+      expect(c.exitCode).toBe(2);
+      expect(readFileSync(file, "utf8")).toBe(before); // byte-unchanged — no append past a torn line
+      const arm = runArm(["--corpus-dir", corpusDir, "--judgment-dir", judgmentDir]);
+      expect(arm.exitCode).toBe(2);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("--pr/--round accept strict decimal digits only: 0x10/1e2/' 5'/-1/0 each exit 2 (F14)", () => {
+    const corpusDir = tmpDir("confirm-strict-");
+    try {
+      for (const bad of ["0x10", "1e2", " 5", "-1", "0"]) {
+        const prBad = runConfirm(["--pr", bad, ...CONFIRM_ARGS.slice(2), "--corpus-dir", corpusDir]);
+        expect(prBad.exitCode).toBe(2);
+        const roundBad = runConfirm([...CONFIRM_ARGS.slice(0, 2), "--round", bad, ...CONFIRM_ARGS.slice(4), "--corpus-dir", corpusDir]);
+        expect(roundBad.exitCode).toBe(2);
+      }
+      expect(existsSync(join(corpusDir, "outcomes.jsonl"))).toBe(false); // " 5" must never have written
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+    }
   });
 });

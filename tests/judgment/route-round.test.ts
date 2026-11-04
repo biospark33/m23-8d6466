@@ -16,10 +16,26 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { corpusFilePath } from "../../scripts/corpus/merge.ts";
 import type { TriageRecord } from "../../scripts/corpus/schema.ts";
+import { rationaleFrom } from "../../scripts/judgment/observe-round.ts";
+import { parseDispositionProbability } from "../../scripts/judgment/route-round.ts";
 import { armStateEntryDigest, thresholds, type ArmStateEntry } from "../../src/judgment/arm-gate.ts";
+import { TYPESAFE_MODEL, type JudgmentEnvelope } from "../../src/judgment/index.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ROUTE_SRC = join(REPO_ROOT, "scripts", "judgment", "route-round.ts");
+
+/** A manifest entry as parsed from JSON (rationale optional per F18). */
+type RoutingEntryJson = { finding_id: string; rationale?: string; armed_state_digest: string };
+
+// The fence.test.ts import-edge scanner (import-from, export-from, and bare
+// side-effect edges) — duplicated here because the fence binds src/judgment/,
+// not this CLI.
+function importSpecifiers(source: string): string[] {
+  return [
+    ...source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^"']*?\bfrom\s*["']([^"']+)["']/g),
+    ...source.matchAll(/(?:^|\n)\s*import\s*["']([^"']+)["']/g),
+  ].map((m) => m[1] ?? "");
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -100,6 +116,7 @@ function partitionShard(): TriageRecord[] {
     mkRecord({ finding_id: "F-no-rationale", disposition: "DISMISS" }),
     mkRecord({ finding_id: "F-frontier-arm", disposition: "DISMISS", labeler: "frontier-lead", arm: "frontier", rationale: "obvious noise" }),
     mkRecord({ finding_id: "F-clause-mismatch", disposition: "DISMISS", rationale: "jev: is_real_defect=0.90; disposition=patch p=0.99" }),
+    mkRecord({ finding_id: "F-dismiss-exponent", disposition: "DISMISS", rationale: "jev: is_real_defect=0.05; disposition=dismiss p=1e-7" }),
   ];
 }
 
@@ -120,6 +137,17 @@ function runRoute(args: string[]) {
 
 function routeArgs(corpusDir: string, judgmentDir: string): string[] {
   return ["--pr", "184", "--round", "4", "--corpus-dir", corpusDir, "--judgment-dir", judgmentDir];
+}
+
+/** An armed run over the given shard (default: the standard partition fixture). */
+function armedRun(records: TriageRecord[] = partitionShard()) {
+  const corpusDir = tmpDir("route-c-");
+  const judgmentDir = tmpDir("route-j-");
+  writeShard(corpusDir, records);
+  const entries = chainedEntries(1); // genesis flip: recording-only → armed
+  writeArmState(judgmentDir, entries);
+  const p = runRoute(routeArgs(corpusDir, judgmentDir));
+  return { corpusDir, judgmentDir, entries, p };
 }
 
 // ---------------------------------------------------------------------------
@@ -190,17 +218,7 @@ describe("route-round — not-armed refusal (fail-closed, writes nothing)", () =
 // ---------------------------------------------------------------------------
 
 describe("route-round — armed manifest partition by recorded answers only", () => {
-  function armedRun() {
-    const corpusDir = tmpDir("route-c-");
-    const judgmentDir = tmpDir("route-j-");
-    writeShard(corpusDir, partitionShard());
-    const entries = chainedEntries(1); // genesis flip: recording-only → armed
-    writeArmState(judgmentDir, entries);
-    const p = runRoute(routeArgs(corpusDir, judgmentDir));
-    return { corpusDir, judgmentDir, entries, p };
-  }
-
-  test("DISMISS p=0.97 → candidate; DISMISS p=0.5, PATCH p=0.99, missing rationale, non-jev arm, clause mismatch → deep", () => {
+  test("DISMISS p=0.97 → candidate; DISMISS p=0.5, PATCH p=0.99, missing rationale, non-jev arm, clause mismatch, exponent-form p → deep", () => {
     const { corpusDir, judgmentDir, p } = armedRun();
     try {
       expect(p.exitCode).toBe(0);
@@ -209,7 +227,7 @@ describe("route-round — armed manifest partition by recorded answers only", ()
       expect(manifest.round).toBe(4);
       expect(manifest.obvious_dismiss_candidates.map((e: { finding_id: string }) => e.finding_id)).toEqual(["F-dismiss-high"]);
       expect(new Set(manifest.deep_adjudication.map((e: { finding_id: string }) => e.finding_id))).toEqual(
-        new Set(["F-dismiss-low", "F-patch-high", "F-no-rationale", "F-frontier-arm", "F-clause-mismatch"]),
+        new Set(["F-dismiss-low", "F-patch-high", "F-no-rationale", "F-frontier-arm", "F-clause-mismatch", "F-dismiss-exponent"]),
       );
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
@@ -217,16 +235,28 @@ describe("route-round — armed manifest partition by recorded answers only", ()
     }
   });
 
-  test("every entry carries armed_state_digest equal to the manifest armed_digest and the armed head's digest", () => {
+  test("every entry carries armed_state_digest equal to the manifest armed_digest; rationale present ONLY for jev-arm records with a parseable clause (F18)", () => {
     const { corpusDir, judgmentDir, entries, p } = armedRun();
     try {
       expect(p.exitCode).toBe(0);
       const manifest = JSON.parse(readFileSync(join(judgmentDir, "routing", "184-4.json"), "utf8"));
       expect(manifest.armed_digest).toBe(armStateEntryDigest(entries[0]!));
-      for (const e of [...manifest.deep_adjudication, ...manifest.obvious_dismiss_candidates]) {
-        expect(e.armed_state_digest).toBe(manifest.armed_digest);
-        expect(e.rationale).toBeDefined();
+      const byId = new Map<string, Record<string, unknown>>(
+        [...manifest.deep_adjudication, ...manifest.obvious_dismiss_candidates].map((e: RoutingEntryJson) => [e.finding_id, e]),
+      );
+      for (const e of byId.values()) {
+        expect(e["armed_state_digest"]).toBe(manifest.armed_digest);
       }
+      // AC4: "the jev rationale" — present exactly when a jev-arm record's
+      // recorded rationale yielded a parseable disposition clause; absent (not
+      // "" and not frontier text) otherwise.
+      expect("rationale" in byId.get("F-dismiss-high")!).toBe(true);
+      expect("rationale" in byId.get("F-dismiss-low")!).toBe(true);
+      expect("rationale" in byId.get("F-patch-high")!).toBe(true);
+      expect("rationale" in byId.get("F-clause-mismatch")!).toBe(true);
+      expect("rationale" in byId.get("F-no-rationale")!).toBe(false);
+      expect("rationale" in byId.get("F-frontier-arm")!).toBe(false);
+      expect(byId.get("F-frontier-arm")).toEqual({ finding_id: "F-frontier-arm", armed_state_digest: manifest.armed_digest });
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
       rmSync(judgmentDir, { recursive: true, force: true });
@@ -244,7 +274,7 @@ describe("route-round — armed manifest partition by recorded answers only", ()
         pr: 184,
         round: 4,
         armed_digest: expect.any(String),
-        deep_adjudication: 5,
+        deep_adjudication: 6,
         obvious_dismiss_candidates: 1,
       });
     } finally {
@@ -263,4 +293,178 @@ describe("route-round — no live judgment path (AC4 negative control)", () => {
     const src = readFileSync(ROUTE_SRC, "utf8");
     expect(src).not.toMatch(/JUDGMENT_PROVIDERS|resolveProvider|makeJevProvider|makeMockProvider|JudgmentClient|src\/judgment\/adapters|typesafe/);
   });
+
+  // The fence.test.ts import-edge scanner, applied to route-round itself: the
+  // name blocklist above stays as belt-and-suspenders, but the allowlist is
+  // the structural pin — no live-path module can even be imported.
+  test("static import specifiers ⊆ node:*, cli-args, corpus merge/schema, arm-gate (F8)", () => {
+    const src = readFileSync(ROUTE_SRC, "utf8");
+    const specs = importSpecifiers(src);
+    expect(specs.length).toBeGreaterThan(0);
+    const allowed = new Set(["../lib/cli-args.ts", "../corpus/merge.ts", "../corpus/schema.ts", "../../src/judgment/arm-gate.ts"]);
+    const violations = specs.filter((spec) => !spec.startsWith("node:") && !allowed.has(spec));
+    expect(violations).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Producer/consumer cross-pin: parseDispositionProbability ≡ rationaleFrom (F2)
+// ---------------------------------------------------------------------------
+
+/** A minimal-but-honest envelope: rationaleFrom reads only the two answers. */
+function mkEnvelope(choice: string, p: number): JudgmentEnvelope {
+  return {
+    requestId: "req-route-cross-pin",
+    model: TYPESAFE_MODEL,
+    questions: {},
+    answers: {
+      is_real_defect: { type: "noul", noul: 0.05 },
+      disposition: { type: "choice", choice, probabilities: { [choice]: p }, confidence: p },
+    },
+    usage: { input_tokens: 1, output_tokens: 1 },
+    latency_ms: 1,
+    egress_class: "finding-text",
+    created_at: "2026-11-04T00:00:00Z",
+  };
+}
+
+describe("route-round — parseDispositionProbability pinned to observe-round's rationaleFrom (F2)", () => {
+  // The agrees()≡outcomeAgrees idiom (arm-gate.test.ts): the consumer must
+  // read exactly what the producer writes, or the dismiss lane dies silently
+  // with every other test green.
+  test("for every asked choice x representative p, the consumer returns the envelope's own choice and exact p", () => {
+    for (const choice of ["patch", "dismiss", "gate-action"] as const) {
+      for (const p of [1, 0.97, 0.5, 0]) {
+        expect(parseDispositionProbability(rationaleFrom(mkEnvelope(choice, p)))).toEqual({ disposition: choice, p });
+      }
+    }
+  });
+
+  test("exponent-form p (1e-7 renders as 'p=1e-7') is not-recorded and routes deep — the documented fail-safe", () => {
+    const rationale = rationaleFrom(mkEnvelope("dismiss", 1e-7));
+    expect(rationale).toContain("disposition=dismiss p=1e-7");
+    expect(parseDispositionProbability(rationale)).toBe("not-recorded");
+    // Routes deep is pinned end-to-end by F-dismiss-exponent in the armed
+    // manifest describe above.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Absent shard / malformed corpus / overwrite provenance (F4, F5, F6)
+// ---------------------------------------------------------------------------
+
+describe("route-round — absent corpus shard refuses (F4)", () => {
+  test("armed state + missing shard file → exit 2 naming the shard, no routing dir or manifest", () => {
+    const corpusDir = tmpDir("route-c-"); // shard never written
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      writeArmState(judgmentDir, chainedEntries(1));
+      const p = runRoute(routeArgs(corpusDir, judgmentDir));
+      expect(p.exitCode).toBe(2);
+      const err = p.stderr.toString();
+      expect(err).toMatch(/no corpus shard/);
+      expect(err).toContain("184-r4.jsonl");
+      expect(existsSync(join(judgmentDir, "routing"))).toBe(false);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("route-round — fatal errors are exit 2 with a clean message, never an uncaught stack (F5)", () => {
+  test("malformed corpus line in the shard → exit 2, message without a stack trace, nothing written", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      const shard = corpusFilePath(corpusDir, 184, 4);
+      mkdirSync(corpusDir, { recursive: true });
+      writeFileSync(shard, `${JSON.stringify(partitionShard()[0])}\n{ torn write\n`);
+      writeArmState(judgmentDir, chainedEntries(1));
+      const p = runRoute(routeArgs(corpusDir, judgmentDir));
+      expect(p.exitCode).toBe(2);
+      const err = p.stderr.toString();
+      expect(err).toMatch(/route-round:/);
+      expect(err).not.toMatch(/\n\s*at\s/); // no stack frames
+      expect(existsSync(join(judgmentDir, "routing"))).toBe(false);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("route-round — manifest overwrite provenance (F6)", () => {
+  test("rerun under a DIFFERENT armed digest → exit 2, the existing manifest byte-unchanged", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      writeShard(corpusDir, partitionShard());
+      writeArmState(judgmentDir, chainedEntries(1));
+      expect(runRoute(routeArgs(corpusDir, judgmentDir)).exitCode).toBe(0);
+      const manifestPath = join(judgmentDir, "routing", "184-4.json");
+      const before = readFileSync(manifestPath, "utf8");
+
+      // A second, equally chain-valid armed head with a different digest.
+      const alt = chainedEntries(1)[0]!;
+      alt.at = "2026-11-05T00:00:00Z";
+      writeArmState(judgmentDir, [alt]);
+
+      const p = runRoute(routeArgs(corpusDir, judgmentDir));
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toMatch(/different armed digest/);
+      expect(readFileSync(manifestPath, "utf8")).toBe(before);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rerun under the SAME armed digest is an idempotent rewrite (exit 0, identical manifest)", () => {
+    const corpusDir = tmpDir("route-c-");
+    const judgmentDir = tmpDir("route-j-");
+    try {
+      writeShard(corpusDir, partitionShard());
+      writeArmState(judgmentDir, chainedEntries(1));
+      expect(runRoute(routeArgs(corpusDir, judgmentDir)).exitCode).toBe(0);
+      const manifestPath = join(judgmentDir, "routing", "184-4.json");
+      const before = readFileSync(manifestPath, "utf8");
+      expect(runRoute(routeArgs(corpusDir, judgmentDir)).exitCode).toBe(0);
+      expect(readFileSync(manifestPath, "utf8")).toBe(before);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Partition clamp + strict CLI digits (F12, F14)
+// ---------------------------------------------------------------------------
+
+describe("route-round — clause probability must be in [MIN_ROUTE_CONFIDENCE, 1] (F12)", () => {
+  test("DISMISS with a percent-style p=97 clause is malformed → deep, never a candidate", () => {
+    const { corpusDir, judgmentDir, p } = armedRun([
+      mkRecord({ finding_id: "F-dismiss-percent", disposition: "DISMISS", rationale: "jev: is_real_defect=0.01; disposition=dismiss p=97" }),
+    ]);
+    try {
+      expect(p.exitCode).toBe(0);
+      const manifest = JSON.parse(readFileSync(join(judgmentDir, "routing", "184-4.json"), "utf8"));
+      expect(manifest.obvious_dismiss_candidates).toEqual([]);
+      expect(manifest.deep_adjudication.map((e: RoutingEntryJson) => e.finding_id)).toEqual(["F-dismiss-percent"]);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("route-round — --pr/--round strict plain-digit parse (F14)", () => {
+  for (const bad of ["0x10", "1e2", " 5", "0", "-1"]) {
+    test(`--pr "${bad}" → exit 2 naming --pr (Number() coercion forms rejected)`, () => {
+      const p = runRoute(["--pr", bad, "--round", "4", "--corpus-dir", tmpDir("route-c-"), "--judgment-dir", tmpDir("route-j-")]);
+      expect(p.exitCode).toBe(2);
+      expect(p.stderr.toString()).toMatch(/--pr/);
+    });
+  }
 });

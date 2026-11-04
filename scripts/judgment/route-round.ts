@@ -32,8 +32,8 @@ export interface RouteRoundArgs {
 }
 
 export function parseArgs(argv: string[]): RouteRoundArgs {
-  let pr: number | undefined;
-  let round: number | undefined;
+  let pr: string | undefined;
+  let round: string | undefined;
   let corpusDir: string | undefined;
   let judgmentDir: string | undefined;
   const { flagTokens } = tokenizeArgs(argv, {
@@ -42,8 +42,8 @@ export function parseArgs(argv: string[]): RouteRoundArgs {
   parseValueFlags(flagTokens, {
     flags: ["--pr", "--round", "--corpus-dir", "--judgment-dir"],
     onValue: (flag, v) => {
-      if (flag === "--pr") pr = Number(v);
-      else if (flag === "--round") round = Number(v);
+      if (flag === "--pr") pr = v;
+      else if (flag === "--round") round = v;
       else if (flag === "--corpus-dir") corpusDir = v;
       else judgmentDir = v;
     },
@@ -61,10 +61,13 @@ export function parseArgs(argv: string[]): RouteRoundArgs {
       "",
     ],
   });
+  // Strict digits, never Number() coercion: 0x10/1e2/" 5" all coerce to valid
+  // integers and would route a round that was never named (F14).
   for (const [name, v] of [["--pr", pr], ["--round", round]] as const) {
-    if (!Number.isInteger(v) || (v as number) <= 0) throw new Error(`${name} <N> is required (a positive integer)`);
+    if (v === undefined) throw new Error(`${name} <N> is required (a positive integer)`);
+    if (!/^\d+$/.test(v) || Number(v) <= 0) throw new Error(`${name} must be a positive integer in plain digits (got "${v}")`);
   }
-  return { pr: pr!, round: round!, corpusDir, judgmentDir };
+  return { pr: Number(pr), round: Number(round), corpusDir, judgmentDir };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,18 +107,21 @@ function armedHeadDigest(judgmentDir: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The recorded jev clause, mirroring parseIsRealDefect (ab-report.ts): regex
- * over the recorded rationale, never a re-judge. Absent clause =
- * "not-recorded" (never guessed).
+ * The recorded jev clause — the same regex idiom as parseIsRealDefect
+ * (ab-report.ts), applied to the `disposition=` clause written by
+ * observe-round's rationaleFrom (pinned by the cross-pin test). Never a
+ * re-judge. Absent or non-plain-decimal clauses (e.g. exponent form, which
+ * String(p) renders as "1e-7") are "not-recorded" — the fail-safe lane.
  */
 export function parseDispositionProbability(rationale: string | undefined): { disposition: string; p: number } | "not-recorded" {
-  const m = rationale?.match(/jev:.*disposition=([a-z_]+) p=([0-9]+(?:\.[0-9]+)?)/);
+  const m = rationale?.match(/jev:.*disposition=([a-z][a-z_-]*) p=([0-9]+(?:\.[0-9]+)?)(?![0-9.eE])/);
   return m ? { disposition: m[1]!, p: Number.parseFloat(m[2]!) } : "not-recorded";
 }
 
 export interface RoutingEntry {
   finding_id: string;
-  rationale: string;
+  /** The jev rationale — present ONLY when the record is a jev-arm record whose recorded rationale yielded a parseable disposition clause (AC4). */
+  rationale?: string;
   armed_state_digest: string;
 }
 
@@ -129,8 +135,9 @@ export interface RoutingManifest {
 
 /**
  * The ONE narrow lane: a recorded DISMISS whose own clause says dismiss at
- * p >= MIN_ROUTE_CONFIDENCE. Everything else — other dispositions,
- * sub-threshold or absent clauses, records without a jev answer — goes
+ * MIN_ROUTE_CONFIDENCE <= p <= 1 (a percent-style p=97 is malformed, not
+ * confident). Everything else — other dispositions, sub-threshold,
+ * out-of-range, or absent clauses, records without a jev answer — goes
  * deep-adjudication (never guessed).
  */
 function partition(records: TriageRecord[], digest: string): { deep: RoutingEntry[]; candidates: RoutingEntry[] } {
@@ -143,8 +150,10 @@ function partition(records: TriageRecord[], digest: string): { deep: RoutingEntr
       r.disposition === "DISMISS" &&
       clause !== "not-recorded" &&
       clause.disposition.toLowerCase() === "dismiss" &&
-      clause.p >= MIN_ROUTE_CONFIDENCE;
-    const entry: RoutingEntry = { finding_id: r.finding_id, rationale: r.rationale ?? "", armed_state_digest: digest };
+      clause.p >= MIN_ROUTE_CONFIDENCE &&
+      clause.p <= 1;
+    const entry: RoutingEntry = { finding_id: r.finding_id, armed_state_digest: digest };
+    if (r.arm === "jev" && clause !== "not-recorded") entry.rationale = r.rationale;
     (obvious ? candidates : deep).push(entry);
   }
   return { deep, candidates };
@@ -158,37 +167,58 @@ export function main(argv: string[]): number {
   let args: RouteRoundArgs;
   try {
     args = parseArgs(argv);
-  } catch (e) {
-    exitWithFailure("route-round:", 2, [(e as Error).message]);
-  }
-  const corpusDir = args.corpusDir ?? DEFAULT_CORPUS_DIR;
-  const judgmentDir = args.judgmentDir ?? DEFAULT_JUDGMENT_DIR;
+    const corpusDir = args.corpusDir ?? DEFAULT_CORPUS_DIR;
+    const judgmentDir = args.judgmentDir ?? DEFAULT_JUDGMENT_DIR;
 
-  const digest = armedHeadDigest(judgmentDir); // refuses exit 2 before any write
-  const records = readRecords(corpusFilePath(corpusDir, args.pr, args.round));
-  const { deep, candidates } = partition(records, digest);
+    const digest = armedHeadDigest(judgmentDir); // refuses exit 2 before any write
+    const shard = corpusFilePath(corpusDir, args.pr, args.round);
+    // readRecords returns [] for a missing file — a typo'd round would route
+    // nobody as an empty manifest and exit 0. Absent findings are absent,
+    // never an empty manifest (F4).
+    if (!existsSync(shard)) {
+      exitWithFailure("route-round:", 2, [
+        `no corpus shard for pr ${args.pr} round ${args.round} at ${shard} — absent findings are absent, never an empty manifest`,
+      ]);
+    }
+    const records = readRecords(shard);
+    const { deep, candidates } = partition(records, digest);
 
-  const manifest: RoutingManifest = {
-    pr: args.pr,
-    round: args.round,
-    armed_digest: digest,
-    deep_adjudication: deep,
-    obvious_dismiss_candidates: candidates,
-  };
-  const routingDir = join(judgmentDir, "routing");
-  mkdirSync(routingDir, { recursive: true });
-  writeFileSync(join(routingDir, `${args.pr}-${args.round}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
-
-  process.stdout.write(
-    `${JSON.stringify({
+    const manifest: RoutingManifest = {
       pr: args.pr,
       round: args.round,
       armed_digest: digest,
-      deep_adjudication: deep.length,
-      obvious_dismiss_candidates: candidates.length,
-    })}\n`,
-  );
-  return 0;
+      deep_adjudication: deep,
+      obvious_dismiss_candidates: candidates,
+    };
+    const routingDir = join(judgmentDir, "routing");
+    const manifestPath = join(routingDir, `${args.pr}-${args.round}.json`);
+    if (existsSync(manifestPath)) {
+      const prior = JSON.parse(readFileSync(manifestPath, "utf8")) as RoutingManifest;
+      if (prior.armed_digest !== digest) {
+        exitWithFailure("route-round:", 2, [
+          `manifest ${manifestPath} exists under a different armed digest — prior routing provenance is not overwritten`,
+        ]);
+      }
+      // Same digest: an idempotent rewrite, allowed.
+    }
+    mkdirSync(routingDir, { recursive: true });
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    process.stdout.write(
+      `${JSON.stringify({
+        pr: args.pr,
+        round: args.round,
+        armed_digest: digest,
+        deep_adjudication: deep.length,
+        obvious_dismiss_candidates: candidates.length,
+      })}\n`,
+    );
+    return 0;
+  } catch (e) {
+    // The 0/2 exit contract: a torn corpus line or a failed write is a fatal
+    // exit 2 with a clean message, never an uncaught exit-1 stack (F5).
+    exitWithFailure("route-round:", 2, [(e as Error).message]);
+  }
 }
 
 if (import.meta.main) {

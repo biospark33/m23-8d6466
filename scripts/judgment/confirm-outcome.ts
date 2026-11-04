@@ -33,6 +33,8 @@ export interface ConfirmOutcomeArgs extends Omit<OutcomeRecord, "confirmed_at"> 
 }
 
 const parsePositiveInt = (flag: string, raw: string): number => {
+  // Strict decimal digits first: bare Number() admits "0x10", "1e2", and " 5".
+  if (!/^\d+$/.test(raw)) throw new Error(`${flag} must be a positive decimal integer (digits only), got "${raw}"`);
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`${flag} must be a positive integer, got "${raw}"`);
   return n;
@@ -131,44 +133,46 @@ export async function main(argv: string[]): Promise<number> {
   } catch (e) {
     exitWithFailure("confirm-outcome:", 2, [(e as Error).message]);
   }
-  const { corpusDir, ...fields } = args;
-  const dir = corpusDir ?? DEFAULT_CORPUS_DIR;
-  const file = join(dir, "outcomes.jsonl");
 
-  let incoming: OutcomeRecord;
-  let existing: OutcomeRecord[];
+  // The whole main body (not just the read half): an uncaught exception
+  // anywhere — store I/O, the append itself — would exit 1 with a stack,
+  // violating the 0/2 exit contract.
   try {
+    const { corpusDir, ...fields } = args;
+    const dir = corpusDir ?? DEFAULT_CORPUS_DIR;
+    const file = join(dir, "outcomes.jsonl");
+
     // confirmed_at attests at confirm time (parse re-stamps it).
-    incoming = OutcomeRecordSchema.parse({ ...fields, confirmed_at: new Date().toISOString() });
-    existing = readOutcomeEntries(file);
+    const incoming = OutcomeRecordSchema.parse({ ...fields, confirmed_at: new Date().toISOString() });
+    const existing = readOutcomeEntries(file);
+
+    const key = recordKey(incoming);
+    const prior = existing.filter((e) => recordKey(e) === key);
+    if (prior.length > 0) {
+      // Identity = the three outcome fields (confirmed_at attests each event, so
+      // a re-confirm carries a new timestamp and is still the same outcome).
+      const identical = prior.every(
+        (p) => p.outcome_confirmed === incoming.outcome_confirmed && p.outcome_source === incoming.outcome_source && p.answer_mode === incoming.answer_mode,
+      );
+      if (!identical) {
+        const p = prior[0]!;
+        exitWithFailure("confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins; resolve explicitly):", 2, [
+          `recordKey ${key}`,
+          `existing: outcome_confirmed=${p.outcome_confirmed} outcome_source=${p.outcome_source} answer_mode=${p.answer_mode} confirmed_at=${p.confirmed_at}`,
+          `incoming: outcome_confirmed=${incoming.outcome_confirmed} outcome_source=${incoming.outcome_source} answer_mode=${incoming.answer_mode}`,
+        ]);
+      }
+      process.stdout.write(`${JSON.stringify({ status: "duplicate", recordKey: key })}\n`);
+      return 0;
+    }
+
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(file, `${JSON.stringify(incoming)}\n`);
+    process.stdout.write(`${JSON.stringify({ status: "written", recordKey: key, record: incoming })}\n`);
+    return 0;
   } catch (e) {
     exitWithFailure("confirm-outcome:", 2, [(e as Error).message]);
   }
-
-  const key = recordKey(incoming);
-  const prior = existing.filter((e) => recordKey(e) === key);
-  if (prior.length > 0) {
-    // Identity = the three outcome fields (confirmed_at attests each event, so
-    // a re-confirm carries a new timestamp and is still the same outcome).
-    const identical = prior.every(
-      (p) => p.outcome_confirmed === incoming.outcome_confirmed && p.outcome_source === incoming.outcome_source && p.answer_mode === incoming.answer_mode,
-    );
-    if (!identical) {
-      const p = prior[0]!;
-      exitWithFailure("confirm-outcome: conflicting outcome for an existing recordKey — refusing the append (never first-write-wins; resolve explicitly):", 2, [
-        `recordKey ${key}`,
-        `existing: outcome_confirmed=${p.outcome_confirmed} outcome_source=${p.outcome_source} answer_mode=${p.answer_mode} confirmed_at=${p.confirmed_at}`,
-        `incoming: outcome_confirmed=${incoming.outcome_confirmed} outcome_source=${incoming.outcome_source} answer_mode=${incoming.answer_mode}`,
-      ]);
-    }
-    process.stdout.write(`${JSON.stringify({ status: "duplicate", recordKey: key })}\n`);
-    return 0;
-  }
-
-  mkdirSync(dir, { recursive: true });
-  appendFileSync(file, `${JSON.stringify(incoming)}\n`);
-  process.stdout.write(`${JSON.stringify({ status: "written", recordKey: key, record: incoming })}\n`);
-  return 0;
 }
 
 if (import.meta.main) {

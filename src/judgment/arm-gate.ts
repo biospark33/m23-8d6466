@@ -82,6 +82,9 @@ export interface ArmThresholds {
   MIN_ROUTE_CONFIDENCE: number;
 }
 
+/** The five threshold names evidence.thresholds must carry, each a number. */
+const THRESHOLD_KEYS = ["MIN_OUTCOME_CONFIRMED_JEV_RECORDS", "MIN_CONFIRMED_CLUSTERS", "MIN_WILSON_LOWER_AGREEMENT", "WILSON_Z", "MIN_ROUTE_CONFIDENCE"] as const;
+
 export interface ArmStateEntry {
   seq: number;
   at: string;
@@ -145,8 +148,15 @@ export function agrees(disposition: string, outcome_confirmed: boolean): boolean
 // Wilson lower bound
 // ---------------------------------------------------------------------------
 
-/** Two-sided Wilson score-interval lower bound for agreed/n at z. */
+/**
+ * Two-sided Wilson score-interval lower bound for agreed/n at z. Throws on
+ * invalid inputs (n ≤ 0, agreed < 0, agreed > n): evaluateGate guards its own
+ * calls, but a silent NaN would lie to any future caller.
+ */
 export function wilsonLowerBound(agreed: number, n: number, z: number): number {
+  if (!(n > 0) || agreed < 0 || agreed > n) {
+    throw new Error(`wilsonLowerBound: invalid inputs (agreed=${agreed}, n=${n}) — need n>0 and 0 ≤ agreed ≤ n`);
+  }
   const p = agreed / n;
   const denom = 1 + (z * z) / n;
   const center = p + (z * z) / (2 * n);
@@ -167,28 +177,31 @@ function keyOf(r: { pr: number; round: number; finding_id: string; labeler: stri
  * One resolved entry per distinct recordKey. A key with two IDENTICAL outcome
  * entries resolves (idempotent re-confirm); a key with CONFLICTING entries is
  * unresolved and excluded everywhere — an unresolved disagreement is never
- * counted as agreement (AC5).
+ * counted as agreement (AC5), and `unresolved` counts those keys so the
+ * verdict can surface the shrinkage instead of hiding it.
  */
-function resolvedByKey(outcomeEntries: GateOutcomeEntry[]): Map<string, GateOutcomeEntry> {
+function resolvedByKey(outcomeEntries: GateOutcomeEntry[]): { resolved: Map<string, GateOutcomeEntry>; unresolved: number } {
   const byKey = new Map<string, GateOutcomeEntry[]>();
   for (const e of outcomeEntries) {
     const k = keyOf(e);
     byKey.set(k, [...(byKey.get(k) ?? []), e]);
   }
   const resolved = new Map<string, GateOutcomeEntry>();
+  let unresolved = 0;
   for (const [k, entries] of byKey) {
     const first = entries[0]!;
     const identical = entries.every(
       (e) => e.outcome_confirmed === first.outcome_confirmed && e.outcome_source === first.outcome_source && e.answer_mode === first.answer_mode,
     );
     if (identical) resolved.set(k, first);
+    else unresolved++;
   }
-  return resolved;
+  return { resolved, unresolved };
 }
 
 /** The counted population: resolved live-attested entries joined to a corpus record, key-sorted (canonical order). */
 function countedEntries(outcomeEntries: GateOutcomeEntry[], corpusRecords: GateCorpusRecord[]): GateOutcomeEntry[] {
-  const resolved = resolvedByKey(outcomeEntries);
+  const { resolved } = resolvedByKey(outcomeEntries);
   const joined = new Set<string>();
   for (const r of corpusRecords) {
     const k = keyOf(r);
@@ -199,12 +212,34 @@ function countedEntries(outcomeEntries: GateOutcomeEntry[], corpusRecords: GateC
 }
 
 /**
+ * Fixed literal key order for a counted entry — the digest must not depend on
+ * the JSON key order the file happened to carry (the ArmStateEntry precedent:
+ * build the digest input from explicitly constructed objects, never raw
+ * JSON.parse output).
+ */
+function canonicalOutcomeEntry(e: GateOutcomeEntry): GateOutcomeEntry {
+  return {
+    pr: e.pr,
+    round: e.round,
+    finding_id: e.finding_id,
+    labeler: e.labeler,
+    outcome_confirmed: e.outcome_confirmed,
+    outcome_source: e.outcome_source,
+    answer_mode: e.answer_mode,
+    confirmed_at: e.confirmed_at,
+  };
+}
+
+/**
  * The corpus digest a flip records: sha256 over the counted population's
- * canonical serialization at flip time (key-sorted, so the digest is
- * deterministic under file order).
+ * canonical serialization at flip time — key-sorted entries, each serialized
+ * in fixed literal key order, so the digest is deterministic under file order
+ * AND under cosmetic key reordering.
  */
 export function countedCorpusDigest(outcomeEntries: GateOutcomeEntry[], corpusRecords: GateCorpusRecord[]): string {
-  return createHash("sha256").update(JSON.stringify(countedEntries(outcomeEntries, corpusRecords))).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(countedEntries(outcomeEntries, corpusRecords).map(canonicalOutcomeEntry)))
+    .digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +253,7 @@ export function countedCorpusDigest(outcomeEntries: GateOutcomeEntry[], corpusRe
  * fabricated interval.
  */
 export function evaluateGate(outcomeEntries: GateOutcomeEntry[], corpusRecords: GateCorpusRecord[]): GateVerdict {
-  const resolved = resolvedByKey(outcomeEntries);
+  const { resolved, unresolved } = resolvedByKey(outcomeEntries);
 
   // answer_mode split over ALL resolved entries (mock entries are visible,
   // never counted — the §7.8 counter-metric).
@@ -229,14 +264,21 @@ export function evaluateGate(outcomeEntries: GateOutcomeEntry[], corpusRecords: 
   for (const [k, e] of resolved) if (e.answer_mode === "live") liveByKey.set(k, e);
 
   // Join onto the corpus; the cluster is the interval's unit of independence.
+  // Corpus rows dedupe by recordKey (first occurrence wins): a duplicate row
+  // from a hand-merged shard must not inflate cluster totals or source counts
+  // behind the same confirmed number the deduped run reports.
   const countedKeys = new Set<string>();
   const clusterTotal = new Map<string, number>();
   const clusterAgreed = new Map<string, number>();
   const sources: Record<string, number> = {};
+  const seenCorpusKeys = new Set<string>();
   for (const r of corpusRecords) {
-    const o = liveByKey.get(keyOf(r));
+    const k = keyOf(r);
+    if (seenCorpusKeys.has(k)) continue;
+    seenCorpusKeys.add(k);
+    const o = liveByKey.get(k);
     if (o === undefined) continue;
-    countedKeys.add(keyOf(r));
+    countedKeys.add(k);
     const ck = `${r.pr}|${r.round}`;
     clusterTotal.set(ck, (clusterTotal.get(ck) ?? 0) + 1);
     if (agrees(r.disposition, o.outcome_confirmed)) clusterAgreed.set(ck, (clusterAgreed.get(ck) ?? 0) + 1);
@@ -255,6 +297,9 @@ export function evaluateGate(outcomeEntries: GateOutcomeEntry[], corpusRecords: 
   if (clusters < MIN_CONFIRMED_CLUSTERS) gaps.push(`confirmed_clusters=${clusters}/${MIN_CONFIRMED_CLUSTERS}`);
   if (ci_lower === "n/a") gaps.push("ci_lower=n/a");
   else if (ci_lower < MIN_WILSON_LOWER_AGREEMENT) gaps.push(`ci_lower=${ci_lower.toFixed(4)}/${MIN_WILSON_LOWER_AGREEMENT}`);
+  // A conflicting (hand-edited) outcome key silently shrinks the counted
+  // population — surface the shrinkage instead of hiding it behind a lower count.
+  if (unresolved > 0) gaps.push(`unresolved_outcome_keys=${unresolved}`);
 
   return {
     milestones: {
@@ -288,6 +333,48 @@ export function armStateEntryDigest(entry: ArmStateEntry): string {
 
 const ARM_STATES = new Set(["recording-only", "armed"]);
 
+/**
+ * A strict ISO-8601 INSTANT — a flip moment, so date-only is not enough and
+ * the zone is required (writers use `new Date().toISOString()`, always Z).
+ * The corpus ISO_8601_RE idea inlined: arm-gate sits inside the fence and may
+ * not import scripts/, and `Date.parse` alone normalizes overflow dates like
+ * 2026-02-30, so the calendar day round-trips through UTC.
+ */
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+function isIsoInstant(s: string): boolean {
+  if (!ISO_INSTANT_RE.test(s) || Number.isNaN(Date.parse(s))) return false;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)!;
+  const [y, mo, d] = [Number(m[1]!), Number(m[2]!), Number(m[3]!)];
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === mo - 1 && probe.getUTCDate() === d;
+}
+
+const EVIDENCE_KEYS = ["confirmed", "agreed", "rate", "ci_lower", "thresholds", "corpus_digest"] as const;
+
+/** The flip's evidence snapshot must carry exactly its contract shape (AC3) — anything else names the field it broke on. */
+function evidenceProblem(raw: unknown, seq: number): string | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `entry ${seq} evidence must be an object`;
+  const e = raw as Record<string, unknown>;
+  for (const f of EVIDENCE_KEYS) if (!(f in e)) return `entry ${seq} evidence.${f} is missing`;
+  for (const k of Object.keys(e)) if (!(EVIDENCE_KEYS as readonly string[]).includes(k)) return `entry ${seq} evidence has unexpected field "${k}"`;
+  if (typeof e.confirmed !== "number" || !Number.isFinite(e.confirmed)) return `entry ${seq} evidence.confirmed must be a number`;
+  if (typeof e.agreed !== "number" || !Number.isFinite(e.agreed)) return `entry ${seq} evidence.agreed must be a number`;
+  for (const f of ["rate", "ci_lower"] as const) {
+    const v = e[f];
+    if (v !== "n/a" && (typeof v !== "number" || !Number.isFinite(v))) return `entry ${seq} evidence.${f} must be a number or "n/a"`;
+  }
+  const th = e.thresholds;
+  if (typeof th !== "object" || th === null || Array.isArray(th)) return `entry ${seq} evidence.thresholds must be an object`;
+  for (const k of THRESHOLD_KEYS) {
+    const v = (th as Record<string, unknown>)[k];
+    if (typeof v !== "number" || !Number.isFinite(v)) return `entry ${seq} evidence.thresholds.${k} must be a number`;
+  }
+  for (const k of Object.keys(th)) if (!(THRESHOLD_KEYS as readonly string[]).includes(k)) return `entry ${seq} evidence.thresholds has unexpected field "${k}"`;
+  if (typeof e.corpus_digest !== "string" || !/^[0-9a-f]{64}$/.test(e.corpus_digest)) return `entry ${seq} evidence.corpus_digest must be 64 hex chars`;
+  return null;
+}
+
 /** Structural + chain check of one parsed entry at its expected position. */
 function entryProblem(raw: unknown, expectedSeq: number, prevDigest: string | null, prevTo: string | null): string | null {
   const e = raw as Partial<ArmStateEntry>;
@@ -299,15 +386,26 @@ function entryProblem(raw: unknown, expectedSeq: number, prevDigest: string | nu
   if (e.from === undefined || e.to === undefined || !ARM_STATES.has(e.from) || !ARM_STATES.has(e.to)) {
     return `entry ${expectedSeq} from/to must be "recording-only" | "armed"`;
   }
+  if (e.from === e.to) return `entry ${expectedSeq} from===to ("${e.from}") — no-op flips are invalid`;
+  if (expectedSeq === 1 && e.from !== "recording-only") {
+    return `entry 1 is genesis — from must be "recording-only", got "${e.from}"`;
+  }
   if (prevTo !== null && e.from !== prevTo) return `entry ${expectedSeq} from "${e.from}" does not continue entry ${expectedSeq - 1} to "${prevTo}"`;
   if (typeof e.sign_off !== "string" || e.sign_off.length === 0) return `entry ${expectedSeq} sign_off must be a non-empty string`;
+  if (typeof e.at !== "string" || !isIsoInstant(e.at)) {
+    return `entry ${expectedSeq} at must be an ISO-8601 instant (e.g. "2026-11-04T00:00:00Z")`;
+  }
+  const ev = evidenceProblem(e.evidence, expectedSeq);
+  if (ev !== null) return ev;
   return null;
 }
 
 /**
  * Walk the append-only arm-state log from genesis. seq starts at 1 and is
  * gapless; each prev_digest must equal the computed digest of the prior
- * entry; from continues the prior to. ANY violation refuses (fail-closed).
+ * entry; from continues the prior to (genesis from is "recording-only";
+ * from===to is never legal — no no-op flips). ANY violation refuses
+ * (fail-closed).
  * An empty log is not a chain — an absent or empty file means
  * recording-only, never armed.
  */

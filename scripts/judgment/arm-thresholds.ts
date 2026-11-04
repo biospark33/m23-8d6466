@@ -107,7 +107,7 @@ export function loadOutcomeEntries(corpusDir: string): GateOutcomeEntry[] {
     });
 }
 
-/** jev-arm records of every `*-r*.jsonl` corpus file (machine-state never enters: readRecords refuses it loudly). */
+/** jev-arm records of every `<pr|x>-r<round>.jsonl` corpus shard (machine-state never enters: readRecords refuses it loudly). */
 export function loadJevCorpusRecords(corpusDir: string): GateCorpusRecord[] {
   let names: string[];
   try {
@@ -117,7 +117,11 @@ export function loadJevCorpusRecords(corpusDir: string): GateCorpusRecord[] {
   }
   const out: GateCorpusRecord[] = [];
   for (const n of names.sort()) {
-    if (!n.endsWith(".jsonl") || !/-r./.test(n)) continue; // *-r*.jsonl shards (outcomes.jsonl never matches)
+    // Strict shard grammar `<pr|x>-r<round>.jsonl`: both joinable corpusFilePath
+    // forms (the null-pr backfill renders "x"). `<pr>-rx.jsonl` (null round) is
+    // excluded — its records can never join an outcome — and the old substring
+    // /-r./ admitted foreign names like "notes-round.jsonl".
+    if (!/^(\d+|x)-r\d+\.jsonl$/.test(n)) continue;
     for (const r of readRecords(join(corpusDir, n))) {
       // pr/round-null records (x-r*.jsonl backfills) can never join an outcome (positive ints).
       if (r.arm === "jev" && r.pr !== null && r.round !== null) {
@@ -154,72 +158,70 @@ function readArmState(judgmentDir: string): { state: "recording-only" | "armed";
 
 export async function main(argv: string[]): Promise<number> {
   let args: ArmThresholdsArgs;
-  let corpusDir: string;
-  let judgmentDir: string;
   try {
     args = parseArgs(argv);
-    corpusDir = args.corpusDir ?? DEFAULT_CORPUS_DIR;
-    judgmentDir = args.judgmentDir ?? DEFAULT_JUDGMENT_DIR;
   } catch (e) {
     exitWithFailure("arm-thresholds:", 2, [(e as Error).message]);
   }
+  const corpusDir = args.corpusDir ?? DEFAULT_CORPUS_DIR;
+  const judgmentDir = args.judgmentDir ?? DEFAULT_JUDGMENT_DIR;
 
-  let verdict: ReturnType<typeof evaluateGate>;
-  let corpusDigest: string;
-  let armState: ReturnType<typeof readArmState>;
+  // The whole main body (not just the loading half): an uncaught exception
+  // anywhere — shard I/O, the flip's mkdir/append — would exit 1 with a stack,
+  // violating the 0/2 exit contract.
   try {
     const outcomes = loadOutcomeEntries(corpusDir);
     const jevRecords = loadJevCorpusRecords(corpusDir);
-    verdict = evaluateGate(outcomes, jevRecords);
-    corpusDigest = countedCorpusDigest(outcomes, jevRecords);
+    const verdict = evaluateGate(outcomes, jevRecords);
+    const corpusDigest = countedCorpusDigest(outcomes, jevRecords);
     // Read on every run, dry or flip: a broken chain is an operator emergency
     // that must refuse even a dry-run verdict (INV-ARM-1 fail-closed).
-    armState = readArmState(judgmentDir);
+    const armState = readArmState(judgmentDir);
+
+    if (!args.arm && !args.unarm) {
+      process.stdout.write(`${JSON.stringify(verdict)}\n`);
+      return 0;
+    }
+
+    // The flip: every gap collected, then ONE refusal before any write.
+    const gaps: string[] = [];
+    if (args.arm && verdict.verdict !== "eligible") {
+      gaps.push(`gate verdict is ${verdict.verdict} — arming needs eligible:`, ...verdict.gaps.map((g) => `  ${g}`));
+    }
+    if (!args.signOff || args.signOff.trim().length === 0) {
+      gaps.push("--sign-off \"<who when>\" is required — the DD-21 operator sign-off half of the pair");
+    }
+    if (process.env.QDS_JUDGMENT_ARM_CONFIRMED !== "1") {
+      gaps.push("env QDS_JUDGMENT_ARM_CONFIRMED=1 is required — the second half of the sign-off pair");
+    }
+    if (args.arm && armState.state === "armed") gaps.push(`already armed (head seq ${armState.lastSeq}) — the log head IS the state`);
+    if (args.unarm && armState.state === "recording-only") gaps.push(`already recording-only (head seq ${armState.lastSeq}) — nothing to unarm`);
+    if (gaps.length > 0) exitWithFailure("arm-thresholds: refusing the flip, nothing written:", 2, gaps);
+
+    // Fixed literal key order = the canonical serialization the digest chains.
+    const entry: ArmStateEntry = {
+      seq: armState.lastSeq + 1,
+      at: new Date().toISOString(),
+      from: armState.state,
+      to: args.arm ? "armed" : "recording-only",
+      sign_off: args.signOff!,
+      evidence: {
+        confirmed: verdict.milestones.confirmed,
+        agreed: verdict.milestones.agreed,
+        rate: verdict.milestones.rate,
+        ci_lower: verdict.milestones.ci_lower,
+        thresholds: thresholds(),
+        corpus_digest: corpusDigest,
+      },
+      prev_digest: armState.headDigest,
+    };
+    mkdirSync(judgmentDir, { recursive: true });
+    appendFileSync(join(judgmentDir, "arm-state.jsonl"), `${JSON.stringify(entry)}\n`);
+    process.stdout.write(`${JSON.stringify(entry)}\n`);
+    return 0;
   } catch (e) {
     exitWithFailure("arm-thresholds:", 2, [(e as Error).message]);
   }
-
-  if (!args.arm && !args.unarm) {
-    process.stdout.write(`${JSON.stringify(verdict)}\n`);
-    return 0;
-  }
-
-  // The flip: every gap collected, then ONE refusal before any write.
-  const gaps: string[] = [];
-  if (args.arm && verdict.verdict !== "eligible") {
-    gaps.push(`gate verdict is ${verdict.verdict} — arming needs eligible:`, ...verdict.gaps.map((g) => `  ${g}`));
-  }
-  if (!args.signOff || args.signOff.trim().length === 0) {
-    gaps.push("--sign-off \"<who when>\" is required — the DD-21 operator sign-off half of the pair");
-  }
-  if (process.env.QDS_JUDGMENT_ARM_CONFIRMED !== "1") {
-    gaps.push("env QDS_JUDGMENT_ARM_CONFIRMED=1 is required — the second half of the sign-off pair");
-  }
-  if (args.arm && armState.state === "armed") gaps.push(`already armed (head seq ${armState.lastSeq}) — the log head IS the state`);
-  if (args.unarm && armState.state === "recording-only") gaps.push(`already recording-only (head seq ${armState.lastSeq}) — nothing to unarm`);
-  if (gaps.length > 0) exitWithFailure("arm-thresholds: refusing the flip, nothing written:", 2, gaps);
-
-  // Fixed literal key order = the canonical serialization the digest chains.
-  const entry: ArmStateEntry = {
-    seq: armState.lastSeq + 1,
-    at: new Date().toISOString(),
-    from: armState.state,
-    to: args.arm ? "armed" : "recording-only",
-    sign_off: args.signOff!,
-    evidence: {
-      confirmed: verdict.milestones.confirmed,
-      agreed: verdict.milestones.agreed,
-      rate: verdict.milestones.rate,
-      ci_lower: verdict.milestones.ci_lower,
-      thresholds: thresholds(),
-      corpus_digest: corpusDigest,
-    },
-    prev_digest: armState.headDigest,
-  };
-  mkdirSync(judgmentDir, { recursive: true });
-  appendFileSync(join(judgmentDir, "arm-state.jsonl"), `${JSON.stringify(entry)}\n`);
-  process.stdout.write(`${JSON.stringify(entry)}\n`);
-  return 0;
 }
 
 if (import.meta.main) {
