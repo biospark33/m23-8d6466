@@ -1511,7 +1511,14 @@ describe("buildIdFileInputs", () => {
       // now spans three pins (8a993b22 → e1f65418 → b055ee29 → e8d8a3b5);
       // settlement waits on the operator registry window (register item 8),
       // which lands AFTER this commit per the register's sequencing.
-      "e8d8a3b540b0c2192c74e55d8a77bb2ba6da76423453569421f722911c001c04",
+      // 7700b503: moved from e8d8a3b5 by P1.7 (feature/p1-7-lsp-diagnostics-gate,
+      // 2026-11-05) — `src/phase-engine/gates/lsp-diagnostics-gate.ts` and
+      // `lsp-diagnostics-prod-deps.ts` are NEW walked COPY inputs (the
+      // post-edit diagnostics gate + its pi-lens MCP prod deps). PUBLISH
+      // DEFERRED with recorded pairing debt, per this file's own deferral
+      // precedent: the accumulated publish→adopt debt now spans four pins;
+      // settlement waits on the next merge-triggered publish window.
+      "da967dcb2394abc8046e73359eece665995bc9be883c59950e58a570d38b5801",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
