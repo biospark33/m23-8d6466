@@ -502,7 +502,7 @@ describe("parseBaseRefs", () => {
     // Both the engine builder and the runtime stage name the same ref. One
     // entry, one registry resolution, one digest in the buildId.
     expect(parseBaseRefs(realDockerfile())).toEqual([
-      "ghcr.io/boldsoftware/exeuntu:latest@sha256:bb7e0268970e18a1e377a9e0b00896acdf7210fd1f66b57b65ba2a00d952adc9",
+      "ghcr.io/boldsoftware/exeuntu:latest@sha256:8c8bd42cfc164e2112d0ea5c162ef24e5c474ad4486e8dfa976a399bce8a009a",
     ]);
   });
 
@@ -1337,7 +1337,13 @@ describe("buildIdFileInputs", () => {
       // 2026-11-02 (second pin): OPENRIG_TREE_SHA256 1f9d6a1d → 139620d5
       // (run 41454454888's TOFU refusal). Dockerfile bytes only; measured
       // from this test's own failing run.
-      "oci/exedev/Dockerfile": "666a207af863aa9b3831a31bece269dfb8c8168c275dd5cb517558417dd8e650",
+      // 2026-11-05: exeuntu base re-pin bb7e0268 → 8c8bd42c (scheduled
+      // base-drift, upstream's weekly rebuild: 2026-10-30 eMudhra-CA note,
+      // urfave/cli v3.14.0, pnpm-12 settings, ~/.config boot-mode fix,
+      // Shelley socket-activation, headless-shell via Shelley metadata).
+      // Both FROM digests only; measured with shasum -a 256 on the edited
+      // file. The driver REF/BUILD_ID adoption stays owed behind the merge.
+      "oci/exedev/Dockerfile": "3c69aef6ed5bae34b7478fb8937ae1ea14e57cff50463749abc67f7c044ca0cc",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
