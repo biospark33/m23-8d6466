@@ -88,7 +88,7 @@ function fakeClient() {
   const client = {
     retain: async (bankId: string, content: string, metadata?: RetainMetadata) => {
       calls.push({ bankId, content, metadata });
-      return { memoryId: "", bankId, status: "created" as const, durationMs: 0 };
+      return { bankId, status: "created" as const, durationMs: 0 };
     },
   };
   return { calls, client: client as unknown as Pick<HindsightClient, "retain"> };

@@ -1501,7 +1501,17 @@ describe("buildIdFileInputs", () => {
       // re-computed LATE on merged dev, exactly the failure mode the
       // LIMITATION paragraph above names). Re-pinned late here; publish→adopt
       // still deferred with the accumulated debt.
-      "b055ee29fb5fb948e2ee6a2134425c92e5c8db293235b12e2d01771b59824e37",
+      // e8d8a3b5: moved from b055ee29 by the #408 memoryId sub-decision
+      // (feature/408-roundtripok-memoryid, 2026-11-04) — `src/hindsight/
+      // {schemas,round-trip-verifier,client}.ts` (retain legacy view drops the
+      // memoryId placeholder; RoundTripOk gains recall-sourced
+      // matchedMemoryId) and `scripts/lib/kpi-retain.ts` (stub shape) are
+      // walked COPY inputs. PUBLISH STILL DEFERRED: the buildId was never
+      // published under b055ee29 either — the accumulated publish→adopt debt
+      // now spans three pins (8a993b22 → e1f65418 → b055ee29 → e8d8a3b5);
+      // settlement waits on the operator registry window (register item 8),
+      // which lands AFTER this commit per the register's sequencing.
+      "e8d8a3b540b0c2192c74e55d8a77bb2ba6da76423453569421f722911c001c04",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

@@ -10,7 +10,9 @@
  * against a deterministic seam.
  *
  * Implements the 4 Hindsight tools against an in-memory Map<bank_id, Memory[]>:
- *   - retain     — auto-creates bank, pushes memory, returns RetainResponse shape
+ *   - retain     — auto-creates bank, pushes memory, returns the retain result
+ *                  WITHOUT memoryId (the 0.10.0 surface carries no retain-side
+ *                  identity; #408 RoundTripOk decision, 2026-11-04)
  *   - recall     — bank-not-found → JSON-RPC error -32000 (NOT -32601/-32602,
  *                  so P0.7's bridge maps it to HTTP 502 per AC-3); substring
  *                  match with score 0.5–1.0 otherwise
@@ -130,7 +132,10 @@ function callTool(name: string, args: Record<string, unknown>): { result: unknow
       }
       const memoryId = nextMemoryId();
       arr.push({ memoryId, content });
-      return { result: { memoryId, bankId, status, durationMs: 1 } };
+      // Retain result = the post-#408 legacy view (bankId/status/durationMs).
+      // NO memoryId in the result — the 0.10.0 surface returns no retain-side
+      // identity; the mint stays internal, surfaced recall-side.
+      return { result: { bankId, status, durationMs: 1 } };
     }
     case "recall": {
       const arr = banks.get(bankId);

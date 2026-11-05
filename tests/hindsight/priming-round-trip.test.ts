@@ -24,7 +24,7 @@ function makeSubstrate() {
     retain: async (bankId: string, content: string, metadata?: { documentId?: string }) => {
       if (!docs.has(bankId)) docs.set(bankId, new Map());
       docs.get(bankId)!.set(metadata?.documentId ?? `doc-${docs.get(bankId)!.size}`, content);
-      return { memoryId: `mem-${Math.random()}`, bankId, status: "created" as const, durationMs: 0 };
+      return { bankId, status: "created" as const, durationMs: 0 };
     },
     listBanks: async () => ({ banks: [...banks].map((bank_id) => ({ bank_id })) }),
     recall: async (bankId: string) => ({

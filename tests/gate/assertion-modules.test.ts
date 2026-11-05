@@ -770,7 +770,7 @@ describe("p0-7 probe reclaim — the registered server is deleted in a finally",
 
 const OK_ROUND_TRIP: RoundTripResult = {
   ok: true,
-  memoryId: "m-1",
+  matchedMemoryId: "m-1",
   recallMatches: true,
   insightCount: 2,
   consolidatedCount: 1,

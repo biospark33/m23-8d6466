@@ -75,23 +75,35 @@ function escapeRegex(s: string): string {
  * Ponytail: O(n*m) scan, fine for the test-memory scale; upgrade to a real
  * similarity score in Phase-2.
  */
-function resultsContainRetainedTokens(
-  results: readonly { content: string }[],
+/**
+ * The first recalled result matching the retained content's key tokens — the
+ * predicate behind `resultsContainRetainedTokens`, reused so the match's
+ * identity (`memoryId`) and its verdict can never disagree.
+ */
+function firstMatchingResult(
+  results: readonly { content: string; memoryId?: string }[],
   retainedContent: string,
-): boolean {
+): { content: string; memoryId?: string } | undefined {
   const tokens = keyTokens(retainedContent);
   if (tokens.length === 0) {
     // No key tokens (all <3 chars / non-Latin) — fall back to whole-content
     // substring match so short content still validates the round-trip.
     const needle = retainedContent.toLowerCase();
-    return results.some((r) => r.content.toLowerCase().includes(needle));
+    return results.find((r) => r.content.toLowerCase().includes(needle));
   }
   // Token-boundary match per token: avoids false positives like "spa" matching
   // inside "spark". (?:^|[^a-z0-9]) + token + (?:[^a-z0-9]|$), case-insensitive.
   const tokenRes = tokens.map(
     (t) => new RegExp(`(?:^|[^a-z0-9])${escapeRegex(t)}(?:[^a-z0-9]|$)`, "i"),
   );
-  return results.some((r) => tokenRes.every((re) => re.test(r.content)));
+  return results.find((r) => tokenRes.every((re) => re.test(r.content)));
+}
+
+function resultsContainRetainedTokens(
+  results: readonly { content: string }[],
+  retainedContent: string,
+): boolean {
+  return firstMatchingResult(results, retainedContent) !== undefined;
 }
 
 /**
@@ -160,7 +172,14 @@ export interface RoundTripDurations {
 
 export interface RoundTripOk {
   ok: true;
-  memoryId: string;
+  /**
+   * The recall-matched result's memoryId (server-minted fact id, recall view)
+   * — never retain-sourced: the 0.10.0 retain wire carries no identity, and
+   * the legacy view no longer fabricates one (issue #408 RoundTripOk
+   * decision, 2026-11-04). null = the matched result reported no memory id
+   * (the recall view folds an absent wire id to "").
+   */
+  matchedMemoryId: string | null;
   recallMatches: boolean;
   insightCount: number;
   consolidatedCount: number;
@@ -216,14 +235,12 @@ export async function verifyRoundTrip(
   };
 
   // --- Step 1: retain -----------------------------------------------------
-  let memoryId: string;
   {
     const start = Date.now();
     let status: "ok" | "error" = "ok";
     let errMsg: { code: string; message: string } | undefined;
     try {
       const res = await client.retain(bankId, content);
-      memoryId = res.memoryId;
       durations.retain = res.durationMs;
     } catch (e) {
       status = "error";
@@ -268,6 +285,7 @@ export async function verifyRoundTrip(
 
   // --- Step 2: recall -----------------------------------------------------
   let recallMatches = false;
+  let matchedMemoryId: string | null = null;
   let slowQuery = false;
   {
     const start = Date.now();
@@ -332,6 +350,11 @@ export async function verifyRoundTrip(
       return { ok: false, step: "recall", error: errMsg, requestId };
     }
     recallMatches = resultsContainRetainedTokens(results, content);
+    // RoundTripOk.matchedMemoryId: identity from the MATCH (recall view,
+    // server-minted fact id) — never retain-sourced (#408 RoundTripOk
+    // decision). "" (the view's absent-id fold) reads as null here.
+    const matched = firstMatchingResult(results, content);
+    matchedMemoryId = matched?.memoryId !== undefined && matched.memoryId !== "" ? matched.memoryId : null;
     if (!recallMatches) {
       errMsg = {
         code: "recall_content_mismatch",
@@ -612,7 +635,7 @@ export async function verifyRoundTrip(
 
   return {
     ok: true,
-    memoryId,
+    matchedMemoryId,
     recallMatches,
     insightCount,
     consolidatedCount,

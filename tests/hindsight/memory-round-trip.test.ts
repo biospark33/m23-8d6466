@@ -33,7 +33,6 @@ interface StubConfig {
 function makeClient(cfg: StubConfig): any {
   return {
     retain: cfg.retain ?? (async () => ({
-      memoryId: "mem-1",
       bankId: "qds-factory",
       status: "created",
       durationMs: 10,
@@ -103,7 +102,7 @@ describe("verifyRoundTrip — happy path", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const ok = result as Extract<RoundTripResult, { ok: true }>;
-    expect(ok.memoryId).toBe("mem-1");
+    expect(ok.matchedMemoryId).toBe("mem-1");
     expect(ok.recallMatches).toBe(true);
     expect(ok.insightCount).toBe(1);
     expect(ok.consolidatedCount).toBe(2);
@@ -501,7 +500,7 @@ describe("verifyRoundTrip — short content (no key tokens)", () => {
     if (!result.ok) return;
     const ok = result as Extract<RoundTripResult, { ok: true }>;
     expect(ok.recallMatches).toBe(true);
-    expect(ok.memoryId).toBe("mem-1");
+    expect(ok.matchedMemoryId).toBe("short-mem");
   });
 });
 

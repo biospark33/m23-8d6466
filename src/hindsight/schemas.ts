@@ -149,13 +149,14 @@ export const ConsolidatePayloadSchema = z.object({
  * legacy camelCase view so existing consumers compile unchanged (issue #408
  * conformance slice).
  *
- * Legacy-view placeholders are issue #408's OPEN DECISION, not observations:
- * 0.10.0 has NO wire source for `memoryId` — identity is `document_id` now —
- * so `memoryId` falls back to "" from a forward-compat `id` field no current
- * server emits. `status` is pinned "created": the 0.10.0 body carries no
- * created/updated distinction (the upsert is silent). `durationMs` is absent
- * from the measured body → 0 (host-side latency is the honest figure anyway —
- * round-trip-verifier F009).
+ * Legacy-view placeholders were issue #408's OPEN DECISION, RESOLVED
+ * 2026-11-04 for `memoryId` (RoundTripOk option): 0.10.0 has NO wire source
+ * for `memoryId` — identity is `document_id` now — so the transform no longer
+ * emits the field at all; the only honest identity signal is recall-side
+ * (`RoundTripOk.matchedMemoryId`, round-trip-verifier.ts). `status` is pinned
+ * "created": the 0.10.0 body carries no created/updated distinction (the
+ * upsert is silent). `durationMs` is absent from the measured body → 0
+ * (host-side latency is the honest figure anyway — round-trip-verifier F009).
  */
 const RetainWireSchema = z.object({
   success: z.boolean(),
@@ -176,7 +177,6 @@ const RetainWireSchema = z.object({
 });
 
 export const RetainResponseSchema = RetainWireSchema.transform((w) => ({
-  memoryId: w.id ?? "", // dp:ok #408 OPEN DECISION placeholder — 0.10.0 has no wire source for memoryId; blanking is the documented legacy-view contract
   bankId: w.bank_id ?? "", // dp:ok bank_id is optional on the measured wire; the legacy view pins string, absent folds to ""
   status: "created" as const,
   durationMs: w.durationMs ?? 0,

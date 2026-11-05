@@ -119,8 +119,9 @@ describe("AC-1 bridge proof: register hindsight → /test → /invoke round-trip
       };
       expect(retainPayload.bankId).toBe(bankId);
       expect(retainPayload.status).toBe("created");
-      expect(typeof retainPayload.memoryId).toBe("string");
-      expect(retainPayload.memoryId.length).toBeGreaterThan(0);
+      // NO retain-side memoryId: the 0.10.0 surface carries no identity on
+      // retain (#408 RoundTripOk decision); identity is recall-side.
+      expect("memoryId" in retainPayload).toBe(false);
       expect(typeof retainPayload.durationMs).toBe("number");
 
       // 2) recall — query tokens "planning methodology" must hit the retained content.

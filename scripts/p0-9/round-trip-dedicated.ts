@@ -10,7 +10,8 @@
  * Clause map:
  *   - AC2 live path: the round trip ALWAYS runs on the live client. An
  *     injected `deps.client` is used VERBATIM (the DI-shape negative control:
- *     evidence must carry the injected collaborator's distinctive memoryId —
+ *     evidence must carry the injected collaborator's distinctive memoryId,
+ *     surfaced through `RoundTripOk.matchedMemoryId` from the recall match —
  *     a driver that swapped in its own mock client could not surface it);
  *     otherwise a `HindsightClient` is constructed on the resolved,
  *     trap-checked baseUrl (F-002) with `mode:"live"` on the live path (never

@@ -71,7 +71,6 @@ function makeMockClient(opts: { recallResults?: (q: string, bank: string) => Arr
         }
       }
       return {
-        memoryId: crypto.randomUUID(),
         bankId,
         status: "created" as const,
         durationMs: 1,

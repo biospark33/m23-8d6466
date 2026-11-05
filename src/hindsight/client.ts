@@ -74,8 +74,9 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8888";
  * so mock round-trips pass the SAME strict parse as live ones (M1.2 AC5: mock
  * is a network-only short-circuit, never a validation short-circuit). The
  * retain body is the measured 0.10.0 wire (zero-token usage); the legacy
- * camelCase view consumers see (memoryId "" placeholder etc.) is produced by
- * the schema transform, not by this body.
+ * camelCase view consumers see (bankId/status/durationMs; the memoryId ""
+ * placeholder was REMOVED per the #408 RoundTripOk decision, 2026-11-04) is
+ * produced by the schema transform, not by this body.
  */
 function mockBody(path: string, bankId: string): unknown {
   if (path.endsWith("/memories/recall")) return { results: [], durationMs: 0 };
