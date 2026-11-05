@@ -611,3 +611,18 @@ accurate statement in the file.
 - The `pi-lens-verify.ts` failure in §4 was executed twice, with and without
   `PI_LENS_ROOT`, and both stack traces reproduced verbatim.
 - No `status:` field and no DoD checkbox was modified by this work.
+
+### P0.5 update 2026-11-04 (later same day) — window executed, drift resolved
+
+The "not reproducible without a reinstall" state above is RESOLVED: the operator
+window ran. pi-lens@3.8.71 installed via `pi install npm:pi-lens@3.8.71`
+(settings.json entry present); trivy/pyright/typescript-language-server/opengrep
+installed; `pi-lens-verify --strict` → exit 0, 3 pass / 0 fail / 1 optional skip
+(evidence `p0-5/2026-11-04-pi-lens-verify-strict-3.8.71.json`). The four legs
+ran: mode-json agent e2e (structured lsp_diagnostics TS2322 + pyright warning
+over the json transport, real agent) and the secret-scan chain — precisely
+diagnosed, PARTIAL (STOP blocker observed live; trivy→sessionSecrets→STOP
+promotion unobserved: pi-lens 3.8.71 session-start heavyweight scans never run
+headless, trivy 0.76.1 lacks the AWS rule). Reading notes + verbatim logs:
+`_bmad-output/evidence/p0-5/legs-2026-11-04/README.md`. Story DoD now
+6 met / 3 partial / 0 not; row flip to done proposed with partials recorded.
