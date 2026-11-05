@@ -399,4 +399,24 @@ describe("P1.7 Gate adapter", () => {
     expect(report.passed).toBe(true);
     expect(report.checks.some((c) => c.note.includes("NOT evaluated"))).toBe(true);
   });
+
+  // CodeRabbit #495 finding 4476281843: a malformed envelope previously folded
+  // to [] and passed on an empty scan — the inverse of AC5 fail-closed.
+  test("missing changedFiles fails the check (fail-closed envelope)", async () => {
+    const { deps, state } = makeDeps({ responses: [{ text: "", timedOut: null }] });
+    const gate = createLspDiagnosticsGate(deps);
+    const report = await gate.run({} as never, { runRoot: "/tmp" });
+    expect(report.passed).toBe(false);
+    expect(report.checks[0]?.item).toBe("envelope");
+    expect(state.calls).toHaveLength(0); // never reached the LSP with an empty union
+  });
+
+  test("non-array changedFiles fails the check (fail-closed envelope)", async () => {
+    const { deps, state } = makeDeps({ responses: [{ text: "", timedOut: null }] });
+    const gate = createLspDiagnosticsGate(deps);
+    const report = await gate.run({ changedFiles: "src/auth.ts" } as never, { runRoot: "/tmp" });
+    expect(report.passed).toBe(false);
+    expect(report.checks[0]?.item).toBe("envelope");
+    expect(state.calls).toHaveLength(0);
+  });
 });

@@ -69,6 +69,11 @@ export async function createProdLspGateDeps(
       }
       try {
         const res = await c.call("pilens_lsp_diagnostics", { paths }, RPC_CEILING_MS);
+        // An isError tool result carries no content (CodeRabbit #495 finding
+        // 4476281859): folding it to text:"" let the freshness proxy see two
+        // identical empty snapshots and misroute a live-LSP tool failure to the
+        // no-lsp waiver instead of the story table's blocked lsp-timeout row.
+        if (res.isError) return { text: "", timedOut: "rpc" };
         const text = (res.content ?? []).map((x) => x.text ?? "").join("\n"); // dp:ok missing text block folds to "" — the tool's text is the only payload and the parser tolerates empty
         return { text, timedOut: null };
       } catch {
@@ -86,13 +91,21 @@ export async function createProdLspGateDeps(
       const safe = files.filter((f) => !f.startsWith("-"));
       if (safe.length === 0) return [];
       return new Promise((resolve) => {
-        execFile(bin, ["scan", "json", "--", ...safe], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
-          if (err) {
-            resolve([]);
+        // CodeRabbit #495 finding 4476281871: "json" was a positional PATH, not
+        // an output flag — ast-grep emitted no JSON at all (config-less targets
+        // exit 3 with empty stdout), so the arm parsed nothing, always. `--json`
+        // is the real output flag; stdout is parsed even when err is set (some
+        // exits still carry findings), and an empty/unparseable stdout stays the
+        // DECLARED advisory-vacuous posture (dp:ok above, story DoD), not a new
+        // clean signal.
+        execFile(bin, ["scan", "--json", "--", ...safe], { maxBuffer: 8 * 1024 * 1024 }, (_err, stdout) => {
+          const text = typeof stdout === "string" ? stdout.trim() : "";
+          if (text === "") {
+            resolve([]); // declared advisory vacuous — also the config-less-target shape (exit 3, empty stdout)
             return;
           }
           try {
-            const parsed: DiagnosticEntry[] = JSON.parse(stdout).map(
+            const parsed: DiagnosticEntry[] = JSON.parse(text).map(
               (h: { file?: string }) => ({
                 file: typeof h.file === "string" ? h.file : "",
                 line: 0,
@@ -103,7 +116,7 @@ export async function createProdLspGateDeps(
             );
             resolve(parsed);
           } catch {
-            resolve([]);
+            resolve([]); // declared advisory vacuous — invalid JSON never reads as a clean scan
           }
         });
       });
