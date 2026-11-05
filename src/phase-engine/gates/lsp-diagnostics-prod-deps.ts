@@ -98,11 +98,29 @@ export async function createProdLspGateDeps(
         // exits still carry findings), and an empty/unparseable stdout stays the
         // DECLARED advisory-vacuous posture (dp:ok above, story DoD), not a new
         // clean signal.
-        execFile(bin, ["scan", "--json", "--", ...safe], { cwd: targetRoot, maxBuffer: 8 * 1024 * 1024 }, (_err, stdout) => {
+        execFile(bin, ["scan", "--json", "--", ...safe], { cwd: targetRoot, maxBuffer: 8 * 1024 * 1024 }, (scanErr, stdout) => {
           // cwd = targetRoot (INV-3's pinned root): sgconfig discovery and the
           // output's relative-path base must resolve against the run's project,
           // not the factory checkout — the module doc and the other two arms
           // (MCP server cwd, runTestSuite) already bind to targetRoot.
+          // A maxBuffer overrun is NOT the declared vacuous shape: the arm RAN
+          // and its verdict was lost — the truncated stdout never parses
+          // (verified empirically: err.code ERR_CHILD_PROCESS_STDIO_MAXBUFFER,
+          // stdout exactly maxBuffer bytes). Resolving [] here would read a
+          // lost verdict as a clean scan; a visible, non-blocking warning keeps
+          // the arm advisory without claiming clean.
+          if (scanErr?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+            resolve([
+              {
+                file: "",
+                line: 0,
+                severity: "warning",
+                message: "ast-grep scan output exceeded maxBuffer — the scan's verdict is unreadable (advisory, not clean, not blocking)",
+                source: "ast-grep",
+              },
+            ]);
+            return;
+          }
           const text = typeof stdout === "string" ? stdout.trim() : "";
           if (text === "") {
             resolve([]); // declared advisory vacuous — also the config-less-target shape (exit 3, empty stdout)
@@ -124,7 +142,7 @@ export async function createProdLspGateDeps(
             );
             resolve(parsed);
           } catch {
-            resolve([]); // declared advisory vacuous — invalid JSON never reads as a clean scan
+            resolve([]); // declared advisory vacuous — a COMPLETE-but-unparseable output is a malformed tool, still the declared posture
           }
         });
       });
