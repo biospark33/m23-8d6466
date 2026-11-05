@@ -1,0 +1,201 @@
+{
+  "leg": "p0-9-idempotency-rerun",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass",
+  "steps": [
+    {
+      "step": "prereq",
+      "outcome": "ok",
+      "detail": {
+        "file": "2026-11-05T18-08-22-942Z-p0-9-hindsight-live-t6ll11.json"
+      }
+    },
+    {
+      "step": "snapshot-pre",
+      "outcome": "ok",
+      "detail": {
+        "count": 5
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 8,
+      "detail": {
+        "bankId": "qds-factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 14,
+      "detail": {
+        "bankId": "qds-factory-dev-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 19,
+      "detail": {
+        "bankId": "qds-factory-qa-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 25,
+      "detail": {
+        "bankId": "qds-factory-maint-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 30,
+      "detail": {
+        "bankId": "qds-collective",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-1",
+      "outcome": "ok",
+      "durationMs": 30,
+      "detail": {
+        "roster": [
+          "qds-factory",
+          "qds-factory-dev-meta",
+          "qds-factory-qa-meta",
+          "qds-factory-maint-meta",
+          "qds-collective"
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "snapshot-post",
+      "outcome": "ok",
+      "detail": {
+        "count": 5
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 3,
+      "detail": {
+        "bankId": "qds-factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 6,
+      "detail": {
+        "bankId": "qds-factory-dev-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 9,
+      "detail": {
+        "bankId": "qds-factory-qa-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 11,
+      "detail": {
+        "bankId": "qds-factory-maint-meta",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 14,
+      "detail": {
+        "bankId": "qds-collective",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "provision-2",
+      "outcome": "ok",
+      "durationMs": 15,
+      "detail": {
+        "roster": [
+          "qds-factory",
+          "qds-factory-dev-meta",
+          "qds-factory-qa-meta",
+          "qds-factory-maint-meta",
+          "qds-collective"
+        ],
+        "repoSlug": "QDS-Factory",
+        "mode": "reupsert-existing"
+      }
+    },
+    {
+      "step": "snapshot-post2",
+      "outcome": "ok",
+      "detail": {
+        "count": 5
+      }
+    },
+    {
+      "step": "idempotency",
+      "outcome": "ok",
+      "detail": {
+        "rosterSize": 5,
+        "createdInAttempt": 0,
+        "createdInRerun": 0
+      }
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"snapshot-pre\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":8}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":14}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":19}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":25}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":30}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-1\",\"outcome\":\"ok\",\"durationMs\":30}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"snapshot-post\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":3}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":6}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":9}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":11}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":14}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"provision-2\",\"outcome\":\"ok\",\"durationMs\":15}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"snapshot-post2\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-idempotency-rerun\",\"step\":\"idempotency\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-11-05T18:20:11.664Z",
+  "createdInAttempt": [],
+  "unclaimedCreated": [],
+  "residue": [],
+  "deleteOutcomes": {},
+  "rosters": {
+    "pre": [
+      "qds-factory-qa-meta",
+      "qds-factory-dev-meta",
+      "qds-factory",
+      "qds-collective",
+      "qds-factory-maint-meta"
+    ],
+    "post": [
+      "qds-factory-qa-meta",
+      "qds-factory-dev-meta",
+      "qds-factory",
+      "qds-collective",
+      "qds-factory-maint-meta"
+    ],
+    "post2": [
+      "qds-factory-qa-meta",
+      "qds-factory-dev-meta",
+      "qds-factory",
+      "qds-collective",
+      "qds-factory-maint-meta"
+    ]
+  },
+  "repoSlug": "QDS-Factory",
+  "createdInRerun": []
+}

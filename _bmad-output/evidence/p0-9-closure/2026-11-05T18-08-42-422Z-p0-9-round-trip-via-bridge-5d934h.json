@@ -1,0 +1,27 @@
+{
+  "leg": "p0-9-round-trip-via-bridge",
+  "mode": "live",
+  "ok": false,
+  "outcome": "fail: round trip failed at step \"reflect\": bad_gateway — Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"bankId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"array\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"insights\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]",
+  "steps": [
+    {
+      "step": "reflect",
+      "outcome": "fail bad_gateway: Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"bankId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"array\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"insights\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"outcome\":\"start\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"reflect\",\"bankId\":\"qds-factory\",\"outcome\":\"fail\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"outcome\":\"fail\"}",
+  "writtenAt": "2026-11-05T18:08:42.421Z",
+  "bankId": "qds-factory",
+  "roundTrip": {
+    "ok": false,
+    "step": "reflect",
+    "error": {
+      "code": "bad_gateway",
+      "message": "Hindsight response failed schema validation: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"bankId\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"array\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"insights\"\n    ],\n    \"message\": \"Required\"\n  },\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"number\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Required\"\n  }\n]"
+    },
+    "requestId": "1bb7091a-c0e2-4e39-8e2d-eaf4fb51388d"
+  }
+}

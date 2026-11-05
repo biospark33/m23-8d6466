@@ -1,0 +1,32 @@
+{
+  "leg": "p0-9-hindsight-live",
+  "mode": "live",
+  "ok": false,
+  "outcome": "leg-failure",
+  "steps": [
+    {
+      "step": "health-probe",
+      "outcome": "ok",
+      "durationMs": 6,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"status\":\"healthy\",\"database\":\"connected\",\"db_acquire_ms\":1.0,\"db_pool_waiting\":0,\"db_pool_in_use\":0,\"db_pool_max\":100,\"db_pool_idle\":5}"
+      }
+    },
+    {
+      "step": "digest-identity",
+      "outcome": "failed-docker-inspect",
+      "detail": "docker inspect hindsight-qds failed: error: no such object: hindsight-qds"
+    },
+    {
+      "step": "shape-probe",
+      "outcome": "skipped-digest-unproven",
+      "detail": "digest identity unproven — no raw shape probe issued against a possibly-unpinned container"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"health-probe\",\"outcome\":\"ok\",\"durationMs\":6}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"digest-identity\",\"outcome\":\"failed-docker-inspect\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"shape-probe\",\"outcome\":\"skipped-digest-unproven\"}",
+  "writtenAt": "2026-11-05T18:07:35.816Z"
+}

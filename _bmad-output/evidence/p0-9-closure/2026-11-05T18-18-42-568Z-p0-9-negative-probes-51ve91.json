@@ -1,0 +1,69 @@
+{
+  "leg": "p0-9-negative-probes",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass: nonexistent-bank refused (404 class) and unavailable-instance refused (502/fetch_failed/408 class); zero banks created",
+  "steps": [
+    {
+      "step": "listBanks",
+      "outcome": "ok",
+      "detail": "5 bank(s)"
+    },
+    {
+      "step": "recall",
+      "outcome": "answered-empty-200 (pre-recorded 0.10.0 nuance)"
+    },
+    {
+      "step": "bank-operations-read",
+      "outcome": "refused http_404"
+    },
+    {
+      "step": "down-instance-probe",
+      "outcome": "refused transport-error"
+    },
+    {
+      "step": "listBanks",
+      "outcome": "ok",
+      "detail": "5 bank(s)"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"outcome\":\"start\",\"bankId\":\"qds-does-not-exist-w1b9jz\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"listBanks\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"recall\",\"outcome\":\"recorded\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"bank-operations-read\",\"outcome\":\"recorded\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"down-instance-probe\",\"outcome\":\"refused\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"step\":\"listBanks\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-negative-probes\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-11-05T18:18:42.568Z",
+  "missingBankId": "qds-does-not-exist-w1b9jz",
+  "downOrigin": "http://127.0.0.1:9/",
+  "banksBefore": [
+    "qds-factory-qa-meta",
+    "qds-factory-dev-meta",
+    "qds-factory",
+    "qds-collective",
+    "qds-factory-maint-meta"
+  ],
+  "banksAfter": [
+    "qds-factory-qa-meta",
+    "qds-factory-dev-meta",
+    "qds-factory",
+    "qds-collective",
+    "qds-factory-maint-meta"
+  ],
+  "banksCreated": [],
+  "refusals": [
+    {
+      "name": "recall-missing-bank",
+      "class": "recall-missing-bank-empty-200",
+      "detail": "0.10.0 recall path has no _require_bank_exists: recall on a MISSING bank answers 200 with empty results (Track A) — pre-recorded so the evidence reads consistent; the REFUSING read is the bank profile endpoint (missing-bank-profile-read)"
+    },
+    {
+      "name": "missing-bank-operations-read",
+      "class": "http_404",
+      "detail": "HTTP 404: Bank 'qds-does-not-exist-w1b9jz' not found"
+    },
+    {
+      "name": "unavailable-instance",
+      "class": "transport-error",
+      "detail": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+    }
+  ]
+}
