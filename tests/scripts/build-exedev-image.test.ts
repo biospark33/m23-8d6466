@@ -1511,7 +1511,25 @@ describe("buildIdFileInputs", () => {
       // now spans three pins (8a993b22 → e1f65418 → b055ee29 → e8d8a3b5);
       // settlement waits on the operator registry window (register item 8),
       // which lands AFTER this commit per the register's sequencing.
-      "e8d8a3b540b0c2192c74e55d8a77bb2ba6da76423453569421f722911c001c04",
+      // 7700b503: moved from e8d8a3b5 by P1.7 (feature/p1-7-lsp-diagnostics-gate,
+      // 2026-11-05) — `src/phase-engine/gates/lsp-diagnostics-gate.ts` and
+      // `lsp-diagnostics-prod-deps.ts` are NEW walked COPY inputs (the
+      // post-edit diagnostics gate + its pi-lens MCP prod deps). PUBLISH
+      // DEFERRED with recorded pairing debt, per this file's own deferral
+      // precedent: the accumulated publish→adopt debt now spans four pins;
+      // settlement waits on the next merge-triggered publish window.
+      // ee9c1a55: moved from da967dcb the same session — the security-review
+      // round on the P1.7 PR hardened the prod deps (ast-grep argv `--`
+      // separator + dash-leading rejection; the test-pass fallback default
+      // flipped fail-closed false/false pending a real runner).
+      // 728f03bf: moved from ee9c1a55 by the P1.7 self-review round — the
+      // prod-path fixes the fakes could not catch: init/RPC timeout
+      // separation in the prod dep, non-poisoning client memoization,
+      // parser-keyed file errors, waiver persistence on degraded passes,
+      // runRoot-pinned path resolution, zero-coverage degradation, the
+      // fail-closed real test-pass fallback (bun test, bounded), and the
+      // ast-grep slice removal.
+      "728f03bf1faa30ed34a69d201e011551c27d549ebe6b248297df854fd8fdaefe",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
