@@ -48,3 +48,12 @@
 
 ## Deferred from: code review of m2-1-memory-gateway (2026-10-07)
 - F-029: the delivered env file retains revoked key material after the lifecycle returns (one dead plaintext `QDS_KG_RECALL_KEY` per completed run accumulates on the host). By-design mirror posture — the file must live through the run it serves; post-run cleanup belongs to box teardown (DF2.5 lineage), outside the gateway module's surface. Actionable in the story that owns box teardown for memory runs.
+
+## Decision-register closure (2026-11-04)
+- **openrig stale-ledger SKIPs — CLOSED not-reproducible.** Register item 6 directed
+  closure unless steve supplies a pointer. Premise sweep 2026-11-04 found no matching
+  artifact anywhere: `_bmad-output/evidence/openrig-{s0,s1,s2,sc2}/` JSONs, suite logs,
+  `sprint-status.yaml`, this register, `dark-factory-v6/`, and `.sandbox/runs/` all
+  carry no stale openrig ledger SKIP. Sole grep hit was incidental (a "deferred
+  docker/image builds" note inside `openrig-sc2/2026-09-28-sc2-1-5-code.json`). If
+  steve later supplies a pointer, reopen under a new entry with that pointer cited.
