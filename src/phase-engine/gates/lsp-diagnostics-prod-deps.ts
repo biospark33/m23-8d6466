@@ -69,6 +69,11 @@ export async function createProdLspGateDeps(
       }
       try {
         const res = await c.call("pilens_lsp_diagnostics", { paths }, RPC_CEILING_MS);
+        // An isError tool result carries no content (CodeRabbit #495 finding
+        // 4476281859): folding it to text:"" let the freshness proxy see two
+        // identical empty snapshots and misroute a live-LSP tool failure to the
+        // no-lsp waiver instead of the story table's blocked lsp-timeout row.
+        if (res.isError) return { text: "", timedOut: "rpc" };
         const text = (res.content ?? []).map((x) => x.text ?? "").join("\n"); // dp:ok missing text block folds to "" — the tool's text is the only payload and the parser tolerates empty
         return { text, timedOut: null };
       } catch {
@@ -86,24 +91,58 @@ export async function createProdLspGateDeps(
       const safe = files.filter((f) => !f.startsWith("-"));
       if (safe.length === 0) return [];
       return new Promise((resolve) => {
-        execFile(bin, ["scan", "json", "--", ...safe], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
-          if (err) {
-            resolve([]);
+        // CodeRabbit #495 finding 4476281871: "json" was a positional PATH, not
+        // an output flag — ast-grep emitted no JSON at all (config-less targets
+        // exit 3 with empty stdout), so the arm parsed nothing, always. `--json`
+        // is the real output flag; stdout is parsed even when err is set (some
+        // exits still carry findings), and an empty/unparseable stdout stays the
+        // DECLARED advisory-vacuous posture (dp:ok above, story DoD), not a new
+        // clean signal.
+        execFile(bin, ["scan", "--json", "--", ...safe], { cwd: targetRoot, maxBuffer: 8 * 1024 * 1024 }, (scanErr, stdout) => {
+          // cwd = targetRoot (INV-3's pinned root): sgconfig discovery and the
+          // output's relative-path base must resolve against the run's project,
+          // not the factory checkout — the module doc and the other two arms
+          // (MCP server cwd, runTestSuite) already bind to targetRoot.
+          // A maxBuffer overrun is NOT the declared vacuous shape: the arm RAN
+          // and its verdict was lost — the truncated stdout never parses
+          // (verified empirically: err.code ERR_CHILD_PROCESS_STDIO_MAXBUFFER,
+          // stdout exactly maxBuffer bytes). Resolving [] here would read a
+          // lost verdict as a clean scan; a visible, non-blocking warning keeps
+          // the arm advisory without claiming clean.
+          if (scanErr?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+            resolve([
+              {
+                file: "",
+                line: 0,
+                severity: "warning",
+                message: "ast-grep scan output exceeded maxBuffer — the scan's verdict is unreadable (advisory, not clean, not blocking)",
+                source: "ast-grep",
+              },
+            ]);
+            return;
+          }
+          const text = typeof stdout === "string" ? stdout.trim() : "";
+          if (text === "") {
+            resolve([]); // declared advisory vacuous — also the config-less-target shape (exit 3, empty stdout)
             return;
           }
           try {
-            const parsed: DiagnosticEntry[] = JSON.parse(stdout).map(
-              (h: { file?: string }) => ({
+            const parsed: DiagnosticEntry[] = JSON.parse(text).map(
+              // Preserve ast-grep's own per-rule severity (CR #497 inline finding):
+              // the rule declares it in the JSON, and the ladder blocks ONLY on
+              // severity==="error" — hardcoding "error" inflated every rule hit
+              // (warnings, hints) into a blocking diagnostic.
+              (h: { file?: string; severity?: string }) => ({
                 file: typeof h.file === "string" ? h.file : "",
                 line: 0,
-                severity: "error",
+                severity: h.severity === "error" ? "error" : "warning",
                 message: "ast-grep finding",
                 source: "ast-grep",
               }),
             );
             resolve(parsed);
           } catch {
-            resolve([]);
+            resolve([]); // declared advisory vacuous — a COMPLETE-but-unparseable output is a malformed tool, still the declared posture
           }
         });
       });

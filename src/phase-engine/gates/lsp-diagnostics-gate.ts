@@ -323,7 +323,16 @@ export function createLspDiagnosticsGate(deps: LspGateDeps): Gate {
   return {
     name: "lsp-diagnostics-gate",
     async run(envelope: unknown, ctx: GateContext) { // dp:ok gatedBody's catch converts a throw into a failed check
-      const raw = (envelope as { changedFiles?: string[] } | undefined)?.changedFiles ?? [];
+      // Fail closed on a malformed envelope (CodeRabbit #495 finding 4476281843):
+      // a missing or non-array changedFiles previously folded to [] and let the
+      // gate pass on an empty scan — the exact inverse of AC5's fail-closed
+      // posture. An EXPLICIT empty array stays a legitimate empty scan.
+      const raw = (envelope as { changedFiles?: unknown } | undefined)?.changedFiles;
+      if (!Array.isArray(raw)) {
+        const report = new GateReport();
+        report.check("envelope", false, "envelope.changedFiles missing or not an array");
+        return report;
+      }
       // INV-3: burrow-relative changedFiles resolve against the SAME pinned
       // runRoot the phase used — never against the gate's own cwd.
       const changed = raw.map((f) => (path.isAbsolute(f) ? f : path.resolve(ctx.runRoot, f)));

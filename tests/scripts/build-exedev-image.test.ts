@@ -1522,6 +1522,24 @@ describe("buildIdFileInputs", () => {
       // round on the P1.7 PR hardened the prod deps (ast-grep argv `--`
       // separator + dash-leading rejection; the test-pass fallback default
       // flipped fail-closed false/false pending a real runner).
+      // fb7602c0: moved from ebdb0764 by the third CodeRabbit round on the
+      // triage PR — a maxBuffer overrun on the ast-grep scan now resolves a
+      // visible non-blocking warning diagnostic instead of the declared
+      // vacuous [] (a lost verdict must not read as a clean scan; verified
+      // empirically: ERR_CHILD_PROCESS_STDIO_MAXBUFFER, truncated stdout
+      // never parses).
+      // ebdb0764: moved from 4eaa4e0c by the second CodeRabbit round on the
+      // triage PR — the ast-grep execFile now binds cwd to targetRoot (INV-3,
+      // matching the module doc and the other two arms) and preserves the
+      // per-rule severity from the scan JSON instead of hardcoding "error"
+      // (the ladder blocks only on severity==="error").
+      // 4eaa4e0c: moved from 728f03bf by the P1.7 CodeRabbit-triage round — the
+      // fail-closed envelope check in the gate adapter (missing/non-array
+      // changedFiles refuses instead of scanning empty), the isError → rpc
+      // classification in the prod dep, and the ast-grep arm's `--json` flag
+      // fix (stdout now parsed even on non-zero exit). All src/ walked inputs;
+      // the debt is declared on the branch and dev settles it at merge via the
+      // publish→adopt window, same as every src drift.
       // 728f03bf: moved from ee9c1a55 by the P1.7 self-review round — the
       // prod-path fixes the fakes could not catch: init/RPC timeout
       // separation in the prod dep, non-poisoning client memoization,
@@ -1529,7 +1547,7 @@ describe("buildIdFileInputs", () => {
       // runRoot-pinned path resolution, zero-coverage degradation, the
       // fail-closed real test-pass fallback (bun test, bounded), and the
       // ast-grep slice removal.
-      "728f03bf1faa30ed34a69d201e011551c27d549ebe6b248297df854fd8fdaefe",
+      "fb7602c030c487587a3c3784dc02315b23ad918ac229b4adab35d1928143bc2c",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

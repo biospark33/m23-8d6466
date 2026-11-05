@@ -225,7 +225,21 @@ describe("pinned review set (scope-derivation amendment, 2026-10-27)", () => {
     expect(() => deriveReviewSet("short")).toThrow(/40-hex/);
     const { dir: repo } = seedRepo();
     try {
-      execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "empty"], { cwd: repo });
+      // A CI runner has no git identity (no user.name/email anywhere), so this
+      // commit inherits an identity-less env and dies before the EMPTY-diff
+      // assertion — every CI `tests` job since 2026-10-27 failed here while
+      // macOS passed (local global config supplies an identity). Same identity
+      // env the seedRepo helper uses.
+      execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "empty"], {
+        cwd: repo,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t",
+        },
+      });
       const emptySha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
       expect(() => deriveReviewSet(emptySha, { cwd: repo })).toThrow(/EMPTY/);
     } finally {
