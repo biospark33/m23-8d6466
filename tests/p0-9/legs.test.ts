@@ -40,7 +40,11 @@
  *     {unauthenticated, knownKeyOutOfScope, unknownKey}`,
  *     `measuredCount: number`, `dangerRetired: boolean` (R3-013: requires the
  *     RETAIN write leg specifically refused-auth),
- *     `containmentStatement: string`.
+ *     `containmentStatement: string`;
+ *     changed-content-upsert (#408 remainder) → `probeBankId`, `documentId`,
+ *     `retainOne`/`retainTwo`/`recallBaseline`/`readBack` (measured shapes),
+ *     `upsertObserved: boolean` (true ONLY on the changed-content update
+ *     path: v2 present, v1 gone, exactly one identity hit).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -2312,4 +2316,352 @@ describe("rosterPatternClaim (leg-lib)", () => {
       `${base52}-maint-meta`,
     ]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// #408 conformance remainder (2026-11-05): the bank-profile endpoint was
+// REMOVED in 0.10.0 and the 2026-10-04 evidence's 410s are inconclusive
+// (p0-9-closure/README.md). The probe drivers read SUPPORTED endpoints now
+// and a 410 classifies endpoint-removed-inconclusive — proof of nothing.
+// ---------------------------------------------------------------------------
+
+describe("auth-retired-check #408 conformance", () => {
+  test.skipIf(!hasDriver("auth-retired-check"))(
+    "the known-key and unknown-key probes hit the SUPPORTED recall read, never the removed /profile endpoint",
+    async () => {
+      const runLeg = await loadDriver("auth-retired-check");
+      const served: ServedCall[] = [];
+      const fetchImpl = makeAuthFetch({ unauthStatus: 401, known: "Bearer test-known-key", served });
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        fetchImpl,
+        authHeader: "Bearer test-known-key",
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(served.some((x) => x.call.url.includes("/profile"))).toBe(false);
+      // cross-bank (known credential beyond the proof) + unknown-key both rode
+      // the bank-scoped recall path
+      expect(
+        served.filter((x) => /\/memories\/recall$/.test(x.call.url)).length,
+      ).toBeGreaterThanOrEqual(2);
+      const ao = ev.authOutcomes as
+        | Record<string, { class?: string; measured?: boolean }>
+        | undefined;
+      expect(ao?.knownKeyOutOfScope?.measured).toBe(true);
+      expect(ao?.unknownKey?.measured).toBe(true);
+    },
+  );
+
+  test.skipIf(!hasDriver("auth-retired-check"))(
+    "a 410 on the probe read classifies endpoint-removed-inconclusive for both credential probes — measured, never an auth claim",
+    async () => {
+      const runLeg = await loadDriver("auth-retired-check");
+      const served: ServedCall[] = [];
+      const fetchImpl = makeFetchRouter(
+        [
+          { match: (c) => c.method === "DELETE", respond: () => new Response("{}", { status: 200 }) },
+          {
+            // the key-known PROOF (banks list GET) answers for the known credential
+            match: (c) =>
+              c.headers.authorization === "Bearer test-known-key" && !c.url.includes("/memories"),
+            respond: () => new Response("{}", { status: 200 }),
+          },
+          {
+            // the supported recall read is GONE (410) for the known credential
+            match: (c) => c.headers.authorization === "Bearer test-known-key",
+            respond: () => new Response("gone", { status: 410 }),
+          },
+          { match: () => true, respond: () => new Response("gone", { status: 410 }) },
+        ],
+        served,
+      );
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        fetchImpl,
+        authHeader: "Bearer test-known-key",
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(true);
+      const ao = ev.authOutcomes as
+        | Record<string, { class?: string; measured?: boolean }>
+        | undefined;
+      expect(ao?.knownKeyOutOfScope?.class).toBe("endpoint-removed-inconclusive");
+      expect(ao?.unknownKey?.class).toBe("endpoint-removed-inconclusive");
+      expect(ao?.knownKeyOutOfScope?.measured).toBe(true);
+      expect(ao?.unknownKey?.measured).toBe(true);
+      // the 410s prove nothing about auth — the danger verdict is untouched
+      expect(ev.dangerRetired).toBe(false);
+    },
+  );
+});
+
+describe("negative-probes #408 conformance", () => {
+  test.skipIf(!hasDriver("negative-probes"))(
+    "a 410 recall refusal on the missing bank classifies endpoint-removed-inconclusive, not a bank-existence proof",
+    async () => {
+      const runLeg = await loadDriver("negative-probes");
+      const client = makeListClient({
+        recallThrows: new HindsightHttpError(410, "endpoint removed", "req-410"),
+      });
+      const fetchImpl = makeFetchRouter(
+        [{ match: () => true, respond: () => new Response("{}", { status: 200 }) }],
+        [],
+      );
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        fetchImpl,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      const refusals = ev.refusals as Array<{ name: string; class: string }>;
+      expect(refusals).toBeDefined();
+      const recall = refusals.find((r) => r.name === "recall-missing-bank");
+      expect(recall?.class).toBe("endpoint-removed-inconclusive");
+    },
+  );
+
+  test.skipIf(!hasDriver("negative-probes"))(
+    "the refusing-read probe uses the SUPPORTED operations endpoint: a 410 is inconclusive, a 404 still proves the refusal (no /profile anywhere)",
+    async () => {
+      const runLeg = await loadDriver("negative-probes");
+      const seenPaths: string[] = [];
+      const base = makeListClient({
+        recallThrows: new HindsightHttpError(410, "endpoint removed", "req-410"),
+      });
+      const client = {
+        ...base,
+        request: async (method: string, path: string) => {
+          seenPaths.push(`${method} ${path}`);
+          throw new HindsightHttpError(404, "bank not found", "req-a2");
+        },
+      };
+      // the down-instance probe refuses on transport (fetch rejects), so with
+      // the 404 on the operations read BOTH probes prove their refusals: green
+      const fetchImpl = makeFetchRouter(
+        [
+          {
+            match: () => true,
+            respond: () => {
+              throw new TypeError("fetch failed");
+            },
+          },
+        ],
+        [],
+      );
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        fetchImpl,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(seenPaths.some((p) => p.includes("/profile"))).toBe(false);
+      expect(seenPaths.some((p) => p.includes("/operations"))).toBe(true);
+      const refusals = ev.refusals as Array<{ name: string; class: string }>;
+      const ops = refusals.find((r) => r.name === "missing-bank-operations-read");
+      expect(ops?.class).toBe("http_404");
+      expect(refusals.some((r) => r.name.includes("profile"))).toBe(false);
+      // 404 on the operations read + transport refusal on the down probe:
+      // both refusal proofs landed → the leg is green
+      expect(ev.ok).toBe(true);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// changed-content-upsert (#408 remainder): the document_id upsert UPDATE
+// path — same identity, DIFFERENT content, read-back. Complements
+// document-id-retain-twice, whose identical re-retain only proved the
+// no-duplicate check.
+// ---------------------------------------------------------------------------
+
+/**
+ * Stateful upsert fake: retains store content by documentId; recall filters
+ * stored docs by the query's VERSION marker and emits the transformed schema
+ * view's item shape ({memoryId, content, score, documentId}).
+ */
+function makeUpsertClient(
+  cfg: {
+    retain2Throws?: boolean;
+    duplicateV2?: boolean;
+    recallThrowsOn?: "baseline" | "readback";
+    deleteFails?: boolean;
+    readbackForeignIdentity?: boolean;
+  } = {},
+): { calls: { retain: Array<{ documentId: string; content: string }>; recall: string[]; deleteBank: string[] } } & Record<string, unknown> {
+  const docs: Array<{ documentId: string; content: string }> = [];
+  const calls = {
+    retain: [] as Array<{ documentId: string; content: string }>,
+    recall: [] as string[],
+    deleteBank: [] as string[],
+  };
+  return {
+    calls,
+    createBank: async (id: string) => ({ bank_id: id }),
+    retain: async (bankId: string, content: string, metadata?: { documentId?: string }) => {
+      calls.retain.push({ documentId: metadata?.documentId ?? "", content }); // dp:ok the driver under test always supplies a documentId; "" only marks a fake-storage anomaly
+      if (content.includes("VERSION-TWO marker") && cfg.retain2Throws) {
+        throw new HindsightHttpError(502, "retain boom", "req-v2");
+      }
+      docs.push({ documentId: metadata?.documentId ?? "", content }); // dp:ok same as above — driver always supplies the identity; "" marks fake-storage anomaly
+      if (cfg.duplicateV2 && content.includes("VERSION-TWO marker")) {
+        // the duplicate shape: the same identity stored TWICE
+        docs.push({ documentId: metadata?.documentId ?? "", content }); // dp:ok same as above — driver always supplies the identity; "" marks fake-storage anomaly
+      }
+      return {
+        success: true,
+        bank_id: bankId,
+        items_count: 1,
+        async: false,
+        usage: { input_tokens: 3, output_tokens: 4, total_tokens: 7, cached_tokens: 0, thoughts_tokens: 0 },
+      };
+    },
+    recall: async (_bankId: string, query: string) => {
+      calls.recall.push(query);
+      if (cfg.recallThrowsOn === "baseline" && !docs.some((d) => d.content.includes("VERSION-TWO"))) {
+        throw new HindsightHttpError(502, "baseline recall boom", "req-b");
+      }
+      if (cfg.recallThrowsOn === "readback" && docs.some((d) => d.content.includes("VERSION-TWO"))) {
+        throw new HindsightHttpError(502, "read-back recall boom", "req-rb");
+      }
+      const wantV2 = query.includes("VERSION-TWO");
+      const results = docs
+        .filter((d) => d.content.includes(wantV2 ? "VERSION-TWO" : "VERSION-ONE"))
+        .map((d, i) => ({
+          memoryId: `m-${wantV2 ? "v2" : "v1"}-${i}`,
+          content: d.content,
+          score: 1,
+          documentId: cfg.readbackForeignIdentity && wantV2 ? "qds-foreign-doc" : d.documentId,
+        }));
+      return { results, durationMs: 1 };
+    },
+    deleteBank: async (bankId: string) => {
+      calls.deleteBank.push(bankId);
+      if (cfg.deleteFails) throw new HindsightHttpError(500, "delete boom", "req-d");
+      return { deleted: true, alreadyGone: false, deletedCount: 1 };
+    },
+  };
+}
+
+describe("changed-content-upsert", () => {
+  test.skipIf(!hasDriver("changed-content-upsert"))(
+    "happy path: v2 retained under the SAME document_id, read-back carries v2 only with exactly one identity hit → upsertObserved TRUE",
+    async () => {
+      const runLeg = await loadDriver("changed-content-upsert");
+      const client = makeUpsertClient();
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(true);
+      expect(ev.upsertObserved).toBe(true);
+      const readBack = ev.readBack as { sawV2?: boolean; sawV1?: boolean; withIdentity?: number };
+      expect(readBack?.sawV2).toBe(true);
+      expect(readBack?.sawV1).toBe(false);
+      expect(readBack?.withIdentity).toBe(1);
+      expect(ev.outcome).toMatch(/OBSERVED/);
+      expect((ev.probeBankId as string).startsWith("qds-")).toBe(true);
+      expect(ev.documentId as string).toMatch(/^qds-ccupsert-doc-/);
+    },
+  );
+
+  test.skipIf(!hasDriver("changed-content-upsert"))(
+    "retain v2 throws → read-back unmeasured, upsertObserved FALSE, leg honest (never a presupposed update)",
+    async () => {
+      const runLeg = await loadDriver("changed-content-upsert");
+      const client = makeUpsertClient({ retain2Throws: true });
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(true);
+      expect(ev.upsertObserved).toBe(false);
+      expect(ev.outcome).toMatch(/UNMEASURED/);
+    },
+  );
+
+  test.skipIf(!hasDriver("changed-content-upsert"))(
+    "duplicate identity hits on read-back → upsertObserved FALSE (ambiguous), never a measured update",
+    async () => {
+      const runLeg = await loadDriver("changed-content-upsert");
+      const client = makeUpsertClient({ duplicateV2: true });
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(true);
+      expect(ev.upsertObserved).toBe(false);
+      expect(ev.outcome).toMatch(/AMBIGUOUS|identity hits=2/);
+    },
+  );
+
+  test.skipIf(!hasDriver("changed-content-upsert"))(
+    "read-back hits carry a foreign identity → unproven branch (recall is semantic; a no-hit asserts nothing)",
+    async () => {
+      const runLeg = await loadDriver("changed-content-upsert");
+      const client = makeUpsertClient({ readbackForeignIdentity: true });
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(true);
+      expect(ev.upsertObserved).toBe(false);
+      expect(ev.outcome).toMatch(/NO hit under the probe identity|unproven/);
+    },
+  );
+
+  test.skipIf(!hasDriver("changed-content-upsert"))(
+    "probe-bank delete fails → ok FALSE + exitCode 1 (the disposable bank must not outlive the leg)",
+    async () => {
+      const runLeg = await loadDriver("changed-content-upsert");
+      const client = makeUpsertClient({ deleteFails: true });
+      const ev = await runLeg({
+        mode: "mock",
+        baseUrl: "http://127.0.0.1:18890",
+        client,
+        outDir: tmpDir,
+      });
+      assertEvidenceContract(ev);
+      expect(ev.ok).toBe(false);
+      expect(ev.exitCode).toBe(1);
+      expect(ev.outcome).toMatch(/delete failed/);
+    },
+  );
+
+  test.skipIf(!hasDriver("changed-content-upsert"))(
+    "no baseUrl anywhere → fatal refusal, exitCode 2, ok FALSE (fail-closed env guard)",
+    async () => {
+      const runLeg = await loadDriver("changed-content-upsert");
+      const prior = process.env.HINDSIGHT_BASE_URL;
+      // biome-ignore lint/performance/noDelete: unsetting an env var cannot be expressed by assignment — `= undefined` coerces to the string "undefined"
+      delete process.env.HINDSIGHT_BASE_URL;
+      try {
+        const ev = await runLeg({ mode: "mock", outDir: tmpDir });
+        assertEvidenceContract(ev);
+        expect(ev.ok).toBe(false);
+        expect(ev.exitCode).toBe(2);
+      } finally {
+        if (prior !== undefined) process.env.HINDSIGHT_BASE_URL = prior;
+      }
+    },
+  );
 });

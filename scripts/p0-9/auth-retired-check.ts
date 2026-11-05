@@ -37,9 +37,15 @@
  *       per-bank authorization exists — so when the known key SUCCEEDS
  *       cross-bank the class is recorded as `not-applicable-authz-absent`
  *       (with status + masked body tail), and the containment statement
- *       carries the weight.
- *   (c) UNKNOWN key: one deliberately-invalid bearer against the same bank —
- *       its 401-vs-2xx is only interpretable given the (b) proof result.
+ *       carries the weight. #408 conformance (2026-11-05): the probe read is
+ *       the SUPPORTED bank-scoped recall — the old bank-profile endpoint was
+ *       REMOVED in 0.10.0 and answered 410 on the 2026-10-04 evidence
+ *       (p0-9-closure/README.md), which no credential check can be read
+ *       from; a 410 now classifies `endpoint-removed-inconclusive`.
+ *   (c) UNKNOWN key: one deliberately-invalid bearer against the same
+ *       supported bank-scoped recall — its 401-vs-2xx is only interpretable
+ *       given the (b) proof result; a 410 is `endpoint-removed-inconclusive`
+ *       by the same conformance rule.
  *
  * The leg MEASURES, it does not gate: an answering unauthenticated probe
  * yields `dangerRetired:false` on a GREEN leg (the verdict field carries the
@@ -336,7 +342,6 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
   const steps: LegStepRecord[] = [];
   const unauthUrl = `${baseUrl}/v1/default/banks/${probeBankId}/memories`;
   const recallUrl = `${unauthUrl}/recall`;
-  const profileUrl = `${baseUrl}/v1/default/banks/${probeBankId}/profile`;
   const banksUrl = `${baseUrl}/v1/default/banks`;
   log({ outcome: "start", bankId: probeBankId });
 
@@ -463,7 +468,13 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
       });
       log({ step: "auth-proof", outcome: proof.kind });
 
-      const cross = await rawCall(f, profileUrl, "GET", { Authorization: cred }, undefined);
+      // #408 conformance: the probe read is the SUPPORTED bank-scoped recall —
+      // the bank-profile endpoint was removed in 0.10.0 (410 on the
+      // 2026-10-04 evidence), and a 410 classifies inconclusive below.
+      const cross = await rawCall(f, recallUrl, "POST", { Authorization: cred, "content-type": "application/json" }, {
+        query: "auth retired-check scope probe",
+        limit: 1,
+      });
       knownKeyOutOfScope = {
         answered: cross.kind === "answered",
         measured: cross.kind !== "error",
@@ -475,9 +486,11 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
               ? "not-applicable-authz-absent"
               : "answered-2xx-proof-unavailable"
             : cross.kind === "refused"
-              ? isNonAuthRefusalStatus(cross.status)
-                ? `known-key-refused-non-auth-http_${cross.status}`
-                : `known-key-out-of-scope-http_${cross.status}`
+              ? cross.status === 410
+                ? "endpoint-removed-inconclusive"
+                : isNonAuthRefusalStatus(cross.status)
+                  ? `known-key-refused-non-auth-http_${cross.status}`
+                  : `known-key-out-of-scope-http_${cross.status}`
               : "known-key-out-of-scope-error",
         ...(cross.kind === "answered" && proof.kind === "answered"
           ? {
@@ -514,7 +527,12 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
     // --- (c) unknown key — distinguishable only via the (b) proof ----------
     if (f !== undefined) {
       const badCred = `Bearer qds-invalid-${rand6()}`;
-      const bad = await rawCall(f, profileUrl, "GET", { Authorization: badCred }, undefined);
+      // Same supported recall read as (b) — #408 conformance, 410 →
+      // endpoint-removed-inconclusive below.
+      const bad = await rawCall(f, recallUrl, "POST", { Authorization: badCred, "content-type": "application/json" }, {
+        query: "auth retired-check unknown-key probe",
+        limit: 1,
+      });
       unknownKey = {
         answered: bad.kind === "answered",
         measured: bad.kind !== "error",
@@ -524,9 +542,11 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
           bad.kind === "answered"
             ? "unknown-key-answered"
             : bad.kind === "refused"
-              ? keyProof.ok === true
-                ? `unknown-key-refused-http_${bad.status}`
-                : "indistinguishable-proof-unavailable"
+              ? bad.status === 410
+                ? "endpoint-removed-inconclusive"
+                : keyProof.ok === true
+                  ? `unknown-key-refused-http_${bad.status}`
+                  : "indistinguishable-proof-unavailable"
               : "unknown-key-error",
         detail: "deliberately-invalid bearer (qds-invalid-<rand>) — never a real credential",
         ...(bad.error !== undefined ? { detail: `error: ${bad.error}` } : {}),

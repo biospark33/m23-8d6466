@@ -7,10 +7,14 @@
  *     with `HindsightHttpError` 404 (the MCP-era -32001-class supersession on
  *     REST). Track A correction (0.10.0 source, binding): the recall path has
  *     NO `_require_bank_exists` — recall on a missing bank answers 200 EMPTY,
- *     not 404 — so the refusing read is the bank PROFILE endpoint
- *     (`GET /v1/default/banks/{id}/profile`), and the recall's empty-200 is
- *     pre-recorded honestly as its own class so VPS-day evidence reads
- *     consistent, not contradictory.
+ *     not 404 — and the bank-profile endpoint that read the refusal in the
+ *     pre-conformance evidence was REMOVED in 0.10.0 (410 on the 2026-10-04
+ *     evidence, p0-9-closure/README.md). #408 conformance (2026-11-05): the
+ *     refusing-read probe moved to the SUPPORTED bank-scoped operations list
+ *     (`GET /v1/default/banks/{id}/operations`), the recall's empty-200 stays
+ *     pre-recorded honestly as its own class, and a 410 on any probed read
+ *     classifies `endpoint-removed-inconclusive` — proof of nothing about
+ *     bank existence, never counted as the refusal.
  *   - unavailable instance: one request against an origin nothing answers,
  *     expecting the -32002-class supersession shapes — 502 / fetch_failed /
  *     408 (the client's own transport mapping, src/lib/http.ts
@@ -295,13 +299,24 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
     }
   } catch (e) {
     if (e instanceof HindsightHttpError) {
-      refusals.push({
-        name: "recall-missing-bank",
-        class: `http_${e.status}`,
-        detail: maskTail(e.message),
-      });
-      if (e.status === 404) bankProbeRefused = true;
-      steps.push({ step: "recall", outcome: `refused http_${e.status}` });
+      if (e.status === 410) {
+        // #408 conformance: the endpoint itself is gone — proves nothing
+        // about bank existence, so it is neither the refusal nor an answer.
+        refusals.push({
+          name: "recall-missing-bank",
+          class: "endpoint-removed-inconclusive",
+          detail: maskTail(e.message),
+        });
+        steps.push({ step: "recall", outcome: "inconclusive http_410 (endpoint removed)" });
+      } else {
+        refusals.push({
+          name: "recall-missing-bank",
+          class: `http_${e.status}`,
+          detail: maskTail(e.message),
+        });
+        if (e.status === 404) bankProbeRefused = true;
+        steps.push({ step: "recall", outcome: `refused http_${e.status}` });
+      }
     } else {
       refusals.push({
         name: "recall-missing-bank",
@@ -313,41 +328,52 @@ export async function runLeg(deps: Partial<LegDeps> = {}): Promise<LegEvidence> 
   }
   log({ step: "recall", outcome: bankProbeAnswered ? "answered" : "recorded" });
 
-  // A2 — profile read, the 0.10.0 REFUSING read (404 via _require_bank_exists).
+  // A2 — supported bank-scoped read, the candidate REFUSING read (404 via
+  // _require_bank_exists on the operations list). #408 conformance: the old
+  // profile endpoint was removed in 0.10.0 (410) and classifies inconclusive.
   // Only when the client exposes raw `request` (the real HindsightClient does;
   // injected fakes model the refusal on recall instead — tests/p0-9 contract).
   if (typeof client.request === "function") {
     try {
-      await client.request("GET", `/v1/default/banks/${missingBankId}/profile`);
+      await client.request("GET", `/v1/default/banks/${missingBankId}/operations`);
       bankProbeAnswered = true;
       refusals.push({
-        name: "missing-bank-profile-read",
+        name: "missing-bank-operations-read",
         class: "answered-2xx",
-        detail: "profile read on a missing bank ANSWERED — mis-behaved probe",
+        detail: "operations read on a missing bank ANSWERED — mis-behaved probe",
       });
-      steps.push({ step: "bank-profile-read", outcome: "fail answered" });
+      steps.push({ step: "bank-operations-read", outcome: "fail answered" });
     } catch (e) {
       if (e instanceof HindsightHttpError) {
-        refusals.push({
-          name: "missing-bank-profile-read",
-          class: `http_${e.status}`,
-          detail: maskTail(e.message),
-        });
-        if (e.status === 404) bankProbeRefused = true;
-        steps.push({ step: "bank-profile-read", outcome: `refused http_${e.status}` });
+        if (e.status === 410) {
+          refusals.push({
+            name: "missing-bank-operations-read",
+            class: "endpoint-removed-inconclusive",
+            detail: maskTail(e.message),
+          });
+          steps.push({ step: "bank-operations-read", outcome: "inconclusive http_410 (endpoint removed)" });
+        } else {
+          refusals.push({
+            name: "missing-bank-operations-read",
+            class: `http_${e.status}`,
+            detail: maskTail(e.message),
+          });
+          if (e.status === 404) bankProbeRefused = true;
+          steps.push({ step: "bank-operations-read", outcome: `refused http_${e.status}` });
+        }
       } else {
         refusals.push({
-          name: "missing-bank-profile-read",
+          name: "missing-bank-operations-read",
           class: classifyTransport(e),
           detail: maskTail(errMessage(e)),
         });
-        steps.push({ step: "bank-profile-read", outcome: "fail transport/error" });
+        steps.push({ step: "bank-operations-read", outcome: "fail transport/error" });
       }
     }
-    log({ step: "bank-profile-read", outcome: "recorded" });
+    log({ step: "bank-operations-read", outcome: "recorded" });
   } else {
     steps.push({
-      step: "bank-profile-read",
+      step: "bank-operations-read",
       outcome: "skipped: injected client exposes no raw request — recall carries the probe",
     });
   }
