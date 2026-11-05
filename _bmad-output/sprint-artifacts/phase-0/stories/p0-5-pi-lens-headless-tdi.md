@@ -16,7 +16,7 @@ so that post-edit QA gates and turn-end reports work in non-interactive DAG node
 
 ## Overview
 
-Installs pi-lens v3.8.47, confirms `--mode json`/`--mode rpc` headless emission, validates `lsp_diagnostics` structured output, proves TDI fallback path (warning-count proxy via on-disk `~/.pi-lens/` artifacts), and confirms secret-scan blocking behavior (NFR-SEC-3). Cuts Pi extension layer only. 4 pts because it spans multiple pi-lens surfaces (diagnostics, navigation, TDI, secret-scan) and requires live LSP server validation.
+Installs pi-lens v3.8.71 (spec amendment 2026-11-04: the original floor was 3.8.47, but P1.7 `p1-7-lsp-diagnostics-gate.md:61-62` forbids re-pinning to 3.8.47 and the observed/P0.6-verified version is 3.8.71 — reconciliation §Update-2026-11-04), confirms `--mode json`/`--mode rpc` headless emission, validates `lsp_diagnostics` structured output, proves TDI fallback path (warning-count proxy via on-disk `~/.pi-lens/` artifacts), and confirms secret-scan blocking behavior (NFR-SEC-3). Cuts Pi extension layer only. 4 pts because it spans multiple pi-lens surfaces (diagnostics, navigation, TDI, secret-scan) and requires live LSP server validation.
 
 ## E2E Slice
 
@@ -28,7 +28,7 @@ Installs pi-lens v3.8.47, confirms `--mode json`/`--mode rpc` headless emission,
 
 ## Acceptance Criteria
 
-1. **(make-or-break)** Given pi-lens v3.8.47 installed and `typescript-language-server@5.3.0` on PATH, When a Pi agent runs in `--mode json` against a TypeScript file with a type error, Then the output contains structured `lsp_diagnostics` JSON with ≥1 finding and stable `aw:<hash>` IDs.
+1. **(make-or-break)** Given pi-lens v3.8.71 installed (spec floor 3.8.47, amended 2026-11-04 — P1.7 forbids re-pinning to 3.8.47) and `typescript-language-server@5.3.0` on PATH, When a Pi agent runs in `--mode json` against a TypeScript file with a type error, Then the output contains structured `lsp_diagnostics` JSON with ≥1 finding and stable `aw:<hash>` IDs.
 2. Given a file with a hardcoded API key pattern, When pi-lens secret-scan runs, Then the turn-end emit is blocked with a `secret_detected` finding (NFR-SEC-3).
 3. Given headless TDI is a TUI slash-command (not a CLI flag), When the proxy metric path is used, Then warning count from on-disk `~/.pi-lens/` artifacts is readable as a numeric value with logged fallback reason (FR-EX-8).
 
@@ -57,7 +57,7 @@ Installs pi-lens v3.8.47, confirms `--mode json`/`--mode rpc` headless emission,
 > `_bmad-output/sprint-artifacts/p0-5-p0-9-dod-reconciliation.md` §3.
 > **3 met / 1 partial / 5 not satisfied — this story is `in-review`, not `done`.**
 
-- [ ] **Impl:** pi-lens v3.8.47 installed via `pi install npm:pi-lens`; settings.json contains package entry.
+- [ ] **Impl:** pi-lens v3.8.71 installed via `pi install npm:pi-lens`; settings.json contains package entry. (Spec amended 2026-11-04 from 3.8.47: floor+observed pair per the closure plan — P1.7 `p1-7-lsp-diagnostics-gate.md:61-62` forbids re-pinning to 3.8.47.)
       *Install half real (`~/.pi/agent/settings.json:8` has `"npm:pi-lens"`); pinned-version half false — installed is **3.8.71**, and P1.7 (`p1-7-lsp-diagnostics-gate.md:61-62`) says do not re-pin to 3.8.47. Fix is a spec amendment (see reconciliation §8 Q4).*
 - [x] **Impl:** Verification script exercises `lsp_diagnostics`, secret-scan, and warning-count proxy paths.
       *Settled 2026-07-28. `scripts/pi-lens-verify.ts` (PR #26/#30) was un-runnable until PR #84 (issue #55) unified the resolver in `scripts/lib/pi-lens-harness.ts:57-58` to honour `PI_LENS_ROOT`. Live re-run on pi-lens 3.8.71: `bun scripts/pi-lens-verify.ts --strict` → exit 0, 3 pass / 0 fail / 1 optional skip; all three check families (AC1 `lsp_diagnostics`, AC2 secret-scan, AC3 warning-count proxy) executed.*
