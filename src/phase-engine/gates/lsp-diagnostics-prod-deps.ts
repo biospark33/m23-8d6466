@@ -98,7 +98,11 @@ export async function createProdLspGateDeps(
         // exits still carry findings), and an empty/unparseable stdout stays the
         // DECLARED advisory-vacuous posture (dp:ok above, story DoD), not a new
         // clean signal.
-        execFile(bin, ["scan", "--json", "--", ...safe], { maxBuffer: 8 * 1024 * 1024 }, (_err, stdout) => {
+        execFile(bin, ["scan", "--json", "--", ...safe], { cwd: targetRoot, maxBuffer: 8 * 1024 * 1024 }, (_err, stdout) => {
+          // cwd = targetRoot (INV-3's pinned root): sgconfig discovery and the
+          // output's relative-path base must resolve against the run's project,
+          // not the factory checkout — the module doc and the other two arms
+          // (MCP server cwd, runTestSuite) already bind to targetRoot.
           const text = typeof stdout === "string" ? stdout.trim() : "";
           if (text === "") {
             resolve([]); // declared advisory vacuous — also the config-less-target shape (exit 3, empty stdout)
@@ -106,10 +110,14 @@ export async function createProdLspGateDeps(
           }
           try {
             const parsed: DiagnosticEntry[] = JSON.parse(text).map(
-              (h: { file?: string }) => ({
+              // Preserve ast-grep's own per-rule severity (CR #497 inline finding):
+              // the rule declares it in the JSON, and the ladder blocks ONLY on
+              // severity==="error" — hardcoding "error" inflated every rule hit
+              // (warnings, hints) into a blocking diagnostic.
+              (h: { file?: string; severity?: string }) => ({
                 file: typeof h.file === "string" ? h.file : "",
                 line: 0,
-                severity: "error",
+                severity: h.severity === "error" ? "error" : "warning",
                 message: "ast-grep finding",
                 source: "ast-grep",
               }),

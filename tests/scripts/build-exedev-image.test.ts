@@ -1522,6 +1522,11 @@ describe("buildIdFileInputs", () => {
       // round on the P1.7 PR hardened the prod deps (ast-grep argv `--`
       // separator + dash-leading rejection; the test-pass fallback default
       // flipped fail-closed false/false pending a real runner).
+      // ebdb0764: moved from 4eaa4e0c by the second CodeRabbit round on the
+      // triage PR — the ast-grep execFile now binds cwd to targetRoot (INV-3,
+      // matching the module doc and the other two arms) and preserves the
+      // per-rule severity from the scan JSON instead of hardcoding "error"
+      // (the ladder blocks only on severity==="error").
       // 4eaa4e0c: moved from 728f03bf by the P1.7 CodeRabbit-triage round — the
       // fail-closed envelope check in the gate adapter (missing/non-array
       // changedFiles refuses instead of scanning empty), the isError → rpc
@@ -1536,7 +1541,7 @@ describe("buildIdFileInputs", () => {
       // runRoot-pinned path resolution, zero-coverage degradation, the
       // fail-closed real test-pass fallback (bun test, bounded), and the
       // ast-grep slice removal.
-      "4eaa4e0c7290a569a2c00dfb953ec1ba6eb489262464049847f1d915637b664d",
+      "ebdb0764c70baab610770c97cba0dfa10261c287a56e4abc87b712dea7f87a5f",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
