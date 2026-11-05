@@ -1,0 +1,16 @@
+initialized
+session_start isError: false textLen: 1794
+trivy-cache: false
+turn_end isError: false
+STOP-count: 0
+hardcoded-secrets: false
+FULLTEXT-BEGIN
+Turn-end over 1 file(s).
+No turn-end advisory.
+
+```json
+{
+  "filesRegistered": 1
+}
+```
+FULLTEXT-END

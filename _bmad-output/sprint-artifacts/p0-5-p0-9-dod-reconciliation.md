@@ -611,3 +611,45 @@ accurate statement in the file.
 - The `pi-lens-verify.ts` failure in §4 was executed twice, with and without
   `PI_LENS_ROOT`, and both stack traces reproduced verbatim.
 - No `status:` field and no DoD checkbox was modified by this work.
+
+### P0.5 update 2026-11-04/05 (post-CR rounds 1+2) — promotion observed; DoD 6/9 back to partial
+
+Two rounds of CodeRabbit findings on PR #494, each verified against current
+code before acting; all four round-2 findings (like both round-1 findings)
+were VALID and are applied:
+
+Round 1 corrected two overclaims (observed-id wording; "never runs headless"
+→ the MCP transport can run the full lifecycle and leg b5 did, promoting the
+verbatim `🔴 STOP — hardcoded secrets detected … slack-access-token [trivy]`).
+
+Round 2 sharpened further, from source and leg evidence:
+
+1. The MCP boot-time auto session-start fires ONLY with
+   `PI_LENS_MCP_AUTO_SESSION=1` (`dist/mcp/server.js:134`); leg b5 did NOT
+   set it — its trivy scan came from the documented explicit
+   `pilens_session_start` tool call recorded in the leg log.
+2. What the legs OBSERVE is promotion + delivery to the MCP consumer. NOT
+   demonstrated: downstream emission blocking — prevention of a secret
+   reaching coms output, merged JSON, or a Hindsight bank (INV-1's
+   downstream surfaces).
+3. DoD 6 returns to `[~]`: the DoD-named `secret_detected` finding type does
+   not exist in installed pi-lens; closing that is a spec amendment (operator
+   call), not a behavioral re-reading.
+4. DoD 9 returns to `[~]`: no single `--mode json` agent run has shown the
+   secret STOP and a warning count in its stdout. A closing attempt (leg9,
+   2026-11-05 02:44) warmed the trivy cache under the agent-resolved cwd key
+   (`/private/tmp/p05-legs` → `…private-tmp-p05-legs/`, secret verified in
+   cache) and ran a real json agent turn — the session's turn-end machinery
+   NEVER fired (zero turn_end rows in latency.log at 02:4x; last working
+   rows: leg b5's 02:12 `blockers_found`). Recorded as
+   attempted-but-unobserved.
+
+Tally: 7 met / 2 partial / 0 not. Row flip to done WITHDRAWN; keep in-review
+with the three partials (DoD 6, 8, 9) recorded. Original window record: the
+operator window ran; pi-lens@3.8.71 installed via `pi install npm:pi-lens@
+3.8.71`; trivy/pyright/typescript-language-server/opengrep installed;
+`pi-lens-verify --strict` → exit 0, 3 pass / 0 fail / 1 optional skip. Legs:
+mode-json agent e2e (structured lsp_diagnostics TS2322 + pyright warning over
+the json transport, real agent), python-lsp discovery with real assertion,
+and the secret-scan chain. Reading notes + verbatim logs:
+`_bmad-output/evidence/p0-5/legs-2026-11-04/README.md`.

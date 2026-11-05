@@ -1,0 +1,19 @@
+session_start isError: false
+STOP-count: 2
+hardcoded-secrets: true
+EXCERPT: STOP — hardcoded secrets detected. Rotate the credentials and remove them from source: |   slack-fixture.ts:1 — slack-access-token [trivy]: Slack token |  |  | ```json | { |   "turnEnd": "[pi-lens automated check — not a user request] Address 🔴 blockers before continuing
+FULLTEXT-BEGIN
+Turn-end over 1 file(s).
+[pi-lens automated check — not a user request] Address 🔴 blockers before continuing; ℹ️ advisories are informational only.
+
+🔴 STOP — hardcoded secrets detected. Rotate the credentials and remove them from source:
+  slack-fixture.ts:1 — slack-access-token [trivy]: Slack token
+
+
+```json
+{
+  "turnEnd": "[pi-lens automated check — not a user request] Address 🔴 blockers before continuing; ℹ️ advisories are informational only.\n\n🔴 STOP — hardcoded secrets detected. Rotate the credentials and remove them from source:\n  slack-fixture.ts:1 — slack-access-token [trivy]: Slack token\n",
+  "filesRegistered": 1
+}
+```
+FULLTEXT-END
