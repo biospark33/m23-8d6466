@@ -41,3 +41,13 @@ Reading notes:
 - `…-negative-probes-51ve91` (ok=true): both refusal proofs landed on the CONFORMANT drivers (#499): operations-read 404 (missing-bank-operations-read) + transport refusal on the down target; zero banks created.
 - `…-idempotency-rerun-skmtfv` (ok=true): provisioner rerun created nothing new; zero-banks diff clean.
 - provision-and-import: NO evidence file — the leg was killed by the 600s alarm (exit 142) mid-run amid **OpenRouter 402** (`limit_source: openrouter_credits` — the workspace credit pool, not the key's $50 limit; solstice-hindsight usage $1.14/50 recorded before the pool floor). Retains need the workspace topped up; the leg rerun rides the next window. auth-retired-check + changed-content-upsert also hold for credits.
+
+### Continuation (same day, ~19:11Z — pool refilled only to a token floor)
+
+A 1-token probe answered 200 and was read as "credits restored" — wrong: the pool had only enough credit to collateralize ~63,743 tokens, and the extraction path requests `max_tokens 64000`, so retains still 402. The three held legs ran anyway (window discipline: run and record):
+
+- `…-provision-and-import-s4c2fb` (ok=false): provisioning GREEN (5 roster banks reupserted, snapshot 5→5), first mulch-import retained 23 expertise entries before the pool floor bit; subsequent batches 402'd, leg-failure recorded honestly. Rerun is rerun-safe (idempotency leg proves the provisioner).
+- `…-auth-retired-check-8tfhbg` (ok=true): all three probes measured, classes exactly as the #499 drivers predict on real 0.10.0: unauthenticated retain answered 2xx (the 0.8.6 danger is NOT retired on this instance — the record carries it), knownKeyOutOfScope = `not-applicable-authz-absent` (Track A, live), unknownKey answered (`unknown-key-answered`). dangerRetired=false honest. First live validation of the conformant drivers.
+- `…-changed-content-upsert-04ya9t` (ok=true, `upsertObserved=false` honest): retain v1 402'd (`Fact extraction failed … 402`, wrapped HTTP 500), so v2/baseline/read-back skipped; probe bank cleanup `already-gone` (the lazy-create never landed). The leg records the unmeasured shape without claiming an update — exactly the honest-unmeasured arm working.
+
+Pool floor ≈ 63,743-token collateral at capture time. Reruns of provision-and-import + changed-content-upsert + the reflect capture ride the next real top-up.

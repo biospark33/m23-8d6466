@@ -1,0 +1,78 @@
+{
+  "leg": "p0-9-auth-retired-check",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass: probes recorded (measuredCount=3) — dangerRetired=false (answered-2xx) (unauthenticated retain refused (500), recall answered (200)); probe bank cleanup: already-gone",
+  "steps": [
+    {
+      "step": "probe-create",
+      "outcome": "ok"
+    },
+    {
+      "step": "unauth-retain",
+      "outcome": "refused 500"
+    },
+    {
+      "step": "unauth-recall",
+      "outcome": "answered 200"
+    },
+    {
+      "step": "auth-proof",
+      "outcome": "answered 200"
+    },
+    {
+      "step": "cross-bank",
+      "outcome": "answered 200"
+    },
+    {
+      "step": "unknown-key",
+      "outcome": "answered 200"
+    },
+    {
+      "step": "cleanup",
+      "outcome": "delete already-gone"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"outcome\":\"start\",\"bankId\":\"qds-probe-1793905881121\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"probe-create\",\"bankId\":\"qds-probe-1793905881121\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"recall\",\"bankId\":\"qds-probe-1793905881121\",\"outcome\":\"answered\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"auth-proof\",\"outcome\":\"answered\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"cross-bank\",\"bankId\":\"qds-probe-1793905881121\",\"outcome\":\"answered\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"unknown-key\",\"outcome\":\"answered\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"step\":\"cleanup\",\"bankId\":\"qds-probe-1793905881121\",\"outcome\":\"already-gone\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-auth-retired-check\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-11-05T19:11:28.940Z",
+  "probeBankId": "qds-probe-1793905881121",
+  "authOutcomes": {
+    "unauthenticated": {
+      "answered": true,
+      "measured": true,
+      "writeMeasured": true,
+      "status": 500,
+      "bodyTail": "https://openrouter.ai/workspaces/default/keys/150360e482d24595de01019be86c24d9f08837f006b2245ddce1c4ab376ed898 and adjust the key's monthly limit\\\"}]}}, 'user_id': 'org_3JBsM5PqmYenX4dWAZCYFNMra1m'}\"}",
+      "class": "answered-2xx",
+      "detail": "unauthenticated retain refused (500), recall answered (200)"
+    },
+    "knownKeyOutOfScope": {
+      "answered": true,
+      "measured": true,
+      "status": 200,
+      "bodyTail": "{\"results\":[],\"trace\":null,\"entities\":null,\"chunks\":null,\"source_facts\":null,\"source_facts_truncated\":null}",
+      "class": "not-applicable-authz-absent",
+      "detail": "0.10.0 auth is INSTANCE-WIDE (single tenant key, opt-in extension) and no per-bank authorization exists (Track A): the known key succeeds cross-bank, so 'out of scope' is not applicable here — containment carries the weight (see containmentStatement)"
+    },
+    "unknownKey": {
+      "answered": true,
+      "measured": true,
+      "status": 200,
+      "bodyTail": "{\"results\":[],\"trace\":null,\"entities\":null,\"chunks\":null,\"source_facts\":null,\"source_facts_truncated\":null}",
+      "class": "unknown-key-answered",
+      "detail": "deliberately-invalid bearer (qds-invalid-<rand>) — never a real credential"
+    }
+  },
+  "keyProof": {
+    "attempted": true,
+    "ok": true,
+    "status": 200
+  },
+  "credentialSource": "env",
+  "measuredCount": 3,
+  "dangerRetired": false,
+  "containmentStatement": "Containment is topological on this instance (INV-MEM-2/3): the dedicated Hindsight binds loopback only (host publish 127.0.0.1:18890 per Z4's compose; 18889 stays the tenant stack's host map and is never resolved by a factory leg), the box firewall admits 22/80/443 only (runbook G2 — 8888/18889/18890 are never published), and the M2 memory gateway is the standing authz front door until it lands. Measured verdict: the unauthenticated probe was ANSWERED — the 0.8.6 no-auth danger is NOT retired. 0.10.0 auth is instance-wide (opt-in tenant-key extension) with NO per-bank authorization (Track A), so containment remains loopback bind + firewall + the M2 gateway when it lands — stated here, not hidden."
+}
