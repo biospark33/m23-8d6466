@@ -1522,6 +1522,13 @@ describe("buildIdFileInputs", () => {
       // round on the P1.7 PR hardened the prod deps (ast-grep argv `--`
       // separator + dash-leading rejection; the test-pass fallback default
       // flipped fail-closed false/false pending a real runner).
+      // 4eaa4e0c: moved from 728f03bf by the P1.7 CodeRabbit-triage round — the
+      // fail-closed envelope check in the gate adapter (missing/non-array
+      // changedFiles refuses instead of scanning empty), the isError → rpc
+      // classification in the prod dep, and the ast-grep arm's `--json` flag
+      // fix (stdout now parsed even on non-zero exit). All src/ walked inputs;
+      // the debt is declared on the branch and dev settles it at merge via the
+      // publish→adopt window, same as every src drift.
       // 728f03bf: moved from ee9c1a55 by the P1.7 self-review round — the
       // prod-path fixes the fakes could not catch: init/RPC timeout
       // separation in the prod dep, non-poisoning client memoization,
@@ -1529,7 +1536,7 @@ describe("buildIdFileInputs", () => {
       // runRoot-pinned path resolution, zero-coverage degradation, the
       // fail-closed real test-pass fallback (bun test, bounded), and the
       // ast-grep slice removal.
-      "728f03bf1faa30ed34a69d201e011551c27d549ebe6b248297df854fd8fdaefe",
+      "4eaa4e0c7290a569a2c00dfb953ec1ba6eb489262464049847f1d915637b664d",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
