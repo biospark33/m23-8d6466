@@ -172,12 +172,17 @@ describe("P1.7 waiver shape (R5-1)", () => {
     expect(state.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  test("no-lsp vacuous pass (V1): waiver 1, passed", async () => {
-    const { deps } = makeDeps({
+  test("no-lsp vacuous pass (V1): waiver 1, passed, waiver PERSISTED (INV-DIAG-2)", async () => {
+    const { deps, state } = makeDeps({
       responses: [{ text: batchText({ fileErrors: [{ path: F1, reason: "no LSP server resolved" }] }), timedOut: null }],
     });
     const r = await evaluateLspDiagnosticsGate(deps, { changedFiles: [F1] });
     expect(r).toMatchObject({ gateResult: "passed", passed: true, waiver: 1, waiverReason: "no-lsp" });
+    expect(state.waivers).toHaveLength(1);
+    expect(state.waivers[0]?.reason).toBe("no-lsp");
+    // The persisted file keys are the PATHS pi-lens reported, not raw
+    // "path: reason" lines (the shared parser splits on the first ": ").
+    expect(state.waivers[0]?.files).toEqual([F1]);
   });
 
   test("no-evaluator: waiver 1, blocked (AC5 fail-closed)", async () => {
@@ -187,8 +192,7 @@ describe("P1.7 waiver shape (R5-1)", () => {
       hasTestSuite: false,
     });
     const r = await evaluateLspDiagnosticsGate(deps, { changedFiles: [F1] });
-    expect(r).toMatchObject({ gateResult: "blocked", passed: false, waiverReason: "no-evaluator" });
-    expect(r.waiver).toBeGreaterThanOrEqual(1);
+    expect(r).toMatchObject({ gateResult: "blocked", passed: false, waiver: 1, waiverReason: "no-evaluator" });
   });
 });
 
@@ -322,14 +326,37 @@ describe("P1.7 timeouts and invocation contract", () => {
     expect(r.waiverReason).toBeUndefined();
   });
 
-  test("changed-file union capped at 50 (documented choice: truncate, evaluate, note)", async () => {
+  test("changed-file union capped at 50: truncate, evaluate, RECORD the truncation", async () => {
     const { deps, state } = makeDeps({
       responses: [{ text: batchText({ files: [] }), timedOut: null }],
     });
     const many = Array.from({ length: 60 }, (_, i) => `f${i}.ts`);
     const r = await evaluateLspDiagnosticsGate(deps, { changedFiles: many });
     expect(r.passed).toBe(true);
+    expect(r.truncated).toBe(10);
     expect(state.calls[0]?.length).toBe(50);
+  });
+
+  test("empty changedFiles: vacuous pass with waiver 0 (nothing to gate)", async () => {
+    const { deps, state } = makeDeps({
+      responses: [{ text: batchText({ files: [] }), timedOut: null }],
+    });
+    const r = await evaluateLspDiagnosticsGate(deps, { changedFiles: [] });
+    expect(r).toMatchObject({ passed: true, waiver: 0 });
+    expect(state.calls.length).toBe(0); // no LSP call for an empty union
+  });
+
+  test("zero-coverage response (no changed file parsed) is NOT a clean pass — degrades to fallback", async () => {
+    const { deps } = makeDeps({
+      responses: [
+        // The text parses and names ONLY a file outside the changed set —
+        // a real diagnostic line so the parser keys it as foreign.
+        { text: batchText({ files: [{ file: "other/unrelated.ts", diags: [{ line: 1, severity: "warning", message: "foreign" }] }] }), timedOut: null },
+      ],
+      astGrepFindings: [],
+    });
+    const r = await evaluateLspDiagnosticsGate(deps, { changedFiles: [F1] });
+    expect(r).toMatchObject({ passed: true, waiver: 1, waiverReason: "no-lsp" });
   });
 
   test("waiver persistence: fires on waiver>0, not on clean pass", async () => {
@@ -351,5 +378,25 @@ describe("P1.7 Gate adapter", () => {
     const gate = createLspDiagnosticsGate(deps);
     const report = await gate.run({ changedFiles: [F1] } as never, { runRoot: "/tmp" });
     expect(report.passed).toBe(false);
+  });
+
+  test("resolves burrow-relative changedFiles against the pinned runRoot (INV-3)", async () => {
+    const { deps, state } = makeDeps({
+      responses: [{ text: batchText({ files: [{ file: "/run/xyz/src/auth.ts", diags: [] }] }), timedOut: null }],
+    });
+    const gate = createLspDiagnosticsGate(deps);
+    await gate.run({ changedFiles: ["src/auth.ts"] } as never, { runRoot: "/run/xyz" });
+    expect(state.calls[0]?.[0]).toBe("/run/xyz/src/auth.ts");
+  });
+
+  test("truncation lands in the GateReport note", async () => {
+    const { deps } = makeDeps({
+      responses: [{ text: batchText({ files: [] }), timedOut: null }],
+    });
+    const gate = createLspDiagnosticsGate(deps);
+    const many = Array.from({ length: 60 }, (_, i) => `/run/f${i}.ts`);
+    const report = await gate.run({ changedFiles: many } as never, { runRoot: "/" });
+    expect(report.passed).toBe(true);
+    expect(report.checks.some((c) => c.note.includes("NOT evaluated"))).toBe(true);
   });
 });

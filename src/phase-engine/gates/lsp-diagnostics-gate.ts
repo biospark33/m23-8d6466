@@ -32,6 +32,7 @@
  * Reuses `parseBatchDiagnosticsText` (scripts/lsp-verify.ts, P0.6) for
  * per-file keying — never a second parser.
  */
+import * as path from "node:path";
 import { parseBatchDiagnosticsText } from "../../../scripts/lsp-verify.ts";
 import type { Gate, GateContext } from "./library.ts";
 import { GateReport } from "./report.ts";
@@ -55,6 +56,8 @@ export interface DiagnosticsGateResult {
   waiverReason?: WaiverReason;
   diagnostics: DiagnosticEntry[];
   gateVersion: string;
+  /** Set when the changed-file union exceeded MAX_CHANGED_FILES (guard cap). */
+  truncated?: number;
 }
 
 export const LSP_GATE_VERSION = "p1.7.1";
@@ -112,6 +115,7 @@ function result(
   waiver: number,
   waiverReason: WaiverReason | undefined,
   diagnostics: DiagnosticEntry[],
+  truncated?: number,
 ): DiagnosticsGateResult {
   return {
     passed,
@@ -120,6 +124,7 @@ function result(
     ...(waiverReason !== undefined ? { waiverReason } : {}),
     diagnostics,
     gateVersion: LSP_GATE_VERSION,
+    ...(truncated !== undefined ? { truncated } : {}),
   };
 }
 
@@ -154,22 +159,14 @@ function diagnosticsFromText(text: string): DiagnosticEntry[] {
   return out;
 }
 
-/** Files pi-lens reports it could not evaluate (AC3 availability signal). */
-function fileErrorsFromText(text: string): string[] {
-  const out: string[] = [];
-  let inFileErrors = false;
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (/^File errors:/i.test(line)) {
-      inFileErrors = true;
-      continue;
-    }
-    if (inFileErrors) {
-      if (!line) break;
-      out.push(line);
-    }
-  }
-  return out;
+/** Files pi-lens reports it could not evaluate (AC3 availability signal) —
+ *  keyed from the SHARED parser's byFile (its `.error` field splits on the
+ *  first ": ", which a reason containing colons needs). */
+function fileErrorsFromParsed(text: string): string[] {
+  const { byFile } = parseBatchDiagnosticsText(text);
+  return Object.entries(byFile)
+    .filter(([, e]) => typeof (e as { error?: unknown }).error === "string")
+    .map(([f]) => f);
 }
 
 async function persistBestEffort(deps: LspGateDeps, event: WaiverEvent): Promise<void> {
@@ -189,6 +186,13 @@ export async function evaluateLspDiagnosticsGate(
   input: { changedFiles: string[] },
 ): Promise<DiagnosticsGateResult> { // dp:ok a dep throw propagates; gatedBody's catch fails the check closed
   const changed = input.changedFiles.slice(0, MAX_CHANGED_FILES);
+  const truncated = input.changedFiles.length - changed.length;
+
+  // Nothing changed → nothing to gate: a vacuous pass with waiver 0 (the
+  // empty envelope is the phase's claim, not the gate's evidence hole).
+  if (changed.length === 0) {
+    return result(true, 0, undefined, []);
+  }
 
   // --- one LSP verdict for the union, with freshness (AC6) -----------------
   let text: string;
@@ -217,17 +221,18 @@ export async function evaluateLspDiagnosticsGate(
 
   // --- declared timeout outcomes (story table) -----------------------------
   if (timedOut === "rpc") {
-    const out = result(false, 1, "lsp-timeout", []);
+    const out = result(false, 1, "lsp-timeout", [], truncated || undefined);
     await persistBestEffort(deps, { reason: "lsp-timeout", files: changed, diagnostics: [], gateVersion: LSP_GATE_VERSION });
     return out;
   }
   if (timedOut === "init") {
     // AC3a: LSP treated as unavailable → the whole union degrades to fallback.
-    return evaluateFallback(deps, changed, 1, "no-lsp");
+    const out = await evaluateFallback(deps, changed, 1, "no-lsp");
+    return { ...out, ...(truncated ? { truncated } : {}) };
   }
   if (!fresh) {
     // AC6 fail-closed: freshness not confirmed inside the deadline.
-    const out = result(false, 1, "stale-diagnostics", diagnosticsFromText(text));
+    const out = result(false, 1, "stale-diagnostics", diagnosticsFromText(text), truncated || undefined);
     await persistBestEffort(deps, { reason: "stale-diagnostics", files: changed, diagnostics: out.diagnostics, gateVersion: LSP_GATE_VERSION });
     return out;
   }
@@ -236,16 +241,30 @@ export async function evaluateLspDiagnosticsGate(
   const diagnostics = diagnosticsFromText(text);
   const errors = diagnostics.filter((d) => d.severity === "error");
   if (errors.length > 0) {
-    return result(false, 0, undefined, diagnostics);
+    return result(false, 0, undefined, diagnostics, truncated || undefined);
   }
 
   // --- pi-lens-reported unavailability (AC3) → fallback for those files ----
-  const fileErrors = fileErrorsFromText(text);
+  const fileErrors = fileErrorsFromParsed(text);
   if (fileErrors.length > 0) {
-    return evaluateFallback(deps, fileErrors, 1, "no-lsp");
+    const out = await evaluateFallback(deps, fileErrors, 1, "no-lsp");
+    return { ...out, ...(truncated ? { truncated } : {}) };
+  }
+  // Zero coverage (the response names NONE of the changed files) is not a
+  // clean pass — pi-lens evaluated nothing. Covered = a parsed key IS a
+  // changed file, or the response's `Files checked` self-report covers the
+  // union and names no foreign file.
+  const parsed = parseBatchDiagnosticsText(text);
+  const keys = Object.keys(parsed.byFile);
+  const keysCoverChanged = keys.some((k) => changed.includes(k));
+  const noForeignKeys = keys.every((k) => changed.includes(k));
+  const selfReported = typeof parsed.filesChecked === "number" && parsed.filesChecked >= changed.length;
+  if (!keysCoverChanged && !(selfReported && noForeignKeys)) {
+    const out = await evaluateFallback(deps, changed, 1, "no-lsp");
+    return { ...out, ...(truncated ? { truncated } : {}) };
   }
 
-  return result(true, 0, undefined, diagnostics);
+  return result(true, 0, undefined, diagnostics, truncated || undefined);
 }
 
 /**
@@ -263,8 +282,10 @@ async function evaluateFallback(
   const tests = await deps.hasTestSuite();
 
   if (!astOk && !tests) {
-    // AC5 fail-closed: no evaluator at all.
-    const out = result(false, waiver + 1, "no-evaluator", []);
+    // AC5 fail-closed: no evaluator at all. The waiver COUNT is 1 (the story's
+    // AC5 shape) — the reason names the outcome; the count is not additive
+    // across the degradation chain.
+    const out = result(false, 1, "no-evaluator", []);
     await persistBestEffort(deps, { reason: "no-evaluator", files: degraded, diagnostics: [], gateVersion: LSP_GATE_VERSION });
     return out;
   }
@@ -284,6 +305,10 @@ async function evaluateFallback(
     await persistBestEffort(deps, { reason, files: degraded, diagnostics, gateVersion: LSP_GATE_VERSION });
     return out;
   }
+  // Degraded PASS is still a waiver event: INV-DIAG-2 names "all waiver
+  // events (including no-lsp degradation)" — the most common waiver must
+  // reach the audit bank too.
+  await persistBestEffort(deps, { reason, files: degraded, diagnostics, gateVersion: LSP_GATE_VERSION });
   return result(true, waiver, reason, diagnostics);
 }
 
@@ -297,14 +322,17 @@ async function evaluateFallback(
 export function createLspDiagnosticsGate(deps: LspGateDeps): Gate {
   return {
     name: "lsp-diagnostics-gate",
-    async run(envelope: unknown, _ctx: GateContext) { // dp:ok gatedBody's catch converts a throw into a failed check
-      const changed = (envelope as { changedFiles?: string[] } | undefined)?.changedFiles ?? [];
+    async run(envelope: unknown, ctx: GateContext) { // dp:ok gatedBody's catch converts a throw into a failed check
+      const raw = (envelope as { changedFiles?: string[] } | undefined)?.changedFiles ?? [];
+      // INV-3: burrow-relative changedFiles resolve against the SAME pinned
+      // runRoot the phase used — never against the gate's own cwd.
+      const changed = raw.map((f) => (path.isAbsolute(f) ? f : path.resolve(ctx.runRoot, f)));
       const r = await evaluateLspDiagnosticsGate(deps, { changedFiles: changed });
       const report = new GateReport();
       report.check(
-        `waiver=${r.waiver}${r.waiverReason !== undefined ? ` (${r.waiverReason})` : ""}`,
+        `waiver=${r.waiver}${r.waiverReason !== undefined ? ` (${r.waiverReason})` : ""}${r.truncated ? ` [truncated ${r.truncated}]` : ""}`,
         r.passed,
-        `${r.diagnostics.length} diagnostic(s)`,
+        `${r.diagnostics.length} diagnostic(s)${r.truncated !== undefined && r.truncated > 0 ? `; union capped at ${MAX_CHANGED_FILES}, ${r.truncated} file(s) NOT evaluated` : ""}`,
       );
       return report;
     },

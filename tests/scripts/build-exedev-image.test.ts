@@ -1522,7 +1522,14 @@ describe("buildIdFileInputs", () => {
       // round on the P1.7 PR hardened the prod deps (ast-grep argv `--`
       // separator + dash-leading rejection; the test-pass fallback default
       // flipped fail-closed false/false pending a real runner).
-      "ee9c1a5577f03fc0db2272ddb7f708b0eeae1206a76a8c9a40629c4ada0c96e5",
+      // 728f03bf: moved from ee9c1a55 by the P1.7 self-review round — the
+      // prod-path fixes the fakes could not catch: init/RPC timeout
+      // separation in the prod dep, non-poisoning client memoization,
+      // parser-keyed file errors, waiver persistence on degraded passes,
+      // runRoot-pinned path resolution, zero-coverage degradation, the
+      // fail-closed real test-pass fallback (bun test, bounded), and the
+      // ast-grep slice removal.
+      "728f03bf1faa30ed34a69d201e011551c27d549ebe6b248297df854fd8fdaefe",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)
