@@ -424,7 +424,10 @@ function makeProbeClient(
 /** Fake client shaped like memory-round-trip.test.ts's makeClient (any-cast fake). */
 function makeRoundTripClient(memoryId = "rt-mem-xyz"): Record<string, unknown> {
   return {
-    retain: async () => ({ memoryId, bankId: "qds-factory", status: "created", durationMs: 10 }),
+    // Retain returns NO memoryId: the 0.10.0 wire (and the post-#408 legacy
+    // view) carry none. The distinctive id lives on the recall results —
+    // the real, server-minted source RoundTripOk.matchedMemoryId surfaces.
+    retain: async () => ({ bankId: "qds-factory", status: "created", durationMs: 10 }),
     recall: async () => ({
       results: [{ content: "Sprint planning uses SPARC methodology", score: 0.95, memoryId }],
       durationMs: 50,
@@ -1779,7 +1782,7 @@ describe("round-trip-dedicated", () => {
       const rt = ev.roundTrip as
         | {
             ok: boolean;
-            memoryId: string;
+            matchedMemoryId: string | null;
             durations: { recall: number; serverRecall: number };
             slowQuery: boolean;
           }
@@ -1814,11 +1817,12 @@ describe("round-trip-dedicated", () => {
   test.skipIf(!hasDriver("round-trip-dedicated"))(
     "negative control: the live path uses the injected client verbatim — never a self-constructed mode:mock client",
     async () => {
-      // DI-shape assertion (documented choice): the fake returns a
-      // distinctive memoryId; a leg that ignored deps.client — or built its
-      // own HindsightClient, whose mode:"mock" short-circuits to canned
-      // bodies (src/hindsight/client.ts) — could not surface it. Any
-      // roundTrip evidence on the live path must carry OUR fake's value.
+      // DI-shape assertion (documented choice): the fake's recall returns a
+      // distinctive memoryId, which RoundTripOk.matchedMemoryId surfaces; a
+      // leg that ignored deps.client — or built its own HindsightClient,
+      // whose mode:"mock" short-circuits to canned bodies
+      // (src/hindsight/client.ts) — could not surface it. Any roundTrip
+      // evidence on the live path must carry OUR fake's value.
       const runLeg = await loadDriver("round-trip-dedicated");
       const dir = join(tmpDir, "di");
       writePrereqFixture(dir, "live");
@@ -1829,8 +1833,8 @@ describe("round-trip-dedicated", () => {
         client: makeRoundTripClient("di-mem-4f77"),
       });
       expect(ev.ok).toBe(true);
-      const rt = ev.roundTrip as { memoryId?: string } | undefined;
-      expect(rt?.memoryId).toBe("di-mem-4f77");
+      const rt = ev.roundTrip as { matchedMemoryId?: string } | undefined;
+      expect(rt?.matchedMemoryId).toBe("di-mem-4f77");
     },
   );
 });

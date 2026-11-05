@@ -164,9 +164,10 @@ describe("HindsightClient success paths", () => {
       requestId: "req-retain",
     });
     const r = await client.retain("qds-factory", "Sprint planning uses SPARC methodology");
-    // Legacy view via the schema transform: memoryId "" is the issue-#408
-    // placeholder (0.10.0 wire has no memoryId source; identity is document_id).
-    expect(r.memoryId).toBe("");
+    // Legacy view via the schema transform: NO memoryId field — the issue-#408
+    // placeholder was removed (RoundTripOk decision, 2026-11-04); the 0.10.0
+    // wire has no memoryId source, so the view no longer fabricates one.
+    expect("memoryId" in r).toBe(false);
     expect(r.bankId).toBe("qds-factory");
     expect(r.status).toBe("created");
     expect(r.durationMs).toBe(0);
@@ -436,9 +437,10 @@ describe("HindsightClient mock mode", () => {
   test("mock retain returns the measured 0.10.0 wire body through the strict parse", async () => {
     const c = new HindsightClient({ mode: "mock" });
     const res = await c.retain("qds-factory", "data");
-    // Legacy view via the transform. memoryId "" is the issue-#408 placeholder
-    // (the canned wire body has no id source); no bank_id on the wire → "".
-    expect(res.memoryId).toBe("");
+    // Legacy view via the transform. No memoryId field — the issue-#408
+    // placeholder was removed (RoundTripOk decision, 2026-11-04); the canned
+    // wire body has no id source, and the view fabricates nothing.
+    expect("memoryId" in res).toBe(false);
     expect(res.bankId).toBe("");
     expect(res.status).toBe("created");
     expect(res.durationMs).toBe(0);
@@ -752,11 +754,11 @@ describe("M1.2 retain surface", () => {
     });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
-      expect(parsed.data).toEqual({ memoryId: "", bankId: "", status: "created", durationMs: 0 });
+      expect(parsed.data).toEqual({ bankId: "", status: "created", durationMs: 0 });
     }
     const c = new HindsightClient({ mode: "mock" });
     const res = await c.retain("qds-factory", "data");
-    expect(res).toEqual({ memoryId: "", bankId: "", status: "created", durationMs: 0 });
+    expect(res).toEqual({ bankId: "", status: "created", durationMs: 0 });
   });
 
   test("recall wire result {id, text, document_id} → legacy view fields + documentId echo", () => {

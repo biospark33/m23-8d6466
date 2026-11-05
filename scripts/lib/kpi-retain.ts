@@ -81,7 +81,7 @@ export async function retainSnapshot(
                 // `payload` directly is the same bytes (payloadHashHex
                 // re-serializes stably) without a JSON round-trip.
                 appendFileSync(capturePath, `${JSON.stringify({ bankId, documentId: metadata?.documentId, content_sha256: payloadHashHex(payload), content_bytes: content.length, metadata })}\n`);
-                return { memoryId: "", bankId, status: "created" as const, durationMs: 0 };
+                return { bankId, status: "created" as const, durationMs: 0 };
               },
             }
           : new HindsightClient();

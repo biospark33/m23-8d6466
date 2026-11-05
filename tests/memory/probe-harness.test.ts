@@ -316,7 +316,6 @@ function fakeProbeClient(
     retain: async (bankId: string, content: string, metadata?: Record<string, unknown>) => {
       retains.push({ bankId, content, metadata });
       return {
-        memoryId: `mem-retain-${retains.length}`,
         bankId,
         status: "created" as const,
         durationMs: 0,

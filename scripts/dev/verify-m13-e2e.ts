@@ -143,7 +143,7 @@ try {
   const calls: { bankId: string; query: string }[] = [];
   const client: ProbeClient = {
     listBanks: async () => ({ banks: [{ bank_id: "qds-factory-dev-meta" }] }),
-    retain: async () => ({ memoryId: "m-canary", bankId: "qds-factory-dev-meta", status: "created" as const, durationMs: 0 }),
+    retain: async () => ({ bankId: "qds-factory-dev-meta", status: "created" as const, durationMs: 0 }),
     recall: async (bankId: string, query: string, _limit?: number) => {
       calls.push({ bankId, query });
       if (query.includes("qds-canary")) {
