@@ -23,9 +23,12 @@ L4:7: error[typescript] (2322): Type 'number' is not assignable to type 'string'
 Severity, source, error code, position — full structured payload with a real
 LLM agent driving. This is the "--mode json diagnostic payload" proof: the
 payload previously validated over MCP stdio arrives intact over the agent
-transport. (AC1's aw:<hash> id clause is covered by the verify harness's
-observed-id probe — aw: ids are turn-end aggregations, not per-tool-result
-fields; they are not present in these logs and the logs do not claim them.)
+transport. (AC1's aw:<hash> id clause: the verify harness's observed-id probe
+did NOT observe pi-lens assigning an id — `idObserved:false`,
+`idProvenance:"derived+native-parity"` with `matchesNative:true` in the
+2026-11-04 strict run; aw: ids are turn-end aggregations, not per-tool-result
+fields, so they are not present in these agent logs either. The id contract is
+proven as DERIVED parity, never as an observed assignment.)
 
 ## Leg c — python-lsp discovery with a real assertion (pyright)
 
@@ -42,41 +45,60 @@ This is the "Python LSP discovery (fixture only, no assertion)" open item
 closed with a live agent-run assertion: the fixture's expected warning fired,
 with the expected rule, at the expected position.
 
-## Leg b — secret-scan emit-block (NFR-SEC-3 + INV-1): PARTIAL, precisely diagnosed
+## Leg b — secret-scan emit-block (NFR-SEC-3 + INV-1): OBSERVED (post-CR corrected)
 
-Four logs document the chain. What each proves:
+Six logs document the chain. What each proves:
 
-1. `leg-b-ts-error-stop-block.jsonl` — **the block mechanism is observed live**:
-   a 🔴 STOP turn-end blocker (TS2322 redeclare) reached the agent in a real
-   `--mode json` session; the agent received and narrated it ("The pi-lens
+1. `leg-b-ts-error-stop-block.jsonl` — **the block mechanism observed live** in
+   a real `--mode json` agent session: a 🔴 STOP turn-end blocker (TS2322
+   redeclare) reached the agent, which received and narrated it ("The pi-lens
    notice about variable redeclaration..."). The promotion+delivery path works
-   end-to-end.
+   end-to-end over the agent transport.
 2. `leg-b-rpc-model-refusal.jsonl` — the agent (claude-haiku-4-5) REFUSED to
    write a slack-token-shaped literal even as a declared test fixture ("I'm not
    going to write that file as-is... credential-in-source-control issue"). A
-   secrets-blocker leg needs the agent to emit a trivy-detectable secret.
+   secrets-blocker leg cannot rely on an agent writing the secret itself.
 3. `trivy-db-warmup.log` + direct-CLI runs — trivy 0.76.1 secret detection is
    live (slack-access-token HIGH fired on a synthetic token file), but its
    ruleset no longer contains the generic AWS access-key rule (`AKIA…` shapes
    do not fire; only maven/slack-family rules matched in debug output), and
    pi-lens's own `TrivyClient.scan()` runs it clean end-to-end once the
    `trivy.enabled` + dependency-manifest gate is satisfied.
-4. `leg-b-session-start-attempt.jsonl` — the structural gap: pi-lens 3.8.71's
-   session-start heavyweight scans (gitleaks/jscpd/madge/trivy) **never run in
-   headless or rpc sessions**. Measured across 8 headless/rpc sessions:
-   `~/.pi-lens/projects/<proj>/cache/` gained knip caches only — zero
-   gitleaks/jscpd/madge/trivy caches; `sessionstart.log` shows auto-install
-   ensure lines only. Turn-end reads the trivy cache
-   (`runtime-turn.js:377-389`, source-verified), so with no cache ever written,
-   the trivy→sessionSecrets→🔴 STOP promotion is unreachable in headless mode.
+4. `leg-b4-mcp-first-attempt.log` — the MCP-transport attempt that exposed the
+   two subtleties this leg needed: (a) pi-lens's scanner caches are PER-CWD
+   and macOS-symlink-sensitive (`/tmp/p05-legs` → `~/.pi-lens/projects/tmp-p05-legs/`,
+   `/private/tmp/p05-legs` → `…private-tmp-p05-legs/` — watching the wrong
+   sibling reads as "no cache"); (b) a turn-end that races the first-ever
+   trivy scan misses it.
+5. `leg-b5-mcp-trivy-stop-OBSERVED.log` — **the trivy→sessionSecrets→🔴 STOP
+   promotion OBSERVED live** over MCP stdio, no fakes, with the trivy gate
+   open (`trivy.enabled` + manifest + classic-typescript host fixes):
+   session-start ran trivy (127 ms scan), the cache carried
+   `slack-access-token @ slack-fixture.ts:1`, and `pilens_turn_end` promoted:
 
-**Net:** block mechanism proven live (via the TS-error STOP), secret DETECTION
-proven live (opengrep in the verify run; trivy slack-rule via direct CLI), but
-the specific trivy→secrets-STOP promotion was not observed and is structurally
-unreachable headless on pi-lens 3.8.71 + pi 1.1.0. Closing it needs either an
-interactive session leg or a pi-lens-side session-start-in-headless fix —
-both operator calls. The verify harness's own optional probe reaches the same
-wall (blockMechanism source-verified, emitBlockObserved false).
+   ```
+   🔴 STOP — hardcoded secrets detected. Rotate the credentials and remove them from source:
+     slack-fixture.ts:1 — slack-access-token [trivy]: Slack token
+   ```
+
+6. `leg-b-session-start-attempt.jsonl` — the default json/rpc agent-session
+   evidence. SCOPED CORRECTION (CR round 1, finding 2): the earlier claim
+   "heavyweight scans never run in headless sessions" was OVERCLAIMED — the
+   8 default json/rpc sessions only prove DEFAULT sessions skip them; the MCP
+   stdio transport AUTO-RUNS the full session_start lifecycle on server boot
+   (`dist/mcp/server.js` auto `runSessionStart`), which is exactly how leg b5
+   closed the chain. Default json/rpc agent sessions still show no
+   heavyweight-scan caches and still read the trivy cache only if something
+   else populated it — that narrower statement stands.
+
+**Net:** NFR-SEC-3's emit-block is now PROVEN live end-to-end: detection
+(opengrep in the verify run; trivy slack-rule), cache, promotion, and the 🔴
+STOP reaching the consumer — the secrets blocker with `[trivy]` provenance was
+observed verbatim over MCP stdio (leg b5) and a blocker reached a real agent
+over `--mode json` (leg b1). The verify harness's optional probe still records
+its own stricter bar (`emitBlockObserved:false` for its specific turn-end
+probe shape); that probe's non-observation predates this leg and describes
+that probe, not the promotion.
 
 ## Fixture notes
 
