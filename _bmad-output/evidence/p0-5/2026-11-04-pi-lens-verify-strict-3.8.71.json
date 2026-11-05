@@ -1,0 +1,99 @@
+{
+ "results": [
+  {
+   "ac": "AC1",
+   "name": "lsp_diagnostics structured output with stable aw:<hash> id",
+   "status": "pass",
+   "evidence": {
+    "diagnosticCount": 1,
+    "lspStatus": "failed",
+    "lspLatencyMs": 967,
+    "diagnostic": {
+     "line": 4,
+     "column": 7,
+     "severity": "error",
+     "semantic": "blocking",
+     "tool": "lsp",
+     "rule": "typescript:2322",
+     "message": "Type 'number' is not assignable to type 'string'."
+    },
+    "stableId": "aw:35344075b5",
+    "idProvenance": "derived+native-parity",
+    "idReproducible": true,
+    "nativeId": "aw:35344075b5",
+    "matchesNative": true,
+    "idObserved": false,
+    "warningFixtureDiagnostic": {
+     "rule": "Pyright:reportUnusedImport",
+     "severity": "warning",
+     "fixable": false
+    },
+    "awHistoryEntries": 0,
+    "idNotObservedReason": "the warning fixture DID produce a severity-2 LSP diagnostic (Pyright:reportUnusedImport, fixable=false), but pi-lens assigned no aw: id at turn-end (0 entries): the aggregator (actionable-warnings.js) additionally requires an LSP CODE ACTION for the diagnostic, and this host's language servers provide none for it \u2014 OSS pyright ships no quick-fix for reportUnusedImport, and TypeScript has no warning-category diagnostics at all. Dispatch-path warnings (e.g. ruff) can't be observed either: the MCP pilens_analyze path never records them into the warm runtime (clients/mcp/analyze.js). Derived id + native-function parity remain the evidence."
+   }
+  },
+  {
+   "ac": "AC2",
+   "name": "secret-scan detects hardcoded secret (live, opengrep)",
+   "status": "pass",
+   "evidence": {
+    "detectedBy": "opengrep",
+    "rule": "Semgrep:generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value",
+    "message": "AWS Access Key ID Value detected. This is a sensitive credential and should not be hardcoded here. Instead, read this value from an environment variable or keep it in a separate, private file.",
+    "line": 2,
+    "severity": "warning",
+    "matchedBy": "provenance (tool/rule family), not keyword regex",
+    "git": {
+     "available": true,
+     "initOk": true,
+     "stagedOk": true
+    },
+    "gitleaksOnPath": false,
+    "trivyOnPath": true,
+    "fixtureSecretsSynthetic": true
+   }
+  },
+  {
+   "ac": "AC2",
+   "name": "secret-scan emit-block on NFR-SEC-3 (empirical pilens_turn_end probe)",
+   "status": "skip",
+   "optional": true,
+   "reason": "emit-block NOT observed in turn-end output: gitleaks/trivy are not installed (gitleaksOnPath=false, trivyOnPath=true), and runtime-turn.js promotes ONLY gitleaks/trivy sessionSecrets to the '\ud83d\udd34 STOP' blocker \u2014 the opengrep detection above is advisory-tier and never blocks by itself. Block mechanism verified in installed source (dist/clients/runtime-turn.js).",
+   "evidence": {
+    "emitBlockObserved": false,
+    "detectionProvenLive": true,
+    "turnEndExcerpt": "Turn-end over 3 file(s).\nNo turn-end advisory.\n\n```json\n{\n  \"filesRegistered\": 3\n}\n```",
+    "gitleaksOnPath": false,
+    "trivyOnPath": true,
+    "blockMechanism": "runtime-turn.js: sessionSecrets (gitleaks+trivy ONLY) \u2192 blockerParts.push('\ud83d\udd34 STOP \u2014 hardcoded secrets detected'); opengrep findings enrich but never promote",
+    "blockMechanismSourceVerified": true
+   }
+  },
+  {
+   "ac": "AC3",
+   "name": "warning-count readable as numeric from on-disk pi-lens artifact (FR-EX-8)",
+   "status": "pass",
+   "evidence": {
+    "projectDir": "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/pilens-verify-gUIPzJ/.pilens-data/var-folders-60-x8v34pqn6gn1qhlbsfswbmh0000gn-T-pilens-verify-gUIPzJ",
+    "artifactRead": "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/pilens-verify-gUIPzJ/.pilens-data/var-folders-60-x8v34pqn6gn1qhlbsfswbmh0000gn-T-pilens-verify-gUIPzJ/cache/code-quality-warnings.json",
+    "warningCount": 0,
+    "fallbackReason": "actionable-warnings.jsonl absent (only appended when the aw: aggregator emits \u22651 warning at turn-end; headless TDI slash-command unavailable). Fell back to code-quality-warnings.json summary.warnings \u2014 the turn-delta warning-count proxy."
+   }
+  }
+ ],
+ "summary": {
+  "piLensVersion": "3.8.71",
+  "piLensRoot": "/Users/steve/.pi/agent/npm/node_modules/pi-lens",
+  "piLensSource": "PI_LENS_ROOT",
+  "piLensVersionSpec": "3.8.71",
+  "versionMismatch": false,
+  "strict": true,
+  "pass": 3,
+  "fail": 0,
+  "skip": 1,
+  "optionalSkip": 1,
+  "notes": []
+ },
+ "capturedAt": "2026-11-04",
+ "captureLog": "/tmp/pilens-final.log"
+}

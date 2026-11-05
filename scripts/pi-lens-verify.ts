@@ -63,8 +63,8 @@ import {
   resolvePiLens as resolvePiLensAt,
 } from "./lib/pi-lens-harness.ts";
 
-/** pi-lens version the story pins. Drift is reported, never fatal. */
-const SPEC_PI_LENS_VERSION = "3.8.47";
+/** pi-lens version the story pins (amended 2026-11-04 from 3.8.47 — P1.7 forbids re-pinning to 3.8.47; the observed/P0.6-verified version is 3.8.71). Drift is reported, never fatal. */
+const SPEC_PI_LENS_VERSION = "3.8.71";
 
 
 // ---------------------------------------------------------------------------
@@ -244,6 +244,14 @@ async function main(): Promise<void> {
   gitState.initOk = gitState.available && git(["init", "-q"]);
 
   // AC1 fixture: a genuine TS type error (error severity → structured LSP diag).
+  // pi-lens's language policy gates typescript-language-server behind project
+  // config (`heavyScansRequireConfig` for jsts): without a tsconfig.json the
+  // server never spawns and lsp_diagnostics returns 0 — measured live
+  // 2026-11-04 (three runs, lsp "succeeded" with zero children).
+  fs.writeFileSync(
+    path.join(work, "tsconfig.json"),
+    JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ["*.ts"] }),
+  );
   fs.writeFileSync(
     tsFile,
     [
