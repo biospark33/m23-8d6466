@@ -1518,7 +1518,11 @@ describe("buildIdFileInputs", () => {
       // DEFERRED with recorded pairing debt, per this file's own deferral
       // precedent: the accumulated publish→adopt debt now spans four pins;
       // settlement waits on the next merge-triggered publish window.
-      "da967dcb2394abc8046e73359eece665995bc9be883c59950e58a570d38b5801",
+      // ee9c1a55: moved from da967dcb the same session — the security-review
+      // round on the P1.7 PR hardened the prod deps (ast-grep argv `--`
+      // separator + dash-leading rejection; the test-pass fallback default
+      // flipped fail-closed false/false pending a real runner).
+      "ee9c1a5577f03fc0db2272ddb7f708b0eeae1206a76a8c9a40629c4ada0c96e5",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

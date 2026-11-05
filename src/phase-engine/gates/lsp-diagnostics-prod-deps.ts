@@ -65,15 +65,19 @@ export async function createProdLspGateDeps(repoSlug: string): Promise<LspGateDe
     astGrepScan: async (files) => { // dp:ok every failure resolves [] (clean) — the ast-grep arm is advisory inside an already-degraded fallback
       const bin = await whichAsync("ast-grep");
       if (bin === null) return [];
+      // argv hardening: `--` ends flag parsing; dash-leading entries are
+      // rejected (a path starting with "-" could smuggle ast-grep flags).
+      const safe = files.slice(0, 20).filter((f) => !f.startsWith("-"));
+      if (safe.length === 0) return [];
       return new Promise((resolve) => {
-        execFile(bin, ["scan", "json", ...files.slice(0, 20)], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+        execFile(bin, ["scan", "json", "--", ...safe], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
           if (err) {
             resolve([]);
             return;
           }
           try {
             const parsed: DiagnosticEntry[] = JSON.parse(stdout).map(
-              (h: { file?: string; r? : unknown }) => ({
+              (h: { file?: string }) => ({
                 file: typeof h.file === "string" ? h.file : "",
                 line: 0,
                 severity: "error",
@@ -88,8 +92,13 @@ export async function createProdLspGateDeps(repoSlug: string): Promise<LspGateDe
         });
       });
     },
-    hasTestSuite: async () => true,
-    runTestSuite: async () => true,
+    // Test-pass fallback: NOT wired in this window. FAIL-CLOSED default (no
+    // suite "detected") — the ladder blocks into no-evaluator when ast-grep
+    // is also absent, and never vacuously passes on a suite that was never
+    // run. Wiring a real runner is the follow-up; shipping always-true here
+    // would make AC4's suite-failure block unreachable (fail-open).
+    hasTestSuite: async () => false,
+    runTestSuite: async () => false,
     retainWaiverEvent: async (event: WaiverEvent) => { // dp:ok best-effort by contract — persistBestEffort wraps this; a throw never flips the verdict (INV-DIAG-3)
       // Best-effort, env-gated (retain-best-effort posture): no configured
       // memory means no row and no gate change.
