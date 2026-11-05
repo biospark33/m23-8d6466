@@ -612,34 +612,44 @@ accurate statement in the file.
   `PI_LENS_ROOT`, and both stack traces reproduced verbatim.
 - No `status:` field and no DoD checkbox was modified by this work.
 
-### P0.5 update 2026-11-04 (post-CR correction) — emit-block promotion OBSERVED
+### P0.5 update 2026-11-04/05 (post-CR rounds 1+2) — promotion observed; DoD 6/9 back to partial
 
-The window-day addendum below carried two overclaims CodeRabbit's round-1 on PR
-#494 correctly flagged; both verified against source and corrected:
+Two rounds of CodeRabbit findings on PR #494, each verified against current
+code before acting; all four round-2 findings (like both round-1 findings)
+were VALID and are applied:
 
-1. The verify harness's observed-id probe did NOT observe an id
-   (`idObserved:false`, `derived+native-parity`) — the evidence README now
-   says so explicitly and distinguishes it from an observed assignment.
-2. "Heavyweight scans never run headless" was overclaimed: the 8 default
-   json/rpc sessions only prove DEFAULT sessions skip them. The MCP stdio
-   transport AUTO-RUNS the full session_start lifecycle on server boot
-   (`dist/mcp/server.js` auto `runSessionStart`), and with the trivy gates
-   open it ran the scan (127 ms) and `pilens_turn_end` promoted the finding:
+Round 1 corrected two overclaims (observed-id wording; "never runs headless"
+→ the MCP transport can run the full lifecycle and leg b5 did, promoting the
+verbatim `🔴 STOP — hardcoded secrets detected … slack-access-token [trivy]`).
 
-   `🔴 STOP — hardcoded secrets detected … slack-fixture.ts:1 — slack-access-token [trivy]: Slack token`
+Round 2 sharpened further, from source and leg evidence:
 
-   That is NFR-SEC-3's emit-block observed live, no fakes
-   (`legs-2026-11-04/leg-b5-mcp-trivy-stop-OBSERVED.log`). The scoped fact
-   that still stands: DEFAULT json/rpc agent sessions show no heavyweight-scan
-   caches and read the trivy cache only if something else populated it.
+1. The MCP boot-time auto session-start fires ONLY with
+   `PI_LENS_MCP_AUTO_SESSION=1` (`dist/mcp/server.js:134`); leg b5 did NOT
+   set it — its trivy scan came from the documented explicit
+   `pilens_session_start` tool call recorded in the leg log.
+2. What the legs OBSERVE is promotion + delivery to the MCP consumer. NOT
+   demonstrated: downstream emission blocking — prevention of a secret
+   reaching coms output, merged JSON, or a Hindsight bank (INV-1's
+   downstream surfaces).
+3. DoD 6 returns to `[~]`: the DoD-named `secret_detected` finding type does
+   not exist in installed pi-lens; closing that is a spec amendment (operator
+   call), not a behavioral re-reading.
+4. DoD 9 returns to `[~]`: no single `--mode json` agent run has shown the
+   secret STOP and a warning count in its stdout. A closing attempt (leg9,
+   2026-11-05 02:44) warmed the trivy cache under the agent-resolved cwd key
+   (`/private/tmp/p05-legs` → `…private-tmp-p05-legs/`, secret verified in
+   cache) and ran a real json agent turn — the session's turn-end machinery
+   NEVER fired (zero turn_end rows in latency.log at 02:4x; last working
+   rows: leg b5's 02:12 `blockers_found`). Recorded as
+   attempted-but-unobserved.
 
-Original window record (tally superseded — now 8 met / 1 partial / 0 not):
-the operator window ran. pi-lens@3.8.71 installed via `pi install
-npm:pi-lens@3.8.71`; trivy/pyright/typescript-language-server/opengrep
-installed; `pi-lens-verify --strict` → exit 0, 3 pass / 0 fail / 1 optional
-skip. Legs: mode-json agent e2e (structured lsp_diagnostics TS2322 + pyright
-warning over the json transport, real agent), python-lsp discovery with real
-assertion, and the secret-scan chain — first recorded PARTIAL, closed by the
-MCP leg above. Reading notes + verbatim logs:
-`_bmad-output/evidence/p0-5/legs-2026-11-04/README.md`. Row flip to done
-proposed with the one remaining partial (stable-ID) recorded.
+Tally: 7 met / 2 partial / 0 not. Row flip to done WITHDRAWN; keep in-review
+with the three partials (DoD 6, 8, 9) recorded. Original window record: the
+operator window ran; pi-lens@3.8.71 installed via `pi install npm:pi-lens@
+3.8.71`; trivy/pyright/typescript-language-server/opengrep installed;
+`pi-lens-verify --strict` → exit 0, 3 pass / 0 fail / 1 optional skip. Legs:
+mode-json agent e2e (structured lsp_diagnostics TS2322 + pyright warning over
+the json transport, real agent), python-lsp discovery with real assertion,
+and the secret-scan chain. Reading notes + verbatim logs:
+`_bmad-output/evidence/p0-5/legs-2026-11-04/README.md`.

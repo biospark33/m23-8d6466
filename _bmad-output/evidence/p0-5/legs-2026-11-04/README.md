@@ -82,23 +82,40 @@ Six logs document the chain. What each proves:
    ```
 
 6. `leg-b-session-start-attempt.jsonl` — the default json/rpc agent-session
-   evidence. SCOPED CORRECTION (CR round 1, finding 2): the earlier claim
-   "heavyweight scans never run in headless sessions" was OVERCLAIMED — the
-   8 default json/rpc sessions only prove DEFAULT sessions skip them; the MCP
-   stdio transport AUTO-RUNS the full session_start lifecycle on server boot
-   (`dist/mcp/server.js` auto `runSessionStart`), which is exactly how leg b5
-   closed the chain. Default json/rpc agent sessions still show no
-   heavyweight-scan caches and still read the trivy cache only if something
-   else populated it — that narrower statement stands.
+   evidence. SCOPED CORRECTION (CR round 1, finding 2; sharpened CR round 2,
+   finding 1): the earlier claim "heavyweight scans never run in headless
+   sessions" was OVERCLAIMED — the 8 default json/rpc sessions only prove
+   DEFAULT sessions skip them. The MCP transport CAN run the full lifecycle:
+   via the documented `pilens_session_start` tool call — which is how leg b5
+   actually ran it — and separately via the boot-time auto start, which fires
+   ONLY when `PI_LENS_MCP_AUTO_SESSION=1` (`dist/mcp/server.js:134`); leg b5
+   did NOT set that variable, so its trivy scan came from the explicit tool
+   call recorded in the leg log, not from boot auto. Default json/rpc agent
+   sessions still show no heavyweight-scan caches and read the trivy cache
+   only if something else populated it — that narrower statement stands.
+7. `leg9-json-agent-attempt-no-turnend.jsonl` (2026-11-05 02:44): the
+   attempted DoD-9 closing leg. A fresh
+   `pilens_session_start` (explicit call) populated the trivy cache under the
+   agent-resolved cwd key (`/private/tmp/p05-legs` → `…private-tmp-p05-legs/`,
+   scan 02:41:00, secret present in cache — verified by direct read), then a
+   real `--mode json` agent turn analyzed slack-fixture.ts + unused-import.py.
+   The turn-end machinery NEVER fired in that session: `latency.log` has ZERO
+   turn_end rows at 02:4x (last working rows: leg b5's 02:12
+   `blockers_found`). No STOP, no warning count reached the agent stdout.
+   Recorded as the attempted-but-unobserved leg behind DoD 9's remaining
+   partial.
 
-**Net:** NFR-SEC-3's emit-block is now PROVEN live end-to-end: detection
-(opengrep in the verify run; trivy slack-rule), cache, promotion, and the 🔴
-STOP reaching the consumer — the secrets blocker with `[trivy]` provenance was
-observed verbatim over MCP stdio (leg b5) and a blocker reached a real agent
-over `--mode json` (leg b1). The verify harness's optional probe still records
-its own stricter bar (`emitBlockObserved:false` for its specific turn-end
-probe shape); that probe's non-observation predates this leg and describes
-that probe, not the promotion.
+**Net (CR round 2 sharpened):** what is OBSERVED: detection (opengrep in the
+verify run; trivy slack-rule), session-start scan, cache, the trivy→
+sessionSecrets→🔴 STOP promotion, and delivery of that blocker to the MCP
+consumer (`pilens_turn_end` result, leg b5). What is NOT demonstrated:
+downstream emission blocking — that a secret is prevented from reaching coms
+output, merged JSON, or a Hindsight bank (INV-1's downstream surfaces). The
+verify harness's optional probe still records its own stricter bar
+(`emitBlockObserved:false` for its specific turn-end probe shape); that
+probe's non-observation predates this leg and describes that probe, not the
+promotion. INV-1 / NFR-SEC-3 emit-block stays PARTIAL at story level until
+secret prevention at those downstream surfaces is demonstrated.
 
 ## Fixture notes
 
