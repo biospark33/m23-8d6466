@@ -1007,7 +1007,12 @@ describe("memory cycle live", () => {
         // retain seam a THIRD time after the dedup assertions above.
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], { cwd: hostRepo, env, timeoutMs: 300_000 });
         evidence.push({ phase: "teardown-verb", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
-        expect(td.exitCode).toBe(0);
+        // Exit 6 = the DOCUMENTED harvest_waived success for --no-harvest
+        // teardown (live-e2e skill gotcha #6: "a --no-harvest teardown
+        // legitimately exits 6 — asserting toBe(0) on it is wrong"). The
+        // authored toBe(0) predates the exit-table; the substance asserts
+        // below (closedAt / spend / boxGone) prove the actual cleanup.
+        expect(td.exitCode === 0 || td.exitCode === 6).toBeTrue();
         const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
         expect(closed.closedAt ?? "").not.toBe("");
         expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
