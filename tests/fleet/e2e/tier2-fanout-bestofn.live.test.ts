@@ -59,7 +59,11 @@ import {
   writeEvidenceQuietly,
 } from "./live-harness.ts";
 
-const T2_CAP_MICRO_USD = 50_000;
+// 2026-11-06: 50_000 µ$ capped BELOW this leg's real measured spend (~76k µ$
+// per arm — the M1.2 T2 live round's authed-call profile, same fleet shape).
+// Authored-expectation defect, same family as M1.2's: the phase fail looked
+// "transient" but was the cap biting. 500_000 = $0.50/arm headroom.
+const T2_CAP_MICRO_USD = 500_000;
 const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
 
 interface ArmLine {
@@ -71,7 +75,7 @@ interface ArmLine {
 }
 
 test.todoIf(liveTodoOff())(
-  "T2.2 fanout best-of-n N=2 (real arms, real spend ≤ 2×50,000 µ$) → harvest both → teardown both → rank",
+  "T2.2 fanout best-of-n N=2 (real arms, real spend ≤ 2×500,000 µ$) → harvest both → teardown both → rank",
   async () => {
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];
