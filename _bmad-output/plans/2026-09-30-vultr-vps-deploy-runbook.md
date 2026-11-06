@@ -157,7 +157,7 @@ pairing" gate (`.unlazy/df3-6b/GATES.md`) — the two share a label, nothing els
 
 | Row | Ownership | Why |
 | --- | --- | --- |
-| m2-gateway image publish (GHCR) | UNOWNED | A G9 analog: M2.1 is dev-first/mock-tier per DD-26(1) and ships no GHCR publish; ops register §5 row 5 covers the exedev image only. Until the image is published, the `m2-gateway` compose service shows its documented awaiting-image state and smoke evidence records it `{"status":"awaiting-image"}` — never green-by-default. |
+| m2-gateway image publish (GHCR) | OWNED (2026-11-06) | A G9 analog: M2.1 is dev-first/mock-tier per DD-26(1) and ships no GHCR publish; ops register §5 row 5 covers the exedev image only. **Owned as of PR #506**: `.github/workflows/publish-m2-gateway-image.yml` publishes `ghcr.io/quantum-digital-solutions/qds-m2-gateway:sha-<sha>` (dispatch from any ref pre-merge; auto on push to dev/main touching `src/**` or `oci/m2-gateway/**`; amd64 asserted on registry read-back). Operator seeds `M2_GATEWAY_TAG=sha-<sha>` from the run they want — seeded-once, never floating (F-006). Until a run has published, the `m2-gateway` compose service shows its documented awaiting-image state and smoke evidence records it `{"status":"awaiting-image"}` — never green-by-default. |
 | factory-stack data backup policy | UNOWNED | G8's backup is the zeropoint swarmclaw stack's; no story or register entry covers factory data backup. |
 
 **Round-1 review additions (2026-10-03, code-review round 1; findings F-001, F-002, F-022, F-023).**

@@ -1,0 +1,118 @@
+name: Publish m2-gateway image
+
+# The Z4 compose slot's 8080 listener as a registry artifact. Mirrors the
+# publish-exedev-image.yml shape at MINIMUM viable weight — deliberately no
+# pin gate, no attest job, no prune step: the compose ref is seeded-once
+# (QDS_FACTORY_OWNER + M2_GATEWAY_TAG in the VPS compose project .env, F-006),
+# so the operator pins the exact `sha-<sha>` tag after reading this run, and
+# the digest the operator pinned is what production boots. The exedev image
+# needed a signed pin because every box boots it by DEFAULT; nothing boots
+# the gateway by default — a human sets M2_GATEWAY_TAG.
+#
+# Tags: exactly `sha-<github.sha>` (immutable-by-convention, the sha names
+# the exact tree). The operator seeds M2_GATEWAY_TAG=sha-<sha> from the run
+# they want. NO floating tags — no `latest`, no `dev`, no branch names: a
+# compose ref that moves under a pinned tag is the F-006 failure in slow
+# motion, so the workflow cannot create one.
+#
+# Trigger discipline, stated rather than implied:
+#   * workflow_dispatch from ANY ref — the gateway image is not a default
+#     boot substrate; publishing from a feature branch is how the AC8 leg
+#     gets its image BEFORE merge, and the operator opts in by seeding the
+#     tag. Registry-write choice is explicit (a dispatch), not implicit.
+#   * push to dev/main on the image's byte-set (the Dockerfile COPYs src/
+#     WHOLE, so the filter is src/**, not src/memgate/** — plus the Dockerfile
+#     itself). Post-merge publishes are automatic and idempotent per sha:
+#     same tree, same `sha-<sha>` tag, same bytes.
+#
+# KNOWN GAP, named: this file itself is not in its own paths filter (same
+# reasoning as publish-exedev-image.yml's — comment edits would churn
+# packages), so editing the tag expression here moves what operators pin
+# with no trigger. Mitigation: changing the tag grammar IS a re-publish
+# decision and goes through a dispatch anyway.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, main]
+    paths:
+      - oci/m2-gateway/**
+      - src/**
+
+# Fork guard, house style: GITHUB_TOKEN holds packages:write for this org's
+# namespace only, so a fork's run would build and scan then 403 on a package
+# it does not own. Fail in seconds instead.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/quantum-digital-solutions/qds-m2-gateway
+
+jobs:
+  publish:
+    if: github.repository_owner == 'Quantum-Digital-Solutions'
+    runs-on: ubuntu-latest
+    # Native amd64, non-negotiable: the VPS is x86_64. Asserted on the pushed
+    # image below rather than trusted to the runner's architecture.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # zizmor artipacked: nothing here talks to git after checkout.
+          persist-credentials: false
+
+      # No setup-bun: the build runs inside oven/bun:1.4-debian; the runner
+      # itself runs only docker + jq.
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/amd64 \
+            --tag "$IMAGE:sha-$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -f oci/m2-gateway/Dockerfile .
+
+      - name: Push
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+
+      # THE ONLY GATE, and it is the one that matters here: what the registry
+      # actually holds must be the linux/amd64 image this run built. ghcr is
+      # eventually consistent — retry the read-back.
+      - name: Read back and assert platform
+        run: |
+          set -euo pipefail
+          manifest=""
+          for attempt in 1 2 3 4 5; do
+            if manifest=$(docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --format '{{json .Manifest}}'); then break; fi
+            manifest=""
+            echo "imagetools could not read $IMAGE:sha-$GITHUB_SHA (attempt $attempt)"
+            if [ "$attempt" -lt 5 ]; then sleep 5; fi
+          done
+          if [ -z "$manifest" ]; then
+            echo "::error::could not read $IMAGE:sha-$GITHUB_SHA back after 5 attempts — a registry read failure, not a build verdict. Re-run."
+            exit 1
+          fi
+          digest=$(printf '%s' "$manifest" | jq -er '.digest // empty' || true)
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "::error::no usable manifest digest for $IMAGE:sha-$GITHUB_SHA: [$digest]"; exit 1 ;;
+          esac
+          # Pull by digest and assert the platform — the manifest may be an
+          # index, so inspect the pulled image's config.
+          docker pull --quiet "$IMAGE@$digest"
+          platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE@$digest")
+          if [ "$platform" != "linux/amd64" ]; then
+            echo "::error::image is $platform, must be linux/amd64 (the VPS is x86_64)."
+            exit 1
+          fi
+          echo "published $IMAGE:sha-$GITHUB_SHA ($digest) — operator seeds M2_GATEWAY_TAG=sha-$GITHUB_SHA"
