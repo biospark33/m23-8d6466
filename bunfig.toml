@@ -4,6 +4,9 @@
 # --config in src/runtime/cli/test/parallel/runner.rs — is on bun main,
 # unreleased as of 1.4.4): each worker auto-loads THIS file from the repo root
 # and applies coveragePathIgnorePatterns to the reports it wires upstream.
+# 2026-11-06 re-check at the bun@1.4.2 re-pin: 1.4.2 < 1.4.4, the --config
+# forwarding is still unreleased at the new pin — this file STAYS. (Next
+# re-check lands with any pin move ≥ 1.4.4.)
 # The gate itself stays governed by bunfig.coverage.toml via its explicit
 # --config; the threshold and coverage=true live ONLY there.
 #
