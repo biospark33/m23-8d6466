@@ -944,8 +944,16 @@ describe("memory cycle live", () => {
         });
         expect(outcomeDoc).toBeDefined();
         // The retained payload is the host-authored structured outcome — its
-        // runId field must name THIS run (content, not just identity).
-        expect(outcomeDoc?.content ?? "").toContain(`"runId":"${runId}"`);
+        // runId must name THIS run (content, not just identity). The STORE
+        // renders the canonical JSON payload (buildRetainPayload) as prose
+        // facts on recall — `Execution run <runId> … exit classification of
+        // '<class>' … harvested N items. | When: <retain date>' — so the
+        // assert reads identity + provenance off the RENDERED text, never the
+        // payload's raw bytes (2026-11-06 fire 11: the payload IS compact
+        // JSON; the recall content is the store's fact render, 0 repo-side
+        // prose writers exist).
+        expect(outcomeDoc?.content ?? "").toContain(runId);
+        expect(outcomeDoc?.content ?? "").toContain("completed with an exit classification of");
 
         // ── EXACTLY ONE memory-retain-receipt/retain row, subject = runId ──
         const receiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
