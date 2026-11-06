@@ -15,6 +15,16 @@ RUN apt-get update \
 WORKDIR /opt/qds-factory
 COPY --chown=bun:bun src/ src/
 
+# DEFAULT_MEMGATE_LEDGER is `.sandbox/memgate-ledger.db`, resolved RELATIVE —
+# so with QDS_MEMGATE_LEDGER unset the ledger lands at
+# /opt/qds-factory/.sandbox/. WORKDIR itself is root-owned (Docker creates it
+# before the COPY's --chown can touch it), so bun cannot mkdir there without
+# help: pre-create the ledger dir bun-owned BEFORE the USER switch, or the
+# unset-env boot fails at the ledger open (fail-closed, but for a filesystem
+# reason the image can own).
+RUN mkdir -p /opt/qds-factory/.sandbox \
+ && chown -R bun:bun /opt/qds-factory
+
 USER bun
 EXPOSE 8080
 CMD ["bun", "src/memgate/server.ts"]

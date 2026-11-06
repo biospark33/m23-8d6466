@@ -76,4 +76,29 @@ describe("gateway server - wire contract", () => {
     expect(out.status).toBe(500);
     expect((JSON.parse(out.body) as { error: { code: string } }).error.code).toBe("internal");
   });
+
+  test("refusal bodies carry the CODE alone — no echo of request material (INV-MG-5/6)", async () => {
+    const deps = makeDeps();
+    const auth = await mintedAuthHeader(deps, ["qds-x"]);
+    // A limit string embedding credential-like material: parseForwardBody's
+    // refusal message interpolates the raw value — the wire face must not.
+    const secret = `Bearer ${"x".repeat(48)}`;
+    const out = await handleMemgateRequest(deps, { method: "POST", path: "/v1/default/banks/qds-x/memories/recall", authHeader: auth, bodyText: JSON.stringify({ query: "q", limit: secret }) });
+    expect(out.status).toBe(500);
+    expect((JSON.parse(out.body) as { error: { code: string } }).error.code).toBe("forward-body-invalid");
+    expect(out.body).not.toContain(secret);
+    expect(out.body).not.toContain("x".repeat(48));
+    // The scope refusal's message interpolates method+path — also held back.
+    const out2 = await handleMemgateRequest(deps, { method: "POST", path: "/v1/default/banks/qds-x/NOPE", authHeader: auth, bodyText: "{}" });
+    expect(out2.status).toBe(403);
+    expect((JSON.parse(out2.body) as { error: { code: string } }).error.code).toBe("scope-verb");
+    expect(out2.body).not.toContain("NOPE");
+  });
+
+  test("invalid JSON WITHOUT auth -> no-auth (credentials before the body)", async () => {
+    const deps = makeDeps();
+    const out = await handleMemgateRequest(deps, { method: "POST", path: "/v1/default/banks/qds-x/memories/recall", authHeader: "", bodyText: "{not json" });
+    expect(out.status).toBe(401);
+    expect((JSON.parse(out.body) as { error: { code: string } }).error.code).toBe("no-auth");
+  });
 });

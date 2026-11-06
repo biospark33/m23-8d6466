@@ -53,19 +53,25 @@ export const STATUS_BY_CODE: Record<string, number> = {
 /** One request's wire outcome (the test seam; Bun.serve is a thin shell). */
 export interface MemgateRequestOutcome {
   status: number;
-  /** Answers verbatim; refusals in the {error:{code, message?, remediation?}}
-   * shape the kg-recall client and the M2.3 battery parse. */
+  /** Refusals serialize {error:{code}} — the CODE alone (the kg-recall client
+   * and the M2.3 battery classify by it); MemgateError message/remediation are
+   * diagnostic prose and never reach the response body (INV-MG-5/6). */
   body: string;
   contentType: string;
 }
 
-/** MemgateError -> wire outcome. Out-of-map codes answer 500. */
+/** MemgateError -> wire outcome. Out-of-map codes answer 500. The response
+ * body carries the CODE alone: MemgateError messages are diagnostic prose
+ * that can echo request material (parseForwardBody interpolates the raw
+ * `limit` value; the scope refusals interpolate method+path) — serializing
+ * them would hand attacker-controlled echo material back to the caller
+ * (INV-MG-5/6). Prose rides deps.log only. */
 function outcomeFor(e: MemgateError): MemgateRequestOutcome {
-  const status = STATUS_BY_CODE[e.code] ?? 500;
-  const error: { code: string; message?: string; remediation?: string } = { code: e.code };
-  if (e.message !== "") error.message = e.message;
-  if (e.remediation !== "") error.remediation = e.remediation;
-  return { status, body: JSON.stringify({ error }), contentType: "application/json" };
+  return {
+    status: STATUS_BY_CODE[e.code] ?? 500,
+    body: JSON.stringify({ error: { code: e.code } }),
+    contentType: "application/json",
+  };
 }
 
 /**
@@ -84,16 +90,10 @@ export async function handleMemgateRequest(
   if (route === null) {
     return outcomeFor(new MemgateError("scope-verb", `no route is mapped for ${input.method} ${input.path}`, "the closed VERB_ROUTES table maps POST recall/reflect/consolidate/retain only"));
   }
-  let body: unknown = undefined;
-  if (input.bodyText !== "") {
-    try {
-      body = JSON.parse(input.bodyText);
-    } catch {
-      return outcomeFor(new MemgateError("scope-verb", "request body is not valid JSON", "send the JSON body the matched route's contract names"));
-    }
-  }
-  // verifyRequest walks the credential ladder and emits its own refused
-  // lines through deps. ok:false -> refusal; ok:true -> forward.
+  // Credentials BEFORE the body: an unauthenticated request is refused
+  // no-auth regardless of body shape — parsing attacker-controlled bytes for
+  // a caller with no credential at all is unpaid work in front of the
+  // refusal (and keeps the no-auth verdict independent of body validity).
   const verified = verifyRequest(deps, {
     authHeader: input.authHeader,
     method: input.method,
@@ -102,6 +102,14 @@ export async function handleMemgateRequest(
   });
   if (!verified.ok) {
     return outcomeFor(new MemgateError(verified.reason, verified.reason, "re-mint or re-grant the credential as the refusal names"));
+  }
+  let body: unknown = undefined;
+  if (input.bodyText !== "") {
+    try {
+      body = JSON.parse(input.bodyText);
+    } catch {
+      return outcomeFor(new MemgateError("scope-verb", "request body is not valid JSON", "send the JSON body the matched route's contract names"));
+    }
   }
   const principal: MemgatePrincipal = verified.principal;
   try {
@@ -127,17 +135,46 @@ export async function handleMemgateRequest(
  * public reach is Caddy -> m2-gateway:8080 across the front-door network.
  */
 export function serveMemgate(opts: { port?: number; depsOpts?: MemgateDepsOptions; client?: MemgateClient } = {}): { stop: () => void; port: number } {
-  const deps = memgateDeps({ ...opts.depsOpts, client: opts.client ?? opts.depsOpts?.client ?? new HindsightClient() });
+  // INV-HM1's env chain, one name longer, resolved from the SAME env
+  // memgateDeps uses (F-009: the injected env resolves here too). The
+  // compose slot's env file carries the dedicated instance's TENANT key
+  // (HINDSIGHT_API_TENANT_API_KEY) — the gateway is its first compose-side
+  // consumer (Z4 compose: "without it the first compose-side consumer would
+  // 401"), and none of INV-HM1's two names exists in that file. The
+  // constructor's own chain stays authoritative for the two INV-HM1 names.
+  const env = opts.depsOpts?.env ?? process.env;
+  const apiKey =
+    (env.HINDSIGHT_BEARER_TOKEN || undefined)
+    ?? (env.HINDSIGHT_API_KEY || undefined)
+    ?? (env.HINDSIGHT_API_TENANT_API_KEY || undefined);
+  const deps = memgateDeps({
+    ...opts.depsOpts,
+    client: opts.client ?? opts.depsOpts?.client ?? new HindsightClient(apiKey === undefined ? {} : { apiKey }),
+  });
   const server = Bun.serve({
     port: opts.port ?? 8080,
     hostname: "0.0.0.0",
     async fetch(req: Request): Promise<Response> {
       const url = new URL(req.url);
-      const bodyText = req.method === "POST" ? await req.text() : "";
+      const authHeader = req.headers.get("authorization") ?? "";
+      // Route + credentials BEFORE the body is consumed: a refusal at either
+      // gate answers without req.text(), so unauthenticated/trash-route
+      // requests never pay the body drain — and handleMemgateRequest's own
+      // pre-parse refusals (route, no-auth) fire before any byte is read.
+      // The forwarding rechecks (F-004/F-023) stay inside
+      // handleMemgateRequest, unchanged.
+      const route = matchRoute(req.method, url.pathname);
+      const verified = route === null ? { ok: false as const } : verifyRequest(deps, {
+        authHeader,
+        method: req.method,
+        path: url.pathname,
+        requestId: "wire-preflight",
+      });
+      const bodyText = req.method === "POST" && route !== null && verified.ok ? await req.text() : "";
       const outcome = await handleMemgateRequest(deps, {
         method: req.method,
         path: url.pathname,
-        authHeader: req.headers.get("authorization") ?? "",
+        authHeader,
         bodyText,
       });
       return new Response(outcome.body, { status: outcome.status, headers: { "content-type": outcome.contentType } });

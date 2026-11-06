@@ -84,6 +84,14 @@ services:
       # image digest above.
       - HINDSIGHT_API_LLM_PROVIDER=openrouter
       - HINDSIGHT_API_LLM_MODEL=${SOLSTICE_MODEL_MEMORY_EXTRACTION:-google/gemini-3.7-flash}
+      # F-005 scoping, gateway keys: the operator's env file also carries the
+      # m2-gateway's credentials (MEMGATE_ADMIN_KEY + QDS_MEMGATE_SIGNING_KEY —
+      # hindsight-qds.env.example documents the pair), and env_file delivers
+      # them to EVERY service that names it. These overrides empty both inside
+      # the hindsight container (committed `environment:` beats env_file), so
+      # the internet-reachable gateway is the only place they live.
+      - MEMGATE_ADMIN_KEY=
+      - QDS_MEMGATE_SIGNING_KEY=
       # First boot downloads embedding+reranker models and runs all pg0
       # migrations; the default 300s timeout fires mid-download (the fork's
       # model-init timeout default). 1200s gives a cold start room; the
@@ -188,6 +196,11 @@ services:
       # this override EMPTIES it inside this container; hindsight-qds keeps
       # the real value.
       HINDSIGHT_API_LLM_API_KEY: ""
+      # The GATEWAY's credentials (MEMGATE_ADMIN_KEY + QDS_MEMGATE_SIGNING_KEY)
+      # arrive via env_file from the same operator file and are CONSUMED here —
+      # no override: this is the only compose service that may hold them. The
+      # hindsight-qds service EMPTIES both in its own environment block (F-005
+      # scoping), so the keys never sit in hindsight's environ.
       # The gateway is the FIRST compose-side consumer of the dedicated
       # instance: compose-network service name (Z4 origin split — runbook Z4
       # annotation: compose-side http://hindsight-qds:8888, host-side
