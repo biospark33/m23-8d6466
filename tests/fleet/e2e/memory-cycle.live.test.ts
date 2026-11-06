@@ -934,7 +934,7 @@ describe("memory cycle live", () => {
 
         // ── probe recall: the run bank now holds the outcome document ──────
         const mem = new HindsightClient();
-        const probe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 5 });
+        const probe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 10, waitMs: 5_000 });
         const outcomeDoc = probe.res.results.find((r) => r.documentId === runId);
         evidence.push({
           phase: "probe-recall",
@@ -981,7 +981,7 @@ describe("memory cycle live", () => {
         const reharvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, env, timeoutMs: 300_000 });
         evidence.push({ phase: "reharvest-verb", exitCode: reharvest.exitCode, stdout: reharvest.stdout.trim().slice(0, 200) });
         expect(reharvest.exitCode).toBe(0);
-        const reprobe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 5 });
+        const reprobe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 10, waitMs: 5_000 });
         const matchesAfterReplay = reprobe.res.results.filter((r) => r.documentId === runId).length;
         receipts = receiptRows();
         evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length });
