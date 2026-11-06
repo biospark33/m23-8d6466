@@ -437,9 +437,9 @@ function makeRoundTripClient(memoryId = "rt-mem-xyz"): Record<string, unknown> {
       durationMs: 50,
     }),
     reflect: async () => ({
-      bankId: "qds-factory",
-      insights: [{ summary: "SPARC is the chosen methodology", relatedMemories: 1 }],
-      durationMs: 100,
+      // 0.10.0 wire shape (ReflectResponseSchema): the markdown text IS the
+      // response; the legacy insights[] view has no wire source.
+      text: "SPARC is the chosen methodology",
     }),
     consolidate: async () => ({ consolidatedCount: 2, preservedCount: 5, durationMs: 200 }),
   };

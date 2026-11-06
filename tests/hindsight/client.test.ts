@@ -200,7 +200,33 @@ describe("HindsightClient success paths", () => {
     );
   });
 
-  test("reflect success parses ReflectResponseSchema", async () => {
+  test("reflect success parses the measured 0.10.0 wire (text required)", async () => {
+    installMock({
+      body: {
+        text: "This memory bank contains operational knowledge and conventions.",
+        based_on: null,
+        structured_output: null,
+        structured_output_error: null,
+        usage: {
+          input_tokens: 21,
+          output_tokens: 2,
+          total_tokens: 23,
+          cached_tokens: 0,
+          thoughts_tokens: 0,
+        },
+        trace: null,
+      },
+    });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    const r = await client.reflect("qds-factory");
+    expect(ReflectResponseSchema.safeParse(r).success).toBe(true);
+    expect(r.text).toContain("operational knowledge");
+    expect(lastCall?.url).toBe(
+      "http://hindsight.test/v1/default/banks/qds-factory/reflect",
+    );
+  });
+
+  test("reflect legacy {bankId,insights,durationMs} body REFUSES (not the 0.10.0 wire)", async () => {
     installMock({
       body: {
         bankId: "qds-factory",
@@ -209,12 +235,15 @@ describe("HindsightClient success paths", () => {
       },
     });
     const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
-    const r = await client.reflect("qds-factory");
-    expect(ReflectResponseSchema.safeParse(r).success).toBe(true);
-    expect(r.insights[0]?.summary).toBe("team leans SPARC");
-    expect(lastCall?.url).toBe(
-      "http://hindsight.test/v1/default/banks/qds-factory/reflect",
-    );
+    let caught: HindsightHttpError | undefined;
+    try {
+      await client.reflect("qds-factory");
+    } catch (e) {
+      if (e instanceof HindsightHttpError) caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.status).toBe(502);
+    expect(caught?.message).toContain("text");
   });
 
   test("consolidate success parses ConsolidateResponseSchema", async () => {
@@ -450,6 +479,7 @@ describe("HindsightClient mock mode", () => {
     const c = new HindsightClient({ mode: "mock" });
     const reflected = await c.reflect("qds-factory");
     expect(ReflectResponseSchema.safeParse(reflected).success).toBe(true);
+    expect(reflected.text).toBe("mock reflect");
     const consolidated = await c.consolidate("qds-factory");
     expect(ConsolidateResponseSchema.safeParse(consolidated).success).toBe(true);
     // F-025: the canned body is the WIRE shape — operation_id required, so the

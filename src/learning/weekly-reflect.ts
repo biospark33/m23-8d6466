@@ -247,7 +247,7 @@ function supersededIds(dir: string, week: string, stamp: string): string[] {
 // ─── per-bank reflect ────────────────────────────────────────────────────────
 
 type BankOutcome =
-  | { ok: true; insights: Array<{ summary: string }>; ms: number }
+  | { ok: true; text: string; ms: number }
   | { ok: false; code: string; message: string; remediation: string };
 
 async function reflectOneBank(deps: WeeklyDeps, bank: string, evidence: GatheredEvidence, requestId: string): Promise<BankOutcome> {
@@ -269,15 +269,16 @@ async function reflectOneBank(deps: WeeklyDeps, bank: string, evidence: Gathered
   }
   const parsed = ReflectResponseSchema.safeParse(raw);
   if (!parsed.success) {
-    // Known posture (self-review round 0 #2): ReflectResponseSchema requires insights.min(1) (M1.1-owned,
-    // byte-identical — not widened here), so a FRESH-EMPTY bank reflects as REFLECT_UNPARSEABLE and lands in
+    // Known posture (self-review round 0 #2, updated for the 0.10.0 wire):
+    // ReflectResponseSchema requires `text` (min 1 char), so a FRESH-EMPTY bank
+    // reflects as REFLECT_UNPARSEABLE and lands in
     // banks_failed. That red is honest: by the time the weekly job ever fires, M1.2's retain flow and M3.1's
     // consolidate have guaranteed bank content — a red weekly on an empty memory bank IS an operations problem.
     return { ok: false, code: "REFLECT_UNPARSEABLE",
       message: `the reflect response for bank ${bank} did not parse as ReflectResponse`,
       remediation: "check the instance version against ReflectResponseSchema, then re-run" };
   }
-  return { ok: true, insights: parsed.data.insights, ms: elapsedMs(started, nowMs(deps)) };
+  return { ok: true, text: parsed.data.text, ms: elapsedMs(started, nowMs(deps)) };
 }
 
 // ─── per-proposal retain ─────────────────────────────────────────────────────
@@ -398,7 +399,7 @@ export async function runWeeklyReflect(deps: WeeklyDeps): Promise<WeeklyResult> 
     }
     banksOk.push(bank);
     reflectMsByBank[bank] = outcome.ms;
-    reflects.push({ bankId: bank, insights: outcome.insights });
+    reflects.push({ bankId: bank, text: outcome.text });
     emit(deps, requestId, { event: "reflect-run", leg: deps.leg, bankId: bank, reflect_ms: outcome.ms });
   }
 

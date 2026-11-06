@@ -53,7 +53,7 @@ const baseInput = (evidence: GatheredEvidence, over: Partial<ComposeInput> = {})
   week: "2026-W41",
   firedAt: "2026-10-05T06:23:00.000Z",
   evidence,
-  reflects: [{ bankId: "qds-factory-dev-meta", insights: [{ summary: "cost per story trending down" }] }],
+  reflects: [{ bankId: "qds-factory-dev-meta", text: "cost per story trending down" }],
   reflect_ok: { "qds-factory-dev-meta": true },
   banks: ["qds-factory-dev-meta"],
   ...over,
@@ -157,7 +157,7 @@ describe("composeProposals", () => {
   test("failed-reflect bank falls back to the lane-default bank with empty insights", () => {
     const out = composeProposals(
       baseInput(fullEvidence, {
-        reflects: [{ bankId: "other-bank", insights: [{ summary: "noise" }] }],
+        reflects: [{ bankId: "other-bank", text: "noise" }],
         reflect_ok: { "other-bank": false },
         banks: ["qds-factory-prod-meta", "qds-factory-dev-meta"],
       }),
@@ -314,7 +314,7 @@ describe("review round 1 — ingest filters, class fields, caps, dedup", () => {
   test("hostile insight summaries never enter insights_cited; hostile ref names never enter prose — citations stay raw (F-004)", () => {
     const out = composeProposals({
       ...emptyish,
-      reflects: [{ bankId: "qds-factory-dev-meta", insights: [{ summary: "severity drift detected in routing" }] }],
+      reflects: [{ bankId: "qds-factory-dev-meta", text: "severity drift detected in routing" }],
       reflect_ok: { "qds-factory-dev-meta": true },
       evidence: {
         routingLines: [],

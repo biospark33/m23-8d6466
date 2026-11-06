@@ -95,7 +95,9 @@ function mockBody(path: string, bankId: string): unknown {
     };
   }
   if (path.endsWith("/reflect")) {
-    return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
+    // Wire shape (see ReflectResponseSchema): the markdown text IS the
+    // response; the legacy insights[] view has no 0.10.0 wire source.
+    return { text: "mock reflect" };
   }
   if (path.endsWith("/consolidate")) {
     // F-025: the real 0.10.0 wire is `{operation_id (required), deduplicated?}`

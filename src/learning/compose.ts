@@ -136,7 +136,7 @@ export function buildReflectQuery(bankId: string, evidence: GatheredEvidence): s
 
 // ─── composeProposals ────────────────────────────────────────────────────────
 
-export type ReflectEntry = { bankId: string; insights: Array<{ summary: string }> };
+export type ReflectEntry = { bankId: string; text: string };
 
 export type ComposeInput = {
   week: string;
@@ -238,11 +238,15 @@ export function composeProposals(input: ComposeInput): ProposalRecord[] {
   const reflectOk = reflects.filter((r) => reflect_ok[r.bankId] === true).map((r) => r.bankId);
   const targetBank = reflectOk[0] ?? banks.find((b) => b.endsWith("-dev-meta")) ?? banks[0];
   if (targetBank === undefined || targetBank === "") return [];
-  // insights_cited at ingest (F-004): bank-authored summaries are untrusted
-  // text — the same severity filter as every extracted name, dropped not kept.
-  const insights = (reflects.find((r) => r.bankId === targetBank)?.insights ?? [])
-    .map((i) => safeName(i.summary))
-    .filter((s): s is string => s !== null && s.length > 0);
+  // insights_cited at ingest (F-004): bank-authored text is untrusted — the
+  // same severity filter as every extracted name, dropped not kept. On the
+  // 0.10.0 wire the reflect response is ONE markdown report (no discrete
+  // insights[]), so the citation is that report, verbatim, bounded to the
+  // same discipline as rationale() (payload ceilings — see
+  // RETAIN_PAYLOAD_MAX_BYTES). Empty report ⇒ nothing to cite ([]).
+  const reflectReport = reflects.find((r) => r.bankId === targetBank)?.text ?? "";
+  const cited = safeName(reflectReport.slice(0, 200));
+  const insights = cited === null || cited.length === 0 ? [] : [cited];
 
   const stamp = firedAt.replace(/[:.]/g, "-"); // kpi-snapshot-write.ts:52 idiom
   let seq = 0;
