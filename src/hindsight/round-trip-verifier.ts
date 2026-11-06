@@ -181,7 +181,9 @@ export interface RoundTripOk {
    */
   matchedMemoryId: string | null;
   recallMatches: boolean;
-  insightCount: number;
+  /** Length of the 0.10.0 reflect markdown (see ReflectResponseSchema) —
+   * replaces the legacy insightCount (no insights[] on the wire). */
+  reflectTextChars: number;
   consolidatedCount: number;
   preservedCount: number;
   durations: RoundTripDurations;
@@ -391,18 +393,24 @@ export async function verifyRoundTrip(
   }
 
   // --- Step 3: reflect ----------------------------------------------------
-  let insightCount = 0;
+  let reflectTextChars = 0;
   {
     const start = Date.now();
     let status: "ok" | "error" = "ok";
     let errMsg: { code: string; message: string } | undefined;
-    let reflectMs = 0;
-    let insights: readonly { summary: string }[] = [];
     try {
       const res = await client.reflect(bankId, query);
-      reflectMs = res.durationMs;
-      durations.reflect = reflectMs;
-      insights = res.insights;
+      // F009, same rule as recall: HOST-side elapsed time — the 0.10.0 wire
+      // carries no durationMs (see ReflectResponseSchema).
+      durations.reflect = Date.now() - start;
+      // The production client Zod-validates via `ReflectResponseSchema`
+      // (`text: z.string().min(1)`) upstream, but the verifier also runs
+      // against mock/fake clients (unit tests) that bypass Zod, so this
+      // guard is kept as the runtime check for an empty reflect text.
+      if (res.text.length === 0) {
+        throw new Error("reflect returned empty text");
+      }
+      reflectTextChars = res.text.length;
     } catch (e) {
       status = "error";
       if (e instanceof HindsightHttpError) {
@@ -422,44 +430,6 @@ export async function verifyRoundTrip(
       });
       return { ok: false, step: "reflect", error: errMsg, requestId };
     }
-    if (insights.length === 0) {
-      errMsg = { code: "empty_insights", message: "reflect returned no insights" };
-      status = "error";
-      log({
-        requestId,
-        operation: "reflect",
-        bankId,
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: Date.now() - start,
-        status,
-        error: errMsg,
-      });
-      return { ok: false, step: "reflect", error: errMsg, requestId };
-    }
-    // `i.summary` is statically `string` (typed ReflectResponse), so a
-    // `typeof === "string"` guard would be a TS tautology. The meaningful
-    // check is non-empty: "" is a valid string but an empty insight summary.
-    // The production client Zod-validates via `ReflectResponseSchema`
-    // (`summary: z.string().min(1)`) upstream, but the verifier also runs
-    // against mock/fake clients (unit tests) that bypass Zod, so this guard
-    // is kept as the runtime check for an empty-summary insight.
-    if (!insights.every((i) => i.summary.length > 0)) {
-      errMsg = { code: "invalid_insights", message: "reflect returned an insight with empty summary" };
-      status = "error";
-      log({
-        requestId,
-        operation: "reflect",
-        bankId,
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: Date.now() - start,
-        status,
-        error: errMsg,
-      });
-      return { ok: false, step: "reflect", error: errMsg, requestId };
-    }
-    insightCount = insights.length;
     log({
       requestId,
       operation: "reflect",
@@ -637,7 +607,7 @@ export async function verifyRoundTrip(
     ok: true,
     matchedMemoryId,
     recallMatches,
-    insightCount,
+    reflectTextChars,
     consolidatedCount,
     preservedCount,
     durations,

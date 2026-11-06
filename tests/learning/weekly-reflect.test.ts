@@ -215,7 +215,7 @@ function installWeeklyRouter(o: { listBanks?: unknown; reflectStatus?: number } 
     if (url.endsWith("/v1/default/banks")) return { body: o.listBanks ?? { banks: FAMILY.map((b) => ({ bank_id: b })) } };
     if (url.endsWith("/reflect")) {
       if (o.reflectStatus !== undefined) return { status: o.reflectStatus, body: {} };
-      return { body: { bankId: bankOfUrl(url), insights: [{ summary: "cost per story trending down" }], durationMs: 1 } };
+      return { body: { text: "cost per story trending down" } };
     }
     if (url.endsWith("/memories")) return { body: RETAIN_WIRE };
     return undefined;
@@ -523,7 +523,7 @@ describe("idempotent re-fire (C7)", () => {
   test("async retain failure (wire 500): typed RETAIN_FAILED fault, proposal excluded from the receipt, run NOT ok — the await is load-bearing", async () => {
     installRouter((_method, url) => {
       if (url.endsWith("/memories")) return { status: 500, body: {} };
-      if (url.endsWith("/reflect")) return { body: { bankId: bankOfUrl(url), insights: [{ summary: "s" }], durationMs: 1 } };
+      if (url.endsWith("/reflect")) return { body: { text: "s" } };
       return undefined;
     });
     const result = await runWeeklyReflect(rig());
@@ -649,7 +649,7 @@ describe("typed faults + exit contract (round-1 review fixes)", () => {
       if (url.endsWith("/v1/default/banks")) return { body: { banks: FAMILY.map((b) => ({ bank_id: b })) } };
       if (url.endsWith("/reflect")) {
         if (bankOfUrl(url) === FAMILY[2]) return { status: 500, body: {} };
-        return { body: { bankId: bankOfUrl(url), insights: [{ summary: "s" }], durationMs: 1 } };
+        return { body: { text: "s" } };
       }
       if (url.endsWith("/memories")) return { body: RETAIN_WIRE };
       return undefined;
@@ -857,7 +857,7 @@ const s = http.createServer((q, r) => {
     if (m === null) { r.statusCode = 404; return r.end("unrouted"); }
     if (m[2] === "reflect") {
       lines.push(JSON.stringify({ kind: "reflect", query: JSON.parse(body || "{}").query ?? "" }));
-      return reply({ bankId: m[1], insights: [{ summary: "cost per story trending down" }], durationMs: 1 });
+      return reply({ text: "cost per story trending down" });
     }
     lines.push(JSON.stringify({ kind: "retain", body: JSON.parse(body || "{}") }));
     return reply(${JSON.stringify(RETAIN_WIRE)});

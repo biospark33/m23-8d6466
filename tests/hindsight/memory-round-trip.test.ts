@@ -46,9 +46,7 @@ function makeClient(cfg: StubConfig): any {
     reflect:
       cfg.reflect ??
       (async () => ({
-        bankId: "qds-factory",
-        insights: [{ summary: "SPARC is the chosen methodology", relatedMemories: 1 }],
-        durationMs: 100,
+        text: "SPARC is the chosen methodology",
       })),
     consolidate:
       cfg.consolidate ??
@@ -104,7 +102,7 @@ describe("verifyRoundTrip — happy path", () => {
     const ok = result as Extract<RoundTripResult, { ok: true }>;
     expect(ok.matchedMemoryId).toBe("mem-1");
     expect(ok.recallMatches).toBe(true);
-    expect(ok.insightCount).toBe(1);
+    expect(ok.reflectTextChars).toBe("SPARC is the chosen methodology".length);
     expect(ok.consolidatedCount).toBe(2);
     expect(ok.preservedCount).toBe(5);
     expect(ok.slowQuery).toBe(false);
@@ -114,7 +112,9 @@ describe("verifyRoundTrip — happy path", () => {
     // server's own figure is preserved separately.
     expect(ok.durations.recall).toBeGreaterThanOrEqual(0);
     expect(ok.durations.serverRecall).toBe(50);
-    expect(ok.durations.reflect).toBe(100);
+    // F009, same rule: reflect is measured host-side (the 0.10.0 wire carries
+    // no durationMs), so against an instant stub it is near-zero elapsed time.
+    expect(ok.durations.reflect).toBeGreaterThanOrEqual(0);
     expect(ok.durations.consolidate).toBe(200);
     expect(ok.durations.total).toBeGreaterThan(0);
     expect(typeof ok.requestId).toBe("string");
@@ -314,10 +314,13 @@ describe("verifyRoundTrip — recall failures", () => {
 });
 
 describe("verifyRoundTrip — reflect failures", () => {
-  test("empty insights → ok:false at reflect step", async () => {
+  test("empty reflect text → ok:false at reflect step", async () => {
+    // The mock/fake client bypasses Zod, so the verifier's own runtime guard
+    // (kept for exactly this boundary) must catch the empty text the schema
+    // would refuse upstream.
     const result = await verifyRoundTrip({
       client: makeClient({
-        reflect: async () => ({ bankId: "qds-factory", insights: [], durationMs: 5 }),
+        reflect: async () => ({ text: "" }),
       }),
       bankId: DEFAULTS.bankId,
     });
@@ -326,26 +329,8 @@ describe("verifyRoundTrip — reflect failures", () => {
     if (result.ok) return;
     const err = result as Extract<RoundTripResult, { ok: false }>;
     expect(err.step).toBe("reflect");
-    expect(err.error.code).toBe("empty_insights");
-  });
-
-  test("insight with empty summary → ok:false", async () => {
-    const result = await verifyRoundTrip({
-      client: makeClient({
-        reflect: async () => ({
-          bankId: "qds-factory",
-          insights: [{ summary: "" }],
-          durationMs: 5,
-        }),
-      }),
-      bankId: DEFAULTS.bankId,
-    });
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    const err = result as Extract<RoundTripResult, { ok: false }>;
-    expect(err.step).toBe("reflect");
-    expect(err.error.code).toBe("invalid_insights");
+    expect(err.error.code).toBe("unknown");
+    expect(err.error.message).toContain("empty text");
   });
 
   test("reflect throws HindsightHttpError → ok:false at reflect step", async () => {

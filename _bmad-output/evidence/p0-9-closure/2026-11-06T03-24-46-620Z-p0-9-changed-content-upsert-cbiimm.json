@@ -1,0 +1,62 @@
+{
+  "leg": "p0-9-changed-content-upsert",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass: changed-content upsert OBSERVED — same document_id, different content, read-back carries VERSION-TWO only (identity hits=1); the update half of the upsert is measured (complements document-id-retain-twice's identical-content no-duplicate check); probe bank cleanup: deleted",
+  "steps": [
+    {
+      "step": "probe-create",
+      "outcome": "ok"
+    },
+    {
+      "step": "retain-v1",
+      "outcome": "ok"
+    },
+    {
+      "step": "recall-baseline",
+      "outcome": "hits=1 identity=1 v1=true"
+    },
+    {
+      "step": "retain-v2",
+      "outcome": "ok"
+    },
+    {
+      "step": "recall-read-back",
+      "outcome": "hits=1 identity=1 v2=true v1=false"
+    },
+    {
+      "step": "cleanup",
+      "outcome": "delete deleted"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"outcome\":\"start\",\"bankId\":\"qds-ccupsert-1793935470060\",\"documentId\":\"qds-ccupsert-doc-zytlxp\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"probe-create\",\"bankId\":\"qds-ccupsert-1793935470060\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"retain-v1\",\"bankId\":\"qds-ccupsert-1793935470060\",\"documentId\":\"qds-ccupsert-doc-zytlxp\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"recall-baseline\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"retain-v2\",\"bankId\":\"qds-ccupsert-1793935470060\",\"documentId\":\"qds-ccupsert-doc-zytlxp\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"recall-read-back\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"cleanup\",\"bankId\":\"qds-ccupsert-1793935470060\",\"outcome\":\"deleted\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-11-06T03:24:46.619Z",
+  "probeBankId": "qds-ccupsert-1793935470060",
+  "documentId": "qds-ccupsert-doc-zytlxp",
+  "retainOne": {
+    "measured": true,
+    "answered": true
+  },
+  "recallBaseline": {
+    "measured": true,
+    "hits": 1,
+    "withIdentity": 1,
+    "sawV2": false,
+    "sawV1": true
+  },
+  "retainTwo": {
+    "measured": true,
+    "answered": true
+  },
+  "readBack": {
+    "measured": true,
+    "hits": 1,
+    "withIdentity": 1,
+    "sawV2": true,
+    "sawV1": false
+  },
+  "upsertObserved": true
+}

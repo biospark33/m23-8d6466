@@ -772,7 +772,7 @@ const OK_ROUND_TRIP: RoundTripResult = {
   ok: true,
   matchedMemoryId: "m-1",
   recallMatches: true,
-  insightCount: 2,
+  reflectTextChars: 42,
   consolidatedCount: 1,
   preservedCount: 1,
   durations: { retain: 1, recall: 1, serverRecall: 1, reflect: 1, consolidate: 1, postRecall: 1, total: 5 },
@@ -810,15 +810,15 @@ describe("p0-9 evaluateRoundTrip — clause 7", () => {
     expect(out.detail).toContain("recallMatches=false");
   });
 
-  test("ok:true with ZERO insights does not satisfy 'reflect'", () => {
-    const out = evaluateRoundTrip({ ...OK_ROUND_TRIP, insightCount: 0 }, "b");
+  test("ok:true with an EMPTY reflect text does not satisfy 'reflect'", () => {
+    const out = evaluateRoundTrip({ ...OK_ROUND_TRIP, reflectTextChars: 0 }, "b");
     expect(out.pass).toBe(false);
-    expect(out.detail).toContain("insightCount=0");
+    expect(out.detail).toContain("reflectTextChars=0");
   });
 
-  test("a NaN insight count fails the threshold rather than satisfying it", () => {
+  test("a NaN reflect text length fails the threshold rather than satisfying it", () => {
     // NaN >= 1 is false, so this must fail — the p0-2 `meetsMinCount` lesson.
-    const out = evaluateRoundTrip({ ...OK_ROUND_TRIP, insightCount: Number.NaN }, "b");
+    const out = evaluateRoundTrip({ ...OK_ROUND_TRIP, reflectTextChars: Number.NaN }, "b");
     expect(out.pass).toBe(false);
   });
 });

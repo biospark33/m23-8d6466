@@ -220,16 +220,17 @@ export const RecallResponseSchema = z
   }));
 
 export const ReflectResponseSchema = z.object({
-  bankId: z.string(),
-  insights: z
-    .array(
-      z.object({
-        summary: z.string().min(1),
-        relatedMemories: z.number().int().min(0).optional(),
-      }),
-    )
-    .min(1),
-  durationMs: z.number(),
+  // Wire = view: the 0.10.0 reflect response carries the reflect markdown
+  // itself (openapi.json components/schemas/ReflectResponse, required list =
+  // ["text"]; raw captured body
+  // 2026-11-06T03-16-12Z-p0-9-reflect-raw-body-fisr9.json — based_on /
+  // structured_output / structured_output_error / usage / trace all null,
+  // stripped). The legacy `{bankId, insights[], durationMs}` shape does NOT
+  // exist on the wire — round-trip-via-bridge 5d934h refused it
+  // (`bankId` received undefined). Nothing on the wire maps to the legacy
+  // fields, so unlike RetainResponseSchema there is nothing to fold — no
+  // `.transform()`.
+  text: z.string().min(1),
 });
 
 export const ConsolidateResponseSchema = z.object({

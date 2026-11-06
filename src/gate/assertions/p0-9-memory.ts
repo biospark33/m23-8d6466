@@ -61,12 +61,12 @@ export function describeListBanksFailure(err: unknown, baseUrl: string): string 
 /**
  * Turns a round-trip result into the clause-7 verdict.
  *
- * `recallMatches` and `insightCount` are asserted, not merely printed. Today
+ * `recallMatches` and `reflectTextChars` are asserted, not merely printed. Today
  * `verifyRoundTrip`'s union makes them redundant — but this gate is the artifact
  * that certifies clause 7, and it previously reported both values in its green
  * detail while deciding on `result.ok` alone. Reporting a number is not checking
- * it: if the verifier ever returned `ok:true` with a zero recall or no insights,
- * the gate would have certified "retain -> recall -> reflect round-trips" off a
+ * it: if the verifier ever returned `ok:true` with a zero recall or an empty
+ * reflect, the gate would have certified "retain -> recall -> reflect round-trips" off a
  * round trip that recalled nothing.
  */
 export function evaluateRoundTrip(result: RoundTripResult, bankId: string): GateCheckOutcome {
@@ -78,7 +78,7 @@ export function evaluateRoundTrip(result: RoundTripResult, bankId: string): Gate
   }
   const shortfalls: string[] = [];
   if (result.recallMatches !== true) shortfalls.push(`recallMatches=${String(result.recallMatches)}`);
-  if (!(result.insightCount >= 1)) shortfalls.push(`insightCount=${String(result.insightCount)}`);
+  if (!(result.reflectTextChars >= 1)) shortfalls.push(`reflectTextChars=${String(result.reflectTextChars)}`);
   if (shortfalls.length > 0) {
     return {
       pass: false,
@@ -87,7 +87,7 @@ export function evaluateRoundTrip(result: RoundTripResult, bankId: string): Gate
   }
   return {
     pass: true,
-    detail: `round-trip green on bank "${bankId}" (recallMatches=${result.recallMatches}, insightCount=${result.insightCount})`,
+    detail: `round-trip green on bank "${bankId}" (recallMatches=${result.recallMatches}, reflectTextChars=${result.reflectTextChars})`,
   };
 }
 
