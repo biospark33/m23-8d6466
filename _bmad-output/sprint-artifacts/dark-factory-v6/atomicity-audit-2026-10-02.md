@@ -1,8 +1,8 @@
 # Atomicity Audit — dark-factory-v6 — 2026-10-02
 
 **Auditor:** qds-sprint-planning Phase 2.5
-**Total stories audited:** 23 (11 v6a + 12 v6b)
-**Pass:** 21 / **Warn:** 2 / **Block:** 0
+**Total stories audited:** 24 (11 v6a + 12 v6b + 1 late row — M1.4, added 2026-10-08 by PR #415, audited 2026-11-06, addendum below)
+**Pass:** 22 / **Warn:** 2 / **Block:** 0
 
 > **Post-campaign recount (2026-10-02, after the pre-dev adversarial campaign's fix waves):**
 > all 23 stories re-measured — totals 104–136 (≤200 cap ✓), SP 2–5 (≤8 ✓), blocker
@@ -59,6 +59,28 @@ Invariants` present ×23 (substantive — every story triggers security keywords
   concurrency-integrity and import-closure-fence arms; both are high-signal story-specific
   tests, not CI invariants, and each guards a distinct make-or-break behavior (AC2's
   single-writer log posture; the no-judgment-import fence). **Accepted rather than merged.**
+
+## Late-row addendum — M1.4 (audited 2026-11-06)
+
+> The row was added 2026-10-08 (PR #415, 6cdb1c73), after this audit and the adversarial
+> campaign had closed on the 23 derived rows — the register note "its audit is owed" stands
+> until this addendum. Mechanical scan per the same phase-2.5 checks, same thresholds.
+
+### M1.4 — Jev rerank arm for the recall re-measure — measured, never applied
+
+| Check | Severity | Result | Notes |
+|-------|----------|--------|-------|
+| normative size (≤200) | BLOCK if >250 | pass | 104 (107 total − Dev Agent Record block) |
+| total size (≤400) | WARN | pass | 107 |
+| SP budget (≤8) | BLOCK | pass | 2 SP |
+| DOD count (≤10) | WARN | pass | 8 items |
+| title AND connectors | WARN | pass | 0 |
+| blocker markers (=0) | BLOCK | pass | 0 |
+| Files-to-Modify section | BLOCK if absent | pass | 4 paths (2 scripts + 1 test file + evidence dir) |
+| Security Invariants | BLOCK if triggered+absent | pass | triggered (credential/auth keywords) — INV-ARM-1..4 substantive |
+
+**Verdict: PASS** — 107 total (inside the 103–130 recount range), SP 2, DOD 8, no
+AND-connectors, no blocker markers, substantive invariants. No WARN, no split seam.
 
 ## Override log (operator)
 

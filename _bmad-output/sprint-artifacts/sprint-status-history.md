@@ -253,3 +253,22 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # Operator-gated legs still open: M1.2 AC7 / M2.3 live-fire T2 rounds, A6 AC7 + Z4 AC8 fired
 # halves, A3 sign-offs + crontab install + live round, issue #408 (M1.1 VPS-day remainder).
 # The 2026-10-15 note this replaces was drained to sprint-status-history.md.
+
+# 2026-11-06 (day 5→6, sprint #486-#489 register session — evening):
+# v6 + P/P0 state: P0.9 DONE via PR #501 (merge b17a86e2). P1.7 DONE via PR #502
+# (1986eac2) — its mandatory e2e leg RAN, all three arms PROVEN live (evidence
+# _bmad-output/evidence/p1-7-closure/2026-11-06T04-53-57-400Z-p1-7-e2e-gate-demo-yday6.json).
+# CI `check` job: GREEN again — issue #503 closed via PR #504 (merge 4a0efc50,
+# 2026-11-06). The serial gate had OOMed the hosted runner at the qa→memgate drag
+# peak since #498; the gate now runs bun's --parallel=4 shape (files split across
+# isolated workers, coverage folded across workers, the same per-file 0.60 floor
+# enforced on the merged set), with the worker-side ignore patterns supplied by a
+# root bunfig.toml (workers don't receive the coordinator's --config until bun
+# ships config forwarding), a bun>=1.4 fold guard, and two coverage lifts
+# (scripts/judgment/{arm-thresholds,route-round}.ts — suites drove mains only via
+# spawn children; now in-process per the docblock's live-probe precedent). The
+# check run's own step: 3564 tests / 117 files / ~86s / 0 fail. Two-way check
+# documented in PR #504 (0.99 → RED; 0.60 → green). Sprint close-out items 2+3
+# (workflow-state hygiene, untracked .unlazy review) landed in the same PR.
+# The 2026-10-24 note this replaces was drained to sprint-status-history.md.
+#

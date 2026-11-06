@@ -6,23 +6,16 @@
 # plus the most recent note only. Append new notes here; drain them there.
 #
 # --- Most recent note ---
-# 2026-11-06 (day 5→6, sprint #486-#489 register session — evening):
-# v6 + P/P0 state: P0.9 DONE via PR #501 (merge b17a86e2). P1.7 DONE via PR #502
-# (1986eac2) — its mandatory e2e leg RAN, all three arms PROVEN live (evidence
-# _bmad-output/evidence/p1-7-closure/2026-11-06T04-53-57-400Z-p1-7-e2e-gate-demo-yday6.json).
-# CI `check` job: GREEN again — issue #503 closed via PR #504 (merge 4a0efc50,
-# 2026-11-06). The serial gate had OOMed the hosted runner at the qa→memgate drag
-# peak since #498; the gate now runs bun's --parallel=4 shape (files split across
-# isolated workers, coverage folded across workers, the same per-file 0.60 floor
-# enforced on the merged set), with the worker-side ignore patterns supplied by a
-# root bunfig.toml (workers don't receive the coordinator's --config until bun
-# ships config forwarding), a bun>=1.4 fold guard, and two coverage lifts
-# (scripts/judgment/{arm-thresholds,route-round}.ts — suites drove mains only via
-# spawn children; now in-process per the docblock's live-probe precedent). The
-# check run's own step: 3564 tests / 117 files / ~86s / 0 fail. Two-way check
-# documented in PR #504 (0.99 → RED; 0.60 → green). Sprint close-out items 2+3
-# (workflow-state hygiene, untracked .unlazy review) landed in the same PR.
-# The 2026-10-24 note this replaces was drained to sprint-status-history.md.
+# 2026-11-06 (day 6 late evening, sprint #486-#489 register session — 3rd session today):
+# M1.4's owed atomicity audit LANDED: in-file late-row addendum to
+# sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md — M1.4 PASS clean
+# (107 total / 104 normative / SP 2 / DOD 8 / 0 ANDs / 0 blockers / 4 FTM paths /
+# SecInv substantive); audit now reads 24 rows: 22 PASS / 2 WARN accepted [M2.2, J3] /
+# 0 BLOCK. Same session fixed the register's DF-v6 audit line, which undercounted J3's
+# WARN ("22 PASS / 1 WARN" vs the file's Pass 21 / Warn 2) — now consistent.
+# Audit debt cleared; M1.4's ELIGIBILITY-GATED DEFER stands (revisit when
+# scripts/judgment/arm-thresholds.ts flips eligible). No code touched; docs-only.
+# The 2026-11-06 evening note this replaces was drained to sprint-status-history.md.
 #
 #
 
@@ -317,7 +310,10 @@ epics:
   # Named flex-cuts (DD-26): v6a #1 = M1.3 report leg slips (trigger: v6a >40 pts post-review),
   #   #2 = A6 fired half rides ops (trigger >42); v6b = J4-L9 leg first (trigger >50),
   #   then J3 → v7 (trigger >52).
-  # Atomicity audit: sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md (23 rows: 22 PASS / 1 WARN accepted [M2.2] / 0 BLOCK; the 24th row, M1.4, added 2026-10-08 — its audit is owed).
+  # Atomicity audit: sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md (24 rows: 22 PASS /
+  #   2 WARN accepted [M2.2, J3] / 0 BLOCK — M1.4, the 24th row added 2026-10-08, audited PASS
+  #   2026-11-06 via the in-file late-row addendum; correction: this line previously read "22 PASS /
+  #   1 WARN" against a file that said Pass 21 / Warn 2 — J3's WARN was undercounted here).
   # Adversarial review: tracker + verdicts under _bmad-output/workflow-state/qds-sprint-planning/v6/
   #   (per-batch pipeline verdicts + cross-story pass) + the qds-story-review campaign tracker in
   #   sprint-artifacts/dark-factory-v6/ (charter §9.4).
@@ -353,7 +349,7 @@ epics:
       M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: done, deps: [M2.2, M1.2] }  # v6b — merged PR #418 (dev 3c1509a3; head 32ca3faf; 3 bmad-code-review rounds 16/12/12 findings + CodeRabbit round: roster tools allowlist now enforced end-to-end through TeamRoleSchema→adapter→QDS_AGENT_TEAM_CONFIG_JSON→buildWorkerArgv --tools, FRAME_HEADER echo hole replaced with retained-content recall witness, handoff cleanup claim narrowed to pass/fail+SIGINT-manual); NOT fired — operator-gated T2 handoff recorded per M1.2 precedent (_bmad-output/reviews/m2-3-t2-handoff.md: image-pin ritual, M1.2 T2 fired, memory/exedev env, operator GO); live-fire ACs stay open until the round fires
       M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: done, deps: [M2.1, M1.1] }  # v6b — DONE 2026-10-10: PR #422 merged to dev (merge 7c777bc9, head 0a36ad99); live round fired green on operator GO before merge. Pre-dev note (historical): ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
       M3.2: { title: "L4 weekly reflect → PROPOSE (never auto-apply)", points: 3, status: done, deps: [M3.1, A5] }  # v6b — done 2026-10-12: PR #424 merged to dev (f15f7ee1; head 88ed5e8d; 2 CodeRabbit rounds: r1 week-scoped evidence gather + crontab stderr split + exit-doc truth, r2 exit-0 doc + isoWeekStartUtc nonexistent-week rejection, whole-file routing-log read accepted with documented ceiling). src/learning/{gather,compose,weekly-reflect,proposal-schema}.ts + scripts/memory-weekly.ts; tests/learning 116/0; tsc + biome clean. M3 milestone complete (M3.1 + M3.2). FR-LEARN-30 shape; proposals to meta bank + operator; never auto-apply
-      M1.4: { title: "Jev rerank arm for the recall re-measure (measured, never applied)", points: 2, status: draft, deps: [M1.3] }  # v6b — row added by PR #415 (6cdb1c73, 2026-10-08); rides operator-ruled recall re-measure (8ce22829) pre-DD-22; draft — atomicity audit owed before ready-for-dev. ELIGIBILITY-GATED DEFER (decision register, 2026-11-04): NOT cancelled — revisit only when scripts/judgment/arm-thresholds.ts flips eligible (needs 200 confirmed JEV records via normal M-cycles); verdict at gate time: not-eligible (outcome_confirmed=0/200, confirmed_clusters=0/20, ci_lower=n/a)
+      M1.4: { title: "Jev rerank arm for the recall re-measure (measured, never applied)", points: 2, status: draft, deps: [M1.3] }  # v6b — row added by PR #415 (6cdb1c73, 2026-10-08); rides operator-ruled recall re-measure (8ce22829) pre-DD-22; draft — atomicity audit LANDED 2026-11-06 (PASS, atomicity-audit-2026-10-02.md addendum; audit debt cleared, eligibility gate unaffected). ELIGIBILITY-GATED DEFER (decision register, 2026-11-04): NOT cancelled — revisit only when scripts/judgment/arm-thresholds.ts flips eligible (needs 200 confirmed JEV records via normal M-cycles); verdict at gate time: not-eligible (outcome_confirmed=0/200, confirmed_clusters=0/20, ci_lower=n/a)
   v6-a:
     name: Autonomy (E21-gated)
     status: ready-for-dev

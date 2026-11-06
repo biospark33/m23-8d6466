@@ -2,7 +2,7 @@
 
 **Story Points:** 2
 **Sprint:** v6b (Autonomy — memory lane, the measurement add-on riding the operator-ruled recall series re-measure; E21-independent, no E21 code on any path; rides M1.3's probe set rather than opening a live round of its own)
-**Status:** draft — pre-campaign: the atomicity audit (`sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md`) covers the 23 derived rows and does not include this one; the audit is owed before the row reads ready-for-dev
+**Status:** draft — the owed atomicity audit LANDED 2026-11-06: PASS, no WARN (`sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md`, late-row addendum — 24 rows / 22 PASS / 2 WARN accepted / 0 BLOCK). The row's ELIGIBILITY-GATED DEFER (decision register, 2026-11-04) is unaffected: the audit cleared the audit debt, not the eligibility gate — revisit only when `scripts/judgment/arm-thresholds.ts` flips eligible.
 
 ## Spec Reference
 
