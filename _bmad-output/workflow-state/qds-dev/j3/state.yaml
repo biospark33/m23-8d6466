@@ -26,7 +26,7 @@ driver-pinned-facts:
 open-cell: tier-override materialization (gate rosterPath vs in-box engine roster) — research B Q2
 PAUSE-CHECKPOINT (user break, resume on 'go'):
 - review round 1: 23 findings triaged (19 patch/1 false/3 DAR); fix waves A/B/C landed + driver fixes (cli withRoutingCwd x5, q1 wrap done, skill-contract fixture roster, store-rooted routing log, absent-roster carry fold)
-- REMAINING before round 2: skill-contract DoD e2e probe provenance wrap (same chdir pattern, ~:1129 run(dispatchArgv) site); then grand sweep; then round 2 review (bmad-code-review, fix all incl lows); then node+root gates (G1 full suite vs baseline 15, G2-G4, G7 detect_changes); then story closure (Dev Agent Record, Re-visit refresh, status done, DAR notes: skip-line interpretation, lock-drop sign-off, files-outside-list C11, twin-vs-consume); then PR to dev
+  - "REMAINING before round 2: skill-contract DoD e2e probe provenance wrap (same chdir pattern, ~:1129 run(dispatchArgv) site); then grand sweep; then round 2 review (bmad-code-review, fix all incl lows); then node+root gates (G1 full suite vs baseline 15, G2-G4, G7 detect_changes); then story closure (Dev Agent Record, Re-visit refresh, status done, DAR notes: skip-line interpretation, lock-drop sign-off, files-outside-list C11, twin-vs-consume); then PR to dev"
 - branch: feature/j3-model-router-decision-layer; all work UNCOMMITTED
 - gates: node-1.1/1.2/1.3 ALL MET (stale post-fix-wave — re-approve ledgers before trusting); leaves 1.1.1/1.2.1/1.2.2/1.3.1 VERIFIED+released
 - test state at pause: cli 188/0, q1 13/0, skill-contract 58/0 (q1+sc combined), judgment+retain+dispatch-router+roster-override 248/0 pre-store-rooting (resweep owed)

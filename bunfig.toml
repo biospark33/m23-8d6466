@@ -1,0 +1,61 @@
+# WORKER-SIDE COVERAGE IGNORE PATTERNS ONLY — read by the F083 gate's
+# --parallel WORKERS (issue #503). bun 1.4.2/1.4.3's parallel test runner does
+# not forward the coordinator's config to workers (the fix — forwarding
+# --config in src/runtime/cli/test/parallel/runner.rs — is on bun main,
+# unreleased as of 1.4.4): each worker auto-loads THIS file from the repo root
+# and applies coveragePathIgnorePatterns to the reports it wires upstream.
+# The gate itself stays governed by bunfig.coverage.toml via its explicit
+# --config; the threshold and coverage=true live ONLY there.
+#
+# INERT WITHOUT COVERAGE. This file carries no `coverage = true` and no
+# threshold — on every other run shape (the check job's whole-repo `bun test`,
+# the tests job's file-per-process batches, plain local `bun test`) the [test]
+# keys below have no effect, because those runs never produce coverage reports
+# to filter. This is why the F083 docblock's founding decision — "a root
+# bunfig.toml would gate the repo wholesale" — still holds: coverage stays ON
+# only in the gate's own run line.
+#
+# DELIBERATELY NOT a second copy of the scope rationale. The reasons each
+# pattern exists live in bunfig.coverage.toml (F083 docblock, "the scope is
+# expressed as..."), which is the file a future editor will be reading when
+# they touch the list. The two PATTERN LISTS — the strings, not the comments —
+# MUST stay identical; if they drift, the gate's workers filter differently
+# from its coordinator and the merged table lies. Change both, together, or
+# neither. (Delete this file when bun ships the --config forwarding and the
+# gate's --config reaches workers.)
+#
+[test]
+coveragePathIgnorePatterns = [
+  # Test files, helpers and fixtures are the harness, not the code under test.
+  # (coverageSkipTestFiles only drops the *.test.ts files themselves; test
+  # files are skipped by default in release builds, see bun's
+  # CodeCoverageOptions::default — `skip_test_files: !ALLOW_ASSERT`.)
+  "tests/**",
+  # Workspace members with their own toolchains and their own gates.
+  "cli-anything/**",
+  "pi-vs-claude-code-vendor/**",
+  "visualizer/**",
+  # Out-of-scope src trees pulled in as imports. They are not ungated — they
+  # are gated elsewhere or deliberately not gated yet; either way, dragging
+  # them in here would make this number say nothing about scripts/lib.
+  "src/phase-engine/**",
+  "src/swarmclaw/**",
+  "src/fleet/**",
+  "src/gate/**",
+  # Top-level CLI entry points (scripts/*.ts). This gate is about the shared
+  # LIBRARY code every verb routes through, not about the verbs' own argv
+  # plumbing. `scripts/*.ts` matches the top level only, so `scripts/lib/**`
+  # survives — which is the whole point.
+  "scripts/*.ts",
+  "scripts/dev/**",
+
+  # The two files in scope with NO test of their own. Excluded by name rather
+  # than by lowering the floor, so they read as a debt list and not as a gate
+  # that gates nothing. Both are the next things to cover; delete the line
+  # when the test lands.
+  "scripts/qa/leg-drivers.ts",
+  "scripts/qa/live-round-wiring.ts",
+  "scripts/lib/harness-notes.ts",
+  "src/providers/exedev/transport.ts",
+  "src/providers/fake-gate.ts",
+]

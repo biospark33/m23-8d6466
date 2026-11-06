@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { outcomeAgrees } from "../../scripts/judgment/ab-report.ts";
-import { loadJevCorpusRecords } from "../../scripts/judgment/arm-thresholds.ts";
+import { main as armThresholdsMain, loadJevCorpusRecords } from "../../scripts/judgment/arm-thresholds.ts";
 import { DISPOSITIONS, OutcomeRecordSchema, recordKey } from "../../scripts/corpus/schema.ts";
 import {
   MIN_CONFIRMED_CLUSTERS,
@@ -1349,6 +1349,49 @@ describe("confirm-outcome CLI", () => {
       expect(existsSync(join(corpusDir, "outcomes.jsonl"))).toBe(false); // " 5" must never have written
     } finally {
       rmSync(corpusDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// In-process main drive (issue #503): runArm above is a Bun.spawnSync child,
+// and coverage cannot score children (bunfig.coverage.toml docblock) — the
+// file read 16.67% funcs with main fully unexercised in-process. The dry-run
+// success path drives here under the same fixtures; flip and refusal arms
+// keep their spawn shape (exitWithFailure calls process.exit, which must stay
+// in a child). Same precedent as live-probe.ts's exported-main drive.
+// ---------------------------------------------------------------------------
+
+describe("arm-thresholds main, in-process (coverage scorer — dry-run success path)", () => {
+  test("dry run over the eligible corpus: loads outcomes + jev records, reads the chain, prints the verdict JSON, exit 0", async () => {
+    const corpusDir = tmpDir("arm-ip-c-");
+    const judgmentDir = tmpDir("arm-ip-j-");
+    try {
+      writeEligibleCorpusDir(corpusDir);
+      mkdirSync(judgmentDir, { recursive: true });
+      writeFileSync(join(judgmentDir, "arm-state.jsonl"), `${logLines(chainedEntries(1)).join("\n")}\n`);
+      const chunks: string[] = [];
+      const origWrite = process.stdout.write.bind(process.stdout);
+      process.stdout.write = ((s: string) => {
+        chunks.push(s);
+        return true;
+      }) as typeof process.stdout.write;
+      let code: number;
+      try {
+        code = await armThresholdsMain([
+          "--corpus-dir", corpusDir,
+          "--judgment-dir", judgmentDir,
+        ]);
+      } finally {
+        process.stdout.write = origWrite;
+      }
+      expect(code).toBe(0);
+      const verdict = JSON.parse(chunks.join("")) as { verdict: string; milestones: { confirmed: number; agreed: number } };
+      expect(verdict.verdict).toBe("eligible");
+      expect(verdict.milestones.confirmed).toBeGreaterThan(0);
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+      rmSync(judgmentDir, { recursive: true, force: true });
     }
   });
 });

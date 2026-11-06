@@ -177,8 +177,51 @@
 # serial). Worker-local memory is a strict subset of the serial run's, so no
 # worker can reproduce the qa+memgate peak that killed the serial process.
 #
+# ONE GAP IN THAT SHAPE, MEASURED ON CI (PR #504's first run): the workers do
+# NOT receive the coordinator's config — `--coverage` is forwarded but the
+# ignore patterns are not (bun forwards `--config` to workers only from main,
+# unreleased as of 1.4.4), so every worker measures EVERYTHING it loads and
+# the merged table fills with ignored trees at 0.00% (cli-anything/** et al.)
+# that red-fire the floor. Fixed WITHOUT widening the ignore list: a root
+# `bunfig.toml` (new, 2026-11-06) carries the SAME pattern list for the
+# workers — each worker auto-loads bunfig.toml from cwd, and the gate's
+# coordinator still resolves its own `--config=bunfig.coverage.toml` on top.
+# The root file carries no `coverage = true` and no threshold, so every
+# non-coverage run shape (whole-repo `bun test`, the tests job, plain local
+# `bun test`) is unaffected — the F083 founding decision ("a root bunfig.toml
+# would gate the repo wholesale") still holds: coverage turns ON only in this
+# gate's run line. The two pattern lists must stay identical (change both,
+# together, or neither); delete the root file when bun ships config
+# forwarding and this repo's pins reach it.
+#
+# THE FOLD REQUIRES bun >= 1.4 (CodeRabbit round on PR #504): 1.3.13's
+# aggregate took the max per-worker function-hit count instead of unioning
+# hits, under-counting any file covered by different workers — exactly the
+# drag shape this gate relies on. `check:coverage` therefore runs
+# scripts/dev/require-bun-coverage-fold.ts first (refuses below 1.4); CI pins
+# 1.4.2, local packageManager still declares 1.3.13.
+#
+# TWO FILES LIFTED, NOT IGNORED (2026-11-06, same branch): scripts/judgment/
+# {arm-thresholds,route-round}.ts read 16.67/11.25 and 20.00/7.29 under the
+# run — their suites drove every main through Bun.spawnSync children, and
+# coverage cannot score children. Lifted the sanctioned way (live-probe.ts
+# precedent): both mains were already exported; their suites now drive the
+# success paths in-process (arm-thresholds' dry-run over the eligible corpus,
+# route-round's armed happy path), measured at 80.00/73.10 and 100.00/71.17.
+# The refusal arms keep their spawn shape — exitWithFailure is process.exit
+# and must stay in a child. These two were red-firing under the run since
+# their suites landed (2026-10-19 era) — masked ever since by the serial
+# gate's CI OOM (#498 onward): the gate had a second, older red hiding under
+# the crash.
+#
 # THE TWO-WAY CHECK IS UNCHANGED AND STILL OWED after any script edit: raise
 # the threshold to 0.99, confirm the run goes RED, restore, confirm green.
+# Measured on the #503 branch: 0.99 with --parallel=4 -> 3559 pass / 0 fail /
+# exit 1 (threshold alone turns the gate red); 0.60 -> green with the same
+# run shape on CI (PR #504's first run reached the table with 0 test fails in
+# 85.6s), and locally at --parallel=1 (same fold + merge, no inter-file
+# concurrency: this Mac's spawn-heavy cap-hit family times out at the 5s
+# default under 4-worker contention but passes on CI's runner).
 #
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.

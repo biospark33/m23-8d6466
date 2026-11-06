@@ -1554,6 +1554,15 @@ describe("buildIdFileInputs", () => {
       // fail-closed real test-pass fallback (bun test, bounded), and the
       // ast-grep slice removal.
       //
+      // 32c5be4d: moved from f552ab25 by the same branch's CodeRabbit round —
+      // again `package.json`'s `check:coverage` script alone (the line gained
+      // the bun >= 1.4 guard script prefix: scripts/dev/require-bun-coverage-fold.ts,
+      // which refuses the gate on bun old enough to fold function coverage by
+      // max instead of union). bunfig.toml (new, root) is ABSENT from the
+      // Dockerfile COPY set — measured, not walked; the guard script lives in
+      // scripts/dev/, also not walked. Image re-publish rides the ops-gated
+      // wave-0 ritual.
+      //
       // f552ab25: moved from fb7602c0 by the issue #503 CI-gate fix — the sole
       // mover is `package.json`'s `check:coverage` script (the `--parallel=4`
       // run shape that keeps the gate off the CI runner's OOM cliff; the
@@ -1563,7 +1572,7 @@ describe("buildIdFileInputs", () => {
       // Adopted from this test's own failing run on the final tree
       // (edit-first/re-pin-last; the story-consistency spawn tests' 30s
       // budgets are tests/ and do not walk).
-      "f552ab259b6d2b881c76bb82702f0c2e48c7557e85384f24561b9638be8ba8af",
+      "32c5be4dd9147294c15a21dce439ebbd7ad21b9816cf875d9b1eea207733e155",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

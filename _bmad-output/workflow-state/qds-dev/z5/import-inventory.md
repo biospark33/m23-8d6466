@@ -148,7 +148,7 @@ Counting grep: `grep -rln 'from ["'\''][^"'\'']*stdio-transport' src scripts tes
 | src/hindsight/client.ts:21–24 | log, newRequestId, type LogEntry (multi-line import; file also gets §3 maskEnv edit) |
 | src/hindsight/kg-context.ts:33 | log |
 | src/hindsight/bank-provisioner.ts:22–25 | log, newRequestId, type LogEntry (multi-line) |
-| src/swarmclaw/index.ts:16 | log, newRequestId (from `./mcp/stdio-transport.ts` → becomes `../../lib/log.ts`) |
+| src/swarmclaw/index.ts:16 | log, newRequestId (from `./mcp/stdio-transport.ts` → becomes `../lib/log.ts` — the planning-time off-by-one; the landed import reads `../lib/log.ts` (routes/agents.ts, one level deeper, takes `../../lib/log.ts`)) |
 | src/swarmclaw/routes/agents.ts:5 | log, newRequestId (same) |
 | scripts/provision-hindsight-banks.ts:91 | setLogSink (from `../src/…` → `../src/lib/log.ts`) |
 | tests/hindsight/kg-context.test.ts:16 | setLogSink, type LogEntry |
