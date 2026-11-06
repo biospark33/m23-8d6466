@@ -122,8 +122,20 @@ import {
 const T2_CAP_MICRO_USD = 50_000;
 /** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
 const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
-/** The probe manifest the T2 tiers dispatch: code phases only, 60 s budget. */
-const MANIFEST_PATH = "config/rosters/t2.pipeline.json";
+/**
+ * This round's OWN manifest — NOT the T2 engine probe (`config/rosters/t2.pipeline.json`,
+ * `echo` + `true`, zero commits, zero solicits). L3 asserts a harvested bundle + solicit-prompt
+ * artifacts (`<runId>-solicit-*-prompt.txt` — the in-box `<kg_context>` render proof); a
+ * code-only manifest can never satisfy either: harvest's Step A classifies the empty range
+ * NOCOMMITS, AC4 deliberately leaves no bundle (`rmSync(hostBundle)`), and `pullArtifacts`
+ * pulls prompt files that a command-only pipeline never creates. Latent since authoring
+ * (2026-10-09, triple-reviewed, never fired); first fire 2026-11-06 red'd at
+ * tests/fleet/e2e/memory-cycle.live.test.ts:847 on exactly this (evidence
+ * _bmad-output/evidence/m1-2/2026-11-06-145950-m12-l3-harvest-retain-a43jn8.json:
+ * harvest exit 0 + "harvested: none"). The dispatch_task phase makes the fixer commit on the
+ * sandbox branch (harvest counts commits on sbx/<runId>) and produces the solicit artifacts.
+ */
+const MANIFEST_PATH = "config/rosters/m12-memory-cycle.pipeline.json";
 /** The minted-runId grammar (dispatch.ts MINTED_RUN_ID_RE) — AC4's documentId. */
 const MINTED_RUN_ID = /^qds-\d{8}-[a-f0-9]{6}$/;
 
