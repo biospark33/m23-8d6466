@@ -2,7 +2,7 @@
 
 **Story Points:** 5
 **Sprint:** v6a (Foundation — memory ladder, story 6 of 11; the first primed-dispatch round trip and v6a's only T2 live round)
-**Status:** done — PR #412 merged to dev 2026-10-07 (merge e6022356, head affc88c0). AC7 (T2 live round) is operator-gated and NOT fired; handoff `_bmad-output/reviews/m1-2-t2-handoff.md`.
+**Status:** done — PR #412 merged to dev 2026-10-07 (merge e6022356, head affc88c0). **AC7 (T2 live round) FIRED GREEN 2026-11-06** (16 fires, final green at branch head `17f7699a` — 4 pass/0 fail; L1 echo server-upsert proven, L2 primed dispatch with in-box model phases settled ok, L3 harvest→retain→dedup + cleanup verdicts all green; evidence `_bmad-output/evidence/m1-2/2026-11-06-*`, the four authored-expectation defects fixed on `feature/m12-live-manifest-fix`; the memory env ran against the local `qds-factory-hindsight-qds-1` container — a real Hindsight 0.10.0, not the VPS dedicated instance — recorded honestly; the spend story is in the handoff's new section).
 
 > **Provenance:** charter row M1.2 (`2026-10-01-v6-derivation-session-INPUT.md:78`). Folds P2.8's MECHANISM ONLY — stable dated `documentId` + `updateMode:"replace"` with the idempotency contract schema-owned (`_bmad-output/sprint-artifacts/phase-2/stories/p2-8-hindsight-retain-bridge.md:49,:95,:112`); its Daily-Learnings surface, `promotion_runs` bookkeeping, and qds-product/qds-meta routing are NOT carried (DD-15 fold). Copies the zeropoint `<kg_context>` pattern (`reactive/reactive-grounding-extension.ts` beforePromptBuild → `hindsight-context-adapter.ts`); skips its Clerk gate + Presidio (D-2 — no tenant machinery); keeps the directive/citation grammar.
 
