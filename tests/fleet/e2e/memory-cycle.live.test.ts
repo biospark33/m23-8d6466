@@ -953,7 +953,12 @@ describe("memory cycle live", () => {
         // JSON; the recall content is the store's fact render, 0 repo-side
         // prose writers exist).
         expect(outcomeDoc?.content ?? "").toContain(runId);
-        expect(outcomeDoc?.content ?? "").toContain("completed with an exit classification of");
+        // The prose render is NOT byte-stable across runs (store-side fact
+        // paraphrase: fire 11 "…classification of 'green' and harvested 2
+        // items", fire 13 "…classification 'green' and a harvested count of
+        // 2") — only the identity fields are invariant. The classification
+        // word is the provenance check; the grammar around it is the store's.
+        expect(outcomeDoc?.content ?? "").toContain("green");
 
         // ── EXACTLY ONE memory-retain-receipt/retain row, subject = runId ──
         const receiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
