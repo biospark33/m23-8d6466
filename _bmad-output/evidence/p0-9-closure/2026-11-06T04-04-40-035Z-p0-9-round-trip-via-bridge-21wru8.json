@@ -1,0 +1,61 @@
+{
+  "leg": "p0-9-round-trip-via-bridge",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass: round trip ok — five steps via verifyRoundTrip (the authority), client live",
+  "steps": [
+    {
+      "step": "retain",
+      "outcome": "ok",
+      "durationMs": 0
+    },
+    {
+      "step": "recall",
+      "outcome": "ok",
+      "durationMs": 129
+    },
+    {
+      "step": "reflect",
+      "outcome": "ok",
+      "durationMs": 17629
+    },
+    {
+      "step": "consolidate",
+      "outcome": "ok",
+      "durationMs": 0
+    },
+    {
+      "step": "post_consolidate_recall",
+      "outcome": "ok",
+      "durationMs": 90
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"outcome\":\"start\",\"bankId\":\"qds-factory\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"retain\",\"bankId\":\"qds-factory\",\"durationMs\":0,\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"recall\",\"bankId\":\"qds-factory\",\"durationMs\":129,\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"reflect\",\"bankId\":\"qds-factory\",\"durationMs\":17629,\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"consolidate\",\"bankId\":\"qds-factory\",\"durationMs\":0,\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"step\":\"post_consolidate_recall\",\"bankId\":\"qds-factory\",\"durationMs\":90,\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-round-trip-via-bridge\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-11-06T04:04:40.034Z",
+  "bankId": "qds-factory",
+  "roundTrip": {
+    "ok": true,
+    "matchedMemoryId": "3717edab-9101-4831-9cdb-f26cf95fca87",
+    "recallMatches": true,
+    "reflectTextChars": 639,
+    "consolidatedCount": 0,
+    "preservedCount": 0,
+    "durations": {
+      "retain": 0,
+      "recall": 129,
+      "serverRecall": 0,
+      "reflect": 17629,
+      "consolidate": 0,
+      "postRecall": 90,
+      "total": 17848
+    },
+    "slowQuery": false,
+    "requestId": "7906fe10-9cd1-47ee-bece-638b67ac8c15"
+  },
+  "recallMs": 129,
+  "serverRecall": 0,
+  "slowQuery": false
+}
