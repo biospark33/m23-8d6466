@@ -795,6 +795,17 @@ describe("memory cycle live", () => {
         // surface and park it in evidence BEFORE the throw; on a green settle
         // this runs once, costs nothing, and never throws over the verdict.
         if (state !== "ok") {
+          // Box-side phase journal (the marker `fleet status` reads) — the
+          // completion payload `result` serves lags the verdict (2026-11-06
+          // fire 5 forensics raced it: status:"running", terminal:false while
+          // the settle poll had already read not-ok off the marker), so the
+          // STATUS marker is the capture that names the failed phase.
+          const notOkStatus = await runFleet(["status", round.runId, "--driver", "exedev", "--dir", round.recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 60_000 }).catch((e2: unknown) => ({
+            exitCode: -1,
+            stdout: "",
+            stderr: `status verb itself failed: ${e2 instanceof Error ? e2.message : String(e2)}`,
+          }));
+          round.evidence.push({ phase: "not-ok-forensics-status", statusExitCode: notOkStatus.exitCode, stdoutTail: notOkStatus.stdout.trim().slice(-1200), stderrTail: notOkStatus.stderr.trim().slice(-600) });
           const notOk = await runFleet(["result", round.runId, "--dir", round.recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 60_000 }).catch((e2: unknown) => ({
             exitCode: -1,
             stdout: "",
