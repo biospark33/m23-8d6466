@@ -1,0 +1,67 @@
+{
+  "leg": "p0-9-changed-content-upsert",
+  "mode": "live",
+  "ok": true,
+  "outcome": "pass: read-back UNMEASURED (upsertObserved=false) — retain v2 never completed; the record documents the upsert probe honestly without asserting an update; probe bank cleanup: already-gone",
+  "steps": [
+    {
+      "step": "probe-create",
+      "outcome": "ok"
+    },
+    {
+      "step": "retain-v1",
+      "outcome": "fail",
+      "detail": "HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 63743. To increase, visit https://openrouter.ai/workspaces/default/keys/150360e482d24595de01019be86c24d9f08837f006b2245ddce1c4ab376ed898 and adjust the key's monthly limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_credits', 'remedy_hint': 'Add credits at https:/…"
+    },
+    {
+      "step": "recall-baseline",
+      "outcome": "skipped (retain v1 unmeasured)"
+    },
+    {
+      "step": "retain-v2",
+      "outcome": "skipped (retain v1 unmeasured)"
+    },
+    {
+      "step": "recall-read-back",
+      "outcome": "skipped (retain v2 unmeasured)"
+    },
+    {
+      "step": "cleanup",
+      "outcome": "delete already-gone"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 0,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"prereq\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"outcome\":\"start\",\"bankId\":\"qds-ccupsert-1793905888994\",\"documentId\":\"qds-ccupsert-doc-bmlys0\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"probe-create\",\"bankId\":\"qds-ccupsert-1793905888994\",\"outcome\":\"ok\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"retain-v1\",\"outcome\":\"fail\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"step\":\"cleanup\",\"bankId\":\"qds-ccupsert-1793905888994\",\"outcome\":\"already-gone\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-changed-content-upsert\",\"outcome\":\"ok\"}",
+  "writtenAt": "2026-11-05T19:11:37.741Z",
+  "probeBankId": "qds-ccupsert-1793905888994",
+  "documentId": "qds-ccupsert-doc-bmlys0",
+  "retainOne": {
+    "measured": false,
+    "answered": false,
+    "detail": "HTTP 500: Fact extraction failed: 1/1 chunks failed. First failures: chunk 0: APIStatusError: Error code: 402 - {'error': {'message': \"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 63743. To increase, visit https://openrouter.ai/workspaces/default/keys/150360e482d24595de01019be86c24d9f08837f006b2245ddce1c4ab376ed898 and adjust the key's monthly limit\", 'code': 402, 'metadata': {'limit_source': 'openrouter_credits', 'remedy_hint': 'Add credits at https:/…"
+  },
+  "recallBaseline": {
+    "measured": false,
+    "hits": 0,
+    "withIdentity": 0,
+    "sawV2": false,
+    "sawV1": false,
+    "detail": "not attempted"
+  },
+  "retainTwo": {
+    "measured": false,
+    "answered": false,
+    "detail": "not attempted"
+  },
+  "readBack": {
+    "measured": false,
+    "hits": 0,
+    "withIdentity": 0,
+    "sawV2": false,
+    "sawV1": false,
+    "detail": "not attempted"
+  },
+  "upsertObserved": false
+}

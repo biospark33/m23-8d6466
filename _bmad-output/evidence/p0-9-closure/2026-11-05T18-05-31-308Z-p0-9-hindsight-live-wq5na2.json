@@ -1,0 +1,32 @@
+{
+  "leg": "p0-9-hindsight-live",
+  "mode": "live",
+  "ok": false,
+  "outcome": "leg-failure",
+  "steps": [
+    {
+      "step": "health-probe",
+      "outcome": "ok",
+      "durationMs": 5,
+      "detail": {
+        "status": 200,
+        "bodyTail": "{\"status\":\"healthy\",\"database\":\"connected\",\"db_acquire_ms\":1.0,\"db_pool_waiting\":0,\"db_pool_in_use\":0,\"db_pool_max\":100,\"db_pool_idle\":5}"
+      }
+    },
+    {
+      "step": "digest-identity",
+      "outcome": "failed-fork-checkout-unset",
+      "detail": "QDS_FORK_CHECKOUT unset — the pin source is the integration-lineage fork checkout's config/hindsight-version.txt; no default checkout is trusted (a stale 0.8.6 pin is exactly what this step exists to catch)"
+    },
+    {
+      "step": "shape-probe",
+      "outcome": "skipped-digest-unproven",
+      "detail": "digest identity unproven — no raw shape probe issued against a possibly-unpinned container"
+    }
+  ],
+  "origin": "http://127.0.0.1:18890/",
+  "exitCode": 1,
+  "stdoutTail": "",
+  "stderrTail": "{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"health-probe\",\"outcome\":\"ok\",\"durationMs\":5}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"digest-identity\",\"outcome\":\"failed-fork-checkout-unset\"}\n{\"event\":\"p0-9-leg\",\"leg\":\"p0-9-hindsight-live\",\"step\":\"shape-probe\",\"outcome\":\"skipped-digest-unproven\"}",
+  "writtenAt": "2026-11-05T18:05:31.307Z"
+}
