@@ -1,0 +1,52 @@
+{
+  "leg": "p1-7-e2e-gate-demo",
+  "legVersion": "p1.7-e2e.1",
+  "mode": "live",
+  "ok": false,
+  "startedAt": "2026-11-06T04:27:13.869Z",
+  "writtenAt": "2026-11-06T04:31:17.688Z",
+  "venue": "local-mac (phase-engine production venue)",
+  "spendEstimateUsdWorstCase": 0.15,
+  "workspaceKept": "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/p1-7-e2e-4gMnOJ",
+  "arms": [
+    {
+      "arm": "blocked",
+      "piRun": {
+        "exit": 1,
+        "stderrTail": "",
+        "stdoutTail": ""
+      },
+      "gate": null,
+      "verdict": "UNPROVEN",
+      "note": "agent edit did not carry the instructed error — arm unproven, not failed"
+    },
+    {
+      "arm": "waiver-0",
+      "piRun": {
+        "exit": 1,
+        "stderrTail": "",
+        "stdoutTail": ""
+      },
+      "gate": {
+        "passed": true,
+        "gateResult": "passed",
+        "waiver": 0,
+        "diagnostics": [],
+        "gateVersion": "p1.7.1"
+      },
+      "verdict": "PROVEN"
+    },
+    {
+      "arm": "no-lsp-fallback",
+      "gate": {
+        "passed": true,
+        "gateResult": "passed",
+        "waiver": 1,
+        "waiverReason": "no-lsp",
+        "diagnostics": [],
+        "gateVersion": "p1.7.1"
+      },
+      "verdict": "PROVEN"
+    }
+  ]
+}
