@@ -788,6 +788,20 @@ describe("memory cycle live", () => {
 
         const state = await waitForSettledVerdict({ recordsDir: round.recordsDir, evidence: round.evidence }, round.runId);
         round.evidence.push({ phase: "settled", state });
+        // Not-ok forensics (2026-11-06 fire 4: the run settled not-ok and the
+        // round had NO capture of WHY — the journal is box-side, destroyed with
+        // the box in finally, and the tmp workspace dies with the test). While
+        // the box is still up and the run is closed, read the completion
+        // surface and park it in evidence BEFORE the throw; on a green settle
+        // this runs once, costs nothing, and never throws over the verdict.
+        if (state !== "ok") {
+          const notOk = await runFleet(["result", round.runId, "--dir", round.recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 60_000 }).catch((e2: unknown) => ({
+            exitCode: -1,
+            stdout: "",
+            stderr: `result verb itself failed: ${e2 instanceof Error ? e2.message : String(e2)}`,
+          }));
+          round.evidence.push({ phase: "not-ok-forensics", resultExitCode: notOk.exitCode, stdoutTail: notOk.stdout.trim().slice(-800), stderrTail: notOk.stderr.trim().slice(-800) });
+        }
         // live-mirror: src/fleet/run-completion.ts ChainOutcome "ok" (the settled chain verdict literal)
         expect(state).toBe("ok");
       } catch (e) {
