@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { handleMemgateRequest } from "../../src/memgate/server.ts";
 import type { MemgateDeps } from "../../src/memgate/schemas.ts";
+import type { MemgateIssuanceRow, MemgateIssuanceInput } from "../../src/memgate/ledger.ts";
 import { mintRunMemoryKey } from "../../src/memgate/gateway.ts";
 
 function makeDeps(clientOverride?: { recall?: () => Promise<unknown> }): MemgateDeps {
@@ -12,11 +13,11 @@ function makeDeps(clientOverride?: { recall?: () => Promise<unknown> }): Memgate
     consolidate: async () => ({}),
     retain: async () => ({}),
   };
-  const issuance = new Map<string, { kind: string; claims_json: string; expires_at_ms: number | null }>();
+  const issuance = new Map<string, MemgateIssuanceRow>();
   const ledger = {
     getIssuance: (tokenId: string) => issuance.get(tokenId),
     isRevoked: () => false,
-    recordIssuance: (row: never) => { const r = row as { tokenId: string; kind: string; digest: string; claimsJson: string; runId: string | null; createdAtMs: number; expiresAtMs: number | null }; issuance.set(r.tokenId, { kind: r.kind, digest: r.digest, claims_json: r.claimsJson, run_id: r.runId, created_at_ms: r.createdAtMs, expires_at_ms: r.expiresAtMs }); },
+    recordIssuance: (row: never) => { const r = row as MemgateIssuanceInput; issuance.set(r.tokenId, { token_id: r.tokenId, kind: r.kind, digest: r.digest, claims_json: r.claimsJson, run_id: r.runId, created_at_ms: r.createdAtMs, expires_at_ms: r.expiresAtMs }); },
     listIssued: () => [],
   };
   return {
