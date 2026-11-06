@@ -1,0 +1,32 @@
+story: j3-model-router-decision-layer
+status: done  # merged — PR #427 (5b03a7b7); the in-progress research snapshot below predates the merge and is kept as history
+phase: complete-pr-427
+branch: feature/j3-model-router-decision-layer
+branch-convention: {prefix: feature/, base: dev, target: dev}  # cached sentinel CLAUDE.md
+story-file: _bmad-output/sprint-artifacts/dark-factory-v6/stories/j3-model-router-decision-layer.md
+deps-verified:
+  J1: done (PR #421 merged adf66aed; src/judgment/ present)
+  M1.2: done (PR #412 merged e6022356; run-retain.ts + retain-best-effort.ts landed)
+cross-track: no open feature PRs; J4/A2 ready-but-not-in-flight; wave-0 re-pin ops-gated NOT fired
+gitnexus: indexed HEAD 71cba89d (fresh, one merge commit behind — same tree)
+unlazy: orchestrated mode, scope=j3 (PLAN after research)
+notes: >-
+  A(Context7): no new libs — driver-resolved (Files-to-Modify has no package.json;
+  weights in code per AC1 negative control).
+  E(Deps): driver-verified via sprint-status.yaml + git log.
+  F(Cross-track): driver-verified via gh pr list.
+driver-pinned-facts:
+  seam: judge(state, questions, opts) -> JudgmentEnvelope (client.ts:133); envelope.requestId; mock-default; EGRESS ac-prose valid; ceiling 1M
+  retain: retainRunOutcome run-record-specific; routing retain = client.retain primitive + M1.2 discipline; runHarvest seam fleet.ts:6108
+  lock: acquireRunLock(scripts/lib/run-lock.ts:1011); CORPUS_LOCK_ID idiom (corpus/merge.ts:34)
+  roster: parseRoster schema.ts:266; resolveSlug :243; validate.ts validateRoster :959; gate reads rosterPath file (setup-gate.ts:141,191); dispatch reads roster :1653-1695; engine loadRoster in-box pipeline-run.ts:1568; fill writes .qds pair only (dispatch writes manifest pair and nothing else)
+  dispatch-steps: 2 brief/correlation -> 3 manifest+roster :2927 -> 4 runId :2963 -> admission -> provisioning -> fill :4037 -> gate :4046
+  hook-window: after step 4 (runId exists for log line), before admission/mint; off credentials ordering
+  impact: DispatchDeps CRITICAL 17-direct; optional-add mitigation
+open-cell: tier-override materialization (gate rosterPath vs in-box engine roster) — research B Q2
+PAUSE-CHECKPOINT (user break, resume on 'go'):
+- review round 1: 23 findings triaged (19 patch/1 false/3 DAR); fix waves A/B/C landed + driver fixes (cli withRoutingCwd x5, q1 wrap done, skill-contract fixture roster, store-rooted routing log, absent-roster carry fold)
+- REMAINING before round 2: skill-contract DoD e2e probe provenance wrap (same chdir pattern, ~:1129 run(dispatchArgv) site); then grand sweep; then round 2 review (bmad-code-review, fix all incl lows); then node+root gates (G1 full suite vs baseline 15, G2-G4, G7 detect_changes); then story closure (Dev Agent Record, Re-visit refresh, status done, DAR notes: skip-line interpretation, lock-drop sign-off, files-outside-list C11, twin-vs-consume); then PR to dev
+- branch: feature/j3-model-router-decision-layer; all work UNCOMMITTED
+- gates: node-1.1/1.2/1.3 ALL MET (stale post-fix-wave — re-approve ledgers before trusting); leaves 1.1.1/1.2.1/1.2.2/1.3.1 VERIFIED+released
+- test state at pause: cli 188/0, q1 13/0, skill-contract 58/0 (q1+sc combined), judgment+retain+dispatch-router+roster-override 248/0 pre-store-rooting (resweep owed)

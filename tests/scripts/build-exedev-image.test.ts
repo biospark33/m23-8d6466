@@ -1553,7 +1553,17 @@ describe("buildIdFileInputs", () => {
       // runRoot-pinned path resolution, zero-coverage degradation, the
       // fail-closed real test-pass fallback (bun test, bounded), and the
       // ast-grep slice removal.
-      "fb7602c030c487587a3c3784dc02315b23ad918ac229b4adab35d1928143bc2c",
+      //
+      // f552ab25: moved from fb7602c0 by the issue #503 CI-gate fix — the sole
+      // mover is `package.json`'s `check:coverage` script (the `--parallel=4`
+      // run shape that keeps the gate off the CI runner's OOM cliff; the
+      // bunfig.coverage.toml docblock documenting it measured ABSENT from this
+      // walk — the digest is unchanged by that edit). Script text only; no
+      // dependency moved. Image re-publish rides the ops-gated wave-0 ritual.
+      // Adopted from this test's own failing run on the final tree
+      // (edit-first/re-pin-last; the story-consistency spawn tests' 30s
+      // budgets are tests/ and do not walk).
+      "f552ab259b6d2b881c76bb82702f0c2e48c7557e85384f24561b9638be8ba8af",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

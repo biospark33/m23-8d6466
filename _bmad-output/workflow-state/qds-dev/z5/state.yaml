@@ -1,0 +1,15 @@
+story: Z5
+story_path: _bmad-output/sprint-artifacts/dark-factory-v6/stories/z5-chassis-fate.md
+status: done
+phase: 5-complete  # closed 2026-10-14 — PR #426 merged to dev (77b9339f)
+branch: feature/z5-chassis-fate
+base: dev
+target: dev
+mode: unlazy-orchestrated (scope=z5)
+operator_directive: subagents run ONLY targeted checks on files they own; driver alone runs full suite at branch gate + targeted suites during integration
+branch_convention_sentinel: "qds-dev branch convention: prefix=feature/ base=dev target=dev"
+hitl:
+  story_confirmation: "operator invoked /qds-dev Z5- explicitly 2026-10-13 — confirmed"
+baseline: pending
+research: pending
+dev_story: pending

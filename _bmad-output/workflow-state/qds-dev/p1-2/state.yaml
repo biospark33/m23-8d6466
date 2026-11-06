@@ -1,0 +1,9 @@
+story: P1.2
+status: done  # merged
+branch: feature/p1-2
+pr: 487
+merged: 8545dc8e  # squash merge to dev
+base: dev
+completed: 2026-11-04
+gates: swarmclaw 249 + targeted 1875 green; tsc/biome/dp clean; full suite 9040/2 accounted (pin re-pinned, fanout race standalone-green); review 3 findings applied
+notes: row flip = steve post-merge. live e2e operator-gated.

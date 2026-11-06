@@ -11,9 +11,10 @@
 # gated wholesale, so the gate is its own run:
 #
 #   bun run check:coverage
-#   = bun --config=bunfig.coverage.toml test tests/scripts tests/scripts/corpus \
-#       tests/providers tests/lib tests/judgment tests/reverify tests/p0-9 \
-#       tests/hindsight tests/memgate tests/pr tests/kpi tests/fixloop \
+#   = bun --config=bunfig.coverage.toml test --parallel=4 \
+#       tests/scripts tests/scripts/corpus tests/providers tests/lib \
+#       tests/judgment tests/reverify tests/p0-9 tests/hindsight tests/qa \
+#       tests/memgate tests/pr tests/kpi tests/fixloop \
 #       tests/swarmclaw/mask-env.test.ts
 #
 # FLAG POSITION IS LOAD-BEARING. `--config` is a bun GLOBAL flag and must come
@@ -147,6 +148,38 @@
 # 100.00 / 100.00; no file in scope under 0.60. The red stayed unseen because
 # a permanently red `check` hid #430's real buildIdFileInputs failure (fixed
 # in #432).
+# THE GATE OOMED ON CI — AND THE FIX IS A PARALLEL RUN (2026-11-06, issue #503).
+# Since #498 the CI `check` job died mid-run under coverage instrumentation at
+# the same point every time: the log ends mid tests/qa/harvested-findings.test.ts
+# (thousands of passes, zero fail lines, no error text), right at the
+# qa→memgate boundary — the run's memory peak. Root shape: ONE process
+# instruments the whole drag set, the qa leg-driver tree and the memgate tree
+# peak together, and the hosted runner's OOM killer ends the process (the
+# abrupt no-signal cut; the step is marked failure with no bun error line).
+# The tests job's file-per-process shape (#250) cannot be borrowed: the floor
+# is enforced on every measured file IN the run, so any split red-fires drags
+# whose covering suite sits in another scope (measured: a 2-file corpus subset
+# exits 1 on src/lib/log.ts at 0.00% funcs).
+#
+# THE FIX: `--parallel=4` on the same run line — same file list, same threshold.
+# bun 1.4.2 AND 1.4.3's parallel test runner splits test FILES across N worker
+# processes, implies --isolate (a fresh module registry per file — the memory
+# shape of the green tests job), and the coordinator FOLDS coverage across
+# workers per source path (src/runtime/cli/test/parallel/{Coordinator,aggregate}.rs:
+# `MergedReport` — "coverage folded across every worker that loaded it"), then
+# enforces the SAME per-file threshold over the merged set
+# (print_coverage_reports: fraction() per report, any() failing). The drag
+# closure that made a split architecturally impossible therefore holds ACROSS
+# workers within ONE invocation: a file loaded unexecuted in worker A and
+# covered by its suite in worker B merges covered. Measured on both versions:
+# the merged table and the per-file exit-1 semantics are identical to the
+# serial run's (the same corpus subset red-fires log.ts at 0.00 exactly as
+# serial). Worker-local memory is a strict subset of the serial run's, so no
+# worker can reproduce the qa+memgate peak that killed the serial process.
+#
+# THE TWO-WAY CHECK IS UNCHANGED AND STILL OWED after any script edit: raise
+# the threshold to 0.99, confirm the run goes RED, restore, confirm green.
+#
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 

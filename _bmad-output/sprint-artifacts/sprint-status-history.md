@@ -224,3 +224,32 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # ritual (blocks all T2 — J3+J4 pin moves now on the tree), M1.2 AC7 / M2.3 live-fire T2 rounds,
 # A6 AC7 + Z4 AC8 fired halves, issue #408 (M1.1 VPS-day remainder). The 2026-09-18 note this
 # replaces was drained to sprint-status-history.md.
+
+## 2026-10-24
+
+# 2026-10-24 (post-merge reconciliation — git history + `gh pr view` as authority):
+# v6 state: 21 of 24 rows done (Z1 Z2 Z4 Z5 · M1.1 M1.2 M1.3 M2.1 M2.2 M2.3 M3.1 M3.2 ·
+# A1 A2 A3 A5 A6 · J1 J3 J4 · G1). A1 PR #434 (8e78354c, 2026-10-16), A2 PR #436 (d061869a,
+# 2026-10-16) + follow-through #464/#466 (2026-10-19), A3 PR #437 (556f5bbc, 2026-10-17).
+# Not done: M1.4 draft (atomicity audit owed); Z3 gated (code merged — factory #468 f34ad9b8,
+# swarmclaw #830 cc91aac7 — PR #469 merged to dev 13af550f 2026-10-26 (closes #465,
+# CLOSED COMPLETED); #467 UNBLOCKED 2026-10-26: exe.dev image re-published (publish run
+# 40326654015 green: publish/attest/attested), pin adopted in the same-commit ritual (#474 TOFU
+# ARGs, #476 driver REF sha256:1c8455a0…/buildId c8dd0a49…), verify-image-pin's verify job green
+# (40336238552) — Z3_UPSTREAM_BLOCKERS emptied; live round waits on operator GO only);
+# J2 gated (corpus milestones + operator sign-off). Open QA-leg gap #470.
+# STALENESS FIXED IN THIS RECONCILIATION: this note read 18/24 with A1/A2/A3 gated; the v6 header read
+# "ADR-2 (PROPOSED)" (ACCEPTED 2026-10-15, PR #430); the M3.1 row still read "ready when M2.1
+# lands" (PR #422 merged 2026-10-10); the A2 row read "fork PR #822 open" (merged 898b2d46,
+# 2026-10-19); the A2 story header dated #436's merge 2026-10-17 (merged 2026-10-16). All 30
+# "PR #N merged" date/sha claims in the v6 rows + story headers re-checked against gh.
+# Three independent reviews then also fixed: #469 described as fixing #467 (it closes only #465);
+# "re-pin ritual NOT fired" on M2.2/J3/J4 + the ops register (the ritual has run: 9ae282c9
+# 2026-10-16 → #463 2026-10-18); A2 row named #465 the one handoff (#467/#470 also open) and
+# omitted swarmclaw#808 (still open); uncited PRs #415/#432/#435/#438/#393/#394 added; the v6
+# index still read A1/A2/A3/M3.1 gated + ADR-2 PROPOSED; the P0.3 story header read
+# ready-for-review (PR #40 merged 2026-07-20). Epic-level `status: ready-for-dev` is left as
+# the file-wide convention (every epic, v5 included, carries it).
+# Operator-gated legs still open: M1.2 AC7 / M2.3 live-fire T2 rounds, A6 AC7 + Z4 AC8 fired
+# halves, A3 sign-offs + crontab install + live round, issue #408 (M1.1 VPS-day remainder).
+# The 2026-10-15 note this replaces was drained to sprint-status-history.md.
