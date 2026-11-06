@@ -1,0 +1,155 @@
+{
+  "test": "L3-harvest-retain",
+  "runId": "qds-20261106-a4e4f3",
+  "vmName": "qds-20261106-a4e4f3",
+  "repoBankId": "qds-probe-m12-mw545v39keoy",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1b9bc4b9d574ce4b6bcfc5a5b29b298989ec96f8be67f7d0c37f50add4ec81ac",
+    "buildId": "66729909dd2c9051"
+  },
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "auditDb": "round-owned (under the tmp workspace)"
+    },
+    {
+      "phase": "seed-probe-family",
+      "repoBankId": "qds-probe-m12-mw545v39keoy",
+      "devMetaBankId": "qds-probe-m12-mw545v39keoy-dev-meta",
+      "repoSlug": "qds-probe/m12-mw545v39keoy",
+      "repoUrl": "https://github.com/qds-probe/m12-mw545v39keoy.git",
+      "documentId": "m12-prime-20261106",
+      "preExistingBankCount": 3,
+      "seamResolution": "qds-probe-m12-mw545v39keoy"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20261106-a4e4f3\",\"requestId\":\"0de01904-2ebd-4cad-934c-8c5a9a44cd36\",\"state\":\"ready\",\"vmName\":\"qds-20261106-a4e4f3\",\"httpsUrl\":\"https://qds-20261106-a4e4f3.exe.xyz\"}",
+      "stderrTail": "1-06T15:13:46.774Z\",\"duration\":51325,\"durationMs\":51325,\"status\":\"ok\",\"runId\":\"qds-20261106-a4e4f3\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3334,\"mint_ms\":1657,\"fill_ms\":29572,\"setup_gate_ms\":15462}}\n{\"requestId\":\"0de01904-2ebd-4cad-934c-8c5a9a44cd36\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:13:46.775Z\",\"duration\":51430,\"durationMs\":51430,\"status\":\"ok\",\"runId\":\"qds-20261106-a4e4f3\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20261106-a4e4f3",
+      "vmName": "qds-20261106-a4e4f3"
+    },
+    {
+      "phase": "side-channel-row",
+      "rowPath": "/_bmad-output/memory/recall/0de01904-2ebd-4cad-934c-8c5a9a44cd36.json",
+      "row": {
+        "runId": "0de01904-2ebd-4cad-934c-8c5a9a44cd36",
+        "primed": true,
+        "directive": "kg_context",
+        "banks": [
+          "qds-probe-m12-mw545v39keoy",
+          "qds-collective"
+        ],
+        "recalledDocumentIds": [
+          "m12-prime-20261106"
+        ],
+        "chars": 859,
+        "latencyMs": 100
+      }
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "b6c2d4088d8bb8e8d950121084e63aca0eb629908c163bc74d7b30646866cdfe",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20261106-a4e4f3",
+      "stderrTail": "ervice\",\"printed\":true}\n{\"requestId\":\"967acfab-fc06-4944-a243-bd889695183c\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:13:52.637Z\",\"duration\":4675,\"durationMs\":4675,\"status\":\"ok\",\"runId\":\"qds-20261106-a4e4f3\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "settle-poll",
+      "runId": "qds-20261106-a4e4f3",
+      "state": "not-ok",
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 2,
+          "exitCode": 0,
+          "state": "not-ok"
+        }
+      ]
+    },
+    {
+      "phase": "settled",
+      "state": "not-ok"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: \"ok\"\nReceived: \"not-ok\"\n"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: none",
+      "stderrTail": "\",\"outcome\":\"inserted\",\"message\":\"audit link inserted: run qds-20261106-a4e4f3 hop memory-retain-receipt.retain\"}\n{\"requestId\":\"a7b073e9-718e-4be9-a2c0-2900cf206c7b\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:14:33.084Z\",\"duration\":20298,\"durationMs\":20298,\"status\":\"ok\",\"runId\":\"qds-20261106-a4e4f3\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeTrue()\n\nReceived: false\n"
+    },
+    {
+      "at": "finally-teardown",
+      "runId": "qds-20261106-a4e4f3",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":7}\n{\"requestId\":\"093d0c4b-eb97-4a9d-8e59-80e033100d7f\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:14:41.813Z\",\"duration\":8680,\"durationMs\":8680,\"status\":\"ok\",\"runId\":\"qds-20261106-a4e4f3\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261106-a4e4f3",
+      "ok": true
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": true,
+      "alreadyGone": false,
+      "bankId": "qds-probe-m12-mw545v39keoy",
+      "deletedCount": 13
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": true,
+      "alreadyGone": false,
+      "bankId": "qds-probe-m12-mw545v39keoy-dev-meta",
+      "deletedCount": 5
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "finally-delete-recall-row",
+      "ok": true,
+      "rowPath": "/_bmad-output/memory/recall/0de01904-2ebd-4cad-934c-8c5a9a44cd36.json"
+    }
+  ],
+  "writtenAt": "2026-11-06T15:14:45.478Z"
+}

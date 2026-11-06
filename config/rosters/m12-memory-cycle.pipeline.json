@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "m12-memory-cycle",
+  "runBudgetMs": 900000,
+  "phases": [
+    {
+      "name": "memory-cycle-probe",
+      "kind": "dispatch_task",
+      "description": "M1.2 live round probe phase: the single-fixer team (lead + one write-capable fixer from config/rosters/roster.yaml) makes the smallest possible committing change — create one scratch file with one line, git add + git commit on the current sandbox branch — so harvest classifies the range as harvested (not NOCOMMITS), the bundle exists, and the round's L3 assertions (bundle, artifacts incl. solicit-prompt files, memory-retain receipt, re-harvest dedup) are satisfiable at all. The task is deliberately trivial and fully specified so the only nondeterminism is the model's compliance, never the shape of the work. Budget: 270000 phase cap prices 3x(270000+15000)+2 margins = 865000 under runBudgetMs 900000 — the m23-combined-memory R2-001 rule (runBudgetMs must fit the dispatch caller's ceiling pre-spend).",
+      "roster": "config/rosters/roster.yaml",
+      "task": "You lead a single-fixer team. Make the smallest possible committing change in this checkout: create a file named MEMORY-CYCLE-PROBE.txt containing a single line — the current date and the word PROBE — then git add + git commit it on the current sandbox branch. Uncommitted work is invisible to harvest, which counts commits on the sandbox branch. Do not push, do not open PRs, do not touch git remotes, CI configuration, or the verification surface. When the commit is made, finish with a JSON object of shape {\"changedFiles\": [\"MEMORY-CYCLE-PROBE.txt\"], \"result\": {\"summary\": \"<one-line summary>\"}}.",
+      "maxDurationMs": 270000,
+      "retries": 0
+    },
+    {
+      "name": "verify-committed",
+      "kind": "code",
+      "description": "Fails the run when the fixer left work uncommitted: harvest counts commits on the sandbox branch, so a dirty tree would harvest nothing new and the probe change would silently vanish. ALL three required checks live in testCommand — the commandGate composition (DF3.3) is the ONLY failure path that gates a code phase's verdict (runCommand resolves {exitCode, stdoutTail} on a nonzero command; a command's exit alone never fails the phase, PF-2): clean `git status --porcelain`, MEMORY-CYCLE-PROBE.txt present, and the file in the LATEST commit — a fixer that commits a different file (or nothing, or leaves edits uncommitted) fails here, before harvest can classify the range as harvested. The command stays the informational `git log --oneline -1` tail whose output rides the phase value. Companion phase required by the shipped manifest loader (MIN_PHASES = 2, src/phase-engine/types.ts:57).",
+      "command": [
+        "bash",
+        "-lc",
+        "git log --oneline -1"
+      ],
+      "testCommand": [
+        "bash",
+        "-lc",
+        "test -z \"$(git status --porcelain)\" || { echo 'uncommitted work remains in the checkout — the probe phase must commit everything on the sandbox branch' >&2; exit 1; }; test -f MEMORY-CYCLE-PROBE.txt || { echo 'MEMORY-CYCLE-PROBE.txt absent from the checkout — the probe phase must create it' >&2; exit 1; }; git diff-tree --no-commit-id --name-only -r HEAD | grep -qx 'MEMORY-CYCLE-PROBE.txt' || { echo 'MEMORY-CYCLE-PROBE.txt not in the latest commit — the probe file must land in the probe phase commit' >&2; exit 1; }"
+      ],
+      "maxDurationMs": 15000,
+      "retries": 0
+    }
+  ]
+}

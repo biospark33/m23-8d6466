@@ -118,12 +118,35 @@ import {
 
 // ─── round constants ─────────────────────────────────────────────────────────
 
-/** Plan default (e2e-plan.md §TIER-2): 50,000 µ$ = $0.05 worst-case per key. */
-const T2_CAP_MICRO_USD = 50_000;
+/**
+ * Key cap for the minted per-run key. Was 50,000 µ$ (e2e-plan.md §TIER-2's
+ * "$0.05 worst-case per key") — TOO TIGHT TO FUND THE LEG: every in-box model
+ * call refused instantly (0 tokens, phase fail `transient`), while the same
+ * manifest/box/roster with the built-in default cap ran green and a GREEN run
+ * of this leg actually spends ~75,812 µ$ (manual run qds-20261106-8f3d81,
+ * cost-ledger). Measured 2026-11-06 across fires 4-10 (test fires all
+ * 0-token-failed at cap 50,000; manual repros at the 5,000,000 default all
+ * green — primed AND unprimed). 500,000 µ$ = $0.50 funds the leg with
+ * headroom; the cap still bounds spend (the leg's L3 assert
+ * spendMicroUsd <= cap now reads the 500,000 echo).
+ */
+const T2_CAP_MICRO_USD = 500_000;
 /** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
 const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
-/** The probe manifest the T2 tiers dispatch: code phases only, 60 s budget. */
-const MANIFEST_PATH = "config/rosters/t2.pipeline.json";
+/**
+ * This round's OWN manifest — NOT the T2 engine probe (`config/rosters/t2.pipeline.json`,
+ * `echo` + `true`, zero commits, zero solicits). L3 asserts a harvested bundle + solicit-prompt
+ * artifacts (`<runId>-solicit-*-prompt.txt` — the in-box `<kg_context>` render proof); a
+ * code-only manifest can never satisfy either: harvest's Step A classifies the empty range
+ * NOCOMMITS, AC4 deliberately leaves no bundle (`rmSync(hostBundle)`), and `pullArtifacts`
+ * pulls prompt files that a command-only pipeline never creates. Latent since authoring
+ * (2026-10-09, triple-reviewed, never fired); first fire 2026-11-06 red'd at
+ * tests/fleet/e2e/memory-cycle.live.test.ts:847 on exactly this (evidence
+ * _bmad-output/evidence/m1-2/2026-11-06-145950-m12-l3-harvest-retain-a43jn8.json:
+ * harvest exit 0 + "harvested: none"). The dispatch_task phase makes the fixer commit on the
+ * sandbox branch (harvest counts commits on sbx/<runId>) and produces the solicit artifacts.
+ */
+const MANIFEST_PATH = "config/rosters/m12-memory-cycle.pipeline.json";
 /** The minted-runId grammar (dispatch.ts MINTED_RUN_ID_RE) — AC4's documentId. */
 const MINTED_RUN_ID = /^qds-\d{8}-[a-f0-9]{6}$/;
 
@@ -295,6 +318,9 @@ interface RoundState {
   runId: string;
   vmName: string;
   repoBankId: string;
+  /** The probe repo slug this round dispatched with — the retain seam's
+   * repoSlug input (extensions.budget.repoSlug) must equal it. */
+  probeSlug: string;
   primeDocId: string;
   /** Banks THIS round created (the probe family pair) — the only ones cleanup deletes. */
   banksWeCreated: string[];
@@ -314,6 +340,7 @@ const round: RoundState = {
   runId: "",
   vmName: "",
   repoBankId: "",
+  probeSlug: "",
   primeDocId: "",
   banksWeCreated: [],
   recallRowPaths: [],
@@ -604,6 +631,7 @@ describe("memory cycle live", () => {
         expect(existing.has(base)).toBe(false);
         expect(existing.has(devMeta)).toBe(false);
         round.repoBankId = base;
+        round.probeSlug = probe.slug;
         // Armed BEFORE the awaits (L1's discipline): a createBank that times
         // out AFTER the server-side create still gets deleted by L3's
         // cleanup — pushing after the await orphaned exactly the bank this
@@ -688,7 +716,23 @@ describe("memory cycle live", () => {
         // the one host-side git consumer of the probe URL (the run/harvest/
         // teardown verbs never clone).
         const dispatch = await runFleet(
-          ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", round.recordsDir],
+          [
+            "dispatch",
+            "--driver",
+            "exedev",
+            "--brief",
+            briefPath,
+            "--dir",
+            round.recordsDir,
+            // dual-role (tier2-rig-swarm-mixed, m23-combined-memory R2-001):
+            // dispatch wall clock AND the callerBudgetMs ceiling — the m12
+            // manifest's runBudgetMs 900,000 must fit UNDER it with headroom,
+            // or the ceiling refuses the manifest pre-spend (2026-11-06 fire 2:
+            // "runBudgetMs 1900000 exceeds callerBudgetMs 600000", evidence
+            // _bmad-output/evidence/m1-2/2026-11-06-150739-m12-l2-*.json).
+            "--timeout-ms",
+            "960000",
+          ],
           { cwd: REPO_ROOT, env: { ...env, ...gitAliasEnv }, timeoutMs: 1_200_000 },
         ).catch((e: unknown) => {
           const partial = fleetPartialOutput(e);
@@ -760,6 +804,31 @@ describe("memory cycle live", () => {
 
         const state = await waitForSettledVerdict({ recordsDir: round.recordsDir, evidence: round.evidence }, round.runId);
         round.evidence.push({ phase: "settled", state });
+        // Not-ok forensics (2026-11-06 fire 4: the run settled not-ok and the
+        // round had NO capture of WHY — the journal is box-side, destroyed with
+        // the box in finally, and the tmp workspace dies with the test). While
+        // the box is still up and the run is closed, read the completion
+        // surface and park it in evidence BEFORE the throw; on a green settle
+        // this runs once, costs nothing, and never throws over the verdict.
+        if (state !== "ok") {
+          // Box-side phase journal (the marker `fleet status` reads) — the
+          // completion payload `result` serves lags the verdict (2026-11-06
+          // fire 5 forensics raced it: status:"running", terminal:false while
+          // the settle poll had already read not-ok off the marker), so the
+          // STATUS marker is the capture that names the failed phase.
+          const notOkStatus = await runFleet(["status", round.runId, "--driver", "exedev", "--dir", round.recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 60_000 }).catch((e2: unknown) => ({
+            exitCode: -1,
+            stdout: "",
+            stderr: `status verb itself failed: ${e2 instanceof Error ? e2.message : String(e2)}`,
+          }));
+          round.evidence.push({ phase: "not-ok-forensics-status", statusExitCode: notOkStatus.exitCode, stdoutTail: notOkStatus.stdout.trim().slice(-1200), stderrTail: notOkStatus.stderr.trim().slice(-600) });
+          const notOk = await runFleet(["result", round.runId, "--dir", round.recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 60_000 }).catch((e2: unknown) => ({
+            exitCode: -1,
+            stdout: "",
+            stderr: `result verb itself failed: ${e2 instanceof Error ? e2.message : String(e2)}`,
+          }));
+          round.evidence.push({ phase: "not-ok-forensics", resultExitCode: notOk.exitCode, stdoutTail: notOk.stdout.trim().slice(-800), stderrTail: notOk.stderr.trim().slice(-800) });
+        }
         // live-mirror: src/fleet/run-completion.ts ChainOutcome "ok" (the settled chain verdict literal)
         expect(state).toBe("ok");
       } catch (e) {
@@ -870,7 +939,7 @@ describe("memory cycle live", () => {
 
         // ── probe recall: the run bank now holds the outcome document ──────
         const mem = new HindsightClient();
-        const probe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 5 });
+        const probe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 10, waitMs: 5_000 });
         const outcomeDoc = probe.res.results.find((r) => r.documentId === runId);
         evidence.push({
           phase: "probe-recall",
@@ -880,14 +949,60 @@ describe("memory cycle live", () => {
         });
         expect(outcomeDoc).toBeDefined();
         // The retained payload is the host-authored structured outcome — its
-        // runId field must name THIS run (content, not just identity).
-        expect(outcomeDoc?.content ?? "").toContain(`"runId":"${runId}"`);
+        // runId must name THIS run (content, not just identity). The STORE
+        // renders the canonical JSON payload (buildRetainPayload) as prose
+        // facts on recall — `Execution run <runId> … exit classification of
+        // '<class>' … harvested N items. | When: <retain date>' — so the
+        // assert reads identity off the RENDERED text, never the payload's
+        // raw bytes (2026-11-06 fire 11: the payload IS compact JSON; the
+        // recall content is the store's fact render, 0 repo-side prose
+        // writers exist). IDENTITY ONLY: the prose render is NOT byte-stable
+        // across runs (store-side fact paraphrase — fire 11 vs fire 13 differ
+        // in grammar), so no prose word is asserted here; the payload's
+        // repoSlug input is verified at its seam below (the record field the
+        // retain reads), not off the store's paraphrase.
+        expect(outcomeDoc?.content ?? "").toContain(runId);
 
-        // ── EXACTLY ONE memory-retain-receipt/retain row, subject = runId ──
+        // ── harvest-retain SEAM: the payload's repoSlug input ──────────────
+        // retainRunOutcomeBestEffort reads extensions.budget.repoSlug off the
+        // record and SKIPS the retain without it — the outcome doc found above
+        // proves the retain ran, so the record must carry the probe slug the
+        // round dispatched with. (harvestedCount has NO repo-side capture —
+        // G7: "the bundle IS the harvest's record — harvest writes nothing to
+        // the run record" — so it is verified by the store render's own
+        // prose, which this assert deliberately does not parse.)
+        const retainSeamRec = new RunRecordStore({ dir: recordsDir }).get(runId);
+        const retainRepoSlug = retainSeamRec.extensions?.budget?.repoSlug;
+        evidence.push({ phase: "retain-seam", retainRepoSlug: retainRepoSlug ?? null });
+        expect(retainRepoSlug).toBe(round.probeSlug);
+
+        // ── EXACTLY ONE memory-retain-receipt/retain row for the OUTCOME ──
+        // The M1.2 retain emits TWINS (PR #412's retain-twin dedup contract):
+        // the repo outcome document (subjectId = runId) AND a routing twin to
+        // the -dev-meta bank (subjectId = routing-<runId>-dev-meta). Each twin
+        // carries its own receipt with its own coalesce identity — the dedup
+        // contract is PER-TWIN, so the ONE-receipt assert filters to the
+        // outcome twin's identity (2026-11-06 fire 14: first time this assert
+        // ran — every earlier fire red'd upstream — and read 2: outcome +
+        // routing twin; the authored single-receipt expectation predates the
+        // twins).
         const receiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
           const handle = openAuditStoreForWalk(auditDb);
           try {
-            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain");
+            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain" && l.subjectId === runId);
+          } finally {
+            handle.close();
+          }
+        };
+        // The ROUTING twin's receipts — the same per-twin dedup contract, on
+        // the identity the runId filter above excludes (scripts/fleet.ts's
+        // routing retain: documentId = `routing-<runId>-dev-meta`, bank =
+        // `<repoBankId>-dev-meta`). Queried by its own subject filter, never
+        // folded into the outcome-twin count.
+        const routingReceiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
+          const handle = openAuditStoreForWalk(auditDb);
+          try {
+            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain" && l.subjectId === `routing-${runId}-dev-meta`);
           } finally {
             handle.close();
           }
@@ -904,24 +1019,46 @@ describe("memory cycle live", () => {
         const receiptDetail = receipts[0]?.detail as { documentId?: string; bank?: string } | null | undefined;
         expect(receiptDetail?.documentId).toBe(runId);
         expect(receiptDetail?.bank).toBe(repoBankId);
+        // The routing twin's OWN receipt: exactly one after the first harvest
+        // (its dedup contract is per-twin, same coalesce identity —
+        // (runId, memory-retain-receipt, retain, routing-<runId>-dev-meta)).
+        const routingReceipts = routingReceiptRows();
+        evidence.push({
+          phase: "routing-receipts-after-harvest-1",
+          count: routingReceipts.length,
+          subjects: routingReceipts.map((l) => l.subjectId ?? null),
+          detail: routingReceipts.map((l) => l.detail ?? null),
+        });
+        expect(routingReceipts.length).toBe(1);
+        expect(routingReceipts[0]?.subjectId).toBe(`routing-${runId}-dev-meta`);
+        const routingDetail = routingReceipts[0]?.detail as { documentId?: string; bank?: string } | null | undefined;
+        expect(routingDetail?.documentId).toBe(`routing-${runId}-dev-meta`);
+        expect(routingDetail?.bank).toBe(`${repoBankId}-dev-meta`);
 
         // ── re-harvest: NO second document, NO second receipt row ──────────
         const reharvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, env, timeoutMs: 300_000 });
         evidence.push({ phase: "reharvest-verb", exitCode: reharvest.exitCode, stdout: reharvest.stdout.trim().slice(0, 200) });
         expect(reharvest.exitCode).toBe(0);
-        const reprobe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 5 });
+        const reprobe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 10, waitMs: 5_000 });
         const matchesAfterReplay = reprobe.res.results.filter((r) => r.documentId === runId).length;
         receipts = receiptRows();
-        evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length });
+        const routingAfterReplay = routingReceiptRows();
+        evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length, routingReceiptCount: routingAfterReplay.length });
         expect(matchesAfterReplay).toBe(1);
-        expect(receipts.length).toBe(1);
+        expect(receipts.length).toBe(1); // outcome-twin receipt stays deduped (per-twin identity, filter above)
+        expect(routingAfterReplay.length).toBe(1); // routing twin stays deduped too (same per-twin contract)
 
         // ── body teardown (the round is asserted; the verb closes it) ──────
         // --no-harvest is LOAD-BEARING: a teardown harvest here would fire the
         // retain seam a THIRD time after the dedup assertions above.
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], { cwd: hostRepo, env, timeoutMs: 300_000 });
         evidence.push({ phase: "teardown-verb", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
-        expect(td.exitCode).toBe(0);
+        // Exit 6 = the DOCUMENTED harvest_waived success for --no-harvest
+        // teardown (live-e2e skill gotcha #6: "a --no-harvest teardown
+        // legitimately exits 6 — asserting toBe(0) on it is wrong"). The
+        // authored toBe(0) predates the exit-table; the substance asserts
+        // below (closedAt / spend / boxGone) prove the actual cleanup.
+        expect(td.exitCode === 0 || td.exitCode === 6).toBeTrue();
         const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
         expect(closed.closedAt ?? "").not.toBe("");
         expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);

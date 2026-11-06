@@ -1,0 +1,74 @@
+{
+  "test": "L3-harvest-retain",
+  "runId": "",
+  "vmName": "",
+  "repoBankId": "qds-probe-m12-mw53z2xthsew",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1b9bc4b9d574ce4b6bcfc5a5b29b298989ec96f8be67f7d0c37f50add4ec81ac",
+    "buildId": "66729909dd2c9051"
+  },
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "auditDb": "round-owned (under the tmp workspace)"
+    },
+    {
+      "phase": "seed-probe-family",
+      "repoBankId": "qds-probe-m12-mw53z2xthsew",
+      "devMetaBankId": "qds-probe-m12-mw53z2xthsew-dev-meta",
+      "repoSlug": "qds-probe/m12-mw53z2xthsew",
+      "repoUrl": "https://github.com/qds-probe/m12-mw53z2xthsew.git",
+      "documentId": "m12-prime-20261106",
+      "preExistingBankCount": 3,
+      "seamResolution": "qds-probe-m12-mw53z2xthsew"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdoutTail": "",
+      "stderrTail": "ings\":{\"validate_ms\":0}}\n{\"manifestPath\":\"/Users/steve/QDS-Factory/config/rosters/m12-memory-cycle.pipeline.json\",\"runId\":null,\"code\":\"manifest-rejected\",\"message\":\"manifest rejected: runBudgetMs 1900000 exceeds callerBudgetMs 600000\",\"remediation\":\"fix the manifest, or point manifestPath at one beneath /Users/steve/QDS-Factory\"}\n{\"requestId\":\"0b4ac3b9-4050-43eb-a345-c12fd0c0ec21\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:07:39.250Z\",\"duration\":220,\"durationMs\":220,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "test-error",
+      "error": "L2 did not reach preflight/dispatch — nothing to harvest; refusing to fire a hollow leg"
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": true,
+      "alreadyGone": false,
+      "bankId": "qds-probe-m12-mw53z2xthsew",
+      "deletedCount": 6
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": false,
+      "alreadyGone": true,
+      "bankId": "qds-probe-m12-mw53z2xthsew-dev-meta",
+      "deletedCount": 0
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-11-06T15:07:40.814Z"
+}

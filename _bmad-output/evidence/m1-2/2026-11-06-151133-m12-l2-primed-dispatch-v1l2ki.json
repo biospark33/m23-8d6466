@@ -1,0 +1,45 @@
+{
+  "test": "L2-primed-dispatch",
+  "runId": "qds-20261106-6c333e",
+  "vmName": "",
+  "requestId": "012f10dd-1bd0-4a5e-8659-4000db3bb047",
+  "repoBankId": "qds-probe-m12-mw5424652ahh",
+  "primeDocId": "m12-prime-20261106",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1b9bc4b9d574ce4b6bcfc5a5b29b298989ec96f8be67f7d0c37f50add4ec81ac",
+    "buildId": "66729909dd2c9051"
+  },
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "auditDb": "round-owned (under the tmp workspace)"
+    },
+    {
+      "phase": "seed-probe-family",
+      "repoBankId": "qds-probe-m12-mw5424652ahh",
+      "devMetaBankId": "qds-probe-m12-mw5424652ahh-dev-meta",
+      "repoSlug": "qds-probe/m12-mw5424652ahh",
+      "repoUrl": "https://github.com/qds-probe/m12-mw5424652ahh.git",
+      "documentId": "m12-prime-20261106",
+      "preExistingBankCount": 3,
+      "seamResolution": "qds-probe-m12-mw5424652ahh"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "ted 128: fatal: remote error: upload-pack: not our ref 83df0858a0f0d706b30f8a56567eb8bc5031ded2\",\"remediation\":\"run it by hand in a scratch dir — the HOST's git credentials are the ones in play here; check they can read https://github.com/«redacted»/«redacted» at 83df0858a0f0d706b30f8a56567eb8bc5031ded2\"}\n{\"requestId\":\"012f10dd-1bd0-4a5e-8659-4000db3bb047\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:11:33.885Z\",\"duration\":92081,\"durationMs\":92081,\"status\":\"error\",\"runId\":\"qds-20261106-6c333e\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    }
+  ],
+  "writtenAt": "2026-11-06T15:11:33.888Z"
+}

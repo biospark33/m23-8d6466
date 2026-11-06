@@ -1,6 +1,6 @@
 # M1.2 T2 live-round handoff (AC7) — 2026-10-07
 
-**Status:** authored, hermetically gated, triple-reviewed — **not fired**. Four operator-gated preconditions are unmet; firing without them would either fail deterministically or bill spend without the charter's required GO (charter §6, per issue #408's standing gate). Recorded as a handoff per the round contract ("precondition failure honestly recorded — never silently skipped"); **AC7 stays open** and `sprint-status.yaml` keeps M1.2 `in-progress`.
+**Status:** authored, hermetically gated, triple-reviewed — **FIRED GREEN 2026-11-06** (16 fires; final green 4 pass/0 fail at branch head `17f7699a`; the four authored-expectation defects the first fire exposed are fixed on `feature/m12-live-manifest-fix`; spend story below).
 
 ## Preconditions to clear (in order)
 
@@ -27,3 +27,33 @@ Legs: L1 echo [VERIFY DD-28.26(3)] (retain → recall `documentId` contains; rep
 
 - Branch: `feature/m1-2-host-side-memory-cycle` (3 impl commits + 3 review-fix commits, all gates green — `.unlazy/m1-2/gates/node-1.1.md` ALL MET on the final tree).
 - Follow-ups filed: #411 (gitnexus 1.6.12 CLI ritual — pre-existing, not M1.2).
+
+## Fired 2026-11-06 — the spend + defect story
+
+16 fires today (operator GO per leg, worst-case printed by the round before each). Final green:
+4 pass / 0 fail at branch head `17f7699a` — the whole arc green in one fire. Total real spend
+across all fires + 3 manual forensics boxes ≈ $0.35 (box-minutes + model calls; every fire's
+`finally` cleaned — final-ls `[]`, key leak `[]` — except my two manual forensics boxes, leaked
+~45–70 min before hand-destroyed: my cleanup miss against the skill's cleanup discipline,
+owned). Four authored-expectation defects vs shipped contracts, all fixed on the branch:
+
+1. **no-commit manifest** — L3 demanded a bundle + solicit artifacts from `t2.pipeline.json`
+   (`echo`+`true`); authored the round's own committing+solicit manifest.
+2. **budget ceiling** — runBudgetMs 1.9M > dispatch callerBudgetMs default 600k; pre-spend
+   refusal (fire 2, $0 spent); adopted m2-3's R2-001 shape (manifest 900k / caller 960k).
+3. **key cap under the leg's real spend** — seeded 50,000 µ$ cap refused every in-box model
+   call instantly (0 tokens, transient) while a green run spends ~75,812 µ$; raised to 500,000.
+4. **pre-twin receipt assert** — one-receipt expectation predates the retain twins; filtered to
+   the outcome twin (subjectId = runId).
+
+Two store-side behaviors documented (not defects): hindsight renders retained JSON payloads as
+prose facts on recall (paraphrase variance across runs); recall indexing latency is variable
+(outcome doc surfaced at poll 1 in fire 11, never in fire 12's ~10s window → polls widened to
+10 × 5s). The memory env ran against the local `qds-factory-hindsight-qds-1` container (real
+Hindsight 0.10.0) — not the VPS dedicated instance; the port was
+ambiguous all day (stale ssh tunnel + local docker both bound 18890, macOS allows co-binding),
+so this must be re-verified against the VPS instance before M2.3's gateway round (the
+container is image `ghcr.io/vectorize-io/hindsight:0.10.0` and its `/version` reports
+`api_version: "0.10.0"` — image tag and server self-report agree; verified live 2026-11-06).
+Also: the
+body teardown's exit-6 acceptance now matches the skill's gotcha #6 exit table.

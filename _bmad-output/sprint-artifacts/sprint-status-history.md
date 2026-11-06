@@ -272,3 +272,19 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # (workflow-state hygiene, untracked .unlazy review) landed in the same PR.
 # The 2026-10-24 note this replaces was drained to sprint-status-history.md.
 #
+
+# 2026-11-06 (day 6 late evening, sprint #486-#489 register session — 3rd session today):
+# M1.4's owed atomicity audit LANDED: in-file late-row addendum to
+# sprint-artifacts/dark-factory-v6/atomicity-audit-2026-10-02.md — M1.4 PASS clean
+# (107 total / 104 normative / SP 2 / DOD 8 / 0 ANDs / 0 blockers / 4 FTM paths /
+# SecInv substantive); audit now reads 24 rows: 22 PASS / 2 WARN accepted [M2.2, J3] /
+# 0 BLOCK. Same session fixed the register's DF-v6 audit line, which undercounted J3's
+# WARN ("22 PASS / 1 WARN" vs the file's Pass 21 / Warn 2) — now consistent.
+# Audit debt cleared; M1.4's ELIGIBILITY-GATED DEFER stands (revisit when
+# scripts/judgment/arm-thresholds.ts flips eligible). No code touched; docs-only.
+# The 2026-11-06 evening note this replaces was drained to sprint-status-history.md.
+#
+#
+
+meta:
+#
