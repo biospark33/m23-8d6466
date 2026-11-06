@@ -25,6 +25,9 @@ const CHECKER = resolve(ROOT, "scripts/check-story-consistency.ts");
  * queried for structured findings.
  */
 describe("planning artifacts are self-consistent", () => {
+  // 30s, not the 5s default: a cold `bun` spawn racing the coverage gate's
+  // other --parallel workers (issue #503 run shape) can legitimately take >5s
+  // of wall time; the contract under test is the exit code, not latency.
   test("check-story-consistency exits 0", () => {
     const r = Bun.spawnSync(["bun", CHECKER], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
     const out = `${r.stdout.toString()}${r.stderr.toString()}`;
@@ -34,7 +37,7 @@ describe("planning artifacts are self-consistent", () => {
     // paid for once, in a grep over a file containing NUL bytes.
     expect(r.exitCode, `checker could not run:\n${out}`).not.toBe(2);
     expect(r.exitCode, `planning-artifact drift:\n${out}`).toBe(0);
-  });
+  }, 30_000);
 
   test("the checker is self-proving — it fails when an input is removed", () => {
     // A positive control on the gate itself. Without this, a checker whose file-discovery
@@ -50,7 +53,7 @@ describe("planning artifacts are self-consistent", () => {
     // added 2026-10-08 — recomputed, never incremented).
     expect(r.exitCode).toBe(0);
     expect(`${r.stdout.toString()}`).toContain("66 stories");
-  });
+  }, 30_000);
 });
 
 /**

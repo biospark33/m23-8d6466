@@ -1,0 +1,9 @@
+story: P1.9
+status: done  # merged
+branch: feature/p1-9
+pr: 486
+merged: 618d2e00  # squash merge to dev
+base: dev
+completed: 2026-11-04
+gates: story-suite 29/29; phase-engine 1144/1144; tsc+biome clean; full suite 9026/0 unexpected (buildId pin re-pinned same-commit, publish deferred w/ debt); review round 4 findings applied
+notes: row flip to done = steve's call post-merge. dev-meta logging leg rides #408 window.

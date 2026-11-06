@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { corpusFilePath } from "../../scripts/corpus/merge.ts";
 import type { TriageRecord } from "../../scripts/corpus/schema.ts";
 import { rationaleFrom } from "../../scripts/judgment/observe-round.ts";
-import { parseDispositionProbability } from "../../scripts/judgment/route-round.ts";
+import { main as routeRoundMain, parseDispositionProbability, type RoutingManifest } from "../../scripts/judgment/route-round.ts";
 import { armStateEntryDigest, thresholds, type ArmStateEntry } from "../../src/judgment/arm-gate.ts";
 import { TYPESAFE_MODEL, type JudgmentEnvelope } from "../../src/judgment/index.ts";
 
@@ -673,4 +673,51 @@ describe("route-round — --round strict parse mirrors --pr (R2-P)", () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// In-process main drive (issue #503): every drive above is a Bun.spawnSync
+// child, and coverage cannot score children (bunfig.coverage.toml docblock) —
+// the file read 20.00% funcs with its main fully unexercised in-process. The
+// success path drives here under the same fixtures; refusal arms keep their
+// spawn shape (exitWithFailure calls process.exit, which must stay in a child).
+// Same precedent as live-probe.ts's exported-main drive.
+// ---------------------------------------------------------------------------
+
+describe("route-round main, in-process (coverage scorer — success path only)", () => {
+  test("armed happy path: routes the shard, writes the manifest, prints the summary, exit 0", () => {
+    const corpusDir = tmpDir("route-ip-c-");
+    const judgmentDir = tmpDir("route-ip-j-");
+    writeShard(corpusDir, partitionShard());
+    writeArmState(judgmentDir, chainedEntries(1)); // genesis flip: recording-only → armed
+    const chunks: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((s: string) => {
+      chunks.push(s);
+      return true;
+    }) as typeof process.stdout.write;
+    let code: number;
+    try {
+      code = routeRoundMain(routeArgs(corpusDir, judgmentDir));
+    } finally {
+      process.stdout.write = origWrite;
+    }
+    expect(code).toBe(0);
+    const manifestPath = join(judgmentDir, "routing", "184-4.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RoutingManifest;
+    expect(manifest.pr).toBe(184);
+    expect(manifest.round).toBe(4);
+    expect(Array.isArray(manifest.deep_adjudication)).toBe(true);
+    expect(Array.isArray(manifest.obvious_dismiss_candidates)).toBe(true);
+    const summary = JSON.parse(chunks.join("")) as { pr: number; round: number; deep_adjudication: number; obvious_dismiss_candidates: number };
+    expect(summary.pr).toBe(184);
+    expect(summary.round).toBe(4);
+    expect(summary.deep_adjudication).toBe(manifest.deep_adjudication.length);
+    expect(summary.obvious_dismiss_candidates).toBe(manifest.obvious_dismiss_candidates.length);
+    // The partition is pinned against the fixtures' rationales: high-p DISMISS
+    // records are the deep lane; everything it routed matches the manifest.
+    expect(manifest.deep_adjudication.length + manifest.obvious_dismiss_candidates.length).toBe(9);
+    rmSync(corpusDir, { recursive: true, force: true });
+    rmSync(judgmentDir, { recursive: true, force: true });
+  });
 });
