@@ -288,3 +288,17 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 
 meta:
 #
+
+# 2026-11-06 (day 6 late evening, sprint #486-#489 register session — 3rd session, cont.):
+# M1.2 AC7 (T2 live round) FIRED GREEN — 16 fires, final 4 pass/0 fail at
+# feature/m12-live-manifest-fix head 17f7699a (evidence _bmad-output/evidence/m1-2/2026-11-06-*,
+# committed). Four authored-expectation defects found + fixed: no-commit manifest (authored the
+# round's own committing+solicit manifest), dispatch caller budget (R2-001 shape), key cap 50k
+# under the leg's real ~76k spend (now 500k), pre-twin receipt assert (filtered to outcome twin).
+# Spend ≈ $0.35 total, cleanup verified every fire (boxes [], key leak []); two manual forensic
+# boxes leaked ~1h before hand-destroyed — owned. Memory env hit the LOCAL docker hindsight
+# container (port 18890 ambiguous: stale tunnel + docker co-bound) — must re-verify against the
+# VPS instance before M2.3. PR to dev pending. M2.3 chain next: same cap fix in memory-combined
+# flagged, gateway HTTP server (src/memgate has NO 8080 listener — UNBUILT, out of M2.1's scope
+# by design) + image publish (unowned) + Z4 AC8 + M2.3 fire.
+# The 2026-11-06 M1.4-audit note this replaces was drained to sprint-status-history.md.

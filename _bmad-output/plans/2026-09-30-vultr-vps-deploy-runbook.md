@@ -236,3 +236,26 @@ http://<box-ip>:18890` refuses from outside — the loopback bind is exactly wha
 requires fired-leg evidence to record a `caddyRoute` field: `"spliced"` (after the Caddyfile
 validate + reload) or `"deferred-to-M2.3"`. The field is NEVER omitted — an absent field would
 read green-by-default (absent ≠ zero, same rule as `awaiting-image` above).
+
+---
+
+## Fired-leg execution record — Z4 AC8 (2026-11-06, day 7 session 6)
+
+Z4's fired leg was EXECUTED this session (agent-run on operator instruction; zero spend).
+Append-only record; the authored annotations above are frozen as written:
+
+- Box: vultr qds-alpha (149.28.248.96), ssh root via solstice_fleet_operator key.
+- GHCR qds-m2-gateway stays PRIVATE (operator decision): box pulls via docker login with the
+  biospark33 gh CLI token (write:packages), token passed ssh-stdin only.
+- Compose .env seeded (QDS_FACTORY_OWNER + M2_GATEWAY_TAG=sha-fd1c3ea87808653c903162d9f2eb5a94c3e230da);
+  memgate keys minted + placed 0600 + stored in Proton Pass (item "QDS-Factory m2-gateway keys
+  (vultr qds-alpha)") — the M2.3 fire env MUST carry the same QDS_MEMGATE_SIGNING_KEY value.
+- m2-gateway slot UP + healthy (container-local ledger, uid 1000); hindsight-qds NOT recreated.
+- caddyRoute=deferred-to-M2.3: NO Caddy exists on the box — the front door is solstice-nginx
+  (nginx 1.27.4). The fragment's splice target does not exist; nginx-row-vs-Caddy is an
+  M2.3-day operator decision.
+- Firewall: stale tcp/22 source 68.183.152.138/32 removed; tcp/22 from 71.58.70.204/32 added
+  (operator-authorized). 22/80/443-only stands.
+- Evidence: _bmad-output/evidence/v6-z4-vps/2026-11-06-z4-ac8-fired.json; unlazy z4-vps-day 8/8 MET.
+- Wrapper: still NOT deployed to the fork (no SWARMCLAW_FACTORY_FLEET_CLI on the fork container);
+  install is M1.1 remainder (#408).

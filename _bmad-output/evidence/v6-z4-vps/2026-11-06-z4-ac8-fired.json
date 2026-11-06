@@ -1,0 +1,85 @@
+{
+  "captured": "2026-11-06T20:20:00Z",
+  "session": "sprint #486-#489 day 7 session 6 — Z4 AC8 fired leg, agent-run on operator instruction (do it all), zero agent spend",
+  "unlazy": ".unlazy/z4-vps-day (G1-G8, gate-check --status for live state)",
+  "box": {
+    "provider": "vultr",
+    "label": "qds-alpha",
+    "instance_id": "9dba6236-46d9-43ca-816f-d53720e166d0",
+    "ip": "149.28.248.96",
+    "region": "dfw",
+    "os": "Ubuntu 24.04 LTS x64",
+    "ssh": "root@149.28.248.96 via ~/.ssh/solstice_fleet_operator"
+  },
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-m2-gateway:sha-fd1c3ea87808653c903162d9f2eb5a94c3e230da",
+    "tag": "sha-fd1c3ea87808653c903162d9f2eb5a94c3e230da",
+    "digest": "sha256:c128b3d27fa281c2292c6359025cdfad556e7d32085a08b3dbc50d2c20162f60",
+    "pull": "docker login ghcr.io with biospark33 gh CLI token (write:packages), token over ssh stdin only; private package; no visibility flip",
+    "repo_digest_verified": true
+  },
+  "slot": {
+    "status": "running",
+    "container": "vps-m2-gateway-1",
+    "compose_project": "vps",
+    "health": "running healthy (compose healthcheck nc -z 127.0.0.1 8080)",
+    "hindsight_qds_untouched": "vps-hindsight-qds-1 container id unchanged, healthy (gate G5)",
+    "hindsight_image": "ghcr.io/vectorize-io/hindsight:0.10.0@sha256:3edcb6165cefdeaa6721dd0fce43cfd13b7a9c346ce0d2c5f4b4bf7bc3c8ac0b"
+  },
+  "env": {
+    "compose_env_seeded": [
+      "QDS_FACTORY_OWNER=quantum-digital-solutions",
+      "M2_GATEWAY_TAG=sha-fd1c3ea87808653c903162d9f2eb5a94c3e230da",
+      "FACTORY_FRONT_DOOR_NETWORK=solstice_default (preserved)"
+    ],
+    "hindsight_qds_env_added": [
+      "MEMGATE_ADMIN_KEY",
+      "QDS_MEMGATE_SIGNING_KEY"
+    ],
+    "hindsight_qds_env_preexisting": [
+      "HINDSIGHT_API_TENANT_API_KEY",
+      "HINDSIGHT_API_LLM_API_KEY",
+      "HINDSIGHT_BASE_URL=http://127.0.0.1:18890"
+    ],
+    "ledger_decision": "QDS_MEMGATE_LEDGER left ABSENT: container-local ledger per template guidance",
+    "ledger_state": ".sandbox/memgate-ledger.db inside container, uid 1000 bun-owned (gate G6)",
+    "secrets_home": "Proton Pass Operating vault, item QDS-Factory m2-gateway keys (vultr qds-alpha) (both keys; never printed; M2.3 fire env must carry the SAME QDS_MEMGATE_SIGNING_KEY value)"
+  },
+  "caddyRoute": "deferred-to-M2.3",
+  "caddyRouteReason": "no Caddy on the box; front door is solstice-nginx (1.27.4, TLS 80/443). Splice target absent; nginx-row-vs-Caddy is an M2.3-day operator decision. Field present, never absent (AC8 / R2-F24).",
+  "sequencing": {
+    "m2_1_authz_live": true,
+    "note": "R3 sequencing satisfied: M2.1 authz merged #414 2026-10-08, hardened #506, shipped in the published image; gateway refuses no-auth 401 before body parse."
+  },
+  "firewall": {
+    "group": "qds-alpha-fw (39f1e152-6575-45d9-9a03-285cdffdffc5)",
+    "staleRuleRemoved": "rule 4 tcp/22 from 68.183.152.138/32 (dead source IP; operator-authorized cleanup)",
+    "addedRule": "rule 8 tcp/22 from 71.58.70.204/32 (operator current IP)",
+    "final_set": [
+      "443 v4+v6 world",
+      "80 v4+v6 world",
+      "icmp v4+v6",
+      "22 from 71.58.70.204/32 only"
+    ],
+    "principle": "runbook §1 22/80/443 only; 18889/18890 never public; loopback binds unchanged"
+  },
+  "parity": {
+    "box_checkout": "938e749a215d879ef5c88a79f5668dbb7a239b1e == dev == origin/dev (authenticated fetch, ff-only)",
+    "deploy_vps_files": "6 repo files byte-identical (sha256 compare, gate G1); tracked tree clean",
+    "deployed_wrapper": "NOT deployed; fork container has no SWARMCLAW_FACTORY_FLEET_CLI; wrapper install is M1.1 remainder (issue #408)"
+  },
+  "ghcr_visibility_decision": {
+    "decision": "PRIVATE (operator confirmed 2026-11-06)",
+    "rationale": "layers carry bundled gateway source; a public GHCR package lists on the org packages tab (low-effort discovery); private costs one packages:read credential"
+  },
+  "gates": {
+    "ledger": ".unlazy/z4-vps-day/GATES.md",
+    "met": "G1-G8 (live status: node gate-check.mjs --status)",
+    "hygiene": "secret values never printed or persisted outside pass vault + box 0600 file; evidence carries names/lengths only"
+  },
+  "remaining_for_M2_3": [
+    "perimeter row decision + splice (nginx location row vs Caddy); caddyRoute flips to spliced only then",
+    "M2.3 fire env assembled from the pass vault item (SIGNING_KEY match)",
+    "explicit operator GO (worst case $1.06) per rules of engagement"
+  ]
+}
