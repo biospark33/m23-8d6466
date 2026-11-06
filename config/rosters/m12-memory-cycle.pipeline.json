@@ -1,15 +1,15 @@
 {
   "version": "1.0.0",
   "pipelineId": "m12-memory-cycle",
-  "runBudgetMs": 1900000,
+  "runBudgetMs": 900000,
   "phases": [
     {
       "name": "memory-cycle-probe",
       "kind": "dispatch_task",
-      "description": "M1.2 live round probe phase: the single-fixer team (lead + one write-capable fixer from config/rosters/roster.yaml) makes the smallest possible committing change — create one scratch file with one line, git add + git commit on the current sandbox branch — so harvest classifies the range as harvested (not NOCOMMITS), the bundle exists, and the round's L3 assertions (bundle, artifacts incl. solicit-prompt files, memory-retain receipt, re-harvest dedup) are satisfiable at all. The task is deliberately trivial and fully specified so the only nondeterminism is the model's compliance, never the shape of the work.",
+      "description": "M1.2 live round probe phase: the single-fixer team (lead + one write-capable fixer from config/rosters/roster.yaml) makes the smallest possible committing change — create one scratch file with one line, git add + git commit on the current sandbox branch — so harvest classifies the range as harvested (not NOCOMMITS), the bundle exists, and the round's L3 assertions (bundle, artifacts incl. solicit-prompt files, memory-retain receipt, re-harvest dedup) are satisfiable at all. The task is deliberately trivial and fully specified so the only nondeterminism is the model's compliance, never the shape of the work. Budget: 270000 phase cap prices 3x(270000+15000)+2 margins = 865000 under runBudgetMs 900000 — the m23-combined-memory R2-001 rule (runBudgetMs must fit the dispatch caller's ceiling pre-spend).",
       "roster": "config/rosters/roster.yaml",
       "task": "You lead a single-fixer team. Make the smallest possible committing change in this checkout: create a file named MEMORY-CYCLE-PROBE.txt containing a single line — the current date and the word PROBE — then git add + git commit it on the current sandbox branch. Uncommitted work is invisible to harvest, which counts commits on the sandbox branch. Do not push, do not open PRs, do not touch git remotes, CI configuration, or the verification surface. When the commit is made, finish with a JSON object of shape {\"changedFiles\": [\"MEMORY-CYCLE-PROBE.txt\"], \"result\": {\"summary\": \"<one-line summary>\"}}.",
-      "maxDurationMs": 600000,
+      "maxDurationMs": 270000,
       "retries": 0
     },
     {

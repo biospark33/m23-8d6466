@@ -700,7 +700,23 @@ describe("memory cycle live", () => {
         // the one host-side git consumer of the probe URL (the run/harvest/
         // teardown verbs never clone).
         const dispatch = await runFleet(
-          ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", round.recordsDir],
+          [
+            "dispatch",
+            "--driver",
+            "exedev",
+            "--brief",
+            briefPath,
+            "--dir",
+            round.recordsDir,
+            // dual-role (tier2-rig-swarm-mixed, m23-combined-memory R2-001):
+            // dispatch wall clock AND the callerBudgetMs ceiling — the m12
+            // manifest's runBudgetMs 900,000 must fit UNDER it with headroom,
+            // or the ceiling refuses the manifest pre-spend (2026-11-06 fire 2:
+            // "runBudgetMs 1900000 exceeds callerBudgetMs 600000", evidence
+            // _bmad-output/evidence/m1-2/2026-11-06-150739-m12-l2-*.json).
+            "--timeout-ms",
+            "960000",
+          ],
           { cwd: REPO_ROOT, env: { ...env, ...gitAliasEnv }, timeoutMs: 1_200_000 },
         ).catch((e: unknown) => {
           const partial = fleetPartialOutput(e);
