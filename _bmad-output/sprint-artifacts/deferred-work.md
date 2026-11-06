@@ -57,3 +57,11 @@
   carry no stale openrig ledger SKIP. Sole grep hit was incidental (a "deferred
   docker/image builds" note inside `openrig-sc2/2026-09-28-sc2-1-5-code.json`). If
   steve later supplies a pointer, reopen under a new entry with that pointer cited.
+
+## Deferred from: p0-9 funded window + p1-7 e2e leg (2026-11-06)
+
+- **pi stored auth shadows env and is not_ready** (measured in the p1-7 leg): `pi auth check --provider openrouter` → not_ready, and the stored entry shadows the env key (skill gotcha #2). The leg fixed per-run via explicit --api-key; operator should refresh or delete the stale `~/.pi/agent/auth.json` openrouter entry, or set PI_LENS/PI model defaults so bare `pi -p` works.
+- **PI_LENS_ROOT is an operator pin for local gate runs** (p1-7 leg): pi-lens lives only under `~/.pi/agent/npm/node_modules/pi-lens` (3.8.71); `resolvePiLens` probes npm global roots that don't carry it. Local gate consumers need `PI_LENS_ROOT=/Users/steve/.pi/agent/npm/node_modules/pi-lens` exported, or the prod-deps resolver extended. Deferred to the story that attaches gatedBody (P1.7 item 2).
+- **Box checkout sits on the PR branch** — `/opt/qds/QDS-Factory` is on feature/p0-9-reflect-wire-slice @ 78f36bb6 after the window; move back to dev after #501 merges (next window's first checklist item, before any leg rerun).
+- **solstice-hindsight key stranded at the $0.23 workspace floor** — left in pass-cli (field solstice-hindsight) as a backup; operator may revoke it or top up that workspace. The funded key passed through this session transcript — rotation is the operator's call.
+- **The funded key is a main-account key, not a box-lifecycle ephemeral** (operator's stated intent: factory mints ephemeral keys per box). Operator may mint a scoped ephemeral key for the box and swap it in `deploy/vps/hindsight-qds.env`; current key works, hygiene deferred.
