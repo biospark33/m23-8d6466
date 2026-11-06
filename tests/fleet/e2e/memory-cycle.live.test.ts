@@ -960,11 +960,20 @@ describe("memory cycle live", () => {
         // word is the provenance check; the grammar around it is the store's.
         expect(outcomeDoc?.content ?? "").toContain("green");
 
-        // ── EXACTLY ONE memory-retain-receipt/retain row, subject = runId ──
+        // ── EXACTLY ONE memory-retain-receipt/retain row for the OUTCOME ──
+        // The M1.2 retain emits TWINS (PR #412's retain-twin dedup contract):
+        // the repo outcome document (subjectId = runId) AND a routing twin to
+        // the -dev-meta bank (subjectId = routing-<runId>-dev-meta). Each twin
+        // carries its own receipt with its own coalesce identity — the dedup
+        // contract is PER-TWIN, so the ONE-receipt assert filters to the
+        // outcome twin's identity (2026-11-06 fire 14: first time this assert
+        // ran — every earlier fire red'd upstream — and read 2: outcome +
+        // routing twin; the authored single-receipt expectation predates the
+        // twins).
         const receiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
           const handle = openAuditStoreForWalk(auditDb);
           try {
-            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain");
+            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain" && l.subjectId === runId);
           } finally {
             handle.close();
           }
@@ -991,7 +1000,7 @@ describe("memory cycle live", () => {
         receipts = receiptRows();
         evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length });
         expect(matchesAfterReplay).toBe(1);
-        expect(receipts.length).toBe(1);
+        expect(receipts.length).toBe(1); // outcome-twin receipt stays deduped (per-twin identity, filter above)
 
         // ── body teardown (the round is asserted; the verb closes it) ──────
         // --no-harvest is LOAD-BEARING: a teardown harvest here would fire the
