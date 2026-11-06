@@ -1,0 +1,112 @@
+{
+  "test": "L2-primed-dispatch",
+  "runId": "qds-20261106-bb15bf",
+  "vmName": "qds-20261106-bb15bf",
+  "requestId": "8cbb5abc-1cf7-49ef-b6f8-f72c6a494029",
+  "repoBankId": "qds-probe-m12-mw5661brh27l",
+  "primeDocId": "m12-prime-20261106",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1b9bc4b9d574ce4b6bcfc5a5b29b298989ec96f8be67f7d0c37f50add4ec81ac",
+    "buildId": "66729909dd2c9051"
+  },
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 500000,
+      "auditDb": "round-owned (under the tmp workspace)"
+    },
+    {
+      "phase": "seed-probe-family",
+      "repoBankId": "qds-probe-m12-mw5661brh27l",
+      "devMetaBankId": "qds-probe-m12-mw5661brh27l-dev-meta",
+      "repoSlug": "qds-probe/m12-mw5661brh27l",
+      "repoUrl": "https://github.com/qds-probe/m12-mw5661brh27l.git",
+      "documentId": "m12-prime-20261106",
+      "preExistingBankCount": 3,
+      "seamResolution": "qds-probe-m12-mw5661brh27l"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20261106-bb15bf\",\"requestId\":\"8cbb5abc-1cf7-49ef-b6f8-f72c6a494029\",\"state\":\"ready\",\"vmName\":\"qds-20261106-bb15bf\",\"httpsUrl\":\"https://qds-20261106-bb15bf.exe.xyz\"}",
+      "stderrTail": "1-06T16:09:54.939Z\",\"duration\":52527,\"durationMs\":52527,\"status\":\"ok\",\"runId\":\"qds-20261106-bb15bf\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3469,\"mint_ms\":1680,\"fill_ms\":30818,\"setup_gate_ms\":15402}}\n{\"requestId\":\"8cbb5abc-1cf7-49ef-b6f8-f72c6a494029\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-11-06T16:09:54.940Z\",\"duration\":52674,\"durationMs\":52674,\"status\":\"ok\",\"runId\":\"qds-20261106-bb15bf\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20261106-bb15bf",
+      "vmName": "qds-20261106-bb15bf"
+    },
+    {
+      "phase": "side-channel-row",
+      "rowPath": "/_bmad-output/memory/recall/8cbb5abc-1cf7-49ef-b6f8-f72c6a494029.json",
+      "row": {
+        "runId": "8cbb5abc-1cf7-49ef-b6f8-f72c6a494029",
+        "primed": true,
+        "directive": "kg_context",
+        "banks": [
+          "qds-probe-m12-mw5661brh27l",
+          "qds-collective"
+        ],
+        "recalledDocumentIds": [
+          "m12-prime-20261106"
+        ],
+        "chars": 885,
+        "latencyMs": 141
+      }
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "3fe23c40caf48254b9812672f080b3754fdb0b6e7fdc4b15c5bc2559a2508dad",
+      "limitMicroUsd": 500000
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20261106-bb15bf",
+      "stderrTail": "ervice\",\"printed\":true}\n{\"requestId\":\"8dd79ca0-92bc-444b-a22b-82b3b10a8c12\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-11-06T16:10:01.789Z\",\"duration\":5510,\"durationMs\":5510,\"status\":\"ok\",\"runId\":\"qds-20261106-bb15bf\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "settle-poll",
+      "runId": "qds-20261106-bb15bf",
+      "state": "ok",
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 2,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 3,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 4,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 5,
+          "exitCode": 0,
+          "state": "ok"
+        }
+      ]
+    },
+    {
+      "phase": "settled",
+      "state": "ok"
+    }
+  ],
+  "writtenAt": "2026-11-06T16:11:00.084Z"
+}

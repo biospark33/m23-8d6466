@@ -1,0 +1,181 @@
+{
+  "test": "L3-harvest-retain",
+  "runId": "qds-20261106-76d06c",
+  "vmName": "qds-20261106-76d06c",
+  "repoBankId": "qds-probe-m12-mw55otwsce8u",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:1b9bc4b9d574ce4b6bcfc5a5b29b298989ec96f8be67f7d0c37f50add4ec81ac",
+    "buildId": "66729909dd2c9051"
+  },
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 500000,
+      "auditDb": "round-owned (under the tmp workspace)"
+    },
+    {
+      "phase": "seed-probe-family",
+      "repoBankId": "qds-probe-m12-mw55otwsce8u",
+      "devMetaBankId": "qds-probe-m12-mw55otwsce8u-dev-meta",
+      "repoSlug": "qds-probe/m12-mw55otwsce8u",
+      "repoUrl": "https://github.com/qds-probe/m12-mw55otwsce8u.git",
+      "documentId": "m12-prime-20261106",
+      "preExistingBankCount": 3,
+      "seamResolution": "qds-probe-m12-mw55otwsce8u"
+    },
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20261106-76d06c\",\"requestId\":\"99035374-e851-4554-8dba-b1dc6e511957\",\"state\":\"ready\",\"vmName\":\"qds-20261106-76d06c\",\"httpsUrl\":\"https://qds-20261106-76d06c.exe.xyz\"}",
+      "stderrTail": "1-06T15:56:28.435Z\",\"duration\":47488,\"durationMs\":47488,\"status\":\"ok\",\"runId\":\"qds-20261106-76d06c\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3292,\"mint_ms\":1448,\"fill_ms\":28037,\"setup_gate_ms\":13596}}\n{\"requestId\":\"99035374-e851-4554-8dba-b1dc6e511957\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:56:28.436Z\",\"duration\":47597,\"durationMs\":47597,\"status\":\"ok\",\"runId\":\"qds-20261106-76d06c\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20261106-76d06c",
+      "vmName": "qds-20261106-76d06c"
+    },
+    {
+      "phase": "side-channel-row",
+      "rowPath": "/_bmad-output/memory/recall/99035374-e851-4554-8dba-b1dc6e511957.json",
+      "row": {
+        "runId": "99035374-e851-4554-8dba-b1dc6e511957",
+        "primed": true,
+        "directive": "kg_context",
+        "banks": [
+          "qds-probe-m12-mw55otwsce8u",
+          "qds-collective"
+        ],
+        "recalledDocumentIds": [
+          "m12-prime-20261106"
+        ],
+        "chars": 850,
+        "latencyMs": 104
+      }
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "4900d5ffbe8920ff83d789b4abbcc0a1c7d198b7b15d863742a64b6d84ba1e76",
+      "limitMicroUsd": 500000
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20261106-76d06c",
+      "stderrTail": "ervice\",\"printed\":true}\n{\"requestId\":\"cb3473dc-1930-4a9c-b1c4-749acb81a2a2\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:56:33.651Z\",\"duration\":4050,\"durationMs\":4050,\"status\":\"ok\",\"runId\":\"qds-20261106-76d06c\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "settle-poll",
+      "runId": "qds-20261106-76d06c",
+      "state": "ok",
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 2,
+          "exitCode": 0,
+          "state": "running"
+        },
+        {
+          "attempt": 3,
+          "exitCode": 0,
+          "state": "ok"
+        }
+      ]
+    },
+    {
+      "phase": "settled",
+      "state": "ok"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 2",
+      "stderrTail": "\",\"outcome\":\"inserted\",\"message\":\"audit link inserted: run qds-20261106-76d06c hop memory-retain-receipt.retain\"}\n{\"requestId\":\"432e4dba-ddc6-46ec-a953-1e6b9c59bb77\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:57:26.558Z\",\"duration\":19582,\"durationMs\":19582,\"status\":\"ok\",\"runId\":\"qds-20261106-76d06c\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "solicit-prompts",
+      "promptFiles": [
+        "qds-20261106-76d06c-solicit-1-prompt.txt",
+        "qds-20261106-76d06c-solicit-2-prompt.txt"
+      ]
+    },
+    {
+      "phase": "rendered-kg-context",
+      "file": "qds-20261106-76d06c-solicit-1-prompt.txt",
+      "promptBytes": 1566
+    },
+    {
+      "phase": "probe-recall",
+      "documentIds": [
+        "qds-20261106-76d06c",
+        null,
+        "m12-prime-20261106",
+        null
+      ],
+      "pollCounts": [
+        1
+      ],
+      "outcomeContentHead": "Execution run qds-20261106-76d06c for repository qds-probe/m12-mw55otwsce8u completed with an exit classification of 'green' and harvested 2 items. | When: Friday, November 06, 2026"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toContain(expected)\n\nExpected to contain: \"\\\"runId\\\":\\\"qds-20261106-76d06c\\\"\"\nReceived: \"Execution run qds-20261106-76d06c for repository qds-probe/m12-mw55otwsce8u completed with an exit classification of 'green' and harvested 2 items. | When: Friday, November 06, 2026\"\n"
+    },
+    {
+      "at": "finally-teardown",
+      "runId": "qds-20261106-76d06c",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":5}\n{\"requestId\":\"a5cb9db7-cdda-47a0-b08c-30013e807906\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-11-06T15:57:35.122Z\",\"duration\":8446,\"durationMs\":8446,\"status\":\"ok\",\"runId\":\"qds-20261106-76d06c\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20261106-76d06c",
+      "ok": true
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": true,
+      "alreadyGone": false,
+      "bankId": "qds-probe-m12-mw55otwsce8u",
+      "deletedCount": 11
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": true,
+      "alreadyGone": false,
+      "bankId": "qds-probe-m12-mw55otwsce8u-dev-meta",
+      "deletedCount": 6
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "finally-delete-recall-row",
+      "ok": true,
+      "rowPath": "/_bmad-output/memory/recall/99035374-e851-4554-8dba-b1dc6e511957.json"
+    }
+  ],
+  "writtenAt": "2026-11-06T15:57:38.997Z"
+}

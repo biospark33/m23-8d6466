@@ -1,0 +1,43 @@
+{
+  "test": "L1-echo",
+  "mode": "server-upsert",
+  "documentId": "m12-echo-20261106",
+  "probeBankPrefix": "qds-probe-m12-",
+  "bootedBox": false,
+  "phases": [
+    {
+      "phase": "echo-setup",
+      "bankId": "qds-probe-m12-mw54gqvz5qc0",
+      "documentId": "m12-echo-20261106"
+    },
+    {
+      "phase": "echo-recall-1",
+      "containsDocId": true,
+      "factIds": [
+        "f1d0fd0d-66b7-46fb-aa09-fc17b96e7552"
+      ],
+      "documentIds": [
+        "m12-echo-20261106"
+      ],
+      "pollCounts": [
+        1
+      ]
+    },
+    {
+      "phase": "echo-recall-2",
+      "matchesAfterReplay": 1,
+      "pollCounts": [
+        1
+      ],
+      "upsertObservedPrecedent": "_bmad-output/evidence/p0-9-closure/2026-10-04T20-19-46Z-p0-9-document-id-retain-twice.json"
+    },
+    {
+      "phase": "finally-delete-bank",
+      "deleted": true,
+      "alreadyGone": false,
+      "bankId": "qds-probe-m12-mw54gqvz5qc0",
+      "deletedCount": 5
+    }
+  ],
+  "writtenAt": "2026-11-06T15:21:22.303Z"
+}
