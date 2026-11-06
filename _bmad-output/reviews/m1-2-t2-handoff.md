@@ -50,7 +50,7 @@ Two store-side behaviors documented (not defects): hindsight renders retained JS
 prose facts on recall (paraphrase variance across runs); recall indexing latency is variable
 (outcome doc surfaced at poll 1 in fire 11, never in fire 12's ~10s window → polls widened to
 10 × 5s). The memory env ran against the local `qds-factory-hindsight-qds-1` container (real
-Hindsight 0.1.0 — typed as 0.10.0 image) — not the VPS dedicated instance; the port was
+Hindsight 0.10.0) — not the VPS dedicated instance; the port was
 ambiguous all day (stale ssh tunnel + local docker both bound 18890, macOS allows co-binding),
 so this must be re-verified against the VPS instance before M2.3's gateway round. Also: the
 body teardown's exit-6 acceptance now matches the skill's gotcha #6 exit table.
