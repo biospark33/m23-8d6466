@@ -1,0 +1,65 @@
+{
+  "leg": "p1-7-e2e-gate-demo",
+  "legVersion": "p1.7-e2e.1",
+  "mode": "live",
+  "ok": true,
+  "startedAt": "2026-11-06T04:52:31.793Z",
+  "writtenAt": "2026-11-06T04:53:57.400Z",
+  "venue": "local-mac (phase-engine production venue)",
+  "spendEstimateUsdWorstCase": 0.15,
+  "workspaceKept": "/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/p1-7-e2e-2hmtoo",
+  "arms": [
+    {
+      "arm": "blocked",
+      "piRun": {
+        "exit": 0,
+        "stderrTail": "pi-tui, typebox. Installed copies can bypass the extension loader and create duplicate runtime modules.\nCaveman: pass-through for openrouter/anthropic/claude-haiku-4.5 (no compat mount named \"openrouter\" in the local proxy; add compat.openrouter.base_url to caveman.yaml to route it); no compression\n",
+        "stdoutTail": ":0.0061227},\"cacheWrite1h\":0,\"reasoning\":74},\"stopReason\":\"stop\",\"timestamp\":1793940758244,\"responseId\":\"msg_bdrk_f6j56qhwpts3s5bwacvgciubxfemndoq6c7thhxxuw3ujwg5d3oq\",\"rawStopReason\":\"end_turn\",\"durationMs\":1858,\"thinkingLevel\":\"medium\"}],\"willRetry\":false}\n{\"type\":\"agent_settled\",\"aborted\":false}\n"
+      },
+      "gate": {
+        "passed": false,
+        "gateResult": "blocked",
+        "waiver": 0,
+        "diagnostics": [
+          {
+            "file": "/private/var/folders/60/x8v34pqn6gn1qh_lbsfswbmh0000gn/T/p1-7-e2e-2hmtoo/src/auth.ts",
+            "line": 2,
+            "severity": "error",
+            "message": "Cannot find name 'undefinedHelper'.",
+            "source": "lsp"
+          }
+        ],
+        "gateVersion": "p1.7.1"
+      },
+      "verdict": "PROVEN"
+    },
+    {
+      "arm": "waiver-0",
+      "piRun": {
+        "exit": 0,
+        "stderrTail": "pi-tui, typebox. Installed copies can bypass the extension loader and create duplicate runtime modules.\nCaveman: pass-through for openrouter/anthropic/claude-haiku-4.5 (no compat mount named \"openrouter\" in the local proxy; add compat.openrouter.base_url to caveman.yaml to route it); no compression\n",
+        "stdoutTail": "0000000005},\"cacheWrite1h\":0,\"reasoning\":62},\"stopReason\":\"stop\",\"timestamp\":1793940801790,\"responseId\":\"msg_bdrk_2fheihz22ozzlg4aiar3uj2jfc23t7rv5rxxpo3m5g6tp3bxbzea\",\"rawStopReason\":\"end_turn\",\"durationMs\":2201,\"thinkingLevel\":\"medium\"}],\"willRetry\":false}\n{\"type\":\"agent_settled\",\"aborted\":false}\n"
+      },
+      "gate": {
+        "passed": true,
+        "gateResult": "passed",
+        "waiver": 0,
+        "diagnostics": [],
+        "gateVersion": "p1.7.1"
+      },
+      "verdict": "PROVEN"
+    },
+    {
+      "arm": "no-lsp-fallback",
+      "gate": {
+        "passed": true,
+        "gateResult": "passed",
+        "waiver": 1,
+        "waiverReason": "no-lsp",
+        "diagnostics": [],
+        "gateVersion": "p1.7.1"
+      },
+      "verdict": "PROVEN"
+    }
+  ]
+}
