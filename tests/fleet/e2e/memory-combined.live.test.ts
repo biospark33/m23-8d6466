@@ -93,8 +93,12 @@ import {
 
 // ─── round constants (parity with the tier2 siblings — config integers, copied) ──
 
-/** Plan default (e2e-plan.md §TIER-2): 50,000 µ$ = $0.05 worst-case per key. */
-const T2_CAP_MICRO_USD = 50_000;
+/** 2026-11-06: 50_000 µ$/key capped BELOW this leg's real spend profile (the
+ * M1.2 T2 round measured ~76k µ$ authed-call spend; same authored-expectation
+ * defect family — the cap-bit phase fail read as "transient"). 500_000 =
+ * $0.50/key headroom. (The e2e-plan §TIER-2 plan default this constant
+ * originally quoted is superseded by the measured spend.) */
+const T2_CAP_MICRO_USD = 500_000;
 /** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
 const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
 /** Leg ceilings (L1+L2+L3 test timeouts): the worst-case box exposure on ONE box. */
