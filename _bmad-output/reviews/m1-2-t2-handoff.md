@@ -52,5 +52,8 @@ prose facts on recall (paraphrase variance across runs); recall indexing latency
 10 × 5s). The memory env ran against the local `qds-factory-hindsight-qds-1` container (real
 Hindsight 0.10.0) — not the VPS dedicated instance; the port was
 ambiguous all day (stale ssh tunnel + local docker both bound 18890, macOS allows co-binding),
-so this must be re-verified against the VPS instance before M2.3's gateway round. Also: the
+so this must be re-verified against the VPS instance before M2.3's gateway round (the
+container is image `ghcr.io/vectorize-io/hindsight:0.10.0` and its `/version` reports
+`api_version: "0.10.0"` — image tag and server self-report agree; verified live 2026-11-06).
+Also: the
 body teardown's exit-6 acceptance now matches the skill's gotcha #6 exit table.

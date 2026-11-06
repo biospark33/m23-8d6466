@@ -318,6 +318,9 @@ interface RoundState {
   runId: string;
   vmName: string;
   repoBankId: string;
+  /** The probe repo slug this round dispatched with — the retain seam's
+   * repoSlug input (extensions.budget.repoSlug) must equal it. */
+  probeSlug: string;
   primeDocId: string;
   /** Banks THIS round created (the probe family pair) — the only ones cleanup deletes. */
   banksWeCreated: string[];
@@ -337,6 +340,7 @@ const round: RoundState = {
   runId: "",
   vmName: "",
   repoBankId: "",
+  probeSlug: "",
   primeDocId: "",
   banksWeCreated: [],
   recallRowPaths: [],
@@ -627,6 +631,7 @@ describe("memory cycle live", () => {
         expect(existing.has(base)).toBe(false);
         expect(existing.has(devMeta)).toBe(false);
         round.repoBankId = base;
+        round.probeSlug = probe.slug;
         // Armed BEFORE the awaits (L1's discipline): a createBank that times
         // out AFTER the server-side create still gets deleted by L3's
         // cleanup — pushing after the await orphaned exactly the bank this
@@ -948,17 +953,28 @@ describe("memory cycle live", () => {
         // renders the canonical JSON payload (buildRetainPayload) as prose
         // facts on recall — `Execution run <runId> … exit classification of
         // '<class>' … harvested N items. | When: <retain date>' — so the
-        // assert reads identity + provenance off the RENDERED text, never the
-        // payload's raw bytes (2026-11-06 fire 11: the payload IS compact
-        // JSON; the recall content is the store's fact render, 0 repo-side
-        // prose writers exist).
+        // assert reads identity off the RENDERED text, never the payload's
+        // raw bytes (2026-11-06 fire 11: the payload IS compact JSON; the
+        // recall content is the store's fact render, 0 repo-side prose
+        // writers exist). IDENTITY ONLY: the prose render is NOT byte-stable
+        // across runs (store-side fact paraphrase — fire 11 vs fire 13 differ
+        // in grammar), so no prose word is asserted here; the payload's
+        // repoSlug input is verified at its seam below (the record field the
+        // retain reads), not off the store's paraphrase.
         expect(outcomeDoc?.content ?? "").toContain(runId);
-        // The prose render is NOT byte-stable across runs (store-side fact
-        // paraphrase: fire 11 "…classification of 'green' and harvested 2
-        // items", fire 13 "…classification 'green' and a harvested count of
-        // 2") — only the identity fields are invariant. The classification
-        // word is the provenance check; the grammar around it is the store's.
-        expect(outcomeDoc?.content ?? "").toContain("green");
+
+        // ── harvest-retain SEAM: the payload's repoSlug input ──────────────
+        // retainRunOutcomeBestEffort reads extensions.budget.repoSlug off the
+        // record and SKIPS the retain without it — the outcome doc found above
+        // proves the retain ran, so the record must carry the probe slug the
+        // round dispatched with. (harvestedCount has NO repo-side capture —
+        // G7: "the bundle IS the harvest's record — harvest writes nothing to
+        // the run record" — so it is verified by the store render's own
+        // prose, which this assert deliberately does not parse.)
+        const retainSeamRec = new RunRecordStore({ dir: recordsDir }).get(runId);
+        const retainRepoSlug = retainSeamRec.extensions?.budget?.repoSlug;
+        evidence.push({ phase: "retain-seam", retainRepoSlug: retainRepoSlug ?? null });
+        expect(retainRepoSlug).toBe(round.probeSlug);
 
         // ── EXACTLY ONE memory-retain-receipt/retain row for the OUTCOME ──
         // The M1.2 retain emits TWINS (PR #412's retain-twin dedup contract):
@@ -978,6 +994,19 @@ describe("memory cycle live", () => {
             handle.close();
           }
         };
+        // The ROUTING twin's receipts — the same per-twin dedup contract, on
+        // the identity the runId filter above excludes (scripts/fleet.ts's
+        // routing retain: documentId = `routing-<runId>-dev-meta`, bank =
+        // `<repoBankId>-dev-meta`). Queried by its own subject filter, never
+        // folded into the outcome-twin count.
+        const routingReceiptRows = (): ReturnType<ReturnType<typeof openAuditStoreForWalk>["linksForRun"]> => {
+          const handle = openAuditStoreForWalk(auditDb);
+          try {
+            return handle.linksForRun(runId).filter((l) => l.hop === "memory-retain-receipt" && l.event === "retain" && l.subjectId === `routing-${runId}-dev-meta`);
+          } finally {
+            handle.close();
+          }
+        };
         let receipts = receiptRows();
         evidence.push({
           phase: "receipts-after-harvest-1",
@@ -990,6 +1019,21 @@ describe("memory cycle live", () => {
         const receiptDetail = receipts[0]?.detail as { documentId?: string; bank?: string } | null | undefined;
         expect(receiptDetail?.documentId).toBe(runId);
         expect(receiptDetail?.bank).toBe(repoBankId);
+        // The routing twin's OWN receipt: exactly one after the first harvest
+        // (its dedup contract is per-twin, same coalesce identity —
+        // (runId, memory-retain-receipt, retain, routing-<runId>-dev-meta)).
+        const routingReceipts = routingReceiptRows();
+        evidence.push({
+          phase: "routing-receipts-after-harvest-1",
+          count: routingReceipts.length,
+          subjects: routingReceipts.map((l) => l.subjectId ?? null),
+          detail: routingReceipts.map((l) => l.detail ?? null),
+        });
+        expect(routingReceipts.length).toBe(1);
+        expect(routingReceipts[0]?.subjectId).toBe(`routing-${runId}-dev-meta`);
+        const routingDetail = routingReceipts[0]?.detail as { documentId?: string; bank?: string } | null | undefined;
+        expect(routingDetail?.documentId).toBe(`routing-${runId}-dev-meta`);
+        expect(routingDetail?.bank).toBe(`${repoBankId}-dev-meta`);
 
         // ── re-harvest: NO second document, NO second receipt row ──────────
         const reharvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, env, timeoutMs: 300_000 });
@@ -998,9 +1042,11 @@ describe("memory cycle live", () => {
         const reprobe = await recallPolled(mem, repoBankId, `run outcome ${runId}`, runId, { attempts: 10, waitMs: 5_000 });
         const matchesAfterReplay = reprobe.res.results.filter((r) => r.documentId === runId).length;
         receipts = receiptRows();
-        evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length });
+        const routingAfterReplay = routingReceiptRows();
+        evidence.push({ phase: "dedup-after-reharvest", matchesAfterReplay, pollCounts: reprobe.counts, receiptCount: receipts.length, routingReceiptCount: routingAfterReplay.length });
         expect(matchesAfterReplay).toBe(1);
         expect(receipts.length).toBe(1); // outcome-twin receipt stays deduped (per-twin identity, filter above)
+        expect(routingAfterReplay.length).toBe(1); // routing twin stays deduped too (same per-twin contract)
 
         // ── body teardown (the round is asserted; the verb closes it) ──────
         // --no-harvest is LOAD-BEARING: a teardown harvest here would fire the

@@ -15,11 +15,16 @@
     {
       "name": "verify-committed",
       "kind": "code",
-      "description": "Fails the run when the fixer left work uncommitted: harvest counts commits on the sandbox branch, so a dirty tree would harvest nothing new and the probe change would silently vanish. A clean `git status --porcelain` proves every edit the probe phase made is in a commit on sbx/<runId>. Companion phase required by the shipped manifest loader (MIN_PHASES = 2, src/phase-engine/types.ts:57).",
+      "description": "Fails the run when the fixer left work uncommitted: harvest counts commits on the sandbox branch, so a dirty tree would harvest nothing new and the probe change would silently vanish. A clean `git status --porcelain` proves every edit the probe phase made is in a commit on sbx/<runId>. The composed testCommand additionally requires the LATEST commit to carry MEMORY-CYCLE-PROBE.txt — a fixer that commits a different file (or nothing) fails here, before harvest can classify a non-probe commit as harvested (DF3.3: a code phase declaring a testCommand composes the commandGate over it; the verdict needs BOTH green). Companion phase required by the shipped manifest loader (MIN_PHASES = 2, src/phase-engine/types.ts:57).",
       "command": [
         "bash",
         "-lc",
         "test -z \"$(git status --porcelain)\" || { echo 'uncommitted work remains in the checkout — the probe phase must commit everything on the sandbox branch' >&2; exit 1; }; git log --oneline -1"
+      ],
+      "testCommand": [
+        "bash",
+        "-lc",
+        "test -f MEMORY-CYCLE-PROBE.txt || { echo 'MEMORY-CYCLE-PROBE.txt absent from the checkout — the probe phase must create it' >&2; exit 1; }; git diff-tree --no-commit-id --name-only -r HEAD | grep -qx 'MEMORY-CYCLE-PROBE.txt' || { echo 'MEMORY-CYCLE-PROBE.txt not in the latest commit — the probe file must land in the probe phase commit' >&2; exit 1; }"
       ],
       "maxDurationMs": 15000,
       "retries": 0
