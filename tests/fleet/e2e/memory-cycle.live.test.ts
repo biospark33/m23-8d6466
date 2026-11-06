@@ -118,8 +118,19 @@ import {
 
 // ─── round constants ─────────────────────────────────────────────────────────
 
-/** Plan default (e2e-plan.md §TIER-2): 50,000 µ$ = $0.05 worst-case per key. */
-const T2_CAP_MICRO_USD = 50_000;
+/**
+ * Key cap for the minted per-run key. Was 50,000 µ$ (e2e-plan.md §TIER-2's
+ * "$0.05 worst-case per key") — TOO TIGHT TO FUND THE LEG: every in-box model
+ * call refused instantly (0 tokens, phase fail `transient`), while the same
+ * manifest/box/roster with the built-in default cap ran green and a GREEN run
+ * of this leg actually spends ~75,812 µ$ (manual run qds-20261106-8f3d81,
+ * cost-ledger). Measured 2026-11-06 across fires 4-10 (test fires all
+ * 0-token-failed at cap 50,000; manual repros at the 5,000,000 default all
+ * green — primed AND unprimed). 500,000 µ$ = $0.50 funds the leg with
+ * headroom; the cap still bounds spend (the leg's L3 assert
+ * spendMicroUsd <= cap now reads the 500,000 echo).
+ */
+const T2_CAP_MICRO_USD = 500_000;
 /** Box-hour rate from the operator's TIER-1 cost config (230,000 µ$/h). */
 const T2_BOX_HOUR_RATE_MICRO_USD = 230_000;
 /**
