@@ -1343,7 +1343,7 @@ describe("buildIdFileInputs", () => {
       // Shelley socket-activation, headless-shell via Shelley metadata).
       // Both FROM digests only; measured with shasum -a 256 on the edited
       // file. The driver REF/BUILD_ID adoption stays owed behind the merge.
-      "oci/exedev/Dockerfile": "3c69aef6ed5bae34b7478fb8937ae1ea14e57cff50463749abc67f7c044ca0cc",
+      "oci/exedev/Dockerfile": "cfd5cd68de76d1be4b3fa6e6491694a4d2cfe6ae1474daeaf295beeaf645c21e",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1572,7 +1572,7 @@ describe("buildIdFileInputs", () => {
       // Adopted from this test's own failing run on the final tree
       // (edit-first/re-pin-last; the story-consistency spawn tests' 30s
       // budgets are tests/ and do not walk).
-      "32c5be4dd9147294c15a21dce439ebbd7ad21b9816cf875d9b1eea207733e155",
+      "20fd85febb85ca8263449e80a85c265535b79ed282e5ab4978d8944a2231db58",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

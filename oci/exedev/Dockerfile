@@ -117,8 +117,8 @@ FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:8c8bd42cfc164e2112d0ea5c162ef24e
 # on disagreement; BUN_SHA256 is kept in step by a test
 # (tests/scripts/build-exedev-image.test.ts), because the script pins only the
 # version.
-ARG BUN_VERSION=1.3.13
-ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
+ARG BUN_VERSION=1.4.2
+ARG BUN_SHA256=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
 RUN cd /tmp \
  && curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o bun.zip \
       "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
@@ -500,10 +500,10 @@ LABEL org.opencontainers.image.title="qds-exedev" \
 
 # ── bun ─────────────────────────────────────────────────────────────────────
 # The repo's OWN pin, not a floating install: package.json `packageManager` is
-# bun@1.3.13 and .github/workflows/ci.yml pins 1.3.13 in both jobs. The in-box
+# bun@1.4.2 and .github/workflows/ci.yml pins 1.4.2 in both jobs. The in-box
 # engine must run the runtime the tests ran on. The probe's 1.4.0 was an
 # install measurement, not a pin.
-ARG BUN_VERSION=1.3.13
+ARG BUN_VERSION=1.4.2
 # sha256 of bun-linux-x64.zip for the release above, taken from that release's
 # SHASUMS256.txt and recorded here so the check is against an in-repo constant
 # rather than a file fetched from the same host as the artifact. Re-measure it
@@ -520,7 +520,7 @@ ARG BUN_VERSION=1.3.13
 # that script should refuse a BUN_SHA256 override that is not this file's
 # default for the requested BUN_VERSION. Until it does, a CI misconfiguration
 # or a copy-pasted override is enough.
-ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
+ARG BUN_SHA256=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
 #
 # Deliberately NOT `curl https://bun.sh/install | bash`. Two reasons, both
 # measured: that script resolves "latest" (unpinned — AC2's negative control),
