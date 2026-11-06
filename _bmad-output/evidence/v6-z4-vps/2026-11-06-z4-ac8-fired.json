@@ -41,12 +41,20 @@
       "HINDSIGHT_API_LLM_API_KEY",
       "HINDSIGHT_BASE_URL=http://127.0.0.1:18890"
     ],
-    "ledger_decision": "QDS_MEMGATE_LEDGER left ABSENT: container-local ledger per template guidance",
+    "ledger_decision": "AMENDED post-GO: QDS_MEMGATE_LEDGER=/data/memgate-ledger.db + override volume /opt/qds/memgate:/data (untracked operator override file) so the box-fired M2.3 mint plane shares the deployed gateway ledger. The slot-up container-local ledger was fresh-empty; orphaned on recreate.",
     "ledger_state": ".sandbox/memgate-ledger.db inside container, uid 1000 bun-owned (gate G6)",
     "secrets_home": "Proton Pass Operating vault, item QDS-Factory m2-gateway keys (vultr qds-alpha) (both keys; never printed; M2.3 fire env must carry the SAME QDS_MEMGATE_SIGNING_KEY value)"
   },
-  "caddyRoute": "deferred-to-M2.3",
-  "caddyRouteReason": "no Caddy on the box; front door is solstice-nginx (1.27.4, TLS 80/443). Splice target absent; nginx-row-vs-Caddy is an M2.3-day operator decision. Field present, never absent (AC8 / R2-F24).",
+  "caddyRoute": "spliced",
+  "caddyRouteReason": "post-GO perimeter splice EXECUTED: operator chose nginx row; spliced at the nginx.conf E21-S09A main-*.conf include point (validate nginx -t, reload). NO Caddy involved, no second proxy, no new TLS stack.",
+  "perimeter": {
+    "mechanism": "nginx",
+    "file": "/etc/solstice/nginx/solstice.d/main-gateway-recall.conf",
+    "row": "location = /v1/recall (limit_except POST deny all; proxy_pass http://m2-gateway:8080)",
+    "publicPostRecall": "external POST /v1/recall -> 403 gateway refusal (unauthenticated; scope-verb shape) - forwarded and refused by the gateway itself",
+    "getRecall": "403 by nginx limit_except (not forwarded)",
+    "retainNotForwarded": "POST /v1/retain -> 404 (solstice default; INV-Z4-1 holds: no hindsight path forwarded)"
+  },
   "sequencing": {
     "m2_1_authz_live": true,
     "note": "R3 sequencing satisfied: M2.1 authz merged #414 2026-10-08, hardened #506, shipped in the published image; gateway refuses no-auth 401 before body parse."
