@@ -1023,7 +1023,7 @@ ARG OPENRIG_VERSION=0.5.14
 # 5c4ae1d1e412bbe5806f84eccd51d20405a2ab9a7c14fd90cb12c4c1653ee798; run
 # 41742270947) — pinning the exact versions (npm lockfile for the global
 # install) is the standing fix candidate; filed, not done here.
-ARG OPENRIG_TREE_SHA256=5c4ae1d1e412bbe5806f84eccd51d20405a2ab9a7c14fd90cb12c4c1653ee798
+ARG OPENRIG_TREE_SHA256=ab22c448f87bd46984a0c37d6fa2fab4be07273bff3f54738f196d7b8cf321f2
 # S2.2/S2.6: the claude CLI, pinned. Installed into the SAME /opt/openrig
 # prefix — deliberately: the tree-hash gate above scopes that whole tree, so
 # the claude-code install is frozen by the same measurement instead of a

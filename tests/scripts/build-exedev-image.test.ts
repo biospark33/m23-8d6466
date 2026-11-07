@@ -1343,7 +1343,12 @@ describe("buildIdFileInputs", () => {
       // Shelley socket-activation, headless-shell via Shelley metadata).
       // Both FROM digests only; measured with shasum -a 256 on the edited
       // file. The driver REF/BUILD_ID adoption stays owed behind the merge.
-      "oci/exedev/Dockerfile": "cfd5cd68de76d1be4b3fa6e6491694a4d2cfe6ae1474daeaf295beeaf645c21e",
+      //
+      // 2026-11-07: M2.3 stderr-visibility adoption (run 42374716539's gate B
+      // refusal; adopt-image-pin moved the TOFU ARG + measuredDefault, this
+      // entry measured from the same run's failing assert on the post-adoption
+      // tree). Dockerfile bytes only.
+      "oci/exedev/Dockerfile": "5018c65161ddab3d8c62c7f68c75e783b5ce983e2aaf6d5037f640b12034a608",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -4047,7 +4052,7 @@ describe("checksumArgProblems", () => {
           // is untouched at cc75efdd in failing run and last green run alike).
           // 2026-11-02 (second same-day pin): re-pinned again from publish
           // run 41454454888's refusal — the floats moved within 13 hours.
-          return "5c4ae1d1e412bbe5806f84eccd51d20405a2ab9a7c14fd90cb12c4c1653ee798";
+          return "ab22c448f87bd46984a0c37d6fa2fab4be07273bff3f54738f196d7b8cf321f2";
       }
     };
     for (const name of ["NODE_SHA256", "OPENRIG_TREE_SHA256"] as const) {
