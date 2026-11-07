@@ -1140,6 +1140,7 @@ COPY pi-vs-claude-code-vendor/self-compact/extensions/self-compact /opt/qds/pi-e
 # recall-only, sanitized, char-budgeted (M2.2). Files 0644 root:root like the
 # engine tree: pi reads this as source, and exedev — the user that runs
 # agent-authored code — must not be able to rewrite what a seat can load.
+COPY pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall /opt/qds/pi-ext/kg-recall
 # The repo-shaped COPYs below answer the M2.3 fire-15 root cause: rosters
 # name their extensions REPO-SHAPED (config/rosters/*.roster.yaml), the
 # team-lead-driver resolves the entry against ITS OWN in-image location
