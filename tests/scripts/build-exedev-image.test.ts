@@ -1356,7 +1356,15 @@ describe("buildIdFileInputs", () => {
       // resolve; sources were already walked (the flat /opt/qds/pi-ext COPYs),
       // so the tracked-set digest did NOT move. Measured from this test's own
       // failing run.
-      "oci/exedev/Dockerfile": "dfc21c3a42e1029077bff71e83efd6a7600c8e4b5d2172640c7b53bc5c4902f8",
+      //
+      // e60debed: moved from dfc21c3a in the same session's fixup — #513 had
+      // REPLACED the flat /opt/qds/pi-ext/kg-recall COPY with the comment
+      // block instead of augmenting it (the Edit tool call used the COPY line
+      // as its anchor), so the build died at its own [ -f
+      // /opt/qds/pi-ext/kg-recall/kg-recall.ts ] guard in run 42378357138.
+      // This line restores the flat COPY beside the repo-shaped ones; the
+      // repo-shaped copies stay. Measured from this test's own failing run.
+      "oci/exedev/Dockerfile": "e60debed8138345d0a68ee29244da128a68e2fb03e1988b08ea84cd83cd3ffef",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
