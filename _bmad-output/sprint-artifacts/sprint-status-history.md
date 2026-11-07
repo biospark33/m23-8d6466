@@ -320,3 +320,22 @@ meta:
 # z4-vps-day 8/8 MET. Remaining: M2.3 (GO ask + perimeter row), A3s, #408.
 # The day-6 cont. note this replaces was drained to sprint-status-history.md.
 
+
+# 2026-11-07 (day 7/8, session 6 close-out) — drained from sprint-status.yaml:
+# Z4 AC8 fired leg COMPLETE (8/8 unlazy gates; gateway up, GHCR private pull,
+# memgate keys vaulted, nginx perimeter row spliced + externally verified,
+# shared minting ledger). M2.3 FIRED 13x under operator GO: L0/LD/L1 PASS
+# every fire (real dispatch); L2 fails deterministically - fixer worker
+# empty coms reply ~500ms (0 tokens), coms_await transient verdict; L3 count
+# assert follows. NOT the image (forensic probe works: pi 0.84.4 + extension
+# + minted key + exact argv on a live exe.dev box). Root-cause layer: worker
+# stderr discarded at 3 spawn sites (runner.ts stdio ignore x2; driver line
+# 743 logs tails to stderr the runner ignores) - image-side capture fix
+# owed (rebuild/publish/adopt) then refire. Second defect: transient restart
+# never executes (shouldRetry true, 8 retries left, engine settles after ONE
+# attempt). Instrumentation branch feature/m23-run-record-stdout-tail
+# (stdoutTail + stderrTail 4000 + journal-tail fetch). Spend << $1 total;
+# every fire self-cleaned; 46 stale 2026-10-04 sbx-spike-openrig keys swept
+# (pre-existing leak, standing cleanup authority). Evidence:
+# _bmad-output/evidence/v6-z4-vps/ + memory-live/; handoff:
+# _bmad-output/reviews/2026-11-06-session6-closeout-HANDOFF.md.

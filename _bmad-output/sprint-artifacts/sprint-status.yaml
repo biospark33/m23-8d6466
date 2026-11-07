@@ -6,25 +6,43 @@
 # plus the most recent note only. Append new notes here; drain them there.
 #
 # --- Most recent note ---
-# 2026-11-07 (day 7/8, session 6 close-out):
-# Z4 AC8 fired leg COMPLETE (8/8 unlazy gates; gateway up, GHCR private pull,
-# memgate keys vaulted, nginx perimeter row spliced + externally verified,
-# shared minting ledger). M2.3 FIRED 13x under operator GO: L0/LD/L1 PASS
-# every fire (real dispatch); L2 fails deterministically - fixer worker
-# empty coms reply ~500ms (0 tokens), coms_await transient verdict; L3 count
-# assert follows. NOT the image (forensic probe works: pi 0.84.4 + extension
-# + minted key + exact argv on a live exe.dev box). Root-cause layer: worker
-# stderr discarded at 3 spawn sites (runner.ts stdio ignore x2; driver line
-# 743 logs tails to stderr the runner ignores) - image-side capture fix
-# owed (rebuild/publish/adopt) then refire. Second defect: transient restart
-# never executes (shouldRetry true, 8 retries left, engine settles after ONE
-# attempt). Instrumentation branch feature/m23-run-record-stdout-tail
-# (stdoutTail + stderrTail 4000 + journal-tail fetch). Spend << $1 total;
-# every fire self-cleaned; 46 stale 2026-10-04 sbx-spike-openrig keys swept
-# (pre-existing leak, standing cleanup authority). Evidence:
-# _bmad-output/evidence/v6-z4-vps/ + memory-live/; handoff:
-# _bmad-output/reviews/2026-11-06-session6-closeout-HANDOFF.md.
-# The day-7 note this replaces was drained to sprint-status-history.md.
+# 2026-11-07 (day 7/8, session 7 close-out cont.):
+# M2.3 fix chain EXECUTED under operator GO (merges + image ritual + firewall
+# + fires): PR #510 merged (instrumentation + the memgate serveMemgate listener
+# test that LIFTS the standing check:coverage red — src/memgate/server.ts
+# 55.14% -> 92.47% lines; the gate had been red on dev since #506 and
+# merged-past on #508/#509). PR #511 merged (the stderr-visibility fix:
+# cli-anything/src/runner.ts spawns inherit stderr at both sites — the
+# unread-pipe close-delay rationale cannot apply to an fd; boundary test +
+# measured negative control). Issue #512 filed (coms_await transient settles
+# after one attempt although shouldRetry=true, 8 retries left). Vultr
+# firewall tcp/22 rotated per Z4 G7 precedent (99.43.218.74 -> 73.187.106.188,
+# CGNAT rotation; state/operator-ip.txt updated; verify.mjs firewall ok).
+# Fire 14: dispatch refused - the scratch repo (QDS_EXEDEV_REPO_URL
+# biospark33/m23-8d6466) lacked dev 0315b1bc ("not our ref"); scratch main
+# synced. Fire 15: THE BLOCKER NAMED - the stderr fix surfaced the crash line
+# in box journald exactly as designed:
+#   Error: Failed to load extension
+#   "/opt/qds-factory/pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/
+#   kg-recall.ts": Extension path does not exist
+# Roster-granted seats name extensions REPO-SHAPED; the team-lead-driver
+# resolves against ITS OWN in-image location (/opt/qds-factory) under INV-2
+# containment, which realpath-resolves first — so the flat /opt/qds/pi-ext
+# bake is unreachable and symlinks are structurally rejected. PR #513 merged
+# (repo-shaped COPYs for kg-recall + self-compact); #513's Edit accidentally
+# REPLACED the flat kg-recall COPY, killing build 42378357138 at its own
+# guard; PR #514 restored it. Pin chain healed: digest sha256:1390e837…
+# buildId ac9d2865fdf3c926 adopted on dev (607544dd), healing run green
+# through gate B + anonymous pull; attest FAILED on a Sigstore Rekor
+# transparency-log 500 (third-party outage, measured rekor-http=500) —
+# retry loop armed. Fire 16 + mirror re-push HOLD until the attested gate
+# goes green (nothing pinned unsigned). Fire-14/15 evidence pulled local
+# (memory-live/). Restart-not-executed defect: #512 (needs a ruling once the
+# round proves the worker path). Spend: fires 14-15 ≈ $0.02; total session
+# spend well under the $1.06/fire ceiling. Remaining: attest green -> mirror
+# -> fire 16 -> the same chain for any fix the crash names; A3s + #408.
+# The session-6 close-out note this replaces was drained to
+# sprint-status-history.md.
 
 #
   prd: planning-artifacts/prd-qds-factory-v4.md
@@ -353,7 +371,7 @@ epics:
       M1.3: { title: "Recall measurement harness (probe set, hit-rate@k, DD-22 checkpoint)", points: 3, status: done, deps: [M1.2] }  # v6a — merged PR #413 (939aed0f; 3 bmad-code-review rounds + CodeRabbit round-4: 58 findings, 54 patched, run_id-keyed receipt join, 60/60 probe-harness tests); prerequisite rerun = P0.9 import leg fixed (item-level tags, corpus 8→23, $0.74 spend, keys revoked); first real-instance baseline committed (_bmad-output/evidence/memory/2026-10-07T15-52-32-492Z-hit-rate.json: hit-rate@5 0.565 over 23 probes, canary hit, median 106ms); DD-22 checkpoint DATED not sprint-bound (~30 M1 cycles), decision operator-only (checkpointEligible flag, no swap machinery); report .md leg = flex-cut #1 (never triggered)
       M2.1: { title: "Memory gateway (per-run recall-only keys + agent tokens; D8 amendment impl)", points: 5, status: done, deps: [M1.1] }  # v6a — merged PR #414 (da2195d9; 3 bmad-code-review rounds: 31+21+11 unified findings + CodeRabbit round-4: live-key `run` phase on runMemoryKeyLifecycle with compensation-complete brackets, delivery-boundary docs corrected, driver-fill routing + parent-0700 removal pushed back to M2.2 scope); unit/mock; M1.1 edge ACCEPTANCE-ONLY (dev-first sanctioned, DD-26); mirrors credentials.ts ordering exactly; module root src/memgate/
       M2.2: { title: "In-box kg_recall pi extension + roster grant + full image re-pin ritual", points: 5, status: done, deps: [M2.1] }  # v6b — merged PR #416 (6dff0ba1; 2 bmad-code-review rounds + CodeRabbit round: 7 findings all fixed — writable ledger-handle closes in dispatch+teardown brackets, assertDeliveryConfigSafe moved pre-admission with typed exit-2 re-emit, memory-leg awaits ceiling-bounded via ctx.within, GitNexus skill recovery pinned to contract 1.6.12 + routed through the installer with localize-rule regeneration verified); re-pin ritual = operator GO — UPDATE 2026-10-24: since run on a tree containing M1.2/J3/J4/A2 (publish+adopt 9ae282c9 2026-10-16, 5c541069 2026-10-17, #461/#462/#463 2026-10-18); A2 live T2 legs fired under image f3f1d6cb
-      M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: done, deps: [M2.2, M1.2] }  # v6b — merged PR #418 (dev 3c1509a3; head 32ca3faf; 3 bmad-code-review rounds 16/12/12 findings + CodeRabbit round: roster tools allowlist now enforced end-to-end through TeamRoleSchema→adapter→QDS_AGENT_TEAM_CONFIG_JSON→buildWorkerArgv --tools, FRAME_HEADER echo hole replaced with retained-content recall witness, handoff cleanup claim narrowed to pass/fail+SIGINT-manual); NOT fired — operator-gated T2 handoff recorded per M1.2 precedent (_bmad-output/reviews/m2-3-t2-handoff.md: image-pin ritual, M1.2 T2 fired, memory/exedev env, operator GO); live-fire ACs stay open until the round fires (FIRED 13x 2026-11-06/07 under operator GO: L0/LD/L1 green, L2 deterministic fixer-empty-coms failure, root-cause layer + instrumentation recorded in the session-6 closeout handoff)
+      M2.3: { title: "Combined memory live round (primed dispatch + in-box recall + revoke-verify)", points: 2, status: done, deps: [M2.2, M1.2] }  # v6b — merged PR #418 (dev 3c1509a3; head 32ca3faf; 3 bmad-code-review rounds 16/12/12 findings + CodeRabbit round: roster tools allowlist now enforced end-to-end through TeamRoleSchema→adapter→QDS_AGENT_TEAM_CONFIG_JSON→buildWorkerArgv --tools, FRAME_HEADER echo hole replaced with retained-content recall witness, handoff cleanup claim narrowed to pass/fail+SIGINT-manual); NOT fired — operator-gated T2 handoff recorded per M1.2 precedent (_bmad-output/reviews/m2-3-t2-handoff.md: image-pin ritual, M1.2 T2 fired, memory/exedev env, operator GO); live-fire ACs stay open until the round fires (FIRED 13x 2026-11-06/07 under operator GO: L0/LD/L1 green, L2 deterministic fixer-empty-coms failure — ROOT CAUSE NAMED 2026-11-07 via PR #511's stderr-inherit fix: the in-image extension path /opt/qds-factory/pi-vs-claude-code-vendor/kg-recall/... does not exist, the rosters' repo-shaped extension entries being unresolvable against the flat /opt/qds/pi-ext bake under INV-2 containment; fixed by PRs #513+#514 (repo-shaped extension COPYs in the image), pin sha256:1390e837…/ac9d2865fdf3c926 adopted on dev 607544dd; fire 16 pending the Sigstore Rekor attestation outage (retry loop armed); issue #512 = the separate restart-not-executed defect)
       M3.1: { title: "Manager *-meta banks + L3 nightly consolidate (crontab fallback)", points: 3, status: done, deps: [M2.1, M1.1] }  # v6b — DONE 2026-10-10: PR #422 merged to dev (merge 7c777bc9, head 0a36ad99); live round fired green on operator GO before merge. Pre-dev note (historical): ready when M2.1 lands: the documented crontab fallback is E21-free (gateway driver-agnostic); A1 gates ONLY the platform-schedule leg, never the fallback (DD-28.16)
       M3.2: { title: "L4 weekly reflect → PROPOSE (never auto-apply)", points: 3, status: done, deps: [M3.1, A5] }  # v6b — done 2026-10-12: PR #424 merged to dev (f15f7ee1; head 88ed5e8d; 2 CodeRabbit rounds: r1 week-scoped evidence gather + crontab stderr split + exit-doc truth, r2 exit-0 doc + isoWeekStartUtc nonexistent-week rejection, whole-file routing-log read accepted with documented ceiling). src/learning/{gather,compose,weekly-reflect,proposal-schema}.ts + scripts/memory-weekly.ts; tests/learning 116/0; tsc + biome clean. M3 milestone complete (M3.1 + M3.2). FR-LEARN-30 shape; proposals to meta bank + operator; never auto-apply
       M1.4: { title: "Jev rerank arm for the recall re-measure (measured, never applied)", points: 2, status: draft, deps: [M1.3] }  # v6b — row added by PR #415 (6cdb1c73, 2026-10-08); rides operator-ruled recall re-measure (8ce22829) pre-DD-22; draft — atomicity audit LANDED 2026-11-06 (PASS, atomicity-audit-2026-10-02.md addendum; audit debt cleared, eligibility gate unaffected). ELIGIBILITY-GATED DEFER (decision register, 2026-11-04): NOT cancelled — revisit only when scripts/judgment/arm-thresholds.ts flips eligible (needs 200 confirmed JEV records via normal M-cycles); verdict at gate time: not-eligible (outcome_confirmed=0/200, confirmed_clusters=0/20, ci_lower=n/a)
