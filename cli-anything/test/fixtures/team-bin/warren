@@ -150,6 +150,24 @@ async function main(): Promise<void> {
       process.exit(0);
       break;
     }
+    case "driver_stderr": {
+      // The team-lead-driver logs "worker <id> stderr tail:" diagnostics to
+      // ITS stderr. Under the harness's old ["ignore","pipe","ignore"] that
+      // line died at the spawn boundary — the M2.3 live round lost the fixer
+      // crash line across 13 fires to exactly this discard. The line must
+      // reach the harness's own stderr (journald under the in-box unit).
+      console.error("worker fx-1 stderr tail: EHOSTUNREACH coms handshake failed");
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(coms(3, "lead", "worker-b"));
+      say(cost("lead", "anthropic/claude-x", 0.01));
+      say(cost("worker-a", "openrouter/model-a", 0.02));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts", "src/a.ts"]));
+      say({ type: "merged", result: { summary: "lead merged both workers" } });
+      process.exit(0);
+      break;
+    }
     case "hang": {
       await sleep(60_000);
       break;

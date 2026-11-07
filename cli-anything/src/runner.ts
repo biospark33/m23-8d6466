@@ -316,13 +316,17 @@ export async function runManifest(
     }
 
     try {
-      // stderr is ignored (not piped): the harness captures subprocess stdout
-      // only, and an unread stderr pipe can delay `close` under some runtimes.
+      // Child stderr inherits this harness's stderr — an fd, not a pipe, so the
+      // unread-pipe close-delay that motivated "ignore" cannot occur. The
+      // harness parses stdout only; child diagnostics must survive this
+      // boundary (journald under the in-box systemd unit), or a worker crash is
+      // unobservable: the M2.3 live round lost the fixer crash line across 13
+      // fires to this discard (the driver's "worker <id> stderr tail:" lines).
       // detached (POSIX) gives the child its own process group so a timeout
       // can kill the whole tree, not just the direct child.
       child = spawn(file, argv, {
         env,
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "inherit"],
         detached: process.platform !== "win32",
       });
     } catch (err) {
@@ -1372,9 +1376,15 @@ export async function runTeamManifest(
     }
 
     try {
+      // Child stderr inherits this harness's stderr — an fd, not a pipe, so the
+      // unread-pipe close-delay that motivated "ignore" cannot occur. The
+      // harness parses stdout only; child diagnostics must survive this
+      // boundary (journald under the in-box systemd unit), or a worker crash is
+      // unobservable: the M2.3 live round lost the fixer crash line across 13
+      // fires to this discard (the driver's "worker <id> stderr tail:" lines).
       child = spawn(file, argv, {
         env,
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "inherit"],
         detached: process.platform !== "win32",
       });
 
