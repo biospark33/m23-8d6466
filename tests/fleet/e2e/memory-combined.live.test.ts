@@ -785,7 +785,12 @@ describe("memory combined live (M2.3)", () => {
         expect(markerHits.length).toBeGreaterThan(0); // task compliance: the output quotes the recalled marker
         expect(witnessHits.length).toBeGreaterThan(0); // proof of recall: the witness exists ONLY in the retained memory content
 
-        // ── EXACTLY ONE memory-retain-receipt/retain row, then re-harvest ───
+        // ── The run's retain receipt + J3's routing-decision meta receipt ───
+        // Authored 2026-10-09 expecting EXACTLY ONE retain receipt; J3 (merged
+        // 2026-10-14, PR #427) added the idempotent routing-<runId>-dev-meta
+        // retain to every run, so TWO is the correct current shape — observed
+        // live on fire 16 (the first run where the worker actually executed):
+        // subjects [qds-20261107-cddbb3, routing-qds-20261107-cddbb3-dev-meta].
         const receiptRows = (): AuditLinkRow[] => {
           const handle = openAuditStoreForWalk(auditDb);
           try {
@@ -796,8 +801,10 @@ describe("memory combined live (M2.3)", () => {
         };
         let receipts = receiptRows();
         evidence.push({ phase: "receipts-after-harvest", count: receipts.length, subjects: receipts.map((l) => l.subjectId ?? null) });
-        expect(receipts.length).toBe(1);
-        expect(receipts[0]?.subjectId).toBe(runId);
+        const subjects = receipts.map((l) => l.subjectId ?? null);
+        expect(receipts.length).toBe(2);
+        expect(subjects).toContain(runId);
+        expect(subjects).toContain(`routing-${runId}-dev-meta`);
         // QDS_LOG_VERBOSE: same rationale as the teardown verb — without it the
         // log sink mutes the child's stderr under NODE_ENV=test, and the
         // divergent assert below would pass vacuously on a muted stream.
@@ -809,7 +816,9 @@ describe("memory combined live (M2.3)", () => {
         expect(reharvest.stderr.includes("divergent")).toBe(false);
         receipts = receiptRows();
         evidence.push({ phase: "dedup-after-reharvest", receiptCount: receipts.length, divergentInReharvestStderr: reharvest.stderr.includes("divergent") });
-        expect(receipts.length).toBe(1); // digest-stable: no second row, no divergent alarm
+        // Digest-stable dedup: reharvest adds NO new rows (both the run receipt
+        // and the routing-meta receipt stay at their pre-reharvest counts).
+        expect(receipts.length).toBe(subjects.length); // === 2: no second row, no divergent alarm
       } catch (e) {
         failure = e;
         evidence.push({ phase: "test-error", error: e instanceof Error ? e.message : String(e) });
@@ -949,7 +958,9 @@ describe("memory combined live (M2.3)", () => {
           volatileOrGatewayRows: leaked.map((r) => `${r.hop}.${r.event}`),
           auditHopsUntouched: true,
         });
-        expect(counts("memory-retain-receipt", "retain")).toBe(1);
+        // TWO, not one: the run's retain receipt + J3's routing-<runId>-dev-meta
+        // retain (see the receipt-section comment in L2 — observed live, fire 16).
+        expect(counts("memory-retain-receipt", "retain")).toBe(2);
         expect(counts("run-credential", "revoke")).toBe(1);
         expect(counts("run-credential", "verify-revoked")).toBe(1);
         expect(leaked).toEqual([]); // memgate-* events stayed log lines (AUDIT_HOPS untouched)
