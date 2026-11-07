@@ -651,8 +651,8 @@ describe("memory combined live (M2.3)", () => {
           // "worker <id> stderr tail:" lines the runner's stdio discard hides.
           // Fetch the tail as evidence BEFORE L3 tears the box down.
           try {
-            const jr = await boxExec(ctx.driver, vmName, ["sh", "-c", `journalctl -u 'qds-run@${runId}*' --no-pager -q 2>/dev/null | tail -c 6000 || true`]);
-            evidence.push({ phase: "journal-tail", tail: jr.stdout.trim().slice(-6000) });
+            const jr = await boxExec(ctx.driver, vmName, ["sh", "-c", `journalctl -u 'qds-run@${runId}*' --no-pager -q 2>/dev/null | grep -iE "stderr tail|coms_await|worker|spawn|error" | tail -c 5000 || true`]);
+            evidence.push({ phase: "journal-tail", tail: jr.stdout.trim().slice(-5000) });
           } catch { evidence.push({ phase: "journal-tail", error: "fetch failed (box may be gone)" }); }
         }
         // live-mirror: src/fleet/run-completion.ts ChainOutcome "ok" (the settled chain verdict literal)
