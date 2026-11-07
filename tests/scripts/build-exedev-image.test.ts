@@ -1572,7 +1572,16 @@ describe("buildIdFileInputs", () => {
       // Adopted from this test's own failing run on the final tree
       // (edit-first/re-pin-last; the story-consistency spawn tests' 30s
       // budgets are tests/ and do not walk).
-      "20fd85febb85ca8263449e80a85c265535b79ed282e5ab4978d8944a2231db58",
+      //
+      // 38ae22ad: moved from 20fd85fe by the M2.3 stderr-visibility fix
+      // (feature/m23-runner-stderr-visibility, PR #511, 2026-11-07) —
+      // `cli-anything/src/runner.ts` (both spawn sites' stdio 'ignore' →
+      // 'inherit' + the provenance comments) is a walked COPY input. PUBLISH
+      // NOT DEFERRED this time: the merge triggers the publish workflow and
+      // the M2.3 refire needs the adopted pin — that is the round's whole
+      // point. Adopted from this test's own failing run on the final tree,
+      // measured twice (deterministic).
+      "38ae22ad74a30f8c379a845091a560cc9d515d404c00e25145b51c5d7fe44049",
       // 0c5509f3: moved from 72d8d83b by the DF2.13/DF2.14 merge (PR #254) —
       // `src/fleet/dispatch.ts` (B1 backstop bound + structuredErrorParts),
       // `src/fleet/fanout-primitive.ts` (invalid-cap ceiling + F15 invariant)

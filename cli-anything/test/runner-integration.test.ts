@@ -409,6 +409,25 @@ describe("runTeamManifest", () => {
     expect(out.exitStatus).toBe("overflow");
   }, 30_000);
 
+  it("CLI: driver stderr survives the harness spawn boundary (M2.3 fire blocker)", async () => {
+    // The team-lead-driver logs "worker <id> stderr tail:" diagnostics to its
+    // own stderr. Under the old ["ignore","pipe","ignore"] they died at this
+    // spawn — the M2.3 live round's fixer crash line was unobservable across
+    // 13 fires. stderr is inherited now: the shim's stderr line must land on
+    // THIS process's stderr, which is journald under the in-box systemd unit.
+    const proc = Bun.spawn(
+      ["bun", join(import.meta.dir, "..", "src", "index.ts"), "run", "--manifest", TEAM_MANIFEST],
+      { env: teamEnv("driver_stderr"), stdout: "pipe", stderr: "pipe" },
+    );
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    expect(stderr).toContain("worker fx-1 stderr tail: EHOSTUNREACH coms handshake failed");
+    expect(exitCode).toBe(0);
+    const stdout = await new Response(proc.stdout).text();
+    const out = JSON.parse(stdout) as MergedOutput;
+    expect(out.exitStatus).toBe("success");
+  }, 20_000);
+
   it("INV-1/INV-3: secret env values never appear in the merged JSON", async () => {
     const secret = "sk-team-secret-value-abcdef123456";
     const out = await runTeamManifest(TEAM_MANIFEST, {
