@@ -641,7 +641,7 @@ describe("memory combined live (M2.3)", () => {
         }
         const env = { QDS_RUNS_DIR: recordsDir, QDS_AUDIT_DB: auditDb };
         const started = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 300_000 });
-        evidence.push({ phase: "run-verb", exitCode: started.exitCode, stderrTail: started.stderr.trim().slice(-300), stdoutTail: started.stdout.trim().slice(-2000) });
+        evidence.push({ phase: "run-verb", exitCode: started.exitCode, stderrTail: started.stderr.trim().slice(-4000), stdoutTail: started.stdout.trim().slice(-2000) });
         expect(started.exitCode).toBe(0);
         const state = await waitForSettledVerdict({ recordsDir, evidence }, runId, { attempts: 30, waitMs: 10_000 });
         evidence.push({ phase: "settled", state });
