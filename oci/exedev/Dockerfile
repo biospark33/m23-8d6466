@@ -1140,10 +1140,25 @@ COPY pi-vs-claude-code-vendor/self-compact/extensions/self-compact /opt/qds/pi-e
 # recall-only, sanitized, char-budgeted (M2.2). Files 0644 root:root like the
 # engine tree: pi reads this as source, and exedev — the user that runs
 # agent-authored code — must not be able to rewrite what a seat can load.
-COPY pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall /opt/qds/pi-ext/kg-recall
+# The repo-shaped COPYs below answer the M2.3 fire-15 root cause: rosters
+# name their extensions REPO-SHAPED (config/rosters/*.roster.yaml), the
+# team-lead-driver resolves the entry against ITS OWN in-image location
+# (/opt/qds-factory) under INV-2 containment, and containment realpath-
+# resolves BEFORE the check — so a symlink to the flat /opt/qds/pi-ext bake
+# escapes root and is structurally rejected, and so is any absolute
+# out-of-root path. The flat bake was therefore unreachable from the
+# driver's root and every roster-granted kg-recall seat died in-box with
+# "Extension path does not exist" (13 M2.3 fires; surfaced only after PR
+# #511's stderr-inherit fix made the worker crash line observable). pi
+# loads -e from the repo-shaped copy; the flat pi-ext bake stays for the
+# non-roster flat-bake consumers.
+COPY pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall /opt/qds-factory/pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall
+COPY pi-vs-claude-code-vendor/self-compact/extensions/self-compact /opt/qds-factory/pi-vs-claude-code-vendor/self-compact/extensions/self-compact
 RUN set -e; \
     [ -f /opt/qds/pi-ext/self-compact/self-compact.ts ]; \
     [ -f /opt/qds/pi-ext/kg-recall/kg-recall.ts ]; \
+    [ -f /opt/qds-factory/pi-vs-claude-code-vendor/kg-recall/extensions/kg-recall/kg-recall.ts ]; \
+    [ -f /opt/qds-factory/pi-vs-claude-code-vendor/self-compact/extensions/self-compact/self-compact.ts ]; \
     chown root:root /opt/qds; \
     chmod 0755 /opt/qds; \
     install -d -o exedev -g exedev -m 0700 /opt/qds/swarm-keys; \
