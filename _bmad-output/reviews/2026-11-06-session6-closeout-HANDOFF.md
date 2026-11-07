@@ -1,61 +1,80 @@
-# Sprint #486-#489 register session - day 7, session 6 close-out handoff (2026-11-06)
+# Sprint #486-#489 — day 7/8, session 6 close-out (2026-11-07): M2.3 arc
 
-Companion to 2026-11-06-session7-HANDOFF.md (session 5's doc; its STATE section stays
-authoritative for pre-session-6 facts). This file records session 6's delta only.
-Forward-only: nothing above is rewritten.
+Session 6 executed BOTH operator-gated legs: Z4 AC8 VPS day (COMPLETE, 8/8 gates)
+and the M2.3 combined live round (FIRED 13x, deterministic blocker diagnosed,
+evidence captured). Companion to 2026-11-06-session7-HANDOFF.md (its STATE stays
+authoritative for pre-session-6 facts).
 
-## What changed this session (all gate-verified, unlazy z4-vps-day 8/8 MET)
+## Z4 AC8 (fired leg) — COMPLETE
 
-- Z4 AC8 fired leg EXECUTED: gateway slot UP + healthy on vultr qds-alpha
-  (149.28.248.96). Zero spend, agent-run on operator instruction. Evidence:
-  _bmad-output/evidence/v6-z4-vps/2026-11-06-z4-ac8-fired.json
-  (ledger .unlazy/z4-vps-day/GATES.md).
-- GHCR qds-m2-gateway stays PRIVATE (operator confirmed). Box pulls via docker login
-  with the biospark33 gh CLI token (write:packages), token ssh-stdin only. VPS-day
-  visibility decision CLOSED.
-- Firewall: stale tcp/22 source rule 68.183.152.138/32 (dead IP) removed;
-  tcp/22 from 71.58.70.204/32 added. 22/80/443-only stands.
-- Box checkout ff to dev 938e749a (token-carried fetch; clone has no credential
-  helper). 6 deploy/vps files byte-identical; tracked tree clean.
-- Memgate keys minted + placed + vaulted: MEMGATE_ADMIN_KEY +
-  QDS_MEMGATE_SIGNING_KEY (fresh, never printed). Pass item
-  "QDS-Factory m2-gateway keys (vultr qds-alpha)" (Operating vault). Box file
-  /opt/qds/QDS-Factory/deploy/vps/hindsight-qds.env (0600) carries them;
-  QDS_MEMGATE_LEDGER absent (container-local ledger).
-- Gateway smoke: vps-m2-gateway-1 running healthy; nc 8080 ok in-container;
-  .sandbox/memgate-ledger.db created uid 1000; hindsight-qds NOT recreated.
-- caddyRoute = deferred-to-M2.3 (field present, never absent): NO Caddy on box -
-  front door is solstice-nginx. Row splice (nginx location row vs Caddy install)
-  = M2.3-day operator decision.
-- Register drained: sprint-status.yaml day-7 note (day-6 cont. note drained to
-  history file); Z4 row comment records fired-leg execution.
-- Local cleanups: qds-m2-gateway:devtest image removed; stale 18890 tunnel already
-  dead (docker-only bind); local hindsight-qds container RETAINED.
-- M2.3 preconditions: (1) image pin healed YES; (2) M1.2 T2 fired YES;
-  (3) gateway env DONE this session (fire env must carry the SAME
-  QDS_MEMGATE_SIGNING_KEY); (4) exe.dev env standing recipe (operator-held);
-  (5) GO pending. NEW M2.3-day items: perimeter row (nginx vs Caddy) REQUIRED for
-  public reach (gateway publishes no ports); box checkout refetch before fire if
-  dev moved.
+- Gateway slot UP + healthy on vultr qds-alpha; GHCR stays PRIVATE (operator
+  call); box pulls via gh-token docker login; memgate keys minted+vaulted
+  (Proton Pass item: QDS-Factory m2-gateway keys (vultr qds-alpha)) + placed
+  0600 on box; shared minting ledger via operator override compose file
+  (/opt/qds/memgate <-> /data). Perimeter: nginx row POST /v1/<t>/banks/<b>/
+  memories/recall at the E21-S09A main-*.conf include point (operator chose
+  nginx); externally verified 401 no-auth / 403 GET / 404 not-forwarded.
+  caddyRoute=spliced (nginx mechanism, recorded honestly). Evidence:
+  _bmad-output/evidence/v6-z4-vps/2026-11-06-z4-ac8-fired.json.
+- Firewall: ssh rule re-issued per operator-IP rotation (rotates; helper
+  .unlazy/z4-vps-day/state/fwwindow.sh; one approved temp-detach window used
+  during CGNAT recovery + short windows for round control).
+- Firing-host setup (NEW, standing recipe): box .env carries
+  OPENROUTER_PROVISIONING_KEY, OPENROUTER_API_KEY (solstice-ci),
+  QDS_PI_CATALOG_DIR (bun-global pi-ai data dir), HINDSIGHT_BASE_URL
+  (127.0.0.1:18890), tenant bearer, QDS_KG_GATEWAY_URL
+  (https://qds-alpha.zeropointsignal.com), QDS_MEMGATE_LEDGER
+  (/opt/qds/memgate/memgate-ledger.db), exe.dev repo/SHA/roster;
+  /root/.pi/agent/models.json = custom rate registry (pi's own bundled rates)
+  because the bundled ids are chat:-prefixed and the roster slugs miss.
+  pi 1.1.0 installed on box (bun global) + node->bun symlink.
 
-## Gotchas this session (new, load-bearing)
+## M2.3 — FIRED 13x, DETERMINISTIC BLOCKER DIAGNOSED
 
-1. Box fetch needs a token: the box clone has no credential helper; plain git
-   fetch fails (could not read Username). Working pattern:
-   T=$(gh auth token); printf '%s' "$T" | ssh ... 'T=$(cat); git -c
-   credential.helper=!f(){ echo username=biospark33; echo password=$T; };f'
-   fetch origin dev'. The http.extraheader variant SILENTLY fails, and piping
-   through tail masks the exit - two stacked traps.
-2. Generator discipline (standing this session): hand-writing long files
-   corrupted tokens 4x (invented identifiers, mutated IPs/tags, junk lines).
-   Works: build artifacts from short constants, checker re-asserts load-bearing
-   values (G8 caught the corrupted draft). Re-read regions; git diff pre-commit.
-3. gate-check CWD anchoring: CHECK commands anchor at the LEDGER dir - use
-   absolute script paths in CHECK lines.
+- Preconditions cleared: roster-check green on box (exit 0), exe.dev auth ok,
+  gateway reachable (public origin), shared ledger mint plane ok.
+- L0 + LD + L1 PASS every fire (dispatch real: box created, key minted
+  500000 usd cap, repo filled, engine armed). L2 FAILS identically every
+  fire: fixer worker returns an EMPTY coms reply within ~500ms (0 tokens, 0
+  turns) - lead exits ok, coms_await deadline verdict: transient. L3 count
+  assert then fails. NOT the image (probe: pi 0.84.4 + node + extension +
+  exact worker argv + real minted key = WORKS on a forensic exe.dev box,
+  deepseek-v3.2 replied).
+- Root-cause LAYER (next session's fix): worker stderr discarded at three
+  spawn sites - cli-anything/src/runner.ts stdio ['ignore','pipe','ignore']
+  x2 (driver stderr ignored, comment line 319), driver line 743 logs worker
+  stderr tails to ITS stderr, which the runner ignores. The fixer crash line
+  is unobservable on the deployed image. FIX = runner.ts stderr pipe +
+  engine forwards -> image rebuild -> publish ritual -> adopt -> refire.
+- Second defect: transient restart NEVER EXECUTED (journal: shouldRetry
+  true, retriesRemaining 8, wallClock 3.6M ms remaining - engine settled the
+  run failed after ONE attempt). Separate investigation.
+- Instrumentation branch: feature/m23-run-record-stdout-tail
+  (7a6acb9d..33a7c213: run-verb stdoutTail, stderrTail 4000, journal-tail
+  fetch on non-ok settle; tsc+lint green per commit). PR it next session.
+- Spend: 13 fires x (box-minutes + ~1-4k usd in-box) ~= well under $1 total;
+  every fire's finally cleaned (boxes [] every check, keys [] - the only key
+  churn was a PRE-EXISTING month-old leak: 46 stale sbx-spike-openrig keys
+  from 2026-10-04, swept 2026-11-07 under standing cleanup authority).
+- One forensic box (m23-forensic-1) lived ~45 min, hand-destroyed.
 
-## M2.3 perimeter decision line
+## Session gotchas (new, load-bearing)
 
-CADDY-SPLICE: nginx location row vs Caddy install is an operator call; until a
-row exists the gateway is compose-network-only (no public reach) and M2.3 cannot
-fire without it. forbiddenOrigin traps :8888/:18889 - the origin must be the
-fronted URL.
+1. CGNAT ssh flapping: the operator hotspot rotates egress IPs per flow -
+   /32 Vultr rules flap. Helper fwwindow.sh + short windows + detached
+   rounds (nohup) make control possible; expect poll failure storms.
+2. OpenRouter key-create returns the plaintext at TOP-LEVEL 'key', not
+   .data.key; the list endpoint paginates and old keys hide behind it.
+3. pi's bundled catalog ids are chat:-prefixed; roster slugs miss the rate
+   table -> the DESIGNED fix is ~/.pi/agent/models.json (pi custom registry)
+   seeded with pi's own rates, not catalog surgery.
+4. generator discipline held for every artifact after the corruption streak:
+   python lines-lists + checker re-assertions caught 4 corrupt drafts.
+
+## Remaining (next session)
+
+1. Image-side worker-stderr capture -> rebuild/publish/adopt -> refire M2.3
+   (GO ask per ROE; worst case $1.06).
+2. Restart-not-executed defect.
+3. PR feature/m23-run-record-stdout-tail.
+4. A3 sign-offs + #408 (M1.1 VPS remainder incl. wrapper install) - untouched.

@@ -62,12 +62,12 @@
   "firewall": {
     "group": "qds-alpha-fw (39f1e152-6575-45d9-9a03-285cdffdffc5)",
     "staleRuleRemoved": "rule 4 tcp/22 from 68.183.152.138/32 (dead source IP; operator-authorized cleanup)",
-    "addedRule": "rule 8 tcp/22 from 71.58.70.204/32 (operator current IP)",
+    "addedRule": "tcp/22 from 99.43.218.74/32 (operator current IP; rotates — rule re-issued per session)",
     "final_set": [
       "443 v4+v6 world",
       "80 v4+v6 world",
       "icmp v4+v6",
-      "22 from 71.58.70.204/32 only"
+      "22 from 99.43.218.74/32 only"
     ],
     "principle": "runbook §1 22/80/443 only; 18889/18890 never public; loopback binds unchanged"
   },
@@ -85,9 +85,26 @@
     "met": "G1-G8 (live status: node gate-check.mjs --status)",
     "hygiene": "secret values never printed or persisted outside pass vault + box 0600 file; evidence carries names/lengths only"
   },
+  "m2_3_rounds_fired": {
+    "summary": "13 fires 2026-11-06/07 under operator GO; DETERMINISTIC blocker: L1 primed dispatch passes (spend real), L2 in-box recall fails - fixer worker returns EMPTY coms reply within ~500ms (0 tokens, 0 turns) - then L3 count-assert fails",
+    "root_cause_layer": "worker stderr discarded at THREE spawn sites (runner.ts stdio ignore x2, driver stderr ignored by engine) - the fixer crash line is unobservable on the deployed image",
+    "defects_filed_in_fires": [
+      "fixer coms_await deadline (primary; needs image-side stderr capture: runner.ts stdio pipe + engine forwards driver stderr)",
+      "transient restart never executed (shouldRetry true, 8 retries remaining, engine settled failed after ONE attempt)"
+    ],
+    "fires_evidence": "_bmad-output/evidence/memory-live/ (per-leg scrubbed JSONs, on box + pulled to Mac)",
+    "instrumentation_branch": "feature/m23-run-record-stdout-tail (7a6acb9d..33a7c213: stdoutTail, stderrTail 4000, journal-tail fetch on non-ok settle)",
+    "fixes_closed_this_session": [
+      "roster-check gate: OPENROUTER_API_KEY + QDS_PI_CATALOG_DIR + ~/.pi/agent/models.json custom registry (pi's own rates) on the firing host",
+      "exe.dev ssh auth on the firing host (id_ed25519 registered)",
+      "perimeter row nginx POST /v1/<t>/banks/<b>/memories/recall (401 no-auth verified externally)",
+      "shared minting ledger mount (override compose file)"
+    ]
+  },
   "remaining_for_M2_3": [
-    "perimeter row decision + splice (nginx location row vs Caddy); caddyRoute flips to spliced only then",
-    "M2.3 fire env assembled from the pass vault item (SIGNING_KEY match)",
-    "explicit operator GO (worst case $1.06) per rules of engagement"
+    "image-side worker-stderr capture (runner.ts stdio fix -> image rebuild -> publish ritual -> adopt) then refire",
+    "restart-not-executed defect investigation (transient shouldRetry true but engine settled without retry)",
+    "PR the instrumentation branch",
+    "explicit operator GO per refire"
   ]
 }

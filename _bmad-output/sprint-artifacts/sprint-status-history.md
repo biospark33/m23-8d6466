@@ -302,3 +302,21 @@ meta:
 # flagged, gateway HTTP server (src/memgate has NO 8080 listener — UNBUILT, out of M2.1's scope
 # by design) + image publish (unowned) + Z4 AC8 + M2.3 fire.
 # The 2026-11-06 M1.4-audit note this replaces was drained to sprint-status-history.md.
+
+# 2026-11-06 (day 7, session 6, cont.):
+# Z4 AC8 (fired leg) EXECUTED — gateway slot UP on vultr qds-alpha (149.28.248.96).
+# Agent-run on operator instruction (do it all), zero spend. GHCR stays PRIVATE
+# (operator call); box pulls via gh token docker login. Box checkout ff to dev
+# 938e749a; 6 deploy/vps files byte-identical. Compose .env seeded (owner+tag);
+# memgate keys minted + placed (0600) + stored in Proton Pass item
+# "QDS-Factory m2-gateway keys (vultr qds-alpha)" — M2.3 fire env must reuse the
+# SAME QDS_MEMGATE_SIGNING_KEY. Gateway running healthy, ledger container-local
+# (uid 1000), hindsight-qds NOT recreated. caddyRoute=deferred-to-M2.3: NO Caddy
+# on box — front door is solstice-nginx; row splice (nginx vs Caddy) = M2.3-day
+# operator decision. Firewall: stale 22-rule (68.183.152.138) removed, current
+# IP rule added (operator-authorized). Stale local devtest image removed; 18890
+# tunnel already dead (docker-only bind). Evidence:
+# _bmad-output/evidence/v6-z4-vps/2026-11-06-z4-ac8-fired.json. unlazy
+# z4-vps-day 8/8 MET. Remaining: M2.3 (GO ask + perimeter row), A3s, #408.
+# The day-6 cont. note this replaces was drained to sprint-status-history.md.
+
