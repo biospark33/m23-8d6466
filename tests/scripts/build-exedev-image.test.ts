@@ -1348,7 +1348,15 @@ describe("buildIdFileInputs", () => {
       // refusal; adopt-image-pin moved the TOFU ARG + measuredDefault, this
       // entry measured from the same run's failing assert on the post-adoption
       // tree). Dockerfile bytes only.
-      "oci/exedev/Dockerfile": "5018c65161ddab3d8c62c7f68c75e783b5ce983e2aaf6d5037f640b12034a608",
+      //
+      // dfc21c3a: moved from 5018c651 same-session — the M2.3 fire-15 root
+      // cause fix: two repo-shaped COPY lines for the vendored pi extensions
+      // (kg-recall + self-compact under /opt/qds-factory/pi-vs-claude-code-
+      // vendor/...), the paths the rosters name and INV-2 containment can
+      // resolve; sources were already walked (the flat /opt/qds/pi-ext COPYs),
+      // so the tracked-set digest did NOT move. Measured from this test's own
+      // failing run.
+      "oci/exedev/Dockerfile": "dfc21c3a42e1029077bff71e83efd6a7600c8e4b5d2172640c7b53bc5c4902f8",
       "oci/exedev/systemd/qds-run@.service": "24958f4098d7f31b8efa8f6437744ef8946906ed142967e6d8c3221ffcc78d85",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
