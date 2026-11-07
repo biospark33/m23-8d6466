@@ -102,3 +102,55 @@ describe("gateway server - wire contract", () => {
     expect((JSON.parse(out.body) as { error: { code: string } }).error.code).toBe("no-auth");
   });
 });
+
+describe("gateway server - real listener (serveMemgate)", () => {
+  // Issue-#503-family coverage lift: serveMemgate's Bun.serve wiring was the
+  // coverage gate's red (55.14% lines on dev, red across #508/#509/#510 CI).
+  // These arms drive the REAL listener on an ephemeral port and assert wire
+  // parity with the direct handleMemgateRequest refusals.
+  test("pre-body refusals match the direct handler; authenticated recall forwards through the mock client", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { HindsightClient } = await import("../../src/hindsight/client.ts");
+    const { MEMGATE_ADMIN_KEY, QDS_MEMGATE_SIGNING_KEY, memgateDeps, mintRunMemoryKey } = await import("../../src/memgate/index.ts");
+    const { serveMemgate } = await import("../../src/memgate/server.ts");
+
+    const dir = mkdtempSync(join(tmpdir(), "memgate-listener-"));
+    const depsOpts = {
+      env: { [MEMGATE_ADMIN_KEY]: "listener-admin", [QDS_MEMGATE_SIGNING_KEY]: "listener-signing" },
+      ledgerPath: join(dir, "memgate-ledger.db"),
+      now: () => 1_700_000_000_000,
+    };
+    // A mint-side connection to the SAME ledger file: the listener's own
+    // memgateDeps opens the file again, so the minted row must be on disk.
+    const mintDeps = memgateDeps({ ...depsOpts, client: new HindsightClient({ mode: "mock" }) });
+    const minted = mintRunMemoryKey(mintDeps, { runId: "qds-20261107-cc33dd", banks: ["qds-x"], ttlMs: 60_000, requestId: "listener-mint" });
+    mintDeps.ledger.close();
+
+    const srv = serveMemgate({ port: 0, depsOpts: { ...depsOpts, client: new HindsightClient({ mode: "mock" }) } });
+    const base = `http://127.0.0.1:${srv.port}`;
+    try {
+      const recallPath = "/v1/default/banks/qds-x/memories/recall";
+      // no-auth on the wire == the direct handler's refusal (status + code)
+      const noAuth = await fetch(`${base}${recallPath}`, { method: "POST", body: "{}" });
+      expect(noAuth.status).toBe(401);
+      const noAuthBody = (JSON.parse(await noAuth.text()) as { error: { code: string } }).error.code;
+      expect(noAuthBody).toBe("no-auth");
+      // unmapped route pre-auth == scope-verb, path never reflected
+      const trash = await fetch(`${base}/v1/default/banks/qds-x/NOPE`, { method: "POST", headers: { authorization: "Bearer garbage" }, body: "{}" });
+      const trashBody = await trash.text();
+      expect(trash.status).toBe(403);
+      expect(((JSON.parse(trashBody) as { error: { code: string } }).error.code)).toBe("scope-verb");
+      expect(trashBody).not.toContain("NOPE");
+      // authenticated recall rides the mock client to a 200 with results
+      const ok = await fetch(`${base}${recallPath}`, { method: "POST", headers: { authorization: `Bearer ${minted.keyMaterial}` }, body: JSON.stringify({ query: "q", limit: 3 }) });
+      expect(ok.status).toBe(200);
+      const okBody = (JSON.parse(await ok.text()) as { results?: unknown[] }).results;
+      expect(Array.isArray(okBody)).toBe(true);
+    } finally {
+      srv.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});

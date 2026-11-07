@@ -66,6 +66,7 @@ import { runNegativeProbeBattery } from "../../../scripts/e2e/memory-negative-pr
 import {
   REPO_ROOT,
   awaitBoxAbsent,
+  boxExec,
   boxHome,
   destroyQuietly,
   emittedRunId,
@@ -641,10 +642,19 @@ describe("memory combined live (M2.3)", () => {
         }
         const env = { QDS_RUNS_DIR: recordsDir, QDS_AUDIT_DB: auditDb };
         const started = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: REPO_ROOT, env, timeoutMs: 300_000 });
-        evidence.push({ phase: "run-verb", exitCode: started.exitCode, stderrTail: started.stderr.trim().slice(-300) });
+        evidence.push({ phase: "run-verb", exitCode: started.exitCode, stderrTail: started.stderr.trim().slice(-4000), stdoutTail: started.stdout.trim().slice(-2000) });
         expect(started.exitCode).toBe(0);
         const state = await waitForSettledVerdict({ recordsDir, evidence }, runId, { attempts: 30, waitMs: 10_000 });
         evidence.push({ phase: "settled", state });
+        if (state !== "ok") {
+          // In-box journald holds the team-lead-driver's stderr — including the
+          // "worker <id> stderr tail:" lines the runner's stdio discard hides.
+          // Fetch the tail as evidence BEFORE L3 tears the box down.
+          try {
+            const jr = await boxExec(ctx.driver, vmName, ["sh", "-c", `journalctl -u 'qds-run@${runId}*' --no-pager -q 2>/dev/null | grep -iE "stderr tail|coms_await|worker|spawn|error" | tail -c 5000 || true`]);
+            evidence.push({ phase: "journal-tail", tail: jr.stdout.trim().slice(-5000) });
+          } catch { evidence.push({ phase: "journal-tail", error: "fetch failed (box may be gone)" }); }
+        }
         // live-mirror: src/fleet/run-completion.ts ChainOutcome "ok" (the settled chain verdict literal)
         expect(state).toBe("ok");
 
