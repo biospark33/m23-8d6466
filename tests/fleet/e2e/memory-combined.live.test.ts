@@ -913,17 +913,31 @@ describe("memory combined live (M2.3)", () => {
         expect(memVerify).toBe(true);
 
         // ── ordering from the round's OWN record: revoke+verify BEFORE destroy
-        const handle = openAuditStoreForWalk(auditDb);
-        let rows: AuditLinkRow[];
-        try {
-          rows = handle.linksForRun(runId);
-        } finally {
-          handle.close();
-        }
+        const walkRows = (): AuditLinkRow[] => {
+          const handle = openAuditStoreForWalk(auditDb);
+          try {
+            return handle.linksForRun(runId);
+          } finally {
+            handle.close();
+          }
+        };
+        let rows: AuditLinkRow[] = walkRows();
         const idx = (hop: string, event: string): number => rows.findIndex((r) => r.hop === hop && r.event === event);
-        const revokeAt = idx("run-credential", "revoke");
-        const verifyAt = idx("run-credential", "verify-revoked");
-        const destroyAt = idx("run-box", "teardown");
+        let revokeAt = idx("run-credential", "revoke");
+        let verifyAt = idx("run-credential", "verify-revoked");
+        let destroyAt = idx("run-box", "teardown");
+        // The teardown verb flushes its last link rows (verify-revoked,
+        // run-box teardown) asynchronously NEAR ITS END: fire 19's walk read
+        // 0.4 s after the revoke row and saw neither later row. Poll briefly
+        // until the ordering triple is complete — a bounded wait, not a
+        // swallow: if the rows never land the asserts below red as themselves.
+        for (let i = 0; i < 10 && (verifyAt < 0 || destroyAt < 0); i += 1) {
+          await new Promise((r) => setTimeout(r, 1_000));
+          rows = walkRows();
+          revokeAt = idx("run-credential", "revoke");
+          verifyAt = idx("run-credential", "verify-revoked");
+          destroyAt = idx("run-box", "teardown");
+        }
         evidence.push({
           phase: "memory-live.revoke-verified",
           rowOrder: rows.map((r) => `${r.hop}.${r.event}@${r.occurredAt}`),
