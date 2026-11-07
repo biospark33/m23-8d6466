@@ -448,7 +448,7 @@ describe("memory combined live (M2.3)", () => {
 
         // ── the manifest: code settle + the dispatch_task worker recall turn ──
         const task =
-          `You are a memory-recall test worker. Work strictly alone and modify nothing in the repository. Step 1: call the kg_recall tool exactly ONCE with bank "${base}" and query "${marker}" (limit 5). Step 2: finish with the required JSON reply whose result.summary states how many memories came back and quotes TWO lines of the returned data verbatim: first the block's header line (the one beginning "===== UNTRUSTED RECALLED DATA (kg_recall)"), then any one data line below it. Never call kg_recall with any other bank id.`;
+          `You are a memory-recall test worker. Work strictly alone and modify nothing in the repository. Step 1: call the kg_recall tool exactly ONCE with bank "${base}" and query "${marker}" (limit 5). Step 2: finish with the required JSON reply whose result.summary states how many memories came back and quotes THREE lines of the returned data verbatim, in order: first the block's header line (the one beginning "===== UNTRUSTED RECALLED DATA (kg_recall)"), then the FIRST data line below the header, then the SECOND data line below the header. Never call kg_recall with any other bank id.`;
         writeFileSync(
           manifestPath,
           JSON.stringify({
