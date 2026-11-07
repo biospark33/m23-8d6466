@@ -35,7 +35,16 @@
 # buildId ac9d2865fdf3c926 adopted on dev (607544dd), healing run green
 # through gate B + anonymous pull; attest FAILED on a Sigstore Rekor
 # transparency-log 500 (third-party outage, measured rekor-http=500) —
-# retry loop armed. Fire 16 + mirror re-push HOLD until the attested gate
+# retry loop EXHAUSTED (rekor.sigstore.dev measured 500 for 9h+; run
+# 42379970050's ONLY red jobs are attest/attested — publish, gate B and the
+# anonymous-pull check are GREEN). Fire 16 + mirror re-push HOLD until the
+# attested gate goes green. RESUME RECIPE once Rekor heals:
+# `gh run rerun 42379970050 --failed` → on green: `docker buildx imagetools
+# create --tag ghcr.io/quantum-digital-solutions/qds-exedev-private:
+# build-ac9d2865fdf3c926 ghcr.io/quantum-digital-solutions/qds-exedev@
+# sha256:1390e837ae1802a77b79d37dd49f042a4a1ee96e8e1c515c493eb3dbcabc85b2`
+# → sync scratch main to dev → box .env QDS_EXEDEV_SHA=<dev sha> + checkout
+# → fire 16 (GO standing, worst case $1.06). The attested gate
 # goes green (nothing pinned unsigned). Fire-14/15 evidence pulled local
 # (memory-live/). Restart-not-executed defect: #512 (needs a ruling once the
 # round proves the worker path). Spend: fires 14-15 ≈ $0.02; total session
