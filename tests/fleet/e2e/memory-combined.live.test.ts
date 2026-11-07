@@ -66,6 +66,7 @@ import { runNegativeProbeBattery } from "../../../scripts/e2e/memory-negative-pr
 import {
   REPO_ROOT,
   awaitBoxAbsent,
+  boxExec,
   boxHome,
   destroyQuietly,
   emittedRunId,
@@ -645,6 +646,15 @@ describe("memory combined live (M2.3)", () => {
         expect(started.exitCode).toBe(0);
         const state = await waitForSettledVerdict({ recordsDir, evidence }, runId, { attempts: 30, waitMs: 10_000 });
         evidence.push({ phase: "settled", state });
+        if (state !== "ok") {
+          // In-box journald holds the team-lead-driver's stderr — including the
+          // "worker <id> stderr tail:" lines the runner's stdio discard hides.
+          // Fetch the tail as evidence BEFORE L3 tears the box down.
+          try {
+            const jr = await boxExec(ctx.driver, vmName, ["sh", "-c", `journalctl -u 'qds-run@${runId}*' --no-pager -q 2>/dev/null | tail -c 6000 || true`]);
+            evidence.push({ phase: "journal-tail", tail: jr.stdout.trim().slice(-6000) });
+          } catch { evidence.push({ phase: "journal-tail", error: "fetch failed (box may be gone)" }); }
+        }
         // live-mirror: src/fleet/run-completion.ts ChainOutcome "ok" (the settled chain verdict literal)
         expect(state).toBe("ok");
 
