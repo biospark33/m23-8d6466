@@ -906,7 +906,8 @@ describe("memory combined live (M2.3)", () => {
         // still reds below (memSkip/memRevoke asserts) and the finally arms
         // stay strict — this is acceptance of a documented outcome, not of a
         // dirty cleanup.
-        expect([0, 6]).toContain(td.exitCode);
+        const tdExit = td.exitCode ?? -1;
+        expect([0, 6]).toContain(tdExit);
         expect(memSkip).toBeNull();
         expect(memRevoke).toBe(true);
         expect(memVerify).toBe(true);
